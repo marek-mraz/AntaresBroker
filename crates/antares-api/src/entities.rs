@@ -376,7 +376,7 @@ async fn retrieve_entity_inner(
                 for aux_pass in [false, true] {
                     for (aux, d) in &fed {
                         if *aux == aux_pass {
-                            crate::federation::merge_docs(&mut base, d);
+                            crate::federation::merge_docs(&mut base, d, *aux);
                         }
                     }
                 }
@@ -394,7 +394,7 @@ async fn retrieve_entity_inner(
                 for aux_pass in [false, true] {
                     for (aux, d) in &fed {
                         if *aux == aux_pass {
-                            crate::federation::merge_docs(&mut base, d);
+                            crate::federation::merge_docs(&mut base, d, *aux);
                         }
                     }
                 }

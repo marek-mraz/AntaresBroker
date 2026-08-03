@@ -105,9 +105,14 @@ pub fn normalize_registration(
                                             }
                                         }
                                     }
-                                    if !ne.contains_key("type") {
+                                    // type is optional in EntityInfo when an
+                                    // id/idPattern identifies the entities
+                                    if !ne.contains_key("type")
+                                        && !ne.contains_key("id")
+                                        && !ne.contains_key("idPattern")
+                                    {
                                         return Err(bad(
-                                            "EntityInfo requires type (5.2.8)".into(),
+                                            "EntityInfo requires type, id or idPattern (5.2.8)".into(),
                                         ));
                                     }
                                     nes.push(Value::Object(ne));
@@ -498,10 +503,11 @@ fn type_matches(sel: &str, info_type: &str, ctx: &Context) -> bool {
 /// 5.12: does an EntityInfo element match the entity specification?
 fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
     if let Some(types) = &spec.types {
-        let it = ei.get("type").and_then(Value::as_str).unwrap_or("");
-        if !types.iter().any(|t| type_matches(t, it, ctx)) {
-            return false;
-        }
+        if let Some(it) = ei.get("type").and_then(Value::as_str) {
+            if !types.iter().any(|t| type_matches(t, it, ctx)) {
+                return false;
+            }
+        } // EntityInfo without a type restricts only by id/idPattern
     }
     let ei_id = ei.get("id").and_then(Value::as_str);
     let ei_pat = ei.get("idPattern").and_then(Value::as_str);

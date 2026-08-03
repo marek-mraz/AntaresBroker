@@ -136,10 +136,12 @@ pub fn matching_regs(
             if infos.is_empty() {
                 return None;
             }
-            let endpoint = doc
-                .get("endpoint")
-                .and_then(Value::as_str)?
-                .trim_end_matches('/')
+            let endpoint = doc.get("endpoint").and_then(Value::as_str)?.trim_end_matches('/');
+            // registrations may name the API root itself (…/ngsi-ld/v1) —
+            // normalize so forward URLs never double the prefix (IOP fixtures)
+            let endpoint = endpoint
+                .strip_suffix("/ngsi-ld/v1")
+                .unwrap_or(endpoint)
                 .to_owned();
             let mode = doc
                 .get("mode")
@@ -244,13 +246,41 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
     Some(Value::Object(out))
 }
 
-/// Merge attributes of `add` into `base` (base wins conflicts).
-pub fn merge_docs(base: &mut Value, add: &Value) {
+fn recency(inst: &Value) -> &str {
+    inst.get("observedAt")
+        .or_else(|| inst.get("modifiedAt"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// Merge attributes of `add` into `base` (auxiliary sources never override —
+/// base wins; otherwise conflicting instances resolve by most recent
+/// observedAt/modifiedAt per 4.5.5.3).
+pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
     let Some(bo) = base.as_object_mut() else { return };
     let Some(ao) = add.as_object() else { return };
     for (k, v) in ao {
-        if !bo.contains_key(k) {
-            bo.insert(k.clone(), v.clone());
+        match bo.get_mut(k) {
+            None => {
+                bo.insert(k.clone(), v.clone());
+            }
+            Some(cur) if !aux && !matches!(k.as_str(), "id" | "type" | "scope") => {
+                let (Some(ca), Some(aa)) = (cur.as_array_mut(), v.as_array()) else { continue };
+                for ai in aa {
+                    let ds = ai.get("datasetId").and_then(Value::as_str);
+                    match ca.iter_mut().find(|ci| {
+                        ci.get("datasetId").and_then(Value::as_str) == ds
+                    }) {
+                        None => ca.push(ai.clone()),
+                        Some(ci) => {
+                            if recency(ai) > recency(ci) {
+                                *ci = ai.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -451,7 +481,7 @@ pub fn merge_candidates(local: Vec<Value>, fed: Vec<(bool, Value)>) -> Vec<Value
             }
             let Some(id) = doc.get("id").and_then(Value::as_str) else { continue };
             match by_id.get_mut(id) {
-                Some(base) => merge_docs(base, doc),
+                Some(base) => merge_docs(base, doc, *aux),
                 None => {
                     order.push(id.to_owned());
                     by_id.insert(id.to_owned(), doc.clone());
