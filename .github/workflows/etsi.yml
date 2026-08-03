@@ -1,4 +1,4 @@
-name: Build and run ETSI Test and publish
+name: Build and run ETSI Test and publish ok
 
 on:
   workflow_dispatch: # Manual trigger only
