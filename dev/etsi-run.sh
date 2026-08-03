@@ -16,7 +16,7 @@ BROKER_URL="${BROKER_URL:-http://localhost:9090/ngsi-ld/v1}"
 SUITE="${SUITE:-./ngsi-ld-test-suite}"
 STOP_ON_ERROR="${STOP_ON_ERROR:-1}"
 CALLBACK_HOST="${CALLBACK_HOST:-localhost}"
-SUITES="${SUITES:-CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext}"
+SUITES="${SUITES:-CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations}"
 
 [ -d "$SUITE" ] || { echo "test suite not found at $SUITE"; exit 1; }
 

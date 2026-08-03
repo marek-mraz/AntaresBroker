@@ -35,20 +35,52 @@ jobs:
           done
           curl -sf localhost:9090/q/health
 
-      - name: Monitor broker RSS
+      - name: Monitor broker resources (CPU + RSS, every antares container)
         run: |
-          ( while docker inspect antares >/dev/null 2>&1; do
-              docker stats antares --no-stream --format '{{.MemUsage}}' | awk -F/ '{print $1}'
+          ( while :; do
+              ids=$(docker ps -q --filter name=antares)
+              if [ -n "$ids" ]; then
+                docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $ids \
+                  | sed "s/^/$(date +%s),/"
+              fi
               sleep 2
-            done > mem-samples.txt ) &
-          echo $! > mem-monitor.pid
+            done > resource-samples.csv ) &
+          echo $! > monitor.pid
 
-      - name: Run the ETSI serial suite
+      - name: Run the ETSI serial suite (incl. DistributedOperations)
         env:
           BROKER_URL: http://localhost:9090/ngsi-ld/v1
           CALLBACK_HOST: 172.17.0.1   # docker bridge gateway: broker -> runner mock servers
           STOP_ON_ERROR: "0"          # CI runs the WHOLE suite; local default stops at first error
         run: ./dev/etsi-run.sh || true
+
+      - name: Start the 5-broker IOP stack (Scorpio-parity federation environment)
+        run: |
+          docker rm -f antares || true
+          for i in 1 2 3 4 5; do
+            port=$((9089 + i))
+            docker run -d --name "antares$i" --network host \
+              -e ANTARES_HTTP_PORT=$port -e ANTARES_HOST_ALIAS="antares$i" \
+              antares-local:latest
+          done
+          for i in 1 2 3 4 5; do
+            port=$((9089 + i))
+            for t in $(seq 1 30); do
+              curl -sf "localhost:$port/q/health" && break || sleep 1
+            done
+            curl -sf "localhost:$port/q/health"
+          done
+
+      - name: Run the IOP suite against the 5-broker stack
+        run: |
+          cd ngsi-ld-test-suite
+          ../.venv/bin/robot --outputdir ../results/IOP \
+            --variable b1_url:http://localhost:9090/ngsi-ld/v1 \
+            --variable b2_url:http://localhost:9091/ngsi-ld/v1 \
+            --variable b3_url:http://localhost:9092/ngsi-ld/v1 \
+            --variable b4_url:http://localhost:9093/ngsi-ld/v1 \
+            --variable b5_url:http://localhost:9094/ngsi-ld/v1 \
+            IOP_TP || true
 
       - name: Publish run summary + failures to the job summary
         if: always()
@@ -79,11 +111,47 @@ jobs:
           out.close()
           EOF
 
+      - name: Resource report (CPU / memory per broker)
+        if: always()
+        run: |
+          kill "$(cat monitor.pid)" 2>/dev/null || true
+          python3 - <<'EOF'
+          import os, re, collections
+          rows = collections.defaultdict(lambda: {"cpu": [], "mem": []})
+          def mib(s):
+              m = re.match(r"\s*([\d.]+)\s*([KMG])iB", s)
+              if not m: return None
+              v = float(m.group(1)); u = m.group(2)
+              return v / 1024 if u == "K" else v * 1024 if u == "G" else v
+          try:
+              for line in open("resource-samples.csv"):
+                  parts = line.strip().split(",")
+                  if len(parts) < 4: continue
+                  _, name, cpu, mem = parts[0], parts[1], parts[2], parts[3]
+                  try: rows[name]["cpu"].append(float(cpu.rstrip("%")))
+                  except ValueError: pass
+                  v = mib(mem.split("/")[0])
+                  if v is not None: rows[name]["mem"].append(v)
+          except OSError:
+              pass
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("\n## Broker resource usage\n\n")
+              if not rows:
+                  out.write("no samples collected\n")
+              else:
+                  out.write("| Broker | Samples | CPU avg | CPU peak | RSS avg | RSS peak |\n|---|---|---|---|---|---|\n")
+                  for name in sorted(rows):
+                      c, m = rows[name]["cpu"], rows[name]["mem"]
+                      avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
+                      out.write(f"| {name} | {max(len(c), len(m))} "
+                                f"| {avg(c):.1f}% | {max(c, default=0):.1f}% "
+                                f"| {avg(m):.0f} MiB | {max(m, default=0):.0f} MiB |\n")
+          EOF
+
       - name: Gate — 100% green AND within the memory limit
         id: gate
         if: always()
         run: |
-          kill "$(cat mem-monitor.pid)" 2>/dev/null || true
           python3 - <<'EOF'
           import glob, os, re, sys, xml.etree.ElementTree as ET
           problems, total = [], 0
@@ -102,13 +170,18 @@ jobs:
               if s: problems.append(f"{name}: {s} SKIPPED")
               if p == 0: problems.append(f"{name}: 0 tests passed")
               total += p
-          # memory gate: peak of the docker-stats samples (MiB/GiB units)
+          # memory gate: peak RSS of the serial-phase broker (container "antares")
           peak = 0.0
           try:
-              for line in open("mem-samples.txt"):
-                  m = re.match(r"\s*([\d.]+)\s*([MG])iB", line)
+              for line in open("resource-samples.csv"):
+                  parts = line.strip().split(",")
+                  if len(parts) < 4 or parts[1] != "antares":
+                      continue
+                  m = re.match(r"\s*([\d.]+)\s*([KMG])iB", parts[3].split("/")[0])
                   if m:
-                      v = float(m.group(1)) * (1024 if m.group(2) == "G" else 1)
+                      v = float(m.group(1))
+                      u = m.group(2)
+                      v = v / 1024 if u == "K" else v * 1024 if u == "G" else v
                       peak = max(peak, v)
           except OSError:
               problems.append("memory samples missing")
@@ -135,15 +208,18 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
+          INC="v${{ github.run_number }}"   # incremental release tag, one per green run
           docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
+          docker tag antares-local:latest "$IMG:$INC"
           docker tag antares-local:latest "$IMG:latest"
           docker push "$IMG:${GITHUB_SHA::7}"
+          docker push "$IMG:$INC"
           docker push "$IMG:latest"
-          echo -e "\n## Published: \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\`" >> "$GITHUB_STEP_SUMMARY"
+          echo -e "\n## Published: \`$IMG:$INC\` + \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Tear down
         if: always()
-        run: docker rm -f antares || true
+        run: docker rm -f antares antares1 antares2 antares3 antares4 antares5 2>/dev/null || true
 
       - name: Upload ETSI Test Results
         if: always()
@@ -152,5 +228,5 @@ jobs:
           name: ETSI-Serial-Reports
           path: |
             results/
-            mem-samples.txt
+            resource-samples.csv
           retention-days: 14
