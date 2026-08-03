@@ -3,6 +3,11 @@
 **An NGSI-LD Context Broker in Rust.**
 Design analysis v0.1 — 2026-08-03. Reference implementation studied: Scorpio Broker (`/workspace/ScorpioBroker`), ETSI CIM specs (`/workspace/etsi-cim-specs`), NGSI-LD WebSocket binding draft (`/workspace/websocket.md`).
 
+## 0. Ground rules for agents working in this repo
+
+1. **Never touch the host Mac.** Do not use `/var/run/docker.sock` (or any Docker CLI/API against it), do not start/stop/inspect host containers, do not mount host paths, do not install anything Mac-side. Everything needed for development — build, unit/integration tests, the ETSI suite — runs inside this sandbox. If a task appears to require host Docker (e.g. spinning up Postgres/NATS containers), stop and ask the user instead of doing it.
+2. **Spec-first implementation.** Every feature is implemented from its ETSI CIM 009 V1.9.1 clause (the ledger in §5.4 below), NOT from ETSI test-suite failures. The Robot suite (§5.3) is the validation oracle run *after* a clause is implemented — it is never the requirements source. Its 686 TPs cover only part of the normative surface; a broker built test-first ships the untested gaps broken. Working order per feature: read the clause in `/workspace/etsi-cim-specs/gs_cim009v010901p.pdf` → implement the full normative behaviour (cite the clause number in the PR/commit) → unit-test the clause's own rules and edge cases → only then run the Robot suite as confirmation, and update `docs/ics.yaml` (§14.6).
+
 ---
 
 ## 1. Targets (the contract this design must meet)
@@ -192,7 +197,193 @@ Scorpio gap notes that Antares inherits as scope decisions: Scorpio has **no `/s
 
 ### 5.3 Conformance validation plan
 
-Antares gates on the same instrument as Scorpio: the ETSI Robot Framework suite (`forge.etsi.org/rep/cim/ngsi-ld-test-suite`, run via the fork + `dev/etsi-serial.sh` recipe — 8 suites: CommonBehaviours, CI/Consumption, CI/Provision, CI/Subscription, ContextSource, jsonldContext, DistributedOperations, IOP against a 5-broker stack). Leaf-TP distribution to plan effort by: CI/Prov 235, CI/Cons 166, CI/SUB 87, CS/REGSUB 54, CTX 61, CS/DISC 30, CB/HTTP 25, CS/REG+CSR 28. Scorpio's CI additionally gates on **peak broker RSS ≤ 350 MiB** during the serial run — Antares adopts the same gate (it's stricter than the 500 MB target and free to reuse). Secondary harness: Scorpio's Postman collections (`api-test.json`, 1,584 requests) for fast smoke coverage.
+**The suite validates; it is not the requirements source.** Requirements come from the clause ledger in §5.4 (rule §0.2) — the Robot suite runs after a clause is implemented, to confirm it. Antares gates on the same instrument as Scorpio: the ETSI Robot Framework suite (`forge.etsi.org/rep/cim/ngsi-ld-test-suite`, run via the fork + `dev/etsi-serial.sh` recipe — 8 suites: CommonBehaviours, CI/Consumption, CI/Provision, CI/Subscription, ContextSource, jsonldContext, DistributedOperations, IOP against a 5-broker stack). Leaf-TP distribution to plan effort by: CI/Prov 235, CI/Cons 166, CI/SUB 87, CS/REGSUB 54, CTX 61, CS/DISC 30, CB/HTTP 25, CS/REG+CSR 28. Scorpio's CI additionally gates on **peak broker RSS ≤ 350 MiB** during the serial run — Antares adopts the same gate (it's stricter than the 500 MB target and free to reuse). Secondary harness: Scorpio's Postman collections (`api-test.json`, 1,584 requests) for fast smoke coverage.
+
+### 5.4 Spec-first implementation ledger — CIM 009 V1.9.1, clause by clause
+
+This is the requirements list (rule §0.2): implement each item from its clause text, check it off only when the full normative behaviour (all SHALLs, error cases, and output data of that clause) is implemented and unit-tested — then validate with the Robot suite. Each checkbox maps to a row in `docs/ics.yaml`. Items marked **v1.x** are deliberately staged after v1.0 (§5.1 scope decisions); everything else is v1.0 scope.
+
+#### 5.4.1 Clause 4 — framework, representations, languages (`antares-model`, `antares-jsonld`, `antares-ql`)
+
+Foundations (read before writing `antares-model`):
+
+- [ ] 4.2 Information model: meta-model (4.2.2), cross-domain ontology (4.2.3), domain models & instantiation (4.2.4)
+- [ ] 4.3.5 API structure & implementation options — the broker roles Antares claims (Context Broker + Registry + Discovery + Subscription + Temporal)
+- [ ] 4.3.6 Distributed-operation semantics: additive registrations (4.3.6.2), proxied registrations (4.3.6.3), limiting cascading ops (4.3.6.4), extra info when contacting a Context Source (4.3.6.5), pre/post-processing of that info (4.3.6.6), unitary distributed query/retrieve (4.3.6.7), Context-Source payload backwards compatibility (4.3.6.8) → `antares-registry`
+- [ ] 4.3.7 Snapshots concept — **v1.x**
+- [ ] 4.4 Core and user @context, precedence rules → `antares-jsonld`
+- [ ] Annex A (normative) identifier considerations; Annex B (normative) core @context — pinned at build time
+
+Representations (4.5) — each a serialize/deserialize pair in `antares-model` + `antares-jsonld`, round-trip tested:
+
+- [ ] 4.5.1 Entity representation
+- [ ] 4.5.2 Property: normalized (4.5.2.2), concise (4.5.2.3)
+- [ ] 4.5.3 Relationship: normalized (4.5.3.2), concise (4.5.3.3)
+- [ ] 4.5.4 Simplified representation (keyValues)
+- [ ] 4.5.5 Multi-attribute support: datasetId instance sets (4.5.5.1), conflicting transient entities (4.5.5.2), conflicting attributes (4.5.5.3)
+- [ ] 4.5.6–4.5.8 Temporal representation of Entity / Property / Relationship
+- [ ] 4.5.9 Simplified temporal representation (temporalValues)
+- [ ] 4.5.10–4.5.12 Entity type list / detailed type list / type information
+- [ ] 4.5.13–4.5.15 Attribute list / detailed attribute list / attribute information
+- [ ] 4.5.16 GeoJSON representation: top-level geometry selection algorithm (4.5.16.1), single entity (4.5.16.2), multiple entities (4.5.16.3)
+- [ ] 4.5.17 Simplified GeoJSON representation (single + multiple)
+- [ ] 4.5.18 LanguageProperty: normalized (4.5.18.2), concise (4.5.18.3) — incl. the deleted-LP `{"@none":"urn:ngsi-ld:null"}` map form (§14 lesson)
+- [ ] 4.5.19 Aggregated temporal representation + aggregation-function behaviours (4.5.19.1)
+- [ ] 4.5.20 VocabProperty: normalized/concise
+- [ ] 4.5.21 ListProperty: normalized/concise
+- [ ] 4.5.22 ListRelationship: normalized/concise
+- [ ] 4.5.23 Linked Entity Retrieval: inline (4.5.23.2), flattened (4.5.23.3) — `join`, `joinLevel`, `containedBy`
+- [ ] 4.5.24 JsonProperty: normalized/concise
+- [ ] 4.5.25 EntityMap representation
+
+Restrictions & value spaces (4.6–4.8) — the `antares-jsonld::validate` pass:
+
+- [ ] 4.6.1 supported text encodings; 4.6.2 supported names; 4.6.3 supported datatypes for Values; 4.6.4 supported content; 4.6.5 LanguageMap datatypes; 4.6.6 ordering of duplicate Entities in arrays
+- [ ] 4.7 Geospatial: GeoJSON geometries (4.7.1), their JSON-LD representation (4.7.2), concise GeoProperty (4.7.3)
+- [ ] 4.8 Temporal properties (`observedAt`, system timestamps — value rules)
+
+Languages — each a parser + in-memory evaluator (matcher) + SQL compiler (`antares-ql` → `antares-sql`), proptest round-trips per §9.5:
+
+- [ ] 4.9 NGSI-LD Query Language (`q=`)
+- [ ] 4.10 Geoquery Language (`georel`, `geometry`, `coordinates`, `geoproperty`)
+- [ ] 4.11 Temporal Query Language (`timerel`, `timeAt`, `endTimeAt`, `timeproperty`)
+- [ ] 4.12 Pagination; 4.13 counting results
+- [ ] 4.14 Multiple tenants
+- [ ] 4.15 Language Filter (`lang=`)
+- [ ] 4.16 Multiple entity types; 4.17 Entity Type Selection Language
+- [ ] 4.18 Scopes; 4.19 Scope Query Language (`scopeQ`)
+- [ ] 4.20 Distributed Operation names (the Operation enum + operation groups → the `ops` bitmask, §8.3)
+- [ ] 4.21 Attribute Projection Language (`pick`/`omit`, dotted paths)
+- [ ] 4.22 Transient storage of Entities and Attributes (`expiresAt`)
+- [ ] 4.23 Entity Ordering: datatype comparison order (4.23.2), ordering language (`orderBy`, `orderFrom`, `orderGeometry`, `collation`) (4.23.3)
+
+#### 5.4.2 Clause 5.2–5.4 — data types (`antares-model`, one Rust type per clause, §9.1 naming)
+
+- [ ] 5.2.2 common members; 5.2.3 @context; 5.2.4 Entity; 5.2.5 Property; 5.2.6 Relationship; 5.2.7 GeoProperty
+- [ ] 5.2.8 EntityInfo; 5.2.9 CSourceRegistration; 5.2.10 RegistrationInfo; 5.2.11 TimeInterval
+- [ ] 5.2.12 Subscription; 5.2.13 GeoQuery; 5.2.14 NotificationParams incl. output-only members (5.2.14.2); 5.2.15 Endpoint
+- [ ] 5.2.16 BatchOperationResult; 5.2.17 BatchEntityError; 5.2.18 UpdateResult; 5.2.19 NotUpdatedDetails
+- [ ] 5.2.20 EntityTemporal; 5.2.21 TemporalQuery; 5.2.22 KeyValuePair; 5.2.23 Query (the POST-query body)
+- [ ] 5.2.24 EntityTypeList; 5.2.25 EntityType; 5.2.26 EntityTypeInfo; 5.2.27 AttributeList; 5.2.28 Attribute
+- [ ] 5.2.29 Feature; 5.2.30 FeatureCollection; 5.2.31 FeatureProperties (GeoJSON output types)
+- [ ] 5.2.32 LanguageProperty; 5.2.33 EntitySelector; 5.2.34 RegistrationManagementInfo
+- [ ] 5.2.35 VocabProperty; 5.2.36 ListProperty; 5.2.37 ListRelationship; 5.2.38 JsonProperty
+- [ ] 5.2.39 EntityMap; 5.2.40 Context Source Identity; 5.2.43 OrderingParams; 5.2.44 AggregationParams
+- [ ] 5.2.41 Snapshot; 5.2.42 ExecutionResultDetails — **v1.x**
+- [ ] 5.3.1 Notification; 5.3.2 CSourceNotification; 5.3.3 TriggerReasonEnumeration; 5.3.4 SnapshotNotification (**v1.x**)
+- [ ] 5.4 NGSI-LD Fragments (the partial-update / merge input shapes)
+
+#### 5.4.3 Clause 5.5 — common behaviours (cross-cutting; `antares-api` + `antares-jsonld` + `antares-sql`)
+
+- [ ] 5.5.2 error types; 5.5.3 error response payload (ProblemDetails)
+- [ ] 5.5.4 general NGSI-LD validation
+- [ ] 5.5.5 default @context assignment
+- [ ] 5.5.6 operation execution and generic error handling
+- [ ] 5.5.7 term↔URI expansion and compaction
+- [ ] 5.5.8 Partial Update Patch behaviour
+- [ ] 5.5.9 Pagination behaviour: general (5.5.9.1), limit/offset (5.5.9.2), with Entity maps (5.5.9.3)
+- [ ] 5.5.10 Multi-Tenant behaviour
+- [ ] 5.5.11 duplicate Entity instances in one array — per-batch-op rules (5.5.11.1 create, .2 upsert, .3 update, .4 delete, .5 merge)
+- [ ] 5.5.12 Merge Patch behaviour
+- [ ] 5.5.13 limiting operations to local scope (`local=true`)
+- [ ] 5.5.14 distributed transactional behaviour
+- [ ] 5.5.15 Snapshot behaviour — **v1.x**
+
+#### 5.4.4 Clause 5.6 — Context Information Provision (one public fn per clause, §9.1)
+
+- [ ] 5.6.1 Create Entity → `create_entity`
+- [ ] 5.6.2 Update Attributes → `update_attributes`
+- [ ] 5.6.3 Append Attributes → `append_attributes`
+- [ ] 5.6.4 Partial Attribute Update → `partial_attribute_update`
+- [ ] 5.6.5 Delete Attribute → `delete_attribute`
+- [ ] 5.6.6 Delete Entity → `delete_entity`
+- [ ] 5.6.7 Batch Entity Creation → `batch_create`
+- [ ] 5.6.8 Batch Entity Creation or Update → `batch_upsert`
+- [ ] 5.6.9 Batch Entity Update → `batch_update`
+- [ ] 5.6.10 Batch Entity Delete → `batch_delete`
+- [ ] 5.6.11 Upsert Temporal Evolution → `upsert_temporal_entity`
+- [ ] 5.6.12 Add Attributes to Temporal Evolution → `add_temporal_attributes`
+- [ ] 5.6.13 Delete Attribute from Temporal Evolution → `delete_temporal_attribute`
+- [ ] 5.6.14 Modify Attribute instance in Temporal Evolution → `modify_temporal_instance`
+- [ ] 5.6.15 Delete Attribute instance from Temporal Evolution → `delete_temporal_instance`
+- [ ] 5.6.16 Delete Temporal Evolution → `delete_temporal_entity`
+- [ ] 5.6.17 Merge Entity → `merge_entity`
+- [ ] 5.6.18 Replace Entity → `replace_entity`
+- [ ] 5.6.19 Replace Attribute → `replace_attribute`
+- [ ] 5.6.20 Batch Entity Merge → `batch_merge`
+- [ ] 5.6.21 Purge Entities → `purge_entities` (`keep`/`drop` params, not pick/omit)
+
+#### 5.4.5 Clause 5.7 — Context Information Consumption
+
+- [ ] 5.7.1 Retrieve Entity → `retrieve_entity`
+- [ ] 5.7.2 Query Entities → `query_entities`
+- [ ] 5.7.3 Retrieve Temporal Evolution → `retrieve_temporal_entity`
+- [ ] 5.7.4 Query Temporal Evolution → `query_temporal_entities`
+- [ ] 5.7.5 Retrieve Available Entity Types → `retrieve_entity_types`
+- [ ] 5.7.6 Retrieve Details of Available Entity Types → `retrieve_entity_type_details`
+- [ ] 5.7.7 Retrieve Available Entity Type Information → `retrieve_entity_type_info`
+- [ ] 5.7.8 Retrieve Available Attributes → `retrieve_attributes`
+- [ ] 5.7.9 Retrieve Details of Available Attributes → `retrieve_attribute_details`
+- [ ] 5.7.10 Retrieve Available Attribute Information → `retrieve_attribute_info`
+- [ ] 5.7.11 architecture-related aspects of types/attributes retrieval (distributed discovery)
+
+#### 5.4.6 Clause 5.8 — Context Information Subscription (`antares-matcher` + `antares-notifier`)
+
+- [ ] 5.8.1 Create Subscription (incl. rejection of past `expiresAt` — a named Scorpio violation, §4.1)
+- [ ] 5.8.2 Update Subscription
+- [ ] 5.8.3 Retrieve Subscription
+- [ ] 5.8.4 Query Subscriptions
+- [ ] 5.8.5 Delete Subscription
+- [ ] 5.8.6 Notification behaviour: notificationTrigger semantics incl. deletion payload forms, `showChanges` (prev-payload), `sysAttrs`, `timeInterval` subscriptions, throttling (Duration-typed, §4.1), status/`timesSent`/`lastNotification`/`lastSuccess`/`lastFailure` bookkeeping, expiry enforcement at the single mirror yield point
+
+#### 5.4.7 Clauses 5.9–5.12 — Context Source Registration, Discovery, Registration Subscriptions, Matching (`antares-registry`)
+
+- [ ] 5.9.1 registration semantics; 5.9.2 Register Context Source → `register_context_source`; 5.9.3 Update → `update_csource_registration`; 5.9.4 Delete → `delete_csource_registration`
+- [ ] 5.10.1 Retrieve Context Source Registration; 5.10.2 Query Context Source Registrations
+- [ ] 5.11.2–5.11.6 Create / Update / Retrieve / Query / Delete Context Source Registration Subscription
+- [ ] 5.11.7 CSource notification behaviour
+- [ ] 5.12 Matching Context Source Registrations (the algorithm behind `csource_index`, §8.3)
+
+#### 5.4.8 Clauses 5.13–5.16 — @contexts, EntityMaps, Identity, Snapshots
+
+- [ ] 5.13.2 Add @context; 5.13.3 List @contexts; 5.13.4 Serve @context; 5.13.5 Delete and Reload @context (kinds `Hosted`/`Cached`/`ImplicitlyCreated` per 5.13.1)
+- [ ] 5.14.1 Retrieve EntityMap; 5.14.2 Update EntityMap; 5.14.3 Delete EntityMap
+- [ ] 5.14.4 Create EntityMap for Query Entities; 5.14.5 Create EntityMap for Query Temporal Evolution
+- [ ] 5.15.1 Retrieve Context Source Identity Information (`/info/sourceIdentity`)
+- [ ] 5.16.1–5.16.7 Snapshots: Create, Clone, Retrieve Status, Update Status, Delete, status notifications, Purge — **v1.x**
+
+#### 5.4.9 Clause 6 — HTTP binding (`antares-api`; TS 104 176 successor layer)
+
+- [ ] 6.2 global definitions and resource structure (`{apiRoot}/ngsi-ld/v1/`, Table 6.2-1)
+- [ ] 6.3.2 error types; 6.3.3 reporting errors
+- [ ] 6.3.4 HTTP request preconditions (411/415/406 bare status codes)
+- [ ] 6.3.5 JSON-LD @context resolution (Link-header vs body rules per Content-Type; mixing ⇒ BadRequestData)
+- [ ] 6.3.6 HTTP response common requirements (Link header on `application/json` responses, Content-Type negotiation)
+- [ ] 6.3.7 representation of Entities (`format`/`options` params, precedence)
+- [ ] 6.3.8 notification behaviour over HTTP; 6.3.9 csource notification behaviour
+- [ ] 6.3.10 pagination (RFC 8288 next/prev; temporal: 206 + `Content-Range` in DateTime units, `lastN` direction)
+- [ ] 6.3.11 sysAttrs; 6.3.12 simplified/aggregated temporal representation; 6.3.13 count (`NGSILD-Results-Count`)
+- [ ] 6.3.14 tenant specification (`NGSILD-Tenant` header, echo rules)
+- [ ] 6.3.15 GeoJSON representation (`Accept: application/geo+json` validity, `geometryProperty`)
+- [ ] 6.3.16 expiration for cached @contexts (`Expires`/`Cache-Control`)
+- [ ] 6.3.17 distributed-ops caching and timeout; 6.3.18 limiting distributed ops; 6.3.19 extra info to Context Sources (`Via`, `NGSILD-EntityMap`, `contextSourceInfo`)
+- [ ] 6.3.20 invalid parameters
+- [ ] 6.3.21 `Prefer: ngsi-ld=<version>` / `Preference-Applied` / 203 profile negotiation
+- [ ] 6.3.22 snapshot specification — **v1.x**
+- [ ] Resources, each method implemented per its clause: 6.4 `entities/` POST/GET/DELETE(Purge) · 6.5 `entities/{id}` GET/DELETE/PUT/PATCH(Merge) · 6.6 `entities/{id}/attrs/` POST/PATCH · 6.7 `entities/{id}/attrs/{attrId}` PATCH/DELETE/PUT · 6.8 `csourceRegistrations/` POST/GET · 6.9 `csourceRegistrations/{id}` GET/PATCH/DELETE · 6.10 `subscriptions/` POST/GET · 6.11 `subscriptions/{id}` GET/PATCH/DELETE · 6.12 `csourceSubscriptions/` POST/GET · 6.13 `csourceSubscriptions/{id}` GET/PATCH/DELETE · 6.14–6.17 `entityOperations/{create,upsert,update,delete}` POST · 6.18 `temporal/entities/` POST/GET · 6.19 `temporal/entities/{id}` GET/DELETE · 6.20 `temporal/entities/{id}/attrs/` POST · 6.21 `…/attrs/{attrId}` DELETE · 6.22 `…/attrs/{attrId}/{instanceId}` PATCH/DELETE · 6.23 `entityOperations/query` POST · 6.24 `temporal/entityOperations/query` POST · 6.25 `types/` GET · 6.26 `types/{type}` GET · 6.27 `attributes/` GET · 6.28 `attributes/{attrId}` GET · 6.29 `jsonldContexts/` POST/GET · 6.30 `jsonldContexts/{id}` GET/DELETE · 6.31 `entityOperations/merge` POST · 6.32 `entityMaps/{id}` GET/PATCH/DELETE · 6.33 `info/sourceIdentity` GET · 6.34 `entityMaps` GET/POST · 6.35 `temporal/entityMaps` GET/POST · 6.36–6.38 `snapshots` POST/DELETE, `snapshots/{id}` GET/PATCH/DELETE, `snapshots/{id}/clone` POST (**v1.x**)
+
+#### 5.4.10 Clause 7 — MQTT notification binding (`antares-notifier`, feature `mqtt`)
+
+- [ ] 7.1/7.2 MQTT notification behaviour: `mqtt(s)://host[:port]/topic` endpoint URIs, `notifierInfo` (`MQTT-Version`, `MQTT-QoS`), payload = `{metadata, body}` wrapper, connection handling per endpoint
+
+#### 5.4.11 Ledger → roadmap phase mapping
+
+| Roadmap phase (§13) | Ledger sections |
+|---|---|
+| 1 — single-node core | 5.4.1 (all), 5.4.2 (minus Snapshot types), 5.4.3 (minus 5.5.14/15), 5.4.4 (5.6.1–5.6.10, 5.6.17–5.6.21), 5.4.5 (5.7.1/2/5–10), 5.4.8 @contexts, 5.4.9 core |
+| 2 — eventing | 5.4.4 temporal ops (5.6.11–16), 5.4.5 temporal queries (5.7.3/4), 5.4.6, 5.4.10 |
+| 3 — federation | 5.4.7, 5.4.8 EntityMaps + Identity, 5.4.5 (5.7.11), 4.3.6 semantics, 6.3.17–6.3.19 |
+| 4 — scale & hardening | re-validate everything at load; Snapshots (**v1.x**) start here at the earliest |
 
 ## 6. Rust software stack
 
@@ -658,7 +849,9 @@ Implementation checkpoints from the requirement set: subprotocol `ngsi-ld-ws.v1`
 | 7 | Snapshots/EntityMaps (V1.9.1 additions) scope creep | Low | explicitly staged: EntityMaps v1.0 (tests exist), Snapshots v1.x (no tests yet) |
 | 8 | async-nats / sqlx pre-1.0 API churn | Low | version-pinned workspace; upgrade in dedicated PRs |
 
-## 13. Roadmap (compliance-suite-driven)
+## 13. Roadmap (spec-driven, suite-validated)
+
+Each phase's work items are the §5.4 ledger sections mapped in §5.4.11 — implement from the clauses, then the suite named in the exit criterion confirms the phase.
 
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
@@ -845,3 +1038,71 @@ A single tenant may legitimately hold **1,000+ Context Source Registrations** (a
 - **Discovery stays push-based**: csourceSubscriptions notify peers of registration changes — at 1,000+ CSRs, polling `/csourceRegistrations` is the anti-pattern the WS binding's WS-41 was written to kill.
 
 Test rig: the phase-4 load rig (§13) gains a federation scenario — 1 tenant × 1,000 CSRs (mix of inclusive/exclusive/auxiliary, 20 % expired) against mock sources with injected latency/failures; exit criteria: query p95 bounded by the aggregate deadline, memory within the §2.1 mirror budget, 207 correctness under partial failure.
+
+---
+
+# ETSI NGSI-LD Testing & Runtime Guide (inherited from the Scorpio campaign)
+
+*(Broker-agnostic knowledge about validating an NGSI-LD Context Broker against the ETSI suite — the environment, scripts and traps proven during the Scorpio work in `/workspace/ScorpioBroker`. Applies to Antares the moment it has an HTTP endpoint to point the suite at.)*
+
+## Authoritative Spec Lookups (MemPalace) - MANDATORY
+
+**Whenever you need NGSI-LD / ETSI spec information, query MemPalace — DO NOT answer from memory.**
+*   **Tool:** `mempalace_search` — semantic search over the palace, including the indexed ETSI spec PDFs (`/workspace/etsi-cim-specs`, e.g. `gs_cim009v010901p.pdf`).
+*   **Tool:** `mempalace_get_pdf_pages` — pull the exact PDF pages a search hit points at (via its `pdf_page` metadata) to read the full clause, not just the chunk.
+*   **When to use:** Any question about payload shapes, API endpoint contracts, attribute semantics (`datasetId`, `observedAt`), or temporal behavior.
+*   **How to answer:** Retrieve first, then ground the answer in the returned chunks. Always cite the clause number and location.
+*   Before changing broker behavior to satisfy a failing test, also read the **precise robot file** in the ETSI suite to see what the test actually asserts.
+
+## Fixing ETSI Test-Suite Failures — Broker Bug vs ETSI Tool Bug
+
+*   **Look at the spec first:** Confirm what the spec actually requires via `mempalace_search` (+ `mempalace_get_pdf_pages` for the full clause) before changing broker code.
+*   **Be 100% sure — never guess:** Only flag the test suite as wrong if you can definitively prove it contradicts or invents spec behavior.
+*   **Broker Bug:** Fix the broker. Prefer native broker features over app-level hacks; keep DB changes version-controlled migrations.
+*   **ETSI Tool Bug:** Log it in `error.md`. Do NOT hack the broker to pass a broken test.
+*   **Prefer `https` URLs; use `http` only when necessary.** Default to `https` for @context URLs, endpoints and registrations (e.g. the forge `ngsi-ld-test-suite` context); use `http` only where actually required (local notification-receiver / context-server mocks, local broker endpoints).
+
+## State Reset Between Suites (the phantom-state trap)
+
+*   **Reset = API-level delete PAIRED with DB truncate:** `dev/reset-broker.sh <base_url>` (deletes all subscriptions/registrations/entities via the **NGSI-LD API**, which evicts broker-side caches — no restart needed) paired with `ngsi-ld-test-suite/clean_db.sh` (truncates data tables incl. temporal, preserving schema/migrations). `etsi-serial.sh` already does this pairing in `reset_state()`. `reset-broker.sh --temporal` also wipes temporal history via the API.
+*   **Never** drop/recreate the Postgres database, truncate tables by hand, or restart the postgres container to clear state — raw SQL truncate leaves broker-side state behind (phantom 409s on create, phantom subscription matches, federated csource leakage).
+*   **Cross-suite pollution is real:** a full serial run inflates ContextSource/Subscription failures (CommonBehaviours `045_01_03` registers a dead csource that leaks). Re-measure those two suites individually on a **fresh** broker before concluding a failure is real.
+*   **Measure from a torn-down stack, not just `clean_db`:** federation/temporal state leaks across runs and clean_db (even a broker restart) does NOT clear it — only `./dev/run-iop.sh down` (volume wipe) does. A polluted stack produces phantom temporal-query results (e.g. `/temporal/entities?type=...` returning entities that exist in NO DB table). See `error.md`.
+*   *(Antares note: the design makes rows the single source of truth precisely so `TRUNCATE` alone is a valid reset — but keep the API-level reset pairing in the harness anyway, so the suite setup stays broker-agnostic and the assumption is tested, not trusted.)*
+
+## ONE environment for everything (dev AND CI) — the 5-broker stack
+
+**Always use the single stack `compose-files/docker-compose-iop.yml`** — 5 self-contained brokers, each with its own Postgres + Kafka + MQTT (emqx), built from the working tree. Do NOT maintain a separate single-broker compose: single-broker suites just run against **broker1 (`scorpio1`)**, the federation suites (DistributedOperations, IOP) use all five, and MQTT suites use the per-broker emqx. This keeps local and CI on the same config so results match.
+
+```bash
+./dev/install-tools.sh        # 1. toolchain — once per session (state is wiped between sessions)
+./dev/etsi-serial.sh          # 2. build image + bring up all 5 brokers + run EVERY suite serially
+# (dev/etsi-serial.sh is the SAME entrypoint CI uses — .github/workflows/etsi-serial-test.yml.
+#  It points the suite at broker1, resets state between suites with clean_db + reset-broker, keeps
+#  https @contexts. Env knobs B1..B5 / CALLBACK_HOST select reachability; defaults = this dev box,
+#  CI overrides them.)
+```
+
+To bring the stack up / down without running the suite: `./dev/run-iop.sh` and `./dev/run-iop.sh down` (tears down volumes too). `--no-mvn` reuses the existing locally-built broker image instead of rebuilding.
+
+**While DEBUGGING, run with `STOP_ON_ERROR=1` so the suite halts at the FIRST failing test** (adds robot's `--exitonfailure` to every invocation, stops the serial run right there, writes `etsi-failures.md` for that suite + points at its `log.html`). Fast fix-loop: break, read the one error, fix, repeat — instead of waiting ~30 min for the full run. Default (flag unset) runs every suite to completion for the authoritative/CI result.
+```bash
+STOP_ON_ERROR=1 ./dev/etsi-serial.sh    # debug: stop & report at first failing test
+./dev/etsi-serial.sh                    # full run (CI-identical), all suites to completion
+```
+
+## Federation testing — IOP & DistributedOperations (same single stack)
+
+Both the ETSI **IOP** suite (`IOP_TP`) and the **DistributedOperations** suite (`TP/NGSI-LD/DistributedOperations`) run against the SAME stack. The broker image is **always built from the local working tree** (`dev/build-image.sh`, invoked by `dev/run-iop.sh`), so the stack always exercises the current code.
+
+- **Reachability:** this is a docker-out-of-docker box, so published ports `9081..9085` land on the VM host, **not** this container's localhost. From the Robot suite running *here*, and between the brokers, reach them by **hostname**: `http://scorpio1:9090 .. http://scorpio5:9090` on the stack's own `iop_scorpio-net` network; `dev/run-iop.sh` attaches this dev container to it (and bridges onto `compose-files_default` only for the hardcoded MQTT mock hostname). For a CI runner use `http://host.docker.internal:9081..9085` (works as both client and as the federation endpoint).
+- **Run DistributedOperations** (broker1 is the SUT; its HttpCtrl mock context sources run in this container): point the suite `url` at `http://scorpio1:9090/ngsi-ld/v1` and run `robot --exclude mqtt TP/NGSI-LD/DistributedOperations`.
+- **Run IOP:** `robot --variable b1_url:http://host.docker.internal:9081/ngsi-ld/v1 ... --variable b5_url:http://host.docker.internal:9085/ngsi-ld/v1 IOP_TP`.
+- **Isolation is built INTO the suite (no external scripts, no DB access):** `IOP_TP/__init__.robot` runs a Suite Setup/Teardown that resets every broker (b1..b5) via `libraries/FederationReset.py` — standard NGSI-LD API only (delete subscriptions, delete Context Source Registrations, query+batch-delete entities). Just run `IOP_TP` with the bN_url variables — the reset is automatic. Per-test cleanup stays in each test's own `Test Teardown`.
+- **Known ETSI-tool setup bugs:** e.g. QueryEntities 04_01/04_02 create two payloads with the same id on one broker → 409. Log such cases in `error.md`, never hack the broker around them. See memory `multi-broker-fed-stack.md`.
+
+## Environment gotchas (this dev box)
+
+- `pgrep`/`pkill`/`free` are not installed — scan `/proc/[0-9]*/cmdline` instead.
+- A backgrounded command that PREFIXES a kill-loop may never run its real payload or write its log — run the kill in a separate foreground call first, then launch the bare build/run command with `> log 2>&1`.
+- Background long-running commands need an explicit `cd /workspace &&` — the cwd is not inherited reliably.

@@ -418,10 +418,32 @@ pub async fn create(
     };
     let ts = now_iso();
     norm.insert("createdAt".into(), Value::String(ts.clone()));
-    norm.insert("modifiedAt".into(), Value::String(ts));
+    norm.insert("modifiedAt".into(), Value::String(ts.clone()));
     // notification @context = the creating request's context (5.8.6; §8.3
     // stores it as its own column) — internal member, stripped on output.
     norm.insert("__context".into(), parsed.ctx.source.clone());
+    // Array @context (>1 entry): the broker must host it at its own URL as an
+    // ImplicitlyCreated @context, surfaced via jsonldContext (5.13.1, 050_03)
+    if !norm.contains_key("jsonldContext") {
+        if let Value::Array(a) = &parsed.ctx.source {
+            if a.len() > 1 {
+                let local_id = uuid::Uuid::new_v4().to_string();
+                let url = format!("{}/{local_id}", crate::contexts::base_url(headers));
+                st.store.context_put(
+                    &local_id,
+                    serde_json::json!({
+                        "url": url,
+                        "localId": local_id,
+                        "kind": "ImplicitlyCreated",
+                        "createdAt": ts,
+                        "body": {"@context": parsed.ctx.source.clone()},
+                    }),
+                );
+                st.loader.put_local(url.clone(), parsed.ctx.source.clone()).await;
+                norm.insert("jsonldContext".into(), Value::String(url));
+            }
+        }
+    }
     if !st.store.create(&tenant, kind, &id, Value::Object(norm)) {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
     }

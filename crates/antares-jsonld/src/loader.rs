@@ -43,6 +43,17 @@ static PINNED: &[(&str, &str)] = &[
 /// The core context this broker itself advertises (Link header default).
 pub const CORE_CONTEXT: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
 
+/// Usage bookkeeping for one externally-referenced @context URL (5.13.3.5:
+/// localId, createdAt, numberOfHits, lastUsage of "Cached" entries).
+#[derive(Clone, Debug)]
+pub struct CtxUsage {
+    pub url: String,
+    pub local_id: String,
+    pub created_at: String,
+    pub last_usage: String,
+    pub hits: u64,
+}
+
 pub struct Loader {
     http: reqwest::Client,
     /// URL → parsed `@context` member of the fetched document.
@@ -51,6 +62,11 @@ pub struct Loader {
     merged: RwLock<HashMap<String, Arc<Context>>>,
     /// Core context, pre-merged, for requests without any user context.
     core_only: Arc<Context>,
+    /// URL → usage stats for every external @context referenced by requests.
+    usage: RwLock<HashMap<String, CtxUsage>>,
+    /// merged-cache key → every URL that resolution touched (so cache hits
+    /// still bump numberOfHits for nested references).
+    merged_urls: RwLock<HashMap<String, Vec<String>>>,
 }
 
 impl Default for Loader {
@@ -74,7 +90,56 @@ impl Loader {
             fetched: RwLock::new(HashMap::new()),
             merged: RwLock::new(HashMap::new()),
             core_only: Arc::new(core),
+            usage: RwLock::new(HashMap::new()),
+            merged_urls: RwLock::new(HashMap::new()),
         }
+    }
+
+    fn now() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    /// Bump usage stats (numberOfHits / lastUsage, 5.13.3.5) for one URL.
+    pub async fn bump_url(&self, url: &str) {
+        let now = Self::now();
+        let mut map = self.usage.write().await;
+        map.entry(url.to_owned())
+            .and_modify(|u| {
+                u.hits += 1;
+                u.last_usage = now.clone();
+            })
+            .or_insert_with(|| CtxUsage {
+                url: url.to_owned(),
+                local_id: uuid::Uuid::new_v4().to_string(),
+                created_at: now.clone(),
+                last_usage: now,
+                hits: 1,
+            });
+    }
+
+    pub async fn usage_list(&self) -> Vec<CtxUsage> {
+        self.usage.read().await.values().cloned().collect()
+    }
+
+    /// Find a usage entry by original URL or by its generated localId.
+    pub async fn usage_get(&self, id: &str) -> Option<CtxUsage> {
+        let map = self.usage.read().await;
+        map.get(id)
+            .or_else(|| map.values().find(|u| u.local_id == id))
+            .cloned()
+    }
+
+    pub async fn usage_remove(&self, url: &str) {
+        self.usage.write().await.remove(url);
+        self.evict(url).await;
+    }
+
+    /// Re-download a cached @context from its original URL, replacing the
+    /// stored copy (5.13.5.4 reload).
+    pub async fn refetch(&self, url: &str) -> Result<(), NgsiError> {
+        self.fetched.write().await.remove(url);
+        self.merged.write().await.clear();
+        self.fetch(url).await.map(|_| ())
     }
 
     /// Core-only context (no user @context supplied).
@@ -85,17 +150,42 @@ impl Loader {
     /// Resolve a user-supplied `@context` value (string URL, object, or array)
     /// into a merged Context with the core context merged last.
     pub async fn resolve(&self, user: &Value) -> Result<Arc<Context>, NgsiError> {
+        self.resolve_counted(user, true).await
+    }
+
+    /// Resolve WITHOUT counting usage hits — for broker-internal resolutions
+    /// (notification building), which are not client @context usage (053_08).
+    pub async fn resolve_quiet(&self, user: &Value) -> Result<Arc<Context>, NgsiError> {
+        self.resolve_counted(user, false).await
+    }
+
+    async fn resolve_counted(&self, user: &Value, count: bool) -> Result<Arc<Context>, NgsiError> {
         let key = user.to_string();
         if let Some(hit) = self.merged.read().await.get(&key) {
+            if count {
+                // cache hit: bump every URL this context resolution involves
+                let urls = self.merged_urls.read().await.get(&key).cloned();
+                for url in urls.unwrap_or_default() {
+                    self.bump_url(&url).await;
+                }
+            }
             return Ok(Arc::clone(hit));
         }
         let mut ctx = Context::default();
-        self.merge_entry(&mut ctx, user, 0).await?;
+        let urls = std::sync::Mutex::new(Vec::new());
+        self.merge_entry(&mut ctx, user, 0, &urls).await?;
+        let urls = urls.into_inner().unwrap_or_default();
+        if count {
+            for url in &urls {
+                self.bump_url(url).await; // only after successful resolution
+            }
+        }
         // Core context last: its (protected) terms win — CIM 009 4.4.
         merge_context_value(&mut ctx, &pinned(CORE_CONTEXT).expect("pinned core"));
         ctx.freeze();
         ctx.source = user.clone();
         let arc = Arc::new(ctx);
+        self.merged_urls.write().await.insert(key.clone(), urls);
         self.merged
             .write()
             .await
@@ -108,6 +198,7 @@ impl Loader {
         ctx: &'a mut Context,
         entry: &'a Value,
         depth: usize,
+        urls: &'a std::sync::Mutex<Vec<String>>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NgsiError>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -119,13 +210,16 @@ impl Loader {
             match entry {
                 Value::Array(items) => {
                     for item in items {
-                        self.merge_entry(ctx, item, depth + 1).await?;
+                        self.merge_entry(ctx, item, depth + 1, urls).await?;
                     }
                     Ok(())
                 }
                 Value::String(url) => {
                     let doc = self.fetch(url).await?;
-                    self.merge_entry(ctx, &doc, depth + 1).await
+                    if let Ok(mut u) = urls.lock() {
+                        u.push(url.clone());
+                    }
+                    self.merge_entry(ctx, &doc, depth + 1, urls).await
                 }
                 Value::Object(obj) => ctx.merge_object(obj),
                 Value::Null => Ok(()),
@@ -134,6 +228,11 @@ impl Loader {
                 )),
             }
         })
+    }
+
+    /// Is `url` one of the built-in (pinned) core context URLs?
+    pub fn is_pinned_core(url: &str) -> bool {
+        pinned(url).is_some()
     }
 
     /// Fetch a remote context document, returning its `@context` member.

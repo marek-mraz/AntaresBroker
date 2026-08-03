@@ -48,10 +48,11 @@ docker compose -f compose-files/docker-compose.yml up -d   # postgres+postgis(+t
 dev/etsi-run.sh                 # runs the ETSI Robot suite against the local broker
 ```
 
-`dev/etsi-run.sh` expects the [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
-checkout next to this repo (`../ngsi-ld-test-suite`) — same serial-run recipe
-as ScorpioBroker's `dev/etsi-serial.sh`, which this repo uses as its reference
-implementation. Per-suite pass count is the only progress metric.
+The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
+is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same
+serial-run recipe as ScorpioBroker's `dev/etsi-serial.sh`, which this repo
+uses as its reference implementation. Per-suite pass count is the only
+progress metric.
 
 ## Repository layout
 

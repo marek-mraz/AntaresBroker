@@ -10,6 +10,8 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub loader: Arc<Loader>,
     pub started: Instant,
+    /// Startup timestamp (createdAt of the built-in core @context entry).
+    pub started_at: String,
     pub host_alias: String,
     /// Default page size for queries without an explicit limit.
     pub default_limit: usize,
@@ -25,6 +27,7 @@ impl AppState {
             store: Arc::new(Store::default()),
             loader: Arc::new(Loader::new()),
             started: Instant::now(),
+            started_at: now_iso(),
             host_alias,
             default_limit: 1000,
             max_limit: 1000,

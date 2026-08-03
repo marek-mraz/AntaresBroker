@@ -71,9 +71,11 @@ name = "antares-jsonld"
 version = "0.1.0"
 dependencies = [
  "antares-model",
+ "chrono",
  "reqwest",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

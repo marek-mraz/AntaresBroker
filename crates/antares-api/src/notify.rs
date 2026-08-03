@@ -234,7 +234,7 @@ async fn sub_context(st: &AppState, sub: &Value) -> Arc<Context> {
         .cloned()
         .or_else(|| sub.get("__context").cloned());
     match source {
-        Some(v) if !v.is_null() => st.loader.resolve(&v).await.unwrap_or_else(|_| st.loader.core()),
+        Some(v) if !v.is_null() => st.loader.resolve_quiet(&v).await.unwrap_or_else(|_| st.loader.core()),
         _ => st.loader.core(),
     }
 }
