@@ -7,7 +7,14 @@ use antares_api::AppState;
 use antares_bus::LocalBus;
 use std::time::Instant;
 
-const KNOWN_KEYS: &[&str] = &["ANTARES_HTTP_PORT", "ANTARES_HOST_ALIAS", "ANTARES_ROLES"];
+// ANTARES_DATABASE_URL: accepted (the ETSI compose wires one DB per broker),
+// consumed when the phase-1 sqlx store lands.
+const KNOWN_KEYS: &[&str] = &[
+    "ANTARES_HTTP_PORT",
+    "ANTARES_HOST_ALIAS",
+    "ANTARES_ROLES",
+    "ANTARES_DATABASE_URL",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()

@@ -5,11 +5,13 @@ on:
 
 env:
   MEM_LIMIT_MB: 350   # peak-RSS gate, same limit as ScorpioBroker's pipeline
+  COMPOSE_FILE: compose-files/docker-compose-etsi.yml
 
 jobs:
   build-and-test:
-    name: Build & Run ETSI Tests (single broker)
+    name: Build & Run ETSI Tests (one compose, 5 brokers + 5 DBs)
     runs-on: ubuntu-latest
+    timeout-minutes: 60   # hard cap: the whole ETSI run must fit in 1 hour
     permissions:
       contents: read
       packages: write   # publish the ETSI-tested image to GHCR
@@ -27,15 +29,17 @@ jobs:
       - name: Build the broker image (the exact artifact under test)
         run: docker build -t antares-local:latest .
 
-      - name: Start the broker
+      - name: Start the ONE stack — 5 brokers + 5 databases
         run: |
-          docker run -d --name antares -p 9090:9090 antares-local:latest
-          for i in $(seq 1 30); do
-            curl -sf localhost:9090/q/health && break || sleep 1
+          docker compose -f "$COMPOSE_FILE" up -d --wait
+          for port in 9090 9091 9092 9093 9094; do
+            for t in $(seq 1 30); do
+              curl -sf "localhost:$port/q/health" && break || sleep 1
+            done
+            curl -sf "localhost:$port/q/health"
           done
-          curl -sf localhost:9090/q/health
 
-      - name: Monitor broker resources (CPU + RSS, every antares container)
+      - name: Monitor broker resources (CPU + RSS, every broker container)
         run: |
           ( while :; do
               ids=$(docker ps -q --filter name=antares)
@@ -47,31 +51,14 @@ jobs:
             done > resource-samples.csv ) &
           echo $! > monitor.pid
 
-      - name: Run the ETSI serial suite (incl. DistributedOperations)
+      - name: Run the ETSI serial suite against broker1 (incl. DistributedOperations)
         env:
           BROKER_URL: http://localhost:9090/ngsi-ld/v1
-          CALLBACK_HOST: 172.17.0.1   # docker bridge gateway: broker -> runner mock servers
+          CALLBACK_HOST: localhost    # brokers are host-networked: runner mocks are localhost
           STOP_ON_ERROR: "0"          # CI runs the WHOLE suite; local default stops at first error
         run: ./dev/etsi-run.sh || true
 
-      - name: Start the 5-broker IOP stack (Scorpio-parity federation environment)
-        run: |
-          docker rm -f antares || true
-          for i in 1 2 3 4 5; do
-            port=$((9089 + i))
-            docker run -d --name "antares$i" --network host \
-              -e ANTARES_HTTP_PORT=$port -e ANTARES_HOST_ALIAS="antares$i" \
-              antares-local:latest
-          done
-          for i in 1 2 3 4 5; do
-            port=$((9089 + i))
-            for t in $(seq 1 30); do
-              curl -sf "localhost:$port/q/health" && break || sleep 1
-            done
-            curl -sf "localhost:$port/q/health"
-          done
-
-      - name: Run the IOP suite against the 5-broker stack
+      - name: Run the IOP suite against all 5 brokers of the same stack
         run: |
           cd ngsi-ld-test-suite
           ../.venv/bin/robot --outputdir ../results/IOP \
@@ -170,12 +157,12 @@ jobs:
               if s: problems.append(f"{name}: {s} SKIPPED")
               if p == 0: problems.append(f"{name}: 0 tests passed")
               total += p
-          # memory gate: peak RSS of the serial-phase broker (container "antares")
+          # memory gate: peak RSS of the serial-phase SUT (broker1 = antares1)
           peak = 0.0
           try:
               for line in open("resource-samples.csv"):
                   parts = line.strip().split(",")
-                  if len(parts) < 4 or parts[1] != "antares":
+                  if len(parts) < 4 or parts[1] != "antares1":
                       continue
                   m = re.match(r"\s*([\d.]+)\s*([KMG])iB", parts[3].split("/")[0])
                   if m:
@@ -219,7 +206,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker rm -f antares antares1 antares2 antares3 antares4 antares5 2>/dev/null || true
+        run: docker compose -f "$COMPOSE_FILE" down -v || true
 
       - name: Upload ETSI Test Results
         if: always()

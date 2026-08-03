@@ -1,0 +1,94 @@
+# The ONE ETSI stack: 5 brokers + 5 databases (Scorpio IOP-stack parity).
+# ALL suites run against it — serial suites hit broker1, the IOP suite all five.
+#
+# Brokers run with network_mode: host so the federation endpoints the suite
+# registers (http://localhost:909N) resolve identically from the Robot runner,
+# from broker to broker, and back to the runner's notification mocks.
+#
+# Each broker gets its own Postgres (postgres://…@localhost:543N/antares) via
+# ANTARES_DATABASE_URL. The broker stores in-memory today (v0 skeleton); the
+# DSN is wired now so the phase-1 sqlx store lands with zero compose changes.
+x-broker: &broker
+  image: antares-local:latest
+  network_mode: host
+  restart: unless-stopped
+
+x-postgres: &postgres
+  image: timescale/timescaledb-ha:pg17
+  environment:
+    POSTGRES_USER: antares
+    POSTGRES_PASSWORD: antares
+    POSTGRES_DB: antares
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U antares"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+
+services:
+  postgres1:
+    <<: *postgres
+    container_name: postgres1
+    ports: ["5433:5432"]
+  postgres2:
+    <<: *postgres
+    container_name: postgres2
+    ports: ["5434:5432"]
+  postgres3:
+    <<: *postgres
+    container_name: postgres3
+    ports: ["5435:5432"]
+  postgres4:
+    <<: *postgres
+    container_name: postgres4
+    ports: ["5436:5432"]
+  postgres5:
+    <<: *postgres
+    container_name: postgres5
+    ports: ["5437:5432"]
+
+  antares1:
+    <<: *broker
+    container_name: antares1
+    environment:
+      ANTARES_HTTP_PORT: "9090"
+      ANTARES_HOST_ALIAS: antares1
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
+    depends_on:
+      postgres1: { condition: service_healthy }
+  antares2:
+    <<: *broker
+    container_name: antares2
+    environment:
+      ANTARES_HTTP_PORT: "9091"
+      ANTARES_HOST_ALIAS: antares2
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5434/antares
+    depends_on:
+      postgres2: { condition: service_healthy }
+  antares3:
+    <<: *broker
+    container_name: antares3
+    environment:
+      ANTARES_HTTP_PORT: "9092"
+      ANTARES_HOST_ALIAS: antares3
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5435/antares
+    depends_on:
+      postgres3: { condition: service_healthy }
+  antares4:
+    <<: *broker
+    container_name: antares4
+    environment:
+      ANTARES_HTTP_PORT: "9093"
+      ANTARES_HOST_ALIAS: antares4
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5436/antares
+    depends_on:
+      postgres4: { condition: service_healthy }
+  antares5:
+    <<: *broker
+    container_name: antares5
+    environment:
+      ANTARES_HTTP_PORT: "9094"
+      ANTARES_HOST_ALIAS: antares5
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares
+    depends_on:
+      postgres5: { condition: service_healthy }
