@@ -1,0 +1,17 @@
+[package]
+name = "antares-notifier"
+description = "Notification delivery: NotificationSink trait keyed by endpoint.uri scheme; http sink; mqtt behind feature."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = ["mqtt"]
+mqtt = []   # rumqttc sink lands in phase 2
+
+[lints]
+workspace = true

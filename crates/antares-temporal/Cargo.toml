@@ -1,0 +1,12 @@
+[package]
+name = "antares-temporal"
+description = "Temporal store: TemporalStore trait with timescale and plain-Postgres modes (phase 2)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+
+[lints]
+workspace = true

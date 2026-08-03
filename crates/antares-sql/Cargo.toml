@@ -1,0 +1,13 @@
+[package]
+name = "antares-sql"
+description = "AST -> SQL compiler + schema migrations. sqlx store impls land in phase 1."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+antares-ql = { workspace = true }
+
+[lints]
+workspace = true

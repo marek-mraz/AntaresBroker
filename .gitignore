@@ -1,0 +1,16 @@
+# build
+/target
+**/*.rs.bk
+
+# test runs
+results/
+.venv/
+
+# local env & logs
+.env
+*.log
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/

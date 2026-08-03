@@ -1,0 +1,16 @@
+# cargo-deny: licenses + advisories. TSL-licensed code must NEVER be linked
+# (TimescaleDB is talked to over SQL only — see docs/deep-analysis.md §9.5).
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[advisories]
+yanked = "deny"

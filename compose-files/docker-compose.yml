@@ -1,0 +1,32 @@
+# Local dev stack: Postgres (PostGIS + TimescaleDB) and NATS JetStream.
+# The broker runs on the host (cargo run) — same pattern as Scorpio's dev loop.
+# TimescaleDB is OPTIONAL for Antares (deep-analysis §8.2); the timescaledb-ha
+# image ships both extensions so both temporal modes are testable.
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg17
+    environment:
+      POSTGRES_USER: antares
+      POSTGRES_PASSWORD: antares
+      POSTGRES_DB: antares
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antares"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 2g   # dev cap; production sizing is deep-analysis §2.2
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+    deploy:
+      resources:
+        limits:
+          memory: 256m

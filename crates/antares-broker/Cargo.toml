@@ -1,0 +1,22 @@
+[package]
+name = "antares-broker"
+description = "The Antares NGSI-LD context broker binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "antares"
+path = "src/main.rs"
+
+[dependencies]
+antares-api = { workspace = true }
+axum = { workspace = true }
+antares-bus = { workspace = true }
+antares-model = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

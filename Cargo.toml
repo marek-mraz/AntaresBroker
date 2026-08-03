@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/antares-model",
+    "crates/antares-jsonld",
+    "crates/antares-ql",
+    "crates/antares-sql",
+    "crates/antares-bus",
+    "crates/antares-api",
+    "crates/antares-matcher",
+    "crates/antares-notifier",
+    "crates/antares-temporal",
+    "crates/antares-registry",
+    "crates/antares-broker",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+repository = "https://github.com/AntaresBroker/AntaresBroker"
+
+[workspace.dependencies]
+antares-model = { path = "crates/antares-model" }
+antares-jsonld = { path = "crates/antares-jsonld" }
+antares-ql = { path = "crates/antares-ql" }
+antares-sql = { path = "crates/antares-sql" }
+antares-bus = { path = "crates/antares-bus" }
+antares-api = { path = "crates/antares-api" }
+antares-matcher = { path = "crates/antares-matcher" }
+antares-notifier = { path = "crates/antares-notifier" }
+antares-temporal = { path = "crates/antares-temporal" }
+antares-registry = { path = "crates/antares-registry" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+axum = "0.8"
+tower = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# dev
+http-body-util = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

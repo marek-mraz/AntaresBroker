@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # feature matrix (§9.5): no defaults + all features
+      - run: cargo test --workspace --no-default-features
+      - run: cargo test --workspace --all-features
+      # SQL-injection guard (§16.2): no string-built queries outside antares-sql
+      - name: no format! into SQL outside the compiler
+        run: |
+          ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
+            | grep -v 'crates/antares-sql/'

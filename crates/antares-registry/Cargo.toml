@@ -1,0 +1,12 @@
+[package]
+name = "antares-registry"
+description = "Context Source Registrations, distributed operations, federation (phase 3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+
+[lints]
+workspace = true

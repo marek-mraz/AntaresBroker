@@ -1,0 +1,25 @@
+# ETSI conformance serial run — modeled on ScorpioBroker's etsi-serial-test.yml.
+# Manual for now (the v0 skeleton fails the first TP by design); becomes a
+# gate with a 350 MiB peak-RSS check when phase 1 lands (deep-analysis §5.3).
+name: etsi
+on:
+  workflow_dispatch:
+
+jobs:
+  etsi-serial:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: clone test suite
+        run: git clone --depth 1 https://forge.etsi.org/rep/cim/ngsi-ld-test-suite ../ngsi-ld-test-suite
+      - name: build broker
+        run: cargo build --release -p antares-broker
+      - name: run suite until first failure
+        run: STOP_ON_ERROR=1 dev/etsi-run.sh || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: robot-results
+          path: results/

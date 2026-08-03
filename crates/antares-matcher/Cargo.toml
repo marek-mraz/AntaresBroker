@@ -1,0 +1,14 @@
+[package]
+name = "antares-matcher"
+description = "Subscription matching: compiled subscriptions, candidate index, in-memory evaluation (phase 2)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+antares-ql = { workspace = true }
+antares-bus = { workspace = true }
+
+[lints]
+workspace = true
