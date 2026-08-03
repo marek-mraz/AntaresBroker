@@ -98,6 +98,7 @@ async fn append_attrs_inner(
             fragment: true,
             allow_null: false,
             temporal: false,
+            ..Default::default()
         },
     )?;
     let (regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
@@ -353,6 +354,7 @@ async fn update_attrs_inner(
             fragment: true,
             allow_null: true,
             temporal: false,
+            ..Default::default()
         },
     )?;
     let (regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
@@ -623,6 +625,7 @@ pub async fn replace_attr(
                 fragment: true,
                 allow_null: false,
                 temporal: false,
+                ..Default::default()
             },
         )?;
         let attr_iri = parsed.ctx.expand_key(&attr);

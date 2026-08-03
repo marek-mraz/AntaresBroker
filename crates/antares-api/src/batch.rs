@@ -272,6 +272,7 @@ async fn batch_write(
                     fragment: false,
                     allow_null: fragment_ok,
                     temporal: false,
+                    ..Default::default()
                 },
             )?;
             let id = expanded["id"].as_str().expect("validated").to_owned();

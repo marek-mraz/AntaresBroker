@@ -77,6 +77,10 @@ pub struct ExpandOpts {
     /// Temporal representation: repeated instances of the same datasetId are
     /// legal (4.5.6), so the multi-instance uniqueness check is skipped.
     pub temporal: bool,
+    /// Keep instance-level createdAt/modifiedAt: federation import needs them
+    /// for 4.5.5.3 recency resolution. Provisioning paths re-stamp, so the
+    /// flag stays off everywhere else.
+    pub sys: bool,
 }
 
 pub fn expand_entity(
@@ -435,6 +439,15 @@ fn expand_instance(
             .ok_or_else(|| bad(format!("attribute {name}: invalid observedAt")))?;
         out.insert("observedAt".into(), Value::String(s.to_owned()));
     }
+    if opts.sys {
+        for k in ["createdAt", "modifiedAt"] {
+            if let Some(Value::String(s)) = obj.get(k) {
+                if parse_datetime(s) {
+                    out.insert(k.into(), Value::String(s.clone()));
+                }
+            }
+        }
+    }
     if let Some(u) = obj.get("unitCode") {
         if !u.is_string() {
             return Err(bad(format!("attribute {name}: unitCode must be a string")));
@@ -513,7 +526,7 @@ pub fn expand_attr_fragment(
                     ExpandOpts {
                         fragment: true,
                         allow_null: true,
-                        temporal: false,
+                        ..Default::default()
                     },
                     1,
                 )?;

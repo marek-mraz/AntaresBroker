@@ -1192,6 +1192,7 @@ async fn merge_entity_inner(
             fragment: true,
             allow_null: true,
             temporal: false,
+            ..Default::default()
         },
     )?;
     let ts = now_iso();
@@ -1214,7 +1215,7 @@ async fn merge_entity_inner(
             let local_frag = expand_entity(
                 &rest,
                 &parsed.ctx,
-                ExpandOpts { fragment: true, allow_null: true, temporal: false },
+                ExpandOpts { fragment: true, allow_null: true, temporal: false, ..Default::default() },
             )?;
             let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
                 merge_into(doc, &local_frag, &ts);

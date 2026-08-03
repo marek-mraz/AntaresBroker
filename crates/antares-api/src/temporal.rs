@@ -27,6 +27,7 @@ const TEMPORAL_OPTS: ExpandOpts = ExpandOpts {
     fragment: false,
     allow_null: false,
     temporal: true,
+    sys: false,
 };
 
 fn stamp_instances(doc: &mut Value, ts: &str) {
@@ -1204,6 +1205,7 @@ pub async fn add_temporal_attrs(
                 fragment: true,
                 allow_null: false,
                 temporal: true,
+                ..Default::default()
             },
         )?;
         let ts = now_iso();
@@ -1336,6 +1338,7 @@ pub async fn modify_temporal_instance(
                 fragment: true,
                 allow_null: false,
                 temporal: true,
+                ..Default::default()
             },
         )?;
         let attr_iri = parsed.ctx.expand_key(&attr);

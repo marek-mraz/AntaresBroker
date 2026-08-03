@@ -231,7 +231,7 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
     let expanded = antares_jsonld::expand_entity(
         &obj,
         ctx,
-        antares_jsonld::ExpandOpts::default(),
+        antares_jsonld::ExpandOpts { sys: true, ..Default::default() },
     )
     .ok()?;
     let Some(scope) = &reg.attrs else { return Some(expanded) };
@@ -304,7 +304,11 @@ pub async fn fed_retrieve(
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx) {
         let Some(op) = reg.read_op() else { continue };
-        let mut query: Vec<(String, String)> = Vec::new();
+        // sysAttrs on every forwarded read: conflicting instances resolve by
+        // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
+        // modifiedAt the winner would be arrival order, i.e. indeterminate.
+        let mut query: Vec<(String, String)> =
+            vec![("options".into(), "sysAttrs".into())];
         if let Some(scope) = &reg.attrs {
             let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
             query.push(("attrs".into(), names.join(",")));
@@ -354,7 +358,7 @@ pub async fn fed_retrieve(
                     st,
                     reqwest::Method::POST,
                     format!("{}/ngsi-ld/v1/entityOperations/query", reg.endpoint),
-                    &[],
+                    &query,
                     headers,
                     tenant,
                     &ctx_url,
@@ -414,7 +418,7 @@ pub async fn fed_query(
                 st,
                 reqwest::Method::POST,
                 format!("{}/ngsi-ld/v1/entityOperations/query", reg.endpoint),
-                &[],
+                &[("options".into(), "sysAttrs".into())],
                 headers,
                 tenant,
                 &ctx_url,
@@ -422,7 +426,8 @@ pub async fn fed_query(
             )
             .await
         } else {
-            let mut query: Vec<(String, String)> = Vec::new();
+            let mut query: Vec<(String, String)> =
+                vec![("options".into(), "sysAttrs".into())];
             if let Some(t) = params.get("type") {
                 query.push(("type".into(), t.clone()));
             }
