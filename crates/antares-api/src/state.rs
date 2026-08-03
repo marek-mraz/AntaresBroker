@@ -19,6 +19,9 @@ pub struct AppState {
     pub max_limit: usize,
     /// One shared outbound client, timeouts at construction (U1 lesson).
     pub http: reqwest::Client,
+    /// Federation-forwarding client — longer deadline: the ETSI mock replies
+    /// to unstubbed forwards only when the robot side wakes (up to ~5 s).
+    pub fed_http: reqwest::Client,
 }
 
 impl AppState {
@@ -39,6 +42,12 @@ impl AppState {
                 .http1_title_case_headers()
                 .build()
                 .expect("http client"),
+            fed_http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(8))
+                .http1_title_case_headers()
+                .build()
+                .expect("fed http client"),
         }
     }
 }

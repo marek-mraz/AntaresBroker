@@ -5,6 +5,7 @@ pub mod attrs;
 pub mod batch;
 pub mod contexts;
 pub mod csource;
+pub mod federation;
 pub mod entities;
 pub mod geo;
 pub mod negotiate;

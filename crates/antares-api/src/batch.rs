@@ -195,6 +195,38 @@ async fn batch_write(
     let update_mode = params.get("options").map(String::as_str); // replace|update for upsert; noOverwrite|overwrite for update
     let no_overwrite = update_mode == Some("noOverwrite");
     let items = parse_batch(st, headers, body).await?;
+    // distributed batch (4.3.6): one forwarded request per matching source
+    let mut fwd_items: Vec<(serde_json::Map<String, Value>, std::sync::Arc<antares_jsonld::Context>)> = Vec::new();
+    let mut spec = crate::csource::CsrSpec::default();
+    let mut spec_types = Vec::new();
+    let mut spec_ids = Vec::new();
+    let mut spec_attrs = Vec::new();
+    for (item, ctx) in &items {
+        let (Some(o), Ok(c)) = (item.as_object(), ctx.as_ref()) else { continue };
+        if let Some(id) = o.get("id").and_then(Value::as_str) {
+            spec_ids.push(id.to_owned());
+        }
+        match o.get("type") {
+            Some(Value::String(t)) => spec_types.push(c.expand_key(t)),
+            Some(Value::Array(a)) => {
+                spec_types.extend(a.iter().filter_map(Value::as_str).map(|t| c.expand_key(t)))
+            }
+            _ => {}
+        }
+        for k in o.keys() {
+            if !matches!(k.as_str(), "id" | "type" | "scope" | "@context") {
+                spec_attrs.push(c.expand_key(k));
+            }
+        }
+        fwd_items.push((o.clone(), c.clone()));
+    }
+    if !spec_types.is_empty() { spec.types = Some(spec_types); }
+    if !spec_ids.is_empty() { spec.ids = Some(spec_ids); }
+    if !spec_attrs.is_empty() { spec.attrs = Some(spec_attrs); }
+    let fed_regs = crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params);
+    if !fed_regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
+        return Ok(crate::federation::loop_508(&tenant));
+    }
     let mut out = BatchOutcome {
         success: vec![],
         errors: vec![],
@@ -202,6 +234,8 @@ async fn batch_write(
     let mut created_ids: Vec<String> = vec![];
     let mut any_created = false;
     let mut any_updated = false;
+    let proxies: Vec<&crate::federation::FedReg> =
+        fed_regs.iter().filter(|r| r.is_proxy()).collect();
     for (item, ctx) in items {
         let id_hint = item
             .get("id")
@@ -213,6 +247,18 @@ async fn batch_write(
                 out.errors.push(err_entry(id_hint.as_deref(), &ngsi_of(e)));
                 continue;
             }
+        };
+        // proxied (exclusive/redirect) attributes are never stored locally
+        let item = if proxies.is_empty() {
+            item
+        } else if let Some(o) = item.as_object() {
+            let (rest, has_attrs) = crate::federation::strip_proxied(o, &proxies, &ctx);
+            if !has_attrs {
+                continue; // wholly proxied: no local part for this item
+            }
+            Value::Object(rest)
+        } else {
+            item
         };
         let run = || -> Result<(String, bool, bool), NgsiError> {
             let obj = item
@@ -271,6 +317,8 @@ async fn batch_write(
                     let mut skipped_existing = false;
                     let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
                         if mode == BatchMode::Update && no_overwrite {
+                            // noOverwrite is instance-level: only instances
+                            // whose datasetId already exists are skipped
                             let target = doc.as_object_mut().expect("entity object");
                             for (k, v) in expanded.as_object().expect("expanded") {
                                 if matches!(
@@ -279,10 +327,27 @@ async fn batch_write(
                                 ) {
                                     continue;
                                 }
-                                if target.contains_key(k) {
-                                    skipped_existing = true;
-                                } else {
-                                    target.insert(k.clone(), v.clone());
+                                let incoming: Vec<Value> =
+                                    v.as_array().cloned().unwrap_or_default();
+                                match target.get_mut(k).and_then(Value::as_array_mut) {
+                                    None => {
+                                        target.insert(k.clone(), Value::Array(incoming));
+                                    }
+                                    Some(cur) => {
+                                        for ni in incoming {
+                                            let ds = ni
+                                                .get("datasetId")
+                                                .and_then(Value::as_str);
+                                            if cur.iter().any(|ci| {
+                                                ci.get("datasetId").and_then(Value::as_str)
+                                                    == ds
+                                            }) {
+                                                skipped_existing = true;
+                                            } else {
+                                                cur.push(ni);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             target.insert("modifiedAt".into(), Value::String(ts.clone()));
@@ -339,6 +404,58 @@ async fn batch_write(
         }
         BatchMode::Update | BatchMode::Merge => (StatusCode::NO_CONTENT, false),
     };
+    if !fed_regs.is_empty() {
+        let (op, res_path) = match mode {
+            BatchMode::Create => ("createBatch", "create"),
+            BatchMode::Upsert => ("upsertBatch", "upsert"),
+            BatchMode::Update => ("updateBatch", "update"),
+            BatchMode::Merge => ("mergeBatch", "merge"),
+        };
+        let src = fwd_items
+            .first()
+            .map(|(_, c)| c.source.clone())
+            .unwrap_or(Value::Null);
+        let ctx_url = crate::federation::ctx_link_url(headers, &src);
+        let mut query: Vec<(String, String)> = Vec::new();
+        if let Some(o) = params.get("options") {
+            query.push(("options".into(), o.clone()));
+        }
+        let mut parts = vec![crate::federation::Part {
+            status: if out.errors.is_empty() { status.as_u16() } else { 207 },
+            detail: "local batch".into(),
+        }];
+        for reg in &fed_regs {
+            if reg.mode == "exclusive" && !reg.supports(op) {
+                parts.push(crate::federation::conflict_part(op));
+                continue;
+            }
+            let arr: Vec<Value> = fwd_items
+                .iter()
+                .filter_map(|(o, c)| crate::federation::reduce_to_scope(o, reg, c))
+                .collect();
+            if arr.is_empty() {
+                continue;
+            }
+            parts.push(
+                crate::federation::forward_part(
+                    st,
+                    reqwest::Method::POST,
+                    format!("{}/ngsi-ld/v1/entityOperations/{res_path}", reg.endpoint),
+                    &query,
+                    headers,
+                    &tenant,
+                    &ctx_url,
+                    Some(Value::Array(arr)),
+                )
+                .await,
+            );
+        }
+        return Ok(crate::federation::combine(
+            parts,
+            out.respond(&tenant, status, body_on_ok),
+            &tenant,
+        ));
+    }
     Ok(out.respond(&tenant, status, body_on_ok))
 }
 
@@ -365,6 +482,12 @@ pub async fn batch_delete(
             .ok_or_else(|| {
                 NgsiError::BadRequestData("batch delete body must be a non-empty array".into())
             })?;
+        let spec = crate::csource::CsrSpec {
+            ids: Some(ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+            ..Default::default()
+        };
+        let regs = crate::federation::write_regs(&st, &tenant, &spec, &st.loader.core(), &params);
+        let proxied = regs.iter().any(|r| r.is_proxy());
         let mut out = BatchOutcome {
             success: vec![],
             errors: vec![],
@@ -377,7 +500,9 @@ pub async fn batch_delete(
                 ));
                 continue;
             };
-            if st.store.delete(&tenant, Kind::Entity, id) {
+            if st.store.delete(&tenant, Kind::Entity, id) || proxied {
+                // proxied entities are never stored locally — a local miss is
+                // not an error under exclusive/redirect (4.3.6.3)
                 out.success.push(Value::String(id.to_owned()));
             } else {
                 out.errors.push(err_entry(
@@ -385,6 +510,41 @@ pub async fn batch_delete(
                     &NgsiError::ResourceNotFound(format!("entity {id} not found")),
                 ));
             }
+        }
+        if !regs.is_empty() {
+            if crate::federation::via_loop(&headers, &st.host_alias) {
+                return Ok(crate::federation::loop_508(&tenant));
+            }
+            let ctx_url =
+                crate::federation::ctx_link_url(&headers, &st.loader.core().source);
+            let mut parts = vec![crate::federation::Part {
+                status: if out.errors.is_empty() { 204 } else { 207 },
+                detail: "local batch delete".into(),
+            }];
+            for reg in &regs {
+                if reg.mode == "exclusive" && !reg.supports("deleteBatch") {
+                    parts.push(crate::federation::conflict_part("deleteBatch"));
+                    continue;
+                }
+                parts.push(
+                    crate::federation::forward_part(
+                        &st,
+                        reqwest::Method::POST,
+                        format!("{}/ngsi-ld/v1/entityOperations/delete", reg.endpoint),
+                        &[],
+                        &headers,
+                        &tenant,
+                        &ctx_url,
+                        Some(Value::Array(ids.clone())),
+                    )
+                    .await,
+                );
+            }
+            return Ok(crate::federation::combine(
+                parts,
+                out.respond(&tenant, StatusCode::NO_CONTENT, false),
+                &tenant,
+            ));
         }
         Ok::<_, ApiError>(out.respond(&tenant, StatusCode::NO_CONTENT, false))
     };
@@ -473,7 +633,17 @@ async fn batch_query_inner(
             vp.insert("coordinates".into(), c.to_string());
         }
     }
-    let matches = filter_entities(st, &tenant, &vp, &parsed.ctx)?;
+    if let Some(l) = params.get("local") {
+        vp.insert("local".into(), l.clone());
+    }
+    let fed = if crate::federation::active(&vp)
+        && !crate::federation::via_loop(headers, &st.host_alias)
+    {
+        crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp).await
+    } else {
+        Vec::new()
+    };
+    let matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
     let mut page_params = params.clone();
     page_params.extend(vp.clone());
     let (page, count_hdr, _links) =

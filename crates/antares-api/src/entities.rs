@@ -252,6 +252,79 @@ async fn create_entity_inner(
     })?;
     let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
     let id = expanded["id"].as_str().expect("validated id").to_owned();
+
+    // distributed create (4.3.6, 6.4.3.1)
+    let types: Option<Vec<String>> = expanded["type"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect());
+    let attr_iris: Vec<String> = expanded
+        .as_object()
+        .map(|o| o.keys().filter(|k| !is_meta(k)).cloned().collect())
+        .unwrap_or_default();
+    let spec = crate::csource::CsrSpec {
+        ids: Some(vec![id.clone()]),
+        types,
+        attrs: (!attr_iris.is_empty()).then_some(attr_iris),
+        ..Default::default()
+    };
+    let regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    if !regs.is_empty() {
+        if crate::federation::via_loop(headers, &st.host_alias) {
+            return Ok(crate::federation::loop_508(&tenant));
+        }
+        let mut conflicts = Vec::new();
+        let mut fwd = Vec::new();
+        for reg in &regs {
+            if reg.mode == "exclusive" && !reg.supports("createEntity") {
+                conflicts.push(crate::federation::conflict_part("createEntity"));
+                continue;
+            }
+            if let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) {
+                fwd.push((reg.clone(), frag));
+            }
+        }
+        let proxies: Vec<&crate::federation::FedReg> =
+            regs.iter().filter(|r| r.is_proxy()).collect();
+        let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+        let mut parts = Vec::new();
+        // local part only when something non-proxied remains (4.3.6.3)
+        if has_attrs || proxies.is_empty() {
+            let mut local_exp = expand_entity(&rest, &parsed.ctx, ExpandOpts::default())?;
+            stamp_new(&mut local_exp, &now_iso());
+            if st.store.create(&tenant, Kind::Entity, &id, local_exp.clone()) {
+                mirror_record(st, &tenant, &local_exp);
+                parts.push(crate::federation::Part { status: 201, detail: "created locally".into() });
+            } else {
+                parts.push(crate::federation::Part {
+                    status: 409,
+                    detail: format!("entity {id} already exists"),
+                });
+            }
+        }
+        parts.extend(conflicts);
+        let ctx_url = crate::federation::ctx_link_url(headers, &parsed.ctx.source);
+        for (reg, frag) in fwd {
+            parts.push(
+                crate::federation::forward_part(
+                    st,
+                    reqwest::Method::POST,
+                    format!("{}/ngsi-ld/v1/entities", reg.endpoint),
+                    &[],
+                    headers,
+                    &tenant,
+                    &ctx_url,
+                    Some(frag),
+                )
+                .await,
+            );
+        }
+        return Ok(crate::federation::combine(
+            parts,
+            created(format!("/ngsi-ld/v1/entities/{id}"), &tenant),
+            &tenant,
+        ));
+    }
+
     stamp_new(&mut expanded, &now_iso());
     if !st.store.create(&tenant, Kind::Entity, &id, expanded.clone()) {
         return Err(NgsiError::AlreadyExists(format!("entity {id} already exists")).into());
@@ -293,10 +366,45 @@ async fn retrieve_entity_inner(
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
     antares_model::EntityId::new(id)?;
-    let doc = st
-        .store
-        .get(&tenant, Kind::Entity, id)
-        .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+    let local_doc = st.store.get(&tenant, Kind::Entity, id);
+    let fed_on = crate::federation::active(params)
+        && !crate::federation::via_loop(headers, &st.host_alias);
+    let doc = if fed_on {
+        let fed = crate::federation::fed_retrieve(st, &tenant, headers, &ctx, id).await;
+        match local_doc {
+            Some(mut base) => {
+                for aux_pass in [false, true] {
+                    for (aux, d) in &fed {
+                        if *aux == aux_pass {
+                            crate::federation::merge_docs(&mut base, d);
+                        }
+                    }
+                }
+                base
+            }
+            None => {
+                let mut iter = fed.iter();
+                let mut base = iter
+                    .find(|(aux, _)| !aux)
+                    .map(|(_, d)| d.clone())
+                    .or_else(|| fed.first().map(|(_, d)| d.clone()))
+                    .ok_or_else(|| {
+                        NgsiError::ResourceNotFound(format!("entity {id} not found"))
+                    })?;
+                for aux_pass in [false, true] {
+                    for (aux, d) in &fed {
+                        if *aux == aux_pass {
+                            crate::federation::merge_docs(&mut base, d);
+                        }
+                    }
+                }
+                base
+            }
+        }
+    } else {
+        local_doc
+            .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?
+    };
     // 5.7.1: attrs projection with no matching attribute ⇒ 404
     if let Some(want) = &repr.attrs {
         if !want.iter().any(|a| doc.get(a).is_some()) {
@@ -589,7 +697,14 @@ async fn query_entities_inner(
 
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
-    let mut matches = filter_entities(st, &tenant, params, &ctx)?;
+    let fed = if crate::federation::active(params)
+        && !crate::federation::via_loop(headers, &st.host_alias)
+    {
+        crate::federation::fed_query(st, &tenant, headers, &ctx, params).await
+    } else {
+        Vec::new()
+    };
+    let mut matches = filter_entities_fed(st, &tenant, params, &ctx, fed)?;
     if let Some(spec) = params.get("orderBy") {
         order_entities(&mut matches, spec, &ctx)?;
     }
@@ -655,6 +770,17 @@ pub fn filter_entities(
     params: &HashMap<String, String>,
     ctx: &antares_jsonld::Context,
 ) -> ApiResult<Vec<Value>> {
+    filter_entities_fed(st, tenant, params, ctx, Vec::new())
+}
+
+/// Same, with federated candidate docs merged in before filtering (4.3.6.7).
+pub fn filter_entities_fed(
+    st: &AppState,
+    tenant: &TenantId,
+    params: &HashMap<String, String>,
+    ctx: &antares_jsonld::Context,
+    fed: Vec<(bool, Value)>,
+) -> ApiResult<Vec<Value>> {
     let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
     if let Some(ids) = &ids {
         for id in ids {
@@ -697,7 +823,8 @@ pub fn filter_entities(
     let scope_q = params.get("scopeQ");
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    let all = st.store.list(tenant, Kind::Entity);
+    let all =
+        crate::federation::merge_candidates(st.store.list(tenant, Kind::Entity), fed);
     let mut out = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -840,18 +967,64 @@ pub async fn delete_entity(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = || -> ApiResult<Response> {
+    let go = async {
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
+        let ctx = st.loader.core();
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.clone()]),
+            ..Default::default()
+        };
+        let regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params);
+        if !regs.is_empty() {
+            if crate::federation::via_loop(&headers, &st.host_alias) {
+                return Ok(crate::federation::loop_508(&tenant));
+            }
+            let local_exists = st.store.get(&tenant, Kind::Entity, &id).is_some();
+            let proxy_match = regs.iter().any(|r| r.is_proxy());
+            let mut parts = Vec::new();
+            if local_exists || !proxy_match {
+                if st.store.delete(&tenant, Kind::Entity, &id) {
+                    mirror_delete_entity(&st, &tenant, &id);
+                    parts.push(crate::federation::Part { status: 204, detail: "deleted locally".into() });
+                } else {
+                    parts.push(crate::federation::Part {
+                        status: 404,
+                        detail: format!("entity {id} not found locally"),
+                    });
+                }
+            }
+            let ctx_url = crate::federation::ctx_link_url(&headers, &ctx.source);
+            for reg in &regs {
+                if reg.mode == "exclusive" && !reg.supports("deleteEntity") {
+                    parts.push(crate::federation::conflict_part("deleteEntity"));
+                    continue;
+                }
+                parts.push(
+                    crate::federation::forward_part(
+                        &st,
+                        reqwest::Method::DELETE,
+                        format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                        &[],
+                        &headers,
+                        &tenant,
+                        &ctx_url,
+                        None,
+                    )
+                    .await,
+                );
+            }
+            return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+        }
         if st.store.delete(&tenant, Kind::Entity, &id) {
             mirror_delete_entity(&st, &tenant, &id);
-            Ok(no_content(&tenant))
+            Ok::<_, ApiError>(no_content(&tenant))
         } else {
             Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into())
         }
     };
-    go().unwrap_or_else(|e| e.into_response())
+    go.await.unwrap_or_else(|e| e.into_response())
 }
 
 // ---------- DELETE /entities/ — Purge (5.6.21) ----------
@@ -933,6 +1106,47 @@ async fn purge_inner(
             Ok::<(), NgsiError>(())
         });
     }
+
+    // distributed purge (5.6.21 / 6.4.3.3)
+    let spec = crate::csource::CsrSpec {
+        types: params
+            .get("type")
+            .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
+        ids: params.get("id").map(|s| s.split(',').map(str::to_owned).collect()),
+        ..Default::default()
+    };
+    let regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
+    if !regs.is_empty() {
+        if crate::federation::via_loop(headers, &st.host_alias) {
+            return Ok(crate::federation::loop_508(&tenant));
+        }
+        let mut parts = vec![crate::federation::Part { status: 204, detail: "purged locally".into() }];
+        let ctx_url = crate::federation::ctx_link_url(headers, &ctx.source);
+        let query: Vec<(String, String)> = ["type", "id", "idPattern", "q", "attrs"]
+            .iter()
+            .filter_map(|k| params.get(*k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+        for reg in &regs {
+            if reg.mode == "exclusive" && !reg.supports("purgeEntity") {
+                parts.push(crate::federation::conflict_part("purgeEntity"));
+                continue;
+            }
+            parts.push(
+                crate::federation::forward_part(
+                    st,
+                    reqwest::Method::DELETE,
+                    format!("{}/ngsi-ld/v1/entities", reg.endpoint),
+                    &query,
+                    headers,
+                    &tenant,
+                    &ctx_url,
+                    None,
+                )
+                .await,
+            );
+        }
+        return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+    }
     Ok(no_content(&tenant))
 }
 
@@ -981,6 +1195,68 @@ async fn merge_entity_inner(
         },
     )?;
     let ts = now_iso();
+
+    let spec = crate::csource::CsrSpec {
+        ids: Some(vec![id.to_owned()]),
+        ..Default::default()
+    };
+    let regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    if !regs.is_empty() {
+        if crate::federation::via_loop(headers, &st.host_alias) {
+            return Ok(crate::federation::loop_508(&tenant));
+        }
+        let proxies: Vec<&crate::federation::FedReg> =
+            regs.iter().filter(|r| r.is_proxy()).collect();
+        let mut parts = Vec::new();
+        let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+        let local_exists = st.store.get(&tenant, Kind::Entity, id).is_some();
+        if (local_exists || proxies.is_empty()) && has_attrs {
+            let local_frag = expand_entity(
+                &rest,
+                &parsed.ctx,
+                ExpandOpts { fragment: true, allow_null: true, temporal: false },
+            )?;
+            let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+                merge_into(doc, &local_frag, &ts);
+                Ok::<(), NgsiError>(())
+            });
+            parts.push(match res {
+                Some(Ok(())) => {
+                    mirror_record(st, &tenant, &local_frag);
+                    crate::federation::Part { status: 204, detail: "merged locally".into() }
+                }
+                _ => crate::federation::Part {
+                    status: 404,
+                    detail: format!("entity {id} not found locally"),
+                },
+            });
+        }
+        let ctx_url = crate::federation::ctx_link_url(headers, &parsed.ctx.source);
+        for reg in &regs {
+            if reg.mode == "exclusive" && !reg.supports("mergeEntity") {
+                parts.push(crate::federation::conflict_part("mergeEntity"));
+                continue;
+            }
+            let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) else {
+                continue;
+            };
+            parts.push(
+                crate::federation::forward_part(
+                    st,
+                    reqwest::Method::PATCH,
+                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                    &[],
+                    headers,
+                    &tenant,
+                    &ctx_url,
+                    Some(frag),
+                )
+                .await,
+            );
+        }
+        return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+    }
+
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         merge_into(doc, &fragment, &ts);
         Ok::<(), NgsiError>(())
@@ -1092,11 +1368,38 @@ pub async fn replace_entity(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
-        // 5.6.18: an unknown target is 404 before body validation (057_03)
-        let old = st
-            .store
-            .get(&tenant, Kind::Entity, &id)
-            .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+        let local_doc = st.store.get(&tenant, Kind::Entity, &id);
+        let ctx0 = st.loader.core();
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.clone()]),
+            ..Default::default()
+        };
+        let regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params);
+        if regs.is_empty() {
+            // 5.6.18: an unknown target is 404 before body validation (057_03)
+            let old = local_doc
+                .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+            let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
+            let obj = parsed
+                .value
+                .as_object()
+                .ok_or_else(|| NgsiError::BadRequestData("entity must be a JSON object".into()))?;
+            let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
+            if expanded["id"].as_str() != Some(id.as_str()) {
+                return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());
+            }
+            let ts = now_iso();
+            stamp_new(&mut expanded, &ts);
+            if let (Some(o), Some(created)) = (expanded.as_object_mut(), old.get("createdAt")) {
+                o.insert("createdAt".into(), created.clone());
+            }
+            st.store.upsert(&tenant, Kind::Entity, &id, expanded.clone());
+            mirror_record(&st, &tenant, &expanded);
+            return Ok::<_, ApiError>(no_content(&tenant));
+        }
+        if crate::federation::via_loop(&headers, &st.host_alias) {
+            return Ok(crate::federation::loop_508(&tenant));
+        }
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
             .value
@@ -1106,14 +1409,57 @@ pub async fn replace_entity(
         if expanded["id"].as_str() != Some(id.as_str()) {
             return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());
         }
-        let ts = now_iso();
-        stamp_new(&mut expanded, &ts);
-        if let (Some(o), Some(created)) = (expanded.as_object_mut(), old.get("createdAt")) {
-            o.insert("createdAt".into(), created.clone());
+        let mut parts = Vec::new();
+        let proxies: Vec<&crate::federation::FedReg> =
+            regs.iter().filter(|r| r.is_proxy()).collect();
+        let proxy_match = !proxies.is_empty();
+        if local_doc.is_some() || !proxy_match {
+            match &local_doc {
+                Some(old) => {
+                    let (rest, _) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+                    let mut local_exp = expand_entity(&rest, &parsed.ctx, ExpandOpts::default())?;
+                    let ts = now_iso();
+                    stamp_new(&mut local_exp, &ts);
+                    if let (Some(o), Some(created)) =
+                        (local_exp.as_object_mut(), old.get("createdAt"))
+                    {
+                        o.insert("createdAt".into(), created.clone());
+                    }
+                    st.store.upsert(&tenant, Kind::Entity, &id, local_exp.clone());
+                    mirror_record(&st, &tenant, &local_exp);
+                    parts.push(crate::federation::Part { status: 204, detail: "replaced locally".into() });
+                }
+                None => parts.push(crate::federation::Part {
+                    status: 404,
+                    detail: format!("entity {id} not found locally"),
+                }),
+            }
         }
-        st.store.upsert(&tenant, Kind::Entity, &id, expanded.clone());
-        mirror_record(&st, &tenant, &expanded);
-        Ok::<_, ApiError>(no_content(&tenant))
+        let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);
+        for reg in &regs {
+            if reg.mode == "exclusive" && !reg.supports("replaceEntity") {
+                parts.push(crate::federation::conflict_part("replaceEntity"));
+                continue;
+            }
+            let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) else {
+                continue;
+            };
+            parts.push(
+                crate::federation::forward_part(
+                    &st,
+                    reqwest::Method::PUT,
+                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                    &[],
+                    &headers,
+                    &tenant,
+                    &ctx_url,
+                    Some(frag),
+                )
+                .await,
+            );
+        }
+        let _ = expanded.take();
+        Ok(crate::federation::combine(parts, no_content(&tenant), &tenant))
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
