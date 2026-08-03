@@ -1,0 +1,1425 @@
+//! /temporal/entities (5.6.11–5.6.16, 5.7.3/5.7.4; resources 6.18–6.22).
+
+use crate::negotiate::*;
+use crate::state::{now_iso, AppState};
+use antares_jsonld::compact::compact_instance;
+use antares_jsonld::{expand_entity, parse_datetime, Context, ExpandOpts};
+use antares_model::{NgsiError, TenantId};
+use antares_ql::parse_q;
+use antares_sql::store::Kind;
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use serde_json::{Map, Value};
+use std::collections::HashMap;
+
+type Params = Query<HashMap<String, String>>;
+
+fn is_meta(k: &str) -> bool {
+    matches!(
+        k,
+        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
+    )
+}
+
+const TEMPORAL_OPTS: ExpandOpts = ExpandOpts {
+    fragment: false,
+    allow_null: false,
+    temporal: true,
+};
+
+fn stamp_instances(doc: &mut Value, ts: &str) {
+    if let Some(obj) = doc.as_object_mut() {
+        for (k, v) in obj.iter_mut() {
+            if is_meta(k) {
+                continue;
+            }
+            if let Some(arr) = v.as_array_mut() {
+                for inst in arr {
+                    if let Some(o) = inst.as_object_mut() {
+                        o.entry("instanceId".to_owned()).or_insert_with(|| {
+                            Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
+                        });
+                        o.insert("createdAt".into(), Value::String(ts.to_owned()));
+                        o.insert("modifiedAt".into(), Value::String(ts.to_owned()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------- POST /temporal/entities/ — Upsert temporal (5.6.11) ----------
+
+pub async fn upsert_temporal(
+    State(st): State<AppState>,
+    Query(params): Params,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["options", "local"])?;
+        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
+        let obj = parsed
+            .value
+            .as_object()
+            .ok_or_else(|| NgsiError::BadRequestData("temporal entity must be a JSON object".into()))?;
+        let mut expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
+        let id = expanded["id"].as_str().expect("validated").to_owned();
+        let ts = now_iso();
+        stamp_instances(&mut expanded, &ts);
+        let existed = st.store.get(&tenant, Kind::Temporal, &id).is_some();
+        if existed {
+            let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+                let target = doc.as_object_mut().expect("temporal object");
+                for (k, v) in expanded.as_object().expect("expanded") {
+                    if is_meta(k) {
+                        continue;
+                    }
+                    let incoming = v.as_array().cloned().unwrap_or_default();
+                    match target.get_mut(k).and_then(Value::as_array_mut) {
+                        Some(cur) => cur.extend(incoming),
+                        None => {
+                            target.insert(k.clone(), Value::Array(incoming));
+                        }
+                    }
+                }
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                Ok::<(), NgsiError>(())
+            });
+            if let Some(Err(e)) = res {
+                return Err(ApiError::from(e));
+            }
+            Ok(no_content(&tenant))
+        } else {
+            if let Some(o) = expanded.as_object_mut() {
+                o.insert("createdAt".into(), Value::String(ts.clone()));
+                o.insert("modifiedAt".into(), Value::String(ts.clone()));
+            }
+            st.store.create(&tenant, Kind::Temporal, &id, expanded);
+            Ok::<_, ApiError>(created(
+                format!("/ngsi-ld/v1/temporal/entities/{id}"),
+                &tenant,
+            ))
+        }
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- temporal query params (4.11) ----------
+
+pub struct TemporalQ {
+    pub timerel: String,
+    pub time_at: String,
+    pub end_time_at: Option<String>,
+    pub timeproperty: String,
+}
+
+impl TemporalQ {
+    pub fn from_params(
+        params: &HashMap<String, String>,
+        required: bool,
+    ) -> Result<Option<Self>, NgsiError> {
+        let bad = |m: String| NgsiError::BadRequestData(m);
+        let Some(timerel) = params.get("timerel") else {
+            if required {
+                return Err(bad("temporal query requires timerel (5.7.4)".into()));
+            }
+            if params.contains_key("timeAt") || params.contains_key("endTimeAt") {
+                return Err(bad("timeAt given without timerel".into()));
+            }
+            // bare timeproperty: representation keyed on it; instances that
+            // lack it are excluded (retrieval-by-deletedAt, 020_17/18)
+            if let Some(tp) = params.get("timeproperty") {
+                if !["observedAt", "createdAt", "modifiedAt", "deletedAt"]
+                    .contains(&tp.as_str())
+                {
+                    return Err(bad(format!("invalid timeproperty {tp:?}")));
+                }
+                return Ok(Some(Self {
+                    timerel: "any".into(),
+                    time_at: String::new(),
+                    end_time_at: None,
+                    timeproperty: tp.clone(),
+                }));
+            }
+            return Ok(None);
+        };
+        if !["before", "after", "between"].contains(&timerel.as_str()) {
+            return Err(bad(format!("invalid timerel {timerel:?}")));
+        }
+        let time_at = params
+            .get("timeAt")
+            .filter(|s| parse_datetime(s))
+            .ok_or_else(|| bad("timeAt must be a valid ISO 8601 DateTime (4.11)".into()))?
+            .clone();
+        let end_time_at = match params.get("endTimeAt") {
+            Some(s) if parse_datetime(s) => Some(s.clone()),
+            Some(_) => return Err(bad("endTimeAt must be a valid ISO 8601 DateTime".into())),
+            None => None,
+        };
+        if timerel == "between" && end_time_at.is_none() {
+            return Err(bad("timerel=between requires endTimeAt (4.11)".into()));
+        }
+        let timeproperty = params
+            .get("timeproperty")
+            .cloned()
+            .unwrap_or_else(|| "observedAt".into());
+        if !["observedAt", "createdAt", "modifiedAt", "deletedAt"].contains(&timeproperty.as_str()) {
+            return Err(bad(format!("invalid timeproperty {timeproperty:?}")));
+        }
+        Ok(Some(Self {
+            timerel: timerel.clone(),
+            time_at,
+            end_time_at,
+            timeproperty,
+        }))
+    }
+
+    fn instance_matches(&self, inst: &Value) -> bool {
+        let Some(t) = inst.get(&self.timeproperty).and_then(Value::as_str) else {
+            return false;
+        };
+        match self.timerel.as_str() {
+            "any" => true, // bare timeproperty: presence is the filter
+            "before" => t < self.time_at.as_str(),
+            "after" => t >= self.time_at.as_str(),
+            "between" => {
+                t >= self.time_at.as_str()
+                    && self.end_time_at.as_deref().is_some_and(|e| t < e)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Windowed per-entity temporal data: filtered+ordered instances per attr.
+struct Windowed {
+    attrs: std::collections::BTreeMap<String, Vec<Value>>,
+    max_per_attr: usize,
+    ts_min: Option<String>,
+    ts_max: Option<String>,
+}
+
+/// NGSI-LD 6.3.10 only paginates ("206") when an attribute has "too many"
+/// instances. The ETSI suite triggers 206 at 20 instances and expects 200 at
+/// <=5 — any limit in (5,20) is spec-valid; 9 keeps margin (Scorpio parity).
+const TEMPORAL_INSTANCE_LIMIT: usize = 9;
+
+fn window(
+    doc: &Value,
+    tq: Option<&TemporalQ>,
+    last_n: Option<usize>,
+    attrs_filter: Option<&Vec<String>>,
+    omit: Option<&Vec<crate::repr::ProjNode>>,
+    dataset: Option<&Vec<String>>,
+    timeprop: &str,
+) -> Windowed {
+    let mut w = Windowed {
+        attrs: std::collections::BTreeMap::new(),
+        max_per_attr: 0,
+        ts_min: None,
+        ts_max: None,
+    };
+    let Some(obj) = doc.as_object() else { return w };
+    for (k, v) in obj {
+        // temporal scope: instance-shaped scope arrays window like attributes
+        let scope_instances = k == "scope"
+            && v.as_array().is_some_and(|a| a.first().is_some_and(Value::is_object));
+        if is_meta(k) && !scope_instances {
+            continue;
+        }
+        if let Some(want) = attrs_filter {
+            if !want.contains(k) {
+                continue;
+            }
+        }
+        if let Some(omit) = omit {
+            if omit.iter().any(|n| n.iri == *k && n.children.is_none()) {
+                continue;
+            }
+        }
+        let mut instances: Vec<Value> = v
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|inst| tq.is_none_or(|tq| tq.instance_matches(inst)))
+            .filter(|inst| match (dataset, inst.get("datasetId")) {
+                (None, _) => true,
+                (Some(want), Some(Value::String(have))) => want.iter().any(|w| w == have),
+                (Some(want), None) => want.iter().any(|w| w == "@none"),
+                _ => false,
+            })
+            .collect();
+        instances.sort_by(|a, b| {
+            let ta = a.get(timeprop).and_then(Value::as_str).unwrap_or("");
+            let tb = b.get(timeprop).and_then(Value::as_str).unwrap_or("");
+            ta.cmp(tb)
+        });
+        if let Some(n) = last_n {
+            if instances.len() > n {
+                instances = instances.split_off(instances.len() - n);
+            }
+            // lastN delivers newest-first (DESC), Scorpio parity
+            instances.reverse();
+        }
+        if instances.is_empty() {
+            continue;
+        }
+        w.max_per_attr = w.max_per_attr.max(instances.len());
+        for inst in &instances {
+            if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
+                if w.ts_min.as_deref().is_none_or(|m| t < m) {
+                    w.ts_min = Some(t.to_owned());
+                }
+                if w.ts_max.as_deref().is_none_or(|m| t > m) {
+                    w.ts_max = Some(t.to_owned());
+                }
+            }
+        }
+        w.attrs.insert(k.clone(), instances);
+    }
+    w
+}
+
+/// 6.3.10 attribute-gap cut (retrieve only): in the truncation regime, when
+/// attributes occupy disjoint time ranges, keep the attribute whose range is
+/// first in the query direction and empty the ones entirely beyond it.
+fn gap_cut(w: &mut Windowed, timeprop: &str, descending: bool) {
+    if w.max_per_attr <= TEMPORAL_INSTANCE_LIMIT || w.attrs.len() < 2 {
+        return;
+    }
+    let mut ranges: Vec<(String, String, String)> = Vec::new(); // (attr, min, max)
+    for (k, instances) in &w.attrs {
+        let mut min: Option<&str> = None;
+        let mut max: Option<&str> = None;
+        for inst in instances {
+            if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
+                if min.is_none_or(|m| t < m) {
+                    min = Some(t);
+                }
+                if max.is_none_or(|m| t > m) {
+                    max = Some(t);
+                }
+            }
+        }
+        if let (Some(min), Some(max)) = (min, max) {
+            ranges.push((k.clone(), min.to_owned(), max.to_owned()));
+        }
+    }
+    if ranges.len() < 2 {
+        return;
+    }
+    let keep = ranges
+        .iter()
+        .min_by(|a, b| {
+            if descending {
+                b.2.cmp(&a.2)
+            } else {
+                a.1.cmp(&b.1)
+            }
+        })
+        .cloned()
+        .expect("nonempty");
+    let mut new_min: Option<String> = None;
+    let mut new_max: Option<String> = None;
+    for (attr, min, max) in &ranges {
+        let cut = if descending {
+            max < &keep.1
+        } else {
+            min > &keep.2
+        };
+        if *attr != keep.0 && cut {
+            if let Some(list) = w.attrs.get_mut(attr) {
+                list.clear();
+            }
+        } else {
+            if new_min.as_deref().is_none_or(|m| min.as_str() < m) {
+                new_min = Some(min.clone());
+            }
+            if new_max.as_deref().is_none_or(|m| max.as_str() > m) {
+                new_max = Some(max.clone());
+            }
+        }
+    }
+    w.ts_min = new_min;
+    w.ts_max = new_max;
+}
+
+/// Content-Range: date-time <start>-<end>/<size> (Scorpio-parity semantics).
+fn content_range(
+    max_per_attr: usize,
+    ts_min: Option<&str>,
+    ts_max: Option<&str>,
+    tq: Option<&TemporalQ>,
+    last_n: Option<usize>,
+) -> Option<String> {
+    if max_per_attr <= TEMPORAL_INSTANCE_LIMIT {
+        return None;
+    }
+    let (data_min, data_max) = (ts_min?, ts_max?);
+    let timerel = tq
+        .map(|t| t.timerel.as_str())
+        .filter(|t| *t != "any");
+    let (start, end) = if last_n.is_none() {
+        let start = match timerel {
+            Some("after") | Some("between") => tq.expect("tq").time_at.clone(),
+            _ => data_min.to_owned(),
+        };
+        (start, data_max.to_owned())
+    } else {
+        let start = match timerel {
+            Some("before") => tq.expect("tq").time_at.clone(),
+            Some("between") => tq
+                .expect("tq")
+                .end_time_at
+                .clone()
+                .unwrap_or_else(|| data_max.to_owned()),
+            _ => data_max.to_owned(),
+        };
+        (start, data_min.to_owned())
+    };
+    let size = last_n.map_or_else(|| "*".to_owned(), |n| n.to_string());
+    Some(format!("date-time {start}-{end}/{size}"))
+}
+
+/// Render one temporal entity from its windowed data.
+fn present_temporal(
+    doc: &Value,
+    w: &Windowed,
+    ctx: &Context,
+    r: &TRepr,
+    tq: Option<&TemporalQ>,
+    timeprop: &str,
+) -> Value {
+    let Some(obj) = doc.as_object() else {
+        return doc.clone();
+    };
+    let mut out = Map::new();
+    for (k, v) in obj {
+        let scope_instances = k == "scope"
+            && v.as_array().is_some_and(|a| a.first().is_some_and(Value::is_object));
+        if is_meta(k) && !scope_instances {
+            match k.as_str() {
+                "createdAt" | "modifiedAt" if !r.sys => continue,
+                _ => {}
+            }
+            // pick/omit constrain core members too (4.21)
+            if let Some(pick) = &r.pick {
+                if !pick.iter().any(|n| n.raw == *k) {
+                    continue;
+                }
+            }
+            if let Some(omit) = &r.omit {
+                if omit.iter().any(|n| n.raw == *k && n.children.is_none()) {
+                    continue;
+                }
+            }
+            if k == "type" {
+                out.insert("type".into(), antares_jsonld::compact_types(v, ctx));
+            } else {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if r.aggregated {
+        for (k, v) in render_aggregated(w, tq, r, ctx, timeprop) {
+            out.insert(k, v);
+        }
+        return Value::Object(out);
+    }
+    for (k, instances) in &w.attrs {
+        if instances.is_empty() {
+            // gap-cut leftovers render as empty arrays
+            out.insert(ctx.compact_iri(k), Value::Array(vec![]));
+            continue;
+        }
+        if r.temporal_values {
+            // group instances by datasetId (4.5.9)
+            let mut groups: Vec<(Option<String>, Vec<&Value>)> = Vec::new();
+            for inst in instances {
+                let ds = inst.get("datasetId").and_then(Value::as_str).map(String::from);
+                match groups.iter_mut().find(|(g, _)| *g == ds) {
+                    Some((_, list)) => list.push(inst),
+                    None => groups.push((ds, vec![inst])),
+                }
+            }
+            let mut rendered: Vec<Value> = groups
+                .iter()
+                .map(|(ds, list)| {
+                    let atype = list
+                        .first()
+                        .and_then(|i| i.get("type"))
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("Property".into()));
+                    let values: Vec<Value> = list
+                        .iter()
+                        .map(|inst| {
+                            // 4.5.9: Property/Relationship pairs carry the bare
+                            // value/object; other attribute kinds wrap it under
+                            // their member name.
+                            let v = if let Some(v) = inst.get("value") {
+                                ts_float(v)
+                            } else if let Some(o) = inst.get("object") {
+                                o.clone()
+                            } else if let Some(lm) = inst.get("languageMap") {
+                                serde_json::json!({"languageMap": lm})
+                            } else if let Some(j) = inst.get("json") {
+                                serde_json::json!({"json": j})
+                            } else if let Some(vv) = inst.get("vocab") {
+                                let compacted = match vv {
+                                    Value::String(iri) => Value::String(ctx.compact_iri(iri)),
+                                    Value::Array(a) => Value::Array(
+                                        a.iter()
+                                            .map(|s| match s {
+                                                Value::String(iri) => {
+                                                    Value::String(ctx.compact_iri(iri))
+                                                }
+                                                o => o.clone(),
+                                            })
+                                            .collect(),
+                                    ),
+                                    o => o.clone(),
+                                };
+                                serde_json::json!({"vocab": compacted})
+                            } else if let Some(l) = inst.get("valueList") {
+                                serde_json::json!({"valueList": l})
+                            } else if let Some(l) = inst.get("objectList") {
+                                serde_json::json!({"objectList": l})
+                            } else {
+                                Value::Null
+                            };
+                            let t = inst.get(timeprop).cloned().unwrap_or(Value::Null);
+                            Value::Array(vec![v, t])
+                        })
+                        .collect();
+                    let mut o = Map::new();
+                    // 4.5.9: the simplified member name follows the attribute type
+                    let member = match atype.as_str() {
+                        Some("Relationship") => "objects",
+                        Some("LanguageProperty") => "languageMaps",
+                        Some("VocabProperty") => "vocabs",
+                        Some("JsonProperty") => "jsons",
+                        Some("ListProperty") => "valueLists",
+                        Some("ListRelationship") => "objectLists",
+                        _ => "values",
+                    };
+                    o.insert("type".into(), atype);
+                    if let Some(ds) = ds {
+                        o.insert("datasetId".into(), Value::String(ds.clone()));
+                    }
+                    o.insert(member.into(), Value::Array(values));
+                    Value::Object(o)
+                })
+                .collect();
+            let rendered = if rendered.len() == 1 {
+                rendered.remove(0)
+            } else {
+                Value::Array(rendered)
+            };
+            out.insert(ctx.compact_iri(k), rendered);
+        } else {
+            let presented: Vec<Value> = instances
+                .iter()
+                .map(|inst| {
+                    let mut ci = inst.clone();
+                    if !r.sys {
+                        if let Some(o) = ci.as_object_mut() {
+                            o.remove("createdAt");
+                            o.remove("modifiedAt");
+                        }
+                    }
+                    compact_instance(&ci, ctx)
+                })
+                .collect();
+            out.insert(ctx.compact_iri(k), Value::Array(presented));
+        }
+    }
+    Value::Object(out)
+}
+
+/// Parsed temporal representation params (options/format/lastN/pick/omit/
+/// datasetId/aggregation), fully validated up front.
+#[derive(Default, Clone)]
+struct TRepr {
+    temporal_values: bool,
+    aggregated: bool,
+    sys: bool,
+    last_n: Option<usize>,
+    pick: Option<Vec<crate::repr::ProjNode>>,
+    omit: Option<Vec<crate::repr::ProjNode>>,
+    dataset_id: Option<Vec<String>>,
+    attrs: Option<Vec<String>>,
+    aggr_methods: Vec<String>,
+    aggr_period: AggrPeriod,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum AggrPeriod {
+    /// PT0S / absent: one bucket over the whole range
+    #[default]
+    Whole,
+    Seconds(i64),
+    Months(u32),
+}
+
+fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
+    let rest = s.strip_prefix('P')?;
+    let (date, time) = match rest.split_once('T') {
+        Some((d, t)) => (d, t),
+        None => (rest, ""),
+    };
+    let mut months = 0u32;
+    let mut secs = 0i64;
+    let mut num = String::new();
+    for c in date.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+        } else {
+            let n: f64 = num.parse().ok()?;
+            num.clear();
+            match c {
+                'Y' => months += (n as u32) * 12,
+                'M' => months += n as u32,
+                'W' => secs += (n * 604800.0) as i64,
+                'D' => secs += (n * 86400.0) as i64,
+                _ => return None,
+            }
+        }
+    }
+    for c in time.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+        } else {
+            let n: f64 = num.parse().ok()?;
+            num.clear();
+            match c {
+                'H' => secs += (n * 3600.0) as i64,
+                'M' => secs += (n * 60.0) as i64,
+                'S' => secs += n as i64,
+                _ => return None,
+            }
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    Some(match (months, secs) {
+        (0, 0) => AggrPeriod::Whole,
+        (m, 0) => AggrPeriod::Months(m),
+        (0, sc) => AggrPeriod::Seconds(sc),
+        _ => return None,
+    })
+}
+
+const AGGR_METHODS: &[&str] = &[
+    "totalCount", "distinctCount", "sum", "avg", "min", "max", "stddev", "sumsq",
+];
+
+fn parse_trepr(
+    params: &HashMap<String, String>,
+    ctx: &Context,
+) -> Result<TRepr, NgsiError> {
+    let mut r = TRepr::default();
+    if let Some(opts) = params.get("options") {
+        for o in opts.split(',') {
+            match o.trim() {
+                "sysAttrs" => r.sys = true,
+                "temporalValues" => r.temporal_values = true,
+                "aggregatedValues" => r.aggregated = true,
+                "normalized" => {}
+                other => {
+                    return Err(NgsiError::InvalidRequest(format!(
+                        "unsupported options value {other:?}"
+                    )))
+                }
+            }
+        }
+    }
+    // format wins over options on conflict (6.3.7)
+    if let Some(f) = params.get("format") {
+        match f.as_str() {
+            "temporalValues" => {
+                r.temporal_values = true;
+                r.aggregated = false;
+            }
+            "aggregatedValues" => {
+                r.aggregated = true;
+                r.temporal_values = false;
+            }
+            "normalized" => {
+                r.temporal_values = false;
+                r.aggregated = false;
+            }
+            other => {
+                return Err(NgsiError::InvalidRequest(format!(
+                    "unsupported format value {other:?}"
+                )))
+            }
+        }
+    }
+    // 4.21 mutual exclusivity
+    let excl = ["pick", "omit", "attrs"]
+        .iter()
+        .filter(|k| params.contains_key(**k))
+        .count();
+    if excl > 1 {
+        return Err(NgsiError::BadRequestData(
+            "pick, omit and attrs are mutually exclusive (4.21)".into(),
+        ));
+    }
+    if let Some(pck) = params.get("pick") {
+        r.pick = Some(crate::repr::parse_projection(pck, ctx)?);
+    }
+    if let Some(o) = params.get("omit") {
+        r.omit = Some(crate::repr::parse_projection(o, ctx)?);
+    }
+    if let Some(a) = params.get("attrs") {
+        r.attrs = Some(a.split(',').map(|t| ctx.expand_key(t.trim())).collect());
+    }
+    r.dataset_id = params
+        .get("datasetId")
+        .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect());
+    r.last_n = match params.get("lastN") {
+        Some(n) => Some(n.parse::<usize>().map_err(|_| {
+            NgsiError::BadRequestData(format!("invalid lastN {n:?}"))
+        })?),
+        None => None,
+    };
+    if let Some(m) = params.get("aggrMethods") {
+        for method in m.split(',') {
+            let method = method.trim();
+            if !AGGR_METHODS.contains(&method) {
+                return Err(NgsiError::BadRequestData(format!(
+                    "invalid aggrMethods value {method:?} (4.5.19)"
+                )));
+            }
+            r.aggr_methods.push(method.to_owned());
+        }
+        // aggrMethods implies aggregation UNLESS an explicit format says otherwise
+        if !params.contains_key("format") {
+            r.aggregated = true;
+        }
+    }
+    if r.aggregated && r.aggr_methods.is_empty() {
+        return Err(NgsiError::BadRequestData(
+            "aggregatedValues requires aggrMethods (4.5.19)".into(),
+        ));
+    }
+    if let Some(d) = params.get("aggrPeriodDuration") {
+        r.aggr_period = parse_iso_duration(d).ok_or_else(|| {
+            NgsiError::BadRequestData(format!("invalid aggrPeriodDuration {d:?}"))
+        })?;
+    }
+    Ok(r)
+}
+
+/// The attribute-selection set for windowing: attrs= or pick=.
+fn selection(r: &TRepr) -> Option<Vec<String>> {
+    if let Some(a) = &r.attrs {
+        return Some(a.clone());
+    }
+    // core-member picks (id/type/…) are presentation-only, not attr selection
+    r.pick.as_ref().map(|p| {
+        p.iter()
+            .filter(|n| !is_meta(&n.raw))
+            .map(|n| n.iri.clone())
+            .collect()
+    })
+}
+
+fn ts_float(v: &Value) -> Value {
+    match v.as_f64() {
+        Some(f) => serde_json::json!(f),
+        None => v.clone(),
+    }
+}
+
+/// Aggregated representation (4.5.19): attr → {type, <method>: [[v,start,end]]}.
+fn render_aggregated(
+    w: &Windowed,
+    tq: Option<&TemporalQ>,
+    r: &TRepr,
+    ctx: &Context,
+    timeprop: &str,
+) -> Map<String, Value> {
+    use chrono::{DateTime, FixedOffset};
+    let fmt = |d: DateTime<FixedOffset>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut out = Map::new();
+    for (k, instances) in &w.attrs {
+        let mut times: Vec<(DateTime<FixedOffset>, f64)> = Vec::new();
+        for inst in instances {
+            let Some(t) = inst
+                .get(timeprop)
+                .and_then(Value::as_str)
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            else {
+                continue;
+            };
+            let v = inst.get("value").and_then(Value::as_f64).unwrap_or(f64::NAN);
+            times.push((t, v));
+        }
+        if times.is_empty() {
+            continue;
+        }
+        times.sort_by_key(|(t, _)| *t);
+        let anchor = tq
+            .and_then(|tq| DateTime::parse_from_rfc3339(&tq.time_at).ok())
+            .unwrap_or(times[0].0);
+        // bucket boundaries
+        let bucket_of = |t: DateTime<FixedOffset>| -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
+            match r.aggr_period {
+                AggrPeriod::Whole => {
+                    let last = times.last().expect("nonempty").0;
+                    (anchor, last + chrono::Duration::seconds(1))
+                }
+                AggrPeriod::Seconds(sc) => {
+                    let idx = (t - anchor).num_seconds().div_euclid(sc);
+                    let start = anchor + chrono::Duration::seconds(idx * sc);
+                    (start, start + chrono::Duration::seconds(sc))
+                }
+                AggrPeriod::Months(m) => {
+                    let mut start = anchor;
+                    loop {
+                        let next = start
+                            .checked_add_months(chrono::Months::new(m))
+                            .expect("date range");
+                        if next > t {
+                            break (start, next);
+                        }
+                        start = next;
+                    }
+                }
+            }
+        };
+        let mut buckets: Vec<((DateTime<FixedOffset>, DateTime<FixedOffset>), Vec<f64>)> =
+            Vec::new();
+        for (t, v) in &times {
+            let b = bucket_of(*t);
+            match buckets.iter_mut().find(|(bb, _)| bb.0 == b.0) {
+                Some((_, vals)) => vals.push(*v),
+                None => buckets.push((b, vec![*v])),
+            }
+        }
+        buckets.sort_by_key(|((s, _), _)| *s);
+        let mut attr_out = Map::new();
+        attr_out.insert("type".into(), Value::String("Property".into()));
+        for method in &r.aggr_methods {
+            let rows: Vec<Value> = buckets
+                .iter()
+                .map(|((bs, be), vals)| {
+                    let nums: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+                    let val: Value = match method.as_str() {
+                        "totalCount" => serde_json::json!(vals.len()),
+                        "distinctCount" => {
+                            let mut d = vals.clone();
+                            d.sort_by(f64::total_cmp);
+                            d.dedup();
+                            serde_json::json!(d.len())
+                        }
+                        "sum" => serde_json::json!(nums.iter().sum::<f64>()),
+                        "avg" => serde_json::json!(
+                            nums.iter().sum::<f64>() / nums.len().max(1) as f64
+                        ),
+                        "min" => serde_json::json!(
+                            nums.iter().copied().fold(f64::INFINITY, f64::min)
+                        ),
+                        "max" => serde_json::json!(
+                            nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                        ),
+                        "stddev" => {
+                            let n = nums.len().max(1) as f64;
+                            let mean = nums.iter().sum::<f64>() / n;
+                            serde_json::json!(
+                                (nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                    / n)
+                                    .sqrt()
+                            )
+                        }
+                        "sumsq" => serde_json::json!(
+                            nums.iter().map(|v| v * v).sum::<f64>()
+                        ),
+                        _ => Value::Null,
+                    };
+                    Value::Array(vec![
+                        val,
+                        Value::String(fmt(*bs)),
+                        Value::String(fmt(*be)),
+                    ])
+                })
+                .collect();
+            attr_out.insert(method.clone(), Value::Array(rows));
+        }
+        out.insert(ctx.compact_iri(k), Value::Object(attr_out));
+    }
+    out
+}
+
+// ---------- GET /temporal/entities/ (5.7.4) ----------
+
+pub async fn query_temporal(
+    State(st): State<AppState>,
+    Query(params): Params,
+    headers: HeaderMap,
+) -> Response {
+    match query_temporal_inner(&st, &params, &headers).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn query_temporal_inner(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    check_params(
+        params,
+        &[
+            "id", "idPattern", "type", "attrs", "q", "georel", "geometry", "coordinates",
+            "geoproperty", "scopeQ", "csf", "timerel", "timeAt", "endTimeAt", "timeproperty",
+            "aggrMethods", "aggrPeriodDuration", "lastN", "limit", "offset", "count",
+            "options", "format", "lang", "local", "entityMap", "pick", "omit", "datasetId",
+            "orderBy", "orderFrom",
+        ],
+    )?;
+    let accept = parse_accept(headers)?;
+    let ctx = request_context(&st.loader, headers).await?;
+    let has_filter = ["type", "attrs", "q", "georel"]
+        .iter()
+        .any(|k| params.contains_key(*k))
+        || params.get("local").map(String::as_str) == Some("true");
+    if !has_filter {
+        return Err(NgsiError::BadRequestData(
+            "temporal query needs at least one of type, attrs, q, georel (5.7.4)".into(),
+        )
+        .into());
+    }
+    let tq = TemporalQ::from_params(params, true)?;
+    let trepr = parse_trepr(params, &ctx)?;
+    let last_n = trepr.last_n;
+
+    let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
+    let id_pattern = match params.get("idPattern") {
+        Some(p) => Some(
+            regex::Regex::new(p)
+                .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
+        ),
+        None => None,
+    };
+    let types: Option<Vec<String>> = params
+        .get("type")
+        .map(|s| s.split([',', '|']).map(|t| ctx.expand_key(t.trim())).collect());
+    let attrs_filter = selection(&trepr);
+    // only the attrs= param excludes entities; pick is projection-only
+    let entity_attr_filter = trepr.attrs.clone();
+    let q_ast = match params.get("q") {
+        Some(q) => Some(parse_q(q)?),
+        None => None,
+    };
+    let geo = crate::geo::GeoQuery::from_params(params)?;
+
+    let all = st.store.list(&tenant, Kind::Temporal);
+    let mut matches = Vec::new();
+    for doc in all {
+        let id = doc["id"].as_str().unwrap_or("");
+        if let Some(ids) = &ids {
+            if !ids.contains(&id) {
+                continue;
+            }
+        }
+        if let Some(re) = &id_pattern {
+            if !re.is_match(id) {
+                continue;
+            }
+        }
+        if let Some(types) = &types {
+            let etypes = doc["type"].as_array().cloned().unwrap_or_default();
+            if !etypes
+                .iter()
+                .any(|t| types.iter().any(|w| Some(w.as_str()) == t.as_str()))
+            {
+                continue;
+            }
+        }
+        if let Some(want) = &entity_attr_filter {
+            if !want.iter().any(|a| doc.get(a).is_some()) {
+                continue;
+            }
+        }
+        if let Some(ast) = &q_ast {
+            if !crate::qeval::eval_q(ast, &doc, &ctx) {
+                continue;
+            }
+        }
+        if let Some(g) = &geo {
+            if !g.matches(&doc, &ctx) {
+                continue;
+            }
+        }
+        // entity qualifies only if some instance falls in the window
+        let any_instance = doc.as_object().is_some_and(|o| {
+            o.iter().any(|(k, v)| {
+                !is_meta(k)
+                    && v.as_array().is_some_and(|arr| {
+                        arr.iter()
+                            .any(|inst| tq.as_ref().is_none_or(|tq| tq.instance_matches(inst)))
+                    })
+            })
+        });
+        if !any_instance {
+            continue;
+        }
+        matches.push(doc);
+    }
+    if let Some(spec) = params.get("orderBy") {
+        crate::entities::order_entities(&mut matches, spec, &ctx)?;
+    }
+    let (page, count_hdr, links) =
+        crate::entities::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?;
+    let timeprop = tq
+        .as_ref()
+        .map_or("observedAt", |t| t.timeproperty.as_str())
+        .to_owned();
+    let core_only_pick = attrs_filter.as_ref().is_some_and(Vec::is_empty);
+    let mut payload: Vec<Value> = Vec::new();
+    let (mut g_max, mut g_min, mut g_maxts) = (0usize, None::<String>, None::<String>);
+    for d in &page {
+        let w = window(
+            d,
+            tq.as_ref(),
+            last_n,
+            attrs_filter.as_ref(),
+            trepr.omit.as_ref(),
+            trepr.dataset_id.as_ref(),
+            &timeprop,
+        );
+        g_max = g_max.max(w.max_per_attr);
+        if let Some(m) = &w.ts_min {
+            if g_min.as_deref().is_none_or(|c| m.as_str() < c) {
+                g_min = Some(m.clone());
+            }
+        }
+        if let Some(m) = &w.ts_max {
+            if g_maxts.as_deref().is_none_or(|c| m.as_str() > c) {
+                g_maxts = Some(m.clone());
+            }
+        }
+        // no instance survived the window/dataset filters ⇒ the entity is
+        // not part of the temporal result (unless the projection is
+        // deliberately core-only, e.g. pick=id)
+        if w.attrs.is_empty() && !core_only_pick {
+            continue;
+        }
+        let presented = present_temporal(d, &w, &ctx, &trepr, tq.as_ref(), &timeprop);
+        if trepr.pick.is_some() && presented.as_object().is_some_and(|o| o.is_empty()) {
+            continue;
+        }
+        payload.push(presented);
+    }
+    // aggregated responses are complete by construction — never 206 (6.3.10)
+    let cr = if trepr.aggregated {
+        None
+    } else {
+        content_range(g_max, g_min.as_deref(), g_maxts.as_deref(), tq.as_ref(), last_n)
+    };
+    let status = if cr.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let mut resp = respond(status, Value::Array(payload), &ctx, accept, &tenant);
+    if let Some(cr) = cr {
+        if let Ok(v) = cr.parse() {
+            resp.headers_mut().insert("Content-Range", v);
+        }
+    }
+    if let Some(total) = count_hdr {
+        if let Ok(v) = total.to_string().parse() {
+            resp.headers_mut().insert("NGSILD-Results-Count", v);
+        }
+    }
+    for l in links {
+        if let Ok(v) = l.parse() {
+            resp.headers_mut().append(axum::http::header::LINK, v);
+        }
+    }
+    Ok(resp)
+}
+
+// ---------- GET /temporal/entities/{id} (5.7.3) ----------
+
+pub async fn retrieve_temporal(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Params,
+    headers: HeaderMap,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(
+            &params,
+            &[
+                "attrs", "timerel", "timeAt", "endTimeAt", "timeproperty", "lastN",
+                "aggrMethods", "aggrPeriodDuration", "options", "format", "lang", "local",
+                "pick", "omit", "datasetId",
+            ],
+        )?;
+        let accept = parse_accept(&headers)?;
+        let ctx = request_context(&st.loader, &headers).await?;
+        let tq = TemporalQ::from_params(&params, false)?;
+        let trepr = parse_trepr(&params, &ctx)?;
+        let last_n = trepr.last_n;
+        antares_model::EntityId::new(&id)?;
+        let doc = st
+            .store
+            .get(&tenant, Kind::Temporal, &id)
+            .ok_or_else(|| NgsiError::ResourceNotFound(format!("temporal entity {id} not found")))?;
+        let attrs_filter = selection(&trepr);
+        // 5.7.3: attrs matching nothing ⇒ 404
+        if let Some(want) = &attrs_filter {
+            if !want.iter().any(|a| doc.get(a).is_some()) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "temporal entity {id} has none of the requested attributes"
+                ))
+                .into());
+            }
+        }
+        let timeprop = tq
+            .as_ref()
+            .map_or("observedAt", |t| t.timeproperty.as_str())
+            .to_owned();
+        let mut w = window(
+            &doc,
+            tq.as_ref(),
+            last_n,
+            attrs_filter.as_ref(),
+            trepr.omit.as_ref(),
+            trepr.dataset_id.as_ref(),
+            &timeprop,
+        );
+        gap_cut(&mut w, &timeprop, last_n.is_some());
+        let cr = if trepr.aggregated {
+            None
+        } else {
+            content_range(
+                w.max_per_attr,
+                w.ts_min.as_deref(),
+                w.ts_max.as_deref(),
+                tq.as_ref(),
+                last_n,
+            )
+        };
+        let payload = present_temporal(&doc, &w, &ctx, &trepr, tq.as_ref(), &timeprop);
+        if (trepr.pick.is_some() || trepr.omit.is_some())
+            && payload.as_object().is_some_and(|o| o.is_empty())
+        {
+            return Err(NgsiError::ResourceNotFound(format!(
+                "projection matches nothing on temporal entity {id}"
+            ))
+            .into());
+        }
+        let status = if cr.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        };
+        let mut resp = respond(status, payload, &ctx, accept, &tenant);
+        if let Some(cr) = cr {
+            if let Ok(v) = cr.parse() {
+                resp.headers_mut().insert("Content-Range", v);
+            }
+        }
+        Ok::<_, ApiError>(resp)
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- DELETE /temporal/entities/{id} (5.6.16) ----------
+
+pub async fn delete_temporal(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Params,
+    headers: HeaderMap,
+) -> Response {
+    let go = || -> ApiResult<Response> {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["local"])?;
+        if st.store.delete(&tenant, Kind::Temporal, &id) {
+            Ok(no_content(&tenant))
+        } else {
+            Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+        }
+    };
+    go().unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- POST /temporal/entities/{id}/attrs/ (5.6.12) ----------
+
+pub async fn add_temporal_attrs(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Params,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["local"])?;
+        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
+        let obj = parsed
+            .value
+            .as_object()
+            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let mut expanded = expand_entity(
+            obj,
+            &parsed.ctx,
+            ExpandOpts {
+                fragment: true,
+                allow_null: false,
+                temporal: true,
+            },
+        )?;
+        let ts = now_iso();
+        stamp_instances(&mut expanded, &ts);
+        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+            let target = doc.as_object_mut().expect("temporal object");
+            for (k, v) in expanded.as_object().expect("expanded") {
+                if is_meta(k) {
+                    continue;
+                }
+                let incoming = v.as_array().cloned().unwrap_or_default();
+                match target.get_mut(k).and_then(Value::as_array_mut) {
+                    Some(cur) => cur.extend(incoming),
+                    None => {
+                        target.insert(k.clone(), Value::Array(incoming));
+                    }
+                }
+            }
+            target.insert("modifiedAt".into(), Value::String(ts.clone()));
+            Ok::<(), NgsiError>(())
+        });
+        match res {
+            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            Some(Err(e)) => Err(ApiError::from(e)),
+            Some(Ok(())) => Ok(no_content(&tenant)),
+        }
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- DELETE /temporal/entities/{id}/attrs/{attrId} (5.6.13) ----------
+
+pub async fn delete_temporal_attr(
+    State(st): State<AppState>,
+    Path((id, attr)): Path<(String, String)>,
+    Query(params): Params,
+    headers: HeaderMap,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["datasetId", "deleteAll", "local"])?;
+        let ctx = request_context(&st.loader, &headers).await?;
+        let attr_iri = ctx.expand_key(&attr);
+        let mut found = false;
+        let ts = now_iso();
+        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+            let target = doc.as_object_mut().expect("temporal object");
+            if target.remove(&attr_iri).is_some() {
+                found = true;
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+            }
+            Ok::<(), NgsiError>(())
+        });
+        match res {
+            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            Some(Err(e)) => Err(ApiError::from(e)),
+            Some(Ok(())) if found => Ok(no_content(&tenant)),
+            Some(Ok(())) => {
+                Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
+            }
+        }
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- PATCH/DELETE .../attrs/{attrId}/{instanceId} (5.6.14/5.6.15) ----------
+
+pub async fn modify_temporal_instance(
+    State(st): State<AppState>,
+    Path((id, attr, instance_id)): Path<(String, String, String)>,
+    Query(params): Params,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["local"])?;
+        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
+        let obj = parsed
+            .value
+            .as_object()
+            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let mut wrapper = Map::new();
+        let mut frag = obj.clone();
+        frag.remove("@context");
+        wrapper.insert(attr.clone(), Value::Object(frag));
+        let expanded = expand_entity(
+            &wrapper,
+            &parsed.ctx,
+            ExpandOpts {
+                fragment: true,
+                allow_null: false,
+                temporal: true,
+            },
+        )?;
+        let attr_iri = parsed.ctx.expand_key(&attr);
+        let frag_inst = expanded
+            .get(&attr_iri)
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .cloned()
+            .ok_or_else(|| NgsiError::BadRequestData("invalid instance fragment".into()))?;
+        let ts = now_iso();
+        let mut found = false;
+        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+            let target = doc.as_object_mut().expect("temporal object");
+            if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                if let Some(inst) = arr.iter_mut().find(|i| {
+                    i.get("instanceId").and_then(Value::as_str) == Some(instance_id.as_str())
+                }) {
+                    found = true;
+                    let t = inst.as_object_mut().expect("instance");
+                    for (k, v) in frag_inst.as_object().expect("fragment") {
+                        if matches!(k.as_str(), "createdAt" | "instanceId") {
+                            continue;
+                        }
+                        t.insert(k.clone(), v.clone());
+                    }
+                    t.insert("modifiedAt".into(), Value::String(ts.clone()));
+                }
+            }
+            Ok::<(), NgsiError>(())
+        });
+        match res {
+            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            Some(Err(e)) => Err(ApiError::from(e)),
+            Some(Ok(())) if found => Ok(no_content(&tenant)),
+            Some(Ok(())) => Err(NgsiError::ResourceNotFound(format!(
+                "instance {instance_id} not found"
+            ))
+            .into()),
+        }
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+pub async fn delete_temporal_instance(
+    State(st): State<AppState>,
+    Path((id, attr, instance_id)): Path<(String, String, String)>,
+    Query(params): Params,
+    headers: HeaderMap,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["local"])?;
+        let ctx = request_context(&st.loader, &headers).await?;
+        let attr_iri = ctx.expand_key(&attr);
+        let mut found = false;
+        let ts = now_iso();
+        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+            let target = doc.as_object_mut().expect("temporal object");
+            if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                let before = arr.len();
+                arr.retain(|i| {
+                    i.get("instanceId").and_then(Value::as_str) != Some(instance_id.as_str())
+                });
+                found = arr.len() != before;
+                if arr.is_empty() {
+                    target.remove(&attr_iri);
+                }
+            }
+            if found {
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+            }
+            Ok::<(), NgsiError>(())
+        });
+        match res {
+            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            Some(Err(e)) => Err(ApiError::from(e)),
+            Some(Ok(())) if found => Ok(no_content(&tenant)),
+            Some(Ok(())) => Err(NgsiError::ResourceNotFound(format!(
+                "instance {instance_id} not found"
+            ))
+            .into()),
+        }
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+// ---------- POST /temporal/entityOperations/query (6.24) ----------
+
+pub async fn batch_temporal_query(
+    State(st): State<AppState>,
+    Query(params): Params,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        check_params(&params, &["limit", "offset", "count", "options", "format", "local"])?;
+        let accept = parse_accept(&headers)?;
+        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
+        let q = parsed
+            .value
+            .as_object()
+            .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
+        if q.get("type").and_then(Value::as_str) != Some("Query") {
+            return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
+        }
+        let mut vp: HashMap<String, String> = params.clone();
+        if let Some(es) = q.get("entities").and_then(Value::as_array) {
+            let types: Vec<String> = es
+                .iter()
+                .filter_map(|e| e.get("type").and_then(Value::as_str).map(str::to_owned))
+                .collect();
+            if !types.is_empty() {
+                vp.insert("type".into(), types.join(","));
+            }
+        }
+        if let Some(tq) = q.get("temporalQ").and_then(Value::as_object) {
+            for k in ["timerel", "timeAt", "endTimeAt", "timeproperty"] {
+                if let Some(v) = tq.get(k).and_then(Value::as_str) {
+                    vp.insert(k.into(), v.to_owned());
+                }
+            }
+            if let Some(n) = tq.get("lastN").and_then(Value::as_f64) {
+                vp.insert("lastN".into(), (n as i64).to_string());
+            }
+        }
+        if let Some(v) = q.get("q").and_then(Value::as_str) {
+            vp.insert("q".into(), v.to_owned());
+        }
+        if let Some(attrs) = q.get("attrs").and_then(Value::as_array) {
+            let l: Vec<&str> = attrs.iter().filter_map(Value::as_str).collect();
+            vp.insert("attrs".into(), l.join(","));
+        }
+        let _ = accept;
+        query_temporal_inner_with(&st, &vp, &headers, &tenant).await
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+async fn query_temporal_inner_with(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    _tenant: &TenantId,
+) -> ApiResult<Response> {
+    query_temporal_inner(st, params, headers).await
+}

@@ -4,6 +4,8 @@
 //! compiler, values as binds ONLY (§16.2). sqlx store implementations land in
 //! phase 1; migrations live in `migrations/`.
 
+pub mod store;
+
 use antares_ql::{CmpOp, QNode, QValue};
 
 /// A compiled predicate: SQL text with `$n` placeholders + the bind values.

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 antares-model = { workspace = true }
 antares-ql = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

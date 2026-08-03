@@ -1,28 +1,14 @@
-//! JSON-LD layer (docs/deep-analysis.md §6.3).
-//!
-//! Phase-0 seed. The full pipeline (json-ld crate wrapper, moka parsed-context
-//! LRU, core-context term table) is the first spike — this crate currently
-//! pins the core-context contract that everything else compiles against.
+//! JSON-LD layer (docs/deep-analysis.md §6.3) — hand-rolled NGSI-LD-subset
+//! processor (risk #1 escape hatch): context processing, expansion with
+//! structural validation, compaction, caching loader with pinned core
+//! contexts.
 
-use antares_model::CORE_CONTEXT_URL;
+pub mod compact;
+pub mod context;
+pub mod expand;
+pub mod loader;
 
-/// Returns true when a request's @context is exactly the core context — the
-/// fast-path detector (§6.3): such requests skip the generic processor.
-pub fn is_core_context(urls: &[&str]) -> bool {
-    matches!(urls, [only] if *only == CORE_CONTEXT_URL)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_core_context() {
-        assert!(is_core_context(&[CORE_CONTEXT_URL]));
-        assert!(!is_core_context(&[]));
-        assert!(!is_core_context(&[
-            CORE_CONTEXT_URL,
-            "https://example.org/ctx.jsonld"
-        ]));
-    }
-}
+pub use compact::{compact_entity, compact_entity_shallow, compact_types};
+pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};
+pub use expand::{expand_entity, expand_types, is_ngsi_null, parse_datetime, ExpandOpts};
+pub use loader::{Loader, CORE_CONTEXT};

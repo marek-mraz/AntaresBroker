@@ -7,7 +7,13 @@ license.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }
+antares-jsonld = { workspace = true }
+antares-ql = { workspace = true }
+antares-sql = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 

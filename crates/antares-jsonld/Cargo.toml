@@ -1,6 +1,6 @@
 [package]
 name = "antares-jsonld"
-description = "JSON-LD layer: caching Loader, core-context fast path, NGSI-LD structural validation (phase 0/1)."
+description = "JSON-LD layer: caching Loader, pinned core contexts, NGSI-LD expansion/compaction + structural validation."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 antares-model = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

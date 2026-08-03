@@ -33,8 +33,13 @@ antares-temporal = { path = "crates/antares-temporal" }
 antares-registry = { path = "crates/antares-registry" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
 axum = "0.8"
 tower = "0.5"
+tower-http = { version = "0.6", features = ["normalize-path"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

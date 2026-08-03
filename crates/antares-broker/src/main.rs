@@ -44,14 +44,19 @@ async fn run(
     let _bus = LocalBus::new(1024); // consumers attach as phases land
     tracing::info!(port, %host_alias, %roles, "starting antares (v0 skeleton)");
 
-    let app = antares_api::router(AppState {
-        started: Instant::now(),
-        host_alias,
-    });
+    // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
+    // trailing '/'; normalize before routing.
+    let app = tower::Layer::layer(
+        &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),
+        antares_api::router(AppState::new(host_alias)),
+    );
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://0.0.0.0:{port}");
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(app),
+    )
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");

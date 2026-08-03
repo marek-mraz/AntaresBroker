@@ -4,15 +4,17 @@
 #
 # Env knobs (defaults = local dev box):
 #   BROKER_URL     default http://localhost:9090/ngsi-ld/v1
-#   SUITE          default ../ngsi-ld-test-suite (sibling checkout)
+#   SUITE          default ./ngsi-ld-test-suite (vendored copy in this repo)
 #   CALLBACK_HOST  host the broker POSTs notifications to (default: localhost)
 #   SUITES         robot suite dirs, default: the Scorpio serial order
-#   STOP_ON_ERROR=1  robot --exitonfailure (stop at the FIRST failing TP)
+#   STOP_ON_ERROR  default 1 (local loop: stop at the FIRST failing TP);
+#                  CI sets 0 to run the whole suite and report everything
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BROKER_URL="${BROKER_URL:-http://localhost:9090/ngsi-ld/v1}"
-SUITE="${SUITE:-../ngsi-ld-test-suite}"
+SUITE="${SUITE:-./ngsi-ld-test-suite}"
+STOP_ON_ERROR="${STOP_ON_ERROR:-1}"
 CALLBACK_HOST="${CALLBACK_HOST:-localhost}"
 SUITES="${SUITES:-CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext}"
 
@@ -36,7 +38,7 @@ fi
 
 mkdir -p results
 EXTRA=()
-[ "${STOP_ON_ERROR:-}" = 1 ] && EXTRA+=(--exitonfailure)
+[ "$STOP_ON_ERROR" = 1 ] && EXTRA+=(--exitonfailure)
 
 status=0
 for s in $SUITES; do
@@ -46,6 +48,6 @@ for s in $SUITES; do
       --outputdir "$OLDPWD/results/$name" \
       --exclude iop --exclude '*mqtt*' \
       "${EXTRA[@]}" \
-      "TP/NGSI-LD/$s") || { status=$?; [ "${STOP_ON_ERROR:-}" = 1 ] && break; }
+      "TP/NGSI-LD/$s") || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }
 done
 exit $status
