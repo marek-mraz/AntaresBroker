@@ -157,15 +157,24 @@ pub fn expand_entity(
 
 pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
     let bad = |m: &str| NgsiError::BadRequestData(m.to_owned());
+    // 5.5.4/4.6.2: an Entity Type must expand to an absolute IRI; a name that
+    // is a JSON-LD-keyword alias in the @context (e.g. "type" → "@type") is
+    // invalid (001_02_04).
+    let one = |t: &str| -> Result<Value, NgsiError> {
+        let iri = ctx.expand_key(t);
+        if crate::context::is_absolute_iri(&iri) {
+            Ok(Value::String(iri))
+        } else {
+            Err(bad(&format!("entity type {t:?} does not expand to an IRI")))
+        }
+    };
     match v {
-        Value::String(t) if !t.is_empty() => Ok(vec![Value::String(ctx.expand_key(t))]),
+        Value::String(t) if !t.is_empty() => Ok(vec![one(t)?]),
         Value::Array(a) if !a.is_empty() => {
             let mut out = Vec::new();
             for t in a {
                 match t {
-                    Value::String(t) if !t.is_empty() => {
-                        out.push(Value::String(ctx.expand_key(t)))
-                    }
+                    Value::String(t) if !t.is_empty() => out.push(one(t)?),
                     _ => return Err(bad("entity type entries must be non-empty strings")),
                 }
             }
@@ -175,9 +184,32 @@ pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
     }
 }
 
+/// The NGSI-LD null sentinel — ONLY the string form (a plain JSON null is
+/// invalid data, 057_03_02).
 pub fn is_ngsi_null(v: &Value) -> bool {
     matches!(v, Value::String(s) if s == "urn:ngsi-ld:null")
-        || v.is_null()
+}
+
+/// A LanguageProperty deletion carries `{"@none": "urn:ngsi-ld:null"}`.
+pub fn is_ngsi_null_langmap(v: &Value) -> bool {
+    is_ngsi_null(v)
+        || v.as_object().is_some_and(|m| {
+            m.len() == 1 && m.get("@none").is_some_and(is_ngsi_null)
+        })
+}
+
+/// Whole-instance deletion marker (merge patch, 5.5.12).
+pub fn is_deletion_instance(inst: &Value) -> bool {
+    is_ngsi_null(inst)
+        || inst.as_object().is_some_and(|o| {
+            o.get("value").is_some_and(is_ngsi_null)
+                || o.get("object").is_some_and(is_ngsi_null)
+                || o.get("languageMap").is_some_and(is_ngsi_null_langmap)
+                || o.get("json").is_some_and(is_ngsi_null)
+                || o.get("vocab").is_some_and(is_ngsi_null)
+                || o.get("valueList").is_some_and(is_ngsi_null)
+                || o.get("objectList").is_some_and(is_ngsi_null)
+        })
 }
 
 /// Expand one attribute's value into a normalized instance list.
@@ -285,8 +317,10 @@ fn expand_instance(
             let val = obj
                 .get("value")
                 .ok_or_else(|| bad(format!("attribute {name}: Property needs value")))?;
-            if val.is_null() && !opts.allow_null {
-                return Err(bad(format!("attribute {name}: value must not be null")));
+            if val.is_null() {
+                return Err(bad(format!(
+                    "attribute {name}: JSON null is not a valid value (use \"urn:ngsi-ld:null\")"
+                )));
             }
             out.insert("value".into(), val.clone());
         }
@@ -331,7 +365,8 @@ fn expand_instance(
                 .ok_or_else(|| bad(format!("attribute {name}: needs languageMap")))?;
             let ok = lm.as_object().is_some_and(|m| {
                 m.values().all(|v| v.is_string() || v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
-            }) || (opts.allow_null && is_ngsi_null(lm));
+            }) || (opts.allow_null && is_ngsi_null_langmap(lm))
+                || is_ngsi_null_langmap(lm);
             if !ok {
                 return Err(bad(format!("attribute {name}: invalid languageMap")));
             }
@@ -430,6 +465,62 @@ fn expand_instance(
         out.insert(iri, Value::Array(instances));
     }
 
+    Ok(Value::Object(out))
+}
+
+/// Expand a PARTIAL-UPDATE attribute fragment (5.6.4): reserved members are
+/// kept, others become sub-attributes — and crucially NO attribute-type
+/// inference happens (a fragment `{providedBy: …}` patches the sub-attribute,
+/// it is not a concise Property value).
+pub fn expand_attr_fragment(
+    obj: &Map<String, Value>,
+    ctx: &Context,
+) -> Result<Value, NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let mut out = Map::new();
+    for (k, v) in obj {
+        match k.as_str() {
+            "@context" | "createdAt" | "modifiedAt" | "instanceId" => continue,
+            "type" => {
+                let t = v
+                    .as_str()
+                    .filter(|t| ATTR_TYPES.contains(t))
+                    .ok_or_else(|| bad("invalid attribute type in fragment".into()))?;
+                out.insert("type".into(), Value::String(t.to_owned()));
+            }
+            "observedAt" => {
+                let sdt = v
+                    .as_str()
+                    .filter(|s| parse_datetime(s))
+                    .ok_or_else(|| bad("invalid observedAt in fragment".into()))?;
+                out.insert("observedAt".into(), Value::String(sdt.to_owned()));
+            }
+            "value" => {
+                if v.is_null() {
+                    return Err(bad("JSON null is not a valid value".into()));
+                }
+                out.insert("value".into(), v.clone());
+            }
+            _ if RESERVED_MEMBERS.contains(&k.as_str()) => {
+                out.insert(k.clone(), v.clone());
+            }
+            _ => {
+                let iri = ctx.expand_key(k);
+                let instances = expand_attribute(
+                    k,
+                    v,
+                    ctx,
+                    ExpandOpts {
+                        fragment: true,
+                        allow_null: true,
+                        temporal: false,
+                    },
+                    1,
+                )?;
+                out.insert(iri, Value::Array(instances));
+            }
+        }
+    }
     Ok(Value::Object(out))
 }
 

@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 /// Validate + normalize a CSourceRegistration (5.2.9): types and attribute
 /// names inside `information` expand to IRIs.
@@ -244,7 +244,7 @@ pub fn present_registration(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
 
 pub async fn create_registration(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -282,7 +282,7 @@ pub async fn create_registration(
 pub async fn retrieve_registration(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -310,7 +310,7 @@ pub async fn retrieve_registration(
 
 pub async fn query_registrations(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -425,7 +425,7 @@ pub fn registration_matches_attrs(doc: &Value, attrs: &[String]) -> bool {
 pub async fn update_registration(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -466,7 +466,7 @@ pub async fn update_registration(
 pub async fn delete_registration(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = || -> ApiResult<Response> {

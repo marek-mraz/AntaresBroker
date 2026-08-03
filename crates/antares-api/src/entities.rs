@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 fn is_meta(k: &str) -> bool {
     matches!(
@@ -211,7 +211,7 @@ pub fn mirror_delete_attr(
 
 pub async fn create_entity(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -230,10 +230,9 @@ async fn create_entity_inner(
     let tenant = tenant_from(headers)?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("entity must be a JSON object".into()))?;
+    let obj = parsed.value.as_object().ok_or_else(|| {
+        NgsiError::InvalidRequest("entity document must be a JSON object".into())
+    })?;
     let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
     let id = expanded["id"].as_str().expect("validated id").to_owned();
     stamp_new(&mut expanded, &now_iso());
@@ -249,7 +248,7 @@ async fn create_entity_inner(
 pub async fn retrieve_entity(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     match retrieve_entity_inner(&st, &id, &params, &headers).await {
@@ -532,7 +531,7 @@ pub fn collect_flat(
 
 pub async fn query_entities(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     match query_entities_inner(&st, &params, &headers).await {
@@ -784,11 +783,12 @@ pub fn paginate(
 pub async fn delete_entity(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = || -> ApiResult<Response> {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
         if st.store.delete(&tenant, Kind::Entity, &id) {
             mirror_delete_entity(&st, &tenant, &id);
@@ -804,7 +804,7 @@ pub async fn delete_entity(
 
 pub async fn purge_entities(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     match purge_inner(&st, &params, &headers).await {
@@ -827,21 +827,57 @@ async fn purge_inner(
         ],
     )?;
     let ctx = request_context(&st.loader, headers).await?;
+    // 5.6.21: local=true alone is a valid "purge everything local" request
     let has_filter = ["id", "idPattern", "type", "attrs", "q", "georel"]
         .iter()
-        .any(|k| params.contains_key(*k));
+        .any(|k| params.contains_key(*k))
+        || params.get("local").map(String::as_str) == Some("true");
     if !has_filter {
         return Err(NgsiError::BadRequestData(
             "purge needs at least one filtering condition".into(),
         )
         .into());
     }
+    if params.contains_key("keep") && params.contains_key("drop") {
+        return Err(NgsiError::BadRequestData(
+            "keep and drop are mutually exclusive (5.6.21)".into(),
+        )
+        .into());
+    }
     let matches = filter_entities(st, &tenant, params, &ctx)?;
+    let keep: Option<Vec<String>> = params
+        .get("keep")
+        .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
+    let drop: Option<Vec<String>> = params
+        .get("drop")
+        .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
     for doc in &matches {
-        if let Some(id) = doc["id"].as_str() {
+        let Some(id) = doc["id"].as_str() else { continue };
+        if keep.is_none() && drop.is_none() {
             st.store.delete(&tenant, Kind::Entity, id);
             mirror_delete_entity(st, &tenant, id);
+            continue;
         }
+        // keep=/drop= prune attributes; the entity itself survives (5.6.21)
+        st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+            let target = doc.as_object_mut().expect("entity object");
+            let attrs: Vec<String> = target
+                .keys()
+                .filter(|k| !is_meta(k))
+                .cloned()
+                .collect();
+            for a in attrs {
+                let purge = match (&keep, &drop) {
+                    (Some(keep), _) => !keep.contains(&a),
+                    (_, Some(drop)) => drop.contains(&a),
+                    _ => true,
+                };
+                if purge {
+                    target.remove(&a);
+                }
+            }
+            Ok::<(), NgsiError>(())
+        });
     }
     Ok(no_content(&tenant))
 }
@@ -851,7 +887,7 @@ async fn purge_inner(
 pub async fn merge_entity(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -869,6 +905,7 @@ async fn merge_entity_inner(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)?;
     check_params(params, &["options", "format", "observedAt", "lang", "local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
@@ -937,9 +974,7 @@ pub fn merge_into(doc: &mut Value, fragment: &Value, ts: &str) {
                     .cloned()
                     .unwrap_or_default();
                 for fi in frag_instances {
-                    let is_delete = fi.get("value").is_some_and(is_ngsi_null)
-                        || fi.get("object").is_some_and(is_ngsi_null)
-                        || fi.get("languageMap").is_some_and(is_ngsi_null);
+                    let is_delete = antares_jsonld::is_deletion_instance(&fi);
                     let want_ds = fi.get("datasetId").and_then(Value::as_str);
                     let pos = cur.iter().position(|ci| {
                         ci.get("datasetId").and_then(Value::as_str) == want_ds
@@ -995,13 +1030,19 @@ fn merge_instance(target: &mut Value, frag: &Value, ts: &str) {
 pub async fn replace_entity(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
+        // 5.6.18: an unknown target is 404 before body validation (057_03)
+        let old = st
+            .store
+            .get(&tenant, Kind::Entity, &id)
+            .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
             .value
@@ -1011,10 +1052,6 @@ pub async fn replace_entity(
         if expanded["id"].as_str() != Some(id.as_str()) {
             return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());
         }
-        let old = st
-            .store
-            .get(&tenant, Kind::Entity, &id)
-            .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
         let ts = now_iso();
         stamp_new(&mut expanded, &ts);
         if let (Some(o), Some(created)) = (expanded.as_object_mut(), old.get("createdAt")) {

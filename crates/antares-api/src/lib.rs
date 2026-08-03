@@ -80,7 +80,9 @@ pub fn router(state: AppState) -> Router {
             "/entities",
             post(entities::create_entity)
                 .get(entities::query_entities)
-                .delete(entities::purge_entities),
+                .delete(entities::purge_entities)
+                .patch(missing_entity_id)
+                .put(missing_entity_id),
         )
         .route(
             "/entities/{id}",
@@ -221,9 +223,27 @@ async fn source_identity(
     go.await.unwrap_or_else(|e| e.into_response())
 }
 
+/// PATCH/PUT on the entities collection: the entity id is missing — 400.
+async fn missing_entity_id(headers: HeaderMap) -> Response {
+    let tenant = tenant_from(&headers).unwrap_or_default();
+    let mut resp = ApiError::from(NgsiError::BadRequestData(
+        "entity id is required in the request path".into(),
+    ))
+    .into_response();
+    echo_tenant(&tenant, &mut resp);
+    resp
+}
+
 async fn not_found(headers: HeaderMap, uri: axum::http::Uri) -> Response {
     let path = uri.path().to_owned();
     let tenant = tenant_from(&headers).unwrap_or_default();
+    // A path with an empty segment (…/attrs//{x}) names a resource whose
+    // methods don't apply — 405 per the suite (016_02_04/06).
+    if path.starts_with(API_ROOT) && path.contains("//") {
+        let mut resp = axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response();
+        echo_tenant(&tenant, &mut resp);
+        return resp;
+    }
     let mut resp =
         ApiError::from(NgsiError::ResourceNotFound(format!("unknown path {path}"))).into_response();
     echo_tenant(&tenant, &mut resp);

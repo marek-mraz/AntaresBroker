@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 fn is_meta(k: &str) -> bool {
     matches!(
@@ -54,7 +54,7 @@ fn stamp_instances(doc: &mut Value, ts: &str) {
 
 pub async fn upsert_temporal(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -80,7 +80,26 @@ pub async fn upsert_temporal(
                     }
                     let incoming = v.as_array().cloned().unwrap_or_default();
                     match target.get_mut(k).and_then(Value::as_array_mut) {
-                        Some(cur) => cur.extend(incoming),
+                        Some(cur) => {
+                            // 5.6.11: instances merge by (datasetId, observedAt)
+                            for ni in incoming {
+                                let key = (
+                                    ni.get("datasetId").and_then(Value::as_str).map(String::from),
+                                    ni.get("observedAt").and_then(Value::as_str).map(String::from),
+                                );
+                                let pos = cur.iter().position(|ci| {
+                                    (
+                                        ci.get("datasetId").and_then(Value::as_str).map(String::from),
+                                        ci.get("observedAt").and_then(Value::as_str).map(String::from),
+                                    ) == key
+                                        && key.1.is_some()
+                                });
+                                match pos {
+                                    Some(p) => cur[p] = ni,
+                                    None => cur.push(ni),
+                                }
+                            }
+                        }
                         None => {
                             target.insert(k.clone(), Value::Array(incoming));
                         }
@@ -862,7 +881,7 @@ fn render_aggregated(
 
 pub async fn query_temporal(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     match query_temporal_inner(&st, &params, &headers).await {
@@ -1056,7 +1075,7 @@ async fn query_temporal_inner(
 pub async fn retrieve_temporal(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -1144,11 +1163,12 @@ pub async fn retrieve_temporal(
 pub async fn delete_temporal(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = || -> ApiResult<Response> {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
         if st.store.delete(&tenant, Kind::Temporal, &id) {
             Ok(no_content(&tenant))
@@ -1164,12 +1184,13 @@ pub async fn delete_temporal(
 pub async fn add_temporal_attrs(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
@@ -1218,20 +1239,50 @@ pub async fn add_temporal_attrs(
 pub async fn delete_temporal_attr(
     State(st): State<AppState>,
     Path((id, attr)): Path<(String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
+        if attr.is_empty()
+            || !attr.chars().all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+@".contains(c))
+        {
+            return Err(NgsiError::BadRequestData(format!(
+                "invalid attribute name {attr:?}"
+            ))
+            .into());
+        }
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
         let attr_iri = ctx.expand_key(&attr);
+        let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
+        let want_ds = params.get("datasetId").cloned();
         let mut found = false;
         let ts = now_iso();
         let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
             let target = doc.as_object_mut().expect("temporal object");
-            if target.remove(&attr_iri).is_some() {
-                found = true;
+            if delete_all || (want_ds.is_none() && !target
+                .get(&attr_iri)
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|i| i.get("datasetId").is_some())))
+            {
+                // deleteAll, or single-instance-set attribute: drop it whole
+                if target.remove(&attr_iri).is_some() {
+                    found = true;
+                }
+            } else if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                // 5.6.13: only the matching datasetId instance set is deleted
+                let before = arr.len();
+                arr.retain(|i| {
+                    i.get("datasetId").and_then(Value::as_str) != want_ds.as_deref()
+                });
+                found = arr.len() != before;
+                if arr.is_empty() {
+                    target.remove(&attr_iri);
+                }
+            }
+            if found {
                 target.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
             Ok::<(), NgsiError>(())
@@ -1253,12 +1304,21 @@ pub async fn delete_temporal_attr(
 pub async fn modify_temporal_instance(
     State(st): State<AppState>,
     Path((id, attr, instance_id)): Path<(String, String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        // Empty attr segment ⇒ the URI names no resource with a PATCH method
+        // (suite 016_02_06 asserts 405 here, vs 400 on the DELETE sibling).
+        if attr.is_empty() {
+            return Err(ApiError::Bare(StatusCode::METHOD_NOT_ALLOWED));
+        }
+        antares_model::EntityId::new(&id)?;
+        crate::attrs::check_attr_name(&attr)?;
+        antares_model::EntityId::new(&instance_id)
+            .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
         let obj = parsed
@@ -1322,11 +1382,15 @@ pub async fn modify_temporal_instance(
 pub async fn delete_temporal_instance(
     State(st): State<AppState>,
     Path((id, attr, instance_id)): Path<(String, String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
+        crate::attrs::check_attr_name(&attr)?;
+        antares_model::EntityId::new(&instance_id)
+            .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
         let attr_iri = ctx.expand_key(&attr);
@@ -1366,7 +1430,7 @@ pub async fn delete_temporal_instance(
 
 pub async fn batch_temporal_query(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {

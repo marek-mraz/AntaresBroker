@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 fn is_meta(k: &str) -> bool {
     matches!(
@@ -96,7 +96,7 @@ fn attr_stats(
 
 pub async fn entity_types(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -137,7 +137,7 @@ pub async fn entity_types(
 pub async fn entity_type_info(
     State(st): State<AppState>,
     Path(type_name): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -180,7 +180,7 @@ pub async fn entity_type_info(
 
 pub async fn attributes(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -221,7 +221,7 @@ pub async fn attributes(
 pub async fn attribute_info(
     State(st): State<AppState>,
     Path(attr): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {

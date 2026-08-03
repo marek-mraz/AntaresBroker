@@ -13,7 +13,23 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
+
+/// Attribute names in paths must be valid terms/IRIs (4.6.2) — 400 otherwise.
+pub(crate) fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
+    // 4.6.2 supported names: no '@' (keyword territory), no parens/quotes/etc.
+    let ok = !attr.is_empty()
+        && attr.chars().all(|c| {
+            c.is_ascii_alphanumeric() || "_:.#/%-+".contains(c)
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(NgsiError::BadRequestData(format!(
+            "invalid attribute name {attr:?}"
+        )))
+    }
+}
 
 /// Outcome of a multi-attribute write: 204 when everything applied, else 207
 /// with an UpdateResult (5.2.18).
@@ -26,12 +42,15 @@ fn update_result(
     if not_updated.is_empty() {
         return no_content(tenant);
     }
+    // 207 bodies carry fully-qualified attribute names (6.3.5: errors and
+    // multi-status responses are application/json with expanded names).
+    let _ = ctx;
     let payload = serde_json::json!({
-        "updated": updated.iter().map(|u| ctx.compact_iri(u)).collect::<Vec<_>>(),
+        "updated": updated,
         "notUpdated": not_updated
             .iter()
             .map(|(a, r)| serde_json::json!({
-                "attributeName": ctx.compact_iri(a),
+                "attributeName": a,
                 "reason": r,
             }))
             .collect::<Vec<_>>(),
@@ -44,7 +63,7 @@ fn update_result(
 pub async fn append_attrs(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -62,6 +81,7 @@ async fn append_attrs_inner(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)?;
     check_params(params, &["options", "local", "type"])?;
     let no_overwrite = params
         .get("options")
@@ -85,7 +105,42 @@ async fn append_attrs_inner(
     let mut not_updated = Vec::new();
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         let target = doc.as_object_mut().expect("entity object");
-        for (k, v) in fragment.as_object().expect("fragment object") {
+        let frag = fragment.as_object().expect("fragment object");
+        // 5.6.3: appended types extend the type set
+        if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
+            let mut cur: Vec<Value> = target
+                .get("type")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for t in new_types {
+                if !cur.contains(t) {
+                    cur.push(t.clone());
+                }
+            }
+            target.insert("type".into(), Value::Array(cur));
+            updated.push("type".into());
+        }
+        // appended scope: overwrite replaces; noOverwrite unions (010_07)
+        if let Some(new_scope) = frag.get("scope") {
+            if target.contains_key("scope") && no_overwrite {
+                let mut cur: Vec<Value> = target
+                    .get("scope")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for sc in new_scope.as_array().cloned().unwrap_or_default() {
+                    if !cur.contains(&sc) {
+                        cur.push(sc);
+                    }
+                }
+                target.insert("scope".into(), Value::Array(cur));
+            } else {
+                target.insert("scope".into(), new_scope.clone());
+            }
+            updated.push("scope".into());
+        }
+        for (k, v) in frag {
             if matches!(k.as_str(), "id" | "type" | "scope" | "createdAt" | "modifiedAt") {
                 continue;
             }
@@ -131,6 +186,7 @@ fn stamp_new_attr(v: &mut Value, ts: &str) {
 }
 
 /// Merge incoming instances into an existing instance array by datasetId.
+/// Deletion-marker instances (urn:ngsi-ld:null) remove the matched instance.
 /// Returns false when nothing was applied (noOverwrite and all existed).
 fn merge_instance_sets(existing: &mut Value, incoming: &Value, no_overwrite: bool) -> bool {
     let (Some(cur), Some(inc)) = (existing.as_array_mut(), incoming.as_array()) else {
@@ -142,6 +198,13 @@ fn merge_instance_sets(existing: &mut Value, incoming: &Value, no_overwrite: boo
         let pos = cur
             .iter()
             .position(|ci| ci.get("datasetId").and_then(Value::as_str) == ds);
+        if antares_jsonld::is_deletion_instance(ni) {
+            if let Some(p) = pos {
+                cur.remove(p);
+                any = true;
+            }
+            continue;
+        }
         match pos {
             Some(p) => {
                 if !no_overwrite {
@@ -168,7 +231,7 @@ fn merge_instance_sets(existing: &mut Value, incoming: &Value, no_overwrite: boo
 pub async fn update_attrs(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -186,6 +249,7 @@ async fn update_attrs_inner(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)?;
     check_params(params, &["options", "local", "type"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
@@ -197,7 +261,7 @@ async fn update_attrs_inner(
         &parsed.ctx,
         ExpandOpts {
             fragment: true,
-            allow_null: false,
+            allow_null: true,
             temporal: false,
         },
     )?;
@@ -206,16 +270,57 @@ async fn update_attrs_inner(
     let mut not_updated = Vec::new();
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         let target = doc.as_object_mut().expect("entity object");
-        for (k, v) in fragment.as_object().expect("fragment object") {
+        let frag = fragment.as_object().expect("fragment object");
+        // 5.6.2: appended/updated types extend the type set
+        if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
+            let mut cur: Vec<Value> = target
+                .get("type")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for t in new_types {
+                if !cur.contains(t) {
+                    cur.push(t.clone());
+                }
+            }
+            target.insert("type".into(), Value::Array(cur));
+            updated.push("type".into());
+        }
+        // 5.6.2: scope updates only when the entity already has one
+        if let Some(new_scope) = frag.get("scope") {
+            if target.contains_key("scope") {
+                target.insert("scope".into(), new_scope.clone());
+                updated.push("scope".into());
+            } else {
+                not_updated.push(("scope".into(), "entity has no scope".into()));
+            }
+        }
+        for (k, v) in frag {
             if matches!(k.as_str(), "id" | "type" | "scope" | "createdAt" | "modifiedAt") {
                 continue;
             }
+            let mut incoming = v.clone();
+            stamp_new_attr(&mut incoming, &ts);
             match target.get_mut(k) {
-                None => not_updated.push((k.clone(), "attribute does not exist".into())),
+                // 5.6.2 + 011_01_03: unknown attributes are appended silently
+                None => {
+                    let live: Vec<Value> = incoming
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|i| !antares_jsonld::is_deletion_instance(i))
+                        .collect();
+                    if !live.is_empty() {
+                        target.insert(k.clone(), Value::Array(live));
+                    }
+                    updated.push(k.clone());
+                }
                 Some(existing) => {
-                    let mut incoming = v.clone();
-                    stamp_new_attr(&mut incoming, &ts);
                     merge_instance_sets(existing, &incoming, false);
+                    if existing.as_array().is_some_and(Vec::is_empty) {
+                        target.remove(k);
+                    }
                     updated.push(k.clone());
                 }
             }
@@ -238,7 +343,7 @@ async fn update_attrs_inner(
 pub async fn partial_update_attr(
     State(st): State<AppState>,
     Path((id, attr)): Path<(String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -257,53 +362,58 @@ async fn partial_update_inner(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)?;
+    check_attr_name(attr)?;
     check_params(params, &["local", "type"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
         .value
         .as_object()
         .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
-    // fragment for ONE attribute: wrap under the attr name then expand
-    let mut wrapper = Map::new();
-    wrapper.insert(attr.to_owned(), Value::Object(without_context_map(obj)));
-    let fragment = expand_entity(
-        &wrapper,
-        &parsed.ctx,
-        ExpandOpts {
-            fragment: true,
-            allow_null: true,
-            temporal: false,
-        },
-    )?;
+    let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     let attr_iri = parsed.ctx.expand_key(attr);
-    let frag_inst = fragment
-        .get(&attr_iri)
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .cloned()
-        .ok_or_else(|| NgsiError::BadRequestData("invalid attribute fragment".into()))?;
     let want_ds = frag_inst.get("datasetId").and_then(Value::as_str).map(String::from);
+    let is_deletion = antares_jsonld::is_deletion_instance(&frag_inst);
     let ts = now_iso();
     let mut found = false;
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         let target = doc.as_object_mut().expect("entity object");
         if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
-            if let Some(inst) = existing.iter_mut().find(|ci| {
+            let pos = existing.iter().position(|ci| {
                 ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
-            }) {
+            });
+            if let Some(p) = pos {
                 found = true;
-                let t = inst.as_object_mut().expect("instance object");
-                for (k, v) in frag_inst.as_object().expect("fragment instance") {
-                    if matches!(k.as_str(), "createdAt" | "modifiedAt") {
-                        continue;
+                if is_deletion {
+                    existing.remove(p);
+                } else {
+                    // 5.6.4.4: the fragment may not change the Attribute type
+                    if let (Some(ft), Some(et)) = (
+                        frag_inst.get("type").and_then(Value::as_str),
+                        existing[p].get("type").and_then(Value::as_str),
+                    ) {
+                        if ft != et {
+                            return Err(NgsiError::BadRequestData(format!(
+                                "attribute type mismatch: {ft} != {et} (5.6.4)"
+                            )));
+                        }
                     }
-                    if v.is_null() || antares_jsonld::is_ngsi_null(v) {
-                        t.remove(k);
-                    } else {
-                        t.insert(k.clone(), v.clone());
+                    let t = existing[p].as_object_mut().expect("instance object");
+                    for (k, v) in frag_inst.as_object().expect("fragment instance") {
+                        if matches!(k.as_str(), "createdAt" | "modifiedAt") {
+                            continue;
+                        }
+                        if v.is_null() || antares_jsonld::is_ngsi_null(v) {
+                            t.remove(k);
+                        } else {
+                            t.insert(k.clone(), v.clone());
+                        }
                     }
+                    t.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
-                t.insert("modifiedAt".into(), Value::String(ts.clone()));
+            }
+            if existing.is_empty() {
+                target.remove(&attr_iri);
             }
         }
         if found {
@@ -332,12 +442,14 @@ fn without_context_map(o: &Map<String, Value>) -> Map<String, Value> {
 pub async fn replace_attr(
     State(st): State<AppState>,
     Path((id, attr)): Path<(String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)?;
+        check_attr_name(&attr)?;
         check_params(&params, &["local", "type"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
@@ -356,17 +468,40 @@ pub async fn replace_attr(
             },
         )?;
         let attr_iri = parsed.ctx.expand_key(&attr);
-        let mut incoming = fragment.get(&attr_iri).cloned().ok_or_else(|| {
+        let incoming_arr = fragment.get(&attr_iri).cloned().ok_or_else(|| {
             NgsiError::BadRequestData("invalid attribute fragment".into())
         })?;
+        let new_inst = incoming_arr
+            .as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .ok_or_else(|| NgsiError::BadRequestData("invalid attribute fragment".into()))?;
+        let want_ds = new_inst.get("datasetId").and_then(Value::as_str).map(String::from);
         let ts = now_iso();
-        stamp_new_attr(&mut incoming, &ts);
         let mut found = false;
         let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
             let target = doc.as_object_mut().expect("entity object");
-            if target.contains_key(&attr_iri) {
-                found = true;
-                target.insert(attr_iri.clone(), incoming.clone());
+            if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
+                // 5.6.19: only the instance with the matching datasetId is
+                // replaced; its createdAt survives (055_01/055_02)
+                if let Some(p) = existing.iter().position(|ci| {
+                    ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
+                }) {
+                    found = true;
+                    let created = existing[p].get("createdAt").cloned();
+                    let mut ni = new_inst.clone();
+                    if let Some(o) = ni.as_object_mut() {
+                        if let Some(c) = created {
+                            o.insert("createdAt".into(), c);
+                        } else {
+                            o.insert("createdAt".into(), Value::String(ts.clone()));
+                        }
+                        o.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    }
+                    existing[p] = ni;
+                }
+            }
+            if found {
                 target.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
             Ok::<(), NgsiError>(())
@@ -388,7 +523,7 @@ pub async fn replace_attr(
 pub async fn delete_attr(
     State(st): State<AppState>,
     Path((id, attr)): Path<(String, String)>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     match delete_attr_inner(&st, &id, &attr, &params, &headers).await {
@@ -405,6 +540,8 @@ async fn delete_attr_inner(
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)?;
+    check_attr_name(attr)?;
     check_params(params, &["datasetId", "deleteAll", "local", "type"])?;
     let ctx = request_context(&st.loader, headers).await?;
     let attr_iri = if attr == "scope" {

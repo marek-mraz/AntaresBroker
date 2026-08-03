@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 /// Parse a batch body: JSON array of entity documents; per-document context
 /// resolution (ld+json ⇒ each doc's own @context; json ⇒ Link header).
@@ -34,8 +34,17 @@ async fn parse_batch(
         .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
     let items = value
         .as_array()
-        .ok_or_else(|| NgsiError::BadRequestData("batch body must be a JSON array".into()))?;
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| {
+            NgsiError::BadRequestData("batch body must be a non-empty JSON array".into())
+        })?;
     let link = link_context(headers);
+    if ld && link.is_some() {
+        return Err(NgsiError::BadRequestData(
+            "application/ld+json batch must not also carry a Link @context (6.3.5)".into(),
+        )
+        .into());
+    }
     let mut out = Vec::new();
     for item in items {
         let ctx = if ld {
@@ -120,7 +129,7 @@ fn ngsi_of(e: ApiError) -> NgsiError {
 
 pub async fn batch_create(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -132,7 +141,7 @@ pub async fn batch_create(
 
 pub async fn batch_upsert(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -144,7 +153,7 @@ pub async fn batch_upsert(
 
 pub async fn batch_update(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -156,7 +165,7 @@ pub async fn batch_update(
 
 pub async fn batch_merge(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -184,11 +193,13 @@ async fn batch_write(
     let tenant = tenant_from(headers)?;
     check_params(params, &["options", "local"])?;
     let update_mode = params.get("options").map(String::as_str); // replace|update for upsert; noOverwrite|overwrite for update
+    let no_overwrite = update_mode == Some("noOverwrite");
     let items = parse_batch(st, headers, body).await?;
     let mut out = BatchOutcome {
         success: vec![],
         errors: vec![],
     };
+    let mut created_ids: Vec<String> = vec![];
     let mut any_created = false;
     let mut any_updated = false;
     for (item, ctx) in items {
@@ -203,7 +214,7 @@ async fn batch_write(
                 continue;
             }
         };
-        let run = || -> Result<(String, bool), NgsiError> {
+        let run = || -> Result<(String, bool, bool), NgsiError> {
             let obj = item
                 .as_object()
                 .ok_or_else(|| NgsiError::BadRequestData("entity must be an object".into()))?;
@@ -222,12 +233,13 @@ async fn batch_write(
             match mode {
                 BatchMode::Create => {
                     stamp_new(&mut expanded, &ts);
-                    if !st.store.create(&tenant, Kind::Entity, &id, expanded) {
+                    if !st.store.create(&tenant, Kind::Entity, &id, expanded.clone()) {
                         return Err(NgsiError::AlreadyExists(format!(
                             "entity {id} already exists"
                         )));
                     }
-                    Ok((id, true))
+                    crate::entities::mirror_record(st, &tenant, &expanded);
+                    Ok((id, true, false))
                 }
                 BatchMode::Upsert => {
                     let existed = st.store.get(&tenant, Kind::Entity, &id).is_some();
@@ -239,11 +251,13 @@ async fn batch_write(
                         if let Some(Err(e)) = res {
                             return Err(e);
                         }
+                        crate::entities::mirror_record(st, &tenant, &expanded);
                     } else {
                         stamp_new(&mut expanded, &ts);
-                        st.store.upsert(&tenant, Kind::Entity, &id, expanded);
+                        st.store.upsert(&tenant, Kind::Entity, &id, expanded.clone());
+                        crate::entities::mirror_record(st, &tenant, &expanded);
                     }
-                    Ok((id, !existed))
+                    Ok((id, !existed, false))
                 }
                 BatchMode::Update | BatchMode::Merge => {
                     if st.store.get(&tenant, Kind::Entity, &id).is_none() {
@@ -251,28 +265,67 @@ async fn batch_write(
                             "entity {id} not found"
                         )));
                     }
+                    // batch update with noOverwrite: existing attributes are
+                    // left alone; if any existed, the entity is a partial
+                    // failure (005_02 ⇒ 207)
+                    let mut skipped_existing = false;
                     let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                        merge_into(doc, &expanded, &ts);
+                        if mode == BatchMode::Update && no_overwrite {
+                            let target = doc.as_object_mut().expect("entity object");
+                            for (k, v) in expanded.as_object().expect("expanded") {
+                                if matches!(
+                                    k.as_str(),
+                                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
+                                ) {
+                                    continue;
+                                }
+                                if target.contains_key(k) {
+                                    skipped_existing = true;
+                                } else {
+                                    target.insert(k.clone(), v.clone());
+                                }
+                            }
+                            target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                        } else {
+                            merge_into(doc, &expanded, &ts);
+                        }
                         Ok::<(), NgsiError>(())
                     });
                     if let Some(Err(e)) = res {
                         return Err(e);
                     }
-                    Ok((id, false))
+                    crate::entities::mirror_record(st, &tenant, &expanded);
+                    Ok((id, false, skipped_existing))
                 }
             }
         };
         match run() {
-            Ok((id, created_now)) => {
+            Ok((id, created_now, partial)) => {
                 if created_now {
                     any_created = true;
+                    if !created_ids.contains(&id) {
+                        created_ids.push(id.clone());
+                    }
                 } else {
                     any_updated = true;
                 }
-                out.success.push(Value::String(id));
+                if partial {
+                    out.errors.push(err_entry(
+                        Some(&id),
+                        &NgsiError::BadRequestData(
+                            "some attributes already existed (noOverwrite)".into(),
+                        ),
+                    ));
+                } else if !out.success.contains(&Value::String(id.clone())) {
+                    out.success.push(Value::String(id));
+                }
             }
             Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
         }
+    }
+    // 5.6.8: a 201 upsert body lists ONLY the newly created ids
+    if mode == BatchMode::Upsert && any_created {
+        out.success = created_ids.into_iter().map(Value::String).collect();
     }
     let (status, body_on_ok) = match mode {
         BatchMode::Create => (StatusCode::CREATED, true),
@@ -293,7 +346,7 @@ async fn batch_write(
 
 pub async fn batch_delete(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -308,7 +361,10 @@ pub async fn batch_delete(
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let ids = value
             .as_array()
-            .ok_or_else(|| NgsiError::BadRequestData("batch delete body must be an array".into()))?;
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| {
+                NgsiError::BadRequestData("batch delete body must be a non-empty array".into())
+            })?;
         let mut out = BatchOutcome {
             success: vec![],
             errors: vec![],
@@ -339,7 +395,7 @@ pub async fn batch_delete(
 
 pub async fn batch_query(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {

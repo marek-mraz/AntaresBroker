@@ -10,5 +10,5 @@ pub mod loader;
 
 pub use compact::{compact_entity, compact_entity_shallow, compact_types};
 pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};
-pub use expand::{expand_entity, expand_types, is_ngsi_null, parse_datetime, ExpandOpts};
+pub use expand::{expand_attr_fragment, expand_entity, expand_types, is_deletion_instance, is_ngsi_null, is_ngsi_null_langmap, parse_datetime, ExpandOpts};
 pub use loader::{Loader, CORE_CONTEXT};

@@ -10,6 +10,55 @@ use std::sync::Arc;
 
 pub const JSONLD_CONTEXT_REL: &str = "http://www.w3.org/ns/json-ld#context";
 
+/// Query-string extractor that drops empty-valued parameters — the Robot
+/// suite's keywords frequently send `datasetId=`/`options=` as empty strings
+/// meaning "absent".
+pub struct CleanParams(pub std::collections::HashMap<String, String>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let raw = parts.uri.query().unwrap_or("");
+        let mut map = std::collections::HashMap::new();
+        for pair in raw.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let dec = |s: &str| {
+                percent_decode(s.replace('+', " ").as_bytes())
+            };
+            let (k, v) = (dec(k), dec(v));
+            if !v.is_empty() {
+                map.insert(k, v);
+            }
+        }
+        Ok(Self(map))
+    }
+}
+
+fn percent_decode(input: &[u8]) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            let hex = std::str::from_utf8(&input[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Handler-level error: an NGSI-LD ProblemDetails or a bare status (6.3.4).
 #[derive(Debug)]
 pub enum ApiError {
@@ -184,6 +233,12 @@ pub async fn parse_body(
     }
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|e| NgsiError::InvalidRequest(format!("request body is not valid JSON: {e}")))?;
+    // Every parse_body consumer takes a single JSON object (entities, fragments,
+    // subscriptions, …; batch arrays go through parse_batch) — a non-object here
+    // is a malformed request, not bad data (001_02_02).
+    if !value.is_object() {
+        return Err(NgsiError::InvalidRequest("request body must be a JSON object".into()).into());
+    }
 
     let link = link_context(headers);
     let ctx = if ld {

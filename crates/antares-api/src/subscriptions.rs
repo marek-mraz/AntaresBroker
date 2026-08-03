@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 fn resource_path(kind: Kind) -> &'static str {
     match kind {
@@ -490,7 +490,7 @@ macro_rules! route4 {
     ($create:ident, $retrieve:ident, $list:ident, $update:ident, $delete:ident, $kind:expr) => {
         pub async fn $create(
             State(st): State<AppState>,
-            Query(params): Params,
+            CleanParams(params): CleanParams,
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
@@ -501,7 +501,7 @@ macro_rules! route4 {
         pub async fn $retrieve(
             State(st): State<AppState>,
             Path(id): Path<String>,
-            Query(params): Params,
+            CleanParams(params): CleanParams,
             headers: HeaderMap,
         ) -> Response {
             retrieve(&st, $kind, &id, &params, &headers)
@@ -510,7 +510,7 @@ macro_rules! route4 {
         }
         pub async fn $list(
             State(st): State<AppState>,
-            Query(params): Params,
+            CleanParams(params): CleanParams,
             headers: HeaderMap,
         ) -> Response {
             list(&st, $kind, &params, &headers)
@@ -520,7 +520,7 @@ macro_rules! route4 {
         pub async fn $update(
             State(st): State<AppState>,
             Path(id): Path<String>,
-            Query(params): Params,
+            CleanParams(params): CleanParams,
             headers: HeaderMap,
             body: Bytes,
         ) -> Response {
@@ -531,7 +531,7 @@ macro_rules! route4 {
         pub async fn $delete(
             State(st): State<AppState>,
             Path(id): Path<String>,
-            Query(params): Params,
+            CleanParams(params): CleanParams,
             headers: HeaderMap,
         ) -> Response {
             delete(&st, $kind, &id, &params, &headers)

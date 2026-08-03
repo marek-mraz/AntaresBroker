@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-type Params = Query<HashMap<String, String>>;
+use crate::negotiate::CleanParams;
 
 fn base_url(headers: &HeaderMap) -> String {
     let host = headers
@@ -24,7 +24,7 @@ fn base_url(headers: &HeaderMap) -> String {
 
 pub async fn add_context(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -65,7 +65,7 @@ pub async fn add_context(
 
 pub async fn list_contexts(
     State(st): State<AppState>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -118,7 +118,7 @@ pub async fn list_contexts(
 pub async fn serve_context(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {
@@ -158,7 +158,7 @@ pub async fn serve_context(
 pub async fn delete_context(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Query(params): Params,
+    CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
     let go = async {

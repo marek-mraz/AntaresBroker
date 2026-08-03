@@ -122,6 +122,11 @@ impl Context {
 
     /// Expand an IRI-position string inside a term definition (@id values).
     fn expand_iri_for_def(&self, s: &str) -> String {
+        // JSON-LD keywords ("@type", "@id", …) stay as-is: a term aliased to a
+        // keyword must expand to the keyword, never into the vocab.
+        if s.starts_with('@') {
+            return s.to_owned();
+        }
         if let Some((prefix, suffix)) = s.split_once(':') {
             if !suffix.starts_with("//") {
                 if let Some(def) = self.terms.get(prefix) {
@@ -183,16 +188,27 @@ impl Context {
     }
 
     /// Compact an IRI back to a term (attribute names, type values).
+    ///
+    /// Vocab-relative shortening is only valid when the resulting bare term
+    /// would round-trip: if the term is already bound to a DIFFERENT IRI in
+    /// this context, fall back to prefix compaction
+    /// (`ngsi-ld:default-context/x`) — JSON-LD compaction semantics the
+    /// conformance suite depends on.
     pub fn compact_iri(&self, iri: &str) -> String {
         if let Some(term) = self.inverse.get(iri) {
             return term.clone();
         }
         let vocab = vocab_or_default(&self.vocab);
-        if let Some(rest) = iri.strip_prefix(vocab) {
-            return rest.to_owned();
-        }
-        if let Some(rest) = iri.strip_prefix(DEFAULT_VOCAB) {
-            return rest.to_owned();
+        for v in [vocab, DEFAULT_VOCAB] {
+            if let Some(rest) = iri.strip_prefix(v) {
+                let round_trips = !rest.is_empty()
+                    && !rest.contains(':')
+                    && self.terms.get(rest).is_none_or(|d| d.iri == iri);
+                if round_trips {
+                    return rest.to_owned();
+                }
+                break;
+            }
         }
         // prefix compaction: longest matching prefix-capable term
         let mut best: Option<(usize, String)> = None;
