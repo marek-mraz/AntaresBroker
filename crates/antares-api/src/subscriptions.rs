@@ -66,7 +66,13 @@ pub fn normalize_subscription(
                                     .as_str()
                                     .filter(|t| !t.is_empty())
                                     .ok_or_else(|| bad("EntitySelector type is required".into()))?;
-                                ne.insert("type".into(), Value::String(ctx.expand_key(t)));
+                                // 4.17 type-selection expressions stay raw and
+                                // are evaluated at match time (046_16)
+                                if t.contains(['|', ',', ';', '(']) {
+                                    ne.insert("type".into(), ev.clone());
+                                } else {
+                                    ne.insert("type".into(), Value::String(ctx.expand_key(t)));
+                                }
                             }
                             "id" => {
                                 let id = ev
@@ -178,6 +184,25 @@ pub fn normalize_subscription(
                         "unsupported endpoint scheme {scheme:?}"
                     )));
                 }
+                let member_names = |key: &str| -> Vec<String> {
+                    n.get(key)
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default()
+                };
+                let pick = member_names("pick");
+                let omit = member_names("omit");
+                if !pick.is_empty() && n.contains_key("attributes") {
+                    return Err(bad("notification.pick and attributes are exclusive".into()));
+                }
+                if !omit.is_empty() && n.contains_key("attributes") {
+                    return Err(bad("notification.omit and attributes are exclusive".into()));
+                }
+                if pick.iter().any(|p| omit.contains(p)) {
+                    return Err(bad(
+                        "notification.pick and omit name the same entity member".into(),
+                    ));
+                }
                 if let Some(acc) = ep.get("accept").and_then(Value::as_str) {
                     if !["application/json", "application/ld+json", "application/geo+json"]
                         .contains(&acc)
@@ -255,13 +280,14 @@ pub fn normalize_subscription(
 }
 
 /// Output shaping: compact IRIs, add status (5.8.3).
-pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool) -> Value {
+pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource: bool) -> Value {
     let Some(obj) = doc.as_object() else {
         return doc.clone();
     };
     let mut out = Map::new();
     for (k, v) in obj {
         match k.as_str() {
+            "__context" => continue,
             "createdAt" | "modifiedAt" if !sys_attrs => continue,
             "entities" => {
                 let entities: Vec<Value> = v
@@ -314,6 +340,14 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
             }
         }
     }
+    // default notificationTrigger surfaced on output (5.2.12; 028_06) —
+    // entity subscriptions only, csource subs have no such default (5.11)
+    if !csource && !out.contains_key("notificationTrigger") && !out.contains_key("timeInterval") {
+        out.insert(
+            "notificationTrigger".into(),
+            serde_json::json!(["attributeCreated", "attributeUpdated"]),
+        );
+    }
     // status (5.2.12 output): active | paused | expired
     let expired = obj
         .get("expiresAt")
@@ -324,6 +358,8 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
         "expired"
     } else if paused {
         "paused"
+    } else if obj.get("status").and_then(Value::as_str) == Some("failed") {
+        "failed" // 5.8.6 / 5.11.7 delivery-failure status
     } else {
         "active"
     };
@@ -332,6 +368,29 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
 }
 
 // ---------- handlers (parameterized by Kind) ----------
+
+/// Validate a subscription's jsonldContext member (5.2.12): must be a
+/// dereferenceable @context — invalid value ⇒ 400, unresolvable ⇒ 503.
+async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Result<(), ApiError> {
+    let Some(v) = norm.get("jsonldContext") else {
+        return Ok(());
+    };
+    let is_url = |s: &str| s.starts_with("http://") || s.starts_with("https://");
+    let ok_shape = match v {
+        Value::String(s) => is_url(s),
+        Value::Array(a) => a.iter().all(|e| e.as_str().is_some_and(is_url)),
+        _ => false,
+    };
+    if !ok_shape {
+        return Err(NgsiError::BadRequestData(format!(
+            "jsonldContext is not a valid @context reference: {v}"
+        ))
+        .into());
+    }
+    st.loader.resolve(v).await?;
+    Ok(())
+}
+
 
 pub async fn create(
     st: &AppState,
@@ -348,6 +407,7 @@ pub async fn create(
         .as_object()
         .ok_or_else(|| NgsiError::BadRequestData("subscription must be a JSON object".into()))?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
+    check_jsonld_context(st, &norm).await?;
     let id = match norm.get("id").and_then(Value::as_str) {
         Some(id) => id.to_owned(),
         None => {
@@ -359,8 +419,18 @@ pub async fn create(
     let ts = now_iso();
     norm.insert("createdAt".into(), Value::String(ts.clone()));
     norm.insert("modifiedAt".into(), Value::String(ts));
+    // notification @context = the creating request's context (5.8.6; §8.3
+    // stores it as its own column) — internal member, stripped on output.
+    norm.insert("__context".into(), parsed.ctx.source.clone());
     if !st.store.create(&tenant, kind, &id, Value::Object(norm)) {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
+    }
+    if kind == Kind::CSourceSubscription {
+        // initial CSourceNotification with all matching registrations (5.11.2.4)
+        let (st2, t2, id2) = (st.clone(), tenant.clone(), id.clone());
+        tokio::spawn(async move {
+            crate::notify::csource_initial(&st2, &t2, &id2).await;
+        });
     }
     Ok(created(
         format!("/ngsi-ld/v1/{}/{id}", resource_path(kind)),
@@ -376,6 +446,8 @@ pub async fn retrieve(
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)
+        .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["options", "format", "sysAttrs", "local"])?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
@@ -386,7 +458,7 @@ pub async fn retrieve(
     let sys = params
         .get("options")
         .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
-    let payload = present_subscription(&doc, &ctx, sys);
+    let payload = present_subscription(&doc, &ctx, sys, kind == Kind::CSourceSubscription);
     Ok(respond(StatusCode::OK, payload, &ctx, accept, &tenant))
 }
 
@@ -402,13 +474,19 @@ pub async fn list(
     let ctx = request_context(&st.loader, headers).await?;
     let all = st.store.list(&tenant, kind);
     let (page, count_hdr, links) =
-        crate::entities::paginate(st, params, all, &format!("/ngsi-ld/v1/{}", resource_path(kind)))?;
+        crate::entities::paginate_accept(
+            st,
+            params,
+            all,
+            &format!("/ngsi-ld/v1/{}", resource_path(kind)),
+            accept,
+        )?;
     let sys = params
         .get("options")
         .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
     let payload: Vec<Value> = page
         .iter()
-        .map(|d| present_subscription(d, &ctx, sys))
+        .map(|d| present_subscription(d, &ctx, sys, kind == Kind::CSourceSubscription))
         .collect();
     let mut resp = respond(StatusCode::OK, Value::Array(payload), &ctx, accept, &tenant);
     if let Some(total) = count_hdr {
@@ -433,6 +511,8 @@ pub async fn update(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)
+        .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
@@ -445,6 +525,7 @@ pub async fn update(
         }
     }
     let norm = normalize_subscription(obj, &parsed.ctx, true)?;
+    check_jsonld_context(st, &norm).await?;
     let ts = now_iso();
     let res = st.store.mutate(&tenant, kind, id, |doc| {
         let target = doc.as_object_mut().expect("subscription object");
@@ -464,7 +545,16 @@ pub async fn update(
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("subscription {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
-        Some(Ok(())) => Ok(no_content(&tenant)),
+        Some(Ok(())) => {
+            if kind == Kind::CSourceSubscription {
+                // 5.11.3.4: after update, notify with all currently matching
+                let (st2, t2, id2) = (st.clone(), tenant.clone(), id.to_owned());
+                tokio::spawn(async move {
+                    crate::notify::csource_initial(&st2, &t2, &id2).await;
+                });
+            }
+            Ok(no_content(&tenant))
+        }
     }
 }
 
@@ -476,6 +566,8 @@ pub async fn delete(
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
+    antares_model::EntityId::new(id)
+        .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     if st.store.delete(&tenant, kind, id) {
         Ok(no_content(&tenant))

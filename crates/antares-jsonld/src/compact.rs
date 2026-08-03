@@ -73,7 +73,7 @@ pub fn compact_instance(inst: &Value, ctx: &Context) -> Value {
     };
     let mut out = Map::new();
     for (k, v) in obj {
-        if k == "vocab" {
+        if k == "vocab" || k == "previousVocab" {
             // vocab values compact back to terms
             let compacted = match v {
                 Value::String(iri) => Value::String(ctx.compact_iri(iri)),
@@ -87,7 +87,7 @@ pub fn compact_instance(inst: &Value, ctx: &Context) -> Value {
                 ),
                 o => o.clone(),
             };
-            out.insert("vocab".into(), compacted);
+            out.insert(k.clone(), compacted);
         } else if k == "objectType" {
             out.insert("objectType".into(), compact_types(v, ctx));
         } else if VERBATIM.contains(&k.as_str()) {

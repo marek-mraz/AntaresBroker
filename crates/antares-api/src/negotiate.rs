@@ -41,7 +41,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
     }
 }
 
-fn percent_decode(input: &[u8]) -> String {
+pub(crate) fn percent_decode(input: &[u8]) -> String {
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
     while i < input.len() {
@@ -226,6 +226,9 @@ pub async fn parse_body(
         "application/json" => false,
         "application/ld+json" => true,
         "application/merge-patch+json" if kind == BodyKind::MergePatch => false,
+        // absent Content-Type: parse as JSON — a malformed body then reports
+        // InvalidRequest 400 rather than a bare 415 (039_05)
+        "" if !headers.contains_key(header::CONTENT_TYPE) => false,
         _ => return Err(ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE)),
     };
     if bytes.is_empty() {
@@ -318,7 +321,7 @@ pub fn context_link_url(ctx: &Context) -> String {
     }
 }
 
-fn link_header_value(ctx: &Context) -> String {
+pub(crate) fn link_header_value(ctx: &Context) -> String {
     format!(
         "<{}>; rel=\"{JSONLD_CONTEXT_REL}\"; type=\"application/ld+json\"",
         context_link_url(ctx)
@@ -387,7 +390,7 @@ pub fn respond(
     resp
 }
 
-fn inject_context(payload: Value, ctx: &Context) -> Value {
+pub(crate) fn inject_context(payload: Value, ctx: &Context) -> Value {
     let ctx_val = if ctx.source.is_null() {
         Value::String(CORE_CONTEXT.to_owned())
     } else {

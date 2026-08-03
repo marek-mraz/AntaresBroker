@@ -241,11 +241,11 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 continue;
             }
         }
-        let instances: Vec<Value> = v
+        let raw: Vec<Value> = v
             .as_array()
             .cloned()
             .unwrap_or_else(|| vec![v.clone()]);
-        let instances: Vec<Value> = instances
+        let kept: Vec<&Value> = raw
             .iter()
             .filter(|inst| match (&r.dataset_id, inst.get("datasetId")) {
                 (None, _) => true,
@@ -253,21 +253,30 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 (Some(want), None) => want.iter().any(|w| w == "@none"),
                 _ => false,
             })
-            .map(|inst| transform_instance(inst, r))
             .collect();
+        let instances: Vec<Value> = kept.iter().map(|inst| transform_instance(inst, r)).collect();
         if instances.is_empty() {
             continue;
         }
         if r.key_values {
-            let vals: Vec<Value> = instances.clone();
-            out.insert(
-                k.clone(),
-                if vals.len() == 1 {
-                    vals.into_iter().next().expect("one")
-                } else {
-                    Value::Array(vals)
-                },
-            );
+            if instances.len() == 1 {
+                out.insert(k.clone(), instances.into_iter().next().expect("one"));
+            } else {
+                // 4.5.4 multi-instance simplified form: a "dataset" map keyed
+                // by datasetId ("@none" for the default instance)
+                let mut ds = Map::new();
+                for (orig, simple) in kept.iter().zip(instances.iter()) {
+                    let key = orig
+                        .get("datasetId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("@none");
+                    ds.insert(key.to_owned(), simple.clone());
+                }
+                out.insert(
+                    k.clone(),
+                    serde_json::json!({ "dataset": Value::Object(ds) }),
+                );
+            }
         } else {
             out.insert(k.clone(), Value::Array(instances));
         }
@@ -352,7 +361,7 @@ fn is_reserved_member(k: &str) -> bool {
         "type" | "value" | "object" | "objectType" | "datasetId" | "observedAt" | "unitCode"
             | "lang" | "languageMap" | "vocab" | "json" | "valueList" | "objectList"
             | "createdAt" | "modifiedAt" | "deletedAt" | "instanceId" | "previousValue"
-            | "previousObject" | "previousLanguageMap"
+            | "previousObject" | "previousLanguageMap" | "previousJson" | "previousVocab"
     )
 }
 

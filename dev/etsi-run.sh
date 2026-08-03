@@ -44,6 +44,7 @@ status=0
 for s in $SUITES; do
   name="${s//\//_}"
   echo "=== $s ==="
+  bash dev/reset-broker.sh "$BROKER_URL"   # state reset between suites
   (cd "$SUITE" && "$VENV/bin/robot" \
       --outputdir "$OLDPWD/results/$name" \
       --exclude iop --exclude '*mqtt*' \

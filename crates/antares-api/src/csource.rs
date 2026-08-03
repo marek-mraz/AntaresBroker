@@ -24,6 +24,14 @@ pub fn normalize_registration(
     let bad = |m: String| NgsiError::BadRequestData(m);
     let mut out = Map::new();
     for (k, v) in doc {
+        // NGSI-LD Fragment member removal (5.4): null / NGSI-LD Null
+        if is_patch && k != "id" && (v.is_null() || v.as_str() == Some("urn:ngsi-ld:null")) {
+            if ["type", "information", "endpoint"].contains(&k.as_str()) {
+                return Err(bad(format!("cannot remove mandatory member {k} (5.9.3)")));
+            }
+            out.insert(k.clone(), Value::Null);
+            continue;
+        }
         match k.as_str() {
             "@context" | "createdAt" | "modifiedAt" | "status" => continue,
             "id" => {
@@ -268,8 +276,15 @@ pub async fn create_registration(
         let ts = now_iso();
         norm.insert("createdAt".into(), Value::String(ts.clone()));
         norm.insert("modifiedAt".into(), Value::String(ts));
-        if !st.store.create(&tenant, Kind::Registration, &id, Value::Object(norm)) {
+        let doc = Value::Object(norm);
+        if !st.store.create(&tenant, Kind::Registration, &id, doc.clone()) {
             return Err(NgsiError::AlreadyExists(format!("registration {id} already exists")).into());
+        }
+        {
+            let (st2, t2) = (st.clone(), tenant.clone());
+            tokio::spawn(async move {
+                crate::notify::csource_changed(&st2, &t2, None, Some(doc)).await;
+            });
         }
         Ok::<_, ApiError>(created(
             format!("/ngsi-ld/v1/csourceRegistrations/{id}"),
@@ -287,6 +302,8 @@ pub async fn retrieve_registration(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)
+            .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["options", "format", "local"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
@@ -325,40 +342,77 @@ pub async fn query_registrations(
         )?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
-        let types: Option<Vec<String>> = params
+        let bad = |m: String| NgsiError::BadRequestData(m);
+        let mut spec = CsrSpec::default();
+        if let Some(s) = params.get("id") {
+            let mut ids = Vec::new();
+            for i in s.split(',') {
+                antares_model::EntityId::new(i)
+                    .map_err(|_| bad(format!("invalid id in list: {i:?}")))?;
+                ids.push(i.to_owned());
+            }
+            spec.ids = Some(ids);
+        }
+        spec.id_pattern = params.get("idPattern").map(|p| {
+            regex::Regex::new(p)
+                .map(|_| p.clone())
+                .map_err(|_| bad(format!("invalid idPattern {p:?}")))
+        }).transpose()?;
+        spec.types = params
             .get("type")
             .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
-        let attrs: Option<Vec<String>> = params
+        let mut attrs: Vec<String> = params
             .get("attrs")
-            .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
+            .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect())
+            .unwrap_or_default();
+        // attributes referenced in q / geoQ count as query projection
+        // attributes for matching (5.10.2.4)
+        let q = params.get("q").map(|s| crate::negotiate::percent_decode(s.as_bytes()));
+        if let Some(q) = &q {
+            let ast = antares_ql::parse_q(q)?;
+            let mut roots = Vec::new();
+            q_attr_roots(&ast, &mut roots);
+            attrs.extend(roots.into_iter().map(|r| ctx.expand_key(&r)));
+        }
+        let geo = crate::geo::GeoQuery::from_params(&params)?;
+        if let Some(g) = &geo {
+            attrs.push(ctx.expand_key(&g.geoproperty));
+        }
+        if !attrs.is_empty() {
+            spec.attrs = Some(attrs);
+        }
+        // 5.10.2.4: a discriminating input is required, else too wide
+        // (the suite additionally accepts id-only queries — 037_10_01)
+        if spec.types.is_none() && spec.attrs.is_none() && spec.ids.is_none() && spec.id_pattern.is_none() {
+            return Err(bad("query too wide: one of type, attrs, q or geo query is required (5.10.2.4)".into()).into());
+        }
+        // temporal query: validate + interval presence rules (5.10.2.4)
+        let temporal = crate::temporal::TemporalQ::from_params(&params, false)?
+            .filter(|t| t.timerel != "any");
         let all = st.store.list(&tenant, Kind::Registration);
         let matches: Vec<Value> = all
             .into_iter()
             .filter(|doc| {
-                if let Some(ids) = &ids {
-                    if !ids.contains(&doc["id"].as_str().unwrap_or("")) {
-                        return false;
+                let has_interval = doc.get("observationInterval").is_some()
+                    || doc.get("managementInterval").is_some();
+                match &temporal {
+                    None if has_interval => return false,
+                    None => {}
+                    Some(tq) => {
+                        if !temporal_interval_matches(doc, tq) {
+                            return false;
+                        }
                     }
                 }
-                if let Some(types) = &types {
-                    if !registration_matches_types(doc, types) {
-                        return false;
-                    }
-                }
-                if let Some(attrs) = &attrs {
-                    if !registration_matches_attrs(doc, attrs) {
-                        return false;
-                    }
-                }
-                true
+                csr_matches(&spec, doc, &ctx)
             })
             .collect();
-        let (page, count_hdr, links) = crate::entities::paginate(
+        let (page, count_hdr, links) = crate::entities::paginate_accept(
             &st,
             &params,
             matches,
             "/ngsi-ld/v1/csourceRegistrations",
+            accept,
         )?;
         let sys = params
             .get("options")
@@ -383,43 +437,251 @@ pub async fn query_registrations(
     go.await.unwrap_or_else(|e| e.into_response())
 }
 
-/// 5.12 matching: a registration matches a type when any information entry
-/// either names it or has no entities restriction at all.
-pub fn registration_matches_types(doc: &Value, types: &[String]) -> bool {
-    let Some(infos) = doc.get("information").and_then(Value::as_array) else {
-        return false;
-    };
-    infos.iter().any(|info| {
-        match info.get("entities").and_then(Value::as_array) {
-            None => true,
-            Some(es) => es.iter().any(|e| {
-                e.get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|t| types.iter().any(|w| w == t))
-            }),
+/// Root attribute names referenced by a q= expression (5.10.2.4: they count
+/// as query projection attributes for RegistrationInfo matching).
+fn q_attr_roots(node: &antares_ql::QNode, out: &mut Vec<String>) {
+    use antares_ql::QNode::*;
+    match node {
+        And(v) | Or(v) => v.iter().for_each(|n| q_attr_roots(n, out)),
+        Cmp { path, .. } | Exists { path, .. } => {
+            if let Some(r) = path.first() {
+                out.push(r.clone());
+            }
         }
-    })
+    }
 }
 
-pub fn registration_matches_attrs(doc: &Value, attrs: &[String]) -> bool {
-    let Some(infos) = doc.get("information").and_then(Value::as_array) else {
-        return false;
+/// 5.10.2.4 temporal matching against observationInterval/managementInterval.
+fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::TemporalQ) -> bool {
+    let key = if tq.timeproperty == "observedAt" {
+        "observationInterval"
+    } else {
+        "managementInterval"
     };
-    infos.iter().any(|info| {
-        let props = info.get("propertyNames").and_then(Value::as_array);
-        let rels = info.get("relationshipNames").and_then(Value::as_array);
-        if props.is_none() && rels.is_none() {
-            return true;
+    let Some(iv) = doc.get(key).and_then(Value::as_object) else {
+        return false; // relevant interval not present ⇒ no match
+    };
+    let start = iv.get("startAt").and_then(Value::as_str).unwrap_or("");
+    let end = iv.get("endAt").and_then(Value::as_str); // open-ended when absent
+    match tq.timerel.as_str() {
+        // interval contains times before/after timeAt (037_09, 047_10/11)
+        "before" => start < tq.time_at.as_str(),
+        "after" => end.is_none_or(|e| e > tq.time_at.as_str()),
+        "between" => {
+            // overlap between [timeAt, endTimeAt] and the interval
+            let qe = tq.end_time_at.as_deref().unwrap_or(&tq.time_at);
+            tq.time_at.as_str() <= end.unwrap_or("9999") && qe >= start
         }
-        let has = |list: Option<&Vec<Value>>| {
-            list.is_some_and(|l| {
-                l.iter()
-                    .filter_map(Value::as_str)
-                    .any(|n| attrs.iter().any(|w| w == n))
-            })
-        };
-        has(props) || has(rels)
-    })
+        _ => true,
+    }
+}
+
+/// The entity/attribute specification matched against registrations (5.12).
+#[derive(Default)]
+pub struct CsrSpec {
+    /// Expanded type IRIs (or raw 4.17 selector expressions).
+    pub types: Option<Vec<String>>,
+    pub ids: Option<Vec<String>>,
+    pub id_pattern: Option<String>,
+    /// Expanded attribute IRIs.
+    pub attrs: Option<Vec<String>>,
+}
+
+fn type_matches(sel: &str, info_type: &str, ctx: &Context) -> bool {
+    if sel.contains(['|', ',', ';', '(']) {
+        crate::entities::type_selection_matches(sel, &[info_type], ctx)
+    } else {
+        sel == info_type
+    }
+}
+
+/// 5.12: does an EntityInfo element match the entity specification?
+fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
+    if let Some(types) = &spec.types {
+        let it = ei.get("type").and_then(Value::as_str).unwrap_or("");
+        if !types.iter().any(|t| type_matches(t, it, ctx)) {
+            return false;
+        }
+    }
+    let ei_id = ei.get("id").and_then(Value::as_str);
+    let ei_pat = ei.get("idPattern").and_then(Value::as_str);
+    if ei_id.is_none() && ei_pat.is_none() {
+        return true;
+    }
+    if let Some(ids) = &spec.ids {
+        if let Some(rid) = ei_id {
+            if ids.iter().any(|i| i == rid) {
+                return true;
+            }
+        }
+        if let Some(p) = ei_pat {
+            if let Ok(re) = regex::Regex::new(p) {
+                if ids.iter().any(|i| re.find(i).is_some()) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(qp) = &spec.id_pattern {
+        if let Some(rid) = ei_id {
+            if regex::Regex::new(qp).is_ok_and(|re| re.find(rid).is_some()) {
+                return true;
+            }
+        }
+        if ei_pat.is_some() {
+            return true; // both patterns present ⇒ assumed compatible (5.12)
+        }
+    }
+    // no id restriction given by the query side ⇒ EntityInfo id restrictions
+    // don't exclude it when the type matched
+    spec.ids.is_none() && spec.id_pattern.is_none()
+}
+
+fn attrs_match_info(attrs: &Option<Vec<String>>, info: &Value) -> bool {
+    let Some(attrs) = attrs else { return true };
+    if attrs.is_empty() {
+        return true;
+    }
+    let props = info.get("propertyNames").and_then(Value::as_array);
+    let rels = info.get("relationshipNames").and_then(Value::as_array);
+    if props.is_none() && rels.is_none() {
+        return true;
+    }
+    let has = |list: Option<&Vec<Value>>| {
+        list.is_some_and(|l| {
+            l.iter()
+                .filter_map(Value::as_str)
+                .any(|n| attrs.iter().any(|w| w == n))
+        })
+    };
+    has(props) || has(rels)
+}
+
+/// 5.12: the RegistrationInfo elements of `doc.information` that match `spec`.
+pub fn matching_infos<'a>(spec: &CsrSpec, doc: &'a Value, ctx: &Context) -> Vec<&'a Value> {
+    let Some(infos) = doc.get("information").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    infos
+        .iter()
+        .filter(|info| {
+            let entity_ok = match info.get("entities").and_then(Value::as_array) {
+                None => true,
+                Some(es) => es.iter().any(|ei| entity_info_matches(spec, ei, ctx)),
+            };
+            entity_ok && attrs_match_info(&spec.attrs, info)
+        })
+        .collect()
+}
+
+pub fn csr_matches(spec: &CsrSpec, doc: &Value, ctx: &Context) -> bool {
+    !matching_infos(spec, doc, ctx).is_empty()
+}
+
+/// Full 5.11.2.4 match of a registration against a csource subscription:
+/// 5.12 entity/attr matching + temporal interval rules + geoQ vs the
+/// registration's own `location`.
+pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool {
+    let spec = spec_for_subscription(sub);
+    if !csr_matches(&spec, reg, ctx) {
+        return false;
+    }
+    let has_interval =
+        reg.get("observationInterval").is_some() || reg.get("managementInterval").is_some();
+    match sub.get("temporalQ").and_then(Value::as_object) {
+        None => {
+            if has_interval {
+                return false; // latest-information sources only (5.11.2.4)
+            }
+        }
+        Some(tq) => {
+            let mut params: HashMap<String, String> = HashMap::new();
+            for k in ["timerel", "timeAt", "endTimeAt", "timeproperty"] {
+                if let Some(s) = tq.get(k).and_then(Value::as_str) {
+                    params.insert(k.into(), s.into());
+                }
+            }
+            if let Ok(Some(t)) = crate::temporal::TemporalQ::from_params(&params, false) {
+                if t.timerel != "any" && !temporal_interval_matches(reg, &t) {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
+        let mut params: HashMap<String, String> = HashMap::new();
+        for k in ["georel", "geometry", "geoproperty"] {
+            if let Some(s) = g.get(k).and_then(Value::as_str) {
+                params.insert(k.into(), s.into());
+            }
+        }
+        if let Some(c) = g.get("coordinates") {
+            params.insert(
+                "coordinates".into(),
+                match c {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                },
+            );
+        }
+        if let Ok(Some(gq)) = crate::geo::GeoQuery::from_params(&params) {
+            match reg.get("location") {
+                Some(geom) => {
+                    if !gq.matches_geometry(geom) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Build the 5.12 spec for a csource subscription (5.11.2.4): entities
+/// selectors + watchedAttributes ∪ notification.attributes.
+pub fn spec_for_subscription(sub: &Value) -> CsrSpec {
+    let mut spec = CsrSpec::default();
+    if let Some(es) = sub.get("entities").and_then(Value::as_array) {
+        let mut types = Vec::new();
+        let mut ids = Vec::new();
+        for e in es {
+            if let Some(t) = e.get("type").and_then(Value::as_str) {
+                types.push(t.to_owned());
+            }
+            if let Some(i) = e.get("id").and_then(Value::as_str) {
+                ids.push(i.to_owned());
+            }
+            if spec.id_pattern.is_none() {
+                spec.id_pattern = e
+                    .get("idPattern")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+        if !types.is_empty() {
+            spec.types = Some(types);
+        }
+        if !ids.is_empty() {
+            spec.ids = Some(ids);
+        }
+    }
+    let mut attrs: Vec<String> = sub
+        .get("watchedAttributes")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    if let Some(na) = sub
+        .get("notification")
+        .and_then(|n| n.get("attributes"))
+        .and_then(Value::as_array)
+    {
+        attrs.extend(na.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    if !attrs.is_empty() {
+        spec.attrs = Some(attrs);
+    }
+    spec
 }
 
 pub async fn update_registration(
@@ -431,6 +693,8 @@ pub async fn update_registration(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)
+            .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
         let obj = parsed
@@ -439,6 +703,7 @@ pub async fn update_registration(
             .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
+        let before = st.store.get(&tenant, Kind::Registration, &id);
         let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
             let target = doc.as_object_mut().expect("registration object");
             for (k, v) in &norm {
@@ -457,7 +722,14 @@ pub async fn update_registration(
         match res {
             None => Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into()),
             Some(Err(e)) => Err(ApiError::from(e)),
-            Some(Ok(())) => Ok(no_content(&tenant)),
+            Some(Ok(())) => {
+                let after = st.store.get(&tenant, Kind::Registration, &id);
+                let (st2, t2) = (st.clone(), tenant.clone());
+                tokio::spawn(async move {
+                    crate::notify::csource_changed(&st2, &t2, before, after).await;
+                });
+                Ok(no_content(&tenant))
+            }
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -471,8 +743,15 @@ pub async fn delete_registration(
 ) -> Response {
     let go = || -> ApiResult<Response> {
         let tenant = tenant_from(&headers)?;
+        antares_model::EntityId::new(&id)
+            .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
+        let before = st.store.get(&tenant, Kind::Registration, &id);
         if st.store.delete(&tenant, Kind::Registration, &id) {
+            let (st2, t2) = (st.clone(), tenant.clone());
+            tokio::spawn(async move {
+                crate::notify::csource_changed(&st2, &t2, before, None).await;
+            });
             Ok(no_content(&tenant))
         } else {
             Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into())

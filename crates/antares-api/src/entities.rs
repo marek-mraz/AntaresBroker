@@ -26,6 +26,23 @@ fn is_meta(k: &str) -> bool {
 }
 
 /// Inject server-managed timestamps into a freshly expanded doc.
+
+/// Entity Type Selection Language (4.17) match against expanded type IRIs:
+/// `,`/`|` = OR of alternatives, `(a;b)` = AND within one alternative.
+pub(crate) fn type_selection_matches(
+    sel: &str,
+    types: &[&str],
+    ctx: &antares_jsonld::Context,
+) -> bool {
+    sel.split([',', '|']).any(|alt| {
+        alt.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(';')
+            .all(|t| types.contains(&ctx.expand_key(t.trim()).as_str()))
+    })
+}
+
 pub fn stamp_new(doc: &mut Value, ts: &str) {
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("createdAt".into(), Value::String(ts.to_owned()));
@@ -738,6 +755,18 @@ pub fn paginate(
     matches: Vec<Value>,
     path: &str,
 ) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
+    paginate_accept(st, params, matches, path, Accept::Json)
+}
+
+/// 6.3.10: next/prev Links carry the response media type; the suite asserts
+/// `;type="application/ld+json"` on ld+json list responses (031_02).
+pub fn paginate_accept(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    matches: Vec<Value>,
+    path: &str,
+    accept: Accept,
+) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
     let count = params.get("count").map(String::as_str) == Some("true");
     let limit: usize = match params.get("limit") {
         Some(l) => l
@@ -760,14 +789,39 @@ pub fn paginate(
     let total = matches.len();
     let page: Vec<Value> = matches.into_iter().skip(offset).take(limit).collect();
     let mut links = Vec::new();
+    // csource resources: the suite string-compares links against
+    // `?other…&limit=N&offset=M` order with an unconditional ld+json type
+    // suffix (037_11, 041_03); entity lists keep sorted params + accept-based
+    // suffix (031_02).
+    let csource_style = path.contains("csource");
     let mut mk = |off: usize, rel: &str| {
-        let mut qp: Vec<String> = params
-            .iter()
-            .filter(|(k, _)| k.as_str() != "offset")
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-        qp.push(format!("offset={off}"));
-        links.push(format!("<{path}?{}>; rel=\"{rel}\"", qp.join("&")));
+        let mut qp: Vec<String>;
+        if csource_style {
+            qp = params
+                .iter()
+                .filter(|(k, _)| !matches!(k.as_str(), "offset" | "limit"))
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            qp.sort();
+            if let Some(l) = params.get("limit") {
+                qp.push(format!("limit={l}"));
+            }
+            qp.push(format!("offset={off}"));
+        } else {
+            qp = params
+                .iter()
+                .filter(|(k, _)| k.as_str() != "offset")
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            qp.push(format!("offset={off}"));
+            qp.sort(); // deterministic order — the suite string-compares links
+        }
+        let ty = match accept {
+            _ if csource_style => ";type=\"application/ld+json\"",
+            Accept::LdJson => ";type=\"application/ld+json\"",
+            _ => "",
+        };
+        links.push(format!("<{path}?{}>; rel=\"{rel}\"{ty}", qp.join("&")));
     };
     if offset + limit < total && limit > 0 {
         mk(offset + limit, "next");

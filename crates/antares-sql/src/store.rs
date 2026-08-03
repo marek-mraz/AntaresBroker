@@ -15,9 +15,14 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
+/// Called with (tenant, before, after) on every entity write — the local-mode
+/// change feed (§7): create ⇒ (None, Some), delete ⇒ (Some, None).
+pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send + Sync>;
+
 #[derive(Default)]
 pub struct Store {
     inner: RwLock<Inner>,
+    hook: RwLock<Option<ChangeHook>>,
 }
 
 #[derive(Default)]
@@ -44,6 +49,31 @@ pub enum Kind {
 }
 
 impl Store {
+    pub fn set_change_hook(&self, h: ChangeHook) {
+        *self.hook.write().expect("hook lock") = Some(h);
+    }
+
+    fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
+        if let Some(h) = self.hook.read().expect("hook lock").as_ref() {
+            h(tenant, before, after);
+        }
+    }
+
+    /// Tenants that hold any subscriptions (interval-firing scan).
+    pub fn subscription_tenants(&self) -> Vec<String> {
+        let inner = self.inner.read().expect("store lock");
+        let mut out: Vec<String> = inner
+            .subscriptions
+            .iter()
+            .chain(inner.csource_subscriptions.iter())
+            .filter(|(_, m)| !m.is_empty())
+            .map(|(t, _)| t.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn map<'a>(inner: &'a Inner, kind: Kind) -> &'a HashMap<String, BTreeMap<String, Value>> {
         match kind {
             Kind::Entity => &inner.entities,
@@ -69,25 +99,38 @@ impl Store {
 
     /// Insert a new resource; `false` if the id already exists.
     pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
-        let mut inner = self.inner.write().expect("store lock");
-        let m = Self::map_mut(&mut inner, kind)
-            .entry(tenant.as_str().to_owned())
-            .or_default();
-        if m.contains_key(id) {
-            return false;
+        let created = {
+            let mut inner = self.inner.write().expect("store lock");
+            let m = Self::map_mut(&mut inner, kind)
+                .entry(tenant.as_str().to_owned())
+                .or_default();
+            if m.contains_key(id) {
+                false
+            } else {
+                m.insert(id.to_owned(), doc.clone());
+                true
+            }
+        };
+        if created && kind == Kind::Entity {
+            self.emit(tenant, None, Some(doc));
         }
-        m.insert(id.to_owned(), doc);
-        true
+        created
     }
 
     /// Insert or replace; returns `true` if it existed before.
     pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
-        let mut inner = self.inner.write().expect("store lock");
-        Self::map_mut(&mut inner, kind)
-            .entry(tenant.as_str().to_owned())
-            .or_default()
-            .insert(id.to_owned(), doc)
-            .is_some()
+        let prev = {
+            let mut inner = self.inner.write().expect("store lock");
+            Self::map_mut(&mut inner, kind)
+                .entry(tenant.as_str().to_owned())
+                .or_default()
+                .insert(id.to_owned(), doc.clone())
+        };
+        let existed = prev.is_some();
+        if kind == Kind::Entity {
+            self.emit(tenant, prev, Some(doc));
+        }
+        existed
     }
 
     pub fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Option<Value> {
@@ -99,10 +142,19 @@ impl Store {
     }
 
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
-        let mut inner = self.inner.write().expect("store lock");
-        Self::map_mut(&mut inner, kind)
-            .get_mut(tenant.as_str())
-            .is_some_and(|m| m.remove(id).is_some())
+        let removed = {
+            let mut inner = self.inner.write().expect("store lock");
+            Self::map_mut(&mut inner, kind)
+                .get_mut(tenant.as_str())
+                .and_then(|m| m.remove(id))
+        };
+        let hit = removed.is_some();
+        if kind == Kind::Entity {
+            if let Some(old) = removed {
+                self.emit(tenant, Some(old), None);
+            }
+        }
+        hit
     }
 
     /// Snapshot of all docs of a kind for one tenant (id order).
@@ -123,18 +175,27 @@ impl Store {
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Option<Result<T, E>> {
-        let mut inner = self.inner.write().expect("store lock");
-        let doc = Self::map_mut(&mut inner, kind)
-            .get_mut(tenant.as_str())?
-            .get_mut(id)?;
-        let mut candidate = doc.clone();
-        match f(&mut candidate) {
-            Ok(t) => {
-                *doc = candidate;
-                Some(Ok(t))
+        let (result, change) = {
+            let mut inner = self.inner.write().expect("store lock");
+            let doc = Self::map_mut(&mut inner, kind)
+                .get_mut(tenant.as_str())?
+                .get_mut(id)?;
+            let before = doc.clone();
+            let mut candidate = doc.clone();
+            match f(&mut candidate) {
+                Ok(t) => {
+                    let change = (kind == Kind::Entity && candidate != before)
+                        .then(|| (before, candidate.clone()));
+                    *doc = candidate;
+                    (Ok(t), change)
+                }
+                Err(e) => (Err(e), None),
             }
-            Err(e) => Some(Err(e)),
+        };
+        if let Some((b, a)) = change {
+            self.emit(tenant, Some(b), Some(a));
         }
+        Some(result)
     }
 
     // jsonldContexts (cross-tenant by design)

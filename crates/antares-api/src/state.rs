@@ -15,6 +15,8 @@ pub struct AppState {
     pub default_limit: usize,
     /// Hard ceiling on limit (TooManyResults guard).
     pub max_limit: usize,
+    /// One shared outbound client, timeouts at construction (U1 lesson).
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -26,6 +28,14 @@ impl AppState {
             host_alias,
             default_limit: 1000,
             max_limit: 1000,
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(5))
+                // the suite's notification receiver asserts header names
+                // case-sensitively ("Link", "X-Additional-Key")
+                .http1_title_case_headers()
+                .build()
+                .expect("http client"),
         }
     }
 }

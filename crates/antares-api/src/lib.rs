@@ -8,6 +8,7 @@ pub mod csource;
 pub mod entities;
 pub mod geo;
 pub mod negotiate;
+pub mod notify;
 pub mod qeval;
 pub mod repr;
 pub mod state;

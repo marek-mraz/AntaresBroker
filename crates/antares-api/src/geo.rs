@@ -112,7 +112,7 @@ impl GeoQuery {
         })
     }
 
-    fn matches_geometry(&self, geo: &Value) -> bool {
+    pub fn matches_geometry(&self, geo: &Value) -> bool {
         let target = Geometry::parse(geo);
         let query = Geometry {
             gtype: self.geometry.clone(),

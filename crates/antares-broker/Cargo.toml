@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 antares-api = { workspace = true }
 axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 antares-bus = { workspace = true }
 antares-model = { workspace = true }
 tokio = { workspace = true }

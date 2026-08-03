@@ -46,21 +46,39 @@ async fn run(
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
+    let state = AppState::new(host_alias);
+    antares_api::notify::wire(&state); // matcher + notifier + interval firing
     let app = tower::Layer::layer(
         &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),
-        antares_api::router(AppState::new(host_alias)),
+        antares_api::router(state),
     );
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://0.0.0.0:{port}");
-    axum::serve(
-        listener,
-        axum::ServiceExt::<axum::extract::Request>::into_make_service(app),
-    )
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
-        .await?;
-    Ok(())
+    // Manual serve loop: the ETSI suite reads response headers case-sensitively
+    // ("Location"), so HTTP/1 responses are written with title-case headers.
+    loop {
+        let (stream, _) = tokio::select! {
+            r = listener.accept() => r?,
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                return Ok(());
+            }
+        };
+        let app = app.clone();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let mut app = app.clone();
+                async move {
+                    tower::Service::call(&mut app, req.map(axum::body::Body::new)).await
+                }
+            });
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            builder.http1().title_case_headers(true);
+            let _ = builder
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
+                .await;
+        });
+    }
 }
