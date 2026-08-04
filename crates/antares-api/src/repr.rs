@@ -26,10 +26,7 @@ pub struct Repr {
     pub dataset_id: Option<Vec<String>>,
 }
 
-pub fn parse_repr(
-    params: &HashMap<String, String>,
-    ctx: &Context,
-) -> Result<Repr, NgsiError> {
+pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Repr, NgsiError> {
     let mut r = Repr::default();
     let mut format: Option<String> = None;
     if let Some(opts) = params.get("options") {
@@ -89,10 +86,7 @@ pub fn parse_repr(
         let mut list = Vec::new();
         for t in a.split(',') {
             let t = t.trim();
-            if t.is_empty()
-                || ENTITY_META.contains(&t)
-                || t == "@context"
-            {
+            if t.is_empty() || ENTITY_META.contains(&t) || t == "@context" {
                 return Err(NgsiError::BadRequestData(format!(
                     "invalid attribute name {t:?} in attrs"
                 )));
@@ -114,7 +108,15 @@ pub fn parse_repr(
     Ok(r)
 }
 
-const ENTITY_META: &[&str] = &["id", "type", "scope", "createdAt", "modifiedAt", "deletedAt", "expiresAt"];
+const ENTITY_META: &[&str] = &[
+    "id",
+    "type",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "expiresAt",
+];
 
 /// One node of a 4.21 attribute-projection expression; `children` carries a
 /// nested `{…}` selection (applied to linked entities on join).
@@ -126,18 +128,13 @@ pub struct ProjNode {
 }
 
 /// Parse + validate a pick=/omit= value (4.21) into a projection tree.
-pub(crate) fn parse_projection(
-    s: &str,
-    ctx: &Context,
-) -> Result<Vec<ProjNode>, NgsiError> {
-    let bad = || {
-        NgsiError::BadRequestData(format!("invalid attribute projection {s:?} (4.21)"))
-    };
+pub(crate) fn parse_projection(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, NgsiError> {
+    let bad = || NgsiError::BadRequestData(format!("invalid attribute projection {s:?} (4.21)"));
     if s.is_empty()
         || s.matches('{').count() != s.matches('}').count()
-        || !s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || "_,.:{}#/%-+@".contains(c)
-        })
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_,.:{}#/%-+@".contains(c))
     {
         return Err(bad());
     }
@@ -160,8 +157,7 @@ pub(crate) fn parse_projection(
         Some(out)
     }
     fn parse_nodes(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, NgsiError> {
-        let bad =
-            |m: &str| NgsiError::BadRequestData(format!("invalid attribute projection: {m}"));
+        let bad = |m: &str| NgsiError::BadRequestData(format!("invalid attribute projection: {m}"));
         let parts = split_top(s).ok_or_else(|| bad("unbalanced braces"))?;
         let mut out: Vec<ProjNode> = Vec::new();
         for t in parts {
@@ -171,7 +167,9 @@ pub(crate) fn parse_projection(
             }
             let (head_part, children) = match t.find('{') {
                 Some(i) => {
-                    let inner = t[i + 1..].strip_suffix('}').ok_or_else(|| bad("unclosed brace"))?;
+                    let inner = t[i + 1..]
+                        .strip_suffix('}')
+                        .ok_or_else(|| bad("unclosed brace"))?;
                     (&t[..i], Some(parse_nodes(inner, ctx)?))
                 }
                 None => (t, None),
@@ -180,7 +178,10 @@ pub(crate) fn parse_projection(
             if head.is_empty() || head_part.split('.').any(str::is_empty) {
                 return Err(bad("empty path segment"));
             }
-            if !head.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || "_:@#".contains(c))
+            if !head
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "_:@#".contains(c))
             {
                 return Err(bad("projection member starts with a special character"));
             }
@@ -241,10 +242,7 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 continue;
             }
         }
-        let raw: Vec<Value> = v
-            .as_array()
-            .cloned()
-            .unwrap_or_else(|| vec![v.clone()]);
+        let raw: Vec<Value> = v.as_array().cloned().unwrap_or_else(|| vec![v.clone()]);
         let kept: Vec<&Value> = raw
             .iter()
             .filter(|inst| match (&r.dataset_id, inst.get("datasetId")) {
@@ -254,7 +252,10 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 _ => false,
             })
             .collect();
-        let instances: Vec<Value> = kept.iter().map(|inst| transform_instance(inst, r)).collect();
+        let instances: Vec<Value> = kept
+            .iter()
+            .map(|inst| transform_instance(inst, r))
+            .collect();
         if instances.is_empty() {
             continue;
         }
@@ -358,15 +359,40 @@ fn select_lang(lm: &Map<String, Value>, lang: &str) -> Option<(String, Value)> {
 fn is_reserved_member(k: &str) -> bool {
     matches!(
         k,
-        "type" | "value" | "object" | "objectType" | "datasetId" | "observedAt" | "unitCode"
-            | "lang" | "languageMap" | "vocab" | "json" | "valueList" | "objectList"
-            | "createdAt" | "modifiedAt" | "deletedAt" | "instanceId" | "previousValue"
-            | "previousObject" | "previousLanguageMap" | "previousJson" | "previousVocab"
+        "type"
+            | "value"
+            | "object"
+            | "objectType"
+            | "datasetId"
+            | "observedAt"
+            | "unitCode"
+            | "lang"
+            | "languageMap"
+            | "vocab"
+            | "json"
+            | "valueList"
+            | "objectList"
+            | "createdAt"
+            | "modifiedAt"
+            | "deletedAt"
+            | "instanceId"
+            | "previousValue"
+            | "previousObject"
+            | "previousLanguageMap"
+            | "previousJson"
+            | "previousVocab"
     )
 }
 
 fn simplified_value(obj: &Map<String, Value>) -> Value {
-    for k in ["value", "object", "languageMap", "vocab", "valueList", "objectList"] {
+    for k in [
+        "value",
+        "object",
+        "languageMap",
+        "vocab",
+        "valueList",
+        "objectList",
+    ] {
         if let Some(v) = obj.get(k) {
             if k == "json" {
                 return v.clone();

@@ -526,7 +526,7 @@ clause5_13_16_contexts_maps:
     name: "@context management (Add/List/Serve/Delete+Reload; kinds)"
     status: implemented
     evidence: "crates/antares-api/src/contexts.rs (Hosted/Cached/ImplicitlyCreated, reload)"
-    notes: "6.3.16 cache expiration (Expires/Cache-Control) NOT honoured by the loader — tasks.md H6"
+    notes: "6.3.16 lifetime honoured by the loader since H6 (TTL from Cache-Control/Expires)"
   - clause: "5.14.1–5.14.5"
     name: "EntityMaps (Retrieve/Update/Delete/Create for query + temporal)"
     status: missing
@@ -601,9 +601,9 @@ clause6_http:
     notes: ""
   - clause: "6.3.16"
     name: "Expiration for cached @contexts"
-    status: missing
-    evidence: ""
-    notes: "loader.rs has no Expires/Cache-Control TTL handling — tasks.md H6/J2"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/loader.rs (ttl_from_headers, stale_at refetch; test cache_lifetime_from_headers)"
+    notes: "no-store/no-cache = immediately stale; changed body invalidates merged-context cache"
   - clause: "6.3.17–6.3.19"
     name: "Distributed-ops caching/timeout; limiting; extra info (Via, NGSILD-EntityMap, contextSourceInfo)"
     status: partial
@@ -616,9 +616,9 @@ clause6_http:
     notes: ""
   - clause: "6.3.21"
     name: "Prefer: ngsi-ld=<version> / Preference-Applied / 203"
-    status: missing
-    evidence: ""
-    notes: "tasks.md H4 — no Prefer handling anywhere"
+    status: implemented
+    evidence: "crates/antares-api/src/conformance.rs (4.3.6.8 fallback tables; middleware sets Preference-Applied, 203 when altered; router test prefer_ngsild_version_downgrades_and_203s)"
+    notes: "subscription ngsildConformance amends notifications via the same tables (5.8.6)"
   - clause: "6.3.22"
     name: "Snapshot specification"
     status: staged-v1x
@@ -643,6 +643,6 @@ clause6_http:
 clause7_mqtt:
   - clause: "7.1–7.2"
     name: "MQTT notification binding (endpoint URIs, notifierInfo, {metadata,body} wrapper)"
-    status: missing
-    evidence: ""
-    notes: "tasks.md G — mqtt(s) schemes accepted at subscription creation, delivery silently skipped; suite runs --exclude '*mqtt*'"
+    status: implemented
+    evidence: "crates/antares-notifier/src/mqtt.rs (endpoint parse, Table 7.2-1 params, {metadata,body} wrapper, bounded pooled sink) + notify.rs delivery branch; e2e antares-broker/tests/mqtt_notify.rs against live mosquitto"
+    notes: "058_* TPs included in the pipeline (MQTT=1 default); CI proves them via the suite's own dockerised mosquitto"

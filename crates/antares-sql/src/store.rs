@@ -11,6 +11,8 @@
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
 pub mod any;
+pub mod entity_map;
+pub mod outbox;
 pub mod pg_doc;
 pub mod pg_entity;
 pub mod pg_temporal;
@@ -141,6 +143,12 @@ pub struct Store {
     hook: RwLock<Option<ChangeHook>>,
     /// `file` mode durability shadow; `None` = pure in-memory (`memory` mode).
     shadow: Option<Shadow>,
+    /// B13: writers currently queued behind the single write-critical section
+    /// (redb has ONE writer, so fsync commits serialize here). Exported via
+    /// /q/health; the group-commit lever only gets built if a benchmark shows
+    /// this depth sustained at the measured ~3.1k writes/s ceiling.
+    write_waiters: std::sync::atomic::AtomicUsize,
+    write_waiters_peak: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -216,7 +224,8 @@ impl Store {
                     .map_err(|e| e.to_string())?;
                 {
                     let mut t = tx.open_table(T_META).map_err(|e| e.to_string())?;
-                    t.insert("format", FORMAT_VERSION).map_err(|e| e.to_string())?;
+                    t.insert("format", FORMAT_VERSION)
+                        .map_err(|e| e.to_string())?;
                 }
                 tx.commit().map_err(|e| e.to_string())?;
             }
@@ -263,6 +272,8 @@ impl Store {
             inner: RwLock::new(inner),
             hook: RwLock::new(None),
             shadow: Some(Shadow { db }),
+            write_waiters: Default::default(),
+            write_waiters_peak: Default::default(),
         })
     }
 
@@ -273,6 +284,27 @@ impl Store {
             let bytes = doc.map(|d| serde_json::to_vec(d).expect("serialize doc"));
             shadow.write(table, key, bytes.as_deref());
         }
+    }
+
+    /// B13: acquire the write-critical section, counting queued writers.
+    fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
+        use std::sync::atomic::Ordering;
+        let depth = self.write_waiters.fetch_add(1, Ordering::Relaxed) + 1;
+        self.write_waiters_peak.fetch_max(depth, Ordering::Relaxed);
+        let guard = self.inner.write().expect("store lock");
+        self.write_waiters.fetch_sub(1, Ordering::Relaxed);
+        guard
+    }
+
+    /// B13: (currently queued writers, peak since start). The peak going
+    /// nowhere near sustained depth is the evidence that the group-commit
+    /// lever stays unbuilt.
+    pub fn commit_queue(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering;
+        (
+            self.write_waiters.load(Ordering::Relaxed),
+            self.write_waiters_peak.load(Ordering::Relaxed),
+        )
     }
 
     pub fn set_change_hook(&self, h: ChangeHook) {
@@ -300,7 +332,7 @@ impl Store {
         out
     }
 
-    fn map<'a>(inner: &'a Inner, kind: Kind) -> &'a HashMap<String, BTreeMap<String, Value>> {
+    fn map(inner: &Inner, kind: Kind) -> &HashMap<String, BTreeMap<String, Value>> {
         match kind {
             Kind::Entity => &inner.entities,
             Kind::Subscription => &inner.subscriptions,
@@ -310,10 +342,7 @@ impl Store {
         }
     }
 
-    fn map_mut<'a>(
-        inner: &'a mut Inner,
-        kind: Kind,
-    ) -> &'a mut HashMap<String, BTreeMap<String, Value>> {
+    fn map_mut(inner: &mut Inner, kind: Kind) -> &mut HashMap<String, BTreeMap<String, Value>> {
         match kind {
             Kind::Entity => &mut inner.entities,
             Kind::Subscription => &mut inner.subscriptions,
@@ -326,7 +355,7 @@ impl Store {
     /// Insert a new resource; `false` if the id already exists.
     pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
         let created = on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
+            let mut inner = self.write_inner();
             let m = Self::map_mut(&mut inner, kind)
                 .entry(tenant.as_str().to_owned())
                 .or_default();
@@ -347,7 +376,7 @@ impl Store {
     /// Insert or replace; returns `true` if it existed before.
     pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
         let prev = on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
+            let mut inner = self.write_inner();
             let prev = Self::map_mut(&mut inner, kind)
                 .entry(tenant.as_str().to_owned())
                 .or_default()
@@ -372,7 +401,7 @@ impl Store {
 
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
         let removed = on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
+            let mut inner = self.write_inner();
             let removed = Self::map_mut(&mut inner, kind)
                 .get_mut(tenant.as_str())
                 .and_then(|m| m.remove(id));
@@ -409,13 +438,10 @@ impl Store {
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Option<Result<T, E>> {
         let (result, change) = on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
-            let Some(doc) = Self::map_mut(&mut inner, kind)
+            let mut inner = self.write_inner();
+            let doc = Self::map_mut(&mut inner, kind)
                 .get_mut(tenant.as_str())
-                .and_then(|m| m.get_mut(id))
-            else {
-                return None;
-            };
+                .and_then(|m| m.get_mut(id))?;
             let before = doc.clone();
             let mut candidate = doc.clone();
             Some(match f(&mut candidate) {
@@ -440,19 +466,24 @@ impl Store {
     // jsonldContexts (cross-tenant by design; key = context id, no tenant prefix)
     pub fn context_put(&self, id: &str, doc: Value) {
         on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
+            let mut inner = self.write_inner();
             self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), Some(&doc));
             inner.contexts.insert(id.to_owned(), doc);
         });
     }
 
     pub fn context_get(&self, id: &str) -> Option<Value> {
-        self.inner.read().expect("store lock").contexts.get(id).cloned()
+        self.inner
+            .read()
+            .expect("store lock")
+            .contexts
+            .get(id)
+            .cloned()
     }
 
     pub fn context_delete(&self, id: &str) -> bool {
         on_blocking(|| {
-            let mut inner = self.inner.write().expect("store lock");
+            let mut inner = self.write_inner();
             let hit = inner.contexts.remove(id).is_some();
             if hit {
                 self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), None);
@@ -476,6 +507,18 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn commit_queue_counts_writers() {
+        // B13: every write passes through the counted critical section.
+        let s = Store::default();
+        assert_eq!(s.commit_queue(), (0, 0));
+        let t = TenantId::new("t").unwrap();
+        s.create(&t, Kind::Entity, "urn:a", json!({"id": "urn:a"}));
+        let (depth, peak) = s.commit_queue();
+        assert_eq!(depth, 0, "no writer in flight after the call returns");
+        assert!(peak >= 1, "the write itself must register in the peak");
+    }
 
     #[test]
     fn tenant_isolation() {
@@ -517,7 +560,9 @@ mod tests {
         }
         assert!(s.context_get("ctx1").is_some());
         // tenant isolation intact after rebuild
-        assert!(s.get(&TenantId::default(), Kind::Entity, "urn:x:1").is_none());
+        assert!(s
+            .get(&TenantId::default(), Kind::Entity, "urn:x:1")
+            .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -540,7 +585,10 @@ mod tests {
             assert!(s.context_delete("ctx"));
         }
         let s = Store::open_file(&dir).expect("reopen");
-        assert!(s.get(&t, Kind::Entity, "urn:gone").is_none(), "phantom 409 trap");
+        assert!(
+            s.get(&t, Kind::Entity, "urn:gone").is_none(),
+            "phantom 409 trap"
+        );
         assert_eq!(s.get(&t, Kind::Entity, "urn:kept").expect("kept")["n"], 2);
         assert!(s.context_get("ctx").is_none());
         let _ = std::fs::remove_dir_all(&dir);

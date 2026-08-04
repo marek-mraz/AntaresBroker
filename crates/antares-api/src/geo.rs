@@ -49,9 +49,15 @@ impl GeoQuery {
         for p in parts {
             let p = p.trim();
             if let Some(v) = p.strip_prefix("maxDistance==") {
-                max = Some(v.parse::<f64>().map_err(|_| bad(format!("invalid maxDistance {v:?}")))?);
+                max = Some(
+                    v.parse::<f64>()
+                        .map_err(|_| bad(format!("invalid maxDistance {v:?}")))?,
+                );
             } else if let Some(v) = p.strip_prefix("minDistance==") {
-                min = Some(v.parse::<f64>().map_err(|_| bad(format!("invalid minDistance {v:?}")))?);
+                min = Some(
+                    v.parse::<f64>()
+                        .map_err(|_| bad(format!("invalid minDistance {v:?}")))?,
+                );
             } else {
                 return Err(bad(format!("invalid georel modifier {p:?}")));
             }
@@ -76,7 +82,12 @@ impl GeoQuery {
             .ok_or_else(|| bad("georel requires geometry".into()))?
             .clone();
         const GEOMETRIES: &[&str] = &[
-            "Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon",
+            "Point",
+            "MultiPoint",
+            "LineString",
+            "MultiLineString",
+            "Polygon",
+            "MultiPolygon",
         ];
         if !GEOMETRIES.contains(&geometry.as_str()) {
             return Err(bad(format!("invalid geometry {geometry:?}")));
@@ -170,8 +181,7 @@ impl Geometry {
         // degenerate: Point containers only "contain" identical points
         if container.gtype == "Point" || container.gtype == "MultiPoint" {
             let cpts = container.points();
-            return !self.points().is_empty()
-                && self.points().iter().all(|p| cpts.contains(p));
+            return !self.points().is_empty() && self.points().iter().all(|p| cpts.contains(p));
         }
         if container.gtype != "Polygon" && container.gtype != "MultiPolygon" {
             return false;

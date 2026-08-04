@@ -104,10 +104,7 @@ impl Context {
                             type_is_id: t == "@id",
                             type_is_vocab: t == "@vocab",
                             container_list: c == "@list",
-                            prefix_ok: o
-                                .get("@prefix")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
+                            prefix_ok: o.get("@prefix").and_then(Value::as_bool).unwrap_or(false),
                         },
                     );
                 }

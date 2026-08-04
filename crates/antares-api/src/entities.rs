@@ -5,12 +5,14 @@ use crate::negotiate::*;
 use crate::qeval::eval_q;
 use crate::repr::{apply, parse_repr};
 use crate::state::{now_iso, AppState};
-use antares_jsonld::{compact_entity, compact_entity_shallow, expand_entity, is_ngsi_null, ExpandOpts};
+use antares_jsonld::{
+    compact_entity, compact_entity_shallow, expand_entity, is_ngsi_null, ExpandOpts,
+};
 use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
 use antares_sql::store::Kind;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
@@ -24,8 +26,6 @@ fn is_meta(k: &str) -> bool {
         "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
     )
 }
-
-/// Inject server-managed timestamps into a freshly expanded doc.
 
 /// Entity Type Selection Language (4.17) match against expanded type IRIs:
 /// `,`/`|` = OR of alternatives, `(a;b)` = AND within one alternative.
@@ -43,6 +43,7 @@ pub(crate) fn type_selection_matches(
     })
 }
 
+/// Inject server-managed timestamps into a freshly expanded doc.
 pub fn stamp_new(doc: &mut Value, ts: &str) {
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("createdAt".into(), Value::String(ts.to_owned()));
@@ -83,7 +84,11 @@ fn stamp_instances(v: &mut Value, ts: &str, created: bool) {
 
 /// Compaction for a shaped doc under a representation: keyValues docs get
 /// shallow key renaming only (values are already plain JSON).
-pub fn compact_for(repr: &crate::repr::Repr, shaped: &Value, ctx: &antares_jsonld::Context) -> Value {
+pub fn compact_for(
+    repr: &crate::repr::Repr,
+    shaped: &Value,
+    ctx: &antares_jsonld::Context,
+) -> Value {
     if repr.key_values {
         compact_entity_shallow(shaped, ctx)
     } else {
@@ -95,47 +100,60 @@ pub fn compact_for(repr: &crate::repr::Repr, shaped: &Value, ctx: &antares_jsonl
 
 /// Record an entity write into the temporal store (5.6.11 auto-recording).
 pub fn mirror_record(st: &AppState, tenant: &TenantId, expanded: &Value) {
-    let Some(obj) = expanded.as_object() else { return };
-    let Some(id) = obj.get("id").and_then(Value::as_str) else { return };
-    let exists = st.store.get(tenant, Kind::Temporal, id).is_some();
-    if !exists {
-        let mut doc = Map::new();
-        for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
-            if let Some(v) = obj.get(k) {
-                doc.insert(k.into(), v.clone());
+    let Some(obj) = expanded.as_object() else {
+        return;
+    };
+    let Some(id) = obj.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let r = (|| -> Result<(), antares_model::NgsiError> {
+        let exists = st.store.get(tenant, Kind::Temporal, id)?.is_some();
+        if !exists {
+            let mut doc = Map::new();
+            for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
+                if let Some(v) = obj.get(k) {
+                    doc.insert(k.into(), v.clone());
+                }
             }
+            st.store
+                .create(tenant, Kind::Temporal, id, Value::Object(doc))?;
         }
-        st.store.create(tenant, Kind::Temporal, id, Value::Object(doc));
+        st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+            let target = doc.as_object_mut().expect("temporal doc");
+            for (k, v) in obj {
+                if is_meta(k) {
+                    continue;
+                }
+                let mut incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+                for inst in &mut incoming {
+                    if let Some(o) = inst.as_object_mut() {
+                        o.entry("instanceId".to_owned()).or_insert_with(|| {
+                            Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
+                        });
+                    }
+                }
+                match target.get_mut(k).and_then(Value::as_array_mut) {
+                    Some(cur) => cur.extend(incoming),
+                    None => {
+                        target.insert(k.clone(), Value::Array(incoming));
+                    }
+                }
+            }
+            Ok::<(), std::convert::Infallible>(())
+        })?;
+        Ok(())
+    })();
+    if let Err(e) = r {
+        tracing::warn!("temporal mirror failed: {e}");
     }
-    st.store.mutate(tenant, Kind::Temporal, id, |doc| {
-        let target = doc.as_object_mut().expect("temporal doc");
-        for (k, v) in obj {
-            if is_meta(k) {
-                continue;
-            }
-            let mut incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
-            for inst in &mut incoming {
-                if let Some(o) = inst.as_object_mut() {
-                    o.entry("instanceId".to_owned()).or_insert_with(|| {
-                        Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
-                    });
-                }
-            }
-            match target.get_mut(k).and_then(Value::as_array_mut) {
-                Some(cur) => cur.extend(incoming),
-                None => {
-                    target.insert(k.clone(), Value::Array(incoming));
-                }
-            }
-        }
-        Ok::<(), std::convert::Infallible>(())
-    });
 }
 
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
 /// representation too (suite configuration parity).
 pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
-    st.store.delete(tenant, Kind::Temporal, id);
+    if let Err(e) = st.store.delete(tenant, Kind::Temporal, id) {
+        tracing::warn!("temporal mirror delete failed: {e}");
+    }
 }
 
 /// Attribute deletion appends ONE deletion instance to the temporal
@@ -149,7 +167,7 @@ pub fn mirror_delete_attr(
     ts: &str,
 ) -> bool {
     let mut had = false;
-    st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+    let r = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
         let target = doc.as_object_mut().expect("temporal doc");
         if attr_iri == "scope" {
             // scope deletion: temporal scope becomes an instance array with
@@ -221,6 +239,9 @@ pub fn mirror_delete_attr(
         }
         Ok(())
     });
+    if let Err(e) = r {
+        tracing::warn!("temporal attr mirror failed: {e}");
+    }
     had
 }
 
@@ -247,16 +268,20 @@ async fn create_entity_inner(
     let tenant = tenant_from(headers)?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let obj = parsed.value.as_object().ok_or_else(|| {
-        NgsiError::InvalidRequest("entity document must be a JSON object".into())
-    })?;
+    let obj = parsed
+        .value
+        .as_object()
+        .ok_or_else(|| NgsiError::InvalidRequest("entity document must be a JSON object".into()))?;
     let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
     let id = expanded["id"].as_str().expect("validated id").to_owned();
 
     // distributed create (4.3.6, 6.4.3.1)
-    let types: Option<Vec<String>> = expanded["type"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect());
+    let types: Option<Vec<String>> = expanded["type"].as_array().map(|a| {
+        a.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    });
     let attr_iris: Vec<String> = expanded
         .as_object()
         .map(|o| o.keys().filter(|k| !is_meta(k)).cloned().collect())
@@ -291,9 +316,15 @@ async fn create_entity_inner(
         if has_attrs || proxies.is_empty() {
             let mut local_exp = expand_entity(&rest, &parsed.ctx, ExpandOpts::default())?;
             stamp_new(&mut local_exp, &now_iso());
-            if st.store.create(&tenant, Kind::Entity, &id, local_exp.clone()) {
+            if st
+                .store
+                .create(&tenant, Kind::Entity, &id, local_exp.clone())?
+            {
                 mirror_record(st, &tenant, &local_exp);
-                parts.push(crate::federation::Part { status: 201, detail: "created locally".into() });
+                parts.push(crate::federation::Part {
+                    status: 201,
+                    detail: "created locally".into(),
+                });
             } else {
                 parts.push(crate::federation::Part {
                     status: 409,
@@ -326,7 +357,10 @@ async fn create_entity_inner(
     }
 
     stamp_new(&mut expanded, &now_iso());
-    if !st.store.create(&tenant, Kind::Entity, &id, expanded.clone()) {
+    if !st
+        .store
+        .create(&tenant, Kind::Entity, &id, expanded.clone())?
+    {
         return Err(NgsiError::AlreadyExists(format!("entity {id} already exists")).into());
     }
     mirror_record(st, &tenant, &expanded);
@@ -357,8 +391,19 @@ async fn retrieve_entity_inner(
     check_params(
         params,
         &[
-            "attrs", "pick", "omit", "options", "format", "lang", "geometryProperty",
-            "datasetId", "containedBy", "join", "joinLevel", "local", "entityMap",
+            "attrs",
+            "pick",
+            "omit",
+            "options",
+            "format",
+            "lang",
+            "geometryProperty",
+            "datasetId",
+            "containedBy",
+            "join",
+            "joinLevel",
+            "local",
+            "entityMap",
         ],
     )?;
     let accept = parse_accept_geo(headers)?;
@@ -366,9 +411,9 @@ async fn retrieve_entity_inner(
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
     antares_model::EntityId::new(id)?;
-    let local_doc = st.store.get(&tenant, Kind::Entity, id);
-    let fed_on = crate::federation::active(params)
-        && !crate::federation::via_loop(headers, &st.host_alias);
+    let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
+    let fed_on =
+        crate::federation::active(params) && !crate::federation::via_loop(headers, &st.host_alias);
     let doc = if fed_on {
         let fed = crate::federation::fed_retrieve(st, &tenant, headers, &ctx, id).await;
         match local_doc {
@@ -388,9 +433,7 @@ async fn retrieve_entity_inner(
                     .find(|(aux, _)| !aux)
                     .map(|(_, d)| d.clone())
                     .or_else(|| fed.first().map(|(_, d)| d.clone()))
-                    .ok_or_else(|| {
-                        NgsiError::ResourceNotFound(format!("entity {id} not found"))
-                    })?;
+                    .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
                 for aux_pass in [false, true] {
                     for (aux, d) in &fed {
                         if *aux == aux_pass {
@@ -402,8 +445,7 @@ async fn retrieve_entity_inner(
             }
         }
     } else {
-        local_doc
-            .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?
+        local_doc.ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?
     };
     // 5.7.1: attrs projection with no matching attribute ⇒ 404
     if let Some(want) = &repr.attrs {
@@ -452,9 +494,7 @@ async fn retrieve_entity_inner(
 }
 
 /// join/joinLevel params (4.5.23). Returns (mode, level).
-pub fn parse_join(
-    params: &HashMap<String, String>,
-) -> ApiResult<Option<(String, usize)>> {
+pub fn parse_join(params: &HashMap<String, String>) -> ApiResult<Option<(String, usize)>> {
     let Some(mode) = params.get("join") else {
         return Ok(None);
     };
@@ -465,8 +505,14 @@ pub fn parse_join(
         Some(l) => l
             .parse::<usize>()
             .ok()
-            .filter(|l| *l >= 1)
-            .ok_or_else(|| NgsiError::BadRequestData(format!("invalid joinLevel {l:?}")))?,
+            // I2: bounded traversal depth (§16.3)
+            .filter(|l| *l >= 1 && *l <= crate::bounds::MAX_JOIN_LEVEL)
+            .ok_or_else(|| {
+                NgsiError::BadRequestData(format!(
+                    "invalid joinLevel {l:?} (1..={})",
+                    crate::bounds::MAX_JOIN_LEVEL
+                ))
+            })?,
         None => 1,
     };
     if mode == "@none" {
@@ -477,11 +523,7 @@ pub fn parse_join(
 
 /// The child representation for a linked entity under `key` (4.21 nested
 /// projections apply to the joined entity, not the relationship itself).
-fn joined_repr(
-    parent: &crate::repr::Repr,
-    key_compact: &str,
-    key_iri: &str,
-) -> crate::repr::Repr {
+fn joined_repr(parent: &crate::repr::Repr, key_compact: &str, key_iri: &str) -> crate::repr::Repr {
     let mut r = crate::repr::Repr {
         sys_attrs: parent.sys_attrs,
         key_values: parent.key_values,
@@ -540,7 +582,7 @@ fn lookup_joined(
     id: &str,
     level: usize,
 ) -> Option<Value> {
-    let target = st.store.get(tenant, Kind::Entity, id)?;
+    let target = st.store.get(tenant, Kind::Entity, id).ok().flatten()?;
     let shaped = apply(&target, child);
     let mut c = compact_for(child, &shaped, ctx);
     if level > 1 {
@@ -570,9 +612,11 @@ fn inline_join_value(
             }
             let targets: Vec<String> = match inst.get("object") {
                 Some(Value::String(id)) => vec![id.clone()],
-                Some(Value::Array(a)) => {
-                    a.iter().filter_map(Value::as_str).map(str::to_owned).collect()
-                }
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
                 _ => return,
             };
             let mut joined: Vec<Value> = targets
@@ -590,11 +634,9 @@ fn inline_join_value(
             inst.insert("entity".into(), e);
         }
         // simplified: relationship value is the object URI string
-        Value::String(id) => {
-            if repr.key_values {
-                if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level) {
-                    *v = joined;
-                }
+        Value::String(id) if repr.key_values => {
+            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level) {
+                *v = joined;
             }
         }
         _ => {}
@@ -625,11 +667,16 @@ pub fn collect_flat(
             }
         }
         if let Some(omit) = &repr.omit {
-            if omit.iter().any(|n| (n.iri == *k || n.raw == *k) && n.children.is_none()) {
+            if omit
+                .iter()
+                .any(|n| (n.iri == *k || n.raw == *k) && n.children.is_none())
+            {
                 continue;
             }
         }
-        let Some(instances) = v.as_array() else { continue };
+        let Some(instances) = v.as_array() else {
+            continue;
+        };
         let child = joined_repr(repr, k, k);
         for inst in instances {
             let targets: Vec<&str> = match inst.get("object") {
@@ -641,7 +688,7 @@ pub fn collect_flat(
                 if out.contains_key(id) {
                     continue;
                 }
-                if let Some(target) = st.store.get(tenant, Kind::Entity, id) {
+                if let Some(target) = st.store.get(tenant, Kind::Entity, id).ok().flatten() {
                     out.insert(id.to_owned(), (target.clone(), child.clone()));
                     if level > 1 {
                         collect_flat(st, tenant, &child, &target, level - 1, out);
@@ -666,10 +713,36 @@ pub async fn query_entities(
 }
 
 pub const QUERY_PARAMS: &[&str] = &[
-    "id", "idPattern", "type", "attrs", "q", "georel", "geometry", "coordinates",
-    "geoproperty", "scopeQ", "csf", "limit", "offset", "count", "options", "format",
-    "pick", "omit", "lang", "local", "entityMap", "geometryProperty", "expandValues",
-    "jsonKeys", "datasetId", "join", "joinLevel", "containedBy", "orderBy", "orderFrom",
+    "id",
+    "idPattern",
+    "type",
+    "attrs",
+    "q",
+    "georel",
+    "geometry",
+    "coordinates",
+    "geoproperty",
+    "scopeQ",
+    "csf",
+    "limit",
+    "offset",
+    "count",
+    "options",
+    "format",
+    "pick",
+    "omit",
+    "lang",
+    "local",
+    "entityMap",
+    "geometryProperty",
+    "expandValues",
+    "jsonKeys",
+    "datasetId",
+    "join",
+    "joinLevel",
+    "containedBy",
+    "orderBy",
+    "orderFrom",
 ];
 
 async fn query_entities_inner(
@@ -733,8 +806,7 @@ async fn query_entities_inner(
                 for doc in &page {
                     collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
                 }
-                let page_ids: Vec<&str> =
-                    page.iter().filter_map(|d| d["id"].as_str()).collect();
+                let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
                     if !page_ids.contains(&id.as_str()) {
                         payload.push(compact_for(&lrepr, &apply(&ldoc, &lrepr), &ctx));
@@ -790,13 +862,12 @@ pub fn filter_entities_fed(
     let id_pattern = match params.get("idPattern") {
         Some(p) => {
             if ["**", "++", "*+", "+*"].iter().any(|q| p.contains(q)) {
-                return Err(
-                    NgsiError::BadRequestData(format!("invalid idPattern {p:?}")).into()
-                );
+                return Err(NgsiError::BadRequestData(format!("invalid idPattern {p:?}")).into());
             }
-            Some(regex::Regex::new(p).map_err(|_| {
-                NgsiError::BadRequestData(format!("invalid idPattern {p:?}"))
-            })?)
+            Some(
+                regex::Regex::new(p)
+                    .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
+            )
         }
         None => None,
     };
@@ -823,8 +894,7 @@ pub fn filter_entities_fed(
     let scope_q = params.get("scopeQ");
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    let all =
-        crate::federation::merge_candidates(st.store.list(tenant, Kind::Entity), fed);
+    let all = crate::federation::merge_candidates(st.store.list(tenant, Kind::Entity)?, fed);
     let mut out = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -843,9 +913,9 @@ pub fn filter_entities_fed(
                 .as_array()
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            let matched = sel.iter().any(|and_group| {
-                and_group.iter().all(|w| etypes.contains(&w.as_str()))
-            });
+            let matched = sel
+                .iter()
+                .any(|and_group| and_group.iter().all(|w| etypes.contains(&w.as_str())));
             if !matched {
                 continue;
             }
@@ -901,11 +971,18 @@ pub fn paginate_accept(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid limit {l:?}")))?,
         None => st.default_limit,
     };
-    if limit == 0 && !count {
-        return Err(NgsiError::BadRequestData(
-            "limit=0 requires count=true (6.3.10)".into(),
-        )
+    // I2: result ceiling (§16.3) — 403 TooManyResults, not silent clamping.
+    if limit > st.max_limit {
+        return Err(NgsiError::TooManyResults(format!(
+            "limit {limit} exceeds the server maximum {}",
+            st.max_limit
+        ))
         .into());
+    }
+    if limit == 0 && !count {
+        return Err(
+            NgsiError::BadRequestData("limit=0 requires count=true (6.3.10)".into()).into(),
+        );
     }
     let offset: usize = match params.get("offset") {
         Some(o) => o
@@ -981,13 +1058,16 @@ pub async fn delete_entity(
             if crate::federation::via_loop(&headers, &st.host_alias) {
                 return Ok(crate::federation::loop_508(&tenant));
             }
-            let local_exists = st.store.get(&tenant, Kind::Entity, &id).is_some();
+            let local_exists = st.store.get(&tenant, Kind::Entity, &id)?.is_some();
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
             if local_exists || !proxy_match {
-                if st.store.delete(&tenant, Kind::Entity, &id) {
+                if st.store.delete(&tenant, Kind::Entity, &id)? {
                     mirror_delete_entity(&st, &tenant, &id);
-                    parts.push(crate::federation::Part { status: 204, detail: "deleted locally".into() });
+                    parts.push(crate::federation::Part {
+                        status: 204,
+                        detail: "deleted locally".into(),
+                    });
                 } else {
                     parts.push(crate::federation::Part {
                         status: 404,
@@ -1015,9 +1095,13 @@ pub async fn delete_entity(
                     .await,
                 );
             }
-            return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+            return Ok(crate::federation::combine(
+                parts,
+                no_content(&tenant),
+                &tenant,
+            ));
         }
-        if st.store.delete(&tenant, Kind::Entity, &id) {
+        if st.store.delete(&tenant, Kind::Entity, &id)? {
             mirror_delete_entity(&st, &tenant, &id);
             Ok::<_, ApiError>(no_content(&tenant))
         } else {
@@ -1049,8 +1133,21 @@ async fn purge_inner(
     check_params(
         params,
         &[
-            "id", "idPattern", "type", "attrs", "q", "georel", "geometry", "coordinates",
-            "geoproperty", "scopeQ", "csf", "keep", "drop", "local", "limit",
+            "id",
+            "idPattern",
+            "type",
+            "attrs",
+            "q",
+            "georel",
+            "geometry",
+            "coordinates",
+            "geoproperty",
+            "scopeQ",
+            "csf",
+            "keep",
+            "drop",
+            "local",
+            "limit",
         ],
     )?;
     let ctx = request_context(&st.loader, headers).await?;
@@ -1079,20 +1176,18 @@ async fn purge_inner(
         .get("drop")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
     for doc in &matches {
-        let Some(id) = doc["id"].as_str() else { continue };
+        let Some(id) = doc["id"].as_str() else {
+            continue;
+        };
         if keep.is_none() && drop.is_none() {
-            st.store.delete(&tenant, Kind::Entity, id);
+            st.store.delete(&tenant, Kind::Entity, id)?;
             mirror_delete_entity(st, &tenant, id);
             continue;
         }
         // keep=/drop= prune attributes; the entity itself survives (5.6.21)
         st.store.mutate(&tenant, Kind::Entity, id, |doc| {
             let target = doc.as_object_mut().expect("entity object");
-            let attrs: Vec<String> = target
-                .keys()
-                .filter(|k| !is_meta(k))
-                .cloned()
-                .collect();
+            let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
             for a in attrs {
                 let purge = match (&keep, &drop) {
                     (Some(keep), _) => !keep.contains(&a),
@@ -1104,7 +1199,7 @@ async fn purge_inner(
                 }
             }
             Ok::<(), NgsiError>(())
-        });
+        })?;
     }
 
     // distributed purge (5.6.21 / 6.4.3.3)
@@ -1112,7 +1207,9 @@ async fn purge_inner(
         types: params
             .get("type")
             .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
-        ids: params.get("id").map(|s| s.split(',').map(str::to_owned).collect()),
+        ids: params
+            .get("id")
+            .map(|s| s.split(',').map(str::to_owned).collect()),
         ..Default::default()
     };
     let regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
@@ -1120,7 +1217,10 @@ async fn purge_inner(
         if crate::federation::via_loop(headers, &st.host_alias) {
             return Ok(crate::federation::loop_508(&tenant));
         }
-        let mut parts = vec![crate::federation::Part { status: 204, detail: "purged locally".into() }];
+        let mut parts = vec![crate::federation::Part {
+            status: 204,
+            detail: "purged locally".into(),
+        }];
         let ctx_url = crate::federation::ctx_link_url(headers, &ctx.source);
         let query: Vec<(String, String)> = ["type", "id", "idPattern", "q", "attrs"]
             .iter()
@@ -1145,7 +1245,11 @@ async fn purge_inner(
                 .await,
             );
         }
-        return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+        return Ok(crate::federation::combine(
+            parts,
+            no_content(&tenant),
+            &tenant,
+        ));
     }
     Ok(no_content(&tenant))
 }
@@ -1174,7 +1278,10 @@ async fn merge_entity_inner(
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     antares_model::EntityId::new(id)?;
-    check_params(params, &["options", "format", "observedAt", "lang", "local"])?;
+    check_params(
+        params,
+        &["options", "format", "observedAt", "lang", "local"],
+    )?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
         .value
@@ -1210,21 +1317,29 @@ async fn merge_entity_inner(
             regs.iter().filter(|r| r.is_proxy()).collect();
         let mut parts = Vec::new();
         let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
-        let local_exists = st.store.get(&tenant, Kind::Entity, id).is_some();
+        let local_exists = st.store.get(&tenant, Kind::Entity, id)?.is_some();
         if (local_exists || proxies.is_empty()) && has_attrs {
             let local_frag = expand_entity(
                 &rest,
                 &parsed.ctx,
-                ExpandOpts { fragment: true, allow_null: true, temporal: false, ..Default::default() },
+                ExpandOpts {
+                    fragment: true,
+                    allow_null: true,
+                    temporal: false,
+                    ..Default::default()
+                },
             )?;
             let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
                 merge_into(doc, &local_frag, &ts);
                 Ok::<(), NgsiError>(())
-            });
+            })?;
             parts.push(match res {
                 Some(Ok(())) => {
                     mirror_record(st, &tenant, &local_frag);
-                    crate::federation::Part { status: 204, detail: "merged locally".into() }
+                    crate::federation::Part {
+                        status: 204,
+                        detail: "merged locally".into(),
+                    }
                 }
                 _ => crate::federation::Part {
                     status: 404,
@@ -1255,13 +1370,17 @@ async fn merge_entity_inner(
                 .await,
             );
         }
-        return Ok(crate::federation::combine(parts, no_content(&tenant), &tenant));
+        return Ok(crate::federation::combine(
+            parts,
+            no_content(&tenant),
+            &tenant,
+        ));
     }
 
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         merge_into(doc, &fragment, &ts);
         Ok::<(), NgsiError>(())
-    });
+    })?;
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
@@ -1307,9 +1426,9 @@ pub fn merge_into(doc: &mut Value, fragment: &Value, ts: &str) {
                 for fi in frag_instances {
                     let is_delete = antares_jsonld::is_deletion_instance(&fi);
                     let want_ds = fi.get("datasetId").and_then(Value::as_str);
-                    let pos = cur.iter().position(|ci| {
-                        ci.get("datasetId").and_then(Value::as_str) == want_ds
-                    });
+                    let pos = cur
+                        .iter()
+                        .position(|ci| ci.get("datasetId").and_then(Value::as_str) == want_ds);
                     match (is_delete, pos) {
                         (true, Some(p)) => {
                             cur.remove(p);
@@ -1369,7 +1488,7 @@ pub async fn replace_entity(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
-        let local_doc = st.store.get(&tenant, Kind::Entity, &id);
+        let local_doc = st.store.get(&tenant, Kind::Entity, &id)?;
         let ctx0 = st.loader.core();
         let spec = crate::csource::CsrSpec {
             ids: Some(vec![id.clone()]),
@@ -1394,7 +1513,8 @@ pub async fn replace_entity(
             if let (Some(o), Some(created)) = (expanded.as_object_mut(), old.get("createdAt")) {
                 o.insert("createdAt".into(), created.clone());
             }
-            st.store.upsert(&tenant, Kind::Entity, &id, expanded.clone());
+            st.store
+                .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
             mirror_record(&st, &tenant, &expanded);
             return Ok::<_, ApiError>(no_content(&tenant));
         }
@@ -1426,9 +1546,13 @@ pub async fn replace_entity(
                     {
                         o.insert("createdAt".into(), created.clone());
                     }
-                    st.store.upsert(&tenant, Kind::Entity, &id, local_exp.clone());
+                    st.store
+                        .upsert(&tenant, Kind::Entity, &id, local_exp.clone())?;
                     mirror_record(&st, &tenant, &local_exp);
-                    parts.push(crate::federation::Part { status: 204, detail: "replaced locally".into() });
+                    parts.push(crate::federation::Part {
+                        status: 204,
+                        detail: "replaced locally".into(),
+                    });
                 }
                 None => parts.push(crate::federation::Part {
                     status: 404,
@@ -1460,7 +1584,11 @@ pub async fn replace_entity(
             );
         }
         let _ = expanded.take();
-        Ok(crate::federation::combine(parts, no_content(&tenant), &tenant))
+        Ok(crate::federation::combine(
+            parts,
+            no_content(&tenant),
+            &tenant,
+        ))
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -1563,7 +1691,9 @@ pub fn to_geojson_feature(
     geometry_property: Option<&String>,
     ctx: &antares_jsonld::Context,
 ) -> Value {
-    let geom_term = geometry_property.cloned().unwrap_or_else(|| "location".into());
+    let geom_term = geometry_property
+        .cloned()
+        .unwrap_or_else(|| "location".into());
     let _ = ctx;
     let geometry = entity
         .get(&geom_term)
@@ -1598,4 +1728,96 @@ pub fn to_geojson_collection(
         .map(|e| to_geojson_feature(e, geometry_property, ctx))
         .collect();
     serde_json::json!({"type": "FeatureCollection", "features": features})
+}
+
+// ---------- GET /entities/{id}/attrs/{attrId} [+ /value] ----------
+// NGSI-LD 2.0 pre-adoptions #14/#15 (tasks.md H3, §15.1): retrieve a single
+// attribute of an entity, and its bare value. Additive-only: 2.0 defines the
+// resources, 1.9.1 clients never see them unless asked.
+
+pub async fn retrieve_entity_attr(
+    State(st): State<AppState>,
+    Path((id, attr)): Path<(String, String)>,
+    CleanParams(params): CleanParams,
+    headers: HeaderMap,
+) -> Response {
+    match retrieve_attr_inner(&st, &id, &attr, false, &params, &headers).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+pub async fn retrieve_entity_attr_value(
+    State(st): State<AppState>,
+    Path((id, attr)): Path<(String, String)>,
+    CleanParams(params): CleanParams,
+    headers: HeaderMap,
+) -> Response {
+    match retrieve_attr_inner(&st, &id, &attr, true, &params, &headers).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn retrieve_attr_inner(
+    st: &AppState,
+    id: &str,
+    attr: &str,
+    value_only: bool,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    check_params(params, &["options", "format", "lang", "datasetId", "local"])?;
+    let ctx = request_context(&st.loader, headers).await?;
+    let repr = parse_repr(params, &ctx)?;
+    antares_model::EntityId::new(id)?;
+    crate::attrs::check_attr_name(attr)?;
+    let doc = st
+        .store
+        .get(&tenant, Kind::Entity, id)?
+        .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+    let attr_iri = ctx.expand_key(attr);
+    let node = doc.get(&attr_iri).ok_or_else(|| {
+        NgsiError::ResourceNotFound(format!("entity {id} has no attribute {attr}"))
+    })?;
+    // Compact through the entity pipeline so the attribute serializes exactly
+    // as it would inside a full retrieve.
+    let mini = serde_json::json!({
+        "id": doc.get("id").cloned().unwrap_or_default(),
+        "type": doc.get("type").cloned().unwrap_or_default(),
+        attr_iri.clone(): node.clone(),
+    });
+    let shaped = crate::repr::apply(&mini, &repr);
+    let compacted = compact_for(&repr, &shaped, &ctx);
+    let key = ctx.compact_iri(&attr_iri);
+    let member = compacted
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| NgsiError::ResourceNotFound(format!("attribute {attr} not present")))?;
+    let body = if value_only {
+        // #15: the bare value — value / object / languageMap, whichever the
+        // attribute type carries; multi-instance attributes yield an array.
+        fn bare(v: &Value) -> Value {
+            match v {
+                Value::Array(a) => Value::Array(a.iter().map(bare).collect()),
+                Value::Object(o) => o
+                    .get("value")
+                    .or_else(|| o.get("object"))
+                    .or_else(|| o.get("languageMap"))
+                    .or_else(|| o.get("json"))
+                    .or_else(|| o.get("vocab"))
+                    .or_else(|| o.get("valueList"))
+                    .or_else(|| o.get("objectList"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                other => other.clone(),
+            }
+        }
+        bare(&member)
+    } else {
+        member
+    };
+    let accept = parse_accept(headers)?;
+    Ok(respond(StatusCode::OK, body, &ctx, accept, &tenant))
 }

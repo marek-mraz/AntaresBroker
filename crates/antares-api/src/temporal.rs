@@ -8,7 +8,7 @@ use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
 use antares_sql::store::Kind;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
@@ -63,15 +63,14 @@ pub async fn upsert_temporal(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["options", "local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("temporal entity must be a JSON object".into()))?;
+        let obj = parsed.value.as_object().ok_or_else(|| {
+            NgsiError::BadRequestData("temporal entity must be a JSON object".into())
+        })?;
         let mut expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
         let id = expanded["id"].as_str().expect("validated").to_owned();
         let ts = now_iso();
         stamp_instances(&mut expanded, &ts);
-        let existed = st.store.get(&tenant, Kind::Temporal, &id).is_some();
+        let existed = st.store.get(&tenant, Kind::Temporal, &id)?.is_some();
         if existed {
             let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
                 let target = doc.as_object_mut().expect("temporal object");
@@ -85,13 +84,21 @@ pub async fn upsert_temporal(
                             // 5.6.11: instances merge by (datasetId, observedAt)
                             for ni in incoming {
                                 let key = (
-                                    ni.get("datasetId").and_then(Value::as_str).map(String::from),
-                                    ni.get("observedAt").and_then(Value::as_str).map(String::from),
+                                    ni.get("datasetId")
+                                        .and_then(Value::as_str)
+                                        .map(String::from),
+                                    ni.get("observedAt")
+                                        .and_then(Value::as_str)
+                                        .map(String::from),
                                 );
                                 let pos = cur.iter().position(|ci| {
                                     (
-                                        ci.get("datasetId").and_then(Value::as_str).map(String::from),
-                                        ci.get("observedAt").and_then(Value::as_str).map(String::from),
+                                        ci.get("datasetId")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        ci.get("observedAt")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
                                     ) == key
                                         && key.1.is_some()
                                 });
@@ -108,7 +115,7 @@ pub async fn upsert_temporal(
                 }
                 target.insert("modifiedAt".into(), Value::String(ts.clone()));
                 Ok::<(), NgsiError>(())
-            });
+            })?;
             if let Some(Err(e)) = res {
                 return Err(ApiError::from(e));
             }
@@ -118,7 +125,7 @@ pub async fn upsert_temporal(
                 o.insert("createdAt".into(), Value::String(ts.clone()));
                 o.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
-            st.store.create(&tenant, Kind::Temporal, &id, expanded);
+            st.store.create(&tenant, Kind::Temporal, &id, expanded)?;
             Ok::<_, ApiError>(created(
                 format!("/ngsi-ld/v1/temporal/entities/{id}"),
                 &tenant,
@@ -153,9 +160,7 @@ impl TemporalQ {
             // bare timeproperty: representation keyed on it; instances that
             // lack it are excluded (retrieval-by-deletedAt, 020_17/18)
             if let Some(tp) = params.get("timeproperty") {
-                if !["observedAt", "createdAt", "modifiedAt", "deletedAt"]
-                    .contains(&tp.as_str())
-                {
+                if !["observedAt", "createdAt", "modifiedAt", "deletedAt"].contains(&tp.as_str()) {
                     return Err(bad(format!("invalid timeproperty {tp:?}")));
                 }
                 return Ok(Some(Self {
@@ -187,7 +192,8 @@ impl TemporalQ {
             .get("timeproperty")
             .cloned()
             .unwrap_or_else(|| "observedAt".into());
-        if !["observedAt", "createdAt", "modifiedAt", "deletedAt"].contains(&timeproperty.as_str()) {
+        if !["observedAt", "createdAt", "modifiedAt", "deletedAt"].contains(&timeproperty.as_str())
+        {
             return Err(bad(format!("invalid timeproperty {timeproperty:?}")));
         }
         Ok(Some(Self {
@@ -207,8 +213,7 @@ impl TemporalQ {
             "before" => t < self.time_at.as_str(),
             "after" => t >= self.time_at.as_str(),
             "between" => {
-                t >= self.time_at.as_str()
-                    && self.end_time_at.as_deref().is_some_and(|e| t < e)
+                t >= self.time_at.as_str() && self.end_time_at.as_deref().is_some_and(|e| t < e)
             }
             _ => false,
         }
@@ -247,7 +252,8 @@ fn window(
     for (k, v) in obj {
         // temporal scope: instance-shaped scope arrays window like attributes
         let scope_instances = k == "scope"
-            && v.as_array().is_some_and(|a| a.first().is_some_and(Value::is_object));
+            && v.as_array()
+                .is_some_and(|a| a.first().is_some_and(Value::is_object));
         if is_meta(k) && !scope_instances {
             continue;
         }
@@ -381,9 +387,7 @@ fn content_range(
         return None;
     }
     let (data_min, data_max) = (ts_min?, ts_max?);
-    let timerel = tq
-        .map(|t| t.timerel.as_str())
-        .filter(|t| *t != "any");
+    let timerel = tq.map(|t| t.timerel.as_str()).filter(|t| *t != "any");
     let (start, end) = if last_n.is_none() {
         let start = match timerel {
             Some("after") | Some("between") => tq.expect("tq").time_at.clone(),
@@ -421,7 +425,8 @@ fn present_temporal(
     let mut out = Map::new();
     for (k, v) in obj {
         let scope_instances = k == "scope"
-            && v.as_array().is_some_and(|a| a.first().is_some_and(Value::is_object));
+            && v.as_array()
+                .is_some_and(|a| a.first().is_some_and(Value::is_object));
         if is_meta(k) && !scope_instances {
             match k.as_str() {
                 "createdAt" | "modifiedAt" if !r.sys => continue,
@@ -461,7 +466,10 @@ fn present_temporal(
             // group instances by datasetId (4.5.9)
             let mut groups: Vec<(Option<String>, Vec<&Value>)> = Vec::new();
             for inst in instances {
-                let ds = inst.get("datasetId").and_then(Value::as_str).map(String::from);
+                let ds = inst
+                    .get("datasetId")
+                    .and_then(Value::as_str)
+                    .map(String::from);
                 match groups.iter_mut().find(|(g, _)| *g == ds) {
                     Some((_, list)) => list.push(inst),
                     None => groups.push((ds, vec![inst])),
@@ -636,13 +644,17 @@ fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
 }
 
 const AGGR_METHODS: &[&str] = &[
-    "totalCount", "distinctCount", "sum", "avg", "min", "max", "stddev", "sumsq",
+    "totalCount",
+    "distinctCount",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "stddev",
+    "sumsq",
 ];
 
-fn parse_trepr(
-    params: &HashMap<String, String>,
-    ctx: &Context,
-) -> Result<TRepr, NgsiError> {
+fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr, NgsiError> {
     let mut r = TRepr::default();
     if let Some(opts) = params.get("options") {
         for o in opts.split(',') {
@@ -704,9 +716,10 @@ fn parse_trepr(
         .get("datasetId")
         .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect());
     r.last_n = match params.get("lastN") {
-        Some(n) => Some(n.parse::<usize>().map_err(|_| {
-            NgsiError::BadRequestData(format!("invalid lastN {n:?}"))
-        })?),
+        Some(n) => Some(
+            n.parse::<usize>()
+                .map_err(|_| NgsiError::BadRequestData(format!("invalid lastN {n:?}")))?,
+        ),
         None => None,
     };
     if let Some(m) = params.get("aggrMethods") {
@@ -779,7 +792,10 @@ fn render_aggregated(
             else {
                 continue;
             };
-            let v = inst.get("value").and_then(Value::as_f64).unwrap_or(f64::NAN);
+            let v = inst
+                .get("value")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::NAN);
             times.push((t, v));
         }
         if times.is_empty() {
@@ -790,33 +806,34 @@ fn render_aggregated(
             .and_then(|tq| DateTime::parse_from_rfc3339(&tq.time_at).ok())
             .unwrap_or(times[0].0);
         // bucket boundaries
-        let bucket_of = |t: DateTime<FixedOffset>| -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
-            match r.aggr_period {
-                AggrPeriod::Whole => {
-                    let last = times.last().expect("nonempty").0;
-                    (anchor, last + chrono::Duration::seconds(1))
-                }
-                AggrPeriod::Seconds(sc) => {
-                    let idx = (t - anchor).num_seconds().div_euclid(sc);
-                    let start = anchor + chrono::Duration::seconds(idx * sc);
-                    (start, start + chrono::Duration::seconds(sc))
-                }
-                AggrPeriod::Months(m) => {
-                    let mut start = anchor;
-                    loop {
-                        let next = start
-                            .checked_add_months(chrono::Months::new(m))
-                            .expect("date range");
-                        if next > t {
-                            break (start, next);
+        let bucket_of =
+            |t: DateTime<FixedOffset>| -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
+                match r.aggr_period {
+                    AggrPeriod::Whole => {
+                        let last = times.last().expect("nonempty").0;
+                        (anchor, last + chrono::Duration::seconds(1))
+                    }
+                    AggrPeriod::Seconds(sc) => {
+                        let idx = (t - anchor).num_seconds().div_euclid(sc);
+                        let start = anchor + chrono::Duration::seconds(idx * sc);
+                        (start, start + chrono::Duration::seconds(sc))
+                    }
+                    AggrPeriod::Months(m) => {
+                        let mut start = anchor;
+                        loop {
+                            let next = start
+                                .checked_add_months(chrono::Months::new(m))
+                                .expect("date range");
+                            if next > t {
+                                break (start, next);
+                            }
+                            start = next;
                         }
-                        start = next;
                     }
                 }
-            }
-        };
-        let mut buckets: Vec<((DateTime<FixedOffset>, DateTime<FixedOffset>), Vec<f64>)> =
-            Vec::new();
+            };
+        type Bucket = (DateTime<FixedOffset>, DateTime<FixedOffset>);
+        let mut buckets: Vec<(Bucket, Vec<f64>)> = Vec::new();
         for (t, v) in &times {
             let b = bucket_of(*t);
             match buckets.iter_mut().find(|(bb, _)| bb.0 == b.0) {
@@ -841,34 +858,30 @@ fn render_aggregated(
                             serde_json::json!(d.len())
                         }
                         "sum" => serde_json::json!(nums.iter().sum::<f64>()),
-                        "avg" => serde_json::json!(
-                            nums.iter().sum::<f64>() / nums.len().max(1) as f64
-                        ),
-                        "min" => serde_json::json!(
-                            nums.iter().copied().fold(f64::INFINITY, f64::min)
-                        ),
-                        "max" => serde_json::json!(
-                            nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-                        ),
+                        "avg" => {
+                            serde_json::json!(nums.iter().sum::<f64>() / nums.len().max(1) as f64)
+                        }
+                        "min" => {
+                            serde_json::json!(nums.iter().copied().fold(f64::INFINITY, f64::min))
+                        }
+                        "max" => serde_json::json!(nums
+                            .iter()
+                            .copied()
+                            .fold(f64::NEG_INFINITY, f64::max)),
                         "stddev" => {
                             let n = nums.len().max(1) as f64;
                             let mean = nums.iter().sum::<f64>() / n;
-                            serde_json::json!(
-                                (nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                                    / n)
-                                    .sqrt()
-                            )
+                            serde_json::json!((nums
+                                .iter()
+                                .map(|v| (v - mean).powi(2))
+                                .sum::<f64>()
+                                / n)
+                                .sqrt())
                         }
-                        "sumsq" => serde_json::json!(
-                            nums.iter().map(|v| v * v).sum::<f64>()
-                        ),
+                        "sumsq" => serde_json::json!(nums.iter().map(|v| v * v).sum::<f64>()),
                         _ => Value::Null,
                     };
-                    Value::Array(vec![
-                        val,
-                        Value::String(fmt(*bs)),
-                        Value::String(fmt(*be)),
-                    ])
+                    Value::Array(vec![val, Value::String(fmt(*bs)), Value::String(fmt(*be))])
                 })
                 .collect();
             attr_out.insert(method.clone(), Value::Array(rows));
@@ -900,11 +913,37 @@ async fn query_temporal_inner(
     check_params(
         params,
         &[
-            "id", "idPattern", "type", "attrs", "q", "georel", "geometry", "coordinates",
-            "geoproperty", "scopeQ", "csf", "timerel", "timeAt", "endTimeAt", "timeproperty",
-            "aggrMethods", "aggrPeriodDuration", "lastN", "limit", "offset", "count",
-            "options", "format", "lang", "local", "entityMap", "pick", "omit", "datasetId",
-            "orderBy", "orderFrom",
+            "id",
+            "idPattern",
+            "type",
+            "attrs",
+            "q",
+            "georel",
+            "geometry",
+            "coordinates",
+            "geoproperty",
+            "scopeQ",
+            "csf",
+            "timerel",
+            "timeAt",
+            "endTimeAt",
+            "timeproperty",
+            "aggrMethods",
+            "aggrPeriodDuration",
+            "lastN",
+            "limit",
+            "offset",
+            "count",
+            "options",
+            "format",
+            "lang",
+            "local",
+            "entityMap",
+            "pick",
+            "omit",
+            "datasetId",
+            "orderBy",
+            "orderFrom",
         ],
     )?;
     let accept = parse_accept(headers)?;
@@ -931,9 +970,11 @@ async fn query_temporal_inner(
         ),
         None => None,
     };
-    let types: Option<Vec<String>> = params
-        .get("type")
-        .map(|s| s.split([',', '|']).map(|t| ctx.expand_key(t.trim())).collect());
+    let types: Option<Vec<String>> = params.get("type").map(|s| {
+        s.split([',', '|'])
+            .map(|t| ctx.expand_key(t.trim()))
+            .collect()
+    });
     let attrs_filter = selection(&trepr);
     // only the attrs= param excludes entities; pick is projection-only
     let entity_attr_filter = trepr.attrs.clone();
@@ -943,7 +984,7 @@ async fn query_temporal_inner(
     };
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    let all = st.store.list(&tenant, Kind::Temporal);
+    let all = st.store.list(&tenant, Kind::Temporal)?;
     let mut matches = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -1045,7 +1086,13 @@ async fn query_temporal_inner(
     let cr = if trepr.aggregated {
         None
     } else {
-        content_range(g_max, g_min.as_deref(), g_maxts.as_deref(), tq.as_ref(), last_n)
+        content_range(
+            g_max,
+            g_min.as_deref(),
+            g_maxts.as_deref(),
+            tq.as_ref(),
+            last_n,
+        )
     };
     let status = if cr.is_some() {
         StatusCode::PARTIAL_CONTENT
@@ -1084,9 +1131,21 @@ pub async fn retrieve_temporal(
         check_params(
             &params,
             &[
-                "attrs", "timerel", "timeAt", "endTimeAt", "timeproperty", "lastN",
-                "aggrMethods", "aggrPeriodDuration", "options", "format", "lang", "local",
-                "pick", "omit", "datasetId",
+                "attrs",
+                "timerel",
+                "timeAt",
+                "endTimeAt",
+                "timeproperty",
+                "lastN",
+                "aggrMethods",
+                "aggrPeriodDuration",
+                "options",
+                "format",
+                "lang",
+                "local",
+                "pick",
+                "omit",
+                "datasetId",
             ],
         )?;
         let accept = parse_accept(&headers)?;
@@ -1095,10 +1154,9 @@ pub async fn retrieve_temporal(
         let trepr = parse_trepr(&params, &ctx)?;
         let last_n = trepr.last_n;
         antares_model::EntityId::new(&id)?;
-        let doc = st
-            .store
-            .get(&tenant, Kind::Temporal, &id)
-            .ok_or_else(|| NgsiError::ResourceNotFound(format!("temporal entity {id} not found")))?;
+        let doc = st.store.get(&tenant, Kind::Temporal, &id)?.ok_or_else(|| {
+            NgsiError::ResourceNotFound(format!("temporal entity {id} not found"))
+        })?;
         let attrs_filter = selection(&trepr);
         // 5.7.3: attrs matching nothing ⇒ 404
         if let Some(want) = &attrs_filter {
@@ -1171,7 +1229,7 @@ pub async fn delete_temporal(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
-        if st.store.delete(&tenant, Kind::Temporal, &id) {
+        if st.store.delete(&tenant, Kind::Temporal, &id)? {
             Ok(no_content(&tenant))
         } else {
             Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
@@ -1226,9 +1284,11 @@ pub async fn add_temporal_attrs(
             }
             target.insert("modifiedAt".into(), Value::String(ts.clone()));
             Ok::<(), NgsiError>(())
-        });
+        })?;
         match res {
-            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            None => {
+                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+            }
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) => Ok(no_content(&tenant)),
         }
@@ -1248,12 +1308,13 @@ pub async fn delete_temporal_attr(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         if attr.is_empty()
-            || !attr.chars().all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+@".contains(c))
+            || !attr
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+@".contains(c))
         {
-            return Err(NgsiError::BadRequestData(format!(
-                "invalid attribute name {attr:?}"
-            ))
-            .into());
+            return Err(
+                NgsiError::BadRequestData(format!("invalid attribute name {attr:?}")).into(),
+            );
         }
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
@@ -1264,10 +1325,12 @@ pub async fn delete_temporal_attr(
         let ts = now_iso();
         let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
             let target = doc.as_object_mut().expect("temporal object");
-            if delete_all || (want_ds.is_none() && !target
-                .get(&attr_iri)
-                .and_then(Value::as_array)
-                .is_some_and(|a| a.iter().any(|i| i.get("datasetId").is_some())))
+            if delete_all
+                || (want_ds.is_none()
+                    && !target
+                        .get(&attr_iri)
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| a.iter().any(|i| i.get("datasetId").is_some())))
             {
                 // deleteAll, or single-instance-set attribute: drop it whole
                 if target.remove(&attr_iri).is_some() {
@@ -1276,9 +1339,7 @@ pub async fn delete_temporal_attr(
             } else if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 // 5.6.13: only the matching datasetId instance set is deleted
                 let before = arr.len();
-                arr.retain(|i| {
-                    i.get("datasetId").and_then(Value::as_str) != want_ds.as_deref()
-                });
+                arr.retain(|i| i.get("datasetId").and_then(Value::as_str) != want_ds.as_deref());
                 found = arr.len() != before;
                 if arr.is_empty() {
                     target.remove(&attr_iri);
@@ -1288,9 +1349,11 @@ pub async fn delete_temporal_attr(
                 target.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
             Ok::<(), NgsiError>(())
-        });
+        })?;
         match res {
-            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            None => {
+                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+            }
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) if found => Ok(no_content(&tenant)),
             Some(Ok(())) => {
@@ -1368,15 +1431,16 @@ pub async fn modify_temporal_instance(
                 }
             }
             Ok::<(), NgsiError>(())
-        });
+        })?;
         match res {
-            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            None => {
+                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+            }
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => Err(NgsiError::ResourceNotFound(format!(
-                "instance {instance_id} not found"
-            ))
-            .into()),
+            Some(Ok(())) => {
+                Err(NgsiError::ResourceNotFound(format!("instance {instance_id} not found")).into())
+            }
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -1415,15 +1479,16 @@ pub async fn delete_temporal_instance(
                 target.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
             Ok::<(), NgsiError>(())
-        });
+        })?;
         match res {
-            None => Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into()),
+            None => {
+                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+            }
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => Err(NgsiError::ResourceNotFound(format!(
-                "instance {instance_id} not found"
-            ))
-            .into()),
+            Some(Ok(())) => {
+                Err(NgsiError::ResourceNotFound(format!("instance {instance_id} not found")).into())
+            }
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -1439,7 +1504,10 @@ pub async fn batch_temporal_query(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
-        check_params(&params, &["limit", "offset", "count", "options", "format", "local"])?;
+        check_params(
+            &params,
+            &["limit", "offset", "count", "options", "format", "local"],
+        )?;
         let accept = parse_accept(&headers)?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let q = parsed

@@ -5,7 +5,6 @@
 
 use antares_api::AppState;
 use antares_bus::LocalBus;
-use std::time::Instant;
 
 // ANTARES_DATABASE_URL: accepted — the ETSI compose wires one DB per broker —
 // consumed when the phase-1 sqlx store lands (§8.2 temporal.store).
@@ -16,6 +15,12 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
     "ANTARES_DATA_DIR",
+    // §16.4 egress: private-range destinations are denied by default; the
+    // ETSI/IOP stacks (mock servers on localhost) set this to true.
+    "ANTARES_EGRESS_ALLOW_PRIVATE",
+    // C9/D4 temporal retention horizon in days; absent = keep forever (a
+    // maintenance job must never default to dropping data).
+    "ANTARES_TEMPORAL_RETENTION_DAYS",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,7 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A2: unknown store mode is fatal BEFORE the runtime spins up.
     let mode = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
     if !["memory", "file", "postgres", "timescale"].contains(&mode.as_str()) {
-        return Err(format!("unknown ANTARES_STORE={mode} (memory|file|postgres|timescale)").into());
+        return Err(
+            format!("unknown ANTARES_STORE={mode} (memory|file|postgres|timescale)").into(),
+        );
     }
 
     tokio::runtime::Builder::new_multi_thread()
@@ -55,12 +62,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// ANTARES_STORE → store construction (A2/A3): `file` requires
 /// ANTARES_DATA_DIR (never a default inside the image, B5); postgres and
-/// timescale require ANTARES_DATABASE_URL, connect ONE shared pool and run
-/// the embedded migrations at start (§C-i) — their DATA path lands with
-/// tasks.md §C-ii/§D, so they serve from the in-memory store, loudly.
+/// timescale require ANTARES_DATABASE_URL, connect ONE shared pool, run the
+/// embedded migrations at start (§C-i) and serve from the Pg backend (C13).
 async fn build_store(
     mode: &str,
-) -> Result<(antares_sql::store::Store, String), Box<dyn std::error::Error>> {
+) -> Result<(antares_sql::store::any::AnyStore, String), Box<dyn std::error::Error>> {
+    use antares_sql::store::any::{AnyStore, PgBackend};
+    use antares_sql::store::Store;
     match mode {
         "file" => {
             let dir = std::env::var("ANTARES_DATA_DIR").map_err(|_| {
@@ -69,23 +77,38 @@ async fn build_store(
             })?;
             let dir = std::path::PathBuf::from(dir);
             warn_if_not_mount_point(&dir);
-            Ok((antares_sql::store::Store::open_file(&dir)?, "file".into()))
+            Ok((AnyStore::Mem(Store::open_file(&dir)?), "file".into()))
         }
         "postgres" | "timescale" => {
-            let url = std::env::var("ANTARES_DATABASE_URL").map_err(|_| {
-                format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL")
-            })?;
+            let url = std::env::var("ANTARES_DATABASE_URL")
+                .map_err(|_| format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL"))?;
             // The DB container may still be booting — bounded retry, then die.
             let mut last = String::new();
             for _ in 0..30 {
                 match antares_sql::pg::connect(&url, 20).await {
-                    Ok(_pool) => {
-                        tracing::warn!(
-                            "ANTARES_STORE={mode}: pool up, migrations applied; the {mode} \
-                             data path lands with tasks.md §C-ii/§D — serving from the \
-                             in-memory store until then"
+                    Ok(pool) => {
+                        let ts = antares_sql::maintenance::timescale_present(&pool).await?;
+                        // D3: never silently fall back — timescale mode without
+                        // the extension is a config error, not a downgrade.
+                        if mode == "timescale" && !ts {
+                            return Err("ANTARES_STORE=timescale but the timescaledb extension \
+                                 is not CREATEd in this database — install it (CREATE EXTENSION \
+                                 timescaledb) or use ANTARES_STORE=postgres"
+                                .into());
+                        }
+                        if mode == "postgres" && ts {
+                            tracing::info!(
+                                "timescaledb extension detected: attr_instances runs as a \
+                                 hypertable (§8.2 auto-detection); the plain-mode partition \
+                                 job stands down"
+                            );
+                        }
+                        tracing::info!(
+                            "ANTARES_STORE={mode}: pool up, migrations applied, serving \
+                             from postgres (temporal: {})",
+                            if ts { "timescale" } else { "plain partitions" }
                         );
-                        return Ok((antares_sql::store::Store::default(), "memory".into()));
+                        return Ok((AnyStore::Pg(PgBackend::new(pool)), mode.to_owned()));
                     }
                     Err(e) => {
                         last = e.to_string();
@@ -95,7 +118,7 @@ async fn build_store(
             }
             Err(format!("ANTARES_STORE={mode}: database not reachable after 30 s: {last}").into())
         }
-        _ => Ok((antares_sql::store::Store::default(), "memory".into())),
+        _ => Ok((AnyStore::Mem(Store::default()), "memory".into())),
     }
 }
 
@@ -105,10 +128,9 @@ async fn build_store(
 fn warn_if_not_mount_point(dir: &std::path::Path) {
     use std::os::unix::fs::MetadataExt;
     let _ = std::fs::create_dir_all(dir);
-    if let (Ok(md), Some(Ok(parent_md))) = (
-        std::fs::metadata(dir),
-        dir.parent().map(std::fs::metadata),
-    ) {
+    if let (Ok(md), Some(Ok(parent_md))) =
+        (std::fs::metadata(dir), dir.parent().map(std::fs::metadata))
+    {
         if md.dev() == parent_md.dev() {
             eprintln!(
                 "WARN: ANTARES_DATA_DIR {} is not a mount point — data will be lost when \
@@ -126,7 +148,7 @@ async fn run(
     port: u16,
     host_alias: String,
     roles: String,
-    store: antares_sql::store::Store,
+    store: antares_sql::store::any::AnyStore,
     store_mode: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // consumers attach as phases land
@@ -136,6 +158,29 @@ async fn run(
     // trailing '/'; normalize before routing.
     let state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
     antares_api::notify::wire(&state); // matcher + notifier + interval firing
+
+    // C9/D4: temporal maintenance — plain-mode partition pre-creation and the
+    // (opt-in) retention horizon, single-winner via SKIP LOCKED (§3.1.6).
+    if let antares_sql::store::any::AnyStore::Pg(p) = state.store.as_ref() {
+        let pool = p.docs.pool().clone();
+        let retention: Option<i64> = std::env::var("ANTARES_TEMPORAL_RETENTION_DAYS")
+            .ok()
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| "ANTARES_TEMPORAL_RETENTION_DAYS must be an integer")
+            })
+            .transpose()?;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            loop {
+                tick.tick().await; // first tick is immediate: partitions at boot
+                match antares_sql::maintenance::temporal_maintenance(&pool, retention).await {
+                    Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),
+                    Err(e) => tracing::warn!("temporal maintenance failed: {e}"),
+                }
+            }
+        });
+    }
     let app = tower::Layer::layer(
         &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),
         antares_api::router(state),
@@ -155,12 +200,12 @@ async fn run(
         };
         let app = app.clone();
         tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let mut app = app.clone();
-                async move {
-                    tower::Service::call(&mut app, req.map(axum::body::Body::new)).await
-                }
-            });
+            let svc = hyper::service::service_fn(
+                move |req: hyper::Request<hyper::body::Incoming>| {
+                    let mut app = app.clone();
+                    async move { tower::Service::call(&mut app, req.map(axum::body::Body::new)).await }
+                },
+            );
             let mut builder =
                 hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
             builder.http1().title_case_headers(true);

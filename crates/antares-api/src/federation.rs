@@ -17,22 +17,57 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 const FEDERATION_OPS: &[&str] = &[
-    "retrieveEntity", "queryEntity", "queryBatch", "retrieveEntityTypes",
-    "retrieveEntityTypeDetails", "retrieveEntityTypeInfo", "retrieveAttrTypes",
-    "retrieveAttrTypeDetails", "retrieveAttrTypeInfo", "createSubscription",
-    "updateSubscription", "retrieveSubscription", "querySubscription",
-    "deleteSubscription", "retrieveEntityMap", "updateEntityMap", "deleteEntityMap",
-    "createEntityMapQueryEntity", "retrieveContextSourceIdentity",
+    "retrieveEntity",
+    "queryEntity",
+    "queryBatch",
+    "retrieveEntityTypes",
+    "retrieveEntityTypeDetails",
+    "retrieveEntityTypeInfo",
+    "retrieveAttrTypes",
+    "retrieveAttrTypeDetails",
+    "retrieveAttrTypeInfo",
+    "createSubscription",
+    "updateSubscription",
+    "retrieveSubscription",
+    "querySubscription",
+    "deleteSubscription",
+    "retrieveEntityMap",
+    "updateEntityMap",
+    "deleteEntityMap",
+    "createEntityMapQueryEntity",
+    "retrieveContextSourceIdentity",
 ];
 const REDIRECTION_OPS: &[&str] = &[
-    "createEntity", "updateEntity", "appendAttrs", "updateAttrs", "deleteAttrs",
-    "deleteEntity", "mergeEntity", "replaceEntity", "replaceAttrs", "retrieveEntity",
-    "queryEntity", "purgeEntity", "retrieveEntityTypes", "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo", "retrieveAttrTypes", "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo", "retrieveEntityMap", "updateEntityMap", "deleteEntityMap",
-    "createEntityMapQueryEntity", "retrieveContextSourceIdentity",
+    "createEntity",
+    "updateEntity",
+    "appendAttrs",
+    "updateAttrs",
+    "deleteAttrs",
+    "deleteEntity",
+    "mergeEntity",
+    "replaceEntity",
+    "replaceAttrs",
+    "retrieveEntity",
+    "queryEntity",
+    "purgeEntity",
+    "retrieveEntityTypes",
+    "retrieveEntityTypeDetails",
+    "retrieveEntityTypeInfo",
+    "retrieveAttrTypes",
+    "retrieveAttrTypeDetails",
+    "retrieveAttrTypeInfo",
+    "retrieveEntityMap",
+    "updateEntityMap",
+    "deleteEntityMap",
+    "createEntityMapQueryEntity",
+    "retrieveContextSourceIdentity",
 ];
-const UPDATE_OPS: &[&str] = &["updateEntity", "updateAttrs", "replaceEntity", "replaceAttrs"];
+const UPDATE_OPS: &[&str] = &[
+    "updateEntity",
+    "updateAttrs",
+    "replaceEntity",
+    "replaceAttrs",
+];
 const RETRIEVE_OPS: &[&str] = &["retrieveEntity", "queryEntity"];
 
 /// One matching registration, compiled for forwarding.
@@ -64,7 +99,9 @@ impl FedReg {
     }
     /// Does this registration cover the given expanded attribute IRI?
     pub fn covers_attr(&self, iri: &str) -> bool {
-        self.attrs.as_ref().is_none_or(|a| a.iter().any(|x| x == iri))
+        self.attrs
+            .as_ref()
+            .is_none_or(|a| a.iter().any(|x| x == iri))
     }
     pub fn read_op(&self) -> Option<&'static str> {
         ["retrieveEntity", "queryEntity", "queryBatch"]
@@ -123,6 +160,7 @@ pub fn matching_regs(
     let now = crate::state::now_iso();
     st.store
         .list(tenant, Kind::Registration)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|doc| {
             if doc
@@ -136,7 +174,10 @@ pub fn matching_regs(
             if infos.is_empty() {
                 return None;
             }
-            let endpoint = doc.get("endpoint").and_then(Value::as_str)?.trim_end_matches('/');
+            let endpoint = doc
+                .get("endpoint")
+                .and_then(Value::as_str)?
+                .trim_end_matches('/');
             // registrations may name the API root itself (…/ngsi-ld/v1) —
             // normalize so forward URLs never double the prefix (IOP fixtures)
             let endpoint = endpoint
@@ -151,7 +192,12 @@ pub fn matching_regs(
             let ops = doc
                 .get("operations")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
                 .unwrap_or_else(|| vec!["federationOps".into()]);
             let mut attrs: Option<Vec<String>> = Some(Vec::new());
             let mut ent_ids = Vec::new();
@@ -177,12 +223,20 @@ pub fn matching_regs(
                     }
                 }
             }
-            Some(FedReg { endpoint, mode, ops, attrs, ent_ids, ent_types })
+            Some(FedReg {
+                endpoint,
+                mode,
+                ops,
+                attrs,
+                ent_ids,
+                ent_types,
+            })
         })
         .collect()
 }
 
 /// One forwarded request. `body` is compacted JSON (no @context member).
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn forward(
     st: &AppState,
     method: reqwest::Method,
@@ -231,10 +285,15 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
     let expanded = antares_jsonld::expand_entity(
         &obj,
         ctx,
-        antares_jsonld::ExpandOpts { sys: true, ..Default::default() },
+        antares_jsonld::ExpandOpts {
+            sys: true,
+            ..Default::default()
+        },
     )
     .ok()?;
-    let Some(scope) = &reg.attrs else { return Some(expanded) };
+    let Some(scope) = &reg.attrs else {
+        return Some(expanded);
+    };
     let mut out = Map::new();
     for (k, v) in expanded.as_object()? {
         if ["id", "type", "scope", "createdAt", "modifiedAt"].contains(&k.as_str())
@@ -257,7 +316,9 @@ fn recency(inst: &Value) -> &str {
 /// base wins; otherwise conflicting instances resolve by most recent
 /// observedAt/modifiedAt per 4.5.5.3).
 pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
-    let Some(bo) = base.as_object_mut() else { return };
+    let Some(bo) = base.as_object_mut() else {
+        return;
+    };
     let Some(ao) = add.as_object() else { return };
     for (k, v) in ao {
         match bo.get_mut(k) {
@@ -265,12 +326,15 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
                 bo.insert(k.clone(), v.clone());
             }
             Some(cur) if !aux && !matches!(k.as_str(), "id" | "type" | "scope") => {
-                let (Some(ca), Some(aa)) = (cur.as_array_mut(), v.as_array()) else { continue };
+                let (Some(ca), Some(aa)) = (cur.as_array_mut(), v.as_array()) else {
+                    continue;
+                };
                 for ai in aa {
                     let ds = ai.get("datasetId").and_then(Value::as_str);
-                    match ca.iter_mut().find(|ci| {
-                        ci.get("datasetId").and_then(Value::as_str) == ds
-                    }) {
+                    match ca
+                        .iter_mut()
+                        .find(|ci| ci.get("datasetId").and_then(Value::as_str) == ds)
+                    {
                         None => ca.push(ai.clone()),
                         Some(ci) => {
                             if recency(ai) > recency(ci) {
@@ -307,8 +371,7 @@ pub async fn fed_retrieve(
         // sysAttrs on every forwarded read: conflicting instances resolve by
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
         // modifiedAt the winner would be arrival order, i.e. indeterminate.
-        let mut query: Vec<(String, String)> =
-            vec![("options".into(), "sysAttrs".into())];
+        let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
         if let Some(scope) = &reg.attrs {
             let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
             query.push(("attrs".into(), names.join(",")));
@@ -401,7 +464,11 @@ pub async fn fed_query(
     let ids: Option<Vec<String>> = params
         .get("id")
         .map(|s| s.split(',').map(str::to_owned).collect());
-    let spec = crate::csource::CsrSpec { types, ids, ..Default::default() };
+    let spec = crate::csource::CsrSpec {
+        types,
+        ids,
+        ..Default::default()
+    };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx) {
@@ -426,8 +493,7 @@ pub async fn fed_query(
             )
             .await
         } else {
-            let mut query: Vec<(String, String)> =
-                vec![("options".into(), "sysAttrs".into())];
+            let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
             if let Some(t) = params.get("type") {
                 query.push(("type".into(), t.clone()));
             }
@@ -484,7 +550,9 @@ pub fn merge_candidates(local: Vec<Value>, fed: Vec<(bool, Value)>) -> Vec<Value
             if *aux != aux_pass {
                 continue;
             }
-            let Some(id) = doc.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = doc.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             match by_id.get_mut(id) {
                 Some(base) => merge_docs(base, doc, *aux),
                 None => {
@@ -535,7 +603,12 @@ pub fn combine(parts: Vec<Part>, ok: Response, tenant: &TenantId) -> Response {
             "detail": p.detail,
             "status": p.status,
         });
-        let mut resp = (status, [(axum::http::header::CONTENT_TYPE, "application/json")], axum::Json(body)).into_response();
+        let mut resp = (
+            status,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            axum::Json(body),
+        )
+            .into_response();
         echo_tenant(tenant, &mut resp);
         return resp;
     }
@@ -638,8 +711,21 @@ pub async fn forward_part(
     ctx_url: &str,
     body: Option<Value>,
 ) -> Part {
-    let (status, _) = forward(st, method, url.clone(), query, headers, tenant, ctx_url, body).await;
-    Part { status, detail: format!("distributed operation to {url} returned {status}") }
+    let (status, _) = forward(
+        st,
+        method,
+        url.clone(),
+        query,
+        headers,
+        tenant,
+        ctx_url,
+        body,
+    )
+    .await;
+    Part {
+        status,
+        detail: format!("distributed operation to {url} returned {status}"),
+    }
 }
 
 /// Forward one attribute-level write to every matching registration.
@@ -696,8 +782,10 @@ pub fn strip_covered_expanded(fragment: &Value, regs: &[FedReg]) -> Value {
         let covered: Vec<String> = o
             .keys()
             .filter(|k| {
-                !matches!(k.as_str(), "id" | "type" | "scope" | "createdAt" | "modifiedAt")
-                    && regs.iter().any(|r| r.is_proxy() && r.covers_attr(k))
+                !matches!(
+                    k.as_str(),
+                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
+                ) && regs.iter().any(|r| r.is_proxy() && r.covers_attr(k))
             })
             .cloned()
             .collect();

@@ -1,10 +1,18 @@
 # build
 /target
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
 **/*.rs.bk
 
 # test runs
 results/
+results-proc/
 .venv/
+
+# session notes / scratch dumps (agent transcripts, ad-hoc summaries)
+/20[0-9][0-9]-*.txt
 
 # local env & logs
 .env

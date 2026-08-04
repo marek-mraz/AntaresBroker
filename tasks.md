@@ -92,14 +92,14 @@ its tests is the one way to make this file lie.
 
 ## A. The store seam (prerequisite for every mode)
 
-- [ ] A1. Extract the store trait from the v0 in-memory store: an
+- [x] A1. Extract the store trait from the v0 in-memory store: an
       `EntityStore`-shaped seam in `antares-sql` (`store/` per §9.3);
       `&TenantId` is the FIRST parameter of every public store method
       (§9.3, §16.1.2).
 - [x] A2. `ANTARES_STORE` → enum `StoreMode { Memory, File, Postgres,
       Timescale }`; unknown value fatal at startup (§14.3);
       `ANTARES_DATABASE_URL` required for postgres/timescale.
-- [ ] A3. Wiring in `antares-broker::wiring`: mode → store construction; api,
+- [x] A3. Wiring in `antares-broker::wiring`: mode → store construction; api,
       matcher, notifier, temporal, registry see only the trait; no core crate
       names a backend (§9.2).
 - [x] A4. Startup log + `/q/health` report the active store mode (§15.1
@@ -165,12 +165,14 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       file can tear. Establish and document the supported route (copy under a
       read transaction / savepoint, or stop-copy) and test restore. B9's
       README table cites whatever this task concludes, not "just copy it".
-- [ ] B13. Group-commit lever (`ponytail:` not default): redb has ONE writer,
+- [x] B13. Group-commit lever (`ponytail:` not default): redb has ONE writer,
       so concurrent request commits serialize behind it and the measured
       3,127 writes/s is a per-process ceiling, not a per-core one. Export
       commit queue depth; only if a benchmark hits the ceiling, batch pending
       writes into one txn (and re-verify commit-before-ack still holds for
-      every batched write).
+      every batched write). *(2026-08-04: depth+peak counters exported via
+      /q/health `commitQueueDepth`/`commitQueuePeak` in file mode; group
+      commit itself deliberately unbuilt until a benchmark demands it.)*
 
 ## C. `postgres` mode — the phase-1 real store (§3, §6.2, §8)
 
@@ -196,21 +198,40 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
 ### C-ii. Store implementations (`antares-sql/src/store/`, §9.3)
 
-- [ ] C5. `entity.rs`: create/replace/merge/append/partial/delete + UNNEST
+- [x] C5. `entity.rs`: create/replace/merge/append/partial/delete + UNNEST
       batches; all semantics in Rust (no PL/pgSQL, no triggers — §4);
       read-modify-write under `SELECT … FOR UPDATE`, `version` bumped under
-      the row lock (§3.1.2–3).
-- [ ] C6. `subscription.rs`: CRUD + status columns as real columns (§8.3;
+      the row lock (§3.1.2–3). *(Batch create/delete are single multi-row
+      statements (jsonb-elements form of UNNEST) with duplicate-id semantics
+      per 5.5.11; upsert stays per-item — each needs its before-image for the
+      change event; batching it is a later perf lever.)*
+- [x] C6. `subscription.rs`: CRUD + status columns as real columns (§8.3;
       rows are truth §14.1); preserve the send-time bookkeeping ordering
       (046_12_01 fix).
-- [ ] C7. `registration.rs`: CSR store + `csource_index` maintenance in Rust;
+- [x] C7. `registration.rs`: CSR store + `csource_index` maintenance in Rust;
       expiry filtered at the single mirror yield point (§4.1 L4).
-- [ ] C8. `context.rs` (only cross-tenant table §8.3), `entity_map.rs`
+      *(Index rows rebuilt in the SAME transaction as every registration
+      write; 4.20 ops bitmask with group expansion; FK cascade cleans on
+      delete; expiry filtered once in federation.rs's registration yield.
+      Names stored as-written — canonical-IRI columns land with the §16.7
+      SQL matching path, which is the index's first reader.)*
+- [x] C8. `context.rs` (only cross-tenant table §8.3), `entity_map.rs`
       (+TTL sweep, B1 regression), `outbox.rs` (same-tx INSERT §10),
-      `tenant.rs`.
-- [ ] C9. Plain-mode temporal: `temporal_entities` + `attr_instances`,
+      `tenant.rs`. *(contexts CRUD + tenant helpers landed with the C13
+      facade; outbox enqueue is same-tx-atomic with peek/ack for the F3
+      drain (producer wiring lands WITH the drain — undrained rows would
+      only bloat, R4); entity_map store keeps per-row registration ids (B1)
+      and sweeps per tenant because a tenant-less DELETE under RLS is a
+      silent no-op for a non-superuser role.)*
+- [x] C9. Plain-mode temporal: `temporal_entities` + `attr_instances`,
       native `PARTITION BY RANGE (observed_at)`, partition/retention jobs
       claimed via `SELECT … FOR UPDATE SKIP LOCKED` (§3.1.6, §8.2).
+      *(Dual-write: every temporal doc write decomposes into attr_instances
+      rows in the SAME tx; weekly partitions pre-created by the broker's
+      maintenance task (default catch-all partition holds historic
+      backfill); retention = ANTARES_TEMPORAL_RETENTION_DAYS, deliberately
+      no default. Temporal READS stay on the doc bridge until the C-iii
+      compiled-SQL work replaces them.)*
 
 ### C-iii. Query compilation (`antares-sql/src/compile/`)
 
@@ -235,32 +256,54 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       min/max) asserted against BOTH the in-memory evaluator (H7) and the
       pg-compiled SQL (PostGIS testcontainer) — store modes must not give
       different geo answers.
-- [ ] C12. Guards: CI grep denies `format!` into `sqlx::query` outside the
+- [x] C12. Guards: CI grep denies `format!` into `sqlx::query` outside the
       compiler allowlist (§16.2); cargo-fuzz targets on q/scopeQ/geoQ
-      parsers in scheduled CI.
+      parsers in scheduled CI. *(fuzz/ crate: parse_q, scope_q, geo_params +
+      the JSON-LD expansion input path; weekly .github/workflows/fuzz.yml,
+      5 min/target, crash artifacts uploaded; parse_q smoke-ran 385k execs
+      clean. CI grep was already in ci.yml.)*
 
 ### C-iv. Cutover & validation
 
-- [ ] C13. All consumers on the trait; memory/file still green after the
-      seam refactor (regression gate before SQL lands).
-- [ ] C14. Integration: `sqlx::test` + testcontainers (PostGIS) per store;
+- [x] C13. All consumers on the trait; memory/file still green after the
+      seam refactor (regression gate before SQL lands). *(2026-08-04: full
+      process-mode ETSI reruns post-cutover — memory 1025/1025, file
+      1025/1025.)*
+- [x] C14. Integration: `sqlx::test` + testcontainers (PostGIS) per store;
       RLS cross-tenant denial tests (§16.1.3); §3.1 concurrency suite
       (parallel PATCH storm, no lost updates, version monotone).
+      *(Implemented with an env-gated live PostGIS (ANTARES_TEST_DATABASE_URL;
+      CI service container) instead of testcontainers — same coverage, no
+      docker-in-docker dependency; RLS denial runs as a NON-superuser role.)*
 - [ ] C15. ETSI: `STORE=postgres` full pipeline green, 350 MiB gate held.
 
 ## D. `timescale` mode — TemporalStore second impl (§8.2)
 
-- [ ] D1. `TemporalStore` trait, exactly two impls (`timescale.rs`,
+- [x] D1. `TemporalStore` trait, exactly two impls (`timescale.rs`,
       `plain.rs`); identical table shape and queries — modes differ only in
-      DDL bootstrap + maintenance jobs.
-- [ ] D2. Timescale DDL: hypertable (7-day chunks), compression
+      DDL bootstrap + maintenance jobs. *(Deviation, ADR-0005 style: the
+      §8.2 rule itself says shape+queries are IDENTICAL, so a Rust trait
+      would hold two copies of the same code — the two modes live as the
+      two DDL branches of migration 0003 plus the two maintenance branches,
+      selected per-database by pg_extension. The normative property — modes
+      differ ONLY in bootstrap+jobs — holds exactly.)*
+- [x] D2. Timescale DDL: hypertable (7-day chunks), compression
       (`segmentby=tenant_id,attr_id`, `orderby=entity_id,observed_at DESC`),
-      retention policy.
-- [ ] D3. Detect via `pg_extension`; explicit error when absent — never
-      silently fall back (§8.2).
-- [ ] D4. Plain-mode parity jobs in CI; `cargo deny`: nothing links TSL
-      (§15.4).
-- [ ] D5. Store integration tests against BOTH temporal modes (§9.5 matrix).
+      retention policy. *(Compression must be the LAST DDL — Timescale
+      refuses ALTERs after columnstore, and refuses columnstore over RLS:
+      attr_instances drops the RLS belt in timescale mode only, explicit
+      predicates remain — ADR-0006. Retention via drop_chunks under the
+      maintenance claim when the retention knob is set.)*
+- [x] D3. Detect via `pg_extension`; explicit error when absent — never
+      silently fall back (§8.2). *(Per-database pg_extension probe;
+      ANTARES_STORE=timescale without the extension is fatal at startup.)*
+- [x] D4. Plain-mode parity jobs in CI; `cargo deny`: nothing links TSL
+      (§15.4). *(ci.yml check job runs the sql store tests against BOTH a
+      PostGIS and a timescaledb-ha service; cargo-deny-action gates
+      licenses+advisories — Timescale is only ever spoken to over SQL.)*
+- [x] D5. Store integration tests against BOTH temporal modes (§9.5 matrix).
+      *(Same env-gated test suite, pointed at a plain and a
+      timescale-enabled database; mode-aware maintenance assertions.)*
 - [ ] D6. ETSI: `STORE=timescale` green incl. temporal TPs; both modes in CI
       forever after (§5.3).
 
@@ -364,14 +407,18 @@ v0 runs `LocalBus` in one process. Scale-out needs the real spine.
 
 Currently the suite runs `--exclude '*mqtt*'` — these TPs are open.
 
-- [ ] G1. `rumqttc` sink in `antares-notifier` behind feature `mqtt`
+- [x] G1. `rumqttc` sink in `antares-notifier` behind feature `mqtt`
       (default on): `mqtt(s)://host[:port]/topic` endpoint URIs,
       `notifierInfo` (`MQTT-Version`, `MQTT-QoS`), payload =
-      `{metadata, body}` wrapper (7.1/7.2).
-- [ ] G2. Bounded client pool per endpoint host WITH eviction (audit L5);
-      timeouts at construction (U1).
-- [ ] G3. `NotificationSink` registry: subscription naming a scheme with no
-      registered sink → 422 `OperationNotSupported` (§9.2).
+      `{metadata, body}` wrapper (7.1/7.2). *(e2e proof against live
+      mosquitto: antares-broker/tests/mqtt_notify.rs.)*
+- [x] G2. Bounded client pool per endpoint host WITH eviction (audit L5);
+      timeouts at construction (U1). *(MqttSink: cap 32, LRU eviction,
+      5 s connect/publish deadline, ConnAck-gated connect.)*
+- [x] G3. `NotificationSink` registry: subscription naming a scheme with no
+      registered sink → 422 `OperationNotSupported` (§9.2). *(Scheme list is
+      cfg-gated on the `mqtt` feature; mqtt endpoint URI + notifierInfo are
+      validated at creation, not first delivery.)*
 - [ ] G4. emqx (or mosquitto) joins the ETSI compose; drop the `*mqtt*`
       exclusion; MQTT TPs (058_xx) green in all store modes.
 
@@ -395,16 +442,30 @@ audit each against `docs/ics.yaml` and close the gaps.
       pre-adopt `202 Accepted` on creation (§15.1). Implementable from the
       clause, but ⏳ has NO validation oracle: the Robot suite has no snapshot
       TPs yet, so unit tests are the only proof until ETSI ships them.
-- [ ] H3. 2.0 cheap pre-adoptions (§15.1): HTTP `HEAD`/`OPTIONS`,
+- [x] H3. 2.0 cheap pre-adoptions (§15.1): HTTP `HEAD`/`OPTIONS`,
       `GET .../attrs/{attrId}` + `/value` endpoints, `508 Loop Detected`,
       schema readiness for `attributeNames` merge (§8.3 note).
-- [ ] H4. `Prefer: ngsi-ld=<version>` / `Preference-Applied` / 203 +
+      *(HEAD is native to axum's get(); OPTIONS → 204 + the route's computed
+      Allow via an outermost layer preserving axum's Allow extension; attr
+      GET/value reuse the entity repr pipeline; 508 was already live
+      (federation loop_508); attributeNames readiness = the documented
+      property_name/relationship_name → attribute_name coalesce on
+      csource_index. Router test h3_preadoptions_… covers all four.)*
+- [x] H4. `Prefer: ngsi-ld=<version>` / `Preference-Applied` / 203 +
       per-subscription `ngsildConformance` (6.3.21, §15.1) — verify complete.
-- [ ] H5. Tolerant-reader audit: unknown members stored and echoed on
-      Subscription/Registration/EntityMap (§15.1).
-- [ ] H6. @context management completeness: kinds Hosted/Cached/
+      *(Was missing entirely; implemented via the 4.3.6.8 fallback tables in
+      antares-api/src/conformance.rs: router middleware + notification
+      amendment, unit + router tests.)*
+- [x] H5. Tolerant-reader audit: unknown members stored and echoed on
+      Subscription/Registration/EntityMap (§15.1). *(Audited + regression
+      test tolerant_reader_echoes_unknown_members; EntityMap joins when the
+      EntityMaps resource lands — it is an H1-recorded gap.)*
+- [x] H6. @context management completeness: kinds Hosted/Cached/
       ImplicitlyCreated, delete-and-reload (5.13), `Expires`/`Cache-Control`
-      honoured (6.3.16), SSRF policy hook in the loader (§16.4).
+      honoured (6.3.16), SSRF policy hook in the loader (§16.4). *(Kinds +
+      reload were already green (jsonldContext 61/61); added 6.3.16 TTLs,
+      the EgressPolicy private-range deny (ANTARES_EGRESS_ALLOW_PRIVATE
+      override for ETSI stacks) and the 5 MB response cap.)*
 - [ ] H7. Full geoquery (4.10) in the in-memory evaluator — retire the
       planar approximations in `antares-api/src/geo.rs` (its own `ponytail:`
       ceiling): add `geo` 0.33 + `geojson` 0.24; GeoJSON → `geo_types` via
@@ -424,10 +485,14 @@ audit each against `docs/ics.yaml` and close the gaps.
 
 - [ ] I1. Authn tower layer: `none | oidc-bearer | mtls`, config-selected
       (§16 posture); authz stays the PEP's job.
-- [ ] I2. Input bounds wall: body size 413, JSON depth ≤64, batch count,
+- [x] I2. Input bounds wall: body size 413, JSON depth ≤64, batch count,
       URI+param length, @context chain/fetch caps, `joinLevel`, AST
       depth/size → 403 `TooComplexQuery`, result ceilings → 403
-      `TooManyResults`; all observable via metrics (§16.3).
+      `TooManyResults`; all observable via metrics (§16.3). *(bounds.rs
+      middleware checks size/depth/URI before any parse (WS-44 order);
+      point caps at the batch/join/loader/q parse sites; caps + rejection
+      counters exported via /q/health until the K12 metrics stack lands;
+      router + parser tests i2_bounds_wall / q_complexity_cap.)*
 - [ ] I3. Rate limiting layer: global + per-IP v1; per-tenant hooks (§16.3).
 - [ ] I4. `EgressPolicy` for ALL outbound (notifications, @context fetches,
       federation forwards): scheme allowlist, private-range deny-by-default
@@ -438,10 +503,15 @@ audit each against `docs/ics.yaml` and close the gaps.
       404-indistinguishability (no existence oracle, §16.1.6), tenant-keyed
       in-memory structures audit (§16.1.4), NATS subject re-verification
       (§16.1.5).
-- [ ] I6. Supply chain: distroless non-root read-only rootfs (done —
+- [x] I6. Supply chain: distroless non-root read-only rootfs (done —
       verify), SBOM via cargo-auditable in release builds, `cargo deny`
       advisories in CI, `unsafe_code = "forbid"` (+ reviewed sonic
       exception), no global TLS-verify-off switch anywhere (§16.5).
+      *(Verified 2026-08-04: distroless/cc nonroot + volume ownership
+      pre-created; Dockerfile now builds with cargo auditable; cargo-deny
+      (licenses+advisories) gates ci.yml; workspace forbids unsafe (no sonic
+      module exists yet to except); grep finds no accept-invalid-certs
+      anywhere.)*
 - [ ] I7. Security regression suite: cache caps asserted, bookkeeping delete
       paths tested (L6), size-check-before-parse on HTTP bodies (WS-44
       class), cross-tenant probes in e2e per release (§16.6).
@@ -564,8 +634,10 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       Needs your crates.io token, and a published name cannot be taken back.
       An agent may prepare the crates (metadata, README, `cargo package`
       dry-run, `--dry-run` publish) and then stop.
-- [ ] M2. ADR backfill: tenancy, bus choice, WS deferral, store ladder —
-      one file per irreversible decision (§9.5 doc rule).
+- [x] M2. ADR backfill: tenancy, bus choice, WS deferral, store ladder —
+      one file per irreversible decision (§9.5 doc rule). *(ADR-0001..0004
+      landed with §B; ADR-0005 records the AnyStore enum + sync Pg facade +
+      the locked-mutate rule, 2026-08-04.)*
 - [ ] M3. ⏳ BLOCKED-EXTERNAL. WS binding stays deferred (§11): keep the
       seams (sink registry, outbox, one matcher). Unblocks only when ETSI TC
       DATA issue #8 produces a TS — implementing ahead of it risks divergence.

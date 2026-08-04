@@ -70,9 +70,14 @@ curl -s localhost:9090/q/health
 ## ETSI conformance suite
 
 ```bash
-docker compose -f compose-files/docker-compose.yml up -d   # postgres+postgis(+timescale) & nats
-dev/etsi-run.sh                 # runs the ETSI Robot suite against the local broker
+dev/etsi-local.sh               # the local gate: workspace tests + STORE=file + STORE=timescale
+STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # any single mode while debugging
 ```
+
+Locally the gate runs `file` + `timescale` only — together they cover every
+backend (memory maps + redb shadow; PgBackend on timescaledb-ha, which
+bundles postgres+PostGIS). CI runs **all four** store modes on every push and
+is the authority; `:latest` publishes only when the whole matrix is green.
 
 The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
 is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same

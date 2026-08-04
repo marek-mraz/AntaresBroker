@@ -56,17 +56,37 @@ impl PgBackend {
 }
 
 /// A1/A3: what `antares-api` sees. No core crate names redb or sqlx.
+// One AnyStore exists per process — variant size difference is irrelevant.
+#[allow(clippy::large_enum_variant)]
 pub enum AnyStore {
     Mem(Store),
     Pg(PgBackend),
 }
 
 impl AnyStore {
+    /// B13: (queued writers, peak) of the memory/file write-critical section;
+    /// `None` for the Pg arm (Postgres has no single-writer commit queue).
+    pub fn commit_queue(&self) -> Option<(usize, usize)> {
+        match self {
+            AnyStore::Mem(s) => Some(s.commit_queue()),
+            AnyStore::Pg(_) => None,
+        }
+    }
+
     pub fn set_change_hook(&self, h: ChangeHook) {
         match self {
             AnyStore::Mem(s) => s.set_change_hook(h),
             AnyStore::Pg(p) => *p.hook.write().expect("hook lock") = Some(h),
         }
+    }
+
+    /// §3.1.4/6.3.14 implicit tenant creation on Pg write paths.
+    fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
+        super::pg_entity::wait(async {
+            crate::pg::ensure_tenant(p.docs.pool(), tenant)
+                .await
+                .map_err(db)
+        })
     }
 
     pub fn create(
@@ -79,6 +99,7 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.create(tenant, kind, id, doc)),
             AnyStore::Pg(p) => {
+                Self::ensure_tenant(p, tenant)?;
                 let created = match kind {
                     Kind::Entity => p.entities.create(tenant, id, &doc).map_err(db)?,
                     Kind::Temporal => p.temporal.create(tenant, id, &doc).map_err(db)?,
@@ -100,6 +121,58 @@ impl AnyStore {
         }
     }
 
+    /// C5 batch create (entities only): one multi-row statement on the Pg
+    /// arm, per-item loop on the memory arm. Created-flags in input order.
+    pub fn batch_create(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(items
+                .into_iter()
+                .map(|(id, doc)| s.create(tenant, Kind::Entity, &id, doc))
+                .collect()),
+            AnyStore::Pg(p) => {
+                Self::ensure_tenant(p, tenant)?;
+                let flags = p.entities.batch_create(tenant, &items).map_err(db)?;
+                for ((_, doc), created) in items.into_iter().zip(&flags) {
+                    if *created {
+                        p.emit(tenant, None, Some(doc));
+                    }
+                }
+                Ok(flags)
+            }
+        }
+    }
+
+    /// C5 batch delete (entities only): deleted-flags in input order; a
+    /// duplicate id in the input deletes once and 404s the second time,
+    /// matching the per-item loop's semantics (5.5.11.4).
+    pub fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(ids
+                .iter()
+                .map(|id| s.delete(tenant, Kind::Entity, id))
+                .collect()),
+            AnyStore::Pg(p) => {
+                let deleted = p.entities.batch_delete(tenant, ids).map_err(db)?;
+                let mut prev: std::collections::HashMap<String, Value> =
+                    deleted.into_iter().collect();
+                Ok(ids
+                    .iter()
+                    .map(|id| match prev.remove(id) {
+                        Some(before) => {
+                            p.emit(tenant, Some(before), None);
+                            true
+                        }
+                        None => false,
+                    })
+                    .collect())
+            }
+        }
+    }
+
     pub fn upsert(
         &self,
         tenant: &TenantId,
@@ -110,6 +183,9 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.upsert(tenant, kind, id, doc)),
             AnyStore::Pg(p) => match kind {
+                _ if Self::ensure_tenant(p, tenant).is_err() => Err(NgsiError::InternalError(
+                    "tenant provisioning failed".into(),
+                )),
                 Kind::Entity => {
                     let prev = p.entities.get(tenant, id).map_err(db)?;
                     let existed = prev.is_some();
@@ -161,7 +237,10 @@ impl AnyStore {
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.get(tenant, id).map_err(db),
                 Kind::Temporal => p.temporal.get(tenant, id).map_err(db),
-                _ => p.docs.get(tenant, doc_kind(kind).expect("doc kind"), id).map_err(db),
+                _ => p
+                    .docs
+                    .get(tenant, doc_kind(kind).expect("doc kind"), id)
+                    .map_err(db),
             },
         }
     }
@@ -179,7 +258,10 @@ impl AnyStore {
                     Ok(hit)
                 }
                 Kind::Temporal => p.temporal.delete(tenant, id).map_err(db),
-                _ => p.docs.delete(tenant, doc_kind(kind).expect("doc kind"), id).map_err(db),
+                _ => p
+                    .docs
+                    .delete(tenant, doc_kind(kind).expect("doc kind"), id)
+                    .map_err(db),
             },
         }
     }
@@ -190,7 +272,10 @@ impl AnyStore {
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.list(tenant).map_err(db),
                 Kind::Temporal => p.temporal.list(tenant).map_err(db),
-                _ => p.docs.list(tenant, doc_kind(kind).expect("doc kind")).map_err(db),
+                _ => p
+                    .docs
+                    .list(tenant, doc_kind(kind).expect("doc kind"))
+                    .map_err(db),
             },
         }
     }
@@ -228,19 +313,12 @@ impl AnyStore {
                 }
                 Kind::Temporal => p.temporal.mutate(tenant, id, f).map_err(db),
                 _ => {
+                    // FOR UPDATE + UPDATE in one tx: a bookkeeping writeback
+                    // racing a DELETE must never resurrect the row (047_06).
                     let dk = doc_kind(kind).expect("doc kind");
-                    let Some(mut doc) = p.docs.get(tenant, dk, id).map_err(db)? else {
-                        return Ok(None);
-                    };
-                    // ponytail: get+upsert (no row lock) for doc kinds — their
-                    // writers are single-flow (sub CRUD + status writeback);
-                    // move to FOR UPDATE if a race ever matters here.
-                    match f(&mut doc) {
-                        Ok(t) => {
-                            p.docs.upsert(tenant, dk, id, &doc).map_err(db)?;
-                            Ok(Some(Ok(t)))
-                        }
-                        Err(e) => Ok(Some(Err(e))),
+                    match p.docs.mutate(tenant, dk, id, f).map_err(db)? {
+                        Some(r) => Ok(Some(r)),
+                        None => Ok(None),
                     }
                 }
             },
@@ -265,7 +343,10 @@ impl AnyStore {
 
     pub fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.context_put(id, doc)),
+            AnyStore::Mem(s) => {
+                let _: () = s.context_put(id, doc);
+                Ok(())
+            }
             AnyStore::Pg(p) => {
                 let kind = doc
                     .get("kind")

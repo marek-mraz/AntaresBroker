@@ -35,7 +35,15 @@ pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
 }
 
 /// The internal doc's members that become extracted columns (§8.1).
-fn extract(doc: &Value) -> (Vec<String>, Option<Vec<String>>, String, String, Option<String>) {
+fn extract(
+    doc: &Value,
+) -> (
+    Vec<String>,
+    Option<Vec<String>>,
+    String,
+    String,
+    Option<String>,
+) {
     let as_vec = |v: &Value| -> Vec<String> {
         match v {
             Value::String(s) => vec![s.clone()],
@@ -127,12 +135,10 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query(
-                "SELECT entity FROM entities WHERE tenant_id = $1 ORDER BY id",
-            )
-            .bind(tenant.as_str())
-            .fetch_all(&mut *tx)
-            .await?;
+            let rows = sqlx::query("SELECT entity FROM entities WHERE tenant_id = $1 ORDER BY id")
+                .bind(tenant.as_str())
+                .fetch_all(&mut *tx)
+                .await?;
             tx.commit().await?;
             Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
         })
@@ -188,6 +194,85 @@ impl PgEntityStore {
                     Ok(Some(Err(e)))
                 }
             }
+        })
+    }
+
+    /// C5 batch create: ONE multi-row INSERT for the whole batch (§4 —
+    /// the jsonb elements form of UNNEST), one transaction, one commit.
+    /// Returns a created-flag per input item, input order preserved.
+    /// Duplicate ids within one batch are pre-deduped here: `ON CONFLICT DO
+    /// NOTHING` raises "cannot affect row a second time" otherwise — the
+    /// later duplicate reports `false` (5.5.11.1: the first instance wins).
+    pub fn batch_create(
+        &self,
+        tenant: &TenantId,
+        items: &[(String, Value)],
+    ) -> Result<Vec<bool>, sqlx::Error> {
+        let mut seen = std::collections::HashSet::new();
+        let mut payload = Vec::new();
+        for (id, doc) in items {
+            if seen.insert(id.as_str()) {
+                let (types, scopes, created, modified, expires) = extract(doc);
+                payload.push(serde_json::json!({
+                    "id": id, "doc": doc, "types": types, "scopes": scopes,
+                    "created": created, "modified": modified, "expires": expires,
+                }));
+            }
+        }
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(
+                "INSERT INTO entities
+                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at)
+                 SELECT $1, e->>'id', e->'doc',
+                        ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                        CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                             ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                        (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
+                        (e->>'expires')::timestamptz
+                 FROM jsonb_array_elements($2::jsonb) AS e
+                 ON CONFLICT (tenant_id, id) DO NOTHING
+                 RETURNING id",
+            )
+            .bind(tenant.as_str())
+            .bind(Value::Array(payload))
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            let mut created: std::collections::HashSet<String> =
+                rows.into_iter().map(|r| r.get::<String, _>(0)).collect();
+            // consume-once: a duplicate of a created id still reports false
+            Ok(items
+                .iter()
+                .map(|(id, _)| created.remove(id.as_str()))
+                .collect())
+        })
+    }
+
+    /// C5 batch delete: ONE statement, returning each deleted row's previous
+    /// document (the change-hook before-image).
+    pub fn batch_delete(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+    ) -> Result<Vec<(String, Value)>, sqlx::Error> {
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(
+                "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                 RETURNING id, entity",
+            )
+            .bind(tenant.as_str())
+            .bind(ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok(rows
+                .into_iter()
+                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+                .collect())
         })
     }
 

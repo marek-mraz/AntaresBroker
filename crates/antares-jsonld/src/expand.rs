@@ -133,8 +133,8 @@ pub fn expand_entity(
 
     for (key, v) in doc {
         match key.as_str() {
-            "id" | "@id" | "type" | "@type" | "@context" | "scope" | "createdAt"
-            | "modifiedAt" | "deletedAt" => continue,
+            "id" | "@id" | "type" | "@type" | "@context" | "scope" | "createdAt" | "modifiedAt"
+            | "deletedAt" => continue,
             _ => {}
         }
         if key.is_empty() {
@@ -197,9 +197,8 @@ pub fn is_ngsi_null(v: &Value) -> bool {
 /// A LanguageProperty deletion carries `{"@none": "urn:ngsi-ld:null"}`.
 pub fn is_ngsi_null_langmap(v: &Value) -> bool {
     is_ngsi_null(v)
-        || v.as_object().is_some_and(|m| {
-            m.len() == 1 && m.get("@none").is_some_and(is_ngsi_null)
-        })
+        || v.as_object()
+            .is_some_and(|m| m.len() == 1 && m.get("@none").is_some_and(is_ngsi_null))
 }
 
 /// Whole-instance deletion marker (merge patch, 5.5.12).
@@ -245,9 +244,17 @@ fn looks_like_instance(v: &Value) -> bool {
         o.get("type")
             .and_then(Value::as_str)
             .is_some_and(|t| ATTR_TYPES.contains(&t))
-            || ["value", "object", "languageMap", "vocab", "json", "valueList", "objectList"]
-                .iter()
-                .any(|k| o.contains_key(*k))
+            || [
+                "value",
+                "object",
+                "languageMap",
+                "vocab",
+                "json",
+                "valueList",
+                "objectList",
+            ]
+            .iter()
+            .any(|k| o.contains_key(*k))
     })
 }
 
@@ -344,9 +351,8 @@ fn expand_instance(
             match objv {
                 Value::String(s) => {
                     if !(opts.allow_null && s == "urn:ngsi-ld:null") {
-                        antares_model::EntityId::new(s).map_err(|_| {
-                            bad(format!("attribute {name}: object must be a URI"))
-                        })?;
+                        antares_model::EntityId::new(s)
+                            .map_err(|_| bad(format!("attribute {name}: object must be a URI")))?;
                     }
                 }
                 Value::Array(items) if !items.is_empty() => {
@@ -354,9 +360,8 @@ fn expand_instance(
                         let s = s.as_str().ok_or_else(|| {
                             bad(format!("attribute {name}: object entries must be URIs"))
                         })?;
-                        antares_model::EntityId::new(s).map_err(|_| {
-                            bad(format!("attribute {name}: object must be a URI"))
-                        })?;
+                        antares_model::EntityId::new(s)
+                            .map_err(|_| bad(format!("attribute {name}: object must be a URI")))?;
                     }
                 }
                 _ => return Err(bad(format!("attribute {name}: invalid object"))),
@@ -368,7 +373,9 @@ fn expand_instance(
                 .get("languageMap")
                 .ok_or_else(|| bad(format!("attribute {name}: needs languageMap")))?;
             let ok = lm.as_object().is_some_and(|m| {
-                m.values().all(|v| v.is_string() || v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
+                m.values().all(|v| {
+                    v.is_string() || v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+                })
             }) || (opts.allow_null && is_ngsi_null_langmap(lm))
                 || is_ngsi_null_langmap(lm);
             if !ok {
@@ -414,7 +421,9 @@ fn expand_instance(
                 .get("objectList")
                 .ok_or_else(|| bad(format!("attribute {name}: needs objectList")))?;
             if !l.is_array() && !(opts.allow_null && is_ngsi_null(l)) {
-                return Err(bad(format!("attribute {name}: objectList must be an array")));
+                return Err(bad(format!(
+                    "attribute {name}: objectList must be an array"
+                )));
             }
             out.insert("objectList".into(), l.clone());
         }
@@ -485,10 +494,7 @@ fn expand_instance(
 /// kept, others become sub-attributes — and crucially NO attribute-type
 /// inference happens (a fragment `{providedBy: …}` patches the sub-attribute,
 /// it is not a concise Property value).
-pub fn expand_attr_fragment(
-    obj: &Map<String, Value>,
-    ctx: &Context,
-) -> Result<Value, NgsiError> {
+pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<Value, NgsiError> {
     let bad = |m: String| NgsiError::BadRequestData(m);
     let mut out = Map::new();
     for (k, v) in obj {
@@ -652,9 +658,7 @@ mod tests {
     #[test]
     fn rejects_missing_type() {
         let doc = serde_json::json!({"id": "urn:ngsi-ld:Building:1"});
-        assert!(
-            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err()
-        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     #[test]
@@ -664,9 +668,7 @@ mod tests {
             "type": "Building",
             "a": {"type": "Property", "value": 1, "observedAt": "not-a-date"}
         });
-        assert!(
-            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err()
-        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     #[test]
@@ -676,9 +678,7 @@ mod tests {
             "type": "T",
             "rel": {"type": "Relationship", "object": "not a uri"}
         });
-        assert!(
-            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err()
-        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     #[test]
@@ -688,9 +688,7 @@ mod tests {
             "type": "T",
             "location": {"type": "Property", "value": 3}
         });
-        assert!(
-            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err()
-        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
         let ok = serde_json::json!({
             "id": "urn:ngsi-ld:A:1",
             "type": "T",

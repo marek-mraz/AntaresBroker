@@ -9,7 +9,7 @@ use crate::state::{now_iso, AppState};
 use antares_jsonld::Loader;
 use antares_model::NgsiError;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
@@ -32,7 +32,9 @@ fn details_param(params: &HashMap<String, String>) -> Result<bool, NgsiError> {
         None => Ok(false),
         Some(v) if v == "true" => Ok(true),
         Some(v) if v == "false" => Ok(false),
-        Some(v) => Err(NgsiError::BadRequestData(format!("invalid details value {v:?}"))),
+        Some(v) => Err(NgsiError::BadRequestData(format!(
+            "invalid details value {v:?}"
+        ))),
     }
 }
 
@@ -41,7 +43,9 @@ fn reload_param(params: &HashMap<String, String>) -> Result<bool, NgsiError> {
         None => Ok(false),
         Some(v) if v == "true" => Ok(true),
         Some(v) if v == "false" => Ok(false),
-        Some(v) => Err(NgsiError::BadRequestData(format!("invalid reload value {v:?}"))),
+        Some(v) => Err(NgsiError::BadRequestData(format!(
+            "invalid reload value {v:?}"
+        ))),
     }
 }
 
@@ -82,7 +86,7 @@ enum CtxEntry {
 }
 
 async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
-    if let Some(doc) = st.store.context_get(id) {
+    if let Some(doc) = st.store.context_get(id).ok()? {
         return Some(CtxEntry::Stored(doc));
     }
     // stored entries are also addressable by their full URL
@@ -90,6 +94,7 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
         if let Some(doc) = st
             .store
             .context_list()
+            .ok()?
             .into_iter()
             .find(|c| c["url"].as_str() == Some(id))
         {
@@ -138,11 +143,16 @@ pub async fn add_context(
             "createdAt": now_iso(),
             "body": {"@context": ctx_val.clone()},
         });
-        st.store.context_put(&local_id, doc);
+        st.store.context_put(&local_id, doc)?;
         st.loader.put_local(url.clone(), ctx_val).await;
-        let mut resp =
-            (StatusCode::CREATED, [(header::LOCATION, format!("/ngsi-ld/v1/jsonldContexts/{local_id}"))])
-                .into_response();
+        let mut resp = (
+            StatusCode::CREATED,
+            [(
+                header::LOCATION,
+                format!("/ngsi-ld/v1/jsonldContexts/{local_id}"),
+            )],
+        )
+            .into_response();
         echo_tenant(&tenant, &mut resp);
         Ok::<_, ApiError>(resp)
     };
@@ -158,7 +168,10 @@ pub async fn list_contexts(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
-        check_params(&params, &["kind", "details", "local", "limit", "offset", "count"])?;
+        check_params(
+            &params,
+            &["kind", "details", "local", "limit", "offset", "count"],
+        )?;
         let details = details_param(&params)?;
         let kind_filter = params.get("kind");
         if let Some(k) = kind_filter {
@@ -168,9 +181,14 @@ pub async fn list_contexts(
         }
         let keep = |k: &str| kind_filter.is_none_or(|f| f == k);
         // (url, localId, kind, createdAt, usage)
-        let mut entries: Vec<(String, String, String, String, Option<antares_jsonld::CtxUsage>)> =
-            Vec::new();
-        for c in st.store.context_list() {
+        let mut entries: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<antares_jsonld::CtxUsage>,
+        )> = Vec::new();
+        for c in st.store.context_list()? {
             let kind = c["kind"].as_str().unwrap_or("Hosted").to_owned();
             if !keep(&kind) {
                 continue;
@@ -333,17 +351,16 @@ pub async fn delete_context(
         }
         match entry {
             None => Err(NgsiError::ResourceNotFound(format!("@context {id} not found")).into()),
-            Some(CtxEntry::Core(_)) => Err(NgsiError::BadRequestData(
-                "the core @context cannot be deleted".into(),
-            )
-            .into()),
+            Some(CtxEntry::Core(_)) => {
+                Err(NgsiError::BadRequestData("the core @context cannot be deleted".into()).into())
+            }
             Some(CtxEntry::Cached(u)) => {
                 st.loader.usage_remove(&u.url).await;
                 Ok(no_content(&tenant))
             }
             Some(CtxEntry::Stored(doc)) => {
                 let lid = doc["localId"].as_str().unwrap_or(&id);
-                st.store.context_delete(lid);
+                st.store.context_delete(lid)?;
                 if let Some(url) = doc.get("url").and_then(Value::as_str) {
                     st.loader.usage_remove(url).await;
                 }

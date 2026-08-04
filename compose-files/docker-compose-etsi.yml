@@ -20,6 +20,13 @@ x-broker: &broker
   image: antares-local:latest
   network_mode: host
   restart: unless-stopped
+  # The suite's per-test mosquitto container (MQTT TPs, 058_*) lives on the
+  # bridge network compose-files_default (fixed subnet 172.29.9.0/24, created
+  # by dev/etsi-pipeline.sh); as its only container it always gets .2. The
+  # brokers are host-networked, so the container-DNS name the suite puts in
+  # subscription endpoints resolves via this static mapping instead.
+  extra_hosts:
+    - "ngsi-ld-test-suite-mosquitto-container:172.29.9.2"
 
 x-postgres: &postgres
   image: ${DB_IMAGE:-timescale/timescaledb-ha:pg17}
@@ -68,6 +75,8 @@ services:
       ANTARES_HOST_ALIAS: antares1
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # ETSI mocks (notification receivers, context servers) live on localhost
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
   antares2:
     <<: *broker
@@ -78,6 +87,8 @@ services:
       ANTARES_HOST_ALIAS: antares2
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # ETSI mocks (notification receivers, context servers) live on localhost
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5434/antares
   antares3:
     <<: *broker
@@ -88,6 +99,8 @@ services:
       ANTARES_HOST_ALIAS: antares3
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # ETSI mocks (notification receivers, context servers) live on localhost
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5435/antares
   antares4:
     <<: *broker
@@ -98,6 +111,8 @@ services:
       ANTARES_HOST_ALIAS: antares4
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # ETSI mocks (notification receivers, context servers) live on localhost
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5436/antares
   antares5:
     <<: *broker
@@ -108,6 +123,8 @@ services:
       ANTARES_HOST_ALIAS: antares5
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # ETSI mocks (notification receivers, context servers) live on localhost
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares
 
 # One volume per broker: `file` mode keeps its redb file here, and the volume

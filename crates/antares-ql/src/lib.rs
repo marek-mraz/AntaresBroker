@@ -44,10 +44,24 @@ pub enum QValue {
 pub fn parse_q(input: &str) -> Result<QNode, NgsiError> {
     let mut p = Parser { rest: input.trim() };
     let node = p.or_expr()?;
-    if p.rest.is_empty() {
-        Ok(node)
-    } else {
-        Err(bad(input, "trailing input"))
+    if !p.rest.is_empty() {
+        return Err(bad(input, "trailing input"));
+    }
+    // I2/§16.3: AST size cap — 403 TooComplexQuery, before any evaluation
+    // or SQL compilation sees the tree.
+    const MAX_Q_NODES: usize = 512;
+    if q_nodes(&node) > MAX_Q_NODES {
+        return Err(NgsiError::TooComplexQuery(format!(
+            "q expression exceeds {MAX_Q_NODES} nodes"
+        )));
+    }
+    Ok(node)
+}
+
+fn q_nodes(n: &QNode) -> usize {
+    match n {
+        QNode::And(xs) | QNode::Or(xs) => 1 + xs.iter().map(q_nodes).sum::<usize>(),
+        _ => 1,
     }
 }
 
@@ -244,6 +258,26 @@ mod tests {
     fn rejects_garbage() {
         for bad in ["", "==5", "a==\"unterminated", "a==1)"] {
             assert!(parse_q(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod complexity_tests {
+    use super::*;
+
+    #[test]
+    fn q_complexity_cap_is_403_class() {
+        // I2/§16.3: >512 nodes → TooComplexQuery, small trees untouched.
+        let ok = "a==1;b==2|c==3";
+        assert!(parse_q(ok).is_ok());
+        let huge = (0..600)
+            .map(|i| format!("a{i}==1"))
+            .collect::<Vec<_>>()
+            .join(";");
+        match parse_q(&huge) {
+            Err(NgsiError::TooComplexQuery(_)) => {}
+            other => panic!("expected TooComplexQuery, got {other:?}"),
         }
     }
 }

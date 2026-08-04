@@ -24,6 +24,18 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U antares"
           --health-interval 5s --health-timeout 3s --health-retries 20
+      # D5: the store integration tests run against BOTH temporal modes —
+      # this one carries the timescaledb extension (plus PostGIS).
+      timescaledb:
+        image: timescale/timescaledb-ha:pg17
+        env:
+          POSTGRES_USER: antares
+          POSTGRES_PASSWORD: antares
+          POSTGRES_DB: antares
+        ports: ["54330:5432"]
+        options: >-
+          --health-cmd "pg_isready -U antares"
+          --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,6 +56,20 @@ jobs:
       # feature matrix (§9.5): no defaults + all features
       - run: cargo test --workspace --no-default-features
       - run: cargo test --workspace --all-features
+      # D5: same store tests, timescale temporal mode (hypertable DDL branch,
+      # compression-vs-RLS ordering, D3 detection).
+      - name: Store tests against the timescale temporal mode
+        env:
+          ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54330/antares
+        run: |
+          PGPASSWORD=antares psql -h localhost -p 54330 -U antares -d antares \
+            -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
+          cargo test -p antares-sql
+      # D4/§16.5: license gate (nothing links TSL — Timescale is talked to
+      # over SQL only) + advisories.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories
       # SQL-injection guard (§16.2): no string-built queries outside antares-sql
       - name: no format! into SQL outside the compiler
         run: |

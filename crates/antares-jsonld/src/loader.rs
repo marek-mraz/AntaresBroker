@@ -54,10 +54,118 @@ pub struct CtxUsage {
     pub hits: u64,
 }
 
+/// §16.4 egress policy hook for @context fetches: scheme allowlist is
+/// enforced in `fetch`; this adds the private-range deny (loopback,
+/// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
+/// `ANTARES_EGRESS_ALLOW_PRIVATE=true` opts out — the ETSI/IOP stacks host
+/// their mock context servers on private addresses and need it.
+/// (DNS-pinned re-resolution + redirect caps land with the full I4 policy.)
+#[derive(Clone, Copy, Debug)]
+pub struct EgressPolicy {
+    pub allow_private: bool,
+}
+
+impl EgressPolicy {
+    pub fn from_env() -> Self {
+        Self {
+            allow_private: std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
+                .is_ok_and(|v| v == "true" || v == "1"),
+        }
+    }
+
+    fn ip_is_private(ip: std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    // fc00::/7 unique-local + fe80::/10 link-local
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
+        }
+    }
+
+    /// Deny-by-default for private destinations (§16.4). Resolves the host
+    /// once; any private address in the answer denies the fetch.
+    pub async fn check_host(&self, host: &str, port: u16) -> Result<(), String> {
+        if self.allow_private {
+            return Ok(());
+        }
+        if host.eq_ignore_ascii_case("localhost") {
+            return Err(format!("egress to {host} denied (private range)"));
+        }
+        if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            if Self::ip_is_private(ip) {
+                return Err(format!("egress to {ip} denied (private range)"));
+            }
+            return Ok(());
+        }
+        let addrs = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| format!("resolving {host}: {e}"))?;
+        for a in addrs {
+            if Self::ip_is_private(a.ip()) {
+                return Err(format!(
+                    "egress to {host} denied ({} is a private range)",
+                    a.ip()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 6.3.16: cache lifetime of a downloaded @context comes from its response
+/// headers. `None` = no explicit lifetime (cache until evicted/reloaded).
+fn ttl_from_headers(
+    cache_control: Option<&str>,
+    expires: Option<&str>,
+) -> Option<std::time::Duration> {
+    if let Some(cc) = cache_control {
+        let cc = cc.to_ascii_lowercase();
+        if cc.contains("no-store") || cc.contains("no-cache") {
+            return Some(std::time::Duration::ZERO);
+        }
+        if let Some(v) = cc
+            .split(',')
+            .filter_map(|d| d.trim().strip_prefix("max-age="))
+            .next()
+        {
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                return Some(std::time::Duration::from_secs(secs));
+            }
+        }
+    }
+    if let Some(exp) = expires {
+        // HTTP-date (RFC 7231); an unparsable or past Expires means "stale".
+        let when = chrono::DateTime::parse_from_rfc2822(exp).ok()?;
+        let delta = when.with_timezone(&chrono::Utc) - chrono::Utc::now();
+        return Some(delta.to_std().unwrap_or(std::time::Duration::ZERO));
+    }
+    None
+}
+
+/// @context responses above this size are refused (§16.4 response-size cap).
+const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
+
+struct FetchedDoc {
+    value: Arc<Value>,
+    /// 6.3.16 expiry deadline; `None` = cache until evicted.
+    stale_at: Option<std::time::Instant>,
+}
+
 pub struct Loader {
     http: reqwest::Client,
-    /// URL → parsed `@context` member of the fetched document.
-    fetched: RwLock<HashMap<String, Arc<Value>>>,
+    policy: EgressPolicy,
+    /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
+    fetched: RwLock<HashMap<String, FetchedDoc>>,
     /// cache key (serialized user context) → merged+frozen Context.
     merged: RwLock<HashMap<String, Arc<Context>>>,
     /// Core context, pre-merged, for requests without any user context.
@@ -77,6 +185,10 @@ impl Default for Loader {
 
 impl Loader {
     pub fn new() -> Self {
+        Self::with_policy(EgressPolicy::from_env())
+    }
+
+    pub fn with_policy(policy: EgressPolicy) -> Self {
         let mut core = Context::default();
         merge_context_value(&mut core, &pinned(CORE_CONTEXT).expect("pinned core"));
         core.freeze();
@@ -87,6 +199,7 @@ impl Loader {
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client"),
+            policy,
             fetched: RwLock::new(HashMap::new()),
             merged: RwLock::new(HashMap::new()),
             core_only: Arc::new(core),
@@ -175,6 +288,14 @@ impl Loader {
         let urls = std::sync::Mutex::new(Vec::new());
         self.merge_entry(&mut ctx, user, 0, &urls).await?;
         let urls = urls.into_inner().unwrap_or_default();
+        // I2/§16.3: fetch-count cap per resolution — a hostile @context tree
+        // must not turn one request into an unbounded crawl.
+        if urls.len() > 32 {
+            return Err(NgsiError::LdContextNotAvailable(format!(
+                "@context resolution touched {} URLs (limit 32)",
+                urls.len()
+            )));
+        }
         if count {
             for url in &urls {
                 self.bump_url(url).await; // only after successful resolution
@@ -186,10 +307,7 @@ impl Loader {
         ctx.source = user.clone();
         let arc = Arc::new(ctx);
         self.merged_urls.write().await.insert(key.clone(), urls);
-        self.merged
-            .write()
-            .await
-            .insert(key, Arc::clone(&arc));
+        self.merged.write().await.insert(key, Arc::clone(&arc));
         Ok(arc)
     }
 
@@ -223,9 +341,7 @@ impl Loader {
                 }
                 Value::Object(obj) => ctx.merge_object(obj),
                 Value::Null => Ok(()),
-                _ => Err(NgsiError::BadRequestData(
-                    "invalid @context entry".into(),
-                )),
+                _ => Err(NgsiError::BadRequestData("invalid @context entry".into())),
             }
         })
     }
@@ -236,17 +352,33 @@ impl Loader {
     }
 
     /// Fetch a remote context document, returning its `@context` member.
+    /// Cache hits honour the 6.3.16 lifetime; stale entries are re-fetched,
+    /// and a changed body invalidates the merged-context cache.
     async fn fetch(&self, url: &str) -> Result<Arc<Value>, NgsiError> {
         if let Some(v) = pinned(url) {
             return Ok(Arc::new(v));
         }
+        let mut stale_value: Option<Arc<Value>> = None;
         if let Some(hit) = self.fetched.read().await.get(url) {
-            return Ok(Arc::clone(hit));
+            match hit.stale_at {
+                Some(deadline) if std::time::Instant::now() >= deadline => {
+                    stale_value = Some(Arc::clone(&hit.value));
+                }
+                _ => return Ok(Arc::clone(&hit.value)),
+            }
         }
         let err = |m: String| NgsiError::LdContextNotAvailable(m);
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(err(format!("unsupported @context URL: {url}")));
         }
+        // §16.4 SSRF hook: deny private destinations unless configured.
+        let parsed = reqwest::Url::parse(url).map_err(|e| err(format!("bad URL {url}: {e}")))?;
+        let host = parsed.host_str().unwrap_or_default().to_owned();
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        self.policy
+            .check_host(&host, port)
+            .await
+            .map_err(|e| err(format!("fetching {url}: {e}")))?;
         let resp = self
             .http
             .get(url)
@@ -257,29 +389,59 @@ impl Loader {
         if !resp.status().is_success() {
             return Err(err(format!("fetching {url}: HTTP {}", resp.status())));
         }
-        let doc: Value = resp
-            .json()
+        let ttl = ttl_from_headers(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            resp.headers().get("expires").and_then(|v| v.to_str().ok()),
+        );
+        // §16.4: bounded response size (504 LdContextNotAvailable on breach).
+        if resp
+            .content_length()
+            .is_some_and(|l| l as usize > MAX_CONTEXT_BYTES)
+        {
+            return Err(err(format!("{url}: @context document too large")));
+        }
+        let bytes = resp
+            .bytes()
             .await
+            .map_err(|e| err(format!("reading {url}: {e}")))?;
+        if bytes.len() > MAX_CONTEXT_BYTES {
+            return Err(err(format!("{url}: @context document too large")));
+        }
+        let doc: Value = serde_json::from_slice(&bytes)
             .map_err(|e| err(format!("{url} is not a JSON document: {e}")))?;
         let ctx_val = doc
             .get("@context")
             .cloned()
             .ok_or_else(|| err(format!("{url} has no @context member")))?;
         let arc = Arc::new(ctx_val);
-        self.fetched
-            .write()
-            .await
-            .insert(url.to_owned(), Arc::clone(&arc));
+        if stale_value.is_some_and(|old| *old != *arc) {
+            // Refreshed content differs: merged contexts built on the old
+            // copy are invalid.
+            self.merged.write().await.clear();
+            self.merged_urls.write().await.clear();
+        }
+        self.fetched.write().await.insert(
+            url.to_owned(),
+            FetchedDoc {
+                value: Arc::clone(&arc),
+                stale_at: ttl.map(|d| std::time::Instant::now() + d),
+            },
+        );
         Ok(arc)
     }
 
     /// Insert a locally-hosted context (jsonldContexts API) so later
     /// resolutions of `url` need no network round-trip.
     pub async fn put_local(&self, url: String, context_value: Value) {
-        self.fetched
-            .write()
-            .await
-            .insert(url, Arc::new(context_value));
+        self.fetched.write().await.insert(
+            url,
+            FetchedDoc {
+                value: Arc::new(context_value),
+                stale_at: None, // hosted locally: no 6.3.16 lifetime
+            },
+        );
         self.merged.write().await.clear();
     }
 
@@ -326,7 +488,67 @@ mod tests {
             c.expand_key("unknownTerm"),
             "https://uri.etsi.org/ngsi-ld/default-context/unknownTerm"
         );
-        assert_eq!(c.compact_iri("https://uri.etsi.org/ngsi-ld/location"), "location");
+        assert_eq!(
+            c.compact_iri("https://uri.etsi.org/ngsi-ld/location"),
+            "location"
+        );
+    }
+
+    #[test]
+    fn cache_lifetime_from_headers() {
+        // 6.3.16: Cache-Control wins, no-store/no-cache = immediately stale,
+        // Expires as the fallback, neither = cache until evicted.
+        assert_eq!(
+            ttl_from_headers(Some("max-age=60"), None),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            ttl_from_headers(Some("public, max-age=5, immutable"), None),
+            Some(std::time::Duration::from_secs(5))
+        );
+        assert_eq!(
+            ttl_from_headers(Some("no-store"), None),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(ttl_from_headers(None, None), None);
+        let past = ttl_from_headers(None, Some("Tue, 01 Jan 2019 00:00:00 GMT"));
+        assert_eq!(
+            past,
+            Some(std::time::Duration::ZERO),
+            "past Expires = stale"
+        );
+        let future = ttl_from_headers(None, Some("Fri, 01 Jan 2100 00:00:00 GMT"));
+        assert!(future.expect("parsed") > std::time::Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn egress_policy_denies_private_ranges() {
+        let deny = EgressPolicy {
+            allow_private: false,
+        };
+        for host in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.9",
+            "172.16.5.5",
+            "169.254.169.254",
+            "localhost",
+            "::1",
+            "0.0.0.0",
+        ] {
+            assert!(
+                deny.check_host(host, 80).await.is_err(),
+                "{host} must be denied"
+            );
+        }
+        assert!(
+            deny.check_host("93.184.216.34", 443).await.is_ok(),
+            "public IP allowed"
+        );
+        let allow = EgressPolicy {
+            allow_private: true,
+        };
+        assert!(allow.check_host("127.0.0.1", 80).await.is_ok());
     }
 
     #[tokio::test]

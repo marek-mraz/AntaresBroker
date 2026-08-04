@@ -2,8 +2,14 @@
 # (non-root, read-only rootfs friendly — deep-analysis §16.5).
 FROM rust:1-slim AS build
 WORKDIR /src
+# §16.5: release binaries embed their dependency list (SBOM) via
+# cargo-auditable — `cargo audit bin /antares` can then verify a shipped
+# broker against advisories with no source tree at hand. Installed BEFORE
+# the source COPY so the layer caches across source changes.
+RUN cargo install cargo-auditable --locked
 COPY . .
-RUN cargo build --release -p antares-broker && mkdir /data-init
+RUN cargo auditable build --release -p antares-broker \
+ && mkdir /data-init
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/antares /antares

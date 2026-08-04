@@ -5,13 +5,13 @@
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
-use antares_model::{NgsiError, TenantId};
+use antares_model::NgsiError;
 use antares_sql::store::Kind;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
@@ -179,15 +179,43 @@ pub fn normalize_subscription(
                 antares_model::EntityId::new(uri)
                     .map_err(|_| bad(format!("endpoint.uri is not a valid URI: {uri:?}")))?;
                 let scheme = uri.split(':').next().unwrap_or("");
-                if !["http", "https", "mqtt", "mqtts"].contains(&scheme) {
+                // G3: a scheme with no registered sink is 422 at creation.
+                #[cfg(feature = "mqtt")]
+                let supported = ["http", "https", "mqtt", "mqtts"];
+                #[cfg(not(feature = "mqtt"))]
+                let supported = ["http", "https"];
+                if !supported.contains(&scheme) {
                     return Err(NgsiError::OperationNotSupported(format!(
                         "unsupported endpoint scheme {scheme:?}"
                     )));
                 }
+                #[cfg(feature = "mqtt")]
+                if scheme.starts_with("mqtt") {
+                    // 7.2: endpoint URI shape and Table 7.2-1 params validate
+                    // at creation, not at first delivery.
+                    antares_notifier::mqtt::MqttEndpoint::parse(uri)?;
+                    let pairs = ep
+                        .get("notifierInfo")
+                        .and_then(Value::as_array)
+                        .map(|ni| {
+                            ni.iter()
+                                .filter_map(|kv| {
+                                    Some((kv.get("key")?.as_str()?, kv.get("value")?.as_str()?))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    antares_notifier::mqtt::MqttParams::from_notifier_info(pairs)?;
+                }
                 let member_names = |key: &str| -> Vec<String> {
                     n.get(key)
                         .and_then(Value::as_array)
-                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
                         .unwrap_or_default()
                 };
                 let pick = member_names("pick");
@@ -204,8 +232,12 @@ pub fn normalize_subscription(
                     ));
                 }
                 if let Some(acc) = ep.get("accept").and_then(Value::as_str) {
-                    if !["application/json", "application/ld+json", "application/geo+json"]
-                        .contains(&acc)
+                    if ![
+                        "application/json",
+                        "application/ld+json",
+                        "application/geo+json",
+                    ]
+                    .contains(&acc)
                     {
                         return Err(bad(format!("invalid endpoint accept {acc:?}")));
                     }
@@ -242,9 +274,17 @@ pub fn normalize_subscription(
                 }
                 out.insert("isActive".into(), v.clone());
             }
-            "scopeQ" | "lang" | "subscriptionName" | "name" | "description"
-            | "notificationTrigger" | "temporalQ" | "csf" | "jsonldContext"
-            | "ngsildConformance" | "datasetId" => {
+            "scopeQ"
+            | "lang"
+            | "subscriptionName"
+            | "name"
+            | "description"
+            | "notificationTrigger"
+            | "temporalQ"
+            | "csf"
+            | "jsonldContext"
+            | "ngsildConformance"
+            | "datasetId" => {
                 out.insert(k.clone(), v.clone());
             }
             // tolerant reader: keep unknown members (§15.1)
@@ -391,7 +431,6 @@ async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Resul
     Ok(())
 }
 
-
 pub async fn create(
     st: &AppState,
     kind: Kind,
@@ -438,13 +477,15 @@ pub async fn create(
                         "createdAt": ts,
                         "body": {"@context": parsed.ctx.source.clone()},
                     }),
-                );
-                st.loader.put_local(url.clone(), parsed.ctx.source.clone()).await;
+                )?;
+                st.loader
+                    .put_local(url.clone(), parsed.ctx.source.clone())
+                    .await;
                 norm.insert("jsonldContext".into(), Value::String(url));
             }
         }
     }
-    if !st.store.create(&tenant, kind, &id, Value::Object(norm)) {
+    if !st.store.create(&tenant, kind, &id, Value::Object(norm))? {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
     }
     if kind == Kind::CSourceSubscription {
@@ -475,7 +516,7 @@ pub async fn retrieve(
     let ctx = request_context(&st.loader, headers).await?;
     let doc = st
         .store
-        .get(&tenant, kind, id)
+        .get(&tenant, kind, id)?
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("subscription {id} not found")))?;
     let sys = params
         .get("options")
@@ -491,18 +532,20 @@ pub async fn list(
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
-    check_params(params, &["limit", "offset", "count", "options", "format", "local"])?;
+    check_params(
+        params,
+        &["limit", "offset", "count", "options", "format", "local"],
+    )?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
-    let all = st.store.list(&tenant, kind);
-    let (page, count_hdr, links) =
-        crate::entities::paginate_accept(
-            st,
-            params,
-            all,
-            &format!("/ngsi-ld/v1/{}", resource_path(kind)),
-            accept,
-        )?;
+    let all = st.store.list(&tenant, kind)?;
+    let (page, count_hdr, links) = crate::entities::paginate_accept(
+        st,
+        params,
+        all,
+        &format!("/ngsi-ld/v1/{}", resource_path(kind)),
+        accept,
+    )?;
     let sys = params
         .get("options")
         .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
@@ -563,7 +606,7 @@ pub async fn update(
         }
         target.insert("modifiedAt".into(), Value::String(ts.clone()));
         Ok::<(), NgsiError>(())
-    });
+    })?;
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("subscription {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
@@ -591,7 +634,7 @@ pub async fn delete(
     antares_model::EntityId::new(id)
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
-    if st.store.delete(&tenant, kind, id) {
+    if st.store.delete(&tenant, kind, id)? {
         Ok(no_content(&tenant))
     } else {
         Err(NgsiError::ResourceNotFound(format!("subscription {id} not found")).into())
@@ -676,6 +719,7 @@ route4!(
 mod tests {
     use super::*;
     use antares_jsonld::Loader;
+    use serde_json::json;
 
     #[test]
     fn validates_subscription() {
@@ -696,12 +740,9 @@ mod tests {
             "type": "Subscription",
             "entities": [{"type": "Building"}]
         });
-        assert!(normalize_subscription(
-            missing_notification.as_object().unwrap(),
-            &ctx,
-            false
-        )
-        .is_err());
+        assert!(
+            normalize_subscription(missing_notification.as_object().unwrap(), &ctx, false).is_err()
+        );
 
         let past_expiry = json!({
             "type": "Subscription",
@@ -709,8 +750,6 @@ mod tests {
             "expiresAt": "2020-01-01T00:00:00Z",
             "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}}
         });
-        assert!(
-            normalize_subscription(past_expiry.as_object().unwrap(), &ctx, false).is_err()
-        );
+        assert!(normalize_subscription(past_expiry.as_object().unwrap(), &ctx, false).is_err());
     }
 }

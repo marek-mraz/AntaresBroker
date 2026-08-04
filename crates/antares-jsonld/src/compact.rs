@@ -6,9 +6,24 @@ use serde_json::{Map, Value};
 
 /// Entity-instance members whose values stay verbatim during compaction.
 const VERBATIM: &[&str] = &[
-    "type", "value", "object", "datasetId", "observedAt", "unitCode", "lang", "languageMap",
-    "json", "valueList", "objectList", "createdAt", "modifiedAt", "deletedAt", "instanceId",
-    "previousValue", "previousObject", "previousLanguageMap",
+    "type",
+    "value",
+    "object",
+    "datasetId",
+    "observedAt",
+    "unitCode",
+    "lang",
+    "languageMap",
+    "json",
+    "valueList",
+    "objectList",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "instanceId",
+    "previousValue",
+    "previousObject",
+    "previousLanguageMap",
 ];
 
 /// Compact an internal expanded entity for output.

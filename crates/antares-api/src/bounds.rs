@@ -1,0 +1,135 @@
+//! Input bounds wall (tasks.md I2; §16.3): every request-shaped resource has
+//! a configured cap, rejected with the spec-shaped error. One middleware
+//! enforces the transport-level caps (URI length 414, body size 413, JSON
+//! nesting 400) — size and depth are checked BEFORE any parse (the WS-44
+//! order). The per-feature caps (batch count, joinLevel, @context fetch
+//! count, q= complexity, result ceiling) live at their parse points.
+//! Rejections are counted and exported via /q/health (observability, §16.3).
+
+use axum::body::{Body, Bytes};
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Hard caps (v1: compile-time constants — a config file is a later knob;
+/// every value is spec-shaped on rejection).
+pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // → bare 413 (6.3.4)
+pub const MAX_URI_BYTES: usize = 8 * 1024; // → bare 414
+pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData (§16.3)
+pub const MAX_BATCH_ITEMS: usize = 1_000; // → 400 BadRequestData
+pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
+pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
+pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
+
+/// Rejection counters, exported by /q/health.
+#[derive(Default)]
+pub struct LimitStats {
+    pub uri_too_long: AtomicU64,
+    pub body_too_large: AtomicU64,
+    pub body_too_deep: AtomicU64,
+}
+
+impl LimitStats {
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "maxBodyBytes": MAX_BODY_BYTES,
+            "maxUriBytes": MAX_URI_BYTES,
+            "maxJsonDepth": MAX_JSON_DEPTH,
+            "maxBatchItems": MAX_BATCH_ITEMS,
+            "maxJoinLevel": MAX_JOIN_LEVEL,
+            "maxContextFetches": MAX_CONTEXT_FETCHES,
+            "maxQNodes": MAX_Q_NODES,
+            "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
+            "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
+            "rejectedBodyTooDeep": self.body_too_deep.load(Ordering::Relaxed),
+        })
+    }
+}
+
+/// Maximum brace/bracket nesting of a JSON byte stream, string-aware.
+/// A scan, not a parse — depth is checked before serde ever runs (WS-44).
+pub fn json_depth(bytes: &[u8]) -> usize {
+    let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
+    for &b in bytes {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' | b'[' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
+pub async fn bounds_layer(
+    axum::extract::State(st): axum::extract::State<crate::AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if req.uri().to_string().len() > MAX_URI_BYTES {
+        st.limits.uri_too_long.fetch_add(1, Ordering::Relaxed);
+        return StatusCode::URI_TOO_LONG.into_response(); // bare, like 6.3.4
+    }
+    let has_body = matches!(req.method().as_str(), "POST" | "PATCH" | "PUT" | "DELETE");
+    if !has_body {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes: Bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            st.limits.body_too_large.fetch_add(1, Ordering::Relaxed);
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response(); // bare 413
+        }
+    };
+    let is_json = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("json"));
+    if is_json && json_depth(&bytes) > MAX_JSON_DEPTH {
+        st.limits.body_too_deep.fetch_add(1, Ordering::Relaxed);
+        return crate::negotiate::ApiError::from(antares_model::NgsiError::BadRequestData(
+            format!("JSON nesting exceeds the {MAX_JSON_DEPTH}-level limit"),
+        ))
+        .into_response();
+    }
+    next.run(Request::from_parts(parts, Body::from(bytes)))
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_scan_is_string_aware() {
+        assert_eq!(json_depth(br#"{"a": [1, {"b": 2}]}"#), 3);
+        assert_eq!(
+            json_depth(br#"{"a": "}]}]}]{[{["}"#),
+            1,
+            "braces in strings don't count"
+        );
+        assert_eq!(
+            json_depth(br#"{"a": "\"}"}"#),
+            1,
+            "escaped quotes stay in-string"
+        );
+        let deep = "[".repeat(100) + &"]".repeat(100);
+        assert_eq!(json_depth(deep.as_bytes()), 100);
+    }
+}

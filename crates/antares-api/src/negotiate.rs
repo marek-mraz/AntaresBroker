@@ -29,9 +29,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
                 continue;
             }
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let dec = |s: &str| {
-                percent_decode(s.replace('+', " ").as_bytes())
-            };
+            let dec = |s: &str| percent_decode(s.replace('+', " ").as_bytes());
             let (k, v) = (dec(k), dec(v));
             if !v.is_empty() {
                 map.insert(k, v);
@@ -300,10 +298,7 @@ pub fn check_params(
 ) -> ApiResult<()> {
     for k in params.keys() {
         if !allowed.contains(&k.as_str()) {
-            return Err(NgsiError::InvalidRequest(format!(
-                "unknown query parameter {k:?}"
-            ))
-            .into());
+            return Err(NgsiError::InvalidRequest(format!("unknown query parameter {k:?}")).into());
         }
     }
     Ok(())

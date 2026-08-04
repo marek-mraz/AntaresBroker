@@ -23,5 +23,10 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+# mqtt e2e (G1/G4 local proof): sync rumqttc client against a live mosquitto
+rumqttc = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

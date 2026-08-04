@@ -70,7 +70,15 @@ fn navigate<'a>(v: &'a Value, path: &[String]) -> Option<&'a Value> {
 
 fn comparable_value(inst: &Value) -> Option<&Value> {
     let obj = inst.as_object()?;
-    for k in ["value", "object", "languageMap", "vocab", "json", "valueList", "objectList"] {
+    for k in [
+        "value",
+        "object",
+        "languageMap",
+        "vocab",
+        "json",
+        "valueList",
+        "objectList",
+    ] {
         if let Some(v) = obj.get(k) {
             return Some(v);
         }

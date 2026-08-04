@@ -13,6 +13,9 @@ members = [
     "crates/antares-registry",
     "crates/antares-broker",
 ]
+# §16.2 fuzz harness: own lockfile/profile, built only by cargo-fuzz on
+# nightly (.github/workflows/fuzz.yml) — never part of the normal build.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,7 +31,7 @@ antares-sql = { path = "crates/antares-sql" }
 antares-bus = { path = "crates/antares-bus" }
 antares-api = { path = "crates/antares-api" }
 antares-matcher = { path = "crates/antares-matcher" }
-antares-notifier = { path = "crates/antares-notifier" }
+antares-notifier = { path = "crates/antares-notifier", default-features = false }
 antares-temporal = { path = "crates/antares-temporal" }
 antares-registry = { path = "crates/antares-registry" }
 
@@ -45,6 +48,7 @@ tower-http = { version = "0.6", features = ["normalize-path"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redb = "4.1"
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "json", "chrono", "uuid", "migrate", "macros"] }
 thiserror = "2"
 tracing = "0.1"

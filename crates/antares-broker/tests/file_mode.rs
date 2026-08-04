@@ -20,6 +20,9 @@ fn http(port: u16, request: &str) -> String {
 
 fn start(port: u16, dir: &Path, store: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_antares"))
+        // harness vars (e.g. ANTARES_TEST_DATABASE_URL) would trip the
+        // unknown-config-is-fatal guard (§14.3) — strip them.
+        .env_remove("ANTARES_TEST_DATABASE_URL")
         .env("ANTARES_HTTP_PORT", port.to_string())
         .env("ANTARES_STORE", store)
         .env("ANTARES_DATA_DIR", dir)
@@ -31,7 +34,7 @@ fn wait_healthy(port: u16) -> String {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
-            let req = format!("GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            let req = "GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_string();
             if s.write_all(req.as_bytes()).is_ok() {
                 let mut out = String::new();
                 let _ = s.read_to_string(&mut out);
@@ -40,7 +43,10 @@ fn wait_healthy(port: u16) -> String {
                 }
             }
         }
-        assert!(Instant::now() < deadline, "broker on :{port} never got healthy");
+        assert!(
+            Instant::now() < deadline,
+            "broker on :{port} never got healthy"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -55,7 +61,13 @@ fn tempdir(name: &str) -> PathBuf {
 #[test]
 fn kill_dash_nine_right_after_201_loses_nothing() {
     let dir = tempdir("kill9");
-    let port = 21000 + (std::process::id() % 20000) as u16;
+    // Ask the OS for a free port (racing other parallel test binaries on a
+    // pid-derived port was flaky).
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe")
+        .local_addr()
+        .expect("addr")
+        .port();
     let entity = r#"{"id":"urn:ngsi-ld:Test:kill9","type":"Test"}"#;
 
     // 1. create, get the 201 ack, SIGKILL immediately — no drain, no grace.
@@ -81,7 +93,10 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
         port,
         "GET /ngsi-ld/v1/entities/urn:ngsi-ld:Test:kill9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
     );
-    assert!(resp.starts_with("HTTP/1.1 200"), "retrieve after restart: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "retrieve after restart: {resp}"
+    );
     assert!(resp.contains("urn:ngsi-ld:Test:kill9"));
 
     // 3. delete, SIGKILL, restart: the delete reached redb — recreate gets
@@ -100,7 +115,10 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
         port,
         "GET /ngsi-ld/v1/entities/urn:ngsi-ld:Test:kill9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
     );
-    assert!(resp.starts_with("HTTP/1.1 404"), "deleted stays deleted: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 404"),
+        "deleted stays deleted: {resp}"
+    );
     let resp = http(
         port,
         &format!(
@@ -120,6 +138,9 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
 fn unknown_store_mode_is_fatal() {
     let dir = tempdir("badmode");
     let status = start(23999, &dir, "bogus").wait().expect("wait");
-    assert!(!status.success(), "unknown ANTARES_STORE must be fatal (A2)");
+    assert!(
+        !status.success(),
+        "unknown ANTARES_STORE must be fatal (A2)"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

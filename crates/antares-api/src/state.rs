@@ -1,13 +1,14 @@
 //! Shared application state.
 
 use antares_jsonld::Loader;
+use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
 use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Store>,
+    pub store: Arc<AnyStore>,
     /// Active store backend ("memory" | "file" | …) — reported by `/q/health`
     /// (A4; NOT in `/info/sourceIdentity`, which is a spec resource).
     pub store_mode: String,
@@ -25,15 +26,24 @@ pub struct AppState {
     /// Federation-forwarding client — longer deadline: the ETSI mock replies
     /// to unstubbed forwards only when the robot side wakes (up to ~5 s).
     pub fed_http: reqwest::Client,
+    /// Clause 7 MQTT delivery: bounded pooled sink (L5/U1 lessons).
+    #[cfg(feature = "mqtt")]
+    pub mqtt: Arc<antares_notifier::mqtt::MqttSink>,
+    /// I2 bounds-wall rejection counters (exported by /q/health).
+    pub limits: Arc<crate::bounds::LimitStats>,
 }
 
 impl AppState {
     /// In-memory store (tests, `memory` mode).
     pub fn new(host_alias: String) -> Self {
-        Self::with_store(host_alias, Arc::new(Store::default()), "memory".into())
+        Self::with_store(
+            host_alias,
+            Arc::new(AnyStore::Mem(Store::default())),
+            "memory".into(),
+        )
     }
 
-    pub fn with_store(host_alias: String, store: Arc<Store>, store_mode: String) -> Self {
+    pub fn with_store(host_alias: String, store: Arc<AnyStore>, store_mode: String) -> Self {
         Self {
             store,
             store_mode,
@@ -57,12 +67,14 @@ impl AppState {
                 .http1_title_case_headers()
                 .build()
                 .expect("fed http client"),
+            #[cfg(feature = "mqtt")]
+            mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
+            limits: Arc::new(crate::bounds::LimitStats::default()),
         }
     }
 }
 
 /// Server-managed timestamp, ISO 8601 UTC with milliseconds.
 pub fn now_iso() -> String {
-    chrono::Utc::now()
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }

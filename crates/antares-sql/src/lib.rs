@@ -3,7 +3,9 @@
 //! Phase-0 seed: the q= compiler emits parameterized SQL — structure from the
 //! compiler, values as binds ONLY (§16.2). sqlx store implementations land in
 //! phase 1; migrations live in `migrations/`.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod maintenance;
 pub mod pg;
 pub mod store;
 

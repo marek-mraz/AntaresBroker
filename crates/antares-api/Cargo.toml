@@ -10,13 +10,20 @@ antares-model = { workspace = true }
 antares-jsonld = { workspace = true }
 antares-ql = { workspace = true }
 antares-sql = { workspace = true }
+antares-notifier = { workspace = true, default-features = false }
 axum = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+
+[features]
+# Clause 7 MQTT notification binding (G1); on by default — the 058 TPs need it.
+default = ["mqtt"]
+mqtt = ["antares-notifier/mqtt"]
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

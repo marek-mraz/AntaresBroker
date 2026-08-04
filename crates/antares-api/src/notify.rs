@@ -28,9 +28,11 @@ enum ChangeClass {
 pub fn wire(state: &AppState) {
     let (tx, mut rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Option<Value>, Option<Value>)>();
-    state.store.set_change_hook(Box::new(move |tenant, before, after| {
-        let _ = tx.send((tenant.as_str().to_owned(), before, after));
-    }));
+    state
+        .store
+        .set_change_hook(Box::new(move |tenant, before, after| {
+            let _ = tx.send((tenant.as_str().to_owned(), before, after));
+        }));
     let st = state.clone();
     tokio::spawn(async move {
         while let Some((tenant, before, after)) = rx.recv().await {
@@ -93,10 +95,8 @@ fn diff(before: Option<&Value>, after: Option<&Value>) -> Vec<(String, ChangeCla
             (Some(x), Some(y)) => {
                 // instance-level deletion (by datasetId) counts as
                 // attributeDeleted even when other instances survive (5.8.6)
-                let bx: Vec<&Value> =
-                    x.as_array().map(|a| a.iter().collect()).unwrap_or_default();
-                let by: Vec<&Value> =
-                    y.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+                let bx: Vec<&Value> = x.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+                let by: Vec<&Value> = y.as_array().map(|a| a.iter().collect()).unwrap_or_default();
                 let removed = bx
                     .iter()
                     .any(|bi| !by.iter().any(|ai| instance_ds(ai) == instance_ds(bi)));
@@ -129,8 +129,7 @@ fn is_active(sub: &Value) -> bool {
     if sub.get("isActive") == Some(&Value::Bool(false)) {
         return false;
     }
-    !sub
-        .get("expiresAt")
+    !sub.get("expiresAt")
         .and_then(Value::as_str)
         .is_some_and(|e| e < now_iso().as_str())
 }
@@ -155,9 +154,10 @@ fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
             }
         });
         let id_ok = e.get("id").and_then(Value::as_str).is_none_or(|i| i == id);
-        let pat_ok = e.get("idPattern").and_then(Value::as_str).is_none_or(|p| {
-            regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some())
-        });
+        let pat_ok = e
+            .get("idPattern")
+            .and_then(Value::as_str)
+            .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()));
         t_ok && id_ok && pat_ok
     })
 }
@@ -234,7 +234,11 @@ async fn sub_context(st: &AppState, sub: &Value) -> Arc<Context> {
         .cloned()
         .or_else(|| sub.get("__context").cloned());
     match source {
-        Some(v) if !v.is_null() => st.loader.resolve_quiet(&v).await.unwrap_or_else(|_| st.loader.core()),
+        Some(v) if !v.is_null() => st
+            .loader
+            .resolve_quiet(&v)
+            .await
+            .unwrap_or_else(|_| st.loader.core()),
         _ => st.loader.core(),
     }
 }
@@ -333,9 +337,14 @@ fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
         ..Default::default()
     };
     let names = |key: &str| -> Option<Vec<String>> {
-        n.and_then(|n| n.get(key)).and_then(Value::as_array).map(|a| {
-            a.iter().filter_map(Value::as_str).map(str::to_owned).collect()
-        })
+        n.and_then(|n| n.get(key))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
     };
     if let Some(attrs) = names("attributes") {
         repr.attrs = Some(attrs.iter().map(|a| ctx.expand_key(a)).collect());
@@ -357,7 +366,10 @@ fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
     }
     if let Some(ds) = sub.get("datasetId").and_then(Value::as_array) {
         repr.dataset_id = Some(
-            ds.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            ds.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
         );
     }
     let join = n
@@ -408,15 +420,13 @@ fn build_data(
                         if ENTITY_META.contains(&k.as_str()) {
                             continue;
                         }
-                        let Some(arr) = v.as_array_mut() else { continue };
+                        let Some(arr) = v.as_array_mut() else {
+                            continue;
+                        };
                         for inst in arr {
-                            let Some(bi) = b
-                                .get(k)
-                                .and_then(Value::as_array)
-                                .and_then(|ba| {
-                                    ba.iter().find(|x| instance_ds(x) == instance_ds(inst))
-                                })
-                            else {
+                            let Some(bi) = b.get(k).and_then(Value::as_array).and_then(|ba| {
+                                ba.iter().find(|x| instance_ds(x) == instance_ds(inst))
+                            }) else {
                                 continue;
                             };
                             let atype = inst
@@ -457,7 +467,9 @@ fn build_data(
                         }
                         vec![ts]
                     } else {
-                        gone.iter().map(|di| tombstone(di, sys, show, now)).collect()
+                        gone.iter()
+                            .map(|di| tombstone(di, sys, show, now))
+                            .collect()
                     };
                     if let Some(arr) = doc
                         .as_object_mut()
@@ -541,8 +553,13 @@ async fn process_change(
     before: Option<Value>,
     after: Option<Value>,
 ) {
-    let Ok(tenant) = TenantId::new(tenant_str) else { return };
-    let subs = st.store.list(&tenant, Kind::Subscription);
+    let Ok(tenant) = TenantId::new(tenant_str) else {
+        return;
+    };
+    let subs = st
+        .store
+        .list(&tenant, Kind::Subscription)
+        .unwrap_or_default();
     if subs.is_empty() {
         return;
     }
@@ -561,7 +578,12 @@ async fn process_change(
         let triggers: Vec<String> = sub
             .get("notificationTrigger")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
             .unwrap_or_else(|| DEFAULT_TRIGGERS.iter().map(|s| s.to_string()).collect());
         // which attribute-level changes this sub cares about
         let watched: Option<Vec<&str>> = sub
@@ -604,8 +626,7 @@ async fn process_change(
         } else {
             Vec::new()
         };
-        let entity_deleted_fired =
-            after.is_none() && triggers.iter().any(|t| t == "entityDeleted");
+        let entity_deleted_fired = after.is_none() && triggers.iter().any(|t| t == "entityDeleted");
         let now = now_iso();
         let data = build_data(
             st,
@@ -624,9 +645,15 @@ async fn process_change(
 
 /// timeInterval subscriptions: fire when due, with all matching entities.
 async fn interval_tick(st: &AppState) {
-    for tenant_str in st.store.subscription_tenants() {
-        let Ok(tenant) = TenantId::new(&tenant_str) else { continue };
-        for sub in st.store.list(&tenant, Kind::Subscription) {
+    for tenant_str in st.store.subscription_tenants().unwrap_or_default() {
+        let Ok(tenant) = TenantId::new(&tenant_str) else {
+            continue;
+        };
+        for sub in st
+            .store
+            .list(&tenant, Kind::Subscription)
+            .unwrap_or_default()
+        {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
                 continue;
             };
@@ -653,11 +680,10 @@ async fn interval_tick(st: &AppState) {
             let matching: Vec<Value> = st
                 .store
                 .list(&tenant, Kind::Entity)
+                .unwrap_or_default()
                 .into_iter()
                 .filter(|d| selector_match(&sub, d, &ctx) && conditions_match(&sub, d, &ctx))
-                .flat_map(|d| {
-                    build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now)
-                })
+                .flat_map(|d| build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now))
                 .collect();
             if matching.is_empty() {
                 continue;
@@ -666,7 +692,11 @@ async fn interval_tick(st: &AppState) {
         }
         // csource timeInterval subs: periodic CSourceNotification with all
         // matching registrations, independent of changes (5.11.7)
-        for sub in st.store.list(&tenant, Kind::CSourceSubscription) {
+        for sub in st
+            .store
+            .list(&tenant, Kind::CSourceSubscription)
+            .unwrap_or_default()
+        {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
                 continue;
             };
@@ -693,26 +723,56 @@ async fn interval_tick(st: &AppState) {
             let data: Vec<Value> = st
                 .store
                 .list(&tenant, Kind::Registration)
+                .unwrap_or_default()
                 .into_iter()
                 .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
                 .map(|r| {
-                    let mut p = crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+                    let mut p = crate::csource::present_registration(
+                        &filter_csr(&spec, &r, &ctx),
+                        &ctx,
+                        false,
+                    );
                     arrayify_entity_types(&mut p);
                     p
                 })
                 .collect();
-            deliver_as(st, &tenant, Kind::CSourceSubscription, &sub, "ContextSourceNotification", data, &ctx, Some("newlyMatching")).await;
+            deliver_as(
+                st,
+                &tenant,
+                Kind::CSourceSubscription,
+                &sub,
+                "ContextSourceNotification",
+                data,
+                &ctx,
+                Some("newlyMatching"),
+            )
+            .await;
         }
     }
 }
 
 /// POST the Notification (5.3.1) and write the 5.2.14.2 bookkeeping back.
 async fn deliver(st: &AppState, tenant: &TenantId, sub: &Value, data: Vec<Value>, ctx: &Context) {
-    deliver_as(st, tenant, Kind::Subscription, sub, "Notification", data, ctx, None).await
+    deliver_as(
+        st,
+        tenant,
+        Kind::Subscription,
+        sub,
+        "Notification",
+        data,
+        ctx,
+        None,
+    )
+    .await
 }
 
 /// 5.11.7: which csource subs care about a registration change, and why.
-fn csource_trigger(sub: &Value, before: Option<&Value>, after: Option<&Value>, ctx: &Context) -> Option<&'static str> {
+fn csource_trigger(
+    sub: &Value,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    ctx: &Context,
+) -> Option<&'static str> {
     let m = |d: Option<&Value>| {
         d.is_some_and(|d| crate::csource::csr_matches_subscription(sub, d, ctx))
     };
@@ -727,9 +787,13 @@ fn csource_trigger(sub: &Value, before: Option<&Value>, after: Option<&Value>, c
 /// The notification validator reads EntityInfo.type as an array
 /// (`entities[0]["type"][0]`) — normalize to array form in notification data.
 fn arrayify_entity_types(reg: &mut Value) {
-    let Some(infos) = reg.get_mut("information").and_then(Value::as_array_mut) else { return };
+    let Some(infos) = reg.get_mut("information").and_then(Value::as_array_mut) else {
+        return;
+    };
     for info in infos {
-        let Some(es) = info.get_mut("entities").and_then(Value::as_array_mut) else { continue };
+        let Some(es) = info.get_mut("entities").and_then(Value::as_array_mut) else {
+            continue;
+        };
         for e in es {
             if let Some(t) = e.get("type").filter(|t| t.is_string()).cloned() {
                 if let Some(o) = e.as_object_mut() {
@@ -740,14 +804,32 @@ fn arrayify_entity_types(reg: &mut Value) {
     }
 }
 
-/// Registration create/update/delete → CSourceNotification fan-out (5.11.7).
-pub async fn csource_changed(
+/// One prepared CSource notification, ready to send.
+pub struct CsourceJob {
+    sub: Value,
+    presented: Value,
+    ctx: std::sync::Arc<antares_jsonld::Context>,
+    reason: &'static str,
+}
+
+/// Registration create/update/delete → CSourceNotification fan-out (5.11.7),
+/// in two phases: `prepare_csource_jobs` runs IN the request path (store
+/// reads + matching + payload build — so job order is the handlers' commit
+/// order even on a slower store), and the caller spawns `send_csource_jobs`
+/// (network only — the ack must not block on the receiver: the ETSI mock
+/// replies only when the robot side wakes).
+pub async fn prepare_csource_jobs(
     st: &AppState,
     tenant: &TenantId,
     before: Option<Value>,
     after: Option<Value>,
-) {
-    for sub in st.store.list(tenant, Kind::CSourceSubscription) {
+) -> Vec<CsourceJob> {
+    let mut jobs = Vec::new();
+    for sub in st
+        .store
+        .list(tenant, Kind::CSourceSubscription)
+        .unwrap_or_default()
+    {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
         }
@@ -756,19 +838,79 @@ pub async fn csource_changed(
             continue;
         };
         let spec = crate::csource::spec_for_subscription(&sub);
-        let source = if reason == "noLongerMatching" { &before } else { &after };
-        let Some(reg) = source.as_ref().or(before.as_ref()) else { continue };
+        let source = if reason == "noLongerMatching" {
+            &before
+        } else {
+            &after
+        };
+        let Some(reg) = source.as_ref().or(before.as_ref()) else {
+            continue;
+        };
         let filtered = filter_csr(&spec, reg, &ctx);
         let mut presented = crate::csource::present_registration(&filtered, &ctx, false);
         arrayify_entity_types(&mut presented);
-        deliver_as(st, tenant, Kind::CSourceSubscription, &sub, "ContextSourceNotification", vec![presented], &ctx, Some(reason)).await;
+        jobs.push(CsourceJob {
+            sub,
+            presented,
+            ctx,
+            reason,
+        });
     }
+    jobs
+}
+
+pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<CsourceJob>) {
+    for job in jobs {
+        // §4.1 L4 / 5.11.7: re-check the subscription still exists right
+        // before the send — a deleted subscription must never notify.
+        let sub_id = job
+            .sub
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(
+            st.store.get(tenant, Kind::CSourceSubscription, sub_id),
+            Ok(Some(_))
+        ) {
+            continue;
+        }
+        deliver_as(
+            st,
+            tenant,
+            Kind::CSourceSubscription,
+            &job.sub,
+            "ContextSourceNotification",
+            vec![job.presented],
+            &job.ctx,
+            Some(job.reason),
+        )
+        .await;
+    }
+}
+
+/// Compatibility wrapper: prepare + send in one call (spawned contexts that
+/// don't need the phase split).
+pub async fn csource_changed(
+    st: &AppState,
+    tenant: &TenantId,
+    before: Option<Value>,
+    after: Option<Value>,
+) {
+    let jobs = prepare_csource_jobs(st, tenant, before, after).await;
+    send_csource_jobs(st, tenant, jobs).await;
 }
 
 /// Initial / post-update CSourceNotification with all currently matching
 /// registrations (5.11.2.4 / 5.11.3.4).
 pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
-    let Some(sub) = st.store.get(tenant, Kind::CSourceSubscription, sub_id) else { return };
+    let Some(sub) = st
+        .store
+        .get(tenant, Kind::CSourceSubscription, sub_id)
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
     if !is_active(&sub) {
         return;
     }
@@ -777,10 +919,12 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     let data: Vec<Value> = st
         .store
         .list(tenant, Kind::Registration)
+        .unwrap_or_default()
         .into_iter()
         .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
         .map(|r| {
-            let mut p = crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+            let mut p =
+                crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
             arrayify_entity_types(&mut p);
             p
         })
@@ -788,7 +932,17 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     if data.is_empty() {
         return; // nothing currently matching ⇒ no initial notification
     }
-    deliver_as(st, tenant, Kind::CSourceSubscription, &sub, "ContextSourceNotification", data, &ctx, Some("newlyMatching")).await;
+    deliver_as(
+        st,
+        tenant,
+        Kind::CSourceSubscription,
+        &sub,
+        "ContextSourceNotification",
+        data,
+        &ctx,
+        Some("newlyMatching"),
+    )
+    .await;
 }
 
 /// Registration copy reduced to the matching RegistrationInfo elements
@@ -826,9 +980,12 @@ async fn deliver_as(
     else {
         return;
     };
-    let Some(uri) = ep.get("uri").and_then(Value::as_str) else { return };
-    if !uri.starts_with("http") {
-        return; // mqtt sinks land with the MQTT TPs (feature-gated per §9.2)
+    let Some(uri) = ep.get("uri").and_then(Value::as_str) else {
+        return;
+    };
+    let is_mqtt = uri.starts_with("mqtt://") || uri.starts_with("mqtts://");
+    if !uri.starts_with("http") && !is_mqtt {
+        return; // creation rejects unknown schemes with 422 (§9.2); belt only
     }
     let accept = ep
         .get("accept")
@@ -845,35 +1002,112 @@ async fn deliver_as(
     if let Some(r) = trigger_reason {
         body["triggerReason"] = Value::String(r.into());
     }
-    let mut req = st.http.post(uri);
+    // 5.8.6: a subscription's ngsildConformance pins the notification format —
+    // amend the data entities per the 4.3.6.8 fallbacks.
+    if let Some(ver) = sub_str(sub, "ngsildConformance").and_then(crate::conformance::parse_version)
+    {
+        if let Some(d) = body.get_mut("data") {
+            crate::conformance::amend_payload(d, ver);
+        }
+    }
     if accept == "application/ld+json" {
         // JSON-LD notifications carry the @context inside each data entity
-        // (046_14: data[0] must contain @context; no Link header)
+        // (046_14: data[0] must contain @context; no Link header) — same rule
+        // over MQTT: with ld+json the @context travels in the body (7.2).
         if let Some(arr) = body.get_mut("data").and_then(Value::as_array_mut) {
             for e in arr.iter_mut() {
                 *e = inject_context(e.clone(), ctx);
             }
         }
-        req = req.header("Content-Type", "application/ld+json");
-    } else {
-        req = req
-            .header("Content-Type", "application/json")
-            .header("Link", link_header_value(ctx));
     }
-    if let Some(ri) = ep.get("receiverInfo").and_then(Value::as_array) {
-        for kv in ri {
-            if let (Some(k), Some(v)) = (
-                kv.get("key").and_then(Value::as_str),
-                kv.get("value").and_then(Value::as_str),
-            ) {
-                req = req.header(k, v);
+    let receiver_info: Vec<(String, String)> = ep
+        .get("receiverInfo")
+        .and_then(Value::as_array)
+        .map(|ri| {
+            ri.iter()
+                .filter_map(|kv| {
+                    Some((
+                        kv.get("key")?.as_str()?.to_owned(),
+                        kv.get("value")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Per-binding send, prepared BEFORE the bookkeeping writeback so the
+    // optimistic stamp covers only the in-flight attempt (046_12_01 race).
+    enum Outbound {
+        Http(reqwest::RequestBuilder, Vec<u8>),
+        #[cfg(feature = "mqtt")]
+        Mqtt(
+            antares_notifier::mqtt::MqttEndpoint,
+            antares_notifier::mqtt::MqttParams,
+            Vec<u8>,
+        ),
+    }
+    let outbound = if is_mqtt {
+        #[cfg(feature = "mqtt")]
+        {
+            use antares_notifier::mqtt::{build_message, MqttEndpoint, MqttParams};
+            // Creation validated both (5.2.15 / Table 7.2-1); a parse failure
+            // here means a hand-edited row — log, count as delivery failure.
+            let parsed = MqttEndpoint::parse(uri).and_then(|e| {
+                let pairs = ep
+                    .get("notifierInfo")
+                    .and_then(Value::as_array)
+                    .map(|ni| {
+                        ni.iter()
+                            .filter_map(|kv| {
+                                Some((kv.get("key")?.as_str()?, kv.get("value")?.as_str()?))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Ok((e, MqttParams::from_notifier_info(pairs)?))
+            });
+            match parsed {
+                Ok((endpoint, params)) => {
+                    // 7.2 Table 7.2-2: header-borne info moves into "metadata".
+                    let link = link_header_value(ctx);
+                    let mut ri = receiver_info.clone();
+                    if tenant.as_str() != "default" {
+                        ri.push(("NGSILD-Tenant".into(), tenant.as_str().to_owned()));
+                    }
+                    let msg = build_message(&body, accept, Some(&link), &ri);
+                    Outbound::Mqtt(
+                        endpoint,
+                        params,
+                        serde_json::to_vec(&msg).unwrap_or_default(),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("mqtt endpoint of subscription {sub_id} unusable: {e}");
+                    return;
+                }
             }
         }
-    }
-    if tenant.as_str() != "default" {
-        req = req.header("NGSILD-Tenant", tenant.as_str());
-    }
-    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+        #[cfg(not(feature = "mqtt"))]
+        {
+            return; // no sink compiled: creation already answered 422 (G3)
+        }
+    } else {
+        let mut req = st.http.post(uri);
+        if accept == "application/ld+json" {
+            req = req.header("Content-Type", "application/ld+json");
+        } else {
+            req = req
+                .header("Content-Type", "application/json")
+                .header("Link", link_header_value(ctx));
+        }
+        for (k, v) in &receiver_info {
+            req = req.header(k, v);
+        }
+        if tenant.as_str() != "default" {
+            req = req.header("NGSILD-Tenant", tenant.as_str());
+        }
+        Outbound::Http(req, serde_json::to_vec(&body).unwrap_or_default())
+    };
     // Bookkeeping BEFORE the send (5.8.6/5.2.14.2: lastNotification is the
     // instant the notification is sent). The ETSI mock unblocks the test the
     // moment the request ARRIVES, so a post-response-only writeback races the
@@ -882,45 +1116,69 @@ async fn deliver_as(
     // window is the in-flight attempt itself, and the failure TPs wait for the
     // attempt to resolve before asserting.
     let mut prev_success: Option<Value> = None;
-    st.store.mutate(tenant, kind, &sub_id, |doc| {
-        if let Some(o) = doc.as_object_mut() {
-            o.remove("status");
-        }
-        if let Some(n) = doc
-            .as_object_mut()
-            .and_then(|o| o.get_mut("notification"))
-            .and_then(Value::as_object_mut)
-        {
-            let sent = n.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
-            n.insert("timesSent".into(), json!(sent + 1));
-            n.insert("lastNotification".into(), Value::String(now.clone()));
-            prev_success = n.insert("lastSuccess".into(), Value::String(now.clone()));
-            n.insert("status".into(), Value::String("ok".into()));
-        }
-        Ok::<(), antares_model::NgsiError>(())
-    });
-    let ok = matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success());
-    if !ok {
-        // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
-        // roll back the optimistic lastSuccess stamp.
-        let ts = now_iso();
-        st.store.mutate(tenant, kind, &sub_id, |doc| {
+    st.store
+        .mutate(tenant, kind, &sub_id, |doc| {
             if let Some(o) = doc.as_object_mut() {
-                o.insert("status".into(), Value::String("failed".into()));
+                o.remove("status");
             }
             if let Some(n) = doc
                 .as_object_mut()
                 .and_then(|o| o.get_mut("notification"))
                 .and_then(Value::as_object_mut)
             {
-                match prev_success.take() {
-                    Some(v) => n.insert("lastSuccess".into(), v),
-                    None => n.remove("lastSuccess"),
-                };
-                n.insert("lastFailure".into(), Value::String(ts.clone()));
-                n.insert("status".into(), Value::String("failed".into()));
+                let sent = n.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
+                n.insert("timesSent".into(), json!(sent + 1));
+                n.insert("lastNotification".into(), Value::String(now.clone()));
+                prev_success = n.insert("lastSuccess".into(), Value::String(now.clone()));
+                n.insert("status".into(), Value::String("ok".into()));
             }
             Ok::<(), antares_model::NgsiError>(())
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!("bookkeeping writeback failed: {e}");
+            None
         });
+    let ok = match outbound {
+        Outbound::Http(req, bytes) => {
+            matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
+        }
+        #[cfg(feature = "mqtt")]
+        Outbound::Mqtt(endpoint, params, bytes) => {
+            match st.mqtt.deliver(&endpoint, params, &bytes).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
+                    false
+                }
+            }
+        }
+    };
+    if !ok {
+        // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
+        // roll back the optimistic lastSuccess stamp.
+        let ts = now_iso();
+        st.store
+            .mutate(tenant, kind, &sub_id, |doc| {
+                if let Some(o) = doc.as_object_mut() {
+                    o.insert("status".into(), Value::String("failed".into()));
+                }
+                if let Some(n) = doc
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("notification"))
+                    .and_then(Value::as_object_mut)
+                {
+                    match prev_success.take() {
+                        Some(v) => n.insert("lastSuccess".into(), v),
+                        None => n.remove("lastSuccess"),
+                    };
+                    n.insert("lastFailure".into(), Value::String(ts.clone()));
+                    n.insert("status".into(), Value::String("failed".into()));
+                }
+                Ok::<(), antares_model::NgsiError>(())
+            })
+            .unwrap_or_else(|e| {
+                tracing::warn!("failure-status writeback failed: {e}");
+                None
+            });
     }
 }

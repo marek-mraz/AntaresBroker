@@ -4,11 +4,11 @@ use crate::negotiate::*;
 use crate::state::AppState;
 use antares_model::NgsiError;
 use antares_sql::store::Kind;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::negotiate::CleanParams;
 
@@ -24,7 +24,7 @@ type TypeStats = BTreeMap<String, (usize, BTreeMap<String, BTreeSet<String>>)>;
 
 fn type_stats(st: &AppState, tenant: &antares_model::TenantId) -> TypeStats {
     let mut map: TypeStats = BTreeMap::new();
-    for doc in st.store.list(tenant, Kind::Entity) {
+    for doc in st.store.list(tenant, Kind::Entity).unwrap_or_default() {
         let mut attrs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if let Some(o) = doc.as_object() {
             for (k, v) in o {
@@ -48,7 +48,9 @@ fn type_stats(st: &AppState, tenant: &antares_model::TenantId) -> TypeStats {
                 let e = map.entry(t.to_owned()).or_default();
                 e.0 += 1;
                 for (a, tys) in &attrs {
-                    e.1.entry(a.clone()).or_default().extend(tys.iter().cloned());
+                    e.1.entry(a.clone())
+                        .or_default()
+                        .extend(tys.iter().cloned());
                 }
             }
         }
@@ -62,7 +64,7 @@ fn attr_stats(
     tenant: &antares_model::TenantId,
 ) -> BTreeMap<String, (usize, BTreeSet<String>, BTreeSet<String>)> {
     let mut map: BTreeMap<String, (usize, BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
-    for doc in st.store.list(tenant, Kind::Entity) {
+    for doc in st.store.list(tenant, Kind::Entity).unwrap_or_default() {
         let etypes: Vec<String> = doc["type"]
             .as_array()
             .cloned()
@@ -148,10 +150,9 @@ pub async fn entity_type_info(
         let iri = ctx.expand_key(&type_name);
         let stats = type_stats(&st, &tenant);
         let Some((count, attrs)) = stats.get(&iri) else {
-            return Err(NgsiError::ResourceNotFound(format!(
-                "no entities of type {type_name}"
-            ))
-            .into());
+            return Err(
+                NgsiError::ResourceNotFound(format!("no entities of type {type_name}")).into(),
+            );
         };
         let attr_details: Vec<Value> = attrs
             .iter()

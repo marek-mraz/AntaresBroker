@@ -7,6 +7,9 @@
 
 use antares_model::NgsiError;
 
+#[cfg(feature = "mqtt")]
+pub mod mqtt;
+
 /// A delivery binding for one URI scheme family.
 pub trait NotificationSink: Send + Sync {
     /// Schemes this sink serves, e.g. `["http", "https"]`.

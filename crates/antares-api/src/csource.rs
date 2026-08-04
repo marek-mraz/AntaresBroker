@@ -6,7 +6,7 @@ use antares_jsonld::{parse_datetime, Context};
 use antares_model::NgsiError;
 use antares_sql::store::Kind;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
@@ -44,7 +44,7 @@ pub fn normalize_registration(
             "type" => {
                 if v.as_str() != Some("ContextSourceRegistration") {
                     return Err(bad(
-                        "type must be \"ContextSourceRegistration\" (5.2.9)".into(),
+                        "type must be \"ContextSourceRegistration\" (5.2.9)".into()
                     ));
                 }
                 out.insert("type".into(), v.clone());
@@ -63,22 +63,26 @@ pub fn normalize_registration(
                     for (ik, iv) in io {
                         match ik.as_str() {
                             "entities" => {
-                                let es = iv
-                                    .as_array()
-                                    .filter(|a| !a.is_empty())
-                                    .ok_or_else(|| bad("entities must be a non-empty array".into()))?;
+                                let es =
+                                    iv.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+                                        bad("entities must be a non-empty array".into())
+                                    })?;
                                 let mut nes = Vec::new();
                                 for e in es {
-                                    let eo = e
-                                        .as_object()
-                                        .ok_or_else(|| bad("entities entries must be objects".into()))?;
+                                    let eo = e.as_object().ok_or_else(|| {
+                                        bad("entities entries must be objects".into())
+                                    })?;
                                     let mut ne = Map::new();
                                     for (ek, ev) in eo {
                                         match ek.as_str() {
                                             "type" => {
-                                                let t = ev.as_str().filter(|t| !t.is_empty()).ok_or_else(
-                                                    || bad("EntityInfo type is required (5.2.8)".into()),
-                                                )?;
+                                                let t = ev
+                                                    .as_str()
+                                                    .filter(|t| !t.is_empty())
+                                                    .ok_or_else(|| {
+                                                        bad("EntityInfo type is required (5.2.8)"
+                                                            .into())
+                                                    })?;
                                                 ne.insert(
                                                     "type".into(),
                                                     Value::String(ctx.expand_key(t)),
@@ -112,7 +116,8 @@ pub fn normalize_registration(
                                         && !ne.contains_key("idPattern")
                                     {
                                         return Err(bad(
-                                            "EntityInfo requires type, id or idPattern (5.2.8)".into(),
+                                            "EntityInfo requires type, id or idPattern (5.2.8)"
+                                                .into(),
                                         ));
                                     }
                                     nes.push(Value::Object(ne));
@@ -125,9 +130,9 @@ pub fn normalize_registration(
                                     .ok_or_else(|| bad(format!("{ik} must be an array")))?;
                                 let mut nn = Vec::new();
                                 for n in names {
-                                    let s = n
-                                        .as_str()
-                                        .ok_or_else(|| bad(format!("{ik} entries must be strings")))?;
+                                    let s = n.as_str().ok_or_else(|| {
+                                        bad(format!("{ik} entries must be strings"))
+                                    })?;
                                     nn.push(Value::String(ctx.expand_key(s)));
                                 }
                                 ni.insert(ik.clone(), Value::Array(nn));
@@ -185,7 +190,9 @@ pub fn normalize_registration(
     }
     if !is_patch {
         if !out.contains_key("type") {
-            return Err(bad("type must be \"ContextSourceRegistration\" (5.2.9)".into()));
+            return Err(bad(
+                "type must be \"ContextSourceRegistration\" (5.2.9)".into()
+            ));
         }
         if !out.contains_key("endpoint") {
             return Err(bad("endpoint is required (5.2.9)".into()));
@@ -220,10 +227,7 @@ pub fn present_registration(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
                                 .map(|e| {
                                     let mut ne = e.as_object().cloned().unwrap_or_default();
                                     if let Some(t) = ne.get("type").and_then(Value::as_str) {
-                                        ne.insert(
-                                            "type".into(),
-                                            Value::String(ctx.compact_iri(t)),
-                                        );
+                                        ne.insert("type".into(), Value::String(ctx.compact_iri(t)));
                                     }
                                     Value::Object(ne)
                                 })
@@ -265,15 +269,17 @@ pub async fn create_registration(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("registration must be a JSON object".into()))?;
+        let obj = parsed.value.as_object().ok_or_else(|| {
+            NgsiError::BadRequestData("registration must be a JSON object".into())
+        })?;
         let mut norm = normalize_registration(obj, &parsed.ctx, false)?;
         let id = match norm.get("id").and_then(Value::as_str) {
             Some(id) => id.to_owned(),
             None => {
-                let id = format!("urn:ngsi-ld:ContextSourceRegistration:{}", uuid::Uuid::new_v4());
+                let id = format!(
+                    "urn:ngsi-ld:ContextSourceRegistration:{}",
+                    uuid::Uuid::new_v4()
+                );
                 norm.insert("id".into(), Value::String(id.clone()));
                 id
             }
@@ -282,13 +288,21 @@ pub async fn create_registration(
         norm.insert("createdAt".into(), Value::String(ts.clone()));
         norm.insert("modifiedAt".into(), Value::String(ts));
         let doc = Value::Object(norm);
-        if !st.store.create(&tenant, Kind::Registration, &id, doc.clone()) {
-            return Err(NgsiError::AlreadyExists(format!("registration {id} already exists")).into());
+        if !st
+            .store
+            .create(&tenant, Kind::Registration, &id, doc.clone())?
+        {
+            return Err(
+                NgsiError::AlreadyExists(format!("registration {id} already exists")).into(),
+            );
         }
         {
+            // Prepare in the request path (ordering), spawn only the send
+            // (the ack must not block on the receiver).
+            let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, None, Some(doc)).await;
             let (st2, t2) = (st.clone(), tenant.clone());
             tokio::spawn(async move {
-                crate::notify::csource_changed(&st2, &t2, None, Some(doc)).await;
+                crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
             });
         }
         Ok::<_, ApiError>(created(
@@ -314,7 +328,7 @@ pub async fn retrieve_registration(
         let ctx = request_context(&st.loader, &headers).await?;
         let doc = st
             .store
-            .get(&tenant, Kind::Registration, &id)
+            .get(&tenant, Kind::Registration, &id)?
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("registration {id} not found")))?;
         let sys = params
             .get("options")
@@ -340,9 +354,27 @@ pub async fn query_registrations(
         check_params(
             &params,
             &[
-                "id", "idPattern", "type", "attrs", "q", "georel", "geometry", "coordinates",
-                "geoproperty", "timeproperty", "timerel", "timeAt", "endTimeAt", "csf",
-                "limit", "offset", "count", "options", "format", "local", "scopeQ",
+                "id",
+                "idPattern",
+                "type",
+                "attrs",
+                "q",
+                "georel",
+                "geometry",
+                "coordinates",
+                "geoproperty",
+                "timeproperty",
+                "timerel",
+                "timeAt",
+                "endTimeAt",
+                "csf",
+                "limit",
+                "offset",
+                "count",
+                "options",
+                "format",
+                "local",
+                "scopeQ",
             ],
         )?;
         let accept = parse_accept(&headers)?;
@@ -358,11 +390,14 @@ pub async fn query_registrations(
             }
             spec.ids = Some(ids);
         }
-        spec.id_pattern = params.get("idPattern").map(|p| {
-            regex::Regex::new(p)
-                .map(|_| p.clone())
-                .map_err(|_| bad(format!("invalid idPattern {p:?}")))
-        }).transpose()?;
+        spec.id_pattern = params
+            .get("idPattern")
+            .map(|p| {
+                regex::Regex::new(p)
+                    .map(|_| p.clone())
+                    .map_err(|_| bad(format!("invalid idPattern {p:?}")))
+            })
+            .transpose()?;
         spec.types = params
             .get("type")
             .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
@@ -372,7 +407,9 @@ pub async fn query_registrations(
             .unwrap_or_default();
         // attributes referenced in q / geoQ count as query projection
         // attributes for matching (5.10.2.4)
-        let q = params.get("q").map(|s| crate::negotiate::percent_decode(s.as_bytes()));
+        let q = params
+            .get("q")
+            .map(|s| crate::negotiate::percent_decode(s.as_bytes()));
         if let Some(q) = &q {
             let ast = antares_ql::parse_q(q)?;
             let mut roots = Vec::new();
@@ -388,13 +425,20 @@ pub async fn query_registrations(
         }
         // 5.10.2.4: a discriminating input is required, else too wide
         // (the suite additionally accepts id-only queries — 037_10_01)
-        if spec.types.is_none() && spec.attrs.is_none() && spec.ids.is_none() && spec.id_pattern.is_none() {
-            return Err(bad("query too wide: one of type, attrs, q or geo query is required (5.10.2.4)".into()).into());
+        if spec.types.is_none()
+            && spec.attrs.is_none()
+            && spec.ids.is_none()
+            && spec.id_pattern.is_none()
+        {
+            return Err(bad(
+                "query too wide: one of type, attrs, q or geo query is required (5.10.2.4)".into(),
+            )
+            .into());
         }
         // temporal query: validate + interval presence rules (5.10.2.4)
-        let temporal = crate::temporal::TemporalQ::from_params(&params, false)?
-            .filter(|t| t.timerel != "any");
-        let all = st.store.list(&tenant, Kind::Registration);
+        let temporal =
+            crate::temporal::TemporalQ::from_params(&params, false)?.filter(|t| t.timerel != "any");
+        let all = st.store.list(&tenant, Kind::Registration)?;
         let matches: Vec<Value> = all
             .into_iter()
             .filter(|doc| {
@@ -402,12 +446,8 @@ pub async fn query_registrations(
                     || doc.get("managementInterval").is_some();
                 match &temporal {
                     None if has_interval => return false,
-                    None => {}
-                    Some(tq) => {
-                        if !temporal_interval_matches(doc, tq) {
-                            return false;
-                        }
-                    }
+                    Some(tq) if !temporal_interval_matches(doc, tq) => return false,
+                    _ => {}
                 }
                 csr_matches(&spec, doc, &ctx)
             })
@@ -675,7 +715,12 @@ pub fn spec_for_subscription(sub: &Value) -> CsrSpec {
     let mut attrs: Vec<String> = sub
         .get("watchedAttributes")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
     if let Some(na) = sub
         .get("notification")
@@ -709,7 +754,7 @@ pub async fn update_registration(
             .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
-        let before = st.store.get(&tenant, Kind::Registration, &id);
+        let before = st.store.get(&tenant, Kind::Registration, &id)?;
         let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
             let target = doc.as_object_mut().expect("registration object");
             for (k, v) in &norm {
@@ -724,15 +769,16 @@ pub async fn update_registration(
             }
             target.insert("modifiedAt".into(), Value::String(ts.clone()));
             Ok::<(), NgsiError>(())
-        });
+        })?;
         match res {
             None => Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into()),
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) => {
-                let after = st.store.get(&tenant, Kind::Registration, &id);
+                let after = st.store.get(&tenant, Kind::Registration, &id)?;
+                let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, after).await;
                 let (st2, t2) = (st.clone(), tenant.clone());
                 tokio::spawn(async move {
-                    crate::notify::csource_changed(&st2, &t2, before, after).await;
+                    crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
                 });
                 Ok(no_content(&tenant))
             }
@@ -747,21 +793,24 @@ pub async fn delete_registration(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = || -> ApiResult<Response> {
+    let go = async {
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)
             .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
-        let before = st.store.get(&tenant, Kind::Registration, &id);
-        if st.store.delete(&tenant, Kind::Registration, &id) {
+        let before = st.store.get(&tenant, Kind::Registration, &id)?;
+        if st.store.delete(&tenant, Kind::Registration, &id)? {
+            let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, None).await;
             let (st2, t2) = (st.clone(), tenant.clone());
             tokio::spawn(async move {
-                crate::notify::csource_changed(&st2, &t2, before, None).await;
+                crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
             });
             Ok(no_content(&tenant))
         } else {
-            Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into())
+            Err::<Response, ApiError>(
+                NgsiError::ResourceNotFound(format!("registration {id} not found")).into(),
+            )
         }
     };
-    go().unwrap_or_else(|e| e.into_response())
+    go.await.unwrap_or_else(|e| e.into_response())
 }

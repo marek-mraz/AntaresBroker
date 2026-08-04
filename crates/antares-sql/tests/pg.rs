@@ -39,9 +39,15 @@ async fn migrations_apply_and_indexes_exist() {
 
     // C2: every §8.3 table exists.
     for table in [
-        "tenants", "entities", "subscriptions", "csource_subscriptions",
-        "csource_registrations", "csource_index", "jsonld_contexts",
-        "entity_maps", "outbox",
+        "tenants",
+        "entities",
+        "subscriptions",
+        "csource_subscriptions",
+        "csource_registrations",
+        "csource_index",
+        "jsonld_contexts",
+        "entity_maps",
+        "outbox",
     ] {
         let ok: bool = sqlx::query("SELECT to_regclass($1) IS NOT NULL")
             .bind(table)
@@ -85,7 +91,10 @@ async fn rls_denies_cross_tenant_reads_and_writes() {
     }
 
     let app_url = url.replace("antares:antares@", "antares_app:app@");
-    assert_ne!(app_url, url, "test URL must embed antares:antares credentials");
+    assert_ne!(
+        app_url, url,
+        "test URL must embed antares:antares credentials"
+    );
     let app = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&app_url)
@@ -127,7 +136,10 @@ async fn rls_denies_cross_tenant_reads_and_writes() {
     .bind(ta.as_str())
     .execute(&mut *tx)
     .await;
-    assert!(forged.is_err(), "WITH CHECK must reject cross-tenant inserts");
+    assert!(
+        forged.is_err(),
+        "WITH CHECK must reject cross-tenant inserts"
+    );
     drop(tx); // rollback
 
     // Tenant a still sees its row.

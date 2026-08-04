@@ -1,15 +1,15 @@
 //! Batch operations /entityOperations/* (5.6.7–5.6.10, 5.6.20, 5.7.2-POST;
 //! resources 6.14–6.17, 6.23, 6.31).
 
-use crate::entities::{filter_entities, merge_into, paginate, stamp_new};
+use crate::entities::{merge_into, paginate, stamp_new};
 use crate::negotiate::*;
 use crate::repr::{apply, parse_repr};
 use crate::state::{now_iso, AppState};
-use antares_jsonld::{compact_entity, expand_entity, ExpandOpts};
+use antares_jsonld::{expand_entity, ExpandOpts};
 use antares_model::NgsiError;
 use antares_sql::store::Kind;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
@@ -32,12 +32,18 @@ async fn parse_batch(
     };
     let value: Value = serde_json::from_slice(body)
         .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
-    let items = value
-        .as_array()
-        .filter(|a| !a.is_empty())
-        .ok_or_else(|| {
-            NgsiError::BadRequestData("batch body must be a non-empty JSON array".into())
-        })?;
+    let items = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+        NgsiError::BadRequestData("batch body must be a non-empty JSON array".into())
+    })?;
+    // I2: batch entity count cap (§16.3)
+    if items.len() > crate::bounds::MAX_BATCH_ITEMS {
+        return Err(NgsiError::BadRequestData(format!(
+            "batch of {} exceeds the {}-entity limit",
+            items.len(),
+            crate::bounds::MAX_BATCH_ITEMS
+        ))
+        .into());
+    }
     let link = link_context(headers);
     if ld && link.is_some() {
         return Err(NgsiError::BadRequestData(
@@ -56,10 +62,7 @@ async fn parse_batch(
                 .into()),
             }
         } else if item.get("@context").is_some() {
-            Err(
-                NgsiError::BadRequestData("application/json entity carries @context".into())
-                    .into(),
-            )
+            Err(NgsiError::BadRequestData("application/json entity carries @context".into()).into())
         } else {
             match &link {
                 Some(url) => st
@@ -196,13 +199,18 @@ async fn batch_write(
     let no_overwrite = update_mode == Some("noOverwrite");
     let items = parse_batch(st, headers, body).await?;
     // distributed batch (4.3.6): one forwarded request per matching source
-    let mut fwd_items: Vec<(serde_json::Map<String, Value>, std::sync::Arc<antares_jsonld::Context>)> = Vec::new();
+    let mut fwd_items: Vec<(
+        serde_json::Map<String, Value>,
+        std::sync::Arc<antares_jsonld::Context>,
+    )> = Vec::new();
     let mut spec = crate::csource::CsrSpec::default();
     let mut spec_types = Vec::new();
     let mut spec_ids = Vec::new();
     let mut spec_attrs = Vec::new();
     for (item, ctx) in &items {
-        let (Some(o), Ok(c)) = (item.as_object(), ctx.as_ref()) else { continue };
+        let (Some(o), Ok(c)) = (item.as_object(), ctx.as_ref()) else {
+            continue;
+        };
         if let Some(id) = o.get("id").and_then(Value::as_str) {
             spec_ids.push(id.to_owned());
         }
@@ -220,9 +228,15 @@ async fn batch_write(
         }
         fwd_items.push((o.clone(), c.clone()));
     }
-    if !spec_types.is_empty() { spec.types = Some(spec_types); }
-    if !spec_ids.is_empty() { spec.ids = Some(spec_ids); }
-    if !spec_attrs.is_empty() { spec.attrs = Some(spec_attrs); }
+    if !spec_types.is_empty() {
+        spec.types = Some(spec_types);
+    }
+    if !spec_ids.is_empty() {
+        spec.ids = Some(spec_ids);
+    }
+    if !spec_attrs.is_empty() {
+        spec.attrs = Some(spec_attrs);
+    }
     let fed_regs = crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params);
     if !fed_regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
         return Ok(crate::federation::loop_508(&tenant));
@@ -236,11 +250,11 @@ async fn batch_write(
     let mut any_updated = false;
     let proxies: Vec<&crate::federation::FedReg> =
         fed_regs.iter().filter(|r| r.is_proxy()).collect();
+    // C5: creates are collected and written as ONE multi-row statement (§4);
+    // the other modes are per-item read-modify-write under the row lock.
+    let mut pending_creates: Vec<(String, Value)> = Vec::new();
     for (item, ctx) in items {
-        let id_hint = item
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let id_hint = item.get("id").and_then(Value::as_str).map(str::to_owned);
         let ctx = match ctx {
             Ok(c) => c,
             Err(e) => {
@@ -260,6 +274,22 @@ async fn batch_write(
         } else {
             item
         };
+        if mode == BatchMode::Create {
+            let prep = || -> Result<(String, Value), NgsiError> {
+                let obj = item
+                    .as_object()
+                    .ok_or_else(|| NgsiError::BadRequestData("entity must be an object".into()))?;
+                let mut expanded = expand_entity(obj, &ctx, ExpandOpts::default())?;
+                let id = expanded["id"].as_str().expect("validated").to_owned();
+                stamp_new(&mut expanded, &now_iso());
+                Ok((id, expanded))
+            };
+            match prep() {
+                Ok(pair) => pending_creates.push(pair),
+                Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
+            }
+            continue;
+        }
         let run = || -> Result<(String, bool, bool), NgsiError> {
             let obj = item
                 .as_object()
@@ -278,36 +308,28 @@ async fn batch_write(
             let id = expanded["id"].as_str().expect("validated").to_owned();
             let ts = now_iso();
             match mode {
-                BatchMode::Create => {
-                    stamp_new(&mut expanded, &ts);
-                    if !st.store.create(&tenant, Kind::Entity, &id, expanded.clone()) {
-                        return Err(NgsiError::AlreadyExists(format!(
-                            "entity {id} already exists"
-                        )));
-                    }
-                    crate::entities::mirror_record(st, &tenant, &expanded);
-                    Ok((id, true, false))
-                }
+                BatchMode::Create => unreachable!("creates take the batch path above"),
                 BatchMode::Upsert => {
-                    let existed = st.store.get(&tenant, Kind::Entity, &id).is_some();
+                    let existed = st.store.get(&tenant, Kind::Entity, &id)?.is_some();
                     if existed && update_mode == Some("update") {
                         let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
                             merge_into(doc, &expanded, &ts);
                             Ok::<(), NgsiError>(())
-                        });
+                        })?;
                         if let Some(Err(e)) = res {
                             return Err(e);
                         }
                         crate::entities::mirror_record(st, &tenant, &expanded);
                     } else {
                         stamp_new(&mut expanded, &ts);
-                        st.store.upsert(&tenant, Kind::Entity, &id, expanded.clone());
+                        st.store
+                            .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
                         crate::entities::mirror_record(st, &tenant, &expanded);
                     }
                     Ok((id, !existed, false))
                 }
                 BatchMode::Update | BatchMode::Merge => {
-                    if st.store.get(&tenant, Kind::Entity, &id).is_none() {
+                    if st.store.get(&tenant, Kind::Entity, &id)?.is_none() {
                         return Err(NgsiError::ResourceNotFound(format!(
                             "entity {id} not found"
                         )));
@@ -336,12 +358,9 @@ async fn batch_write(
                                     }
                                     Some(cur) => {
                                         for ni in incoming {
-                                            let ds = ni
-                                                .get("datasetId")
-                                                .and_then(Value::as_str);
+                                            let ds = ni.get("datasetId").and_then(Value::as_str);
                                             if cur.iter().any(|ci| {
-                                                ci.get("datasetId").and_then(Value::as_str)
-                                                    == ds
+                                                ci.get("datasetId").and_then(Value::as_str) == ds
                                             }) {
                                                 skipped_existing = true;
                                             } else {
@@ -356,7 +375,7 @@ async fn batch_write(
                             merge_into(doc, &expanded, &ts);
                         }
                         Ok::<(), NgsiError>(())
-                    });
+                    })?;
                     if let Some(Err(e)) = res {
                         return Err(e);
                     }
@@ -387,6 +406,27 @@ async fn batch_write(
                 }
             }
             Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
+        }
+    }
+    // C5: the collected creates, one multi-row statement, one transaction.
+    if !pending_creates.is_empty() {
+        let flags = st.store.batch_create(&tenant, pending_creates.clone())?;
+        for ((id, expanded), created) in pending_creates.iter().zip(flags) {
+            if created {
+                any_created = true;
+                if !created_ids.contains(id) {
+                    created_ids.push(id.clone());
+                }
+                crate::entities::mirror_record(st, &tenant, expanded);
+                if !out.success.contains(&Value::String(id.clone())) {
+                    out.success.push(Value::String(id.clone()));
+                }
+            } else {
+                out.errors.push(err_entry(
+                    Some(id),
+                    &NgsiError::AlreadyExists(format!("entity {id} already exists")),
+                ));
+            }
         }
     }
     // 5.6.8: a 201 upsert body lists ONLY the newly created ids
@@ -422,7 +462,11 @@ async fn batch_write(
             query.push(("options".into(), o.clone()));
         }
         let mut parts = vec![crate::federation::Part {
-            status: if out.errors.is_empty() { status.as_u16() } else { 207 },
+            status: if out.errors.is_empty() {
+                status.as_u16()
+            } else {
+                207
+            },
             detail: "local batch".into(),
         }];
         for reg in &fed_regs {
@@ -477,14 +521,16 @@ pub async fn batch_delete(
         }
         let value: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
-        let ids = value
-            .as_array()
-            .filter(|a| !a.is_empty())
-            .ok_or_else(|| {
-                NgsiError::BadRequestData("batch delete body must be a non-empty array".into())
-            })?;
+        let ids = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+            NgsiError::BadRequestData("batch delete body must be a non-empty array".into())
+        })?;
         let spec = crate::csource::CsrSpec {
-            ids: Some(ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+            ids: Some(
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            ),
             ..Default::default()
         };
         let regs = crate::federation::write_regs(&st, &tenant, &spec, &st.loader.core(), &params);
@@ -493,6 +539,13 @@ pub async fn batch_delete(
             success: vec![],
             errors: vec![],
         };
+        // C5: one multi-row DELETE for the whole batch; flags in input order.
+        let id_strs: Vec<String> = ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let mut flags = st.store.batch_delete(&tenant, &id_strs)?.into_iter();
         for id in ids {
             let Some(id) = id.as_str() else {
                 out.errors.push(err_entry(
@@ -501,7 +554,7 @@ pub async fn batch_delete(
                 ));
                 continue;
             };
-            if st.store.delete(&tenant, Kind::Entity, id) || proxied {
+            if flags.next().unwrap_or(false) || proxied {
                 // proxied entities are never stored locally — a local miss is
                 // not an error under exclusive/redirect (4.3.6.3)
                 out.success.push(Value::String(id.to_owned()));
@@ -516,8 +569,7 @@ pub async fn batch_delete(
             if crate::federation::via_loop(&headers, &st.host_alias) {
                 return Ok(crate::federation::loop_508(&tenant));
             }
-            let ctx_url =
-                crate::federation::ctx_link_url(&headers, &st.loader.core().source);
+            let ctx_url = crate::federation::ctx_link_url(&headers, &st.loader.core().source);
             let mut parts = vec![crate::federation::Part {
                 status: if out.errors.is_empty() { 204 } else { 207 },
                 detail: "local batch delete".into(),
@@ -573,7 +625,10 @@ async fn batch_query_inner(
     body: &[u8],
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
-    check_params(params, &["limit", "offset", "count", "options", "format", "local"])?;
+    check_params(
+        params,
+        &["limit", "offset", "count", "options", "format", "local"],
+    )?;
     // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
     let accept = parse_accept_geo(headers)?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
@@ -647,8 +702,12 @@ async fn batch_query_inner(
     let matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
     let mut page_params = params.clone();
     page_params.extend(vp.clone());
-    let (page, count_hdr, _links) =
-        paginate(st, &page_params, matches, "/ngsi-ld/v1/entityOperations/query")?;
+    let (page, count_hdr, _links) = paginate(
+        st,
+        &page_params,
+        matches,
+        "/ngsi-ld/v1/entityOperations/query",
+    )?;
     let repr = parse_repr(params, &parsed.ctx)?;
     let join = crate::entities::parse_join(&vp)?;
     let mut payload: Vec<Value> = page
@@ -673,8 +732,7 @@ async fn batch_query_inner(
                 for doc in &page {
                     crate::entities::collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
                 }
-                let page_ids: Vec<&str> =
-                    page.iter().filter_map(|d| d["id"].as_str()).collect();
+                let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
                     if !page_ids.contains(&id.as_str()) {
                         payload.push(crate::entities::compact_for(

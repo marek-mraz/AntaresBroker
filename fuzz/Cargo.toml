@@ -1,0 +1,46 @@
+# §16.2 fuzzing (tasks.md C12): the user-input interpreters — q=, scopeQ,
+# geoQ params, and the JSON-LD expansion input path — run under libFuzzer in
+# scheduled CI (.github/workflows/fuzz.yml). Not a workspace member.
+[package]
+name = "antares-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+antares-ql = { path = "../crates/antares-ql" }
+antares-api = { path = "../crates/antares-api", default-features = false }
+antares-jsonld = { path = "../crates/antares-jsonld" }
+
+[[bin]]
+name = "parse_q"
+path = "fuzz_targets/parse_q.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scope_q"
+path = "fuzz_targets/scope_q.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geo_params"
+path = "fuzz_targets/geo_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "expand_entity"
+path = "fuzz_targets/expand_entity.rs"
+test = false
+doc = false
+bench = false
