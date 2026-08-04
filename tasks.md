@@ -352,7 +352,7 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       submodule in place, which leaves `ngsi-ld-test-suite` permanently
       dirty in `git status`. Restore it on exit (trap) so a dirty submodule
       means a real change, not a leftover.
-- [ ] E9. Full-granularity parallel CI matrix — `store × suite` (4×8 = 32
+- [x] E9. Full-granularity parallel CI matrix — `store × suite` (4×8 = 32
       jobs), SAME script as local runs (the §E one-pipeline rule), selected
       by a filter:
       - E9a. `SUITES=` env in `dev/etsi-pipeline.sh` (comma list of suite
@@ -381,6 +381,18 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
         sharding (pabot / per-file splits) only pays if each shard gets its
         own stack, at which point startup time dominates — revisit only if
         the slowest cell exceeds ~15 min.
+      *(All six done in .github/workflows/etsi.yml: `SUITES=` filter in
+      dev/etsi-pipeline.sh (E9a); ONE `build` job exports the image as an
+      artifact every cell loads — an artifact rather than a GHCR
+      `:run-<id>` tag, same "never 32 builds" property without publishing
+      untested bytes (E9b); each cell runs the pipeline, which brings up its
+      own stack (E9c); `etsi-serial` job — all suites, ONE stack, 4 modes in
+      parallel, on master pushes + nightly cron, so `reset_state()` stays
+      exercised where the matrix cannot exercise it, and `publish` needs it
+      (E9d); `etsi-aggregate` renders the 4 per-store tables via
+      dev/etsi-matrix-summary.py as the required check, concurrency reality
+      in the workflow header (E9e); per-suite is the floor, reasoning kept in
+      the etsi-cell comment (E9f).)*
 
 ## F. Messaging & scale-out — phase 2 eventing (§6.4, §7, §10)
 

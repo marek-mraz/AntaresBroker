@@ -5,12 +5,23 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
-# CI runs ONLY the full store × suite matrix (4 × 8 = 32 cells) on every
-# trigger; the aggregate job concatenates the cells into 4 per-store tables
-# and is the single required gate — green only when ALL 32 cells are green.
+  schedule:
+    - cron: "23 2 * * *" # nightly serial run (E9d), 02:23 UTC
+# Two signals, deliberately different (E9d):
+#
+#   etsi-cell      the full store × suite matrix (4 × 8 = 32 cells), every
+#                  trigger. Each cell gets its OWN fresh stack, so it is fast
+#                  and pollution-free — the PR signal.
+#   etsi-serial    all suites in ONE stack per store mode, on master pushes
+#                  and nightly. Per-cell isolation no longer exercises
+#                  reset_state() (clean_db + API-level reset between suites),
+#                  and that reset story is exactly where phantom state hides.
+#                  This run is the truth; the matrix is the fast answer.
+#
 # E9e concurrency reality: GitHub free plan runs 20 jobs concurrently (12
 # queue), Pro 40 — the 32-cell matrix + build fits one wave on Pro, two waves
-# on free. Wall-clock ≈ image build + the slowest suite (Consumption, 328 TPs).
+# on free. Wall-clock ≈ image build + the slowest suite (Consumption, 328 TPs);
+# the serial run is 4 parallel jobs of ≈ all-suites wall-clock.
 
 # A newer commit supersedes a running ETSI run — cancel the old one.
 concurrency:
@@ -107,6 +118,65 @@ jobs:
           echo "gate(${{ matrix.store }} × ${{ matrix.suite }}) = $gate"
           [ "$gate" = PASS ]
 
+  etsi-serial:
+    # E9d: the authoritative run — every suite, IN ORDER, against ONE stack,
+    # so `reset_state()` (clean_db.sh + dev/reset-broker.sh) is exercised
+    # between suites. The matrix cells each get a fresh stack and therefore
+    # prove nothing about reset; a broker that leaks state across suites is
+    # green there and red here. Four store modes in parallel, one job each.
+    name: serial ${{ matrix.store }} (all suites, one stack)
+    if: github.event_name != 'pull_request'
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, file, postgres, timescale]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Run EVERY suite serially through the ONE pipeline
+        env:
+          STORE: ${{ matrix.store }}
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/serial-${{ matrix.store }}
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload serial results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-serial-${{ matrix.store }}
+          path: |
+            results/serial-${{ matrix.store }}/run-summary.md
+            results/serial-${{ matrix.store }}/gate-status.txt
+          retention-days: 14
+
+      - name: Gate — the serial run is 100% green
+        run: |
+          gate=$(cat "results/serial-${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "serial gate(${{ matrix.store }}) = $gate"
+          cat "results/serial-${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
   etsi-aggregate:
     # Concat all 32 cells into 4 per-store tables (same | Suite | Pass |
     # Fail | Skip | shape as run-summary.md) — the single required status
@@ -128,12 +198,15 @@ jobs:
         run: ./dev/etsi-matrix-summary.py cells
 
   publish:
-    # One publish, only when ALL 32 store × suite cells are green.
+    # One publish, only when ALL 32 matrix cells AND all four serial runs
+    # are green (E9d: the serial run is the authoritative gate — it is what
+    # proves the reset story). `push` only: the nightly schedule re-runs the
+    # gates on master, it does not mint a release.
     # success() is EXPLICIT: a custom `if` replaces the implicit needs-check,
     # and etsi-aggregate runs under always() so it can be a failure here.
     name: Publish the ETSI-green image to GHCR
-    if: github.event_name != 'pull_request' && success()
-    needs: etsi-aggregate
+    if: github.event_name == 'push' && success()
+    needs: [etsi-aggregate, etsi-serial]
     runs-on: ubuntu-latest
     permissions:
       packages: write
