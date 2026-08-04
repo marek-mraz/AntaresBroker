@@ -12,11 +12,13 @@ on:
 #   etsi-cell      the full store × suite matrix (4 × 8 = 32 cells), every
 #                  trigger. Each cell gets its OWN fresh stack, so it is fast
 #                  and pollution-free — the PR signal.
-#   etsi-serial    all suites in ONE stack per store mode, on master pushes
-#                  and nightly. Per-cell isolation no longer exercises
+#   etsi-serial    all suites in ONE stack per store mode. NIGHTLY (and
+#                  manual) ONLY — never on a commit: a push gets the parallel
+#                  matrix and nothing else. Per-cell isolation no longer
+#                  exercises
 #                  reset_state() (clean_db + API-level reset between suites),
 #                  and that reset story is exactly where phantom state hides.
-#                  This run is the truth; the matrix is the fast answer.
+#                  It catches leaks the matrix cannot see, on its own schedule.
 #
 # E9e concurrency reality: GitHub free plan runs 20 jobs concurrently (12
 # queue), Pro 40 — the 32-cell matrix + build fits one wave on Pro, two waves
@@ -125,7 +127,9 @@ jobs:
     # prove nothing about reset; a broker that leaks state across suites is
     # green there and red here. Four store modes in parallel, one job each.
     name: serial ${{ matrix.store }} (all suites, one stack)
-    if: github.event_name != 'pull_request'
+    # Nightly + manual only. Commits get the parallel matrix; this never
+    # lengthens a push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build
     strategy:
       fail-fast: false
@@ -198,15 +202,14 @@ jobs:
         run: ./dev/etsi-matrix-summary.py cells
 
   publish:
-    # One publish, only when ALL 32 matrix cells AND all four serial runs
-    # are green (E9d: the serial run is the authoritative gate — it is what
-    # proves the reset story). `push` only: the nightly schedule re-runs the
-    # gates on master, it does not mint a release.
+    # One publish, only when ALL 32 matrix cells are green. `push` only: the
+    # nightly serial run re-checks the reset story on its own schedule and
+    # does not mint a release.
     # success() is EXPLICIT: a custom `if` replaces the implicit needs-check,
     # and etsi-aggregate runs under always() so it can be a failure here.
     name: Publish the ETSI-green image to GHCR
     if: github.event_name == 'push' && success()
-    needs: [etsi-aggregate, etsi-serial]
+    needs: etsi-aggregate
     runs-on: ubuntu-latest
     permissions:
       packages: write
