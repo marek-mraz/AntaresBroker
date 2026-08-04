@@ -280,6 +280,22 @@ impl AnyStore {
         }
     }
 
+    /// C10: Query Entities with the filter pushed down where the backend can
+    /// take it. `memory`/`file` have nothing to push into — their entities
+    /// are already in RAM — so they return the same snapshot `list` does.
+    /// Either way the caller applies the exact filter afterwards, which is
+    /// what keeps every store mode answering identically.
+    pub fn query_entities(
+        &self,
+        tenant: &TenantId,
+        f: &crate::store::pg_entity::EntityFilter<'_>,
+    ) -> Result<Vec<Value>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Entity)),
+            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db),
+        }
+    }
+
     pub fn mutate<T, E>(
         &self,
         tenant: &TenantId,

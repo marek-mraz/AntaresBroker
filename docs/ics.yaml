@@ -146,13 +146,13 @@ clause4_languages:
   - clause: "4.9"
     name: "NGSI-LD Query Language (q=)"
     status: implemented
-    evidence: "crates/antares-ql/src/lib.rs::parse_q; antares-api/src/qeval.rs"
-    notes: "in-memory evaluation only; SQL compilation is tasks.md C10"
+    evidence: "crates/antares-ql/src/lib.rs::parse_q; antares-api/src/qeval.rs; antares-sql/src/compile/q.rs"
+    notes: "qeval is the arbiter in every store mode; postgres/timescale additionally push an exact subset into jsonb_path_exists (bound jsonpath, C10). Dotted paths, ~= and string ordering deliberately do not compile — the compiler declines rather than risk narrowing wrongly"
   - clause: "4.10"
     name: "Geoquery Language"
-    status: partial
-    evidence: "crates/antares-api/src/geo.rs"
-    notes: "planar approximations except near (haversine) — polygon holes, edge-crossing intersects, line/line unhandled; tasks.md H7 retires this ceiling"
+    status: implemented
+    evidence: "crates/antares-api/src/geo.rs (DE-9IM relate, H7); antares-sql/src/compile/geo.rs (PostGIS pushdown, C11b); antares-api/tests/pg_query_parity.rs (C11c)"
+    notes: "evaluator is the arbiter; postgres/timescale push georel onto the GIST-indexed location column for the DEFAULT GeoProperty only. near compiles for a Point query geometry, with the radius widened for the haversine-vs-spheroid delta so SQL can only narrow. Invalid query geometry or a non-default geoproperty declines to compile"
   - clause: "4.11"
     name: "Temporal Query Language"
     status: implemented
@@ -173,6 +173,11 @@ clause4_languages:
     status: implemented
     evidence: "crates/antares-api/src/repr.rs (lang selection)"
     notes: ""
+  - clause: "4.18–4.19"
+    name: "Scopes; Scope Query Language (scopeQ)"
+    status: implemented
+    evidence: "crates/antares-api/src/lib.rs::scope_matches; antares-sql/src/compile/scope.rs (C11)"
+    notes: "OR-of-AND with +/# wildcards; postgres/timescale compile it to an anchored regex over unnest(scopes) (GIN-indexed column). Separators match /+ and edge slashes are optional so the compiled form is never stricter than the matcher"
   - clause: "4.16–4.17"
     name: "Multiple entity types; Entity Type Selection Language"
     status: implemented

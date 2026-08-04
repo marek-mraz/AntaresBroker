@@ -237,14 +237,25 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
 ### C-iii. Query compilation (`antares-sql/src/compile/`)
 
-- [ ] C10. `q=` AST → `jsonb_path_query`/`jsonb_path_exists` (Scorpio's
+- [x] C10. `q=` AST → `jsonb_path_query`/`jsonb_path_exists` (Scorpio's
       proven strategy §8.1); jsonpath BOUND as a parameter, never spliced
-      (§16.2).
+      (§16.2). *(compile/q.rs; wired into Query Entities via
+      `EntityFilter.q`. The compiler is deliberately PARTIAL and returns
+      `None` for any shape it cannot reproduce exactly as `qeval` would —
+      dotted paths (sub-attribute vs value-object navigation is a per-row
+      decision), `~=` (regex dialects differ) and string ordering (Rust
+      byte-wise vs DB collation). SQL narrows, qeval answers, so a refusal
+      costs a scan and never a wrong row.)*
 - [ ] C11. geo (`ST_DWithin`/`ST_Within`/`ST_Intersects`, geozero
       GeoJSON→EWKB binds §6.5), scopeQ, projection (attrs/pick/omit), entity
       ordering (4.23), temporal ranges + 206/`Content-Range` bounds (U3),
       pagination (limit/offset; keyset for temporal §8.2).
-- [ ] C11b. Geo completeness for the SQL path: `near` compiles to
+      *(geo (C11b) and scopeQ (compile/scope.rs) DONE and wired. Still open:
+      projection, ordering, temporal ranges, pagination — all four are
+      answer-shaping rather than row-narrowing, so each is only sound once
+      the predicate under it is EXACT; the pushdown is deliberately partial
+      today, which is why they cannot simply be appended to the WHERE.)*
+- [x] C11b. Geo completeness for the SQL path: `near` compiles to
       `ST_DWithin(location::geography, $n::geography, N)` (geography cast =
       real meters, GIST-indexable); query geometry ALWAYS a bind
       (`ST_GeomFromGeoJSON($n)` / geozero EWKB), never spliced (§16.2);
@@ -253,11 +264,22 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       `geoproperty≠location` gets the unindexed
       `ST_GeomFromGeoJSON(jsonb path)` route (or documented in-memory
       post-filter fallback) — indexed fast path is `location` only.
-- [ ] C11c. Geo parity fixtures: ONE shared fixture set (points/lines/
+      *(Deviation: PostGIS converts the GeoJSON itself
+      (`ST_GeomFromGeoJSON($n)`) instead of geozero encoding EWKB — the DB
+      already owns the conversion, the value still travels as a bind (§16.2),
+      and it drops a dependency. Both `entities.location` and
+      `csource_index.location` are filled this way at write time, guarded by
+      `ST_IsValid` so an unrepresentable geometry becomes NULL. A
+      non-default `geoproperty` declines to compile and the evaluator
+      post-filters — the documented fallback.)*
+- [x] C11c. Geo parity fixtures: ONE shared fixture set (points/lines/
       polygons with holes, edge-crossing intersects, MultiPolygon, near
       min/max) asserted against BOTH the in-memory evaluator (H7) and the
       pg-compiled SQL (PostGIS testcontainer) — store modes must not give
-      different geo answers.
+      different geo answers. *(antares-api/tests/pg_query_parity.rs, run
+      against live PostGIS 3.3 — asserts the one-directional invariant: every
+      entity the evaluator keeps is returned by SQL. Covers q=, scopeQ and
+      geo together, since all three narrow the same statement.)*
 - [x] C12. Guards: CI grep denies `format!` into `sqlx::query` outside the
       compiler allowlist (§16.2); cargo-fuzz targets on q/scopeQ/geoQ
       parsers in scheduled CI. *(fuzz/ crate: parse_q, scope_q, geo_params +

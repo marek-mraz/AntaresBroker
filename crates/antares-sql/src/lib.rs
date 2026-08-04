@@ -5,6 +5,7 @@
 //! phase 1; migrations live in `migrations/`.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod compile;
 pub mod maintenance;
 pub mod pg;
 pub mod store;

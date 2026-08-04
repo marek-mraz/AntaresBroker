@@ -4,10 +4,11 @@
 //! call sites in `antares-api` never change when the cutover (C13) lands.
 //!
 //! Extracted columns are computed in Rust at write time (§4 — no triggers):
-//! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` from the
-//! internal doc form. `location` stays NULL in this slice.
-//! (`ponytail:` geo extraction lands with C11, when compiled geoQ actually
-//! reads the column — nothing consumes it before then.)
+//! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and (C11b)
+//! `location`, the default GeoProperty, converted by PostGIS itself from
+//! bound GeoJSON text (`ponytail:` `ST_GeomFromGeoJSON` over a geozero
+//! dependency — the DB already owns the conversion, and the value still
+//! travels as a bind).
 
 use antares_model::TenantId;
 use serde_json::Value;
@@ -16,6 +17,52 @@ use sqlx::Row;
 
 pub struct PgEntityStore {
     pool: PgPool,
+}
+
+/// What a Query Entities call can push into SQL (C10). Every member is
+/// optional and every omission is safe: a filter left out only widens the
+/// result set, and the caller filters exactly afterwards.
+pub struct EntityFilter<'a> {
+    /// exact entity ids (`id=` / the ids of a batch query)
+    pub ids: Option<&'a [&'a str]>,
+    /// Entity Type Selection (4.17) as OR-of-AND groups, expanded IRIs
+    pub types: Option<&'a [Vec<String>]>,
+    /// `attrs=`: the entity must carry at least one, expanded IRIs
+    pub attrs: Option<&'a [String]>,
+    /// `q=` AST; compiled when its shape is exactly reproducible, else skipped
+    pub q: Option<&'a antares_ql::QNode>,
+    /// `scopeQ=` verbatim (4.19); compiled over the `scopes` column (C11)
+    pub scope_q: Option<&'a str>,
+    /// `georel`/`geometry`/`coordinates`/`geoproperty` (4.10), compiled over
+    /// the extracted `location` column (C11b)
+    pub geo: Option<&'a crate::compile::geo::GeoSpec<'a>>,
+    /// term → IRI, the request context's expander (the AST holds terms)
+    pub expand: &'a dyn Fn(&str) -> String,
+}
+
+impl Default for EntityFilter<'_> {
+    fn default() -> Self {
+        Self {
+            ids: None,
+            types: None,
+            attrs: None,
+            q: None,
+            scope_q: None,
+            geo: None,
+            expand: &|t: &str| t.to_owned(),
+        }
+    }
+}
+
+/// A bound value. Enumerated because the bind list is built dynamically while
+/// the SQL is assembled — the alternative is string interpolation (§16.2: no).
+enum Bind {
+    Text(String),
+    TextArr(Vec<String>),
+    /// jsonpath; bound as text and cast with `$n::jsonpath` in the SQL
+    Path(String),
+    /// a distance in metres (C11b `near`)
+    Num(f64),
 }
 
 /// Run an async block from sync code without stalling a tokio worker
@@ -35,15 +82,20 @@ pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
 }
 
 /// The internal doc's members that become extracted columns (§8.1).
-fn extract(
-    doc: &Value,
-) -> (
-    Vec<String>,
-    Option<Vec<String>>,
-    String,
-    String,
-    Option<String>,
-) {
+pub(crate) struct Extracted {
+    types: Vec<String>,
+    scopes: Option<Vec<String>>,
+    created: String,
+    modified: String,
+    expires: Option<String>,
+    /// C11b: the default GeoProperty as GeoJSON text, for `ST_GeomFromGeoJSON`.
+    /// `None` (→ SQL NULL) whenever it cannot be represented as ONE geometry —
+    /// the compiled geoquery guards on `location IS NULL` so those rows still
+    /// reach the evaluator.
+    location: Option<String>,
+}
+
+fn extract(doc: &Value) -> Extracted {
     let as_vec = |v: &Value| -> Vec<String> {
         match v {
             Value::String(s) => vec![s.clone()],
@@ -54,17 +106,16 @@ fn extract(
             _ => vec![],
         }
     };
-    let types = doc.get("type").map(&as_vec).unwrap_or_default();
-    let scopes = doc.get("scope").map(&as_vec);
     let ts = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
     let now = || "1970-01-01T00:00:00Z".to_owned(); // caller always stamps; belt only
-    (
-        types,
-        scopes,
-        ts("createdAt").unwrap_or_else(now),
-        ts("modifiedAt").unwrap_or_else(now),
-        ts("expiresAt"),
-    )
+    Extracted {
+        types: doc.get("type").map(&as_vec).unwrap_or_default(),
+        scopes: doc.get("scope").map(&as_vec),
+        created: ts("createdAt").unwrap_or_else(now),
+        modified: ts("modifiedAt").unwrap_or_else(now),
+        expires: ts("expiresAt"),
+        location: crate::compile::geo::extract_location(doc),
+    }
 }
 
 impl PgEntityStore {
@@ -74,24 +125,28 @@ impl PgEntityStore {
 
     /// 5.6.1-shaped create: `false` when the id already exists (→ 409).
     pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
-        let (types, scopes, created, modified, expires) = extract(doc);
+        let e = extract(doc);
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(
                 "INSERT INTO entities
-                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz)
+                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                    location)
+                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz,
+                         CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($9), 4326))
+                              THEN ST_SetSRID(ST_GeomFromGeoJSON($9), 4326) END)
                  ON CONFLICT (tenant_id, id) DO NOTHING",
             )
             .bind(tenant.as_str())
             .bind(id)
             .bind(doc)
-            .bind(&types)
-            .bind(&scopes)
-            .bind(&created)
-            .bind(&modified)
-            .bind(&expires)
+            .bind(&e.types)
+            .bind(&e.scopes)
+            .bind(&e.created)
+            .bind(&e.modified)
+            .bind(&e.expires)
+            .bind(&e.location)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -129,8 +184,124 @@ impl PgEntityStore {
         })
     }
 
-    /// Id-ordered snapshot for one tenant (v0 `list` shape; compiled-SQL
-    /// querying replaces call sites one by one in C10/C11).
+    /// C10 query pushdown. The predicates that compile EXACTLY go to
+    /// Postgres; everything else is simply left out of the WHERE clause, so
+    /// the result is always a superset of the answer and the caller's
+    /// in-memory evaluator remains the arbiter. That is the property that
+    /// makes store modes agree: SQL removes rows, it never decides them.
+    ///
+    /// §16.2: every value here is a bind. The only text this function
+    /// concatenates is its own operators and `$n` placeholders.
+    pub fn query(
+        &self,
+        tenant: &TenantId,
+        f: &EntityFilter<'_>,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        let mut binds: Vec<Bind> = vec![Bind::Text(tenant.as_str().to_owned())];
+        let mut wheres = vec!["tenant_id = $1".to_owned()];
+
+        if let Some(ids) = f.ids {
+            binds.push(Bind::TextArr(ids.iter().map(|s| s.to_string()).collect()));
+            wheres.push(format!("id = ANY(${})", binds.len()));
+        }
+        // OR of AND-groups, mirroring the Entity Type Selection Language
+        // (4.17) the caller already parsed: `types @> ARRAY[…]` per group.
+        if let Some(groups) = f.types {
+            let mut ors = Vec::with_capacity(groups.len());
+            for g in groups {
+                binds.push(Bind::TextArr(g.clone()));
+                ors.push(format!("types @> ${}", binds.len()));
+            }
+            if !ors.is_empty() {
+                wheres.push(format!("({})", ors.join(" OR ")));
+            }
+        }
+        // `attrs`: the entity carries at least one of them — jsonb `?|`,
+        // exactly the evaluator's `any(|a| doc.get(a).is_some())`.
+        if let Some(attrs) = f.attrs {
+            binds.push(Bind::TextArr(attrs.to_vec()));
+            wheres.push(format!("entity ?| ${}", binds.len()));
+        }
+        if let Some(node) = f.q {
+            if let Some(c) = crate::compile::q::compile_q(node, "entity", binds.len() + 1, f.expand)
+            {
+                wheres.push(c.sql);
+                binds.extend(c.binds.into_iter().map(Bind::Path));
+            }
+        }
+        if let Some(sq) = f.scope_q {
+            if let Some(c) = crate::compile::scope::compile_scope_q(sq, "scopes", binds.len() + 1) {
+                wheres.push(c.sql);
+                binds.extend(c.binds.into_iter().map(Bind::Text));
+            }
+        }
+        if let Some(spec) = f.geo {
+            // A client may send a self-intersecting polygon. GEOS raises on
+            // one (`side location conflict`), which would turn a query into a
+            // 500 in `postgres` mode while `memory` mode answers happily from
+            // the evaluator. Probing validity once here keeps the two modes
+            // identical: invalid ⇒ no pushdown, evaluator decides. Stored
+            // geometries can't be invalid — the write path NULLs those.
+            if self.geometry_is_valid(spec).unwrap_or(false) {
+                if let Some(c) = crate::compile::geo::compile_geo(spec, "location", binds.len() + 1)
+                {
+                    wheres.push(c.sql);
+                    // geo binds first, then the numeric ones — the order
+                    // `compile_geo` numbered its placeholders in.
+                    binds.extend(c.geo_binds.into_iter().map(Bind::Text));
+                    binds.extend(c.num_binds.into_iter().map(Bind::Num));
+                }
+            }
+        }
+
+        let sql = format!(
+            "SELECT entity FROM entities WHERE {} ORDER BY id",
+            wheres.join(" AND ")
+        );
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
+            // construction: `sql` is built from this function's own literals
+            // plus `$n` placeholders — no caller-supplied text reaches it
+            // (§16.2). The audit lives here, next to the builder.
+            let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
+            for b in &binds {
+                qy = match b {
+                    Bind::Text(s) | Bind::Path(s) => qy.bind(s),
+                    Bind::TextArr(v) => qy.bind(v),
+                    Bind::Num(n) => qy.bind(n),
+                };
+            }
+            let rows = qy.fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+        })
+    }
+
+    /// Id-ordered snapshot for one tenant (the v0 `list` shape — still the
+    /// path for every non-entity kind and for callers with no filter).
+    /// One cheap probe: is the client's query geometry OGC-valid? An error
+    /// (unparseable GeoJSON) counts as invalid — same outcome, no pushdown.
+    fn geometry_is_valid(
+        &self,
+        spec: &crate::compile::geo::GeoSpec<'_>,
+    ) -> Result<bool, sqlx::Error> {
+        let geojson = serde_json::to_string(&serde_json::json!({
+            "type": spec.geometry, "coordinates": spec.coordinates
+        }))
+        .unwrap_or_default();
+        wait(async {
+            Ok(
+                sqlx::query_scalar::<_, bool>("SELECT ST_IsValid(ST_GeomFromGeoJSON($1))")
+                    .bind(&geojson)
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap_or(false),
+            )
+        })
+    }
+
     pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
@@ -170,20 +341,23 @@ impl PgEntityStore {
             let mut doc: Value = row.get(0);
             match f(&mut doc) {
                 Ok(t) => {
-                    let (types, scopes, _created, modified, expires) = extract(&doc);
+                    let e = extract(&doc);
                     sqlx::query(
                         "UPDATE entities SET entity = $3, types = $4, scopes = $5,
                            modified_at = $6::timestamptz, expires_at = $7::timestamptz,
+                           location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))
+                                           THEN ST_SetSRID(ST_GeomFromGeoJSON($8), 4326) END,
                            version = version + 1
                          WHERE tenant_id = $1 AND id = $2",
                     )
                     .bind(tenant.as_str())
                     .bind(id)
                     .bind(&doc)
-                    .bind(&types)
-                    .bind(&scopes)
-                    .bind(&modified)
-                    .bind(&expires)
+                    .bind(&e.types)
+                    .bind(&e.scopes)
+                    .bind(&e.modified)
+                    .bind(&e.expires)
+                    .bind(&e.location)
                     .execute(&mut *tx)
                     .await?;
                     tx.commit().await?;
@@ -212,10 +386,11 @@ impl PgEntityStore {
         let mut payload = Vec::new();
         for (id, doc) in items {
             if seen.insert(id.as_str()) {
-                let (types, scopes, created, modified, expires) = extract(doc);
+                let e = extract(doc);
                 payload.push(serde_json::json!({
-                    "id": id, "doc": doc, "types": types, "scopes": scopes,
-                    "created": created, "modified": modified, "expires": expires,
+                    "id": id, "doc": doc, "types": e.types, "scopes": e.scopes,
+                    "created": e.created, "modified": e.modified, "expires": e.expires,
+                    "location": e.location,
                 }));
             }
         }
@@ -224,13 +399,16 @@ impl PgEntityStore {
             crate::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "INSERT INTO entities
-                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at)
+                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                    location)
                  SELECT $1, e->>'id', e->'doc',
                         ARRAY(SELECT jsonb_array_elements_text(e->'types')),
                         CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
                              ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
                         (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
-                        (e->>'expires')::timestamptz
+                        (e->>'expires')::timestamptz,
+                        CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
+                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END
                  FROM jsonb_array_elements($2::jsonb) AS e
                  ON CONFLICT (tenant_id, id) DO NOTHING
                  RETURNING id",

@@ -223,6 +223,13 @@ fn mode_code(reg: &Value) -> i16 {
     }
 }
 
+/// Hard ceiling on rows one registration may explode into. The API caps
+/// cardinality at the validation boundary (§16.3), but a document written
+/// through any other path — a restored dump, a future importer — must not be
+/// able to drive this quadratically. Truncating loses federation matches for
+/// an absurd registration; OOM loses the process.
+pub const MAX_INDEX_ROWS: usize = 10_000;
+
 /// Explode one registration document into csource_index rows: each
 /// RegistrationInfo element yields entities × (propertyNames ∪
 /// relationshipNames) rows, with NULL placeholders when a dimension is
@@ -244,6 +251,12 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
             "entity_type": entity.and_then(|e| e.get("type")).and_then(Value::as_str),
             "property_name": prop,
             "relationship_name": rel,
+            // C11b: a registration carries its geo scope as a RAW GeoJSON
+            // geometry under `location` (not instance-wrapped like an entity
+            // attribute) — see antares_api::csource::csr_matches_subscription,
+            // which hands exactly this value to `matches_geometry`.
+            "location": reg.get("location").filter(|g| g.get("type").is_some())
+                           .map(|g| g.to_string()),
             "scopes": reg.get("scope").map(|s| match s {
                 Value::String(one) => vec![one.clone()],
                 Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
@@ -283,6 +296,12 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
             _ => vec![None],
         };
         for ent in entities {
+            if rows.len() >= MAX_INDEX_ROWS {
+                tracing::warn!(
+                    "registration explodes past {MAX_INDEX_ROWS} index rows; truncating"
+                );
+                return rows;
+            }
             if props.is_empty() && rels.is_empty() {
                 rows.push(common(ent, None, None));
             }
@@ -382,14 +401,16 @@ impl PgDocStore {
                     "INSERT INTO csource_index
                        (tenant_id, registration_id, entity_id, id_pattern, entity_type,
                         property_name, relationship_name, scopes, expires_at, endpoint,
-                        mode, ops, tenant_at_peer, headers, host_alias)
+                        mode, ops, tenant_at_peer, headers, host_alias, location)
                      SELECT $1, $2, e->>'entity_id', e->>'id_pattern', e->>'entity_type',
                             e->>'property_name', e->>'relationship_name',
                             CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
                                  ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
                             (e->>'expires_at')::timestamptz, e->>'endpoint',
                             (e->>'mode')::smallint, (e->>'ops')::bigint,
-                            e->>'tenant_at_peer', e->'headers', e->>'host_alias'
+                            e->>'tenant_at_peer', e->'headers', e->>'host_alias',
+                            CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
+                                 THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END
                      FROM jsonb_array_elements($3::jsonb) AS e",
                 )
                 .bind(tenant.as_str())

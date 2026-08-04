@@ -894,7 +894,25 @@ pub fn filter_entities_fed(
     let scope_q = params.get("scopeQ");
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    let all = crate::federation::merge_candidates(st.store.list(tenant, Kind::Entity)?, fed);
+    // C10: hand the store what it can filter on. A backend that can push the
+    // predicate down (postgres/timescale) returns fewer rows; one that cannot
+    // (memory/file) returns the snapshot. Either way the loop below is what
+    // decides — the store narrows, it never answers.
+    let expand = |t: &str| ctx.expand_key(t);
+    let geo_spec = geo.as_ref().and_then(|g| g.to_sql_spec(ctx));
+    let local = st.store.query_entities(
+        tenant,
+        &antares_sql::store::pg_entity::EntityFilter {
+            ids: ids.as_deref(),
+            types: type_sel.as_deref(),
+            attrs: attr_filter.as_deref(),
+            q: q_ast.as_ref(),
+            scope_q: scope_q.map(String::as_str),
+            geo: geo_spec.as_ref(),
+            expand: &expand,
+        },
+    )?;
+    let all = crate::federation::merge_candidates(local, fed);
     let mut out = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");

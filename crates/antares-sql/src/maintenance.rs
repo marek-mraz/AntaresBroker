@@ -14,7 +14,7 @@
 //! just unpartitioned).
 
 use sqlx::postgres::PgPool;
-use sqlx::Row;
+use sqlx::{Acquire, Row};
 
 /// True when the timescaledb extension is CREATED in this database (D3 —
 /// per-database `pg_extension`, not "installed on the server").
@@ -70,16 +70,27 @@ pub async fn temporal_maintenance(
                 "CREATE TABLE IF NOT EXISTS attr_instances_{suffix} PARTITION OF attr_instances \
                  FOR VALUES FROM ('{lo}') TO ('{hi}')"
             );
-            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(ddl))
-                .execute(&mut *tx)
+            // The failure below is EXPECTED (see module docs), and in
+            // PostgreSQL a failed statement aborts the whole transaction —
+            // every later one then returns 25P02. Tolerating an error means
+            // owning a savepoint to roll back to; without it the first
+            // already-occupied range poisons the entire maintenance pass.
+            let mut sp = tx.begin().await?;
+            match sqlx::query(sqlx::AssertSqlSafe(ddl))
+                .execute(&mut *sp)
                 .await
             {
-                // rows for this range already sit in the DEFAULT partition —
-                // fine, they stay there (see module docs).
-                tracing::debug!("partition attr_instances_{suffix} not created: {e}");
-                done.push(format!("partition {suffix}: left in default"));
-            } else {
-                done.push(format!("partition {suffix}: ok"));
+                Ok(_) => {
+                    sp.commit().await?;
+                    done.push(format!("partition {suffix}: ok"));
+                }
+                Err(e) => {
+                    // rows for this range already sit in the DEFAULT partition —
+                    // fine, they stay there (see module docs).
+                    sp.rollback().await?;
+                    tracing::debug!("partition attr_instances_{suffix} not created: {e}");
+                    done.push(format!("partition {suffix}: left in default"));
+                }
             }
         }
         if let Some(days) = retention_days {

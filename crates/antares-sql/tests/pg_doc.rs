@@ -204,4 +204,26 @@ async fn registration_maintains_csource_index() {
         .delete(&t, DocKind::Registration, "urn:csr:idx1")
         .expect("delete"));
     assert_eq!(count(&pool).await, 0, "cascade cleaned the index");
+    // C11b: a registration's own `location` becomes an indexed geometry so
+    // federation matching can be a GIST lookup rather than a scan (§16.7).
+    let geo_id = "urn:ngsi-ld:ContextSourceRegistration:geo1";
+    let geo_reg = serde_json::json!({
+        "id": geo_id, "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "endpoint": "http://peer.example/ngsi-ld/v1",
+        "location": {"type": "Polygon",
+                     "coordinates": [[[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]]]}
+    });
+    s.upsert(&t, DocKind::Registration, geo_id, &geo_reg)
+        .expect("upsert geo reg");
+    let inside: bool = sqlx::query_scalar(
+        "SELECT bool_or(ST_Within(ST_SetSRID(ST_Point(2, 2), 4326), location))
+           FROM csource_index WHERE tenant_id = $1 AND registration_id = $2",
+    )
+    .bind(t.as_str())
+    .bind(geo_id)
+    .fetch_one(&pool)
+    .await
+    .expect("geo query");
+    assert!(inside, "the registration geometry must be queryable in SQL");
 }

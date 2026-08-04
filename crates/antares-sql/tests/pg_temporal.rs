@@ -18,6 +18,24 @@ macro_rules! require_db {
     };
 }
 
+/// Maintenance is single-winner by design (§3.1.6 `FOR UPDATE SKIP LOCKED`),
+/// so a concurrent caller legitimately gets "skipped" — including a sibling
+/// test. A real deployment retries on the next tick; so do we, rather than
+/// weakening an assertion about what a winning pass must do.
+async fn maintenance_winning(
+    pool: &sqlx::PgPool,
+    retention_days: Option<i64>,
+) -> Result<String, sqlx::Error> {
+    for _ in 0..50 {
+        let msg = antares_sql::maintenance::temporal_maintenance(pool, retention_days).await?;
+        if !msg.starts_with("skipped") {
+            return Ok(msg);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("never won the maintenance claim in 50 tries");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_doc_roundtrip_and_instance_append() {
     let url = require_db!();
@@ -121,9 +139,7 @@ async fn attr_instances_decomposition_and_maintenance() {
     let ts = antares_sql::maintenance::timescale_present(&pool)
         .await
         .expect("detect");
-    let msg = antares_sql::maintenance::temporal_maintenance(&pool, None)
-        .await
-        .expect("maintenance");
+    let msg = maintenance_winning(&pool, None).await.expect("maintenance");
     if ts {
         assert!(
             msg.contains("nothing to do"),
@@ -140,4 +156,67 @@ async fn attr_instances_decomposition_and_maintenance() {
         .expect("parts");
         assert!(parts >= 5, "default + >=4 weekly partitions, got {parts}");
     }
+}
+
+/// A range whose rows already sit in the DEFAULT partition cannot be
+/// partitioned off, and the module contract is that maintenance SKIPS it and
+/// carries on. PostgreSQL aborts the whole transaction on any failed
+/// statement, so "carries on" only holds if that one statement runs under its
+/// own savepoint — without it the pass dies with 25P02 on the NEXT statement
+/// and no partition is ever created on a live database.
+#[tokio::test(flavor = "multi_thread")]
+async fn occupied_range_is_skipped_without_poisoning_the_pass() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    if antares_sql::maintenance::timescale_present(&pool)
+        .await
+        .expect("detect")
+    {
+        return; // plain-mode-only contract; timescale has chunks
+    }
+    let t = TenantId::new("pgpart").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    // Drop any weekly partition covering now, then park a row in DEFAULT for
+    // that exact range — the conflict maintenance must tolerate.
+    let this_week: String = sqlx::query_scalar(
+        "SELECT 'attr_instances_' || to_char(date_trunc('week', now()), 'IYYY\"w\"IW')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("suffix");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS {this_week}"
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop");
+    sqlx::query(
+        "INSERT INTO attr_instances
+           (tenant_id, entity_id, attr_id, instance_id, observed_at, created_at, modified_at, data)
+         VALUES ($1, 'urn:e:part', 'urn:a:part', 'urn:i:part', now(), now(), now(), '{}'::jsonb)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(t.as_str())
+    .execute(&pool)
+    .await
+    .expect("park row in default");
+
+    let msg = maintenance_winning(&pool, None)
+        .await
+        .expect("maintenance must survive an occupied range");
+    assert!(
+        msg.contains("left in default"),
+        "occupied range reported: {msg}"
+    );
+    assert!(
+        msg.contains(": ok"),
+        "the pass continued past the occupied range: {msg}"
+    );
+
+    sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }

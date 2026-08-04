@@ -195,6 +195,40 @@ impl GeoQuery {
         })
     }
 
+    /// C11b: the same query, in the shape `antares-sql` compiles to PostGIS.
+    /// `geoproperty` is expanded here because the compiler only pushes down
+    /// the DEFAULT GeoProperty — the one with an extracted column.
+    pub fn to_sql_spec<'a>(
+        &'a self,
+        ctx: &antares_jsonld::Context,
+    ) -> Option<antares_sql::compile::geo::GeoSpec<'a>> {
+        use antares_sql::compile::geo::Rel;
+        let rel = match self.rel {
+            Georel::Near { max, min } => Rel::Near { max, min },
+            Georel::Within => Rel::Within,
+            Georel::Contains => Rel::Contains,
+            Georel::Intersects => Rel::Intersects,
+            Georel::Equals => Rel::Equals,
+            Georel::Disjoint => Rel::Disjoint,
+            Georel::Overlaps => Rel::Overlaps,
+        };
+        // an empty geoproperty means the default; expanding "" would not
+        let iri = if self.geoproperty.is_empty() {
+            String::new()
+        } else {
+            ctx.expand_key(&self.geoproperty)
+        };
+        if !iri.is_empty() && iri != antares_sql::compile::geo::LOCATION_IRI {
+            return None;
+        }
+        Some(antares_sql::compile::geo::GeoSpec {
+            rel,
+            geometry: &self.geometry,
+            coordinates: &self.coordinates,
+            geoproperty_iri: "",
+        })
+    }
+
     /// One target GeoJSON value against the query. A malformed TARGET is a
     /// non-match (queries 400 at parse; stored data must never 500 a read).
     pub fn matches_geometry(&self, geo: &Value) -> bool {

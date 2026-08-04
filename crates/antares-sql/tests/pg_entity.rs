@@ -190,3 +190,191 @@ async fn batch_create_and_delete_multirow() {
     // cleanup
     let _ = s.batch_delete(&t, &["urn:b:2".into()]);
 }
+
+// ---- C10: query pushdown -------------------------------------------------
+// The contract is one-directional and it is the whole reason the pushdown is
+// safe: SQL may only NARROW. Every row the in-memory evaluator would accept
+// must survive the WHERE clause; extra rows are fine because the caller
+// re-filters exactly. So each case below asserts the expected set is present,
+// and the refusal cases assert the query widens to everything rather than
+// guessing a translation.
+
+const NS: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+
+fn ex(t: &str) -> String {
+    format!("{NS}{t}")
+}
+
+/// The shape the broker actually stores: expanded IRI keys, each holding an
+/// ARRAY of instances. Testing against the internal shape, not a convenient
+/// one, is the point — the jsonpath addresses instances.
+fn expanded(id: &str, ty: &str, attrs: serde_json::Value) -> serde_json::Value {
+    let mut doc = json!({
+        "id": id,
+        "type": format!("{NS}{ty}"),
+        "createdAt": "2026-08-04T09:00:00Z",
+        "modifiedAt": "2026-08-04T09:00:00Z"
+    });
+    for (k, v) in attrs.as_object().expect("attrs object") {
+        doc[ex(k)] = json!([v]);
+    }
+    doc
+}
+
+fn ids_of(rows: &[serde_json::Value]) -> Vec<String> {
+    let mut v: Vec<String> = rows
+        .iter()
+        .map(|r| r["id"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_pushdown_narrows_without_dropping_matches() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgquery").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    let seed = [
+        (
+            "urn:ngsi-ld:Room:1",
+            "Room",
+            json!({"temperature": {"type": "Property", "value": 30},
+                   "name": {"type": "Property", "value": "north"}}),
+        ),
+        (
+            "urn:ngsi-ld:Room:2",
+            "Room",
+            json!({"temperature": {"type": "Property", "value": 10}}),
+        ),
+        (
+            "urn:ngsi-ld:Vehicle:1",
+            "Vehicle",
+            json!({"speed": {"type": "Property", "value": 60},
+                   "name": {"type": "Property", "value": "south"}}),
+        ),
+        (
+            "urn:ngsi-ld:Vehicle:2",
+            "Vehicle",
+            json!({"brandName": {"type": "Property", "value": "Mercedes"}}),
+        ),
+    ];
+    for (id, ty, attrs) in &seed {
+        let _ = s.delete(&t, id);
+        assert!(
+            s.create(&t, id, &expanded(id, ty, attrs.clone()))
+                .expect("create"),
+            "seed {id}"
+        );
+    }
+    let all: Vec<String> = seed.iter().map(|(id, ..)| (*id).to_owned()).collect();
+
+    let q = |f: &antares_sql::store::pg_entity::EntityFilter<'_>| {
+        ids_of(&s.query(&t, f).expect("query"))
+    };
+    let base = || antares_sql::store::pg_entity::EntityFilter {
+        expand: &ex,
+        ..Default::default()
+    };
+
+    // no filter: everything this tenant holds
+    assert_eq!(q(&base()), all);
+
+    // ids
+    let want = ["urn:ngsi-ld:Room:2"];
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            ids: Some(&want),
+            ..base()
+        }),
+        want
+    );
+
+    // type selection (OR of AND-groups, expanded IRIs)
+    let groups = vec![vec![ex("Vehicle")]];
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            types: Some(&groups),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Vehicle:1", "urn:ngsi-ld:Vehicle:2"]
+    );
+
+    // attrs: carries at least one of them
+    let attrs = vec![ex("speed"), ex("brandName")];
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            attrs: Some(&attrs),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Vehicle:1", "urn:ngsi-ld:Vehicle:2"]
+    );
+
+    // q=: numeric comparison over instance values
+    let ast = antares_ql::parse_q("temperature>20").expect("parse");
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            q: Some(&ast),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Room:1"]
+    );
+
+    // q=: string equality, and the AND of two predicates
+    let ast = antares_ql::parse_q("name==\"south\";speed==60").expect("parse");
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            q: Some(&ast),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Vehicle:1"]
+    );
+
+    // q=: existence, and negated existence (true when the attribute is ABSENT
+    // — the case a naive `NOT jsonb_path_exists` on the wrong path gets wrong)
+    let ast = antares_ql::parse_q("brandName").expect("parse");
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            q: Some(&ast),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Vehicle:2"]
+    );
+    let ast = antares_ql::parse_q("!name").expect("parse");
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            q: Some(&ast),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Room:2", "urn:ngsi-ld:Vehicle:2"]
+    );
+
+    // q= the compiler REFUSES (dotted path, regex, string ordering): the row
+    // set must widen to everything, never narrow on a guess.
+    for refused in ["address.city==\"Bonn\"", "name~=\"^so\"", "name>\"m\""] {
+        let ast = antares_ql::parse_q(refused).expect("parse");
+        assert_eq!(
+            q(&antares_sql::store::pg_entity::EntityFilter {
+                q: Some(&ast),
+                ..base()
+            }),
+            all,
+            "{refused} must fall back to the full set, not a guess"
+        );
+    }
+
+    // and the filters compose: type AND q
+    let groups = vec![vec![ex("Room")]];
+    let ast = antares_ql::parse_q("temperature<20").expect("parse");
+    assert_eq!(
+        q(&antares_sql::store::pg_entity::EntityFilter {
+            types: Some(&groups),
+            q: Some(&ast),
+            ..base()
+        }),
+        ["urn:ngsi-ld:Room:2"]
+    );
+}
