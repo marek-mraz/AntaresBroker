@@ -25,8 +25,10 @@ write-through shadow (§B), so keeping `memory` costs no second implementation
 — it is the same code with durability disabled. It earns its keep as: the
 control mode when a `file`-only bug appears; the unit/integration-test default
 (no temp dirs, no fsync, parallel `cargo test` never fights over a file); the
-only mode that runs with a read-only rootfs and no volume; and the ONLY mode
-that compiles to the browser target (§N — `wasm32` has no filesystem).
+only mode that runs with a read-only rootfs and no volume; and the browser
+fallback when OPFS is unavailable (§N — redb itself compiles to `wasm32`
+fine, but that target has no filesystem, so persistence there needs the OPFS
+backend and `memory` is what runs without it).
 
 **Checking off a task:** flip `- [ ]` to `- [x]` in the same PR/commit that
 lands it — GitHub renders these as checkboxes and shows section progress.
@@ -49,8 +51,10 @@ its tests is the one way to make this file lie.
 - [ ] A3. Wiring in `antares-broker::wiring`: mode → store construction; api,
       matcher, notifier, temporal, registry see only the trait; no core crate
       names a backend (§9.2).
-- [ ] A4. Startup log + `/info` report the active store mode (§15.1 feature
-      registry posture).
+- [ ] A4. Startup log + `/q/health` report the active store mode (§15.1
+      feature registry posture). NOT in `/info/sourceIdentity`: that is a
+      spec resource (5.15) and inventing members in a normative payload is
+      exactly the drift §14.6 exists to prevent.
 
 ## B. `file` mode — redb write-through (ships first, v0-compatible)
 
@@ -88,8 +92,26 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 - [ ] B8. Tests: table round-trip + key-encoding units; e2e SIGKILL-restart
       (full state survives); e2e kill -9 right after 201 (commit-before-ack
       proven); 350 MiB gate unchanged.
-- [ ] B9. Docs: README mode table (+"backup = copy the file"); ADR: mode
-      ladder, redb-as-durability, SQLite rejected.
+- [ ] B9. Docs: README mode table; ADR: mode ladder, redb-as-durability,
+      SQLite rejected.
+- [ ] B10. **Reset path** (the Scorpio phantom-state trap, §14.1): the API
+      deletes that `dev/reset-broker.sh` issues MUST reach redb, or the next
+      suite starts against a file the maps no longer show and every create
+      returns a phantom 409 after the first restart. Prove it: run two suites
+      back-to-back in `file` mode WITH a broker restart between them.
+- [ ] B11. On-disk format version in a `meta` table, checked at boot: refuse
+      to start with a clear message (or migrate) on mismatch. A value-shape
+      change must never be read as valid data by a newer binary.
+- [ ] B12. Backup story, verified not assumed: a live `cp` of an open redb
+      file can tear. Establish and document the supported route (copy under a
+      read transaction / savepoint, or stop-copy) and test restore. B9's
+      README table cites whatever this task concludes, not "just copy it".
+- [ ] B13. Group-commit lever (`ponytail:` not default): redb has ONE writer,
+      so concurrent request commits serialize behind it and the measured
+      3,127 writes/s is a per-process ceiling, not a per-core one. Export
+      commit queue depth; only if a benchmark hits the ceiling, batch pending
+      writes into one txn (and re-verify commit-before-ack still holds for
+      every batched write).
 
 ## C. `postgres` mode — the phase-1 real store (§3, §6.2, §8)
 
@@ -183,6 +205,15 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 - [ ] E4. ADRs: mode ladder; redb-as-durability; SQLite rejected.
 - [ ] E5. `docs/ics.yaml` per clause as C/D land; `mempalace mine` after
       each phase.
+- [ ] E6. Create `error.md` (mandated by the ETSI testing guide, absent from
+      the repo): the log of ETSI *tool* bugs, so a broken TP is never "fixed"
+      by hacking the broker. Seed it with the known ones (QueryEntities
+      04_01/04_02 create two payloads with the same id → 409 by the suite's
+      own doing).
+- [ ] E7. `dev/etsi-run.sh` seds `resources/variables.py` inside the
+      submodule in place, which leaves `ngsi-ld-test-suite` permanently
+      dirty in `git status`. Restore it on exit (trap) so a dirty submodule
+      means a real change, not a leftover.
 
 ## F. Messaging & scale-out — phase 2 eventing (§6.4, §7, §10)
 
@@ -240,6 +271,9 @@ Currently the suite runs `--exclude '*mqtt*'` — these TPs are open.
 The suite is green, but the ledger has normative surface the TPs don't cover;
 audit each against `docs/ics.yaml` and close the gaps.
 
+- [ ] H0. Create `docs/ics.yaml` — it does not exist yet, though §14.6
+      mandates it and E5/H1 both write to it. CIM 029 shape, one row per
+      clause, rendered by CI.
 - [ ] H1. ICS audit: walk §5.4.1–5.4.10 checkbox by checkbox against the v0
       code; record implemented/partial/missing in `docs/ics.yaml` — the
       suite's 686 TPs cover only part of the normative surface (§0.2).
@@ -459,6 +493,12 @@ N4) selected through the same trait, compiled to a different target.
         browser tier (covered by N7a) until the harness proxies them.
         A 5-broker federation stack in-browser needs the proxy regardless:
         no inbound sockets means no broker-to-broker HTTP.
+- [ ] N4b. OPFS has the same single-writer property as the native file
+      (§K10): a sync access handle is exclusive per file, so a SECOND TAB on
+      the same origin cannot open the store. Decide the owner story
+      (SharedWorker owning the handle and serving other tabs, or leader
+      election with a clear "another tab owns this store" error) before N6 —
+      a demo page that dies on the user's second tab is worse than no demo.
 - [ ] N8. Docs/ADR: browser build is memory (or OPFS-file) only — no NATS,
       no MQTT, no Postgres, no roles; state which suites gate it and which
       are structurally out of reach.
@@ -474,7 +514,10 @@ E tracks the ladder; matrix columns gate as C15/D6 land.
 F (NATS/roles) after C — the outbox table is its foundation.
 G (MQTT) independent — any time after the sink registry exists.
 H/I/J interleave continuously (spec-first rule: clause by clause).
-K after F; L last (phase-4 exit); M whenever a crate is stable.
+K splits: the `file`-mode drills (K9, K10) need only B and should land WITH
+it; the roll/LB/failover work (K1-K8, K11) needs C and F, since rolling
+updates only exist once state is external.
+L last (phase-4 exit); M whenever a crate is stable.
 N (browser WASM) needs only A; independent of C/D/F and gated by its own
 Node/browser tiers, never by the container pipeline.
 ```
