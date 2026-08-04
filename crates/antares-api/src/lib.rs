@@ -8,6 +8,7 @@ pub mod bounds;
 pub mod conformance;
 pub mod contexts;
 pub mod csource;
+pub mod egress;
 pub mod entities;
 pub mod federation;
 pub mod geo;

@@ -1072,6 +1072,20 @@ Test rig: the phase-4 load rig (§13) gains a federation scenario — 1 tenant �
 
 ## ONE environment for everything (dev AND CI) — the 5-broker stack
 
+> **Antares run policy (supersedes the Scorpio recipe below for this repo).**
+> Locally run **one store mode — the one your change touches**:
+> `STORE=<memory|file|postgres|timescale> dev/etsi-local.sh` (workspace tests
+> + that mode's 8 suite cells), or `STORE=<mode> STOP_ON_ERROR=1
+> dev/etsi-pipeline.sh` for the tight debug loop. Local cells run serially,
+> so running all four costs ~4× wall-clock for a signal CI already produces.
+> **CI runs all four modes in parallel** — `.github/workflows/etsi.yml` fans
+> out a 4 × 8 store × suite matrix (`fail-fast: false`, one image build feeds
+> all 32 cells) and is the authority; `:latest` publishes only when every
+> cell is green. `STORE=all dev/etsi-local.sh` reproduces the matrix locally
+> on the rare occasion that is worth the wall-clock.
+> Never build (cargo or docker) while a measured ETSI run is in flight — CPU
+> contention manufactures phantom mock-502 and notification-timeout failures.
+
 **Always use the single stack `compose-files/docker-compose-iop.yml`** — 5 self-contained brokers, each with its own Postgres + Kafka + MQTT (emqx), built from the working tree. Do NOT maintain a separate single-broker compose: single-broker suites just run against **broker1 (`scorpio1`)**, the federation suites (DistributedOperations, IOP) use all five, and MQTT suites use the per-broker emqx. This keeps local and CI on the same config so results match.
 
 ```bash

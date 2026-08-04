@@ -59,7 +59,8 @@ pub struct CtxUsage {
 /// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
 /// `ANTARES_EGRESS_ALLOW_PRIVATE=true` opts out — the ETSI/IOP stacks host
 /// their mock context servers on private addresses and need it.
-/// (DNS-pinned re-resolution + redirect caps land with the full I4 policy.)
+/// The DNS-pinning resolver and redirect cap that enforce it on the wire
+/// are `PolicyResolver` / `client_builder` below.
 #[derive(Clone, Copy, Debug)]
 pub struct EgressPolicy {
     pub allow_private: bool,
@@ -73,7 +74,7 @@ impl EgressPolicy {
         }
     }
 
-    fn ip_is_private(ip: std::net::IpAddr) -> bool {
+    pub(crate) fn ip_is_private(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => {
                 v4.is_loopback()
@@ -120,6 +121,47 @@ impl EgressPolicy {
         }
         Ok(())
     }
+}
+
+/// §16.4 redirect cap: a fetch may not be bounced more than this many times.
+/// Each hop is a fresh destination the policy has to clear, so the cap is what
+/// keeps an open redirector from walking us into a private range.
+pub const MAX_REDIRECTS: usize = 3;
+
+/// §16.4 DNS pinning. `check_host` resolves a name to decide whether egress is
+/// allowed, but reqwest would resolve it *again* at connect time — a window in
+/// which the answer can change (DNS rebinding). Installing the policy as the
+/// client's resolver closes it: the addresses the connector dials are the ones
+/// this filter passed, so the check and the connect see the same answer by
+/// construction. Redirect hops go through it too.
+#[derive(Debug)]
+pub struct PolicyResolver(EgressPolicy);
+
+impl reqwest::dns::Resolve for PolicyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_private = self.0.allow_private;
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let kept: Vec<std::net::SocketAddr> = addrs
+                .filter(|a| allow_private || !EgressPolicy::ip_is_private(a.ip()))
+                .collect();
+            if kept.is_empty() {
+                return Err(format!("egress to {host} denied (private range)").into());
+            }
+            Ok(Box::new(kept.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The one outbound-client constructor (§16.4): every reqwest client in the
+/// broker — @context fetches, notifications, federation forwards — is built
+/// from this, so the policy cannot be forgotten at a call site. Timeouts stay
+/// the caller's choice; the security-relevant settings do not.
+pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .dns_resolver(std::sync::Arc::new(PolicyResolver(policy)))
 }
 
 /// 6.3.16: cache lifetime of a downloaded @context comes from its response
@@ -209,7 +251,7 @@ impl Loader {
         core.freeze();
         core.source = Value::String(CORE_CONTEXT.to_owned());
         Self {
-            http: reqwest::Client::builder()
+            http: client_builder(policy)
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
@@ -540,6 +582,72 @@ fn merge_context_value(ctx: &mut Context, v: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// I4/§16.4: the resolver is the enforcement point, so a name that
+    /// resolves into a private range must fail at DNS time — that is what
+    /// makes a rebinding answer between check and connect harmless.
+    #[tokio::test]
+    async fn policy_resolver_filters_private_answers() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        let deny = PolicyResolver(EgressPolicy {
+            allow_private: false,
+        });
+        let name = reqwest::dns::Name::from_str("localhost").expect("name");
+        assert!(deny.resolve(name).await.is_err());
+
+        let allow = PolicyResolver(EgressPolicy {
+            allow_private: true,
+        });
+        let name = reqwest::dns::Name::from_str("localhost").expect("name");
+        let addrs = allow.resolve(name).await.expect("allowed");
+        assert!(addrs.count() > 0);
+    }
+
+    /// The redirect cap is only real if it is installed on the client an open
+    /// redirector actually talks to — so bounce one against a server that
+    /// always redirects to itself and assert the client gives up.
+    #[tokio::test]
+    async fn client_builder_caps_redirects() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hops.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{addr}/loop\r\nContent-Length: 0\r\n\r\n"
+                );
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let client = client_builder(EgressPolicy {
+            allow_private: true,
+        })
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+        let err = client
+            .get(format!("http://{addr}/start"))
+            .send()
+            .await
+            .expect_err("redirect loop must not be followed forever");
+        assert!(err.is_redirect(), "gave up for the redirect-cap reason");
+        assert_eq!(
+            hops.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_REDIRECTS + 1,
+            "one initial request plus MAX_REDIRECTS hops"
+        );
+    }
 
     #[tokio::test]
     async fn core_context_has_ngsi_terms() {

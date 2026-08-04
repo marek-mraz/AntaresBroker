@@ -15,4 +15,4 @@ pub use expand::{
     expand_attr_fragment, expand_entity, expand_types, is_deletion_instance, is_ngsi_null,
     is_ngsi_null_langmap, parse_datetime, ExpandOpts,
 };
-pub use loader::{CtxUsage, Loader, CORE_CONTEXT};
+pub use loader::{client_builder, CtxUsage, EgressPolicy, Loader, CORE_CONTEXT, MAX_REDIRECTS};

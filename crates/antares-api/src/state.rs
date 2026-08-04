@@ -33,6 +33,9 @@ pub struct AppState {
     pub limits: Arc<crate::bounds::LimitStats>,
     /// J7: allocator stats provider (set by the broker; None in tests/wasm).
     pub mem_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
+    /// I4: one egress policy for notifications and federation forwards
+    /// (scheme allowlist, private-range deny, per-destination breakers).
+    pub egress: Arc<crate::egress::Egress>,
 }
 
 impl AppState {
@@ -46,6 +49,10 @@ impl AppState {
     }
 
     pub fn with_store(host_alias: String, store: Arc<AnyStore>, store_mode: String) -> Self {
+        // I4: one policy value, read once, shared by every outbound path —
+        // the gate (scheme/breakers) and the clients (DNS pinning, redirect
+        // cap) can never disagree about what is allowed (§16.4).
+        let egress_policy = antares_jsonld::EgressPolicy::from_env();
         Self {
             store,
             store_mode,
@@ -55,7 +62,7 @@ impl AppState {
             host_alias,
             default_limit: 1000,
             max_limit: 1000,
-            http: reqwest::Client::builder()
+            http: antares_jsonld::client_builder(egress_policy)
                 .connect_timeout(std::time::Duration::from_secs(2))
                 .timeout(std::time::Duration::from_secs(5))
                 // the suite's notification receiver asserts header names
@@ -63,7 +70,7 @@ impl AppState {
                 .http1_title_case_headers()
                 .build()
                 .expect("http client"),
-            fed_http: reqwest::Client::builder()
+            fed_http: antares_jsonld::client_builder(egress_policy)
                 .connect_timeout(std::time::Duration::from_secs(2))
                 .timeout(std::time::Duration::from_secs(8))
                 .http1_title_case_headers()
@@ -73,6 +80,7 @@ impl AppState {
             mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
+            egress: Arc::new(crate::egress::Egress::new(egress_policy)),
         }
     }
 }

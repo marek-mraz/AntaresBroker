@@ -11,11 +11,13 @@ Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in
 2. Implement the full normative behaviour with the smallest diff that holds
    it — reuse before writing, stdlib before dependencies.
 3. Unit-test that clause's own rules and edge cases.
-4. Run the local gate: `dev/etsi-local.sh` (workspace tests + `file` +
-   `timescale` — those two cover every backend; `memory`/`postgres` add no
-   extra local code path). Single-mode loop while debugging:
-   `STORE=<mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh`. CI runs ALL FOUR
-   modes on push — CI is the authority, the local gate is the fast loop.
+4. Run the local gate for the ONE store mode your change touches:
+   `STORE=<mode> dev/etsi-local.sh` (workspace tests + that mode's 8 suite
+   cells; default `memory`). Tighter loop while debugging:
+   `STORE=<mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh`. Do NOT run all four
+   locally — cells run serially here, so it is 4× the wall-clock for a
+   signal CI already gives: **CI fans all four modes out in parallel on
+   every push and is the authority** (32 cells, `fail-fast: false`).
 5. In ONE commit: the code, its tests, the `docs/ics.yaml` row, the ticked
    box, and a message citing the clause number.
 6. File the decision or the gotcha in MemPalace (other agents read it).
@@ -514,11 +516,24 @@ audit each against `docs/ics.yaml` and close the gaps.
       counters exported via /q/health until the K12 metrics stack lands;
       router + parser tests i2_bounds_wall / q_complexity_cap.)*
 - [ ] I3. Rate limiting layer: global + per-IP v1; per-tenant hooks (§16.3).
-- [ ] I4. `EgressPolicy` for ALL outbound (notifications, @context fetches,
+- [x] I4. `EgressPolicy` for ALL outbound (notifications, @context fetches,
       federation forwards): scheme allowlist, private-range deny-by-default
       with `egress.allow_private` switch (ETSI stacks need it), redirect
       cap, DNS-pinned re-resolution, response-size caps, per-destination
-      circuit breakers (§16.4, §16.7).
+      circuit breakers (§16.4, §16.7). *(api/egress.rs gate — scheme
+      allowlist + private deny + per-destination breakers (5 consecutive
+      failures trip, 30 s cooldown, one half-open probe) — wired into
+      notify.rs::deliver_as (refused = drop) and federation.rs::forward
+      (refused 502, breaker-open 503). DNS pinning is a reqwest `Resolve`
+      impl, not resolve-then-pin: reqwest re-resolves at connect time, so
+      only owning the resolver closes the rebinding window. `client_builder`
+      in jsonld/loader.rs is the ONE outbound-client constructor (loader +
+      st.http + st.fed_http) and installs resolver + redirect cap 3;
+      @context fetch keeps its 5 MB cap → 504. Tests: policy_resolver_
+      filters_private_answers, client_builder_caps_redirects (302-to-self
+      server, asserts MAX_REDIRECTS+1 accepts), scheme_allowlist_and_
+      private_deny, breaker_trips_after_consecutive_failures. ETSI memory
+      mode 1025/1025 after the gate landed.)*
 - [ ] I5. Tenant isolation test pack: RLS denial per store, cross-tenant
       404-indistinguishability (no existence oracle, §16.1.6), tenant-keyed
       in-memory structures audit (§16.1.4), NATS subject re-verification

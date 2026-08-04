@@ -70,14 +70,18 @@ curl -s localhost:9090/q/health
 ## ETSI conformance suite
 
 ```bash
-dev/etsi-local.sh               # the local gate: workspace tests + STORE=file + STORE=timescale
-STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # any single mode while debugging
+dev/etsi-local.sh                       # local gate: workspace tests + ONE store mode (default memory)
+STORE=timescale dev/etsi-local.sh       # the mode you are touching
+STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # single suite/mode while debugging
 ```
 
-Locally the gate runs `file` + `timescale` only — together they cover every
-backend (memory maps + redb shadow; PgBackend on timescaledb-ha, which
-bundles postgres+PostGIS). CI runs **all four** store modes on every push and
-is the authority; `:latest` publishes only when the whole matrix is green.
+**Locally: one store mode — the one you are touching.** A dev box runs the
+cells serially, so all four modes cost ~4× wall-clock for a signal CI already
+produces. **CI runs all four modes in parallel** (`.github/workflows/etsi.yml`,
+a 4 × 8 store × suite matrix, `fail-fast: false`, one image build feeding
+every cell) and is the authority; `:latest` publishes only when all 32 cells
+are green. `STORE=all dev/etsi-local.sh` reproduces the full matrix locally
+when you actually need it.
 
 The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
 is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same

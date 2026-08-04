@@ -1138,21 +1138,40 @@ async fn deliver_as(
             tracing::warn!("bookkeeping writeback failed: {e}");
             None
         });
-    let ok = match outbound {
-        Outbound::Http(req, bytes) => {
-            matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
-        }
-        #[cfg(feature = "mqtt")]
-        Outbound::Mqtt(endpoint, params, bytes) => {
-            match st.mqtt.deliver(&endpoint, params, &bytes).await {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
-                    false
+    // I4: the notification endpoint is an egress destination like any other
+    // — policy check once, breaker consulted before the attempt (§16.4).
+    if let Err(e) = st.egress.check_url(uri).await {
+        tracing::warn!("notification endpoint {uri} refused by egress policy: {e}");
+        return;
+    }
+    let breaker_open = st.egress.is_open(uri);
+    let ok = if breaker_open {
+        tracing::debug!("notification to {uri} short-circuited (breaker open)");
+        false
+    } else {
+        match outbound {
+            Outbound::Http(req, bytes) => {
+                matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
+            }
+            #[cfg(feature = "mqtt")]
+            Outbound::Mqtt(endpoint, params, bytes) => {
+                match st.mqtt.deliver(&endpoint, params, &bytes).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
+                        false
+                    }
                 }
             }
         }
     };
+    if !breaker_open {
+        if ok {
+            st.egress.record_success(uri);
+        } else {
+            st.egress.record_failure(uri);
+        }
+    }
     if !ok {
         // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
         // roll back the optimistic lastSuccess stamp.

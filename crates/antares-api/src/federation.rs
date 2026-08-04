@@ -247,6 +247,16 @@ pub async fn forward(
     ctx_url: &str,
     body: Option<Value>,
 ) -> (u16, Value) {
+    // I4: one policy for every outbound class — scheme allowlist,
+    // private-range deny, per-destination circuit breaker (§16.4/§16.7).
+    if let Err(e) = st.egress.check_url(&url).await {
+        tracing::warn!("federation forward to {url} refused: {e}");
+        return (502, Value::Null);
+    }
+    if st.egress.is_open(&url) {
+        tracing::debug!("federation forward to {url} short-circuited (breaker open)");
+        return (503, Value::Null);
+    }
     let mut req = st
         .fed_http
         .request(method, &url)
@@ -270,11 +280,24 @@ pub async fn forward(
     match req.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
+            // 5xx from a peer counts against it too — a peer answering 500
+            // on every forward is as dead as one that times out.
+            if status >= 500 {
+                st.egress.record_failure(&url);
+            } else {
+                st.egress.record_success(&url);
+            }
             let body = resp.json::<Value>().await.unwrap_or(Value::Null);
             (status, body)
         }
-        Err(e) if e.is_timeout() => (504, Value::Null),
-        Err(_) => (502, Value::Null),
+        Err(e) if e.is_timeout() => {
+            st.egress.record_failure(&url);
+            (504, Value::Null)
+        }
+        Err(_) => {
+            st.egress.record_failure(&url);
+            (502, Value::Null)
+        }
     }
 }
 
