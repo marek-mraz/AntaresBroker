@@ -2,25 +2,8 @@
 
 ## Goal
 
-**Take Antares from the v0 skeleton to the v1 contract — a spec-compliant,
-durable, hardened NGSI-LD broker — by working this list in the §Sequencing
-order until every untagged box is ticked and its proof is in CI.**
-
-Point an agent at this file and it should need no other instruction.
-
-### Finished means all six, measured, not asserted
-
-1. Every `- [ ]` without a ⛔ / 🖥 / ⏳ tag is `- [x]`, each ticked in the
-   commit that landed it.
-2. `dev/etsi-pipeline.sh` is green for **all four** `STORE` values (memory,
-   file, postgres, timescale), locally and in CI, from ONE built image.
-3. **MQTT TPs included** — the `--exclude '*mqtt*'` in `dev/etsi-run.sh` is
-   gone (§G), so "green" means the whole suite, not the convenient part.
-4. The 350 MiB per-broker RSS gate holds in every mode, and `kill -9` loses
-   nothing in every persistent mode (§K9).
-5. `docs/ics.yaml` covers §5.4 clause by clause, `error.md` logs every ETSI
-   *tool* bug found, and every irreversible decision has an ADR.
-6. The §L targets are measured on hardware you provide (🖥), not estimated.
+**Tick every untagged box in this file, spec-first, with the ETSI pipeline
+green in all four store modes as the proof.**
 
 ### The loop for one task
 
@@ -603,5 +586,16 @@ N (browser WASM) needs only A; independent of C/D/F and gated by its own
 Node/browser tiers, never by the container pipeline.
 ```
 
-Definition of done: the six criteria under **§Goal** at the top of this file.
-They live there, once, so this list cannot drift from its own finish line.
+Definition of done, all six measured rather than asserted:
+
+1. Every `- [ ]` without a ⛔ / 🖥 / ⏳ tag is `- [x]`, ticked in the commit
+   that landed it.
+2. `dev/etsi-pipeline.sh` green for **all four** `STORE` values (memory,
+   file, postgres, timescale), locally and in CI, from ONE built image.
+3. **MQTT TPs included** — the `--exclude '*mqtt*'` in `dev/etsi-run.sh` is
+   gone (§G), so "green" means the whole suite, not the convenient part.
+4. The 350 MiB per-broker RSS gate holds in every mode, and `kill -9` loses
+   nothing in every persistent mode (§K9).
+5. `docs/ics.yaml` covers §5.4 clause by clause, `error.md` logs every ETSI
+   *tool* bug found, every irreversible decision has an ADR.
+6. The §L targets measured on hardware you provide (🖥), not estimated.
