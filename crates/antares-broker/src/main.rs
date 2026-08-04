@@ -7,13 +7,15 @@ use antares_api::AppState;
 use antares_bus::LocalBus;
 use std::time::Instant;
 
-// ANTARES_DATABASE_URL: accepted (the ETSI compose wires one DB per broker),
-// consumed when the phase-1 sqlx store lands.
+// ANTARES_DATABASE_URL / ANTARES_STORE (memory|postgres|timescale): accepted —
+// the ETSI compose wires one DB per broker and the pipeline selects the store
+// mode — consumed when the phase-1 sqlx store lands (§8.2 temporal.store).
 const KNOWN_KEYS: &[&str] = &[
     "ANTARES_HTTP_PORT",
     "ANTARES_HOST_ALIAS",
     "ANTARES_ROLES",
     "ANTARES_DATABASE_URL",
+    "ANTARES_STORE",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

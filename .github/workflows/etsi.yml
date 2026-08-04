@@ -1,20 +1,31 @@
 name: Build and run ETSI Test and publish ok
 
 on:
-  workflow_dispatch: # Manual trigger only
+  push:
+    branches: [master]   # auto-run on every commit to master
+  workflow_dispatch:     # manual trigger still available
+
+# A newer commit supersedes a running ETSI run — cancel the old one.
+concurrency:
+  group: etsi-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  MEM_LIMIT_MB: 350   # peak-RSS gate, same limit as ScorpioBroker's pipeline
-  COMPOSE_FILE: compose-files/docker-compose-etsi.yml
+  MEM_LIMIT_MB: 350   # per-broker peak-RSS gate, same limit as ScorpioBroker's pipeline
 
 jobs:
-  build-and-test:
-    name: Build & Run ETSI Tests (one compose, 5 brokers + 5 DBs)
+  etsi:
+    # The SAME pipeline as local dev (dev/etsi-pipeline.sh) — the matrix just
+    # runs the three store modes in parallel; locally you run one at a time.
+    name: ETSI (${{ matrix.store }})
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, postgres, timescale]
     runs-on: ubuntu-latest
     timeout-minutes: 60   # hard cap: the whole ETSI run must fit in 1 hour
     permissions:
       contents: read
-      packages: write   # publish the ETSI-tested image to GHCR
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -26,173 +37,59 @@ jobs:
           git submodule sync
           git submodule update --init --depth 1
 
-      - name: Build the broker image (the exact artifact under test)
-        run: docker build -t antares-local:latest .
-
-      - name: Start the ONE stack — 5 brokers + 5 databases
-        run: |
-          docker compose -f "$COMPOSE_FILE" up -d --wait
-          for port in 9090 9091 9092 9093 9094; do
-            for t in $(seq 1 30); do
-              curl -sf "localhost:$port/q/health" && break || sleep 1
-            done
-            curl -sf "localhost:$port/q/health"
-          done
-
-      - name: Monitor broker resources (CPU + RSS, every broker container)
-        run: |
-          ( while :; do
-              ids=$(docker ps -q --filter name=antares)
-              if [ -n "$ids" ]; then
-                docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $ids \
-                  | sed "s/^/$(date +%s),/"
-              fi
-              sleep 2
-            done > resource-samples.csv ) &
-          echo $! > monitor.pid
-
-      - name: Run the ETSI serial suite against broker1 (incl. DistributedOperations)
+      - name: Run the ONE pipeline (build image + 5 brokers + 5 DBs + all suites)
         env:
-          BROKER_URL: http://localhost:9090/ngsi-ld/v1
-          CALLBACK_HOST: localhost    # brokers are host-networked: runner mocks are localhost
+          STORE: ${{ matrix.store }}
           STOP_ON_ERROR: "0"          # CI runs the WHOLE suite; local default stops at first error
-        run: ./dev/etsi-run.sh || true
+          CALLBACK_HOST: localhost    # brokers are host-networked: runner mocks are localhost
+        run: ./dev/etsi-pipeline.sh || true
 
-      - name: Run the IOP suite against all 5 brokers of the same stack
-        run: |
-          cd ngsi-ld-test-suite
-          ../.venv/bin/robot --outputdir ../results/IOP \
-            --variable b1_url:http://localhost:9090/ngsi-ld/v1 \
-            --variable b2_url:http://localhost:9091/ngsi-ld/v1 \
-            --variable b3_url:http://localhost:9092/ngsi-ld/v1 \
-            --variable b4_url:http://localhost:9093/ngsi-ld/v1 \
-            --variable b5_url:http://localhost:9094/ngsi-ld/v1 \
-            IOP_TP || true
-
-      - name: Publish run summary + failures to the job summary
+      - name: Publish run summary (suites + CPU/RSS + image size) to the job summary
         if: always()
-        run: |
-          python3 - <<'EOF'
-          import glob, os, xml.etree.ElementTree as ET
-          out = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
-          out.write("## ETSI suite results\n\n| Suite | Pass | Fail | Skip |\n|---|---|---|---|\n")
-          fails = []
-          for path in sorted(glob.glob("results/*/output.xml")):
-              name = path.split("/")[1]
-              try:
-                  root = ET.parse(path).getroot()
-              except Exception as e:
-                  out.write(f"| {name} | — | — | unreadable: {e} |\n"); continue
-              stat = root.find("./statistics/total/stat")
-              p, f, s = (int(stat.get(k, "0")) for k in ("pass", "fail", "skip"))
-              out.write(f"| {name} | {p} | {f} | {s} |\n")
-              for test in root.iter("test"):
-                  st = test.find("status")
-                  txt = (st.text or "").strip()
-                  if st.get("status") == "FAIL" and "exit-on-failure" not in txt:
-                      fails.append((name, test.get("name"), txt[:200]))
-          if fails:
-              out.write(f"\n### Failures ({len(fails)}) — first 50\n\n")
-              for name, test, msg in fails[:50]:
-                  out.write(f"- **{name} / {test}**: {msg}\n")
-          out.close()
-          EOF
+        run: cat "results/${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" || echo "no run-summary.md — pipeline did not run" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Resource report (CPU / memory per broker)
+      - name: Save the tested image (memory job only — all three build the same checkout)
+        if: matrix.store == 'memory'
+        run: docker save antares-local:latest | gzip > antares-image.tgz
+
+      - name: Upload the tested image
+        if: matrix.store == 'memory'
+        uses: actions/upload-artifact@v4
+        with:
+          name: antares-image
+          path: antares-image.tgz
+          retention-days: 3
+
+      - name: Upload ETSI Test Results
         if: always()
-        run: |
-          kill "$(cat monitor.pid)" 2>/dev/null || true
-          python3 - <<'EOF'
-          import os, re, collections
-          rows = collections.defaultdict(lambda: {"cpu": [], "mem": []})
-          def mib(s):
-              m = re.match(r"\s*([\d.]+)\s*([KMG])iB", s)
-              if not m: return None
-              v = float(m.group(1)); u = m.group(2)
-              return v / 1024 if u == "K" else v * 1024 if u == "G" else v
-          try:
-              for line in open("resource-samples.csv"):
-                  parts = line.strip().split(",")
-                  if len(parts) < 4: continue
-                  _, name, cpu, mem = parts[0], parts[1], parts[2], parts[3]
-                  try: rows[name]["cpu"].append(float(cpu.rstrip("%")))
-                  except ValueError: pass
-                  v = mib(mem.split("/")[0])
-                  if v is not None: rows[name]["mem"].append(v)
-          except OSError:
-              pass
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
-              out.write("\n## Broker resource usage\n\n")
-              if not rows:
-                  out.write("no samples collected\n")
-              else:
-                  out.write("| Broker | Samples | CPU avg | CPU peak | RSS avg | RSS peak |\n|---|---|---|---|---|---|\n")
-                  for name in sorted(rows):
-                      c, m = rows[name]["cpu"], rows[name]["mem"]
-                      avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
-                      out.write(f"| {name} | {max(len(c), len(m))} "
-                                f"| {avg(c):.1f}% | {max(c, default=0):.1f}% "
-                                f"| {avg(m):.0f} MiB | {max(m, default=0):.0f} MiB |\n")
-          EOF
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-Reports-${{ matrix.store }}
+          path: results/${{ matrix.store }}/
+          retention-days: 14
 
       - name: Gate — 100% green AND within the memory limit
-        id: gate
-        if: always()
         run: |
-          python3 - <<'EOF'
-          import glob, os, re, sys, xml.etree.ElementTree as ET
-          problems, total = [], 0
-          outputs = sorted(glob.glob("results/*/output.xml"))
-          if not outputs:
-              problems.append("no results at all — suite did not run")
-          for path in outputs:
-              name = path.split("/")[1]
-              try:
-                  root = ET.parse(path).getroot()
-              except Exception as e:
-                  problems.append(f"{name}: unreadable output.xml ({e})"); continue
-              stat = root.find("./statistics/total/stat")
-              p, f, s = (int(stat.get(k, "0")) for k in ("pass", "fail", "skip"))
-              if f: problems.append(f"{name}: {f} FAILED")
-              if s: problems.append(f"{name}: {s} SKIPPED")
-              if p == 0: problems.append(f"{name}: 0 tests passed")
-              total += p
-          # memory gate: peak RSS of the serial-phase SUT (broker1 = antares1)
-          peak = 0.0
-          try:
-              for line in open("resource-samples.csv"):
-                  parts = line.strip().split(",")
-                  if len(parts) < 4 or parts[1] != "antares1":
-                      continue
-                  m = re.match(r"\s*([\d.]+)\s*([KMG])iB", parts[3].split("/")[0])
-                  if m:
-                      v = float(m.group(1))
-                      u = m.group(2)
-                      v = v / 1024 if u == "K" else v * 1024 if u == "G" else v
-                      peak = max(peak, v)
-          except OSError:
-              problems.append("memory samples missing")
-          limit = float(os.environ.get("MEM_LIMIT_MB", "350"))
-          mem_ok = peak > 0 and peak <= limit
-          if not mem_ok:
-              problems.append(f"memory gate: peak {peak:.0f} MiB vs limit {limit:.0f} MiB")
-          green = not problems
-          with open(os.environ["GITHUB_OUTPUT"], "a") as o:
-              o.write(f"green={str(green).lower()}\n")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as o:
-              if green:
-                  o.write(f"\n## Publish gate: GREEN — {total} passed, peak RSS {peak:.0f} MiB. Image will be published.\n")
-              else:
-                  o.write("\n## Publish gate: NOT green — image NOT published\n")
-                  o.writelines(f"- {p}\n" for p in problems)
-          print(("ALL GREEN" if green else "NOT GREEN"), *problems, sep="\n")
-          # Only the memory gate fails the job; test failures just block publishing.
-          sys.exit(0 if mem_ok else 1)
-          EOF
+          gate=$(cat "results/${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "gate(${{ matrix.store }}) = $gate"
+          [ "$gate" = PASS ]
 
-      - name: Publish the ETSI-green image to GHCR
-        if: steps.gate.outputs.green == 'true'
+  publish:
+    # One publish, only when memory AND postgres AND timescale are ALL green.
+    name: Publish the ETSI-green image to GHCR
+    needs: etsi
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - name: Push the EXACT image the suites tested
         run: |
+          docker load < antares-image.tgz
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
           INC="v${{ github.run_number }}"   # incremental release tag, one per green run
@@ -202,18 +99,4 @@ jobs:
           docker push "$IMG:${GITHUB_SHA::7}"
           docker push "$IMG:$INC"
           docker push "$IMG:latest"
-          echo -e "\n## Published: \`$IMG:$INC\` + \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Tear down
-        if: always()
-        run: docker compose -f "$COMPOSE_FILE" down -v || true
-
-      - name: Upload ETSI Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ETSI-Serial-Reports
-          path: |
-            results/
-            resource-samples.csv
-          retention-days: 14
+          echo -e "\n## Published: \`$IMG:$INC\` + \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\` (memory+postgres+timescale all green)" >> "$GITHUB_STEP_SUMMARY"

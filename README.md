@@ -10,6 +10,8 @@ Stellio) and reimplements the broker in Rust with hard resource targets.
 > Status: **v0 skeleton.** Architecture is fully designed
 > ([docs/deep-analysis.md](docs/deep-analysis.md)); the API surface answers
 > honestly with 501 + ProblemDetails until each phase lands.
+> Full implementation task list: [tasks.md](tasks.md) — store ladder
+> `memory → file → postgres → timescale`, messaging, MQTT, security, HA, scale.
 
 ## Targets (v1 contract)
 

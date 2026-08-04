@@ -16,6 +16,7 @@ BROKER_URL="${BROKER_URL:-http://localhost:9090/ngsi-ld/v1}"
 SUITE="${SUITE:-./ngsi-ld-test-suite}"
 STOP_ON_ERROR="${STOP_ON_ERROR:-1}"
 CALLBACK_HOST="${CALLBACK_HOST:-localhost}"
+RESULTS_DIR="${RESULTS_DIR:-results}"
 SUITES="${SUITES:-CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations}"
 
 [ -d "$SUITE" ] || { echo "test suite not found at $SUITE"; exit 1; }
@@ -36,7 +37,7 @@ fi
   sed -i "s|^context_source_host = .*|context_source_host = '$CALLBACK_HOST'|" variables.py
   sed -i "s|^context_server_host = .*|context_server_host = '$CALLBACK_HOST'|" variables.py )
 
-mkdir -p results
+mkdir -p "$RESULTS_DIR"
 EXTRA=()
 [ "$STOP_ON_ERROR" = 1 ] && EXTRA+=(--exitonfailure)
 
@@ -46,7 +47,7 @@ for s in $SUITES; do
   echo "=== $s ==="
   bash dev/reset-broker.sh "$BROKER_URL"   # state reset between suites
   (cd "$SUITE" && "$VENV/bin/robot" \
-      --outputdir "$OLDPWD/results/$name" \
+      --outputdir "$OLDPWD/$RESULTS_DIR/$name" \
       --exclude iop --exclude '*mqtt*' \
       "${EXTRA[@]}" \
       "TP/NGSI-LD/$s") || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }
