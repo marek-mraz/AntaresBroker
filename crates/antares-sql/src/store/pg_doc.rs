@@ -64,6 +64,10 @@ impl PgDocStore {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Upsert one doc, refreshing the extracted columns. `Ok(true)` = it
     /// existed before (create paths check existence via `create`).
     pub fn upsert(
