@@ -874,16 +874,17 @@ async fn deliver_as(
         req = req.header("NGSILD-Tenant", tenant.as_str());
     }
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
-    let ok = matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success());
-    let ts = now_iso();
+    // Bookkeeping BEFORE the send (5.8.6/5.2.14.2: lastNotification is the
+    // instant the notification is sent). The ETSI mock unblocks the test the
+    // moment the request ARRIVES, so a post-response-only writeback races the
+    // test's immediate Retrieve Subscription (CI flake on 046_12_01).
+    // Optimistic ok; a failed attempt is corrected right below — the transient
+    // window is the in-flight attempt itself, and the failure TPs wait for the
+    // attempt to resolve before asserting.
+    let mut prev_success: Option<Value> = None;
     st.store.mutate(tenant, kind, &sub_id, |doc| {
-        // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure
         if let Some(o) = doc.as_object_mut() {
-            if ok {
-                o.remove("status");
-            } else {
-                o.insert("status".into(), Value::String("failed".into()));
-            }
+            o.remove("status");
         }
         if let Some(n) = doc
             .as_object_mut()
@@ -892,15 +893,34 @@ async fn deliver_as(
         {
             let sent = n.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
             n.insert("timesSent".into(), json!(sent + 1));
-            n.insert("lastNotification".into(), Value::String(ts.clone()));
-            if ok {
-                n.insert("lastSuccess".into(), Value::String(ts.clone()));
-                n.insert("status".into(), Value::String("ok".into()));
-            } else {
-                n.insert("lastFailure".into(), Value::String(ts.clone()));
-                n.insert("status".into(), Value::String("failed".into()));
-            }
+            n.insert("lastNotification".into(), Value::String(now.clone()));
+            prev_success = n.insert("lastSuccess".into(), Value::String(now.clone()));
+            n.insert("status".into(), Value::String("ok".into()));
         }
         Ok::<(), antares_model::NgsiError>(())
     });
+    let ok = matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success());
+    if !ok {
+        // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
+        // roll back the optimistic lastSuccess stamp.
+        let ts = now_iso();
+        st.store.mutate(tenant, kind, &sub_id, |doc| {
+            if let Some(o) = doc.as_object_mut() {
+                o.insert("status".into(), Value::String("failed".into()));
+            }
+            if let Some(n) = doc
+                .as_object_mut()
+                .and_then(|o| o.get_mut("notification"))
+                .and_then(Value::as_object_mut)
+            {
+                match prev_success.take() {
+                    Some(v) => n.insert("lastSuccess".into(), v),
+                    None => n.remove("lastSuccess"),
+                };
+                n.insert("lastFailure".into(), Value::String(ts.clone()));
+                n.insert("status".into(), Value::String("failed".into()));
+            }
+            Ok::<(), antares_model::NgsiError>(())
+        });
+    }
 }
