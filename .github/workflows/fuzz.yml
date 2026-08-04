@@ -1,0 +1,33 @@
+name: fuzz
+
+# §16.2 / tasks.md C12: scheduled fuzzing of the user-input interpreters —
+# the q= grammar, scopeQ evaluation, geoQ params, and the JSON-LD expansion
+# input path. Any crash/panic fails the job and uploads the artifact input.
+on:
+  schedule:
+    - cron: "17 3 * * 1" # weekly, Monday 03:17 UTC
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_q, scope_q, geo_params, expand_entity]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/

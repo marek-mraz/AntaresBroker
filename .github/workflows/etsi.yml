@@ -1,9 +1,16 @@
-name: Build and run ETSI Test and publish ok
+name: Build and run ETSI Test and publish
 
 on:
   push:
-    branches: [master]   # auto-run on every commit to master
-  workflow_dispatch:     # manual trigger still available
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+# CI runs ONLY the full store × suite matrix (4 × 8 = 32 cells) on every
+# trigger; the aggregate job concatenates the cells into 4 per-store tables
+# and is the single required gate — green only when ALL 32 cells are green.
+# E9e concurrency reality: GitHub free plan runs 20 jobs concurrently (12
+# queue), Pro 40 — the 32-cell matrix + build fits one wave on Pro, two waves
+# on free. Wall-clock ≈ image build + the slowest suite (Consumption, 328 TPs).
 
 # A newer commit supersedes a running ETSI run — cancel the old one.
 concurrency:
@@ -40,18 +47,23 @@ jobs:
           echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
           echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
 
-  etsi:
-    # The SAME pipeline as local dev (dev/etsi-pipeline.sh). CI runs the four
-    # store modes in PARALLEL against the one image from `build`; locally you
-    # run one mode at a time with STOP_ON_ERROR=1.
-    name: ETSI (${{ matrix.store }})
+  etsi-cell:
+    # E9: full-granularity store × suite matrix — the ONLY run mode. Each
+    # cell brings up its OWN fresh stack via the SAME pipeline script (E9c:
+    # cross-suite pollution gone by construction), filtered with SUITES=.
+    # ONE image build feeds all 32 cells (E9b, via the build job's artifact).
+    # Not finer than per-suite (E9f): intra-suite sharding only pays once a
+    # cell exceeds ~15 min, and then each shard needs its own stack anyway.
+    name: ${{ matrix.store }} × ${{ matrix.suite }}
     needs: build
     strategy:
       fail-fast: false
       matrix:
         store: [memory, file, postgres, timescale]
+        suite: [CommonBehaviours, Consumption, Provision, Subscription,
+                ContextSource, jsonldContext, DistributedOperations, IOP]
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # hard cap: each mode's ETSI run must fit in 1 hour
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -59,48 +71,69 @@ jobs:
 
       - name: Fetch the ETSI test suite (submodule)
         run: |
-          # .gitmodules uses the ssh URL; CI has no key — rewrite to https.
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule sync
           git submodule update --init --depth 1
 
-      - name: Load the image built once for all modes
+      - name: Load the image built once for all cells
         uses: actions/download-artifact@v4
         with:
           name: antares-image
 
       - run: docker load < antares-image.tgz
 
-      - name: Run the ONE pipeline (5 brokers + 5 DBs + all suites)
+      - name: Run this cell through the ONE pipeline
         env:
           STORE: ${{ matrix.store }}
-          SKIP_BUILD: "1"             # the image came from the build job
-          STOP_ON_ERROR: "0"          # CI runs the WHOLE suite; local default stops at first error
-          CALLBACK_HOST: localhost    # brokers are host-networked: runner mocks are localhost
+          SUITES: ${{ matrix.suite }}
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
         run: ./dev/etsi-pipeline.sh || true
 
-      - name: Publish run summary (suites + CPU/RSS + image size) to the job summary
-        if: always()
-        run: cat "results/${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" || echo "no run-summary.md — pipeline did not run" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload ETSI Test Results
+      - name: Upload cell results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ETSI-Reports-${{ matrix.store }}
-          path: results/${{ matrix.store }}/
-          retention-days: 14
+          name: ETSI-cell-${{ matrix.store }}-${{ matrix.suite }}
+          path: |
+            results/${{ matrix.store }}/run-summary.md
+            results/${{ matrix.store }}/gate-status.txt
+          retention-days: 7
 
-      - name: Gate — 100% green AND within the memory limit
+      - name: Gate — this cell 100% green
         run: |
           gate=$(cat "results/${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
-          echo "gate(${{ matrix.store }}) = $gate"
+          echo "gate(${{ matrix.store }} × ${{ matrix.suite }}) = $gate"
           [ "$gate" = PASS ]
 
+  etsi-aggregate:
+    # Concat all 32 cells into 4 per-store tables (same | Suite | Pass |
+    # Fail | Skip | shape as run-summary.md) — the single required status
+    # check; any red/missing cell fails it.
+    name: Matrix summary
+    if: always()
+    needs: etsi-cell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all cell results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ETSI-cell-*
+          path: cells
+
+      - name: Build the 4 per-store tables (shared with dev/etsi-local.sh)
+        run: ./dev/etsi-matrix-summary.py cells
+
   publish:
-    # One publish, only when memory AND file AND postgres AND timescale are green.
+    # One publish, only when ALL 32 store × suite cells are green.
+    # success() is EXPLICIT: a custom `if` replaces the implicit needs-check,
+    # and etsi-aggregate runs under always() so it can be a failure here.
     name: Publish the ETSI-green image to GHCR
-    needs: etsi
+    if: github.event_name != 'pull_request' && success()
+    needs: etsi-aggregate
     runs-on: ubuntu-latest
     permissions:
       packages: write

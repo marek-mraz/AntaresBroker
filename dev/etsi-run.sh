@@ -43,6 +43,10 @@ trap 'git -C "$SUITE" checkout -- resources/variables.py 2>/dev/null || true' EX
 mkdir -p "$RESULTS_DIR"
 EXTRA=()
 [ "$STOP_ON_ERROR" = 1 ] && EXTRA+=(--exitonfailure)
+# MQTT TPs (058_*) launch mosquitto via `docker run` (MqttUtils.resource), so
+# they run wherever docker works — the pipeline (G4). MQTT=0 excludes them on
+# dockerless boxes; the CI definition of green INCLUDES them.
+[ "${MQTT:-1}" = 1 ] || EXTRA+=(--exclude '*mqtt*')
 
 status=0
 for s in $SUITES; do
@@ -51,7 +55,7 @@ for s in $SUITES; do
   bash dev/reset-broker.sh "$BROKER_URL"   # state reset between suites
   (cd "$SUITE" && "$VENV/bin/robot" \
       --outputdir "$OLDPWD/$RESULTS_DIR/$name" \
-      --exclude iop --exclude '*mqtt*' \
+      --exclude iop \
       "${EXTRA[@]}" \
       "TP/NGSI-LD/$s") || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }
 done

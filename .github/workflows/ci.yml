@@ -1,21 +1,43 @@
 name: ci
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
+  # Live PostGIS for the antares-sql integration tests (C14) — without this
+  # they skip vacuously and CI proves nothing about the Pg store.
+  ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54329/antares
 
 jobs:
   check:
     runs-on: ubuntu-24.04-arm
+    services:
+      postgis:
+        image: ghcr.io/baosystems/postgis:17-3.5
+        env:
+          POSTGRES_USER: antares
+          POSTGRES_PASSWORD: antares
+          POSTGRES_DB: antares
+        ports: ["54329:5432"]
+        options: >-
+          --health-cmd "pg_isready -U antares"
+          --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # Live MQTT server for the clause-7 e2e (G1) — without the env var the
+      # test skips vacuously and CI proves nothing about MQTT delivery.
+      - name: Start mosquitto for the MQTT e2e
+        run: |
+          sudo apt-get install -y -qq mosquitto
+          printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
+          sudo systemctl restart mosquitto
+          echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

@@ -12,10 +12,20 @@
 #   KEEP_UP=1                        leave the stack running after the run
 #   MEM_LIMIT_MB=350                 per-broker peak-RSS gate (Scorpio's limit)
 #   CALLBACK_HOST=localhost          host the brokers POST notifications to
+#   MQTT=1                           include the 058_* MQTT TPs (G4); 0 skips
+#                                    them on boxes where docker can't run
+#   SUITES=                          comma list filtering which suites run
+#                                    (E9a; substring match on the serial suite
+#                                    names, "IOP" selects the IOP step).
+#                                    Default: everything. Example:
+#                                    STORE=file SUITES=Consumption …
+#   RESULTS_DIR=results/$STORE       where this invocation writes its results
+#                                    (dev/etsi-local.sh gives each serial
+#                                    matrix cell its own dir)
 #
-# Locally run ONE mode at a time:   STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh
-# CI builds the image ONCE and runs all four modes in parallel against it
-# (the matrix jobs load the same image artifact and set SKIP_BUILD=1).
+# Locally run ONE cell at a time:   STORE=postgres SUITES=Consumption dev/etsi-pipeline.sh
+# (dev/etsi-local.sh loops the full store × suite matrix serially; CI builds
+# the image ONCE and runs the same 32 cells in parallel with SKIP_BUILD=1.)
 #
 # Output per mode: results/$STORE/{<suite>/output.xml, resource-samples.csv,
 #                  run-summary.md, gate-status.txt}
@@ -34,7 +44,7 @@ esac
 # Honesty banner: which modes actually have a store backend TODAY. Update this
 # list as §B (file) and §C/§D (postgres/timescale) land — a green column for a
 # mode whose backend does not exist yet validates infrastructure, not storage.
-BACKED="memory file"
+BACKED="memory file postgres timescale"
 case "$STORE" in file) SECTION="B" ;; postgres) SECTION="C" ;; timescale) SECTION="D" ;; *) SECTION="?" ;; esac
 case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
   *) BACKED_NOTE="store backend for \`$STORE\` is NOT implemented yet (tasks.md §$SECTION) — this run validates the stack, not the storage" ;;
@@ -42,25 +52,74 @@ esac
 export BACKED_NOTE
 export STORE DB_IMAGE
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml "${PROFILE[@]}")
-RESULTS="results/$STORE"
+RESULTS="${RESULTS_DIR:-results/$STORE}"
 MEM_LIMIT_MB="${MEM_LIMIT_MB:-350}"
 mkdir -p "$RESULTS"
 
 # 1. The image under test (the exact artifact CI publishes on green).
 [ "${SKIP_BUILD:-}" = 1 ] || docker build -t antares-local:latest .
 
-# 2. The ONE stack.
+# 2. MQTT prerequisites (G4). The suite launches its OWN mosquitto per 058
+# test (MqttUtils.resource: `docker run --network compose-files_default
+# --name ngsi-ld-test-suite-mosquitto-container scorpio-test-mosquitto`).
+# Provide what it expects: the image (built from the suite's own confs — the
+# single source), the network (fixed subnet: the only container on it always
+# gets .2), and name resolution for the runner; the host-networked brokers
+# get the same mapping via extra_hosts in the compose.
+if [ "${MQTT:-1}" = 1 ]; then
+  docker build -t scorpio-test-mosquitto:latest \
+    -f compose-files/mosquitto/Dockerfile \
+    ngsi-ld-test-suite/resources/mqttUtils/mosquitto
+  docker network inspect compose-files_default >/dev/null 2>&1 \
+    || docker network create --subnet 172.29.9.0/24 compose-files_default
+  grep -q ngsi-ld-test-suite-mosquitto-container /etc/hosts \
+    || echo "172.29.9.2 ngsi-ld-test-suite-mosquitto-container" | sudo tee -a /etc/hosts >/dev/null
+fi
+export MQTT="${MQTT:-1}"
+
+# E9a: which suites this invocation runs (default: all serial + IOP).
+SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
+RUN_IOP=1
+SERIAL_SUITES="$SERIAL_ALL"
+if [ -n "${SUITES:-}" ]; then
+  RUN_IOP=0
+  SERIAL_SUITES=""
+  IFS=',' read -ra _parts <<<"$SUITES"
+  for _p in "${_parts[@]}"; do
+    if [ "$_p" = "IOP" ]; then RUN_IOP=1; continue; fi
+    hit=""
+    for _s in $SERIAL_ALL; do
+      case "$_s" in *"$_p"*) SERIAL_SUITES="$SERIAL_SUITES $_s"; hit=1 ;; esac
+    done
+    [ -n "$hit" ] || { echo "SUITES: '$_p' matches no suite (of: $SERIAL_ALL IOP)"; exit 2; }
+  done
+fi
+
+# 3. The ONE stack.
 "${COMPOSE[@]}" up -d --wait
 for port in 9090 9091 9092 9093 9094; do
   for t in $(seq 1 30); do curl -sf "localhost:$port/q/health" >/dev/null && break || sleep 1; done
   curl -sf "localhost:$port/q/health" >/dev/null || { echo "broker on :$port not healthy"; exit 1; }
 done
 
-# 3. Resource monitor (CPU + RSS, every antares container) for the whole run.
+# 4. Resource monitor (CPU + RSS, every antares container) for the whole run.
+# Nested docker daemons report 0B memory in `docker stats` (no cgroup memory
+# accounting) — fall back to VmRSS from /proc/<container pid>/status, which is
+# visible here because the daemon is our child.
 ( while :; do
     ids=$(docker ps -q --filter name=antares)
-    [ -n "$ids" ] && docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $ids \
-      | sed "s/^/$(date +%s),/"
+    if [ -n "$ids" ]; then
+      docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $ids \
+        | while IFS=, read -r name cpu mem; do
+            case "$mem" in
+              "0B / 0B"|0B*)
+                pid=$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)
+                kb=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+                [ -n "${kb:-}" ] && mem="$((kb / 1024))MiB / 0B" ;;
+            esac
+            echo "$(date +%s),$name,$cpu,$mem"
+          done
+    fi
     sleep 2
   done > "$RESULTS/resource-samples.csv" ) &
 MONITOR_PID=$!
@@ -73,21 +132,26 @@ teardown() {
 }
 trap teardown EXIT
 
-# 4. Serial suites against broker1 (STOP_ON_ERROR respected by etsi-run.sh).
-BROKER_URL=http://localhost:9090/ngsi-ld/v1 \
-CALLBACK_HOST="${CALLBACK_HOST:-localhost}" \
-RESULTS_DIR="$RESULTS" \
-STOP_ON_ERROR="${STOP_ON_ERROR:-1}" \
-  ./dev/etsi-run.sh
-serial_status=$?
-if [ "$serial_status" != 0 ] && [ "${STOP_ON_ERROR:-1}" = 1 ]; then
-  echo "stopped at first failing TP (STOP_ON_ERROR=1) — see $RESULTS/<suite>/log.html"
-  exit "$serial_status"
+# 5. Serial suites against broker1 (STOP_ON_ERROR respected by etsi-run.sh).
+serial_status=0
+if [ -n "${SERIAL_SUITES// /}" ]; then
+  BROKER_URL=http://localhost:9090/ngsi-ld/v1 \
+  CALLBACK_HOST="${CALLBACK_HOST:-localhost}" \
+  RESULTS_DIR="$RESULTS" \
+  SUITES="$SERIAL_SUITES" \
+  STOP_ON_ERROR="${STOP_ON_ERROR:-1}" \
+    ./dev/etsi-run.sh
+  serial_status=$?
+  if [ "$serial_status" != 0 ] && [ "${STOP_ON_ERROR:-1}" = 1 ]; then
+    echo "stopped at first failing TP (STOP_ON_ERROR=1) — see $RESULTS/<suite>/log.html"
+    exit "$serial_status"
+  fi
 fi
 
-# 5. IOP suite against all five brokers of the same stack. Configure
+# 6. IOP suite against all five brokers of the same stack. Configure
 # variables.py HERE — etsi-run.sh restores it on exit (E7), so this step must
 # never rely on that sed surviving.
+if [ "$RUN_IOP" = 1 ]; then
 ( cd ngsi-ld-test-suite/resources
   sed -i "s|^url = .*|url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
   sed -i "s|^temporal_api_url = .*|temporal_api_url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
@@ -101,8 +165,9 @@ fi
     --variable b4_url:http://localhost:9093/ngsi-ld/v1 \
     --variable b5_url:http://localhost:9094/ngsi-ld/v1 \
     IOP_TP ) || true
+fi
 
-# 6. Report: suite table + per-broker CPU/RSS + image size + memory gate.
+# 7. Report: suite table + per-broker CPU/RSS + image size + memory gate.
 kill "$MONITOR_PID" 2>/dev/null || true
 IMAGE_BYTES=$(docker image inspect antares-local:latest --format '{{.Size}}' 2>/dev/null || echo 0)
 RESULTS="$RESULTS" STORE="$STORE" MEM_LIMIT_MB="$MEM_LIMIT_MB" IMAGE_BYTES="$IMAGE_BYTES" \
