@@ -30,6 +30,9 @@ if [ ! -x "$VENV/bin/robot" ]; then
 fi
 
 # Point the suite at this broker (same sed recipe as Scorpio's runner).
+# Restore the sed-ed file on exit (E7): a dirty submodule should mean a real
+# change, not a leftover run configuration.
+trap 'git -C "$SUITE" checkout -- resources/variables.py 2>/dev/null || true' EXIT
 ( cd "$SUITE/resources"
   sed -i "s|^url = .*|url = '$BROKER_URL'|" variables.py
   sed -i "s|^temporal_api_url = .*|temporal_api_url = '$BROKER_URL'|" variables.py

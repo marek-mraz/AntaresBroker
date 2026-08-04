@@ -48,7 +48,9 @@ One binary, one config value (`ANTARES_STORE`), same API in every mode:
 | `timescale` | postgres + TimescaleDB temporal | WAL | `ANTARES_DATABASE_URL` | *not implemented yet — tasks.md §D* |
 
 `file` mode notes: queries and subscription matching still run on the
-in-memory maps — redb is durability only. The on-disk file carries a format
+in-memory maps — redb is durability only, so working-set RAM grows with the
+dataset (rule of thumb: ~100k entities; beyond that, move up a rung to
+`postgres`). The on-disk file carries a format
 version and the broker refuses to start on a mismatch or corruption rather
 than serve partial data. Measured cost on a dev box: ~3.1k fsynced writes/s,
 commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit

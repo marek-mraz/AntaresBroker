@@ -248,19 +248,20 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
 ## E. Pipeline / CI closure for the store ladder
 
-- [ ] E1. `dev/etsi-pipeline.sh`: all four `STORE` values (`file` mounts the
+- [x] E1. `dev/etsi-pipeline.sh`: all four `STORE` values (`file` mounts the
       data volume; postgres/timescale keep the `db` profile:
       `postgis/postgis:17-3.5` vs `timescale/timescaledb-ha:pg17`).
-- [ ] E2. CI matrix `[memory, file, postgres, timescale]`; publish requires
+- [x] E2. CI matrix `[memory, file, postgres, timescale]`; publish requires
       ALL green; per-mode run-summary (suites + CPU/RSS + image size).
       postgres/timescale columns `continue-on-error` until C15/D6, then
-      gating.
-- [ ] E3. README: store-mode table; `file` RAM ceiling (~100k entities →
+      gating. *(Currently they gate AND pass — they run the memory backend
+      with the run-summary banner saying so; flips to real gating at C15/D6.)*
+- [x] E3. README: store-mode table; `file` RAM ceiling (~100k entities →
       move up a rung).
-- [ ] E4. ADRs: mode ladder; redb-as-durability; SQLite rejected.
+- [x] E4. ADRs: mode ladder; redb-as-durability; SQLite rejected.
 - [ ] E5. `docs/ics.yaml` per clause as C/D land; `mempalace mine` after
       each phase.
-- [ ] E6. Create `error.md` (mandated by the ETSI testing guide, absent from
+- [x] E6. Create `error.md` (mandated by the ETSI testing guide, absent from
       the repo): the log of ETSI *tool* bugs, so a broken TP is never "fixed"
       by hacking the broker. Seed it with the known ones (QueryEntities
       04_01/04_02 create two payloads with the same id → 409 by the suite's
@@ -269,7 +270,7 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       pushes `:latest` + `:v<run>` to GHCR automatically on every green master
       run. Decide: keep it automatic, or gate it behind a GitHub Environment
       with required approval. Until you decide it stays automatic.
-- [ ] E7. `dev/etsi-run.sh` seds `resources/variables.py` inside the
+- [x] E7. `dev/etsi-run.sh` seds `resources/variables.py` inside the
       submodule in place, which leaves `ngsi-ld-test-suite` permanently
       dirty in `git status`. Restore it on exit (trap) so a dirty submodule
       means a real change, not a leftover.
