@@ -187,7 +187,7 @@ clause4_languages:
     name: "Distributed Operation names / operation groups"
     status: partial
     evidence: "crates/antares-api/src/federation.rs (operations matching)"
-    notes: "ops matched from registration JSON; the §8.3 ops bitmask / csource_index lands with tasks.md C7/C10-C12"
+    notes: "ops bitmask + csource_index maintained in-transaction since C7 (pg_doc.rs, Table 4.20-1 order); request-path matching still reads the registration docs — the index's first reader is the §16.7 SQL matching"
   - clause: "4.21"
     name: "Attribute Projection Language (pick/omit)"
     status: implemented
@@ -492,7 +492,7 @@ clause5_8_subscription:
     name: "Notification behaviour (triggers, showChanges, sysAttrs, timeInterval, throttling, bookkeeping)"
     status: partial
     evidence: "crates/antares-api/src/notify.rs (send-time bookkeeping, 046_12_01 fix)"
-    notes: "HTTP delivery only — mqtt(s) endpoints accepted at creation but silently skipped at delivery (tasks.md G); expiry checked at match time"
+    notes: "HTTP + MQTT delivery (clause 7 sink, tasks.md G1-G3); ngsildConformance amendment per 4.3.6.8 (H4); expiry checked at match time"
 
 clause5_9_12_csource:
   - clause: "5.9.1–5.9.4"
@@ -628,7 +628,7 @@ clause6_http:
     name: "Resource methods (entities, attrs, batch, temporal, subscriptions, csource, types/attrs, jsonldContexts, info)"
     status: implemented
     evidence: "crates/antares-api/src/lib.rs::router (all methods routed)"
-    notes: "HEAD/OPTIONS (2.0 pre-adoption) not implemented — tasks.md H3"
+    notes: "HEAD native, OPTIONS answers 204+Allow, GET attrs/{attrId}(+/value) served — 2.0 pre-adoptions landed (tasks.md H3)"
   - clause: "6.32, 6.34–6.35"
     name: "entityMaps resources"
     status: missing

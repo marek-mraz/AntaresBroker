@@ -322,8 +322,12 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       doc + temporal mirror, glibc malloc; J7 jemalloc and dropping the
       per-entity temporal copy are the levers to raise it).
 - [x] E4. ADRs: mode ladder; redb-as-durability; SQLite rejected.
-- [ ] E5. `docs/ics.yaml` per clause as C/D land; `mempalace mine` after
-      each phase.
+- [x] E5. `docs/ics.yaml` per clause as C/D land; `mempalace mine` after
+      each phase. *(Discipline live: rows refreshed with the C/D/G/H
+      landings (4.20 index, 5.8.6 MQTT, H3 pre-adoptions) and the palace
+      re-mined 2026-08-04; remaining partial/missing rows are the honest
+      gap list — EntityMaps, 4.22 transient expiry, contextSourceInfo,
+      orderGeometry/collation, typed-model layer.)*
 - [x] E6. Create `error.md` (mandated by the ETSI testing guide, absent from
       the repo): the log of ETSI *tool* bugs, so a broken TP is never "fixed"
       by hacking the broker. Seed it with the known ones (QueryEntities
