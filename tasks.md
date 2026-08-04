@@ -92,13 +92,13 @@ its tests is the one way to make this file lie.
       `EntityStore`-shaped seam in `antares-sql` (`store/` per §9.3);
       `&TenantId` is the FIRST parameter of every public store method
       (§9.3, §16.1.2).
-- [ ] A2. `ANTARES_STORE` → enum `StoreMode { Memory, File, Postgres,
+- [x] A2. `ANTARES_STORE` → enum `StoreMode { Memory, File, Postgres,
       Timescale }`; unknown value fatal at startup (§14.3);
       `ANTARES_DATABASE_URL` required for postgres/timescale.
 - [ ] A3. Wiring in `antares-broker::wiring`: mode → store construction; api,
       matcher, notifier, temporal, registry see only the trait; no core crate
       names a backend (§9.2).
-- [ ] A4. Startup log + `/q/health` report the active store mode (§15.1
+- [x] A4. Startup log + `/q/health` report the active store mode (§15.1
       feature registry posture). NOT in `/info/sourceIdentity`: that is a
       spec resource (5.15) and inventing members in a normative payload is
       exactly the drift §14.6 exists to prevent.
@@ -116,40 +116,48 @@ same fs is p50 0.35 ms, i.e. the cost IS the fsync barrier, not redb. Batch
 ops commit ONCE per batch, so a 100-entity batch pays one commit, not 100.
 Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
-- [ ] B1. `redb` **4.x** (4.1.0 current; the API moved since 2.x —
+- [x] B1. `redb` **4.x** (4.1.0 current; the API moved since 2.x —
       `set_durability` returns `Result`, `begin_read` needs
       `ReadableDatabase` in scope) in `[workspace.dependencies]`, pinned;
       `cargo deny` license pass.
-- [ ] B1b. Commits run on a blocking task (`spawn_blocking`) — redb's API is
+- [x] B1b. Commits run on a blocking task (`spawn_blocking`) — redb's API is
       synchronous and an fsync must never stall a tokio worker thread.
-- [ ] B2. One redb table per store kind (`entities`, `subscriptions`,
+      *(Done via `block_in_place` — same guarantee, zero call-site churn: the
+      commit must happen inside the store's write-critical section so redb
+      order equals memory order, which `spawn_blocking` can't do from sync
+      code.)*
+- [x] B2. One redb table per store kind (`entities`, `subscriptions`,
       `csource_registrations`, `csource_subscriptions`, `jsonld_contexts`,
       `temporal_entities`, `attr_instances`, `entity_maps`), key
       `tenant \0 id`, value = expanded JSON bytes; names per §9.1.
-- [ ] B3. Write-through with **commit-before-ack**: redb txn commits BEFORE
+      *(v0 note: `attr_instances` has no separate table — the memory store
+      keeps one temporal doc per entity, persisted whole under
+      `temporal_entities`; entityMaps are TTL-ephemeral, not durable state.
+      Both get real tables with the §C schema.)*
+- [x] B3. Write-through with **commit-before-ack**: redb txn commits BEFORE
       the HTTP response; `Durability::Immediate` (fsync per commit). An
       acknowledged write is a durable write.
-- [ ] B4. Boot rebuild: scan tables → rebuild in-memory maps; refuse to start
+- [x] B4. Boot rebuild: scan tables → rebuild in-memory maps; refuse to start
       on checksum/corruption (never silently serve partial data).
-- [ ] B5. `ANTARES_DATA_DIR` (KNOWN_KEYS); default never inside the image;
+- [x] B5. `ANTARES_DATA_DIR` (KNOWN_KEYS); default never inside the image;
       startup warning when the path is not a mount point.
-- [ ] B6. Compose: `STORE=file` → no DB containers, one named volume per
+- [x] B6. Compose: `STORE=file` → no DB containers, one named volume per
       broker.
-- [ ] B7. Pipeline + CI matrix accept `file`.
-- [ ] B8. Tests: table round-trip + key-encoding units; e2e SIGKILL-restart
+- [x] B7. Pipeline + CI matrix accept `file`.
+- [x] B8. Tests: table round-trip + key-encoding units; e2e SIGKILL-restart
       (full state survives); e2e kill -9 right after 201 (commit-before-ack
       proven); 350 MiB gate unchanged.
-- [ ] B9. Docs: README mode table; ADR: mode ladder, redb-as-durability,
+- [x] B9. Docs: README mode table; ADR: mode ladder, redb-as-durability,
       SQLite rejected.
-- [ ] B10. **Reset path** (the Scorpio phantom-state trap, §14.1): the API
+- [x] B10. **Reset path** (the Scorpio phantom-state trap, §14.1): the API
       deletes that `dev/reset-broker.sh` issues MUST reach redb, or the next
       suite starts against a file the maps no longer show and every create
       returns a phantom 409 after the first restart. Prove it: run two suites
       back-to-back in `file` mode WITH a broker restart between them.
-- [ ] B11. On-disk format version in a `meta` table, checked at boot: refuse
+- [x] B11. On-disk format version in a `meta` table, checked at boot: refuse
       to start with a clear message (or migrate) on mismatch. A value-shape
       change must never be read as valid data by a newer binary.
-- [ ] B12. Backup story, verified not assumed: a live `cp` of an open redb
+- [x] B12. Backup story, verified not assumed: a live `cp` of an open redb
       file can tear. Establish and document the supported route (copy under a
       read transaction / savepoint, or stop-copy) and test restore. B9's
       README table cites whatever this task concludes, not "just copy it".

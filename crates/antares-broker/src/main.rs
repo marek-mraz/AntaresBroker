@@ -7,15 +7,15 @@ use antares_api::AppState;
 use antares_bus::LocalBus;
 use std::time::Instant;
 
-// ANTARES_DATABASE_URL / ANTARES_STORE (memory|postgres|timescale): accepted —
-// the ETSI compose wires one DB per broker and the pipeline selects the store
-// mode — consumed when the phase-1 sqlx store lands (§8.2 temporal.store).
+// ANTARES_DATABASE_URL: accepted — the ETSI compose wires one DB per broker —
+// consumed when the phase-1 sqlx store lands (§8.2 temporal.store).
 const KNOWN_KEYS: &[&str] = &[
     "ANTARES_HTTP_PORT",
     "ANTARES_HOST_ALIAS",
     "ANTARES_ROLES",
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
+    "ANTARES_DATA_DIR",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,24 +38,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let host_alias = std::env::var("ANTARES_HOST_ALIAS").unwrap_or_else(|_| "antares".into());
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
+    let (store, store_mode) = build_store()?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(port, host_alias, roles))
+        .block_on(run(port, host_alias, roles, store, store_mode))
 }
+
+/// ANTARES_STORE → store construction (A2/A3): unknown value fatal; `file`
+/// requires ANTARES_DATA_DIR (never a default inside the image, B5);
+/// postgres/timescale accepted for the CI matrix but their backends land with
+/// tasks.md §C/§D — until then they run the in-memory store, loudly.
+fn build_store() -> Result<(antares_sql::store::Store, String), String> {
+    let mode = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
+    match mode.as_str() {
+        "memory" => Ok((antares_sql::store::Store::default(), "memory".into())),
+        "file" => {
+            let dir = std::env::var("ANTARES_DATA_DIR").map_err(|_| {
+                "ANTARES_STORE=file requires ANTARES_DATA_DIR (a mounted volume — data \
+                 must never live inside the image)"
+                    .to_owned()
+            })?;
+            let dir = std::path::PathBuf::from(dir);
+            warn_if_not_mount_point(&dir);
+            Ok((antares_sql::store::Store::open_file(&dir)?, "file".into()))
+        }
+        "postgres" | "timescale" => {
+            eprintln!(
+                "WARN: ANTARES_STORE={mode} backend is not implemented yet (tasks.md §C/§D) — \
+                 running the in-memory store"
+            );
+            Ok((antares_sql::store::Store::default(), "memory".into()))
+        }
+        other => Err(format!(
+            "unknown ANTARES_STORE={other} (memory|file|postgres|timescale)"
+        )),
+    }
+}
+
+/// B5: warn when the data dir shares a device with its parent — i.e. it is
+/// not a mount point, so the redb file dies with the container.
+#[cfg(unix)]
+fn warn_if_not_mount_point(dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let _ = std::fs::create_dir_all(dir);
+    if let (Ok(md), Some(Ok(parent_md))) = (
+        std::fs::metadata(dir),
+        dir.parent().map(std::fs::metadata),
+    ) {
+        if md.dev() == parent_md.dev() {
+            eprintln!(
+                "WARN: ANTARES_DATA_DIR {} is not a mount point — data will be lost when \
+                 the container is removed",
+                dir.display()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_not_mount_point(_dir: &std::path::Path) {}
 
 async fn run(
     port: u16,
     host_alias: String,
     roles: String,
+    store: antares_sql::store::Store,
+    store_mode: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // consumers attach as phases land
-    tracing::info!(port, %host_alias, %roles, "starting antares (v0 skeleton)");
+    tracing::info!(port, %host_alias, %roles, %store_mode, "starting antares (v0 skeleton)");
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
-    let state = AppState::new(host_alias);
+    let state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
     antares_api::notify::wire(&state); // matcher + notifier + interval firing
     let app = tower::Layer::layer(
         &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),

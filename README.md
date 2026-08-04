@@ -36,6 +36,25 @@ logic is Rust with parameterized DML (no PL/pgSQL, no ORM). Full rationale,
 Scorpio reference mapping, and the improvement catalogue:
 [docs/deep-analysis.md](docs/deep-analysis.md).
 
+## Store modes
+
+One binary, one config value (`ANTARES_STORE`), same API in every mode:
+
+| Mode | Backend | Durability | Extra config | Backup |
+|---|---|---|---|---|
+| `memory` (default) | in-memory maps | none — state dies with the process | — | n/a |
+| `file` | memory + [redb](https://www.redb.org/) write-through shadow | fsync **before** every ack (commit-before-ack; a `kill -9` after a 201 loses nothing) | `ANTARES_DATA_DIR` (must be a mounted volume) | **stop-copy only**: stop the broker, copy `antares.redb`, restart. A live copy of the open file is unsupported (redb holds an exclusive lock; a mid-commit copy can tear) |
+| `postgres` | PostgreSQL + PostGIS | WAL | `ANTARES_DATABASE_URL` | *not implemented yet — tasks.md §C* |
+| `timescale` | postgres + TimescaleDB temporal | WAL | `ANTARES_DATABASE_URL` | *not implemented yet — tasks.md §D* |
+
+`file` mode notes: queries and subscription matching still run on the
+in-memory maps — redb is durability only. The on-disk file carries a format
+version and the broker refuses to start on a mismatch or corruption rather
+than serve partial data. Measured cost on a dev box: ~3.1k fsynced writes/s,
+commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit
+once per entity write, and redb has a single writer, so this is a per-process
+ceiling (tasks.md B13).
+
 ## Build & test
 
 ```bash

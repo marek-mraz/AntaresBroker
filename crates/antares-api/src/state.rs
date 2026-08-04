@@ -8,6 +8,9 @@ use std::time::Instant;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
+    /// Active store backend ("memory" | "file" | …) — reported by `/q/health`
+    /// (A4; NOT in `/info/sourceIdentity`, which is a spec resource).
+    pub store_mode: String,
     pub loader: Arc<Loader>,
     pub started: Instant,
     /// Startup timestamp (createdAt of the built-in core @context entry).
@@ -25,9 +28,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// In-memory store (tests, `memory` mode).
     pub fn new(host_alias: String) -> Self {
+        Self::with_store(host_alias, Arc::new(Store::default()), "memory".into())
+    }
+
+    pub fn with_store(host_alias: String, store: Arc<Store>, store_mode: String) -> Self {
         Self {
-            store: Arc::new(Store::default()),
+            store,
+            store_mode,
             loader: Arc::new(Loader::new()),
             started: Instant::now(),
             started_at: now_iso(),

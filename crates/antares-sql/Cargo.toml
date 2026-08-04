@@ -9,6 +9,9 @@ license.workspace = true
 antares-model = { workspace = true }
 antares-ql = { workspace = true }
 serde_json = { workspace = true }
+redb = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

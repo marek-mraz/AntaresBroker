@@ -34,7 +34,7 @@ esac
 # Honesty banner: which modes actually have a store backend TODAY. Update this
 # list as §B (file) and §C/§D (postgres/timescale) land — a green column for a
 # mode whose backend does not exist yet validates infrastructure, not storage.
-BACKED="memory"
+BACKED="memory file"
 case "$STORE" in file) SECTION="B" ;; postgres) SECTION="C" ;; timescale) SECTION="D" ;; *) SECTION="?" ;; esac
 case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
   *) BACKED_NOTE="store backend for \`$STORE\` is NOT implemented yet (tasks.md §$SECTION) — this run validates the stack, not the storage" ;;
@@ -137,7 +137,11 @@ except OSError:
     pass
 
 peaks = {n: max(d["mem"], default=0) for n, d in rows.items()}
-mem_ok = bool(peaks) and all(p <= limit for p in peaks.values())
+# Some daemons (DinD without a delegated memory cgroup) report "0B / 0B" —
+# say so rather than letting an unmeasured gate pass silently; CI runners
+# report real values and DO enforce the limit.
+measurable = any(p > 0 for p in peaks.values())
+mem_ok = bool(peaks) and (not measurable or all(p <= limit for p in peaks.values()))
 gate = "PASS" if mem_ok and total_fail == 0 and total_pass > 0 else "FAIL"
 open(f"{results}/gate-status.txt", "w").write(gate + "\n")
 
@@ -148,6 +152,9 @@ with open(f"{results}/run-summary.md", "w") as out:
               f"image {image_mb:.0f} MB · peak RSS limit {limit:.0f} MiB\n\n")
     if os.environ.get("BACKED_NOTE"):
         out.write(f"> ⚠️ {os.environ['BACKED_NOTE']}\n\n")
+    if peaks and not measurable:
+        out.write("> ⚠️ RSS not measurable on this docker daemon (stats reported 0B) — "
+                  "the memory gate was not evaluated in this run\n\n")
     out.write("| Suite | Pass | Fail | Skip |\n|---|---|---|---|\n")
     for name, p, f, s in suites:
         out.write(f"| {name} | {p} | {f} | {s} |\n")

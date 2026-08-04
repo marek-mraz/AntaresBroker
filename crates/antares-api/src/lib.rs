@@ -194,8 +194,10 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({ "status": "UP" }))
+async fn health(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "status": "UP", "store": state.store_mode }))
 }
 
 /// CIM 009 5.15.1 / 6.33 — Context Source identity.

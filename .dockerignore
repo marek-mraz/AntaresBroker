@@ -1,0 +1,8 @@
+# Keep the build context to what `cargo build -p antares-broker` needs.
+target/
+results/
+ScorpioBroker/
+etsi-cim-specs/
+ngsi-ld-test-suite/
+.git/
+*.log
