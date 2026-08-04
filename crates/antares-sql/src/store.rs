@@ -10,6 +10,8 @@
 //! timestamps embedded (`createdAt`/`modifiedAt` at entity level and inside
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
+pub mod pg_entity;
+
 use antares_model::TenantId;
 use redb::{Database, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use serde_json::Value;
