@@ -2,8 +2,7 @@
 
 ## Goal
 
-**Tick every untagged box in this file, spec-first, with the ETSI pipeline
-green in all four store modes as the proof.**
+Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in all four store modes as the proof.
 
 ### The loop for one task
 
