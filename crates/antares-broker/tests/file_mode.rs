@@ -19,10 +19,10 @@ fn http(port: u16, request: &str) -> String {
 }
 
 fn start(port: u16, dir: &Path, store: &str) -> Child {
+    // Harness vars (ANTARES_TEST_*) are inherited from CI but are not broker
+    // config; the §14.3 guard reserves that prefix, so no env_remove allowlist
+    // to keep in sync here.
     Command::new(env!("CARGO_BIN_EXE_antares"))
-        // harness vars (e.g. ANTARES_TEST_DATABASE_URL) would trip the
-        // unknown-config-is-fatal guard (§14.3) — strip them.
-        .env_remove("ANTARES_TEST_DATABASE_URL")
         .env("ANTARES_HTTP_PORT", port.to_string())
         .env("ANTARES_STORE", store)
         .env("ANTARES_DATA_DIR", dir)
@@ -49,6 +49,16 @@ fn wait_healthy(port: u16) -> String {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Ask the OS for a free port — racing other parallel test binaries on a
+/// pid-derived port was flaky.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn tempdir(name: &str) -> PathBuf {
@@ -134,6 +144,139 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// K10, half one: redb takes an EXCLUSIVE file lock, so `file` mode is
+/// single-instance by construction — which is exactly why §K pins
+/// `strategy: Recreate` for it and never RollingUpdate. The drill asserts the
+/// refusal IS the contract: the second process dies with a nameable error,
+/// and the FIRST one keeps serving. Never silent corruption, never two
+/// writers sharing a volume.
+#[test]
+fn double_start_refuses_the_lock_instead_of_corrupting() {
+    let dir = tempdir("doublestart");
+    let port = free_port();
+    let mut first = start(port, &dir, "file");
+    wait_healthy(port);
+
+    // second process, same data dir, different port: must refuse to start
+    let out = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .env("ANTARES_HTTP_PORT", free_port().to_string())
+        .env("ANTARES_STORE", "file")
+        .env("ANTARES_DATA_DIR", &dir)
+        .output()
+        .expect("run second broker");
+    assert!(
+        !out.status.success(),
+        "a second broker on the same volume must NOT start"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("Cannot acquire lock"),
+        "the refusal must name the lock, not fail obscurely: {err}"
+    );
+
+    // the incumbent is untouched — still serving, still writable
+    let entity = r#"{"id":"urn:ngsi-ld:Test:lock1","type":"Test"}"#;
+    let resp = http(
+        port,
+        &format!(
+            "POST /ngsi-ld/v1/entities HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{entity}",
+            entity.len()
+        ),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 201"),
+        "incumbent still writable after the refused start: {resp}"
+    );
+
+    first.kill().expect("cleanup kill");
+    first.wait().expect("cleanup reap");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// K10, half two: because `file` mode can only ever be recreated (never
+/// rolled), the restart gap IS the downtime — so it has to be bounded rather
+/// than assumed. Boot rebuild scans the redb tables back into the in-memory
+/// maps; §K measured 257k entities/s, which puts the gap at process start
+/// rather than at the scan.
+///
+/// Scale note: §K writes the gate as "<2 s at 100k entities", but E3 measured
+/// `file` at ~19 KB RSS per entity, so 100k is ~1.9 GB — past the mode's own
+/// documented ~10k ceiling and past the 350 MiB gate. The drill therefore
+/// runs at that documented ceiling and reports the implied rate, which is the
+/// honest measurement; 100k belongs to a `postgres` box, not to this rung.
+#[test]
+fn restart_gap_stays_under_the_gate() {
+    const SEED: usize = 10_000;
+    const BATCH: usize = 1_000; // = MAX_BATCH_ITEMS (I2 bounds wall)
+
+    let dir = tempdir("restartgap");
+    let port = free_port();
+    let mut broker = start(port, &dir, "file");
+    wait_healthy(port);
+
+    for chunk in 0..(SEED / BATCH) {
+        let entities: Vec<String> = (0..BATCH)
+            .map(|i| {
+                let n = chunk * BATCH + i;
+                format!(r#"{{"id":"urn:ngsi-ld:Test:gap{n}","type":"Test"}}"#)
+            })
+            .collect();
+        let body = format!("[{}]", entities.join(","));
+        let resp = http(
+            port,
+            &format!(
+                "POST /ngsi-ld/v1/entityOperations/create HTTP/1.1\r\nHost: x\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(
+            resp.starts_with("HTTP/1.1 201"),
+            "batch {chunk} create: {}",
+            &resp[..resp.len().min(120)]
+        );
+    }
+
+    // Restart cold and time the gap: SIGKILL, so nothing is flushed on the
+    // way out and the rebuild has to do the real work.
+    broker.kill().expect("SIGKILL");
+    broker.wait().expect("reap");
+    let t0 = Instant::now();
+    let mut broker = start(port, &dir, "file");
+    wait_healthy(port);
+    let gap = t0.elapsed();
+
+    // the rebuild is correct, not merely fast
+    let resp = http(
+        port,
+        &format!(
+            "GET /ngsi-ld/v1/entities/urn:ngsi-ld:Test:gap{} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            SEED - 1
+        ),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "last seeded entity survived the restart: {}",
+        &resp[..resp.len().min(120)]
+    );
+
+    println!(
+        "K10 restart gap: {:?} for {SEED} entities ({:.0} entities/s implied)",
+        gap,
+        SEED as f64 / gap.as_secs_f64()
+    );
+    assert!(
+        gap < Duration::from_secs(2),
+        "restart gap {gap:?} exceeds the 2 s gate at {SEED} entities"
+    );
+
+    broker.kill().expect("cleanup kill");
+    broker.wait().expect("cleanup reap");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn unknown_store_mode_is_fatal() {
     let dir = tempdir("badmode");
@@ -142,5 +285,49 @@ fn unknown_store_mode_is_fatal() {
         !status.success(),
         "unknown ANTARES_STORE must be fatal (A2)"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §14.3: an unknown ANTARES_* key is fatal, but ANTARES_TEST_* is the reserved
+/// harness namespace. CI exports ANTARES_TEST_DATABASE_URL / ANTARES_TEST_MQTT_URL
+/// for the integration tests and they land in the env of every broker a test
+/// spawns — reserving the prefix is what keeps that from killing the process.
+/// Both halves are asserted here so neither can regress alone: a typo must still
+/// be caught, and a harness var must still be ignored.
+#[test]
+fn unknown_key_is_fatal_but_the_test_prefix_is_reserved() {
+    let dir = tempdir("badkey");
+
+    let typo = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .env("ANTARES_HTTP_PROT", "9090") // transposed — the Scorpio typo class
+        .env("ANTARES_STORE", "bogus")
+        .env("ANTARES_DATA_DIR", &dir)
+        .output()
+        .expect("run broker with a typo'd key");
+    let err = String::from_utf8_lossy(&typo.stderr);
+    assert!(
+        err.contains("unknown config key ANTARES_HTTP_PROT"),
+        "a typo'd ANTARES_* key must be fatal and name itself: {err}"
+    );
+
+    // Same run, but the only extra var is a harness one: the guard must fall
+    // through to the store check rather than dying on the env var.
+    let harness = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .env("ANTARES_TEST_MQTT_URL", "mqtt://127.0.0.1:1883")
+        .env("ANTARES_TEST_DATABASE_URL", "postgresql://x/y")
+        .env("ANTARES_STORE", "bogus")
+        .env("ANTARES_DATA_DIR", &dir)
+        .output()
+        .expect("run broker with harness vars");
+    let err = String::from_utf8_lossy(&harness.stderr);
+    assert!(
+        !err.contains("unknown config key"),
+        "ANTARES_TEST_* is reserved for the harness, not broker config: {err}"
+    );
+    assert!(
+        err.contains("unknown ANTARES_STORE"),
+        "the guard must fall through to the store check: {err}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
