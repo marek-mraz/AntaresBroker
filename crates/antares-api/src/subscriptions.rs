@@ -118,7 +118,14 @@ pub fn normalize_subscription(
             }
             "q" => {
                 let q = v.as_str().ok_or_else(|| bad("q must be a string".into()))?;
-                antares_ql::parse_q(q)?;
+                // Validate the string the MATCHER will parse. `conditions_match`
+                // percent-decodes first (4.9, 046_05), so validating the raw
+                // form would let `%28%28%28…` through create-time checks and
+                // only become thousands of real parens at notification time —
+                // inside a spawned task, where the parser's own limits are the
+                // last line of defence.
+                let decoded = crate::negotiate::percent_decode(q.as_bytes());
+                antares_ql::parse_q(&decoded)?;
                 out.insert("q".into(), v.clone());
             }
             "geoQ" => {

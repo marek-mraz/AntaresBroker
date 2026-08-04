@@ -623,6 +623,59 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Security audit C2 (2026-08-04): `information[].entities ×
+    /// (propertyNames + relationshipNames)` was expanded into an in-memory Vec
+    /// before any SQL ran, with no cardinality cap — a 4 MiB body produced on
+    /// the order of 10^10 objects and OOM-killed the process. Capped at the
+    /// validation boundary so it is a 403, not a dead pod.
+    #[tokio::test]
+    async fn registration_cardinality_is_capped_before_expansion() {
+        let app = app();
+        let entities: Vec<serde_json::Value> = (0..600)
+            .map(|i| serde_json::json!({"id": format!("urn:e:{i}")}))
+            .collect();
+        let props: Vec<String> = (0..600).map(|i| format!("p{i}")).collect();
+        let reg = serde_json::json!({
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer.example/ngsi-ld/v1",
+            "information": [{"entities": entities, "propertyNames": props}]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/csourceRegistrations")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(reg.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "TooComplexQuery = 403"
+        );
+
+        // a registration of ordinary size is untouched by the cap
+        let reg = serde_json::json!({
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer.example/ngsi-ld/v1",
+            "information": [{"entities": [{"type": "Vehicle"}],
+                             "propertyNames": ["speed", "heading"]}]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/csourceRegistrations")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(reg.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
     #[tokio::test]
     async fn tolerant_reader_echoes_unknown_members() {
         // §15.1: unknown members of Subscription/Registration documents are

@@ -114,7 +114,10 @@ mod tests {
         });
         assert!(e.check_url("file:///etc/passwd").await.is_err());
         assert!(e.check_url("http://127.0.0.1:9090/x").await.is_err());
-        assert!(e.check_url("http://169.254.169.254/latest/meta-data").await.is_err());
+        assert!(e
+            .check_url("http://169.254.169.254/latest/meta-data")
+            .await
+            .is_err());
         let allow = Egress::new(antares_jsonld::EgressPolicy {
             allow_private: true,
         });
