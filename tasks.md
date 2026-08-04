@@ -11,7 +11,11 @@ Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in
 2. Implement the full normative behaviour with the smallest diff that holds
    it — reuse before writing, stdlib before dependencies.
 3. Unit-test that clause's own rules and edge cases.
-4. Run `STORE=<affected mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh`.
+4. Run the local gate: `dev/etsi-local.sh` (workspace tests + `file` +
+   `timescale` — those two cover every backend; `memory`/`postgres` add no
+   extra local code path). Single-mode loop while debugging:
+   `STORE=<mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh`. CI runs ALL FOUR
+   modes on push — CI is the authority, the local gate is the fast loop.
 5. In ONE commit: the code, its tests, the `docs/ics.yaml` row, the ticked
    box, and a message citing the clause number.
 6. File the decision or the gotcha in MemPalace (other agents read it).
@@ -376,12 +380,17 @@ Currently the suite runs `--exclude '*mqtt*'` — these TPs are open.
 The suite is green, but the ledger has normative surface the TPs don't cover;
 audit each against `docs/ics.yaml` and close the gaps.
 
-- [ ] H0. Create `docs/ics.yaml` — it does not exist yet, though §14.6
+- [x] H0. Create `docs/ics.yaml` — it does not exist yet, though §14.6
       mandates it and E5/H1 both write to it. CIM 029 shape, one row per
       clause, rendered by CI.
-- [ ] H1. ICS audit: walk §5.4.1–5.4.10 checkbox by checkbox against the v0
+- [x] H1. ICS audit: walk §5.4.1–5.4.10 checkbox by checkbox against the v0
       code; record implemented/partial/missing in `docs/ics.yaml` — the
       suite's 686 TPs cover only part of the normative surface (§0.2).
+      *(2026-08-04: 122 rows — 95 implemented, 13 partial, 7 missing,
+      7 staged-v1x. Gaps feed H2–H7 + new: EntityMaps (5.14/6.32/6.34/6.35)
+      missing entirely; 4.22 transient expiresAt not enforced on entities;
+      mqtt scheme accepted then silently skipped → G3; contextSourceInfo
+      (4.3.6.5/6) missing; orderGeometry/collation absent (4.23).)*
 - [ ] H2. Snapshots (5.16, 6.36–6.38, 5.2.41/42, 5.3.4) — staged v1.x;
       pre-adopt `202 Accepted` on creation (§15.1). Implementable from the
       clause, but ⏳ has NO validation oracle: the Robot suite has no snapshot

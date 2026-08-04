@@ -1,0 +1,648 @@
+# Antares ICS — Implementation Conformance Statement (CIM 029 shape, §14.6)
+# Baseline: ETSI GS CIM 009 V1.9.1 (2025-07). Audited: 2026-08-04 (H0/H1)
+# against the v0 code (in-memory + AnyStore cutover tree; ETSI 1025/1025 green,
+# MQTT TPs excluded).
+#
+# status values:
+#   implemented  — full normative behaviour present, suite- and/or unit-tested
+#   partial      — present but with a named gap (see notes)
+#   missing      — not implemented
+#   staged-v1x   — deliberately staged after v1.0 (tasks.md / §5.1)
+#
+# One row per §5.4 ledger checkbox line. Update per PR (tasks.md loop step 5).
+
+clause4_foundations:
+  - clause: "4.2"
+    name: "Information model (meta-model, cross-domain ontology)"
+    status: partial
+    evidence: "crates/antares-jsonld/src/expand.rs (structural validation)"
+    notes: "document-shaped (serde_json Value) — meta-model enforced during expansion validation; no typed model layer in antares-model yet (only ids + errors)"
+  - clause: "4.3.5"
+    name: "API structure & implementation options (broker roles)"
+    status: implemented
+    evidence: "crates/antares-broker/src/main.rs (one binary, all roles)"
+    notes: "--roles accepted; consumers split lands with tasks.md F6"
+  - clause: "4.3.6"
+    name: "Distributed-operation semantics (additive/proxied/cascade/extra-info)"
+    status: partial
+    evidence: "crates/antares-api/src/federation.rs (modes, Via, hop limit, 508)"
+    notes: "contextSourceInfo (4.3.6.5/6) not implemented; NGSILD-EntityMap not implemented (see 5.14)"
+  - clause: "4.3.7"
+    name: "Snapshots concept"
+    status: staged-v1x
+    evidence: ""
+    notes: "tasks.md H2 — no Robot TPs exist yet"
+  - clause: "4.4"
+    name: "Core and user @context, precedence rules"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/context.rs, loader.rs"
+    notes: ""
+  - clause: "Annex A/B"
+    name: "Identifier considerations; core @context pinned"
+    status: implemented
+    evidence: "crates/antares-model/src/id.rs::EntityId; crates/antares-jsonld/contexts/core-v1.{6,7,9}.jsonld"
+    notes: ""
+
+clause4_representations:
+  - clause: "4.5.1"
+    name: "Entity representation"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs"
+    notes: ""
+  - clause: "4.5.2–4.5.3"
+    name: "Property/Relationship normalized + concise"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (concise transform)"
+    notes: ""
+  - clause: "4.5.4"
+    name: "Simplified representation (keyValues)"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (format=simplified|keyValues)"
+    notes: ""
+  - clause: "4.5.5"
+    name: "Multi-attribute support (datasetId sets, conflict resolution)"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs, federation.rs::recency (4.5.5.3)"
+    notes: ""
+  - clause: "4.5.6–4.5.8"
+    name: "Temporal representation of Entity/Property/Relationship"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs"
+    notes: ""
+  - clause: "4.5.9"
+    name: "Simplified temporal representation (temporalValues)"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs (format=temporalValues)"
+    notes: ""
+  - clause: "4.5.10–4.5.12"
+    name: "Entity type list / detailed list / type info"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs::entity_types, entity_type_info"
+    notes: ""
+  - clause: "4.5.13–4.5.15"
+    name: "Attribute list / detailed list / attribute info"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs::attributes, attribute_info"
+    notes: ""
+  - clause: "4.5.16"
+    name: "GeoJSON representation (top-level geometry selection)"
+    status: implemented
+    evidence: "crates/antares-api/src/negotiate.rs (geo+json), entities.rs (geometryProperty)"
+    notes: ""
+  - clause: "4.5.17"
+    name: "Simplified GeoJSON representation"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs (geo+json × keyValues)"
+    notes: ""
+  - clause: "4.5.18"
+    name: "LanguageProperty normalized/concise incl. deleted-LP @none map form"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (lang), notify.rs"
+    notes: ""
+  - clause: "4.5.19"
+    name: "Aggregated temporal representation + aggregation functions"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs (aggrMethods, aggrPeriodDuration)"
+    notes: ""
+  - clause: "4.5.20–4.5.22"
+    name: "VocabProperty / ListProperty / ListRelationship"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs, entities.rs, temporal.rs"
+    notes: ""
+  - clause: "4.5.23"
+    name: "Linked Entity Retrieval (inline + flattened; join/joinLevel/containedBy)"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::inline_join, collect_flat"
+    notes: ""
+  - clause: "4.5.24"
+    name: "JsonProperty normalized/concise"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs, entities.rs"
+    notes: ""
+  - clause: "4.5.25"
+    name: "EntityMap representation"
+    status: missing
+    evidence: ""
+    notes: "no /entityMaps resource; entityMap query param is accepted-but-inert (see 5.14)"
+
+clause4_restrictions:
+  - clause: "4.6.1–4.6.6"
+    name: "Supported encodings/names/datatypes/content; duplicate-Entity ordering"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/expand.rs (validation pass)"
+    notes: "4.6.6 duplicate-entity array ordering not separately unit-tested"
+  - clause: "4.7"
+    name: "Geospatial properties (GeoJSON geometries, concise GeoProperty)"
+    status: implemented
+    evidence: "crates/antares-api/src/geo.rs, antares-jsonld/src/expand.rs"
+    notes: ""
+  - clause: "4.8"
+    name: "Temporal properties (observedAt, system timestamps)"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/expand.rs (observedAt validation)"
+    notes: ""
+
+clause4_languages:
+  - clause: "4.9"
+    name: "NGSI-LD Query Language (q=)"
+    status: implemented
+    evidence: "crates/antares-ql/src/lib.rs::parse_q; antares-api/src/qeval.rs"
+    notes: "in-memory evaluation only; SQL compilation is tasks.md C10"
+  - clause: "4.10"
+    name: "Geoquery Language"
+    status: partial
+    evidence: "crates/antares-api/src/geo.rs"
+    notes: "planar approximations except near (haversine) — polygon holes, edge-crossing intersects, line/line unhandled; tasks.md H7 retires this ceiling"
+  - clause: "4.11"
+    name: "Temporal Query Language"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs (timerel/timeAt/endTimeAt/timeproperty)"
+    notes: ""
+  - clause: "4.12–4.13"
+    name: "Pagination; counting results"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::paginate (6.3.10), NGSILD-Results-Count"
+    notes: ""
+  - clause: "4.14"
+    name: "Multiple tenants"
+    status: implemented
+    evidence: "crates/antares-model/src/id.rs::TenantId; store keyed by tenant"
+    notes: ""
+  - clause: "4.15"
+    name: "Language Filter (lang=)"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (lang selection)"
+    notes: ""
+  - clause: "4.16–4.17"
+    name: "Multiple entity types; Entity Type Selection Language"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::type_selection_matches"
+    notes: ""
+  - clause: "4.18–4.19"
+    name: "Scopes; Scope Query Language (scopeQ)"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs, qeval.rs (scopeQ)"
+    notes: ""
+  - clause: "4.20"
+    name: "Distributed Operation names / operation groups"
+    status: partial
+    evidence: "crates/antares-api/src/federation.rs (operations matching)"
+    notes: "ops matched from registration JSON; the §8.3 ops bitmask / csource_index lands with tasks.md C7/C10-C12"
+  - clause: "4.21"
+    name: "Attribute Projection Language (pick/omit)"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (pick/omit, dotted paths)"
+    notes: ""
+  - clause: "4.22"
+    name: "Transient storage (expiresAt) of Entities and Attributes"
+    status: missing
+    evidence: ""
+    notes: "expiresAt is recognised as a system key but no expiry enforcement/sweep exists for entities or attributes; subscriptions/registrations DO enforce expiry at match time"
+  - clause: "4.23"
+    name: "Entity Ordering (orderBy/orderFrom/orderGeometry/collation)"
+    status: partial
+    evidence: "crates/antares-api/src/entities.rs (orderBy/orderFrom, datatype order 4.23.2)"
+    notes: "orderGeometry and collation not implemented"
+
+clause5_2_types:
+  - clause: "5.2.2–5.2.7"
+    name: "Common members, @context, Entity, Property, Relationship, GeoProperty"
+    status: partial
+    evidence: "crates/antares-jsonld/src/expand.rs (shape validation)"
+    notes: "document-shaped; semantics enforced in validation + handlers, no dedicated Rust types (antares-model has only ids + errors)"
+  - clause: "5.2.8–5.2.11"
+    name: "EntityInfo, CSourceRegistration, RegistrationInfo, TimeInterval"
+    status: partial
+    evidence: "crates/antares-api/src/csource.rs (validation on create/update)"
+    notes: "document-shaped, validated in handlers"
+  - clause: "5.2.12–5.2.15"
+    name: "Subscription, GeoQuery, NotificationParams, Endpoint"
+    status: partial
+    evidence: "crates/antares-api/src/subscriptions.rs::normalize_subscription"
+    notes: "document-shaped, validated in handlers; output-only members (5.2.14.2) maintained by notify.rs"
+  - clause: "5.2.16–5.2.19"
+    name: "BatchOperationResult, BatchEntityError, UpdateResult, NotUpdatedDetails"
+    status: implemented
+    evidence: "crates/antares-api/src/batch.rs, attrs.rs (207 shapes)"
+    notes: ""
+  - clause: "5.2.20–5.2.23"
+    name: "EntityTemporal, TemporalQuery, KeyValuePair, Query (POST body)"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs, batch.rs::batch_query"
+    notes: ""
+  - clause: "5.2.24–5.2.28"
+    name: "EntityTypeList/EntityType/EntityTypeInfo/AttributeList/Attribute"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs"
+    notes: ""
+  - clause: "5.2.29–5.2.31"
+    name: "Feature, FeatureCollection, FeatureProperties (GeoJSON output)"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs (geo+json output)"
+    notes: ""
+  - clause: "5.2.32–5.2.34"
+    name: "LanguageProperty, EntitySelector, RegistrationManagementInfo"
+    status: partial
+    evidence: "crates/antares-api/src/notify.rs::selector_match (5.2.33)"
+    notes: "RegistrationManagementInfo (timeouts/cacheDuration) stored but not acted on"
+  - clause: "5.2.35–5.2.38"
+    name: "VocabProperty, ListProperty, ListRelationship, JsonProperty"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/expand.rs (vocab/valueList/objectList/json)"
+    notes: ""
+  - clause: "5.2.39–5.2.40, 5.2.43–5.2.44"
+    name: "EntityMap, Context Source Identity, OrderingParams, AggregationParams"
+    status: partial
+    evidence: "crates/antares-api/src/lib.rs::source_identity; temporal.rs (aggregation)"
+    notes: "EntityMap (5.2.39) missing; sourceIdentity + aggregation params implemented; OrderingParams partial (no collation/orderGeometry)"
+  - clause: "5.2.41–5.2.42"
+    name: "Snapshot, ExecutionResultDetails"
+    status: staged-v1x
+    evidence: ""
+    notes: ""
+  - clause: "5.3.1–5.3.3"
+    name: "Notification, CSourceNotification, TriggerReasonEnumeration"
+    status: implemented
+    evidence: "crates/antares-api/src/notify.rs"
+    notes: ""
+  - clause: "5.3.4"
+    name: "SnapshotNotification"
+    status: staged-v1x
+    evidence: ""
+    notes: ""
+  - clause: "5.4"
+    name: "NGSI-LD Fragments (partial-update / merge input shapes)"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs, entities.rs::merge_entity"
+    notes: ""
+
+clause5_5_common:
+  - clause: "5.5.2–5.5.3"
+    name: "Error types; ProblemDetails payload"
+    status: implemented
+    evidence: "crates/antares-model/src/error.rs::NgsiError (Table 6.3.2-1 verbatim)"
+    notes: ""
+  - clause: "5.5.4"
+    name: "General NGSI-LD validation"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/expand.rs"
+    notes: ""
+  - clause: "5.5.5"
+    name: "Default @context assignment"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/loader.rs (core default)"
+    notes: ""
+  - clause: "5.5.6"
+    name: "Operation execution and generic error handling"
+    status: implemented
+    evidence: "crates/antares-api (ApiError → ProblemDetails everywhere)"
+    notes: ""
+  - clause: "5.5.7"
+    name: "Term↔URI expansion and compaction"
+    status: implemented
+    evidence: "crates/antares-jsonld/src/expand.rs, compact.rs"
+    notes: ""
+  - clause: "5.5.8"
+    name: "Partial Update Patch behaviour"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::partial_update_attr"
+    notes: ""
+  - clause: "5.5.9"
+    name: "Pagination behaviour (general, limit/offset, entity maps)"
+    status: partial
+    evidence: "crates/antares-api/src/entities.rs::paginate"
+    notes: "5.5.9.3 (pagination with Entity maps) missing — no EntityMap support"
+  - clause: "5.5.10"
+    name: "Multi-Tenant behaviour"
+    status: implemented
+    evidence: "crates/antares-api (tenant_from header; NonexistentTenant 404 on reads)"
+    notes: ""
+  - clause: "5.5.11"
+    name: "Duplicate Entity instances per batch op (create/upsert/update/delete/merge)"
+    status: implemented
+    evidence: "crates/antares-api/src/batch.rs (per-op semantics; suite-proven)"
+    notes: "noOverwrite skips at datasetId-instance level (federation session note)"
+  - clause: "5.5.12"
+    name: "Merge Patch behaviour"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::merge_into"
+    notes: ""
+  - clause: "5.5.13"
+    name: "Limiting to local scope (local=true)"
+    status: implemented
+    evidence: "crates/antares-api/src/federation.rs::active"
+    notes: ""
+  - clause: "5.5.14"
+    name: "Distributed transactional behaviour"
+    status: implemented
+    evidence: "crates/antares-api/src/federation.rs::combine (207 classification)"
+    notes: "forwarded 207 counts as failed part when combining (session note)"
+  - clause: "5.5.15"
+    name: "Snapshot behaviour"
+    status: staged-v1x
+    evidence: ""
+    notes: ""
+
+clause5_6_provision:
+  - clause: "5.6.1"
+    name: "Create Entity"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::create_entity"
+    notes: ""
+  - clause: "5.6.2"
+    name: "Update Attributes"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::update_attrs"
+    notes: ""
+  - clause: "5.6.3"
+    name: "Append Attributes"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::append_attrs"
+    notes: ""
+  - clause: "5.6.4"
+    name: "Partial Attribute Update"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::partial_update_attr"
+    notes: ""
+  - clause: "5.6.5"
+    name: "Delete Attribute"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::delete_attr"
+    notes: ""
+  - clause: "5.6.6"
+    name: "Delete Entity"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::delete_entity"
+    notes: ""
+  - clause: "5.6.7–5.6.10"
+    name: "Batch Create / Upsert / Update / Delete"
+    status: implemented
+    evidence: "crates/antares-api/src/batch.rs::batch_{create,upsert,update,delete}"
+    notes: ""
+  - clause: "5.6.11"
+    name: "Upsert Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::upsert_temporal"
+    notes: ""
+  - clause: "5.6.12"
+    name: "Add Attributes to Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::add_temporal_attrs"
+    notes: ""
+  - clause: "5.6.13"
+    name: "Delete Attribute from Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::delete_temporal_attr"
+    notes: ""
+  - clause: "5.6.14"
+    name: "Modify Attribute instance in Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::modify_temporal_instance"
+    notes: ""
+  - clause: "5.6.15"
+    name: "Delete Attribute instance from Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::delete_temporal_instance"
+    notes: ""
+  - clause: "5.6.16"
+    name: "Delete Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::delete_temporal"
+    notes: ""
+  - clause: "5.6.17"
+    name: "Merge Entity"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::merge_entity"
+    notes: ""
+  - clause: "5.6.18"
+    name: "Replace Entity"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::replace_entity"
+    notes: ""
+  - clause: "5.6.19"
+    name: "Replace Attribute"
+    status: implemented
+    evidence: "crates/antares-api/src/attrs.rs::replace_attr"
+    notes: ""
+  - clause: "5.6.20"
+    name: "Batch Entity Merge"
+    status: implemented
+    evidence: "crates/antares-api/src/batch.rs::batch_merge"
+    notes: ""
+  - clause: "5.6.21"
+    name: "Purge Entities (keep/drop)"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::purge_entities"
+    notes: ""
+
+clause5_7_consumption:
+  - clause: "5.7.1"
+    name: "Retrieve Entity"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::retrieve_entity"
+    notes: ""
+  - clause: "5.7.2"
+    name: "Query Entities"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::query_entities"
+    notes: ""
+  - clause: "5.7.3"
+    name: "Retrieve Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::retrieve_temporal"
+    notes: ""
+  - clause: "5.7.4"
+    name: "Query Temporal Evolution"
+    status: implemented
+    evidence: "crates/antares-api/src/temporal.rs::query_temporal"
+    notes: ""
+  - clause: "5.7.5–5.7.7"
+    name: "Entity types retrieval (list / details / info)"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs"
+    notes: ""
+  - clause: "5.7.8–5.7.10"
+    name: "Attributes retrieval (list / details / info)"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs"
+    notes: ""
+  - clause: "5.7.11"
+    name: "Distributed discovery of types/attributes"
+    status: implemented
+    evidence: "crates/antares-api/src/types_attrs.rs (federated merge; CS/DISC suite green)"
+    notes: ""
+
+clause5_8_subscription:
+  - clause: "5.8.1"
+    name: "Create Subscription (incl. past-expiresAt rejection)"
+    status: implemented
+    evidence: "crates/antares-api/src/subscriptions.rs::create_subscription"
+    notes: ""
+  - clause: "5.8.2"
+    name: "Update Subscription"
+    status: implemented
+    evidence: "crates/antares-api/src/subscriptions.rs::update_subscription"
+    notes: ""
+  - clause: "5.8.3–5.8.5"
+    name: "Retrieve / Query / Delete Subscription"
+    status: implemented
+    evidence: "crates/antares-api/src/subscriptions.rs"
+    notes: ""
+  - clause: "5.8.6"
+    name: "Notification behaviour (triggers, showChanges, sysAttrs, timeInterval, throttling, bookkeeping)"
+    status: partial
+    evidence: "crates/antares-api/src/notify.rs (send-time bookkeeping, 046_12_01 fix)"
+    notes: "HTTP delivery only — mqtt(s) endpoints accepted at creation but silently skipped at delivery (tasks.md G); expiry checked at match time"
+
+clause5_9_12_csource:
+  - clause: "5.9.1–5.9.4"
+    name: "Register / Update / Delete Context Source"
+    status: implemented
+    evidence: "crates/antares-api/src/csource.rs"
+    notes: ""
+  - clause: "5.10.1–5.10.2"
+    name: "Retrieve / Query Context Source Registrations"
+    status: implemented
+    evidence: "crates/antares-api/src/csource.rs::retrieve_registration, query_registrations"
+    notes: ""
+  - clause: "5.11.2–5.11.6"
+    name: "CSource Registration Subscriptions CRUD"
+    status: implemented
+    evidence: "crates/antares-api/src/subscriptions.rs (csource_* handlers)"
+    notes: ""
+  - clause: "5.11.7"
+    name: "CSource notification behaviour"
+    status: implemented
+    evidence: "crates/antares-api/src/notify.rs (csource notifications)"
+    notes: ""
+  - clause: "5.12"
+    name: "Matching Context Source Registrations"
+    status: implemented
+    evidence: "crates/antares-api/src/federation.rs::matching_regs"
+    notes: "in-memory matching over registration docs; the §8.3 csource_index SQL shape lands with tasks.md C7"
+
+clause5_13_16_contexts_maps:
+  - clause: "5.13.2–5.13.5"
+    name: "@context management (Add/List/Serve/Delete+Reload; kinds)"
+    status: implemented
+    evidence: "crates/antares-api/src/contexts.rs (Hosted/Cached/ImplicitlyCreated, reload)"
+    notes: "6.3.16 cache expiration (Expires/Cache-Control) NOT honoured by the loader — tasks.md H6"
+  - clause: "5.14.1–5.14.5"
+    name: "EntityMaps (Retrieve/Update/Delete/Create for query + temporal)"
+    status: missing
+    evidence: ""
+    notes: "no /entityMaps resources, no NGSILD-EntityMap header; entityMap param accepted-but-inert"
+  - clause: "5.15.1"
+    name: "Context Source Identity Information (/info/sourceIdentity)"
+    status: implemented
+    evidence: "crates/antares-api/src/lib.rs::source_identity"
+    notes: ""
+  - clause: "5.16.1–5.16.7"
+    name: "Snapshots"
+    status: staged-v1x
+    evidence: ""
+    notes: "tasks.md H2; pre-adopt 202 on creation when staged"
+
+clause6_http:
+  - clause: "6.2"
+    name: "Global definitions and resource structure"
+    status: implemented
+    evidence: "crates/antares-api/src/lib.rs::router ({apiRoot}/ngsi-ld/v1/)"
+    notes: "entityMaps + snapshots resources absent (see 5.14/5.16)"
+  - clause: "6.3.2–6.3.3"
+    name: "Error types; reporting errors"
+    status: implemented
+    evidence: "crates/antares-model/src/error.rs (https error URI base)"
+    notes: ""
+  - clause: "6.3.4"
+    name: "HTTP request preconditions (411/415/406 bare)"
+    status: implemented
+    evidence: "crates/antares-api/src/negotiate.rs"
+    notes: "406/415 verified; 411 relies on axum/hyper defaults (not separately tested)"
+  - clause: "6.3.5"
+    name: "JSON-LD @context resolution (Link vs body; mixing ⇒ 400)"
+    status: implemented
+    evidence: "crates/antares-api/src/negotiate.rs"
+    notes: ""
+  - clause: "6.3.6"
+    name: "Response common requirements (Link header on application/json)"
+    status: implemented
+    evidence: "crates/antares-api/src/negotiate.rs, repr.rs"
+    notes: ""
+  - clause: "6.3.7"
+    name: "Representation of Entities (format/options precedence)"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs (format wins over options)"
+    notes: ""
+  - clause: "6.3.8–6.3.9"
+    name: "Notification behaviour over HTTP; csource notifications"
+    status: implemented
+    evidence: "crates/antares-api/src/notify.rs"
+    notes: ""
+  - clause: "6.3.10"
+    name: "Pagination (RFC 8288 next/prev; temporal 206 + Content-Range)"
+    status: implemented
+    evidence: "crates/antares-api/src/entities.rs::paginate; temporal.rs (206/Content-Range)"
+    notes: ""
+  - clause: "6.3.11–6.3.13"
+    name: "sysAttrs; simplified/aggregated temporal; count"
+    status: implemented
+    evidence: "crates/antares-api/src/repr.rs, temporal.rs"
+    notes: ""
+  - clause: "6.3.14"
+    name: "Tenant specification (NGSILD-Tenant echo rules)"
+    status: implemented
+    evidence: "crates/antares-api (tenant echo on responses + notifications)"
+    notes: ""
+  - clause: "6.3.15"
+    name: "GeoJSON representation (Accept validity, geometryProperty)"
+    status: implemented
+    evidence: "crates/antares-api/src/negotiate.rs (406 outside Retrieve/Query)"
+    notes: ""
+  - clause: "6.3.16"
+    name: "Expiration for cached @contexts"
+    status: missing
+    evidence: ""
+    notes: "loader.rs has no Expires/Cache-Control TTL handling — tasks.md H6/J2"
+  - clause: "6.3.17–6.3.19"
+    name: "Distributed-ops caching/timeout; limiting; extra info (Via, NGSILD-EntityMap, contextSourceInfo)"
+    status: partial
+    evidence: "crates/antares-api/src/federation.rs (Via chains, hop limit, 508)"
+    notes: "contextSourceInfo and NGSILD-EntityMap not implemented; per-source timeout exists, caching (cacheDuration) not acted on"
+  - clause: "6.3.20"
+    name: "Invalid parameters"
+    status: implemented
+    evidence: "crates/antares-api (check_params allowlists per resource)"
+    notes: ""
+  - clause: "6.3.21"
+    name: "Prefer: ngsi-ld=<version> / Preference-Applied / 203"
+    status: missing
+    evidence: ""
+    notes: "tasks.md H4 — no Prefer handling anywhere"
+  - clause: "6.3.22"
+    name: "Snapshot specification"
+    status: staged-v1x
+    evidence: ""
+    notes: ""
+  - clause: "6.4–6.31, 6.33"
+    name: "Resource methods (entities, attrs, batch, temporal, subscriptions, csource, types/attrs, jsonldContexts, info)"
+    status: implemented
+    evidence: "crates/antares-api/src/lib.rs::router (all methods routed)"
+    notes: "HEAD/OPTIONS (2.0 pre-adoption) not implemented — tasks.md H3"
+  - clause: "6.32, 6.34–6.35"
+    name: "entityMaps resources"
+    status: missing
+    evidence: ""
+    notes: "see 5.14"
+  - clause: "6.36–6.38"
+    name: "snapshots resources"
+    status: staged-v1x
+    evidence: ""
+    notes: ""
+
+clause7_mqtt:
+  - clause: "7.1–7.2"
+    name: "MQTT notification binding (endpoint URIs, notifierInfo, {metadata,body} wrapper)"
+    status: missing
+    evidence: ""
+    notes: "tasks.md G — mqtt(s) schemes accepted at subscription creation, delivery silently skipped; suite runs --exclude '*mqtt*'"
