@@ -6,7 +6,7 @@
 # Serial suites run against broker1, the IOP suite against all five.
 #
 # Env knobs (defaults = local dev loop; CI overrides them):
-#   STORE=memory|postgres|timescale  store mode under test        (default memory)
+#   STORE=memory|file|postgres|timescale  mode under test         (default memory)
 #   STOP_ON_ERROR=1                  halt at the FIRST failing TP  (CI sets 0)
 #   SKIP_BUILD=1                     reuse antares-local:latest    (default: build)
 #   KEEP_UP=1                        leave the stack running after the run
@@ -14,7 +14,8 @@
 #   CALLBACK_HOST=localhost          host the brokers POST notifications to
 #
 # Locally run ONE mode at a time:   STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh
-# CI runs all three modes in parallel via the workflow matrix.
+# CI builds the image ONCE and runs all four modes in parallel against it
+# (the matrix jobs load the same image artifact and set SKIP_BUILD=1).
 #
 # Output per mode: results/$STORE/{<suite>/output.xml, resource-samples.csv,
 #                  run-summary.md, gate-status.txt}
@@ -24,10 +25,21 @@ cd "$(dirname "$0")/.."
 STORE="${STORE:-memory}"
 case "$STORE" in
   memory)    DB_IMAGE="" ; PROFILE=() ;;
+  file)      DB_IMAGE="" ; PROFILE=() ;;   # brokers only; redb lives on the per-broker volume
   postgres)  DB_IMAGE="postgis/postgis:17-3.5"       ; PROFILE=(--profile db) ;;
   timescale) DB_IMAGE="timescale/timescaledb-ha:pg17" ; PROFILE=(--profile db) ;;
-  *) echo "unknown STORE=$STORE (memory|postgres|timescale)"; exit 2 ;;
+  *) echo "unknown STORE=$STORE (memory|file|postgres|timescale)"; exit 2 ;;
 esac
+
+# Honesty banner: which modes actually have a store backend TODAY. Update this
+# list as §B (file) and §C/§D (postgres/timescale) land — a green column for a
+# mode whose backend does not exist yet validates infrastructure, not storage.
+BACKED="memory"
+case "$STORE" in file) SECTION="B" ;; postgres) SECTION="C" ;; timescale) SECTION="D" ;; *) SECTION="?" ;; esac
+case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
+  *) BACKED_NOTE="store backend for \`$STORE\` is NOT implemented yet (tasks.md §$SECTION) — this run validates the stack, not the storage" ;;
+esac
+export BACKED_NOTE
 export STORE DB_IMAGE
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml "${PROFILE[@]}")
 RESULTS="results/$STORE"
@@ -134,6 +146,8 @@ with open(f"{results}/run-summary.md", "w") as out:
     out.write(f"## ETSI results — store: `{store}`\n\n")
     out.write(f"**{total_pass} passed, {total_fail} failed/skipped — gate {gate}** · "
               f"image {image_mb:.0f} MB · peak RSS limit {limit:.0f} MiB\n\n")
+    if os.environ.get("BACKED_NOTE"):
+        out.write(f"> ⚠️ {os.environ['BACKED_NOTE']}\n\n")
     out.write("| Suite | Pass | Fail | Skip |\n|---|---|---|---|\n")
     for name, p, f, s in suites:
         out.write(f"| {name} | {p} | {f} | {s} |\n")

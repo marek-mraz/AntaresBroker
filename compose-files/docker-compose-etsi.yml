@@ -4,6 +4,7 @@
 #
 # Store modes (env, set by the pipeline script):
 #   STORE=memory     brokers only, no DB containers        (docker compose up)
+#   STORE=file       brokers only, one data volume each    (redb, §B)
 #   STORE=postgres   DB_IMAGE=postgis/postgis:17-3.5       (--profile db)
 #   STORE=timescale  DB_IMAGE=timescale/timescaledb-ha:pg17 (--profile db)
 #
@@ -11,10 +12,10 @@
 # registers (http://localhost:909N) resolve identically from the Robot runner,
 # from broker to broker, and back to the runner's notification mocks.
 #
-# Each broker is paired with its own Postgres (postgres://…@localhost:543N).
-# The broker stores in-memory today (v0 skeleton); ANTARES_STORE and
-# ANTARES_DATABASE_URL are wired now so the phase-1 sqlx store lands with
-# zero compose changes.
+# Each broker gets its own data volume (file mode) AND its own Postgres
+# (postgres://…@localhost:543N). The broker stores in-memory today (v0
+# skeleton); ANTARES_STORE / ANTARES_DATA_DIR / ANTARES_DATABASE_URL are wired
+# now so the §B and §C stores land with zero compose changes.
 x-broker: &broker
   image: antares-local:latest
   network_mode: host
@@ -58,40 +59,59 @@ services:
   antares1:
     <<: *broker
     container_name: antares1
+    volumes: ["antares1-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9090"
       ANTARES_HOST_ALIAS: antares1
       ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
   antares2:
     <<: *broker
     container_name: antares2
+    volumes: ["antares2-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9091"
       ANTARES_HOST_ALIAS: antares2
       ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5434/antares
   antares3:
     <<: *broker
     container_name: antares3
+    volumes: ["antares3-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9092"
       ANTARES_HOST_ALIAS: antares3
       ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5435/antares
   antares4:
     <<: *broker
     container_name: antares4
+    volumes: ["antares4-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9093"
       ANTARES_HOST_ALIAS: antares4
       ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5436/antares
   antares5:
     <<: *broker
     container_name: antares5
+    volumes: ["antares5-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9094"
       ANTARES_HOST_ALIAS: antares5
       ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares
+
+# One volume per broker: `file` mode keeps its redb file here, and the volume
+# is what makes the data survive a container swap (B5: never inside the image).
+volumes:
+  antares1-data:
+  antares2-data:
+  antares3-data:
+  antares4-data:
+  antares5-data:

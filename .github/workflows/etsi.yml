@@ -14,21 +14,48 @@ env:
   MEM_LIMIT_MB: 350   # per-broker peak-RSS gate, same limit as ScorpioBroker's pipeline
 
 jobs:
+  build:
+    # ONE image for the whole run. Every store mode tests the SAME bytes, and
+    # the image that ships is the image the suites ran against.
+    name: Build the image under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build antares-local:latest
+        run: docker build -t antares-local:latest .
+
+      - name: Export it for the mode jobs
+        run: docker save antares-local:latest | gzip > antares-image.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antares-image
+          path: antares-image.tgz
+          retention-days: 3
+
+      - name: Report image size
+        run: |
+          echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
+
   etsi:
-    # The SAME pipeline as local dev (dev/etsi-pipeline.sh) — the matrix just
-    # runs the three store modes in parallel; locally you run one at a time.
+    # The SAME pipeline as local dev (dev/etsi-pipeline.sh). CI runs the four
+    # store modes in PARALLEL against the one image from `build`; locally you
+    # run one mode at a time with STOP_ON_ERROR=1.
     name: ETSI (${{ matrix.store }})
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        store: [memory, postgres, timescale]
+        store: [memory, file, postgres, timescale]
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # hard cap: the whole ETSI run must fit in 1 hour
+    timeout-minutes: 60   # hard cap: each mode's ETSI run must fit in 1 hour
     permissions:
       contents: read
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Fetch the ETSI test suite (submodule)
         run: |
@@ -37,9 +64,17 @@ jobs:
           git submodule sync
           git submodule update --init --depth 1
 
-      - name: Run the ONE pipeline (build image + 5 brokers + 5 DBs + all suites)
+      - name: Load the image built once for all modes
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Run the ONE pipeline (5 brokers + 5 DBs + all suites)
         env:
           STORE: ${{ matrix.store }}
+          SKIP_BUILD: "1"             # the image came from the build job
           STOP_ON_ERROR: "0"          # CI runs the WHOLE suite; local default stops at first error
           CALLBACK_HOST: localhost    # brokers are host-networked: runner mocks are localhost
         run: ./dev/etsi-pipeline.sh || true
@@ -47,18 +82,6 @@ jobs:
       - name: Publish run summary (suites + CPU/RSS + image size) to the job summary
         if: always()
         run: cat "results/${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" || echo "no run-summary.md — pipeline did not run" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Save the tested image (memory job only — all three build the same checkout)
-        if: matrix.store == 'memory'
-        run: docker save antares-local:latest | gzip > antares-image.tgz
-
-      - name: Upload the tested image
-        if: matrix.store == 'memory'
-        uses: actions/upload-artifact@v4
-        with:
-          name: antares-image
-          path: antares-image.tgz
-          retention-days: 3
 
       - name: Upload ETSI Test Results
         if: always()
@@ -75,7 +98,7 @@ jobs:
           [ "$gate" = PASS ]
 
   publish:
-    # One publish, only when memory AND postgres AND timescale are ALL green.
+    # One publish, only when memory AND file AND postgres AND timescale are green.
     name: Publish the ETSI-green image to GHCR
     needs: etsi
     runs-on: ubuntu-latest
@@ -99,4 +122,4 @@ jobs:
           docker push "$IMG:${GITHUB_SHA::7}"
           docker push "$IMG:$INC"
           docker push "$IMG:latest"
-          echo -e "\n## Published: \`$IMG:$INC\` + \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\` (memory+postgres+timescale all green)" >> "$GITHUB_STEP_SUMMARY"
+          echo -e "\n## Published: \`$IMG:$INC\` + \`$IMG:${GITHUB_SHA::7}\` + \`$IMG:latest\` (memory+file+postgres+timescale all green)" >> "$GITHUB_STEP_SUMMARY"

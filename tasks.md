@@ -30,6 +30,19 @@ fallback when OPFS is unavailable (§N — redb itself compiles to `wasm32`
 fine, but that target has no filesystem, so persistence there needs the OPFS
 backend and `memory` is what runs without it).
 
+**Tasks an agent must NOT start on its own.** Everything else in this list is
+implementable inside the dev sandbox (private docker daemon) or on CI runners.
+These are not:
+
+| Tag | Meaning | Agent rule |
+|---|---|---|
+| ⛔ NEEDS-YOU | outward-facing submit or a credential only you hold (crates.io token, package publish, anything irreversible in public) | never run it; prepare the artifact, stop, ask |
+| 🖥 NEEDS-HARDWARE | a machine bigger than the sandbox or a free CI runner (16 GB Postgres, 24 h soak, a real k8s cluster) | write the rig, run it only where you point it |
+| ⏳ BLOCKED-EXTERNAL | waiting on a third party (an ETSI work item, a spec that does not exist yet) | do not schedule; recheck when the dependency moves |
+
+Nothing in this list requires the host Mac — ground rule §0.1 stands: no host
+docker, no host paths, no Mac-side installs, ever.
+
 **Checking off a task:** flip `- [ ]` to `- [x]` in the same PR/commit that
 lands it — GitHub renders these as checkboxes and shows section progress.
 A task may only be checked when its OWN done-criterion holds: code + unit
@@ -210,6 +223,10 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       by hacking the broker. Seed it with the known ones (QueryEntities
       04_01/04_02 create two payloads with the same id → 409 by the suite's
       own doing).
+- [ ] E8. ⛔ NEEDS-YOU (policy decision, one line): the CI `publish` job
+      pushes `:latest` + `:v<run>` to GHCR automatically on every green master
+      run. Decide: keep it automatic, or gate it behind a GitHub Environment
+      with required approval. Until you decide it stays automatic.
 - [ ] E7. `dev/etsi-run.sh` seds `resources/variables.py` inside the
       submodule in place, which leaves `ngsi-ld-test-suite` permanently
       dirty in `git status`. Restore it on exit (trap) so a dirty submodule
@@ -278,7 +295,9 @@ audit each against `docs/ics.yaml` and close the gaps.
       code; record implemented/partial/missing in `docs/ics.yaml` — the
       suite's 686 TPs cover only part of the normative surface (§0.2).
 - [ ] H2. Snapshots (5.16, 6.36–6.38, 5.2.41/42, 5.3.4) — staged v1.x;
-      pre-adopt `202 Accepted` on creation (§15.1).
+      pre-adopt `202 Accepted` on creation (§15.1). Implementable from the
+      clause, but ⏳ has NO validation oracle: the Robot suite has no snapshot
+      TPs yet, so unit tests are the only proof until ETSI ships them.
 - [ ] H3. 2.0 cheap pre-adoptions (§15.1): HTTP `HEAD`/`OPTIONS`,
       `GET .../attrs/{attrId}` + `/value` endpoints, `508 Loop Detected`,
       schema readiness for `attributeNames` merge (§8.3 note).
@@ -324,7 +343,8 @@ audit each against `docs/ics.yaml` and close the gaps.
       `Cache-Control`/`Expires` TTLs, Postgres write-through (§6.3, J1b
       lesson).
 - [ ] J3. Bounded JSON-LD concurrency semaphore (§6.3.3).
-- [ ] J4. 10M-row synthetic benchmark on 16 GB Postgres (xtask seeder):
+- [ ] J4. 🖥 NEEDS-HARDWARE (16 GB Postgres box; not a free CI runner).
+      10M-row synthetic benchmark (xtask seeder):
       q=/geo/type query p95s; decide the extracted-attribute side table
       (named lever, §8.1) on numbers, not vibes.
 - [ ] J5. Streaming list endpoints: axum streaming bodies + sqlx `fetch()`
@@ -368,7 +388,8 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       locally and in CI, same script (the §E pipeline rule).
 - [ ] K4. N≥2 api pods behind the LB validated in e2e; matcher/notifier as
       shared-durable consumer groups scale and roll independently (§10).
-- [ ] K5. Reference manifests (compose + K8s): 3-node JetStream R3, Postgres
+- [ ] K5. Reference manifests (compose + K8s): authored and lint/kind-tested
+      in CI; 🖥 a REAL cluster is yours to point at. 3-node JetStream R3, Postgres
       primary/replica (CloudNativePG or Patroni), memory limits in EVERY
       manifest (R1/R2 lesson), `strategy: Recreate` hard-coded for `file`
       mode and `RollingUpdate` for `postgres`/`timescale`.
@@ -398,7 +419,8 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       behaviour on double-start — never silent corruption, never two writers —
       and gate the restart gap (<2 s at 100k entities; rebuild measured at
       257k entities/s, so the gap is process start).
-- [ ] K11. Backend failover drills: Postgres primary kill (replica promotion,
+- [ ] K11. 🖥 NEEDS-HARDWARE for the real drill (kind/compose covers the
+      rehearsal). Postgres primary kill (replica promotion,
       broker reconnects without dropping acked writes), NATS node kill (R3
       stream survives, consumers resume, at-least-once holds), broker pod kill
       between commit and publish (outbox covers it) (§10, §13 phase 4).
@@ -412,9 +434,11 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 
 ## L. Scale validation — phase 4 exit (§13)
 
-- [ ] L1. `xtask load-rig`: 10M entities / 1,000 tenants seeded; 24 h soak;
+- [ ] L1. 🖥 NEEDS-HARDWARE (you provide the box + 24 h of it).
+      `xtask load-rig`: 10M entities / 1,000 tenants seeded; 24 h soak;
       all §1 targets measured and held (broker <500 MB, PG <16 GB).
-- [ ] L2. Federation rig: 1 tenant × 1,000 CSRs (20 % expired, mixed modes)
+- [ ] L2. 🖥 NEEDS-HARDWARE (1,000 mock sources exceeds a CI runner).
+      Federation rig: 1 tenant × 1,000 CSRs (20 % expired, mixed modes)
       vs mock sources with injected latency/failures; p95 bounded by the
       aggregate deadline, 207 correctness, mirror memory in budget (§16.7).
 - [ ] L3. 10k active subscriptions matching load: index-shaped candidate
@@ -424,12 +448,16 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 
 ## M. Ecosystem & publishing (§9.1, §6.6)
 
-- [ ] M1. Publish `ngsild-model` + `ngsild-ql` to crates.io; reserve
-      `ngsild` facade name (§9.1 — checked free 2026-08-03).
+- [ ] M1. ⛔ NEEDS-YOU. Publish `ngsild-model` + `ngsild-ql` to crates.io;
+      reserve the `ngsild` facade name (§9.1 — checked free 2026-08-03).
+      Needs your crates.io token, and a published name cannot be taken back.
+      An agent may prepare the crates (metadata, README, `cargo package`
+      dry-run, `--dry-run` publish) and then stop.
 - [ ] M2. ADR backfill: tenancy, bus choice, WS deferral, store ladder —
       one file per irreversible decision (§9.5 doc rule).
-- [ ] M3. WS binding stays deferred (§11): keep the seams (sink registry,
-      outbox, one matcher); revisit when TC DATA issue #8 produces a TS.
+- [ ] M3. ⏳ BLOCKED-EXTERNAL. WS binding stays deferred (§11): keep the
+      seams (sink registry, outbox, one matcher). Unblocks only when ETSI TC
+      DATA issue #8 produces a TS — implementing ahead of it risks divergence.
 
 ## N. Browser build — the broker compiled to WebAssembly (opt-in, one crate)
 
@@ -474,7 +502,8 @@ N4) selected through the same trait, compiled to a different target.
       Sync access handles are Worker-only, never the main thread.
 - [ ] N5. Build + budget: `wasm-pack` + `wasm-opt -Oz`; ≤8 MB raw, ≤3 MB
       compressed; size printed in the CI summary next to the image size.
-- [ ] N6. Demo page for the docs site: create entities, subscribe, watch
+- [ ] N6. Page builds in-repo and is CI-tested; ⛔ NEEDS-YOU only to publish
+      it (your docs site / domain). Create entities, subscribe, watch
       notifications fire in-page. Zero install, no server. No other NGSI-LD
       broker can do this (JVM brokers can't; Orion-LD needs Mongo).
 - [ ] N7. ETSI conformance for the WASM artifact, in three tiers:
