@@ -20,7 +20,7 @@ pub struct PgEntityStore {
 
 /// Run an async block from sync code without stalling a tokio worker
 /// (same rationale as the redb shadow's `on_blocking`, B1b).
-fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
+pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| h.block_on(fut))

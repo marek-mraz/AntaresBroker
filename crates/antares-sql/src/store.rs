@@ -10,6 +10,7 @@
 //! timestamps embedded (`createdAt`/`modifiedAt` at entity level and inside
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
+pub mod pg_doc;
 pub mod pg_entity;
 
 use antares_model::TenantId;
