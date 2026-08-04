@@ -172,20 +172,20 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
 ### C-i. Foundation
 
-- [ ] C1. `sqlx` 0.9 (postgres, runtime-tokio, tls-rustls, json, chrono,
+- [x] C1. `sqlx` 0.9 (postgres, runtime-tokio, tls-rustls, json, chrono,
       uuid); ONE shared pool ≈2×PG cores (§6.2); never per-tenant pools
       (§14.2).
-- [ ] C2. Embedded `sqlx migrate` run at start: `tenants`, `entities` (§8.1
+- [x] C2. Embedded `sqlx migrate` run at start: `tenants`, `entities` (§8.1
       exact shape: `version`, extracted `types/scopes/location`,
       tenant-leading PK), `subscriptions` (+bookkeeping columns),
       `csource_registrations` + `csource_index` (ops bitmask §8.3),
       `csource_subscriptions`, `jsonld_contexts`, `entity_maps`, `outbox`;
       timescale-only DDL guarded (§8.2).
-- [ ] C3. Indexes exactly §8.1: btree_gin `(tenant_id, types)`, GIST
+- [x] C3. Indexes exactly §8.1: btree_gin `(tenant_id, types)`, GIST
       `location`, GIN `entity jsonb_path_ops` (no kitchen-sink GIN),
       `(tenant_id, modified_at DESC)`, GIN `scopes`; autovacuum tuning +
       lowered fillfactor on `entities` (§3.1.3 bloat note).
-- [ ] C4. Tenancy (§3): RLS policy on every table; `SET LOCAL antares.tenant`
+- [x] C4. Tenancy (§3): RLS policy on every table; `SET LOCAL antares.tenant`
       helper (transaction-scoped ONLY, §3.1.5); SQL always also filters
       `tenant_id = $1`; tenant auto-create = `INSERT … ON CONFLICT DO
       NOTHING` (§3.1.4).
@@ -217,6 +217,20 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       GeoJSON→EWKB binds §6.5), scopeQ, projection (attrs/pick/omit), entity
       ordering (4.23), temporal ranges + 206/`Content-Range` bounds (U3),
       pagination (limit/offset; keyset for temporal §8.2).
+- [ ] C11b. Geo completeness for the SQL path: `near` compiles to
+      `ST_DWithin(location::geography, $n::geography, N)` (geography cast =
+      real meters, GIST-indexable); query geometry ALWAYS a bind
+      (`ST_GeomFromGeoJSON($n)` / geozero EWKB), never spliced (§16.2);
+      write-time extraction fills `entities.location` and
+      `csource_index.location` (C2/C5/C7 columns) via geozero;
+      `geoproperty≠location` gets the unindexed
+      `ST_GeomFromGeoJSON(jsonb path)` route (or documented in-memory
+      post-filter fallback) — indexed fast path is `location` only.
+- [ ] C11c. Geo parity fixtures: ONE shared fixture set (points/lines/
+      polygons with holes, edge-crossing intersects, MultiPolygon, near
+      min/max) asserted against BOTH the in-memory evaluator (H7) and the
+      pg-compiled SQL (PostGIS testcontainer) — store modes must not give
+      different geo answers.
 - [ ] C12. Guards: CI grep denies `format!` into `sqlx::query` outside the
       compiler allowlist (§16.2); cargo-fuzz targets on q/scopeQ/geoQ
       parsers in scheduled CI.
@@ -256,8 +270,10 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       postgres/timescale columns `continue-on-error` until C15/D6, then
       gating. *(Currently they gate AND pass — they run the memory backend
       with the run-summary banner saying so; flips to real gating at C15/D6.)*
-- [x] E3. README: store-mode table; `file` RAM ceiling (~100k entities →
-      move up a rung).
+- [x] E3. README: store-mode table; `file` RAM ceiling (~10k entities →
+      move up a rung; measured 2026-08-04 at ~19 KB RSS/entity — expanded
+      doc + temporal mirror, glibc malloc; J7 jemalloc and dropping the
+      per-entity temporal copy are the levers to raise it).
 - [x] E4. ADRs: mode ladder; redb-as-durability; SQLite rejected.
 - [ ] E5. `docs/ics.yaml` per clause as C/D land; `mempalace mine` after
       each phase.
@@ -274,6 +290,35 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       submodule in place, which leaves `ngsi-ld-test-suite` permanently
       dirty in `git status`. Restore it on exit (trap) so a dirty submodule
       means a real change, not a leftover.
+- [ ] E9. Full-granularity parallel CI matrix — `store × suite` (4×8 = 32
+      jobs), SAME script as local runs (the §E one-pipeline rule), selected
+      by a filter:
+      - E9a. `SUITES=` env in `dev/etsi-pipeline.sh` (comma list of suite
+        names, default = all): filters which serial suites run and whether
+        the IOP step runs. Locally unchanged: `STORE=postgres
+        dev/etsi-pipeline.sh` still runs everything;
+        `STORE=file SUITES=Consumption dev/etsi-pipeline.sh` runs one cell.
+      - E9b. CI: build the image ONCE in a setup job, push
+        `:run-${{ github.run_id }}` to GHCR; every matrix cell pulls it and
+        calls the pipeline with its `STORE`+`SUITES` pair. Never 32 builds.
+      - E9c. Each cell brings up its OWN fresh stack (single-broker suites:
+        1 broker; DistributedOperations/IOP: the 5-broker stack) — cross-
+        suite pollution (the CommonBehaviours dead-csource leak) gone by
+        construction. Per-test teardown inside a suite unchanged.
+      - E9d. The serial all-suites run (E1/E2) STAYS as the authoritative
+        nightly/master gate — it is what proves the reset story
+        (`reset_state()` pairing) that per-cell isolation no longer
+        exercises. The matrix is the fast PR signal; the serial run is the
+        truth.
+      - E9e. Aggregate job: one summary table (mode × suite pass counts +
+        RSS gate per cell) as the required status check; any red cell
+        fails it. Document the concurrency reality in the workflow header:
+        free plan = 20 concurrent (12 queue), Pro = 40; wall-clock target ≈
+        image build + slowest suite (Consumption, 328 TPs).
+      - E9f. NOT finer than per-suite (`ponytail:` ceiling): intra-suite
+        sharding (pabot / per-file splits) only pays if each shard gets its
+        own stack, at which point startup time dominates — revisit only if
+        the slowest cell exceeds ~15 min.
 
 ## F. Messaging & scale-out — phase 2 eventing (§6.4, §7, §10)
 
@@ -351,6 +396,20 @@ audit each against `docs/ics.yaml` and close the gaps.
 - [ ] H6. @context management completeness: kinds Hosted/Cached/
       ImplicitlyCreated, delete-and-reload (5.13), `Expires`/`Cache-Control`
       honoured (6.3.16), SSRF policy hook in the loader (§16.4).
+- [ ] H7. Full geoquery (4.10) in the in-memory evaluator — retire the
+      planar approximations in `antares-api/src/geo.rs` (its own `ponytail:`
+      ceiling): add `geo` 0.33 + `geojson` 0.24; GeoJSON → `geo_types` via
+      `TryFrom`; predicates via DE-9IM `Relate` (`is_within`/`is_contains`/
+      `is_intersects`/`is_overlaps`/`is_equal_topo`, `!intersects` =
+      disjoint) — fixes polygon holes, edge-crossing intersects, line/line,
+      MultiPolygon, and makes `equals` topological; query side parsed ONCE
+      into `PreparedGeometry` (the §6.5 matcher shape, ≤10k prepared
+      geometries); `near` = haversine to closest point (exact for points;
+      document the residual delta vs `ST_DWithin` on geography); malformed
+      shapes (ring <4 positions, unclosed ring) → 400 from the geojson
+      parse, matching the testsuite-doubts.md case. Public `GeoQuery`
+      surface (`from_params`/`matches`) unchanged — call sites in
+      entities/notify/csource untouched. Proof: C11c parity fixtures.
 
 ## I. Security hardening (§16) — requirements with tests, not guidelines
 

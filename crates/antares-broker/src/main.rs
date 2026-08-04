@@ -38,42 +38,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let host_alias = std::env::var("ANTARES_HOST_ALIAS").unwrap_or_else(|_| "antares".into());
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
-    let (store, store_mode) = build_store()?;
+    // A2: unknown store mode is fatal BEFORE the runtime spins up.
+    let mode = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
+    if !["memory", "file", "postgres", "timescale"].contains(&mode.as_str()) {
+        return Err(format!("unknown ANTARES_STORE={mode} (memory|file|postgres|timescale)").into());
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run(port, host_alias, roles, store, store_mode))
+        .block_on(async {
+            let (store, store_mode) = build_store(&mode).await?;
+            run(port, host_alias, roles, store, store_mode).await
+        })
 }
 
-/// ANTARES_STORE → store construction (A2/A3): unknown value fatal; `file`
-/// requires ANTARES_DATA_DIR (never a default inside the image, B5);
-/// postgres/timescale accepted for the CI matrix but their backends land with
-/// tasks.md §C/§D — until then they run the in-memory store, loudly.
-fn build_store() -> Result<(antares_sql::store::Store, String), String> {
-    let mode = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
-    match mode.as_str() {
-        "memory" => Ok((antares_sql::store::Store::default(), "memory".into())),
+/// ANTARES_STORE → store construction (A2/A3): `file` requires
+/// ANTARES_DATA_DIR (never a default inside the image, B5); postgres and
+/// timescale require ANTARES_DATABASE_URL, connect ONE shared pool and run
+/// the embedded migrations at start (§C-i) — their DATA path lands with
+/// tasks.md §C-ii/§D, so they serve from the in-memory store, loudly.
+async fn build_store(
+    mode: &str,
+) -> Result<(antares_sql::store::Store, String), Box<dyn std::error::Error>> {
+    match mode {
         "file" => {
             let dir = std::env::var("ANTARES_DATA_DIR").map_err(|_| {
                 "ANTARES_STORE=file requires ANTARES_DATA_DIR (a mounted volume — data \
                  must never live inside the image)"
-                    .to_owned()
             })?;
             let dir = std::path::PathBuf::from(dir);
             warn_if_not_mount_point(&dir);
             Ok((antares_sql::store::Store::open_file(&dir)?, "file".into()))
         }
         "postgres" | "timescale" => {
-            eprintln!(
-                "WARN: ANTARES_STORE={mode} backend is not implemented yet (tasks.md §C/§D) — \
-                 running the in-memory store"
-            );
-            Ok((antares_sql::store::Store::default(), "memory".into()))
+            let url = std::env::var("ANTARES_DATABASE_URL").map_err(|_| {
+                format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL")
+            })?;
+            // The DB container may still be booting — bounded retry, then die.
+            let mut last = String::new();
+            for _ in 0..30 {
+                match antares_sql::pg::connect(&url, 20).await {
+                    Ok(_pool) => {
+                        tracing::warn!(
+                            "ANTARES_STORE={mode}: pool up, migrations applied; the {mode} \
+                             data path lands with tasks.md §C-ii/§D — serving from the \
+                             in-memory store until then"
+                        );
+                        return Ok((antares_sql::store::Store::default(), "memory".into()));
+                    }
+                    Err(e) => {
+                        last = e.to_string();
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+            Err(format!("ANTARES_STORE={mode}: database not reachable after 30 s: {last}").into())
         }
-        other => Err(format!(
-            "unknown ANTARES_STORE={other} (memory|file|postgres|timescale)"
-        )),
+        _ => Ok((antares_sql::store::Store::default(), "memory".into())),
     }
 }
 

@@ -5,7 +5,7 @@
 # Store modes (env, set by the pipeline script):
 #   STORE=memory     brokers only, no DB containers        (docker compose up)
 #   STORE=file       brokers only, one data volume each    (redb, §B)
-#   STORE=postgres   DB_IMAGE=postgis/postgis:17-3.5       (--profile db)
+#   STORE=postgres   DB_IMAGE=ghcr.io/baosystems/postgis:17-3.5 (--profile db; multi-arch)
 #   STORE=timescale  DB_IMAGE=timescale/timescaledb-ha:pg17 (--profile db)
 #
 # Brokers run with network_mode: host so the federation endpoints the suite
@@ -28,6 +28,9 @@ x-postgres: &postgres
     POSTGRES_USER: antares
     POSTGRES_PASSWORD: antares
     POSTGRES_DB: antares
+    # timescaledb-ha only (plain postgis ignores it): timescaledb-tune panics
+    # when the cgroup memory limit is unreadable (DinD) — skip auto-tuning.
+    NO_TS_TUNE: "true"
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -U antares"]
     interval: 5s

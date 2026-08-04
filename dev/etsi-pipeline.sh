@@ -26,7 +26,7 @@ STORE="${STORE:-memory}"
 case "$STORE" in
   memory)    DB_IMAGE="" ; PROFILE=() ;;
   file)      DB_IMAGE="" ; PROFILE=() ;;   # brokers only; redb lives on the per-broker volume
-  postgres)  DB_IMAGE="postgis/postgis:17-3.5"       ; PROFILE=(--profile db) ;;
+  postgres)  DB_IMAGE="ghcr.io/baosystems/postgis:17-3.5" ; PROFILE=(--profile db) ;;  # multi-arch (postgis/postgis has no arm64)
   timescale) DB_IMAGE="timescale/timescaledb-ha:pg17" ; PROFILE=(--profile db) ;;
   *) echo "unknown STORE=$STORE (memory|file|postgres|timescale)"; exit 2 ;;
 esac
@@ -67,6 +67,8 @@ MONITOR_PID=$!
 
 teardown() {
   kill "$MONITOR_PID" 2>/dev/null || true
+  # Leave the suite submodule clean (E7) — the IOP step seds variables.py.
+  git -C ngsi-ld-test-suite checkout -- resources/variables.py 2>/dev/null || true
   [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
 }
 trap teardown EXIT
@@ -83,7 +85,15 @@ if [ "$serial_status" != 0 ] && [ "${STOP_ON_ERROR:-1}" = 1 ]; then
   exit "$serial_status"
 fi
 
-# 5. IOP suite against all five brokers of the same stack.
+# 5. IOP suite against all five brokers of the same stack. Configure
+# variables.py HERE — etsi-run.sh restores it on exit (E7), so this step must
+# never rely on that sed surviving.
+( cd ngsi-ld-test-suite/resources
+  sed -i "s|^url = .*|url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
+  sed -i "s|^temporal_api_url = .*|temporal_api_url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
+  sed -i "s|^notification_server_host = .*|notification_server_host = '${CALLBACK_HOST:-localhost}'|" variables.py
+  sed -i "s|^context_source_host = .*|context_source_host = '${CALLBACK_HOST:-localhost}'|" variables.py
+  sed -i "s|^context_server_host = .*|context_server_host = '${CALLBACK_HOST:-localhost}'|" variables.py )
 ( cd ngsi-ld-test-suite && ../.venv/bin/robot --outputdir "../$RESULTS/IOP" \
     --variable b1_url:http://localhost:9090/ngsi-ld/v1 \
     --variable b2_url:http://localhost:9091/ngsi-ld/v1 \

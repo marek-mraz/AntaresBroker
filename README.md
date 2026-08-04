@@ -49,7 +49,9 @@ One binary, one config value (`ANTARES_STORE`), same API in every mode:
 
 `file` mode notes: queries and subscription matching still run on the
 in-memory maps — redb is durability only, so working-set RAM grows with the
-dataset (rule of thumb: ~100k entities; beyond that, move up a rung to
+dataset (measured 2026-08-04: ~19 KB RSS per typical entity — expanded doc +
+temporal mirror as `serde_json::Value` — rule of thumb: ~10k entities
+(~200 MB, comfortably inside the 350 MiB gate); beyond that, move up a rung to
 `postgres`). The on-disk file carries a format
 version and the broker refuses to start on a mismatch or corruption rather
 than serve partial data. Measured cost on a dev box: ~3.1k fsynced writes/s,

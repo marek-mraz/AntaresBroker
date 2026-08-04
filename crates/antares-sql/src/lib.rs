@@ -4,6 +4,7 @@
 //! compiler, values as binds ONLY (§16.2). sqlx store implementations land in
 //! phase 1; migrations live in `migrations/`.
 
+pub mod pg;
 pub mod store;
 
 use antares_ql::{CmpOp, QNode, QValue};

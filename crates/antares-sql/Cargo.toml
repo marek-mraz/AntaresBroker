@@ -10,6 +10,7 @@ antares-model = { workspace = true }
 antares-ql = { workspace = true }
 serde_json = { workspace = true }
 redb = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
