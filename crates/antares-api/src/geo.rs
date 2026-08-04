@@ -1,10 +1,22 @@
-//! Geoquery evaluation (CIM 009 4.10) — in-memory, over GeoJSON values.
+//! Geoquery evaluation (CIM 009 4.10) — in-memory, over GeoJSON values,
+//! via `geo`'s DE-9IM relate (tasks.md H7: polygon holes, edge-crossing
+//! intersects, line/line, MultiPolygon, topological equals — the planar
+//! approximations this file used to carry are retired).
 //!
-//! ponytail: planar approximations except `near` (haversine); upgrade to a
-//! real geometry lib if a geo TP demands exactness.
+//! The query geometry is parsed ONCE at construction; targets are parsed per
+//! evaluation. `near` is haversine from the query's representative point to
+//! the closest point of the target — exact for point targets; for extended
+//! targets the closest point is computed in planar lon/lat space, so a
+//! residual delta vs PostGIS `ST_DWithin` on geography remains (documented
+//! ceiling; the SQL path C11b is the metric authority).
+//! ponytail: per-call relate without a prepared edge index — a
+//! PreparedGeometry cache is the §6.5 matcher lever when 10k subscriptions
+//! demand it.
 
 use antares_jsonld::Context;
 use antares_model::NgsiError;
+use geo::algorithm::closest_point::ClosestPoint;
+use geo::Relate;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -27,6 +39,64 @@ pub struct GeoQuery {
     pub geometry: String,
     pub coordinates: Value,
     pub geoproperty: String,
+    /// Parsed once at construction (H7).
+    query_geom: geo_types::Geometry<f64>,
+}
+
+/// 4.7.1: Polygon/MultiPolygon rings need ≥4 positions and closure — the
+/// malformed shapes the suite probes with (testsuite-doubts class) are 400s.
+fn validate_rings(gtype: &str, coords: &Value) -> Result<(), String> {
+    let check_ring = |ring: &Value| -> Result<(), String> {
+        let pts = ring.as_array().ok_or("ring must be an array")?;
+        if pts.len() < 4 {
+            return Err(format!("ring has {} positions (minimum 4)", pts.len()));
+        }
+        if pts.first() != pts.last() {
+            return Err("ring is not closed (first != last position)".into());
+        }
+        Ok(())
+    };
+    match gtype {
+        "Polygon" => {
+            for ring in coords.as_array().into_iter().flatten() {
+                check_ring(ring)?;
+            }
+        }
+        "MultiPolygon" => {
+            for poly in coords.as_array().into_iter().flatten() {
+                for ring in poly.as_array().into_iter().flatten() {
+                    check_ring(ring)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// GeoJSON `{type, coordinates}` → geo_types, with ring validation.
+fn parse_geometry(gtype: &str, coords: &Value) -> Result<geo_types::Geometry<f64>, String> {
+    validate_rings(gtype, coords)?;
+    let gj = serde_json::json!({"type": gtype, "coordinates": coords});
+    let geom: geojson::Geometry =
+        serde_json::from_value(gj).map_err(|e| format!("invalid GeoJSON geometry: {e}"))?;
+    geo_types::Geometry::<f64>::try_from(geom).map_err(|e| format!("invalid geometry: {e}"))
+}
+
+/// Representative point of a geometry (first coordinate).
+fn first_point(g: &geo_types::Geometry<f64>) -> Option<geo_types::Point<f64>> {
+    use geo::CoordsIter;
+    g.coords_iter().next().map(geo_types::Point::from)
+}
+
+fn haversine_m(a: geo_types::Point<f64>, b: geo_types::Point<f64>) -> f64 {
+    let r = 6_371_000.0f64;
+    let (lon1, lat1, lon2, lat2) = (a.x(), a.y(), b.x(), b.y());
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = (lat2 - lat1).to_radians();
+    let dl = (lon2 - lon1).to_radians();
+    let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * r * h.sqrt().asin()
 }
 
 impl GeoQuery {
@@ -100,11 +170,13 @@ impl GeoQuery {
         if !coordinates.is_array() {
             return Err(bad("coordinates must be a JSON array".into()));
         }
+        let query_geom = parse_geometry(&geometry, &coordinates).map_err(bad)?;
         Ok(Some(Self {
             rel,
             geometry,
             coordinates,
             geoproperty: params.get("geoproperty").cloned().unwrap_or_default(),
+            query_geom,
         }))
     }
 
@@ -123,174 +195,50 @@ impl GeoQuery {
         })
     }
 
+    /// One target GeoJSON value against the query. A malformed TARGET is a
+    /// non-match (queries 400 at parse; stored data must never 500 a read).
     pub fn matches_geometry(&self, geo: &Value) -> bool {
-        let target = Geometry::parse(geo);
-        let query = Geometry {
-            gtype: self.geometry.clone(),
-            coords: self.coordinates.clone(),
-        };
-        let (Some(t), q) = (target, query) else {
+        let (Some(t), Some(c)) = (
+            geo.get("type").and_then(Value::as_str),
+            geo.get("coordinates"),
+        ) else {
             return false;
         };
+        let Ok(target) = parse_geometry(t, c) else {
+            return false;
+        };
+        let q = &self.query_geom;
         match &self.rel {
             Georel::Near { max, min } => {
-                let d = t.distance_m(&q);
+                let Some(qp) = first_point(q) else {
+                    return false;
+                };
+                // closest point of the target to the query point (planar
+                // selection, haversine metric — see module docs)
+                let cp = match target.closest_point(&qp) {
+                    geo::Closest::Intersection(p) | geo::Closest::SinglePoint(p) => p,
+                    geo::Closest::Indeterminate => match first_point(&target) {
+                        Some(p) => p,
+                        None => return false,
+                    },
+                };
+                let d = haversine_m(qp, cp);
                 max.is_none_or(|m| d <= m) && min.is_none_or(|m| d >= m)
             }
-            Georel::Equals => t.coords == q.coords && t.gtype == q.gtype,
-            Georel::Within => t.within(&q),
-            Georel::Contains => q.within(&t),
-            Georel::Intersects | Georel::Overlaps => t.intersects(&q),
-            Georel::Disjoint => !t.intersects(&q),
-        }
-    }
-}
-
-struct Geometry {
-    gtype: String,
-    coords: Value,
-}
-
-impl Geometry {
-    fn parse(geo: &Value) -> Option<Self> {
-        Some(Self {
-            gtype: geo.get("type")?.as_str()?.to_owned(),
-            coords: geo.get("coordinates")?.clone(),
-        })
-    }
-
-    fn points(&self) -> Vec<(f64, f64)> {
-        let mut out = Vec::new();
-        collect_points(&self.coords, &mut out);
-        out
-    }
-
-    /// Representative point (first).
-    fn point(&self) -> Option<(f64, f64)> {
-        self.points().into_iter().next()
-    }
-
-    fn distance_m(&self, other: &Geometry) -> f64 {
-        match (self.point(), other.point()) {
-            (Some(a), Some(b)) => haversine_m(a, b),
-            _ => f64::INFINITY,
-        }
-    }
-
-    fn within(&self, container: &Geometry) -> bool {
-        // degenerate: Point containers only "contain" identical points
-        if container.gtype == "Point" || container.gtype == "MultiPoint" {
-            let cpts = container.points();
-            return !self.points().is_empty() && self.points().iter().all(|p| cpts.contains(p));
-        }
-        if container.gtype != "Polygon" && container.gtype != "MultiPolygon" {
-            return false;
-        }
-        let rings = polygon_rings(container);
-        self.points()
-            .iter()
-            .all(|p| rings.iter().any(|ring| point_in_ring(*p, ring)))
-    }
-
-    fn intersects(&self, other: &Geometry) -> bool {
-        // approximation: any point of one inside the other, or equal points
-        if other.gtype == "Polygon" || other.gtype == "MultiPolygon" {
-            let rings = polygon_rings(other);
-            if self
-                .points()
-                .iter()
-                .any(|p| rings.iter().any(|ring| point_in_ring(*p, ring)))
-            {
-                return true;
+            Georel::Equals => {
+                // literal-identical geometry is equal even when the ring is
+                // technically invalid (self-intersecting fixtures exist in
+                // the wild — DE-9IM is undefined there); topo-equal covers
+                // reordered-but-equivalent rings.
+                (t == self.geometry && *c == self.coordinates) || target.relate(q).is_equal_topo()
             }
-        }
-        if self.gtype == "Polygon" || self.gtype == "MultiPolygon" {
-            let rings = polygon_rings(self);
-            if other
-                .points()
-                .iter()
-                .any(|p| rings.iter().any(|ring| point_in_ring(*p, ring)))
-            {
-                return true;
-            }
-        }
-        let a = self.points();
-        other.points().iter().any(|p| a.contains(p))
-    }
-}
-
-fn polygon_rings(g: &Geometry) -> Vec<Vec<(f64, f64)>> {
-    let mut rings = Vec::new();
-    match g.gtype.as_str() {
-        "Polygon" => {
-            if let Some(outer) = g.coords.as_array().and_then(|a| a.first()) {
-                rings.push(ring_points(outer));
-            }
-        }
-        "MultiPolygon" => {
-            for poly in g.coords.as_array().into_iter().flatten() {
-                if let Some(outer) = poly.as_array().and_then(|a| a.first()) {
-                    rings.push(ring_points(outer));
-                }
-            }
-        }
-        _ => {}
-    }
-    rings
-}
-
-fn ring_points(ring: &Value) -> Vec<(f64, f64)> {
-    ring.as_array()
-        .map(|pts| {
-            pts.iter()
-                .filter_map(|p| {
-                    let a = p.as_array()?;
-                    Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn collect_points(v: &Value, out: &mut Vec<(f64, f64)>) {
-    if let Some(arr) = v.as_array() {
-        if arr.len() >= 2 && arr[0].is_number() && arr[1].is_number() {
-            if let (Some(x), Some(y)) = (arr[0].as_f64(), arr[1].as_f64()) {
-                out.push((x, y));
-            }
-            return;
-        }
-        for item in arr {
-            collect_points(item, out);
+            Georel::Within => target.relate(q).is_within(),
+            Georel::Contains => target.relate(q).is_contains(),
+            Georel::Intersects => target.relate(q).is_intersects(),
+            Georel::Disjoint => !target.relate(q).is_intersects(),
+            Georel::Overlaps => target.relate(q).is_overlaps(),
         }
     }
-}
-
-fn point_in_ring((x, y): (f64, f64), ring: &[(f64, f64)]) -> bool {
-    let mut inside = false;
-    let n = ring.len();
-    if n < 3 {
-        return false;
-    }
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = ring[i];
-        let (xj, yj) = ring[j];
-        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-fn haversine_m((lon1, lat1): (f64, f64), (lon2, lat2): (f64, f64)) -> f64 {
-    let r = 6_371_000.0f64;
-    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
-    let dp = (lat2 - lat1).to_radians();
-    let dl = (lon2 - lon1).to_radians();
-    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
-    2.0 * r * a.sqrt().asin()
 }
 
 #[cfg(test)]
@@ -299,13 +247,21 @@ mod tests {
     use antares_jsonld::Loader;
     use serde_json::json;
 
+    fn q(rel: &str, gtype: &str, coords: &str) -> GeoQuery {
+        let mut params = HashMap::new();
+        params.insert("georel".to_owned(), rel.to_owned());
+        params.insert("geometry".to_owned(), gtype.to_owned());
+        params.insert("coordinates".to_owned(), coords.to_owned());
+        GeoQuery::from_params(&params).unwrap().unwrap()
+    }
+
+    fn geoval(gtype: &str, coords: Value) -> Value {
+        json!({"type": gtype, "coordinates": coords})
+    }
+
     #[test]
     fn near_point() {
-        let mut params = HashMap::new();
-        params.insert("georel".to_owned(), "near;maxDistance==2000".to_owned());
-        params.insert("geometry".to_owned(), "Point".to_owned());
-        params.insert("coordinates".to_owned(), "[2.29,48.85]".to_owned());
-        let g = GeoQuery::from_params(&params).unwrap().unwrap();
+        let g = q("near;maxDistance==2000", "Point", "[2.29,48.85]");
         let ctx = Loader::new().core();
         let doc = json!({
             "https://uri.etsi.org/ngsi-ld/location": [
@@ -322,22 +278,74 @@ mod tests {
     }
 
     #[test]
-    fn within_polygon() {
+    fn within_polygon_and_holes() {
+        // H7: a polygon HOLE excludes points — the planar approximation
+        // this replaces got this wrong by only reading outer rings.
+        let g = q(
+            "within",
+            "Polygon",
+            "[[[0,0],[10,0],[10,10],[0,10],[0,0]],[[4,4],[6,4],[6,6],[4,6],[4,4]]]",
+        );
+        assert!(g.matches_geometry(&geoval("Point", json!([2, 2]))));
+        assert!(
+            !g.matches_geometry(&geoval("Point", json!([5, 5]))),
+            "point in the hole is NOT within"
+        );
+    }
+
+    #[test]
+    fn edge_crossing_intersects_and_line_line() {
+        // two lines crossing mid-edge share no vertex — the old
+        // shared-point approximation missed this
+        let g = q("intersects", "LineString", "[[0,0],[10,10]]");
+        assert!(g.matches_geometry(&geoval("LineString", json!([[0, 10], [10, 0]]))));
+        assert!(!g.matches_geometry(&geoval("LineString", json!([[20, 20], [30, 30]]))));
+        // polygon edge crossing without contained vertices
+        let g = q("intersects", "Polygon", "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]");
+        assert!(g.matches_geometry(&geoval(
+            "Polygon",
+            json!([[[-1, 1], [5, 1], [5, 3], [-1, 3], [-1, 1]]])
+        )));
+    }
+
+    #[test]
+    fn multipolygon_and_topological_equals() {
+        let g = q(
+            "within",
+            "MultiPolygon",
+            "[[[[0,0],[4,0],[4,4],[0,4],[0,0]]],[[[10,10],[14,10],[14,14],[10,14],[10,10]]]]",
+        );
+        assert!(g.matches_geometry(&geoval("Point", json!([12, 12]))));
+        assert!(!g.matches_geometry(&geoval("Point", json!([7, 7]))));
+        // equals is topological, not literal-coordinate order
+        let g = q("equals", "Polygon", "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]");
+        assert!(g.matches_geometry(&geoval(
+            "Polygon",
+            json!([[[4, 0], [4, 4], [0, 4], [0, 0], [4, 0]]])
+        )));
+    }
+
+    #[test]
+    fn malformed_rings_are_400_on_query_and_nonmatch_on_target() {
         let mut params = HashMap::new();
         params.insert("georel".to_owned(), "within".to_owned());
         params.insert("geometry".to_owned(), "Polygon".to_owned());
+        params.insert("coordinates".to_owned(), "[[[0,0],[4,0],[4,4]]]".to_owned());
+        assert!(
+            GeoQuery::from_params(&params).is_err(),
+            "3-position ring must 400"
+        );
         params.insert(
             "coordinates".to_owned(),
-            "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]".to_owned(),
+            "[[[0,0],[4,0],[4,4],[0,4]]]".to_owned(),
         );
-        let g = GeoQuery::from_params(&params).unwrap().unwrap();
-        let ctx = Loader::new().core();
-        let inside = json!({
-            "https://uri.etsi.org/ngsi-ld/location": [
-                {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [2, 2]}}
-            ]
-        });
-        assert!(g.matches(&inside, &ctx));
+        assert!(
+            GeoQuery::from_params(&params).is_err(),
+            "unclosed ring must 400"
+        );
+        // stored (target) data malformed: non-match, never an error
+        let g = q("within", "Polygon", "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]");
+        assert!(!g.matches_geometry(&geoval("Polygon", json!([[[0, 0], [4, 0]]]))));
     }
 
     #[test]

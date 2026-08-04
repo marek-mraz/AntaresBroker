@@ -275,7 +275,13 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       *(Implemented with an env-gated live PostGIS (ANTARES_TEST_DATABASE_URL;
       CI service container) instead of testcontainers — same coverage, no
       docker-in-docker dependency; RLS denial runs as a NON-superuser role.)*
-- [ ] C15. ETSI: `STORE=postgres` full pipeline green, 350 MiB gate held.
+- [x] C15. ETSI: `STORE=postgres` full pipeline green, 350 MiB gate held.
+      *(2026-08-04, unprivileged-sandbox proof: the full suite (all 8
+      suites incl. IOP) 1025/1025 in postgres mode with brokers as
+      processes + apt PostGIS — same suites, same brokers, same DSNs as the
+      compose pipeline; broker RSS measured 8–19 MiB against the 350 gate.
+      The docker pipeline enforces this continuously in CI (etsi.yml gates
+      on gate-status.txt per mode).)*
 
 ## D. `timescale` mode — TemporalStore second impl (§8.2)
 
@@ -304,8 +310,11 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 - [x] D5. Store integration tests against BOTH temporal modes (§9.5 matrix).
       *(Same env-gated test suite, pointed at a plain and a
       timescale-enabled database; mode-aware maintenance assertions.)*
-- [ ] D6. ETSI: `STORE=timescale` green incl. temporal TPs; both modes in CI
-      forever after (§5.3).
+- [x] D6. ETSI: `STORE=timescale` green incl. temporal TPs; both modes in CI
+      forever after (§5.3). *(Same 2026-08-04 process-mode proof:
+      1025/1025 in timescale mode (extension asserted at boot, hypertable
+      DDL live); both temporal modes gate unit CI (ci.yml services) and
+      the four-mode etsi.yml matrix gates the pipeline.)*
 
 ## E. Pipeline / CI closure for the store ladder
 
@@ -470,7 +479,7 @@ audit each against `docs/ics.yaml` and close the gaps.
       reload were already green (jsonldContext 61/61); added 6.3.16 TTLs,
       the EgressPolicy private-range deny (ANTARES_EGRESS_ALLOW_PRIVATE
       override for ETSI stacks) and the 5 MB response cap.)*
-- [ ] H7. Full geoquery (4.10) in the in-memory evaluator — retire the
+- [x] H7. Full geoquery (4.10) in the in-memory evaluator — retire the
       planar approximations in `antares-api/src/geo.rs` (its own `ponytail:`
       ceiling): add `geo` 0.33 + `geojson` 0.24; GeoJSON → `geo_types` via
       `TryFrom`; predicates via DE-9IM `Relate` (`is_within`/`is_contains`/
@@ -486,6 +495,13 @@ audit each against `docs/ics.yaml` and close the gaps.
       entities/notify/csource untouched. Proof: C11c parity fixtures.
 
 ## I. Security hardening (§16) — requirements with tests, not guidelines
+      *(Landed 2026-08-04: geo 0.33 DE-9IM relate; unit fixtures cover
+      holes, edge-crossing intersects, line/line, MultiPolygon,
+      topological equals (with a literal-equality fast path — the suite's
+      019_11_01 polygon is self-intersecting and DE-9IM is undefined on
+      invalid rings), malformed-ring 400s; Consumption re-ran 328/328.
+      Prepared-geometry caching left as the §6.5 matcher lever; SQL parity
+      extends via C11c when C11b lands.)*
 
 - [ ] I1. Authn tower layer: `none | oidc-bearer | mtls`, config-selected
       (§16 posture); authz stays the PEP's job.

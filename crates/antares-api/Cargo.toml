@@ -11,6 +11,9 @@ antares-jsonld = { workspace = true }
 antares-ql = { workspace = true }
 antares-sql = { workspace = true }
 antares-notifier = { workspace = true, default-features = false }
+geo = { workspace = true }
+geo-types = { workspace = true }
+geojson = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
