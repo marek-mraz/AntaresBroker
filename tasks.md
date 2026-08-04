@@ -1,5 +1,57 @@
 # Antares — complete implementation task list
 
+## Goal
+
+**Take Antares from the v0 skeleton to the v1 contract — a spec-compliant,
+durable, hardened NGSI-LD broker — by working this list in the §Sequencing
+order until every untagged box is ticked and its proof is in CI.**
+
+Point an agent at this file and it should need no other instruction.
+
+### Finished means all six, measured, not asserted
+
+1. Every `- [ ]` without a ⛔ / 🖥 / ⏳ tag is `- [x]`, each ticked in the
+   commit that landed it.
+2. `dev/etsi-pipeline.sh` is green for **all four** `STORE` values (memory,
+   file, postgres, timescale), locally and in CI, from ONE built image.
+3. **MQTT TPs included** — the `--exclude '*mqtt*'` in `dev/etsi-run.sh` is
+   gone (§G), so "green" means the whole suite, not the convenient part.
+4. The 350 MiB per-broker RSS gate holds in every mode, and `kill -9` loses
+   nothing in every persistent mode (§K9).
+5. `docs/ics.yaml` covers §5.4 clause by clause, `error.md` logs every ETSI
+   *tool* bug found, and every irreversible decision has an ADR.
+6. The §L targets are measured on hardware you provide (🖥), not estimated.
+
+### The loop for one task
+
+1. **Read the clause first** (§0.2). The spec is the requirement; the Robot
+   suite is the oracle that confirms it afterwards. Never the reverse.
+2. Implement the full normative behaviour with the smallest diff that holds
+   it — reuse before writing, stdlib before dependencies.
+3. Unit-test that clause's own rules and edge cases.
+4. Run `STORE=<affected mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh`.
+5. In ONE commit: the code, its tests, the `docs/ics.yaml` row, the ticked
+   box, and a message citing the clause number.
+6. File the decision or the gotcha in MemPalace (other agents read it).
+
+### Never
+
+- Touch the host Mac: no host docker, no host paths, no Mac-side installs
+  (§0.1). The sandbox and CI are sufficient for everything untagged.
+- Start a ⛔ / 🖥 / ⏳ task. Prepare the artifact, stop, and say what you need.
+- Hack the broker to satisfy a broken test purpose. Prove it is a tool bug,
+  log it in `error.md`, leave the broker correct.
+- Tick a box whose test does not exist or does not pass.
+- Push, publish, or release unless asked in that message.
+
+### Progress
+
+`grep -c '^- \[x\]' tasks.md` over `grep -c '^- \[' tasks.md`, plus per-suite
+pass counts from the last pipeline run. Those two numbers are the only
+progress report anyone should need.
+
+---
+
 Everything from v0 skeleton to the v1 contract, derived from `claude.md` /
 `docs/deep-analysis.md` (§ references) and `README.md`. Working order per
 feature is spec-first (§0.2): read the CIM 009 V1.9.1 clause → implement the
@@ -551,7 +603,5 @@ N (browser WASM) needs only A; independent of C/D/F and gated by its own
 Node/browser tiers, never by the container pipeline.
 ```
 
-Definition of done: `dev/etsi-pipeline.sh` green for all four `STORE` values
-(memory, file, postgres, timescale) locally and in CI — MQTT TPs included,
-350 MiB gate held, kill -9 loses nothing in any persistent mode — and the §1
-targets measured in the L-series soak.
+Definition of done: the six criteria under **§Goal** at the top of this file.
+They live there, once, so this list cannot drift from its own finish line.
