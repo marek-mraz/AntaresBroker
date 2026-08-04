@@ -539,8 +539,15 @@ audit each against `docs/ics.yaml` and close the gaps.
       Prepared-geometry caching left as the §6.5 matcher lever; SQL parity
       extends via C11c when C11b lands.)*
 
-- [ ] I1. Authn tower layer: `none | oidc-bearer | mtls`, config-selected
-      (§16 posture); authz stays the PEP's job.
+*Out of scope, deliberately (decision 2026-08-04, user): **authentication and
+rate limiting are not NGSI-LD**. Both are generic HTTP middleware with no
+clause behind them, and §16's own posture already delegates request policy to
+the PEP / reverse proxy Antares sits behind — per-IP limiting is meaningless
+once traffic arrives through a load balancer anyway. What is never delegated
+stays in this list and is done: tenant isolation (I5), injection safety
+(C12/§16.2), resource bounds (I2) and outbound safety (I4). Do not re-add
+these as tasks.*
+
 - [x] I2. Input bounds wall: body size 413, JSON depth ≤64, batch count,
       URI+param length, @context chain/fetch caps, `joinLevel`, AST
       depth/size → 403 `TooComplexQuery`, result ceilings → 403
@@ -549,7 +556,6 @@ audit each against `docs/ics.yaml` and close the gaps.
       point caps at the batch/join/loader/q parse sites; caps + rejection
       counters exported via /q/health until the K12 metrics stack lands;
       router + parser tests i2_bounds_wall / q_complexity_cap.)*
-- [ ] I3. Rate limiting layer: global + per-IP v1; per-tenant hooks (§16.3).
 - [x] I4. `EgressPolicy` for ALL outbound (notifications, @context fetches,
       federation forwards): scheme allowlist, private-range deny-by-default
       with `egress.allow_private` switch (ETSI stacks need it), redirect

@@ -989,7 +989,9 @@ Where it gets hard (the reasons this is a crate, not a weekend):
 
 ## 16. Security requirements
 
-Posture: Antares commonly runs behind a data-space PEP (ODRL/OPA policy front-ends, §15.5) — but it must be **safe when exposed directly**. Per-request authn is a tower layer (`none | oidc-bearer | mtls`, config-selected); fine-grained authorization is explicitly out of core v1 (the PEP's job). What is never delegated: tenant isolation, injection safety, and resource bounds. These are requirements with tests, not guidelines.
+Posture: Antares commonly runs behind a data-space PEP (ODRL/OPA policy front-ends, §15.5) — but it must be **safe when exposed directly**. **Authentication and authorization are both out of core (decision 2026-08-04)** — neither is NGSI-LD, both are generic HTTP middleware with no clause behind them, and the PEP / reverse proxy Antares already sits behind is where they belong. The earlier plan for a `none | oidc-bearer | mtls` tower layer is dropped, not deferred. What is never delegated: tenant isolation, injection safety, and resource bounds. These are requirements with tests, not guidelines.
+
+"Safe when exposed directly" is therefore scoped precisely: an unauthenticated request cannot cross a tenant boundary (§16.1), inject SQL (§16.2), exhaust the process (§16.3), or make the broker attack someone else's network (§16.4). It CAN read and write, because deciding who may do that is the PEP's job.
 
 ### 16.1 Tenant isolation — zero slippage, enforced at seven seams
 
@@ -1012,7 +1014,7 @@ Adapted from the WS binding's WS-47 analysis and applied broker-wide:
 
 ### 16.3 Input hardening & resource bounds
 
-Every request-shaped resource has a configured cap, rejected with the spec error (§2.1 rule made security-normative): body size (413), JSON depth ≤ 64, batch entity count, URI+params length, @context chain length and fetch count per request, `joinLevel`, query AST depth/size → `TooComplexQuery` 403, result ceilings → `TooManyResults` 403. Rate limiting is a tower layer with per-principal/per-tenant hooks (v1 ships global + per-IP; per-tenant quotas are the named v2 knob, §1.1). All limits observable via metrics before users hit them.
+Every request-shaped resource has a configured cap, rejected with the spec error (§2.1 rule made security-normative): body size (413), JSON depth ≤ 64, batch entity count, URI+params length, @context chain length and fetch count per request, `joinLevel`, query AST depth/size → `TooComplexQuery` 403, result ceilings → `TooManyResults` 403. **Rate limiting is out of core (decision 2026-08-04)** — same reasoning as authn above: no clause, generic middleware, and per-IP counting is meaningless once traffic arrives through the load balancer or PEP that fronts the broker. Per-request *cost* is bounded here instead, which is the part that is genuinely the broker's own (a single request can no longer be made expensive enough to matter). Per-tenant quotas remain the named v2 policy knob (§1.1) if a deployment ever wants them enforced broker-side. All limits observable via metrics before users hit them.
 
 ### 16.4 Outbound safety (SSRF) — three egress classes, one policy
 

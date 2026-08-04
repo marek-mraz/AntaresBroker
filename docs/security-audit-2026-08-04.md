@@ -7,6 +7,26 @@
 
 ---
 
+## 0. Amendment — 2026-08-04, after the audit
+
+**Findings H1 and S11 (missing authn tower layer) are WITHDRAWN, not fixed.**
+Scope decision by the project owner on the day of this audit: authentication,
+authorization and rate limiting are **not NGSI-LD** — generic HTTP middleware
+with no clause behind them — and belong to the PEP / reverse proxy Antares
+sits behind. `claude.md` §16 and §16.3 were amended to match, and tasks.md I1
+and I3 were deleted rather than deferred. This report's verdict below was
+written against the *previous* §16 text, which promised a
+`none | oidc-bearer | mtls` layer; read it with that in mind.
+
+What this changes about the verdict: "safe when exposed directly" is now
+scoped to mean an unauthenticated request cannot cross a tenant boundary,
+inject SQL, exhaust the process, or make the broker attack another network.
+It *can* read and write — deciding who may do that is delegated by design.
+Every other finding in this report stands, and the two process-kill findings
+(C1, C2) were fixed in commit d4e79e6.
+
+---
+
 ## 1. Executive summary
 
 ### Verdict
@@ -1134,7 +1154,7 @@ Ordered by severity × cheapness of fix. Paste into `tasks.md`.
 - [ ] **S8** — Cap the federation response body (mirror `MAX_CONTEXT_BYTES`) via `content_length` + bounded `chunk()` loop; report over-cap as a 502 part. Also push an explicit `limit` onto forwarded reads. `crates/antares-api/src/federation.rs:290`, `:519-533` (**H4**)
 - [ ] **S9** — Make the change channel bounded with an explicit overflow policy, and dispatch deliveries under a semaphore instead of inline in the single consumer; export queue depth on `/q/health`. `crates/antares-api/src/notify.rs:29-41,574,642` (**H8**)
 - [ ] **S10** — Bound the `Cached` write-through (row cap + LRU on `last_usage`, body cap well below 5 MiB) and page the boot preload. `crates/antares-broker/src/main.rs:181-210`, `crates/antares-sql/src/store/pg_doc.rs:562-598` (**H7**)
-- [ ] **S11** — Implement the `ANTARES_AUTHN = none|oidc-bearer|mtls` tower layer, add the key to `KNOWN_KEYS`, validate `NGSILD-Tenant` against the principal's claim, and log a loud warning under `none`. `crates/antares-broker/src/main.rs:11-24,236` (**H1**) *(larger than the rest of this tier; start with the warning + config key.)*
+- [~] **S11** — WITHDRAWN (§0 amendment; authn is out of core, not NGSI-LD). Was: implement the `ANTARES_AUTHN = none|oidc-bearer|mtls` tower layer, add the key to `KNOWN_KEYS`, validate `NGSILD-Tenant` against the principal's claim, and log a loud warning under `none`. `crates/antares-broker/src/main.rs:11-24,236` (**H1**) *(larger than the rest of this tier; start with the warning + config key.)*
 
 ### Tier 2 — medium severity, cheap (half a day each)
 
