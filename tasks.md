@@ -314,35 +314,66 @@ audit each against `docs/ics.yaml` and close the gaps.
 So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 "roll during ETSI" is the right chaos test for `postgres`. Don't mix them up.
 
-- [ ] K1. Graceful shutdown drain order: stop HTTP accept → stop consumers →
-      flush outbox → close pools (§9.3 shutdown.rs).
-- [ ] K6. `ha` compose profile: an LB (nginx/haproxy) on 9090 fronting ≥2 api
-      instances on private ports. Needed because the ETSI compose runs
-      `network_mode: host` with fixed ports — two brokers cannot bind the same
-      port, so an in-place roll is impossible without the proxy.
-- [ ] K7. `dev/rolling-update.sh`: swap instances one at a time (drain wait →
-      SIGTERM → new image → `/q/health` → next), driven by the same image the
-      pipeline built.
-- [ ] K8. Continuity harness used by every drill: a writer loop with
-      monotonic entity ids + a notification receiver that records deliveries.
-      Assertions: zero connection errors, zero 5xx, zero lost writes, and
-      notifications at-least-once (duplicates fine, losses not).
-- [ ] K9. **ETSI-during-roll job** (postgres mode): run the full suite through
-      the K6 LB while K7 rolls the brokers underneath. The suite has no
+### K-i. Make it rollable
+
+- [ ] K1. Graceful shutdown drain order (§9.3 `shutdown.rs`): stop accepting
+      new HTTP connections → let in-flight requests finish (bounded deadline)
+      → stop bus consumers → flush the outbox → close pools. Health endpoint
+      flips to "draining" FIRST so the LB stops routing before the socket
+      closes; SIGTERM triggers it, and the container `stopGracePeriod` must
+      exceed the deadline or the orchestrator turns a drain into a kill.
+- [ ] K2. `ha` compose profile: an LB (nginx/haproxy/caddy) on 9090 fronting
+      ≥2 api instances on private ports, health-checked with fast ejection.
+      Required because the ETSI compose runs `network_mode: host` with fixed
+      ports — two brokers cannot bind 9090, so there is nothing to roll in
+      place without the proxy. Profile-gated: the normal ETSI stack is
+      unchanged.
+- [ ] K3. `dev/rolling-update.sh`: swap instances one at a time (mark
+      draining → wait for in-flight to clear → SIGTERM → start new image →
+      wait `/q/health` → next), using the image the pipeline just built. Runs
+      locally and in CI, same script (the §E pipeline rule).
+- [ ] K4. N≥2 api pods behind the LB validated in e2e; matcher/notifier as
+      shared-durable consumer groups scale and roll independently (§10).
+- [ ] K5. Reference manifests (compose + K8s): 3-node JetStream R3, Postgres
+      primary/replica (CloudNativePG or Patroni), memory limits in EVERY
+      manifest (R1/R2 lesson), `strategy: Recreate` hard-coded for `file`
+      mode and `RollingUpdate` for `postgres`/`timescale`.
+
+### K-ii. Prove it (the drills)
+
+- [ ] K6. Continuity harness, shared by every drill below: a writer loop
+      posting monotonically-numbered entities + a recording notification
+      receiver. Assertions: zero connection errors, zero 5xx, zero lost
+      writes (every acked id present at the end), and notifications
+      at-least-once (duplicates fine, losses not).
+- [ ] K7. **SIGTERM drill (graceful):** roll all instances under K6 load.
+      Expected: zero failed requests. This is the only real test of K1 —
+      a drain bug shows up here and nowhere else.
+- [ ] K8. **ETSI-during-roll job** (postgres mode): run the full suite through
+      the K2 LB while K3 rolls the brokers underneath. The suite has no
       retries and asserts exact single responses, which makes it a brutally
-      strict drain test — so this is a STRICT gate, not a soak signal: any
-      failure is a real K1 drain bug, not flake.
-- [ ] K10. `file`-mode restart drill: assert the exclusive-lock error IS the
-      expected behaviour on double-start (never silent corruption), and gate
-      the restart gap (<2 s at 100k entities).
-- [ ] K2. N≥2 api pods behind LB validated in e2e; matcher/notifier as
-      shared-durable groups scale independently (§10).
-- [ ] K3. 3-node JetStream R3 + Postgres primary/replica reference manifests
-      (compose + K8s), memory limits in EVERY manifest (R1/R2 lesson).
-- [ ] K4. Failover drills in e2e: broker pod kill between commit and publish
-      (outbox covers it), NATS node kill, PG failover (§10, §13 phase 4).
-- [ ] K5. Observability: tracing + OTLP + Prometheus metrics with `antares_`
-      prefix and unit suffixes (§9.1), change-lag/notification metrics,
+      strict drain client — so this is a STRICT gate, not a soak signal: any
+      failure is a real K1 bug, not flake. Expected result: 1025/1025.
+- [ ] K9. **SIGKILL drill (ungraceful):** `kill -9` mid-write, per mode.
+      Expected: `file` → every acked write present after restart
+      (commit-before-ack, §B3/B8); `postgres` → a change committed but not yet
+      published is republished from the outbox on restart (§F3); `memory` →
+      documented total loss, asserted so the mode's limits stay honest.
+- [ ] K10. `file`-mode restart drill: assert the exclusive-lock error
+      (`Database already open. Cannot acquire lock.`) IS the expected
+      behaviour on double-start — never silent corruption, never two writers —
+      and gate the restart gap (<2 s at 100k entities; rebuild measured at
+      257k entities/s, so the gap is process start).
+- [ ] K11. Backend failover drills: Postgres primary kill (replica promotion,
+      broker reconnects without dropping acked writes), NATS node kill (R3
+      stream survives, consumers resume, at-least-once holds), broker pod kill
+      between commit and publish (outbox covers it) (§10, §13 phase 4).
+
+### K-iii. Operate it
+
+- [ ] K12. Observability: tracing + OTLP + Prometheus metrics with the
+      `antares_` prefix and unit suffixes (§9.1), change-lag and notification
+      metrics, drain/roll state exported so a roll is visible on a dashboard,
       tokio-console in dev.
 
 ## L. Scale validation — phase 4 exit (§13)
