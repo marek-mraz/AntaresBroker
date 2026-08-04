@@ -706,3 +706,50 @@ mod tests {
         assert!(!parse_datetime("2020-09-09"));
     }
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// J1 (risk #1): the phase-0 go/no-go was ≥5k expansions/s/core.
+    /// Antares hand-rolled its processor from day one (the fork-or-hand-roll
+    /// decision the box anticipated) — this measures it. Run with
+    /// `cargo test -p antares-jsonld --release -- --ignored bench_expansion`.
+    #[test]
+    #[ignore = "benchmark — run explicitly in release"]
+    fn bench_expansion_rate() {
+        let loader = crate::Loader::new();
+        let ctx = loader.core();
+        let entity: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+            "id": "urn:ngsi-ld:Vehicle:bench-1", "type": "Vehicle",
+            "speed": {"type": "Property", "value": 55.1,
+                      "observedAt": "2026-08-04T12:00:00Z", "unitCode": "KMH",
+                      "source": {"type": "Property", "value": "GPS"}},
+            "heading": {"type": "Property", "value": 180},
+            "isParked": {"type": "Relationship",
+                          "object": "urn:ngsi-ld:OffStreetParking:p1",
+                          "providedBy": {"type": "Relationship",
+                                          "object": "urn:ngsi-ld:Person:bob"}},
+            "location": {"type": "GeoProperty",
+                          "value": {"type": "Point", "coordinates": [13.35, 52.51]}},
+            "name": {"type": "LanguageProperty",
+                      "languageMap": {"en": "car", "de": "Auto"}}
+        }"#,
+        )
+        .expect("entity");
+        let n = 20_000u32;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let out = expand_entity(&entity, &ctx, ExpandOpts::default()).expect("expand");
+            std::hint::black_box(out);
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let rate = f64::from(n) / secs;
+        eprintln!("expansion rate: {rate:.0}/s/core ({n} iterations in {secs:.2}s)");
+        assert!(
+            rate >= 5_000.0,
+            "expansion rate {rate:.0}/s is below the 5k/s/core phase-0 gate"
+        );
+    }
+}

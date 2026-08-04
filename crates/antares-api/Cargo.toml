@@ -14,6 +14,7 @@ antares-notifier = { workspace = true, default-features = false }
 geo = { workspace = true }
 geo-types = { workspace = true }
 geojson = { workspace = true }
+sonic-rs = { workspace = true, optional = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -27,6 +28,9 @@ reqwest = { workspace = true }
 # Clause 7 MQTT notification binding (G1); on by default — the 058 TPs need it.
 default = ["mqtt"]
 mqtt = ["antares-notifier/mqtt"]
+# J6: sonic-rs on the batch-ingest hot path (x86_64/aarch64); serde_json is
+# always the compiled fallback (§6.1).
+sonic = ["dep:sonic-rs"]
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

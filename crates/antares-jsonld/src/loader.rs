@@ -155,6 +155,7 @@ fn ttl_from_headers(
 /// @context responses above this size are refused (§16.4 response-size cap).
 const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
 
+#[derive(Clone)]
 struct FetchedDoc {
     value: Arc<Value>,
     /// 6.3.16 expiry deadline; `None` = cache until evicted.
@@ -165,17 +166,31 @@ pub struct Loader {
     http: reqwest::Client,
     policy: EgressPolicy,
     /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
-    fetched: RwLock<HashMap<String, FetchedDoc>>,
-    /// cache key (serialized user context) → merged+frozen Context.
-    merged: RwLock<HashMap<String, Arc<Context>>>,
-    /// Core context, pre-merged, for requests without any user context.
+    /// J2: bounded LRU — every cache has a max size (R4/L7 lesson).
+    fetched: moka::sync::Cache<String, FetchedDoc>,
+    /// cache key (serialized user context) → merged+frozen Context (the
+    /// parsed-context LRU of §6.3 — the centerpiece, size-capped at 256).
+    merged: moka::sync::Cache<String, Arc<Context>>,
+    /// Core context, pre-merged and PINNED outside the LRU (never evicted).
     core_only: Arc<Context>,
-    /// URL → usage stats for every external @context referenced by requests.
+    /// URL → usage stats for every external @context referenced by requests
+    /// (5.13 Cached-entry bookkeeping; bounded — client-supplied URLs must
+    /// never grow state without limit).
     usage: RwLock<HashMap<String, CtxUsage>>,
     /// merged-cache key → every URL that resolution touched (so cache hits
     /// still bump numberOfHits for nested references).
-    merged_urls: RwLock<HashMap<String, Vec<String>>>,
+    merged_urls: moka::sync::Cache<String, Arc<Vec<String>>>,
+    /// J3: bounded concurrency on cold context resolution — a burst of
+    /// exotic-context requests can't blow the JSON working-set budget.
+    resolve_permits: tokio::sync::Semaphore,
+    /// J2 write-through: freshly fetched remote contexts are handed to this
+    /// hook (the broker persists them as kind='Cached' rows) so the cache
+    /// survives a restart. Set once at wiring; None in tests.
+    cache_writer: std::sync::RwLock<Option<CacheWriter>>,
 }
+
+/// (url, parsed `@context` value) — called on every fresh remote fetch.
+pub type CacheWriter = Box<dyn Fn(&str, &Value) + Send + Sync>;
 
 impl Default for Loader {
     fn default() -> Self {
@@ -200,12 +215,42 @@ impl Loader {
                 .build()
                 .expect("reqwest client"),
             policy,
-            fetched: RwLock::new(HashMap::new()),
-            merged: RwLock::new(HashMap::new()),
+            fetched: moka::sync::Cache::new(256),
+            merged: moka::sync::Cache::new(256),
             core_only: Arc::new(core),
             usage: RwLock::new(HashMap::new()),
-            merged_urls: RwLock::new(HashMap::new()),
+            merged_urls: moka::sync::Cache::new(256),
+            resolve_permits: tokio::sync::Semaphore::new(32),
+            cache_writer: std::sync::RwLock::new(None),
         }
+    }
+
+    pub fn set_cache_writer(&self, w: CacheWriter) {
+        *self.cache_writer.write().expect("writer lock") = Some(w);
+    }
+
+    /// Boot preload (J2): re-seed a Cached entry persisted by the writer —
+    /// the parsed doc goes into the fetch cache, the bookkeeping identity
+    /// (localId/createdAt) into the usage registry, so 5.13 listings look
+    /// the same across a restart.
+    pub async fn seed_cached(&self, url: &str, local_id: &str, created_at: &str, ctx_value: Value) {
+        self.fetched.insert(
+            url.to_owned(),
+            FetchedDoc {
+                value: Arc::new(ctx_value),
+                stale_at: None,
+            },
+        );
+        self.usage.write().await.insert(
+            url.to_owned(),
+            CtxUsage {
+                url: url.to_owned(),
+                local_id: local_id.to_owned(),
+                created_at: created_at.to_owned(),
+                last_usage: created_at.to_owned(),
+                hits: 0,
+            },
+        );
     }
 
     fn now() -> String {
@@ -223,7 +268,12 @@ impl Loader {
             })
             .or_insert_with(|| CtxUsage {
                 url: url.to_owned(),
-                local_id: uuid::Uuid::new_v4().to_string(),
+                // deterministic (uuid5 of the URL): the same identity names
+                // this entry in the usage registry, the persisted Cached row
+                // (J2 write-through) and across restarts — an API delete can
+                // therefore always find the row (5.13.5).
+                local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
+                    .to_string(),
                 created_at: now.clone(),
                 last_usage: now,
                 hits: 1,
@@ -250,8 +300,9 @@ impl Loader {
     /// Re-download a cached @context from its original URL, replacing the
     /// stored copy (5.13.5.4 reload).
     pub async fn refetch(&self, url: &str) -> Result<(), NgsiError> {
-        self.fetched.write().await.remove(url);
-        self.merged.write().await.clear();
+        self.fetched.invalidate(url);
+        self.merged.invalidate_all();
+        self.merged_urls.invalidate_all();
         self.fetch(url).await.map(|_| ())
     }
 
@@ -274,16 +325,22 @@ impl Loader {
 
     async fn resolve_counted(&self, user: &Value, count: bool) -> Result<Arc<Context>, NgsiError> {
         let key = user.to_string();
-        if let Some(hit) = self.merged.read().await.get(&key) {
+        if let Some(hit) = self.merged.get(&key) {
             if count {
                 // cache hit: bump every URL this context resolution involves
-                let urls = self.merged_urls.read().await.get(&key).cloned();
-                for url in urls.unwrap_or_default() {
-                    self.bump_url(&url).await;
+                let urls = self.merged_urls.get(&key);
+                for url in urls.iter().flat_map(|u| u.iter()) {
+                    self.bump_url(url).await;
                 }
             }
-            return Ok(Arc::clone(hit));
+            return Ok(hit);
         }
+        // J3: cold resolution is the expensive path — bound its concurrency.
+        let _permit = self
+            .resolve_permits
+            .acquire()
+            .await
+            .expect("semaphore never closed");
         let mut ctx = Context::default();
         let urls = std::sync::Mutex::new(Vec::new());
         self.merge_entry(&mut ctx, user, 0, &urls).await?;
@@ -306,8 +363,8 @@ impl Loader {
         ctx.freeze();
         ctx.source = user.clone();
         let arc = Arc::new(ctx);
-        self.merged_urls.write().await.insert(key.clone(), urls);
-        self.merged.write().await.insert(key, Arc::clone(&arc));
+        self.merged_urls.insert(key.clone(), Arc::new(urls));
+        self.merged.insert(key, Arc::clone(&arc));
         Ok(arc)
     }
 
@@ -359,12 +416,12 @@ impl Loader {
             return Ok(Arc::new(v));
         }
         let mut stale_value: Option<Arc<Value>> = None;
-        if let Some(hit) = self.fetched.read().await.get(url) {
+        if let Some(hit) = self.fetched.get(url) {
             match hit.stale_at {
                 Some(deadline) if std::time::Instant::now() >= deadline => {
                     stale_value = Some(Arc::clone(&hit.value));
                 }
-                _ => return Ok(Arc::clone(&hit.value)),
+                _ => return Ok(hit.value),
             }
         }
         let err = |m: String| NgsiError::LdContextNotAvailable(m);
@@ -419,35 +476,43 @@ impl Loader {
         if stale_value.is_some_and(|old| *old != *arc) {
             // Refreshed content differs: merged contexts built on the old
             // copy are invalid.
-            self.merged.write().await.clear();
-            self.merged_urls.write().await.clear();
+            self.merged.invalidate_all();
+            self.merged_urls.invalidate_all();
         }
-        self.fetched.write().await.insert(
+        self.fetched.insert(
             url.to_owned(),
             FetchedDoc {
                 value: Arc::clone(&arc),
                 stale_at: ttl.map(|d| std::time::Instant::now() + d),
             },
         );
+        // J2 write-through: persist what was just fetched.
+        if let Ok(w) = self.cache_writer.read() {
+            if let Some(w) = w.as_ref() {
+                w(url, &arc);
+            }
+        }
         Ok(arc)
     }
 
     /// Insert a locally-hosted context (jsonldContexts API) so later
     /// resolutions of `url` need no network round-trip.
     pub async fn put_local(&self, url: String, context_value: Value) {
-        self.fetched.write().await.insert(
+        self.fetched.insert(
             url,
             FetchedDoc {
                 value: Arc::new(context_value),
                 stale_at: None, // hosted locally: no 6.3.16 lifetime
             },
         );
-        self.merged.write().await.clear();
+        self.merged.invalidate_all();
+        self.merged_urls.invalidate_all();
     }
 
     pub async fn evict(&self, url: &str) {
-        self.fetched.write().await.remove(url);
-        self.merged.write().await.clear();
+        self.fetched.invalidate(url);
+        self.merged.invalidate_all();
+        self.merged_urls.invalidate_all();
     }
 }
 

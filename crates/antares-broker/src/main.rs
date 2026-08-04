@@ -23,6 +23,12 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_TEMPORAL_RETENTION_DAYS",
 ];
 
+/// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2
+/// when idle; tune via MALLOC_CONF (e.g. dirty_decay_ms). glibc malloc's
+/// arena fragmentation is the §2.1 anti-choice.
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -156,8 +162,54 @@ async fn run(
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
-    let state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
+    let mut state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
+    // J7: heap stats on /q/health (allocated/resident bytes via jemalloc-ctl)
+    state.mem_stats = Some(std::sync::Arc::new(|| {
+        use tikv_jemalloc_ctl::{epoch, stats};
+        let _ = epoch::advance();
+        serde_json::json!({
+            "allocatedBytes": stats::allocated::read().unwrap_or(0),
+            "residentBytes": stats::resident::read().unwrap_or(0),
+        })
+    }));
     antares_api::notify::wire(&state); // matcher + notifier + interval firing
+
+    // J2: Cached-@context write-through + boot preload — fetched contexts
+    // are persisted as kind='Cached' rows and reloaded on start, so the
+    // parsed-context cache and the 5.13 listing survive a restart.
+    {
+        let store = state.store.clone();
+        state
+            .loader
+            .set_cache_writer(Box::new(move |url, ctx_value| {
+                let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
+                let doc = serde_json::json!({
+                    "url": url,
+                    "localId": id.to_string(),
+                    "kind": "Cached",
+                    "createdAt": antares_api::state::now_iso(),
+                    "body": {"@context": ctx_value},
+                });
+                if let Err(e) = store.context_put(&id.to_string(), doc) {
+                    tracing::warn!("@context write-through failed for {url}: {e}");
+                }
+            }));
+        for row in state.store.context_list().unwrap_or_default() {
+            if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
+                continue;
+            }
+            let (Some(url), Some(id), Some(created)) = (
+                row.get("url").and_then(|v| v.as_str()),
+                row.get("localId").and_then(|v| v.as_str()),
+                row.get("createdAt").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            if let Some(v) = row.pointer("/body/@context") {
+                state.loader.seed_cached(url, id, created, v.clone()).await;
+            }
+        }
+    }
 
     // C9/D4: temporal maintenance — plain-mode partition pre-creation and the
     // (opt-in) retention horizon, single-winner via SKIP LOCKED (§3.1.6).

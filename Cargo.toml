@@ -38,7 +38,7 @@ antares-registry = { path = "crates/antares-registry" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 regex = "1"
 axum = "0.8"
 hyper = "1"
@@ -53,6 +53,11 @@ rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"
 geo = "0.33"
 geo-types = "0.7"
 geojson = "0.24"
+# J2 @context parsed-LRU / J6 sonic ingest fast path / J7 allocator
+moka = { version = "0.12", features = ["sync"] }
+sonic-rs = "0.5"
+tikv-jemallocator = "0.7"
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "json", "chrono", "uuid", "migrate", "macros"] }
 thiserror = "2"
 tracing = "0.1"

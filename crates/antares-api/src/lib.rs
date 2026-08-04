@@ -270,6 +270,10 @@ async fn health(
     }
     // I2: configured caps + rejection counters (§16.3 observability).
     body["limits"] = state.limits.snapshot();
+    // J7: jemalloc heap stats (RSS ≈ live×1.2 is the §2.1 target).
+    if let Some(mem) = &state.mem_stats {
+        body["memory"] = mem();
+    }
     axum::Json(body)
 }
 

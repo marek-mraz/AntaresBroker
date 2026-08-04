@@ -31,6 +31,8 @@ pub struct AppState {
     pub mqtt: Arc<antares_notifier::mqtt::MqttSink>,
     /// I2 bounds-wall rejection counters (exported by /q/health).
     pub limits: Arc<crate::bounds::LimitStats>,
+    /// J7: allocator stats provider (set by the broker; None in tests/wasm).
+    pub mem_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             #[cfg(feature = "mqtt")]
             mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
             limits: Arc::new(crate::bounds::LimitStats::default()),
+            mem_stats: None,
         }
     }
 }

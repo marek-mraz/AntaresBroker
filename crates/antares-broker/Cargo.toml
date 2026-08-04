@@ -22,6 +22,13 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+# J7: decay-purging allocator + heap stats (§6.1; glibc malloc is the one
+# wrong answer). Unix-only: the wasm target (§N) keeps the default.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
 
 [dev-dependencies]
 # mqtt e2e (G1/G4 local proof): sync rumqttc client against a live mosquitto

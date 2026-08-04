@@ -19,6 +19,17 @@ use crate::negotiate::CleanParams;
 
 /// Parse a batch body: JSON array of entity documents; per-document context
 /// resolution (ld+json ⇒ each doc's own @context; json ⇒ Link header).
+/// J6: batch bodies are the ingest hot path — sonic-rs (3–4× parse) behind
+/// the `sonic` feature, serde_json always compiled as the fallback (§6.1).
+#[cfg(feature = "sonic")]
+fn parse_batch_body(body: &[u8]) -> Result<Value, String> {
+    sonic_rs::from_slice(body).map_err(|e| e.to_string())
+}
+#[cfg(not(feature = "sonic"))]
+fn parse_batch_body(body: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(body).map_err(|e| e.to_string())
+}
+
 async fn parse_batch(
     st: &AppState,
     headers: &HeaderMap,
@@ -30,7 +41,7 @@ async fn parse_batch(
         "application/ld+json" => true,
         _ => return Err(ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE)),
     };
-    let value: Value = serde_json::from_slice(body)
+    let value: Value = parse_batch_body(body)
         .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
     let items = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
         NgsiError::BadRequestData("batch body must be a non-empty JSON array".into())

@@ -356,6 +356,10 @@ pub async fn delete_context(
             }
             Some(CtxEntry::Cached(u)) => {
                 st.loader.usage_remove(&u.url).await;
+                // J2 write-through row shares the deterministic local id —
+                // deleting the API entry must delete the persisted copy too,
+                // or a restart resurrects a deleted @context (5.13.5).
+                let _ = st.store.context_delete(&u.local_id);
                 Ok(no_content(&tenant))
             }
             Some(CtxEntry::Stored(doc)) => {

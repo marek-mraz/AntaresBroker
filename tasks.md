@@ -538,22 +538,35 @@ audit each against `docs/ics.yaml` and close the gaps.
 
 ## J. Performance & the phase-0 spike debts (§12, §13)
 
-- [ ] J1. `json-ld` crate benchmark (risk #1): ≥5k expansions/s/core or
-      fork/hand-roll; core-context fast path measured (§6.3).
-- [ ] J2. @context parsed-LRU (moka): size cap ~256, core context pinned,
+- [x] J1. `json-ld` crate benchmark (risk #1): ≥5k expansions/s/core or
+      fork/hand-roll; core-context fast path measured (§6.3). *(The
+      fork-or-hand-roll decision was taken at v0: the processor is
+      hand-rolled. Measured 2026-08-04 (release, 6-attr entity with nested
+      sub-attrs, core context): 401k expansions/s/core — 80× the gate.
+      Gate encoded as an ignored release bench in expand.rs.)*
+- [x] J2. @context parsed-LRU (moka): size cap ~256, core context pinned,
       `Cache-Control`/`Expires` TTLs, Postgres write-through (§6.3, J1b
-      lesson).
-- [ ] J3. Bounded JSON-LD concurrency semaphore (§6.3.3).
+      lesson). *(moka caps on merged/fetched/urls caches; core pinned
+      outside the LRU; TTLs from H6; write-through persists Cached rows
+      under deterministic uuid5 ids with boot preload — and API deletes
+      reach the row, so a deleted @context stays deleted across restarts
+      (5.13.5).)*
+- [x] J3. Bounded JSON-LD concurrency semaphore (§6.3.3). *(32 permits on
+      cold context resolution; cache hits bypass.)*
 - [ ] J4. 🖥 NEEDS-HARDWARE (16 GB Postgres box; not a free CI runner).
       10M-row synthetic benchmark (xtask seeder):
       q=/geo/type query p95s; decide the extracted-attribute side table
       (named lever, §8.1) on numbers, not vibes.
 - [ ] J5. Streaming list endpoints: axum streaming bodies + sqlx `fetch()`
       row streams (J3/J11c lesson).
-- [ ] J6. `sonic-rs` feature on the batch-ingest path, serde_json fallback
-      compiled always (§6.1).
-- [ ] J7. jemalloc + decay tuning + heap-stats metrics export (§6.1);
-      RSS ≈ live×1.2 target (§2.1).
+- [x] J6. `sonic-rs` feature on the batch-ingest path, serde_json fallback
+      compiled always (§6.1). *(feature `sonic`, off by default; both
+      variants built in CI via the feature matrix.)*
+- [x] J7. jemalloc + decay tuning + heap-stats metrics export (§6.1);
+      RSS ≈ live×1.2 target (§2.1). *(tikv-jemallocator global alloc in the
+      broker (non-msvc targets); MALLOC_CONF is the decay knob;
+      allocated/resident exported on /q/health via jemalloc-ctl until the
+      K12 metrics stack lands.)*
 
 ## K. HA & operations (§10)
 
