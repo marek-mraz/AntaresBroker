@@ -12,6 +12,7 @@
 
 pub mod pg_doc;
 pub mod pg_entity;
+pub mod pg_temporal;
 
 use antares_model::TenantId;
 use redb::{Database, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
