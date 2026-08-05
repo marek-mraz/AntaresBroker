@@ -18,16 +18,43 @@ fn http(port: u16, request: &str) -> String {
     out
 }
 
-fn start(port: u16, dir: &Path, store: &str) -> Child {
+/// Kills the child on drop, so a failed assert never leaks a broker process
+/// into the test host (the drain test found this the hard way: its panic left
+/// a live broker answering health checks half an hour later).
+struct Broker(Child);
+
+impl Drop for Broker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl std::ops::Deref for Broker {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Broker {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+fn start(port: u16, dir: &Path, store: &str) -> Broker {
     // Harness vars (ANTARES_TEST_*) are inherited from CI but are not broker
     // config; the §14.3 guard reserves that prefix, so no env_remove allowlist
     // to keep in sync here.
-    Command::new(env!("CARGO_BIN_EXE_antares"))
-        .env("ANTARES_HTTP_PORT", port.to_string())
-        .env("ANTARES_STORE", store)
-        .env("ANTARES_DATA_DIR", dir)
-        .spawn()
-        .expect("spawn antares")
+    Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", store)
+            .env("ANTARES_DATA_DIR", dir)
+            .spawn()
+            .expect("spawn antares"),
+    )
 }
 
 fn wait_healthy(port: u16) -> String {
@@ -274,6 +301,84 @@ fn restart_gap_stays_under_the_gate() {
 
     broker.kill().expect("cleanup kill");
     broker.wait().expect("cleanup reap");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// K1: the drain ORDER, which is the whole feature. A load balancer only
+/// learns an instance is going away by polling `/q/health`, so health must go
+/// 503 while the socket STILL WORKS — flipping it at the same moment the
+/// listener closes is what turns a rolling update into connection-refused.
+/// The window is widened here so the assertion is about ordering, not timing.
+#[test]
+fn sigterm_flips_health_before_it_closes_the_socket() {
+    let dir = tempdir("drain");
+    let port = free_port();
+    let mut broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("ANTARES_DRAIN_DELAY_MS", "2000")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    let health = wait_healthy(port);
+    assert!(health.contains(r#""status":"UP""#), "before: {health}");
+
+    // `kill` via the shell builtin — this box ships no /bin/kill binary
+    // (same family as its missing pgrep/pkill).
+    let killed = Command::new("sh")
+        .args(["-c", &format!("kill -TERM {}", broker.id())])
+        .status()
+        .expect("kill -TERM");
+    assert!(killed.success(), "SIGTERM not delivered");
+
+    // inside the notice window: unhealthy, but still accepting and serving
+    std::thread::sleep(Duration::from_millis(300));
+    let resp = http(
+        port,
+        "GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 503"),
+        "draining must be 503 so the LB ejects it — a 200 keeps traffic coming: {resp}"
+    );
+    assert!(
+        resp.contains(r#""status":"DRAINING""#),
+        "drain body: {resp}"
+    );
+
+    // and real API traffic still completes during the window
+    let entity = r#"{"id":"urn:ngsi-ld:Test:drain1","type":"Test"}"#;
+    let resp = http(
+        port,
+        &format!(
+            "POST /ngsi-ld/v1/entities HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{entity}",
+            entity.len()
+        ),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 201"),
+        "in-flight traffic must still be served while draining: {resp}"
+    );
+
+    // then it exits cleanly and on its own — no kill needed
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let status = loop {
+        if let Some(s) = broker.try_wait().expect("try_wait") {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "broker never exited after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        status.success(),
+        "graceful shutdown must exit 0: {status:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -639,22 +639,40 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 
 ### K-i. Make it rollable
 
-- [ ] K1. Graceful shutdown drain order (§9.3 `shutdown.rs`): stop accepting
+- [x] K1. Graceful shutdown drain order (§9.3 `shutdown.rs`): stop accepting
       new HTTP connections → let in-flight requests finish (bounded deadline)
       → stop bus consumers → flush the outbox → close pools. Health endpoint
       flips to "draining" FIRST so the LB stops routing before the socket
       closes; SIGTERM triggers it, and the container `stopGracePeriod` must
       exceed the deadline or the orchestrator turns a drain into a kill.
-- [ ] K2. `ha` compose profile: an LB (nginx/haproxy/caddy) on 9090 fronting
+      *(broker/src/shutdown.rs: drain flips /q/health to 503 DRAINING, keeps
+      serving for ANTARES_DRAIN_DELAY_MS (the LB notice window), then closes
+      the listener, waits in-flight out under ANTARES_DRAIN_DEADLINE_SECS,
+      closes pools. Outbox flush deliberately absent until F3 drains it —
+      today the row commits same-tx and nothing buffers. Proof:
+      file_mode.rs::sigterm_flips_health_before_it_closes_the_socket asserts
+      the ORDER — 503 while the socket still serves a 201 — and clean exit 0.
+      No bus consumers exist yet to stop; that arm lands with F6.)*
+- [x] K2. `ha` compose profile: an LB (nginx/haproxy/caddy) on 9090 fronting
       ≥2 api instances on private ports, health-checked with fast ejection.
       Required because the ETSI compose runs `network_mode: host` with fixed
       ports — two brokers cannot bind 9090, so there is nothing to roll in
       place without the proxy. Profile-gated: the normal ETSI stack is
       unchanged.
-- [ ] K3. `dev/rolling-update.sh`: swap instances one at a time (mark
+      *(compose-files/docker-compose-ha.yml as an OVERLAY, not a profile — a
+      profile can only add services, and HA must also move antares1 off 9090;
+      the normal stack file is untouched, which is the property the task
+      wants. haproxy 3.0 on 9090, check inter 200ms fall 2 = ejection within
+      the 500 ms drain notice window. Verified live 2026-08-05: stack up,
+      both replicas healthy behind the LB.)*
+- [x] K3. `dev/rolling-update.sh`: swap instances one at a time (mark
       draining → wait for in-flight to clear → SIGTERM → start new image →
       wait `/q/health` → next), using the image the pipeline just built. Runs
       locally and in CI, same script (the §E pipeline rule).
+      *(Verified live 2026-08-05: STORE=memory roll of antares1 + antares1b,
+      6 s per instance, while a 20 req/s probe loop ran through the LB —
+      192/192 responses 200, zero failures. CI invocation arrives with K8's
+      ETSI-during-roll job, which calls this same script.)*
 - [ ] K4. N≥2 api pods behind the LB validated in e2e; matcher/notifier as
       shared-durable consumer groups scale and roll independently (§10).
 - [ ] K5. Reference manifests (compose + K8s): authored and lint/kind-tested

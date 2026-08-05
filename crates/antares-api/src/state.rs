@@ -36,6 +36,10 @@ pub struct AppState {
     /// I4: one egress policy for notifications and federation forwards
     /// (scheme allowlist, private-range deny, per-destination breakers).
     pub egress: Arc<crate::egress::Egress>,
+    /// K1: set the moment SIGTERM arrives, BEFORE the listener stops
+    /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
+    /// takes this instance out while its socket still works.
+    pub draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -81,6 +85,7 @@ impl AppState {
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

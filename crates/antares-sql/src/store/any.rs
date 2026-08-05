@@ -73,6 +73,17 @@ impl AnyStore {
         }
     }
 
+    /// K1, the last step of the drain: close the connection pool so in-flight
+    /// transactions finish and the server sees a clean disconnect instead of
+    /// N abandoned backends. A no-op for the memory/file arm, whose durability
+    /// is already commit-before-ack (B3) — there is nothing buffered to lose.
+    pub async fn close(&self) {
+        match self {
+            AnyStore::Mem(_) => {}
+            AnyStore::Pg(p) => p.docs.pool().close().await,
+        }
+    }
+
     pub fn set_change_hook(&self, h: ChangeHook) {
         match self {
             AnyStore::Mem(s) => s.set_change_hook(h),

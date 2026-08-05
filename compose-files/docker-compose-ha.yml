@@ -1,0 +1,63 @@
+# HA overlay (tasks.md K2) — layered ON TOP of the ETSI stack:
+#
+#   docker compose -f compose-files/docker-compose-etsi.yml \
+#                  -f compose-files/docker-compose-ha.yml [--profile db] up -d
+#
+# The task says "profile"; this is an overlay file instead, for a compose
+# reason: a profile can only ADD services, and HA must also MOVE antares1 off
+# port 9090 so the load balancer can take it. An overlay does both; the normal
+# ETSI stack file is untouched, which is the property the task actually wants.
+#
+# Shape: haproxy owns 9090, fronting antares1 (moved to 9095) and antares1b
+# (9096) — both host-networked like every broker, so the ETSI mocks and
+# notification callbacks keep resolving via localhost. The other four brokers
+# and the suite are unchanged: to the Robot runner this stack is
+# indistinguishable from the normal one, which is what makes the K8
+# ETSI-during-roll gate meaningful.
+#
+# Store modes: postgres / timescale only — both instances share postgres1,
+# which is what makes them replicas of ONE broker rather than two brokers.
+# `file` mode CANNOT run this overlay: redb's exclusive lock allows one
+# process per volume (K10 proved the refusal), which is why the K-section
+# table says Recreate, never RollingUpdate, for that rung. `memory` mode
+# comes up but the replicas have independent state — good enough to exercise
+# the LB/drain mechanics, meaningless for data consistency.
+
+services:
+  antares1:
+    environment:
+      ANTARES_HTTP_PORT: "9095"
+    # K1 contract: stop_grace_period must exceed drain delay (0.5 s) +
+    # drain deadline (20 s), or `docker stop` turns the drain into a kill.
+    stop_grace_period: 30s
+
+  antares1b:
+    image: antares-local:latest
+    container_name: antares1b
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    extra_hosts:
+      - "ngsi-ld-test-suite-mosquitto-container:172.29.9.2"
+    environment:
+      ANTARES_HTTP_PORT: "9096"
+      # Same alias as antares1 ON PURPOSE: behind the LB they are one broker,
+      # and Via-chain loop detection must treat them as one hop.
+      ANTARES_HOST_ALIAS: antares1
+      ANTARES_STORE: ${STORE:-memory}
+      ANTARES_DATA_DIR: /data
+      ANTARES_EGRESS_ALLOW_PRIVATE: "true"
+      # Shares antares1's database — that is the whole point.
+      ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
+    volumes: ["antares1b-data:/data"]
+
+  lb:
+    image: haproxy:3.0-alpine
+    container_name: antares-lb
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./haproxy-ha.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+
+volumes:
+  antares1b-data:

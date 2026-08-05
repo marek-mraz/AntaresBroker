@@ -24,7 +24,7 @@ pub mod types_attrs;
 pub use state::AppState;
 
 use antares_model::{NgsiError, API_ROOT};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
@@ -259,8 +259,21 @@ async fn options_204(
 
 async fn health(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<serde_json::Value> {
-    let mut body = serde_json::json!({ "status": "UP", "store": state.store_mode });
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    // K1 drain: the load balancer decides on the STATUS CODE, so draining has
+    // to be a 503 — a 200 body saying "DRAINING" would keep traffic arriving.
+    // This flips BEFORE the listener stops accepting, which is the whole point
+    // of the ordering: the LB must stop routing while the socket still works.
+    let draining = state.draining.load(std::sync::atomic::Ordering::Relaxed);
+    let code = if draining {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    let mut body = serde_json::json!({
+        "status": if draining { "DRAINING" } else { "UP" },
+        "store": state.store_mode,
+    });
     // B13: in `file` mode commits serialize behind one writer — the queue
     // depth (current, peak) is the signal that decides the group-commit lever.
     if state.store_mode == "file" {
@@ -275,7 +288,7 @@ async fn health(
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
     }
-    axum::Json(body)
+    (code, axum::Json(body))
 }
 
 /// CIM 009 5.15.1 / 6.33 — Context Source identity.

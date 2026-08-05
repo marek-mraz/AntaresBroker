@@ -3,6 +3,8 @@
 //! Config: ANTARES_* env vars only for v0 (antares.toml layering lands with
 //! figment in phase 1). Unknown ANTARES_* keys are fatal (§14.3).
 
+mod shutdown;
+
 use antares_api::AppState;
 use antares_bus::LocalBus;
 
@@ -21,6 +23,10 @@ const KNOWN_KEYS: &[&str] = &[
     // C9/D4 temporal retention horizon in days; absent = keep forever (a
     // maintenance job must never default to dropping data).
     "ANTARES_TEMPORAL_RETENTION_DAYS",
+    // K1 drain: the LB notice window, and the ceiling on waiting for
+    // in-flight requests once the listener has closed.
+    "ANTARES_DRAIN_DELAY_MS",
+    "ANTARES_DRAIN_DEADLINE_SECS",
 ];
 
 /// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2
@@ -37,9 +43,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Unknown-config-is-fatal (§14.3): catch typos before they become Scorpio's
-    // $[quarkus.uuid} class of silent misconfiguration.
+    // $[quarkus.uuid} class of silent misconfiguration. ANTARES_TEST_* is the
+    // reserved harness namespace (ANTARES_TEST_DATABASE_URL, ANTARES_TEST_MQTT_URL,
+    // …) — CI exports those for the integration tests, and they land in the env of
+    // any broker a test spawns. Reserving the prefix here beats making every
+    // spawn site remember an env_remove allowlist.
     for (key, _) in std::env::vars() {
-        if key.starts_with("ANTARES_") && !KNOWN_KEYS.contains(&key.as_str()) {
+        if key.starts_with("ANTARES_")
+            && !key.starts_with("ANTARES_TEST_")
+            && !KNOWN_KEYS.contains(&key.as_str())
+        {
             return Err(format!("unknown config key {key} (known: {KNOWN_KEYS:?})").into());
         }
     }
@@ -233,6 +246,11 @@ async fn run(
             }
         });
     }
+    // K1: handles the drain needs, taken before `state` is consumed by the
+    // router — the flag the health endpoint reads, and the store whose pools
+    // close last.
+    let draining = state.draining.clone();
+    let store_for_drain = state.store.clone();
     let app = tower::Layer::layer(
         &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),
         antares_api::router(state),
@@ -240,30 +258,71 @@ async fn run(
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://0.0.0.0:{port}");
+    // K1: count open connections so the drain can wait for them. Incremented
+    // before the task is spawned — incrementing inside the task would race the
+    // drain's first check and let a just-accepted connection be missed.
+    let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // K1: the signal future is created ONCE and polled by reference. Written
+    // inline in the select, it would be dropped and re-created on every
+    // accepted connection — and a SIGTERM landing in that drop-to-recreate
+    // window is lost for good (tokio signal streams do not replay events from
+    // before their creation). Under health-check polling that window is hit
+    // constantly, which is exactly how the drain test caught it.
+    let mut sigterm = std::pin::pin!(shutdown::signal());
     // Manual serve loop: the ETSI suite reads response headers case-sensitively
     // ("Location"), so HTTP/1 responses are written with title-case headers.
     loop {
         let (stream, _) = tokio::select! {
             r = listener.accept() => r?,
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut sigterm => {
+                // 1+2: unhealthy FIRST, then keep serving for the LB's notice
+                // window — still inside this select, so connections arriving
+                // during it are accepted normally.
+                shutdown::begin(&draining);
+                let until = tokio::time::Instant::now() + shutdown::drain_delay();
+                loop {
+                    tokio::select! {
+                        r = listener.accept() => {
+                            let (stream, _) = r?;
+                            serve(stream, app.clone(), inflight.clone());
+                        }
+                        _ = tokio::time::sleep_until(until) => break,
+                    }
+                }
+                // 3–6: listener dropped, in-flight drained, pools closed.
+                drop(listener);
+                shutdown::drain(&inflight, &store_for_drain).await;
                 tracing::info!("shutting down");
                 return Ok(());
             }
         };
-        let app = app.clone();
-        tokio::spawn(async move {
-            let svc = hyper::service::service_fn(
-                move |req: hyper::Request<hyper::body::Incoming>| {
-                    let mut app = app.clone();
-                    async move { tower::Service::call(&mut app, req.map(axum::body::Body::new)).await }
-                },
-            );
-            let mut builder =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-            builder.http1().title_case_headers(true);
-            let _ = builder
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
-                .await;
-        });
+        serve(stream, app.clone(), inflight.clone());
     }
+}
+
+/// The served app: the router under trailing-slash normalization.
+type App = tower_http::normalize_path::NormalizePath<axum::Router>;
+
+/// One accepted connection. Split out of the accept loop so the drain's
+/// notice window serves connections with identical behaviour, and so the
+/// in-flight counter is incremented in exactly one place.
+fn serve(
+    stream: tokio::net::TcpStream,
+    app: App,
+    inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async move {
+        let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let mut app = app.clone();
+            async move { tower::Service::call(&mut app, req.map(axum::body::Body::new)).await }
+        });
+        let mut builder =
+            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+        builder.http1().title_case_headers(true);
+        let _ = builder
+            .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
+            .await;
+        inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    });
 }
