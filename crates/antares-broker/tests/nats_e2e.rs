@@ -254,3 +254,188 @@ fn roles_split_across_two_instances_notifies_and_records() {
             && seen.iter().any(|b| b.contains(&format!("urn:ooo:{run}:4")))
     });
 }
+
+/// K4: N≥2 api pods + N≥2 worker pods. A subscription created through api-1
+/// matches an entity created through api-2 (any pod, one broker), and after
+/// one worker dies with SIGKILL the shared durable rebalances — notifications
+/// keep flowing without it.
+#[test]
+fn api_pods_interchangeable_and_worker_group_survives_a_kill() {
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("k4x{run}");
+
+    let api1 = free_port();
+    let api2 = free_port();
+    let w1 = free_port();
+    let w2 = free_port();
+    let _a1 = start(api1, "api", &db, &nats);
+    let _a2 = start(api2, "api", &db, &nats);
+    let mut worker1 = start(w1, "matcher,notifier,temporal", &db, &nats);
+    let _worker2 = start(w2, "matcher,notifier,temporal", &db, &nats);
+    for p in [api1, api2, w1, w2] {
+        wait_healthy(p);
+    }
+
+    let (rx_port, seen) = receiver();
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:k4:{run}","type":"Subscription",
+            "entities":[{{"type":"K4Probe"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "sub via api-1: {resp}");
+
+    // entity through THE OTHER api pod — pods must be interchangeable
+    let e1 = format!("urn:ngsi-ld:K4Probe:{run}:1");
+    let resp = http(
+        api2,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&format!(
+            r#"{{"id":"{e1}","type":"K4Probe","temperature":{{"type":"Property","value":1}}}}"#
+        )),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "entity via api-2: {resp}");
+    wait_for("notification for the cross-api entity", 30, || {
+        seen.lock().expect("seen").iter().any(|b| b.contains(&e1))
+    });
+
+    // kill one worker ungracefully; the durable's share must rebalance
+    worker1.0.kill().expect("SIGKILL worker-1");
+    let _ = worker1.0.wait();
+    let e2 = format!("urn:ngsi-ld:K4Probe:{run}:2");
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&format!(
+            r#"{{"id":"{e2}","type":"K4Probe","temperature":{{"type":"Property","value":2}}}}"#
+        )),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 201"),
+        "entity after kill: {resp}"
+    );
+    wait_for("notification with one worker dead", 60, || {
+        seen.lock().expect("seen").iter().any(|b| b.contains(&e2))
+    });
+}
+
+/// K9 (postgres arm): a change committed but not yet published survives a
+/// SIGKILL — the outbox republishes it on restart. The kill loop retries
+/// until it catches the drain with rows still pending (outbox_peek > 0 at
+/// the moment of death), so the assertion is about the crash window itself,
+/// never about winning a race.
+#[test]
+fn sigkill_between_commit_and_publish_republishes_from_outbox() {
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("k9pg{run}");
+
+    // a store handle of our own, to observe the outbox table
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    let pool = rt
+        .block_on(antares_sql::pg::connect(&db, 5))
+        .expect("connect");
+    let store =
+        antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(pool));
+
+    let worker_port = free_port();
+    let _worker = start(worker_port, "matcher,notifier,temporal", &db, &nats);
+    wait_healthy(worker_port);
+    let (rx_port, seen) = receiver();
+
+    let mut caught: Vec<String> = Vec::new();
+    for attempt in 0..10 {
+        let api_port = free_port();
+        let mut api = start(api_port, "api", &db, &nats);
+        wait_healthy(api_port);
+        if attempt == 0 {
+            let sub = format!(
+                r#"{{"id":"urn:ngsi-ld:Subscription:k9:{run}","type":"Subscription",
+                    "entities":[{{"type":"K9Probe"}}],
+                    "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+            );
+            let resp = http(
+                api_port,
+                "POST",
+                "/ngsi-ld/v1/subscriptions",
+                Some(&tenant),
+                Some(&sub),
+            );
+            assert!(resp.starts_with("HTTP/1.1 201"), "sub: {resp}");
+        }
+        // burst of acked writes, then die instantly — try to beat the drain
+        let ids: Vec<String> = (0..20)
+            .map(|i| format!("urn:ngsi-ld:K9Probe:{run}:{attempt}:{i}"))
+            .collect();
+        for id in &ids {
+            let resp = http(
+                api_port,
+                "POST",
+                "/ngsi-ld/v1/entities",
+                Some(&tenant),
+                Some(&format!(
+                    r#"{{"id":"{id}","type":"K9Probe","temperature":{{"type":"Property","value":9}}}}"#
+                )),
+            );
+            assert!(resp.starts_with("HTTP/1.1 201"), "create {id}: {resp}");
+        }
+        api.0.kill().expect("SIGKILL api");
+        let _ = api.0.wait();
+        let pending = store.outbox_peek(1000).expect("peek").len();
+        if pending > 0 {
+            eprintln!("attempt {attempt}: caught {pending} unpublished rows at death");
+            caught = ids;
+            break;
+        }
+        eprintln!("attempt {attempt}: drain won the race — retrying");
+    }
+    assert!(
+        !caught.is_empty(),
+        "never caught the drain with pending rows in 10 attempts — widen the burst"
+    );
+
+    // a fresh api pod restarts the drain: every acked write must notify
+    let api_port = free_port();
+    let _api = start(api_port, "api", &db, &nats);
+    wait_healthy(api_port);
+    wait_for("all caught writes republished from the outbox", 60, || {
+        let seen = seen.lock().expect("seen");
+        caught.iter().all(|id| seen.iter().any(|b| b.contains(id)))
+    });
+    // and the outbox drains to empty — nothing wedged
+    wait_for("outbox drained", 30, || {
+        store.outbox_peek(1).expect("peek").is_empty()
+    });
+}

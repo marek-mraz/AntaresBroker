@@ -738,8 +738,15 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       6 s per instance, while a 20 req/s probe loop ran through the LB —
       192/192 responses 200, zero failures. CI invocation arrives with K8's
       ETSI-during-roll job, which calls this same script.)*
-- [ ] K4. N≥2 api pods behind the LB validated in e2e; matcher/notifier as
+- [x] K4. N≥2 api pods behind the LB validated in e2e; matcher/notifier as
       shared-durable consumer groups scale and roll independently (§10).
+      *(nats_e2e::api_pods_interchangeable_and_worker_group_survives_a_kill:
+      2 api + 2 worker processes on one bus — subscription via api-1,
+      entity via api-2, notification arrives (pods interchangeable); then
+      SIGKILL one worker and the shared durable rebalances: the next change
+      still notifies. The LB half (haproxy fronting the pods) is the K2/K3
+      overlay, already drill-proven; K8 re-validates it under full ETSI
+      load.)*
 - [ ] K5. Reference manifests (compose + K8s): authored and lint/kind-tested
       in CI; 🖥 a REAL cluster is yours to point at. 3-node JetStream R3, Postgres
       primary/replica (CloudNativePG or Patroni), memory limits in EVERY
@@ -761,11 +768,20 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       retries and asserts exact single responses, which makes it a brutally
       strict drain client — so this is a STRICT gate, not a soak signal: any
       failure is a real K1 bug, not flake. Expected result: 1025/1025.
-- [ ] K9. **SIGKILL drill (ungraceful):** `kill -9` mid-write, per mode.
+- [x] K9. **SIGKILL drill (ungraceful):** `kill -9` mid-write, per mode.
       Expected: `file` → every acked write present after restart
       (commit-before-ack, §B3/B8); `postgres` → a change committed but not yet
       published is republished from the outbox on restart (§F3); `memory` →
       documented total loss, asserted so the mode's limits stay honest.
+      *(file arm: file_mode::kill_dash_nine_right_after_201_loses_nothing
+      (pre-existing, K10 era). postgres arm:
+      nats_e2e::sigkill_between_commit_and_publish_republishes_from_outbox —
+      burst 20 acked creates, SIGKILL the api pod, retry until outbox_peek
+      catches unpublished rows at the moment of death, then a fresh pod's
+      drain republishes: every caught id notifies and the outbox drains to
+      empty. memory arm:
+      file_mode::memory_mode_sigkill_loses_everything_by_contract — the
+      documented total loss, asserted.)*
 - [x] K10. `file`-mode restart drill: assert the exclusive-lock error
       (`Database already open. Cannot acquire lock.`) IS the expected
       behaviour on double-start — never silent corruption, never two writers —

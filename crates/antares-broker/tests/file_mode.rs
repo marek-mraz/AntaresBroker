@@ -95,6 +95,41 @@ fn tempdir(name: &str) -> PathBuf {
     dir
 }
 
+/// K9, memory arm: SIGKILL loses EVERYTHING and that is the documented
+/// contract of the rung — asserted so the mode's limits stay honest instead
+/// of drifting into an assumed durability nobody built.
+#[test]
+fn memory_mode_sigkill_loses_everything_by_contract() {
+    let dir = tempdir("k9mem"); // unused by the store; start() wants a path
+    let port = free_port();
+    let entity = r#"{"id":"urn:ngsi-ld:Test:k9mem","type":"Test"}"#;
+    let mut broker = start(port, &dir, "memory");
+    wait_healthy(port);
+    let resp = http(
+        port,
+        &format!(
+            "POST /ngsi-ld/v1/entities HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{entity}",
+            entity.len()
+        ),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "create: {resp}");
+    broker.kill().expect("SIGKILL");
+    broker.wait().expect("reap");
+
+    let _broker = start(port, &dir, "memory");
+    wait_healthy(port);
+    let resp = http(
+        port,
+        "GET /ngsi-ld/v1/entities/urn:ngsi-ld:Test:k9mem HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 404"),
+        "memory mode must lose unpersisted state on kill — anything else means \
+         the mode table is lying: {resp}"
+    );
+}
+
 #[test]
 fn kill_dash_nine_right_after_201_loses_nothing() {
     let dir = tempdir("kill9");
