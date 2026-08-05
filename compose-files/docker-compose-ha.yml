@@ -49,7 +49,11 @@ services:
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       # Shares antares1's database — that is the whole point.
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
-    volumes: ["antares1b-data:/data"]
+      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
+      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
+    volumes:
+      - "antares1b-data:/data"
+      - "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"
 
   lb:
     image: haproxy:3.0-alpine

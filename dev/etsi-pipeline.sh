@@ -85,6 +85,14 @@ if [ "${MQTT:-1}" = 1 ]; then
 fi
 export MQTT="${MQTT:-1}"
 
+# TLS trust for the SUITE's own fetches: forge.etsi.org serves an incomplete
+# chain (leaf only — error.md 2026-08-05), which python/requests and curl
+# reject. Hand them the system bundle + the missing intermediate. The brokers
+# get the same anchor via ANTARES_EXTRA_CA_FILE in the compose.
+CA_BUNDLE="$RESULTS/ca-bundle.crt"
+cat /etc/ssl/certs/ca-certificates.crt dev/ca-extra.pem > "$CA_BUNDLE"
+export REQUESTS_CA_BUNDLE="$PWD/$CA_BUNDLE" CURL_CA_BUNDLE="$PWD/$CA_BUNDLE" SSL_CERT_FILE="$PWD/$CA_BUNDLE"
+
 # E9a: which suites this invocation runs (default: all serial + IOP).
 SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
 RUN_IOP=1

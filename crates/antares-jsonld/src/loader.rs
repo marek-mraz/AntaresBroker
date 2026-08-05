@@ -158,10 +158,31 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// broker — @context fetches, notifications, federation forwards — is built
 /// from this, so the policy cannot be forgotten at a call site. Timeouts stay
 /// the caller's choice; the security-relevant settings do not.
+///
+/// `ANTARES_EXTRA_CA_FILE`: optional PEM bundle of ADDITIONAL trust anchors
+/// (private CAs, corporate proxies — and servers that ship an incomplete
+/// chain, see error.md on forge.etsi.org). Verification itself is never
+/// disableable (§16.5); this only widens what it trusts, per deployment.
+/// Read once per builder call — the wiring constructs clients at startup.
 pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    let mut b = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-        .dns_resolver(std::sync::Arc::new(PolicyResolver(policy)))
+        .dns_resolver(std::sync::Arc::new(PolicyResolver(policy)));
+    if let Ok(path) = std::env::var("ANTARES_EXTRA_CA_FILE") {
+        match std::fs::read(&path) {
+            Ok(pem) => match reqwest::Certificate::from_pem_bundle(&pem) {
+                Ok(certs) => {
+                    for c in certs {
+                        b = b.add_root_certificate(c);
+                    }
+                }
+                // once at startup; this crate carries no tracing dep
+                Err(e) => eprintln!("ANTARES_EXTRA_CA_FILE {path}: not a PEM bundle ({e})"),
+            },
+            Err(e) => eprintln!("ANTARES_EXTRA_CA_FILE {path}: unreadable ({e})"),
+        }
+    }
+    b
 }
 
 /// 6.3.16: cache lifetime of a downloaded @context comes from its response

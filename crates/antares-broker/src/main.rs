@@ -27,6 +27,9 @@ const KNOWN_KEYS: &[&str] = &[
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",
     "ANTARES_DRAIN_DEADLINE_SECS",
+    // §16.4: optional PEM bundle of extra TLS trust anchors (private CAs,
+    // incomplete-chain servers — see error.md). Never disables verification.
+    "ANTARES_EXTRA_CA_FILE",
 ];
 
 /// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2
