@@ -85,8 +85,9 @@ async fn deleted_subscription_stops_notifying() {
     // egress: the receiver is loopback, which is denied by default (§16.4) —
     // allow it for this process the way the ETSI stacks do
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
-    let st = AppState::new("test".into());
-    antares_api::notify::wire(&st);
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+    let st = st;
 
     let post = |path: &'static str, body: String| {
         let st = st.clone();

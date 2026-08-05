@@ -61,10 +61,17 @@ pub struct AppState {
     /// delta-fed from `ANTARES_REGISTRY`; expiry stays filtered at the single
     /// yield point (`federation::matching_regs`). `None` in local mode.
     pub reg_mirror: Option<Arc<crate::notify::DocMirror>>,
-    /// F8: record temporal history synchronously in the write path. True in
-    /// local mode; bus=nats api pods turn it off — the temporal role's
-    /// durable recorder owns auto-recording there.
+    /// Temporal auto-recording happens synchronously in the write path in
+    /// EVERY bus mode (K8 lesson — read-your-writes; the F8 recorder
+    /// consumer is gone). The flag stays as the tests' lever for exercising
+    /// the no-local-recording shape.
     pub record_locally: bool,
+    /// True only under bus=nats (set by the broker's wiring): multiple
+    /// processes share the store, so interval-subscription firings must be
+    /// claimed single-winner (§3.1.6). bus=local keeps the direct path — a
+    /// claim there would disturb the 046_12 bookkeeping ordering for
+    /// nothing.
+    pub nats: bool,
 }
 
 impl AppState {
@@ -116,6 +123,7 @@ impl AppState {
             reg_sync: None,
             reg_mirror: None,
             record_locally: true,
+            nats: false,
         }
     }
 

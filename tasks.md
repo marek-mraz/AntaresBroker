@@ -860,8 +860,21 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       Federation rig: 1 tenant × 1,000 CSRs (20 % expired, mixed modes)
       vs mock sources with injected latency/failures; p95 bounded by the
       aggregate deadline, 207 correctness, mirror memory in budget (§16.7).
-- [ ] L3. 10k active subscriptions matching load: index-shaped candidate
-      lookup verified O(log n), never scan-all (§1.1).
+- [x] L3. 10k active subscriptions matching load: index-shaped candidate
+      lookup verified O(log n), never scan-all (§1.1). *(2026-08-05:
+      SubMirror grew the inverted index — (tenant, type) and (tenant,
+      watched-attr) buckets plus a `broad` bucket for 4.17 selection
+      expressions the index cannot prove (over-select allowed, under-select
+      never; the superset property is unit-tested against a naive
+      reference). BOTH bus modes now wire the mirror: local mode hydrates
+      it in notify::wire and feeds it synchronously via sub_sync, so the
+      matcher never rescans the store; the interval-claim gate moved from
+      mirror-presence to the new AppState.nats flag so local-mode 046_12
+      bookkeeping ordering is untouched. Measured (release, ignored gate in
+      tests/sub_index.rs): 100k candidate lookups at 10k subs = 0.6 s
+      (~6 µs each), and 10× the subscriptions costs 1.5× the lookup — the
+      3× scan-smell ceiling holds. Suite regression: Subscription 122/122
+      re-run post-change.)*
 - [ ] L4. RLS pen-test with cross-tenant probes as phase-4 exit criterion
       (§13, §16.1).
 

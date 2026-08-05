@@ -234,7 +234,7 @@ async fn run(
             .map_err(|_| "ANTARES_BUS=nats requires ANTARES_NATS_URL")?;
         wiring::wire_nats(&mut state, &url, roles).await?;
     } else {
-        antares_api::notify::wire(&state); // in-process matcher + notifier + interval firing
+        antares_api::notify::wire(&mut state); // in-process matcher + notifier + interval firing
     }
 
     // J2: Cached-@context write-through + boot preload — fetched contexts

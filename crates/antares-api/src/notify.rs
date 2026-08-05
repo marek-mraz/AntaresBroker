@@ -3,8 +3,15 @@
 //! Change detection: the store's change hook feeds every entity write here as
 //! a (before, after) pair; attribute-level changes are derived by diffing —
 //! one hook point instead of one call per write handler.
-//! ponytail: linear scan over a tenant's subscriptions; the (tenant, type)
-//! index of §1.1 lands with the 10k-subscription target, not the suite.
+//!
+//! L3 (§1.1): candidate lookup is index-shaped. `SubMirror` keeps inverted
+//! (tenant, type) and (tenant, watched-attr) maps next to the docs, so one
+//! change evaluates only the subscriptions that could possibly fire — never
+//! a scan over all of a tenant's subscriptions. Subscriptions the index
+//! cannot classify exactly (4.17 type-selection expressions) fall into a
+//! `broad` bucket that is always evaluated: the index may over-select,
+//! never under-select. Full evaluation (selector/q/geo/scope/triggers)
+//! stays the truth for every candidate.
 
 use crate::negotiate::{inject_context, link_header_value};
 use crate::state::{now_iso, AppState};
@@ -36,9 +43,189 @@ pub struct DocMirror {
     >,
 }
 
-/// The subscription mirror's role name (F4) — kept as a distinct alias so
-/// call sites say what they hold.
-pub type SubMirror = DocMirror;
+/// Both mirror flavours accept `{tenant, id, doc|null}` deltas — the seam
+/// wiring's hydrate/watch loops program against.
+pub trait Mirror: Send + Sync {
+    fn apply(&self, tenant: &str, id: &str, doc: Option<Value>);
+}
+
+impl Mirror for DocMirror {
+    fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
+        DocMirror::apply(self, tenant, id, doc);
+    }
+}
+
+/// L3: the subscription mirror — docs plus the inverted candidate index.
+///
+/// Bucketing per subscription (conservative, union-of-buckets = candidates):
+/// - has an `entities` selector whose every entry names a plain expanded
+///   type IRI → `by_type[iri]` (idPattern/watchedAttributes narrow FURTHER,
+///   so type is the widest exact key);
+/// - no selector but `watchedAttributes` → `by_attr[iri]` (such a sub can
+///   only fire when a watched attribute changed — 5.8.6);
+/// - anything else (4.17 selection expressions, shapes the index cannot
+///   prove) → `broad`, evaluated on every change.
+#[derive(Default)]
+pub struct SubMirror {
+    map: std::sync::RwLock<std::collections::HashMap<String, TenantIndex>>,
+}
+
+#[derive(Default)]
+struct TenantIndex {
+    docs: std::collections::HashMap<String, Value>,
+    by_type: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    by_attr: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    broad: std::collections::HashSet<String>,
+}
+
+/// Which index bucket(s) one stored subscription doc belongs in.
+enum Keys {
+    Types(Vec<String>),
+    Attrs(Vec<String>),
+    Broad,
+}
+
+fn index_keys(doc: &Value) -> Keys {
+    if let Some(entities) = doc.get("entities").and_then(Value::as_array) {
+        let mut types = Vec::new();
+        for e in entities {
+            match e.get("type").and_then(Value::as_str) {
+                // 4.17 selection expressions (and any wildcard) are evaluated
+                // at match time — the index cannot prove them, so the whole
+                // sub goes broad (entries are OR-ed: one opaque entry taints
+                // the union).
+                Some(t) if !t.contains(['|', ',', ';', '(', ')', '*']) => {
+                    types.push(t.to_owned());
+                }
+                _ => return Keys::Broad,
+            }
+        }
+        if types.is_empty() {
+            return Keys::Broad;
+        }
+        return Keys::Types(types);
+    }
+    if let Some(watched) = doc.get("watchedAttributes").and_then(Value::as_array) {
+        let attrs: Vec<String> = watched
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if attrs.len() == watched.len() && !attrs.is_empty() {
+            return Keys::Attrs(attrs);
+        }
+    }
+    Keys::Broad
+}
+
+impl SubMirror {
+    /// Apply one KV delta: `None` doc = deleted. Rekeys the index from the
+    /// old doc before inserting the new one.
+    pub fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
+        let mut map = self.map.write().expect("sub mirror lock");
+        let t = map.entry(tenant.to_owned()).or_default();
+        if let Some(old) = t.docs.remove(id) {
+            match index_keys(&old) {
+                Keys::Types(ts) => {
+                    for ty in ts {
+                        if let Some(s) = t.by_type.get_mut(&ty) {
+                            s.remove(id);
+                            if s.is_empty() {
+                                t.by_type.remove(&ty);
+                            }
+                        }
+                    }
+                }
+                Keys::Attrs(ats) => {
+                    for a in ats {
+                        if let Some(s) = t.by_attr.get_mut(&a) {
+                            s.remove(id);
+                            if s.is_empty() {
+                                t.by_attr.remove(&a);
+                            }
+                        }
+                    }
+                }
+                Keys::Broad => {
+                    t.broad.remove(id);
+                }
+            }
+        }
+        match doc {
+            Some(d) => {
+                match index_keys(&d) {
+                    Keys::Types(ts) => {
+                        for ty in ts {
+                            t.by_type.entry(ty).or_default().insert(id.to_owned());
+                        }
+                    }
+                    Keys::Attrs(ats) => {
+                        for a in ats {
+                            t.by_attr.entry(a).or_default().insert(id.to_owned());
+                        }
+                    }
+                    Keys::Broad => {
+                        t.broad.insert(id.to_owned());
+                    }
+                }
+                t.docs.insert(id.to_owned(), d);
+            }
+            None => {}
+        }
+        if map.get(tenant).is_some_and(|t| t.docs.is_empty()) {
+            map.remove(tenant);
+        }
+    }
+
+    /// The L3 hot path: subscriptions that could possibly fire for a change
+    /// touching these entity types and these changed attributes. Union of
+    /// the type hits, the attr hits and the broad bucket — a superset of
+    /// the firing set, never a subset.
+    pub fn candidates(&self, tenant: &str, types: &[&str], changed_attrs: &[&str]) -> Vec<Value> {
+        let map = self.map.read().expect("sub mirror lock");
+        let Some(t) = map.get(tenant) else {
+            return Vec::new();
+        };
+        let mut ids: std::collections::HashSet<&str> = t.broad.iter().map(String::as_str).collect();
+        for ty in types {
+            if let Some(s) = t.by_type.get(*ty) {
+                ids.extend(s.iter().map(String::as_str));
+            }
+        }
+        for a in changed_attrs {
+            if let Some(s) = t.by_attr.get(*a) {
+                ids.extend(s.iter().map(String::as_str));
+            }
+        }
+        ids.iter()
+            .filter_map(|id| t.docs.get(*id).cloned())
+            .collect()
+    }
+
+    pub fn docs(&self, tenant: &str) -> Vec<Value> {
+        self.map
+            .read()
+            .expect("sub mirror lock")
+            .get(tenant)
+            .map(|t| t.docs.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn tenants(&self) -> Vec<String> {
+        self.map
+            .read()
+            .expect("sub mirror lock")
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
+impl Mirror for SubMirror {
+    fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
+        SubMirror::apply(self, tenant, id, doc);
+    }
+}
 
 impl DocMirror {
     /// Apply one KV delta: `None` doc = deleted.
@@ -80,11 +267,12 @@ impl DocMirror {
     }
 }
 
-/// Where the matcher reads subscriptions from: the KV mirror when wired
-/// (bus=nats), else the store (bus=local — the store IS this process).
-fn subs_for(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+/// Where the matcher reads candidates from: the indexed mirror (both bus
+/// modes wire one — L3), with the store scan only as the never-wired
+/// fallback so a missing mirror degrades to correct-but-slow.
+fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) -> Vec<Value> {
     match &st.sub_mirror {
-        Some(m) => m.docs(tenant.as_str()),
+        Some(m) => m.candidates(tenant.as_str(), types, changed),
         None => st
             .store
             .list(tenant, Kind::Subscription)
@@ -93,7 +281,30 @@ fn subs_for(st: &AppState, tenant: &TenantId) -> Vec<Value> {
 }
 
 /// Wire the store hook and background tasks. Call once at startup.
-pub fn wire(state: &AppState) {
+pub fn wire(state: &mut AppState) {
+    // L3 (bus=local): the same indexed mirror the nats wiring builds, fed
+    // synchronously by the CUD hook — the matcher never rescans the store.
+    let mirror = Arc::new(SubMirror::default());
+    for tenant_str in state.store.subscription_tenants().unwrap_or_default() {
+        if let Ok(tenant) = TenantId::new(&tenant_str) {
+            for doc in state
+                .store
+                .list(&tenant, Kind::Subscription)
+                .unwrap_or_default()
+            {
+                if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                    let id = id.to_owned();
+                    mirror.apply(&tenant_str, &id, Some(doc));
+                }
+            }
+        }
+    }
+    state.sub_mirror = Some(mirror.clone());
+    let m = mirror.clone();
+    state.sub_sync = Some(Arc::new(move |tenant: &TenantId, id: &str, doc| {
+        m.apply(tenant.as_str(), id, doc.cloned());
+    }));
+
     let (tx, mut rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Option<Value>, Option<Value>)>();
     state
@@ -624,10 +835,6 @@ pub async fn process_change(
     let Ok(tenant) = TenantId::new(tenant_str) else {
         return;
     };
-    let subs = subs_for(st, &tenant);
-    if subs.is_empty() {
-        return;
-    }
     let changes = diff(before.as_ref(), after.as_ref());
     let entity_trigger = match (&before, &after) {
         (None, Some(_)) => "entityCreated",
@@ -636,6 +843,18 @@ pub async fn process_change(
     };
     let eval_doc = after.as_ref().or(before.as_ref());
     let Some(eval_doc) = eval_doc else { return };
+    // L3: candidate lookup by the entity's types and the changed attribute
+    // IRIs — the linear scan §1.1 forbids at 10k subs is gone.
+    let types: Vec<&str> = eval_doc
+        .get("type")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let changed_keys: Vec<&str> = changes.iter().map(|(k, _)| k.as_str()).collect();
+    let subs = subs_for(st, &tenant, &types, &changed_keys);
+    if subs.is_empty() {
+        return;
+    }
     for sub in subs {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
@@ -786,9 +1005,7 @@ pub async fn interval_tick(st: &AppState) {
             if !due {
                 continue;
             }
-            if st.sub_mirror.is_some()
-                && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval)
-            {
+            if st.nats && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
                 continue;
             }
             let ctx = sub_context(st, &sub).await;
@@ -834,9 +1051,7 @@ pub async fn interval_tick(st: &AppState) {
             if !due {
                 continue;
             }
-            if st.sub_mirror.is_some()
-                && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval)
-            {
+            if st.nats && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval) {
                 continue;
             }
             let ctx = sub_context(st, &sub).await;

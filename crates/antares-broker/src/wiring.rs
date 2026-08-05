@@ -99,6 +99,10 @@ pub async fn wire_nats(
     roles: Roles,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bus = Arc::new(NatsBus::connect(url).await?);
+    // Multi-process mode: interval firings need the single-winner claim
+    // (§3.1.6) — keyed off this flag, not off mirror presence (L3 wires a
+    // mirror in local mode too).
+    state.nats = true;
     // F3: entity writes now enqueue their events in the write transaction.
     state.store.set_outbox(true);
     // Auto-recording stays SYNCHRONOUS in the write path in every bus mode
@@ -161,7 +165,7 @@ pub async fn wire_nats(
         // delta can fall between them; last-writer-wins per key converges.
         let reg_mirror = Arc::new(antares_api::notify::DocMirror::default());
         let reg_consumer = bus.consume_registry_broadcast().await?;
-        hydrate(&reg_mirror, &state.store, Kind::Registration);
+        hydrate(reg_mirror.as_ref(), &state.store, Kind::Registration);
         state.reg_mirror = Some(reg_mirror.clone());
         tokio::spawn(async move {
             let mut msgs = match reg_consumer.messages().await {
@@ -172,7 +176,7 @@ pub async fn wire_nats(
                 }
             };
             while let Some(delta) = nats::next_delta(&mut msgs).await {
-                apply_delta(&reg_mirror, &delta);
+                apply_delta(reg_mirror.as_ref(), &delta);
             }
             tracing::warn!("registry broadcast consumer stream ended");
         });
@@ -245,14 +249,14 @@ pub async fn wire_nats(
         let sub_mirror = Arc::new(antares_api::notify::SubMirror::default());
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
-        hydrate(&sub_mirror, &state.store, Kind::Subscription);
+        hydrate(sub_mirror.as_ref(), &state.store, Kind::Subscription);
         state.sub_mirror = Some(sub_mirror.clone());
         tokio::spawn(async move {
             let mut watch = watch;
             while let Some(entry) = watch.next().await {
                 let Ok(entry) = entry else { continue };
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&entry.value) {
-                    apply_delta(&sub_mirror, &v);
+                    apply_delta(sub_mirror.as_ref(), &v);
                 }
             }
             tracing::warn!("subscription KV watch ended");
@@ -307,7 +311,7 @@ pub async fn wire_nats(
 
 /// Hydrate a mirror from the system of record (Postgres) at startup.
 fn hydrate(
-    mirror: &antares_api::notify::DocMirror,
+    mirror: &dyn antares_api::notify::Mirror,
     store: &antares_sql::store::any::AnyStore,
     kind: Kind,
 ) {
@@ -326,7 +330,7 @@ fn hydrate(
 }
 
 /// Apply one `{tenant, id, doc|null}` delta to a mirror.
-fn apply_delta(mirror: &antares_api::notify::DocMirror, delta: &serde_json::Value) {
+fn apply_delta(mirror: &dyn antares_api::notify::Mirror, delta: &serde_json::Value) {
     let (Some(tenant), Some(id)) = (
         delta.get("tenant").and_then(serde_json::Value::as_str),
         delta.get("id").and_then(serde_json::Value::as_str),
