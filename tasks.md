@@ -767,14 +767,25 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 
 ### K-ii. Prove it (the drills)
 
-- [ ] K6. Continuity harness, shared by every drill below: a writer loop
+- [x] K6. Continuity harness, shared by every drill below: a writer loop
       posting monotonically-numbered entities + a recording notification
       receiver. Assertions: zero connection errors, zero 5xx, zero lost
       writes (every acked id present at the end), and notifications
       at-least-once (duplicates fine, losses not).
-- [ ] K7. **SIGTERM drill (graceful):** roll all instances under K6 load.
+      *(dev/k6-continuity.py — stdlib-only writer + receiver + auditor in
+      one process; exits 1 on any violation, and on zero acked writes (an
+      idle run proves nothing). --expect-notifications arms the
+      at-least-once assertion when the drill created a subscription.)*
+- [x] K7. **SIGTERM drill (graceful):** roll all instances under K6 load.
       Expected: zero failed requests. This is the only real test of K1 —
       a drain bug shows up here and nowhere else.
+      *(dev/k7-sigterm-drill.sh: subscription → K6 at 20 wr/s through the
+      LB → dev/rolling-update.sh rolls antares1 then antares1b. Run live
+      2026-08-05, STORE=postgres HA_BUS=nats: 878 writes, 878 acked,
+      0 conn-errors, 0 5xx, 0 lost, 0 unnotified — a roll is invisible.
+      The continuity assertions need shared state, so the drill runs in
+      postgres/timescale modes; memory-mode HA is two independent stores
+      by contract (K2 note) and only health-rolls there (K3).)*
 - [ ] K8. **ETSI-during-roll job** (postgres mode): run the full suite through
       the K2 LB while K3 rolls the brokers underneath. The suite has no
       retries and asserts exact single responses, which makes it a brutally

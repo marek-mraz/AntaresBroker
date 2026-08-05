@@ -28,6 +28,13 @@ case "$STORE" in
   postgres|timescale) PROFILE=(--profile db) ;;
   file) echo "file mode cannot roll: redb allows ONE process per volume (K10). Use Recreate."; exit 1 ;;
 esac
+# F10: `up -d` re-resolves the overlay's ${HA_BUS} — pin it to the mode's
+# correct bus here, or a memory-mode roll would recreate brokers with
+# bus=nats and they would refuse to boot (per-process state).
+case "$STORE" in
+  postgres|timescale) export HA_BUS="${HA_BUS:-nats}" ;;
+  *) export HA_BUS="${HA_BUS:-local}" ;;
+esac
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml \
                         -f compose-files/docker-compose-ha.yml "${PROFILE[@]}")
 
