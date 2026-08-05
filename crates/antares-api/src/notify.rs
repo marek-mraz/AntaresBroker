@@ -1508,6 +1508,14 @@ async fn deliver_as(
             st.egress.record_failure(uri);
         }
     }
+    // K12: delivery counters by sink scheme (facade — no-op without the
+    // broker's recorder).
+    let scheme = if is_mqtt { "mqtt" } else { "http" };
+    if ok {
+        metrics::counter!("antares_notifications_sent_total", "scheme" => scheme).increment(1);
+    } else {
+        metrics::counter!("antares_notifications_failed_total", "scheme" => scheme).increment(1);
+    }
     if !ok {
         // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
         // roll back the optimistic lastSuccess stamp.

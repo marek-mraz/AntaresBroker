@@ -22,6 +22,9 @@ uuid = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# K12: the metrics FACADE only — a no-op unless the broker installs a
+# recorder, so tests and future wasm builds cost nothing (§9.2).
+metrics = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 

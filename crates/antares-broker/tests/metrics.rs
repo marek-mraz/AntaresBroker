@@ -1,0 +1,94 @@
+//! K12: the observability surface, proven against the real binary.
+//! /q/metrics serves the Prometheus text format with antares_-prefixed,
+//! unit-suffixed instruments (§9.1) and the counters actually move.
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+struct Broker(Child);
+
+impl Drop for Broker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("probe")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
+
+fn http(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
+    let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) else {
+        return String::new();
+    };
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n");
+    match body {
+        Some(b) => req.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}",
+            b.len()
+        )),
+        None => req.push_str("\r\n"),
+    }
+    let _ = s.write_all(req.as_bytes());
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out
+}
+
+#[test]
+fn q_metrics_serves_prometheus_text_and_counters_move() {
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .spawn()
+            .expect("spawn antares"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !http(port, "GET", "/q/health", None).starts_with("HTTP/1.1 200") {
+        assert!(Instant::now() < deadline, "broker never got healthy");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // traffic that must show up in the counters
+    let create = http(
+        port,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(r#"{"id":"urn:ngsi-ld:K12:1","type":"K12","p":{"type":"Property","value":1}}"#),
+    );
+    assert!(create.starts_with("HTTP/1.1 201"), "create: {create}");
+
+    let metrics = http(port, "GET", "/q/metrics", None);
+    assert!(
+        metrics.starts_with("HTTP/1.1 200"),
+        "metrics endpoint: {metrics}"
+    );
+    // §9.1: antares_ prefix + unit suffixes, and the request counter moved
+    // (at least the create above and this scrape's own health probes).
+    assert!(
+        metrics.contains("antares_http_requests_total"),
+        "request counter missing:\n{metrics}"
+    );
+    assert!(
+        metrics.contains("antares_http_request_duration_seconds"),
+        "duration histogram missing"
+    );
+    assert!(
+        metrics.contains("antares_uptime_seconds") || metrics.contains("antares_draining"),
+        "sampler gauges missing (uptime/draining)"
+    );
+    let post_count = metrics
+        .lines()
+        .find(|l| l.starts_with("antares_http_requests_total") && l.contains("POST"))
+        .and_then(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    assert!(post_count >= 1.0, "POST counter did not move:\n{metrics}");
+}

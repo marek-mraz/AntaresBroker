@@ -277,6 +277,17 @@ pub async fn wire_nats(
                     }
                 };
                 while let Some(Ok(msg)) = msgs.next().await {
+                    // K12: change lag = stream-publish → matcher-processing
+                    // age, from the JetStream metadata timestamp.
+                    if let Ok(info) = msg.info() {
+                        // OffsetDateTime → SystemTime (impl in `time`/std),
+                        // so no direct `time` dependency here.
+                        let published: std::time::SystemTime = info.published.into();
+                        if let Ok(age) = published.elapsed() {
+                            metrics::histogram!("antares_change_lag_seconds")
+                                .record(age.as_secs_f64());
+                        }
+                    }
                     if let Some(ev) = nats::decode(&msg) {
                         let (before, after) = resolve_payloads(&st, &ev);
                         antares_api::notify::process_change(&st, ev.tenant.as_str(), before, after)

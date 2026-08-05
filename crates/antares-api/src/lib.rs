@@ -214,6 +214,9 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/q/health", get(health))
+        // K12: Prometheus text format. 404 until the broker installs the
+        // renderer — the api crate never depends on an exporter (§9.2).
+        .route("/q/metrics", get(metrics_endpoint))
         // 6.3.6/6.3.21: Prefer: ngsi-ld=<version> → 4.3.6.8 amendment +
         // Preference-Applied (+203 when altered) on every API response.
         // OPTIONS (2.0 #59 pre-adoption, H3): axum's MethodRouter already
@@ -235,7 +238,48 @@ pub fn router(state: AppState) -> Router {
         // Router itself, above any nested layer — only a layer wrapping the
         // WHOLE router sees it.
         .layer(axum::middleware::from_fn(options_204))
+        // K12: outermost so the duration covers the full stack.
+        .layer(axum::middleware::from_fn(http_metrics_layer))
         .with_state(state)
+}
+
+/// K12: /q/metrics — Prometheus exposition, rendered by the closure the
+/// broker installed; 404 when no recorder exists (tests, embedded builds).
+async fn metrics_endpoint(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+    match &state.metrics_render {
+        Some(render) => Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            )
+            .body(axum::body::Body::from(render()))
+            .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// K12: request counter + duration histogram, labelled by method and status
+/// class only (bounded cardinality — §16.1.7).
+async fn http_metrics_layer(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().as_str().to_owned();
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let class = match resp.status().as_u16() {
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        _ => "5xx",
+    };
+    metrics::counter!("antares_http_requests_total", "method" => method.clone(), "status" => class)
+        .increment(1);
+    metrics::histogram!("antares_http_request_duration_seconds", "method" => method)
+        .record(start.elapsed().as_secs_f64());
+    resp
 }
 
 /// 2.0 #59 pre-adoption (H3): OPTIONS → 204 No Content + the Allow set the

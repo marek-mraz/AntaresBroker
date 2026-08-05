@@ -1,5 +1,6 @@
 # Antares ICS — Implementation Conformance Statement (CIM 029 shape, §14.6)
-# Baseline: ETSI GS CIM 009 V1.9.1 (2025-07). Audited: 2026-08-04 (H0/H1)
+# Baseline: ETSI GS CIM 009 V1.9.1 (2025-07). Audited: 2026-08-04 (H0/H1),
+# refreshed 2026-08-05 (F6/C7 landings; L3 index-shaped matching)
 # against the v0 code (in-memory + AnyStore cutover tree; ETSI 1025/1025 green,
 # MQTT TPs excluded).
 #
@@ -21,7 +22,7 @@ clause4_foundations:
     name: "API structure & implementation options (broker roles)"
     status: implemented
     evidence: "crates/antares-broker/src/main.rs (one binary, all roles)"
-    notes: "--roles accepted; consumers split lands with tasks.md F6"
+    notes: "roles split consumers per §9 (tasks.md F6); bus=local asserts single-process-all-roles"
   - clause: "4.3.6"
     name: "Distributed-operation semantics (additive/proxied/cascade/extra-info)"
     status: partial
@@ -524,7 +525,7 @@ clause5_9_12_csource:
     name: "Matching Context Source Registrations"
     status: implemented
     evidence: "crates/antares-api/src/federation.rs::matching_regs"
-    notes: "in-memory matching over registration docs; the §8.3 csource_index SQL shape lands with tasks.md C7"
+    notes: "csource_index rows maintained in the registration write tx (tasks.md C7); the mirror serves the hot path, expiry filtered at the single yield point (§4.1)"
 
 clause5_13_16_contexts_maps:
   - clause: "5.13.2–5.13.5"

@@ -413,7 +413,7 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
         sharding (pabot / per-file splits) only pays if each shard gets its
         own stack, at which point startup time dominates — revisit only if
         the slowest cell exceeds ~15 min.
-      *(All six done in .github/workflows/etsi.yml: `SUITES=` filter in
+      *(All six done in .github/workflows/ci.yml: `SUITES=` filter in
       dev/etsi-pipeline.sh (E9a); ONE `build` job exports the image as an
       artifact every cell loads — an artifact rather than a GHCR
       `:run-<id>` tag, same "never 32 builds" property without publishing
@@ -846,10 +846,26 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
 
 ### K-iii. Operate it
 
-- [ ] K12. Observability: tracing + OTLP + Prometheus metrics with the
+- [x] K12. Observability: tracing + OTLP + Prometheus metrics with the
       `antares_` prefix and unit suffixes (§9.1), change-lag and notification
       metrics, drain/roll state exported so a roll is visible on a dashboard,
-      tokio-console in dev.
+      tokio-console in dev. *(broker/src/telemetry.rs is the ONLY place an
+      exporter exists (§9.2) — core crates speak the `metrics` facade, which
+      is a no-op without a recorder, so tests and a future wasm build cost
+      nothing. `/q/metrics` renders Prometheus text through a closure the
+      broker installs; absent recorder = 404. Instruments:
+      antares_http_requests_total{method,status-class} +
+      _duration_seconds (labels deliberately coarse — cardinality is a DoS
+      surface, §16.1.7), antares_notifications_sent/failed_total{scheme},
+      antares_change_lag_seconds from the JetStream publish timestamp,
+      antares_draining (set at the drain flip itself, not sampler-paced, so
+      a short roll is never missed), uptime, jemalloc allocated/resident,
+      commit-queue depth, and the I2 rejection counters. OTLP/HTTP spans
+      when ANTARES_OTLP_ENDPOINT is set, nothing otherwise; tokio-console
+      behind cargo feature `console`. Proof: broker/tests/metrics.rs runs
+      the real binary and asserts the endpoint serves and the POST counter
+      moved. The /q/health stopgap fields stay — they are what the drills
+      and compose healthchecks already read.)*
 
 ## L. Scale validation — phase 4 exit (§13)
 
@@ -875,8 +891,19 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       (~6 µs each), and 10× the subscriptions costs 1.5× the lookup — the
       3× scan-smell ceiling holds. Suite regression: Subscription 122/122
       re-run post-change.)*
-- [ ] L4. RLS pen-test with cross-tenant probes as phase-4 exit criterion
-      (§13, §16.1).
+- [x] L4. RLS pen-test with cross-tenant probes as phase-4 exit criterion
+      (§13, §16.1). *(antares-sql/tests/pg_rls_pentest.rs, live PostGIS,
+      non-superuser role: attacks EVERY RLS table — read, CTE/subquery
+      escape, UPDATE and DELETE naming the row exactly, forged
+      cross-tenant INSERT, and moving one's OWN row into another tenant —
+      plus §3.1.5 scope-does-not-outlive-its-transaction (8 pooled probes)
+      and "the app role cannot turn the policy off" (DISABLE/NO FORCE/DROP
+      POLICY/CREATE permissive/BYPASSRLS all refused). attr_instances is
+      probed only when the database reports RLS on it — timescale drops
+      that belt by design (ADR-0006), so the test asks rather than
+      assumes. Mutation-verified 2026-08-05: dropping the entities policy
+      turns the suite red, restoring it green — and a BYPASSRLS/superuser
+      role fails the premise assert instead of passing vacuously.)*
 
 ## M. Ecosystem & publishing (§9.1, §6.6)
 

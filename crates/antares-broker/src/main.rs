@@ -4,6 +4,7 @@
 //! figment in phase 1). Unknown ANTARES_* keys are fatal (§14.3).
 
 mod shutdown;
+mod telemetry;
 mod wiring;
 
 use antares_api::AppState;
@@ -39,6 +40,9 @@ const KNOWN_KEYS: &[&str] = &[
     // §10 K5: stream/KV replication factor on a clustered JetStream (3 for
     // the reference manifests' R3; default 1 for single-node).
     "ANTARES_NATS_REPLICAS",
+    // K12: OTLP/HTTP span export endpoint (e.g. http://collector:4318/v1/traces);
+    // unset = no OTLP anywhere.
+    "ANTARES_OTLP_ENDPOINT",
     // F3/K9: outbox drain on this pod, on (default) | off. `off` is the
     // crash-drill lever (rows commit but this pod never publishes them —
     // another pod's drain must) and the knob for a dedicated-drainer split.
@@ -52,11 +56,9 @@ const KNOWN_KEYS: &[&str] = &[
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // K12: tracing (fmt + env-gated OTLP [+ console feature]) and the
+    // Prometheus recorder. The handle renders /q/metrics.
+    let prometheus = telemetry::init()?;
 
     // Unknown-config-is-fatal (§14.3): catch typos before they become Scorpio's
     // $[quarkus.uuid} class of silent misconfiguration. ANTARES_TEST_* is the
@@ -91,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(async {
             let (store, store_mode) = build_store(&mode).await?;
-            run(port, host_alias, roles, store, store_mode).await
+            run(port, host_alias, roles, store, store_mode, prometheus).await
         })
 }
 
@@ -185,6 +187,7 @@ async fn run(
     roles: String,
     store: antares_sql::store::any::AnyStore,
     store_mode: String,
+    prometheus: metrics_exporter_prometheus::PrometheusHandle,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
     let roles = wiring::Roles::parse(&roles)?;
@@ -218,6 +221,9 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
+    // K12: /q/metrics renders through this closure; the sampler feeds the
+    // process-level gauges the whole run.
+    state.metrics_render = Some(std::sync::Arc::new(move || prometheus.render()));
     // J7: heap stats on /q/health (allocated/resident bytes via jemalloc-ctl)
     state.mem_stats = Some(std::sync::Arc::new(|| {
         use tikv_jemalloc_ctl::{epoch, stats};
@@ -236,6 +242,7 @@ async fn run(
     } else {
         antares_api::notify::wire(&mut state); // in-process matcher + notifier + interval firing
     }
+    telemetry::spawn_sampler(state.clone());
 
     // J2: Cached-@context write-through + boot preload — fetched contexts
     // are persisted as kind='Cached' rows and reloaded on start, so the

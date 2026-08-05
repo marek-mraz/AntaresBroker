@@ -94,6 +94,9 @@ pub async fn drain(inflight: &Arc<AtomicUsize>, store: &antares_sql::store::any:
 /// Step 1, so the flip and the log line stay in one place.
 pub fn begin(draining: &Arc<AtomicBool>) {
     draining.store(true, Ordering::Relaxed);
+    // K12: immediate, not sampler-paced — a roll must be visible on a
+    // dashboard for its whole (short) duration.
+    metrics::gauge!("antares_draining").set(1.0);
     tracing::info!(
         "draining: /q/health now 503 for {:?} before the listener closes",
         drain_delay()

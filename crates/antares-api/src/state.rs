@@ -66,6 +66,10 @@ pub struct AppState {
     /// consumer is gone). The flag stays as the tests' lever for exercising
     /// the no-local-recording shape.
     pub record_locally: bool,
+    /// K12: renders the Prometheus text format for /q/metrics. Installed by
+    /// the broker (the only crate that knows an exporter exists, §9.2);
+    /// `None` = 404, the facade calls elsewhere stay no-ops.
+    pub metrics_render: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     /// True only under bus=nats (set by the broker's wiring): multiple
     /// processes share the store, so interval-subscription firings must be
     /// claimed single-winner (§3.1.6). bus=local keeps the direct path — a
@@ -123,6 +127,7 @@ impl AppState {
             reg_sync: None,
             reg_mirror: None,
             record_locally: true,
+            metrics_render: None,
             nats: false,
         }
     }

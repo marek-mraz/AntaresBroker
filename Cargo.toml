@@ -63,7 +63,19 @@ async-nats = "0.50"
 futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+# K12 observability: antares_ Prometheus metrics (§9.1), env-gated OTLP traces
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+    "trace",
+    "http-proto",
+    "reqwest-blocking-client",
+] }
+tracing-opentelemetry = "0.33"
+console-subscriber = "0.5"
 
 # dev
 http-body-util = "0.1"

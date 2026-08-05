@@ -328,6 +328,72 @@ jobs:
           cat "results/serial-${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
 
+  etsi-roll:
+    # K8: the ETSI-during-roll gate. The FULL suite runs through the K2
+    # haproxy while dev/rolling-update.sh rolls the two broker1 replicas
+    # underneath it in a loop, postgres mode (shared state + bus=nats — the
+    # only rung where a roll is defined, see the K-table). The suite has no
+    # retries and asserts exact single responses, which makes it a brutally
+    # strict drain client: ANY red TP here is a real K1 drain bug, never
+    # flake. Runs with the serial tier (nightly / tags / dispatch) — it is
+    # a full-suite wall-clock cost, not a per-commit one.
+    name: K8 roll-under-suite (postgres)
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+    needs: [workspace, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Full suite through the LB while the brokers roll
+        env:
+          STORE: postgres
+          HA: "1"
+          ROLL_DURING_RUN: "1"
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/roll-postgres
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload roll results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-roll-postgres
+          path: |
+            results/roll-postgres/run-summary.md
+            results/roll-postgres/gate-status.txt
+            results/roll-postgres/failures.csv
+            results/roll-postgres/roll-loop.log
+            results/roll-postgres/**/log.html
+          retention-days: 14
+
+      - name: Gate — green under continuous rolls
+        run: |
+          gate=$(cat results/roll-postgres/gate-status.txt 2>/dev/null || echo MISSING)
+          echo "K8 roll gate = $gate"
+          cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
   etsi-aggregate:
     # Concat all 32 cells into 4 per-store tables (same | Suite | Pass |
     # Fail | Skip | shape as run-summary.md) — the single required status
@@ -379,10 +445,11 @@ jobs:
 
   publish-release:
     # A version tag is the only thing that mints a production image, and it
-    # needs BOTH gates: the 32-cell matrix AND the serial all-suites run.
+    # needs ALL THREE gates: the 32-cell matrix, the serial all-suites run,
+    # and the K8 roll-under-suite drill.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()
-    needs: [etsi-aggregate, etsi-serial]
+    needs: [etsi-aggregate, etsi-serial, etsi-roll]
     runs-on: ubuntu-latest
     permissions:
       packages: write
