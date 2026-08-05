@@ -448,12 +448,20 @@ impl PgEntityStore {
                     Bind::Int(n) => qy.bind(n),
                 };
             }
-            let rows = qy.fetch_all(&mut *tx).await?;
-            let mut total = if paged {
-                rows.first().map(|r| r.get::<i64, _>(1))
-            } else {
-                None
-            };
+            // J5 (J3/J11c lesson): stream rows, decode each to its Value and
+            // drop the PgRow — the full row set never sits in memory twice.
+            let mut docs: Vec<Value> = Vec::new();
+            let mut total: Option<i64> = None;
+            {
+                use futures_util::TryStreamExt;
+                let mut stream = qy.fetch(&mut *tx);
+                while let Some(row) = stream.try_next().await? {
+                    if paged && docs.is_empty() {
+                        total = Some(row.get::<i64, _>(1));
+                    }
+                    docs.push(row.get::<Value, _>(0));
+                }
+            }
             // an off-the-end page returns zero rows and no window total —
             // count the match set separately so links/count stay correct
             if paged && total.is_none() {
@@ -476,7 +484,7 @@ impl PgEntityStore {
             }
             tx.commit().await?;
             Ok(QueryOutcome {
-                rows: rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
+                rows: docs,
                 decided,
                 paged,
                 total,
@@ -511,12 +519,19 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            let rows = sqlx::query("SELECT entity FROM entities WHERE tenant_id = $1 ORDER BY id")
-                .bind(tenant.as_str())
-                .fetch_all(&mut *tx)
-                .await?;
+            let mut docs: Vec<Value> = Vec::new();
+            {
+                use futures_util::TryStreamExt;
+                let mut stream =
+                    sqlx::query("SELECT entity FROM entities WHERE tenant_id = $1 ORDER BY id")
+                        .bind(tenant.as_str())
+                        .fetch(&mut *tx);
+                while let Some(row) = stream.try_next().await? {
+                    docs.push(row.get::<Value, _>(0));
+                }
+            }
             tx.commit().await?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+            Ok(docs)
         })
     }
 

@@ -385,6 +385,65 @@ pub fn respond(
     resp
 }
 
+/// Build a list response that STREAMS entity-by-entity (J5; the J3/J11c
+/// lesson: the serialized page must never exist as one contiguous buffer).
+/// Json and LdJson only — GeoJSON wraps a FeatureCollection object and takes
+/// the buffered `respond` path.
+pub fn respond_list(
+    status: StatusCode,
+    docs: Vec<Value>,
+    ctx: &Context,
+    accept: Accept,
+    tenant: &TenantId,
+) -> Response {
+    if accept == Accept::GeoJson {
+        return respond(status, Value::Array(docs), ctx, accept, tenant);
+    }
+    let ld_ctx = (accept == Accept::LdJson).then(|| {
+        if ctx.source.is_null() {
+            Value::String(CORE_CONTEXT.to_owned())
+        } else {
+            ctx.source.clone()
+        }
+    });
+    let content_type = match accept {
+        Accept::LdJson => "application/ld+json",
+        _ => "application/json",
+    };
+    let chunks = std::iter::once(axum::body::Bytes::from_static(b"["))
+        .chain(docs.into_iter().enumerate().map(move |(i, doc)| {
+            let doc = match (&ld_ctx, doc) {
+                (Some(ctx_val), Value::Object(mut o)) => {
+                    o.insert("@context".into(), ctx_val.clone());
+                    Value::Object(o)
+                }
+                (_, other) => other,
+            };
+            let mut buf = if i == 0 { Vec::new() } else { vec![b','] };
+            // serializing a Value into a Vec cannot fail
+            let _ = serde_json::to_writer(&mut buf, &doc);
+            axum::body::Bytes::from(buf)
+        }))
+        .chain(std::iter::once(axum::body::Bytes::from_static(b"]")));
+    let body = axum::body::Body::from_stream(futures_util::stream::iter(
+        chunks.map(Ok::<_, std::convert::Infallible>),
+    ));
+    let mut resp = (
+        status,
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (header::LINK, link_header_value(ctx)),
+        ],
+        body,
+    )
+        .into_response();
+    if accept == Accept::LdJson {
+        resp.headers_mut().remove(header::LINK);
+    }
+    echo_tenant(tenant, &mut resp);
+    resp
+}
+
 pub(crate) fn inject_context(payload: Value, ctx: &Context) -> Value {
     let ctx_val = if ctx.source.is_null() {
         Value::String(CORE_CONTEXT.to_owned())

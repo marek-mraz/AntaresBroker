@@ -1127,7 +1127,7 @@ async fn query_temporal_inner(
     } else {
         StatusCode::OK
     };
-    let mut resp = respond(status, Value::Array(payload), &ctx, accept, &tenant);
+    let mut resp = crate::negotiate::respond_list(status, payload, &ctx, accept, &tenant);
     if let Some(cr) = cr {
         if let Ok(v) = cr.parse() {
             resp.headers_mut().insert("Content-Range", v);

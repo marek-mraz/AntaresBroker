@@ -677,8 +677,17 @@ these as tasks.*
       10M-row synthetic benchmark (xtask seeder):
       q=/geo/type query p95s; decide the extracted-attribute side table
       (named lever, §8.1) on numbers, not vibes.
-- [ ] J5. Streaming list endpoints: axum streaming bodies + sqlx `fetch()`
+- [x] J5. Streaming list endpoints: axum streaming bodies + sqlx `fetch()`
       row streams (J3/J11c lesson).
+      *(negotiate::respond_list streams entity-by-entity via
+      Body::from_stream — the serialized page never exists as one contiguous
+      buffer; wired into entities/temporal/subscriptions/csource lists
+      (Json + LdJson; GeoJSON wraps a FeatureCollection and stays
+      buffered). pg store query + list use sqlx fetch() row streams —
+      each row decodes to its Value and the PgRow drops, so the row set
+      never sits in memory twice. Contract pinned in
+      tests/streaming_lists.rs: streamed bytes are valid JSON, chunked
+      (no Content-Length), ld+json embeds @context per entity.)*
 - [x] J6. `sonic-rs` feature on the batch-ingest path, serde_json fallback
       compiled always (§6.1). *(feature `sonic`, off by default; both
       variants built in CI via the feature matrix.)*

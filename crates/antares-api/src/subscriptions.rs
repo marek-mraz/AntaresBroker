@@ -564,7 +564,7 @@ pub async fn list(
         .iter()
         .map(|d| present_subscription(d, &ctx, sys, kind == Kind::CSourceSubscription))
         .collect();
-    let mut resp = respond(StatusCode::OK, Value::Array(payload), &ctx, accept, &tenant);
+    let mut resp = crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
     if let Some(total) = count_hdr {
         if let Ok(v) = total.to_string().parse() {
             resp.headers_mut().insert("NGSILD-Results-Count", v);

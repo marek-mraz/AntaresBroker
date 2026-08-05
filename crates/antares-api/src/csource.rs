@@ -495,7 +495,8 @@ pub async fn query_registrations(
             .iter()
             .map(|d| present_registration(d, &ctx, sys))
             .collect();
-        let mut resp = respond(StatusCode::OK, Value::Array(payload), &ctx, accept, &tenant);
+        let mut resp =
+            crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
         if let Some(total) = count_hdr {
             if let Ok(v) = total.to_string().parse() {
                 resp.headers_mut().insert("NGSILD-Results-Count", v);

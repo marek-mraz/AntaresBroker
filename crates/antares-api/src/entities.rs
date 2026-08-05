@@ -850,12 +850,12 @@ async fn query_entities_inner(
             _ => {}
         }
     }
-    let payload = if accept == Accept::GeoJson {
-        to_geojson_collection(payload, params.get("geometryProperty"), &ctx)
+    let mut resp = if accept == Accept::GeoJson {
+        let fc = to_geojson_collection(payload, params.get("geometryProperty"), &ctx);
+        respond(StatusCode::OK, fc, &ctx, accept, &tenant)
     } else {
-        Value::Array(payload)
+        crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant)
     };
-    let mut resp = respond(StatusCode::OK, payload, &ctx, accept, &tenant);
     if let Some(total) = count_hdr {
         if let Ok(v) = total.to_string().parse() {
             resp.headers_mut().insert("NGSILD-Results-Count", v);

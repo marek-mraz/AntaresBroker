@@ -91,6 +91,15 @@ async fn attr_instances_decomposition_and_maintenance() {
     let pool = pg::connect(&url, 5).await.expect("pool");
     let t = TenantId::new("pgtempdec").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    // self-clean: an interrupted earlier run must not poison this one
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempdec'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("clean");
+    }
     let s = PgTemporalStore::new(pool.clone());
 
     let doc = serde_json::json!({

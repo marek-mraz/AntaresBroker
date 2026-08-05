@@ -11,6 +11,7 @@ antares-ql = { workspace = true }
 serde_json = { workspace = true }
 redb = { workspace = true }
 sqlx = { workspace = true }
+futures-util = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

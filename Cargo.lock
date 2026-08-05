@@ -50,6 +50,7 @@ dependencies = [
  "antares-sql",
  "axum",
  "chrono",
+ "futures-util",
  "geo",
  "geo-types",
  "geojson",
@@ -164,6 +165,7 @@ version = "0.1.0"
 dependencies = [
  "antares-model",
  "antares-ql",
+ "futures-util",
  "redb",
  "serde_json",
  "sqlx",
