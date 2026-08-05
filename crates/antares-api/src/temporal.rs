@@ -984,7 +984,35 @@ async fn query_temporal_inner(
     };
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    let all = st.store.list(&tenant, Kind::Temporal)?;
+    // C11: push entity narrowing (ids/types/attrs) and instance-window
+    // pruning (range + RANK()-capped lastN) into the store. The loop below
+    // and window() stay the arbiters — pruning is byte-exact against
+    // instance_matches (compile::temporal), so it cannot change an answer.
+    // With q= or geo present the instance pruning is withheld: both evaluate
+    // over the FULL instance set, and a pruned doc would flip their verdicts
+    // (memory mode would answer differently — the one unforgivable bug).
+    let push_instances = q_ast.is_none() && geo.is_none();
+    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+        ids: ids.as_deref(),
+        types: types.as_deref(),
+        attrs: entity_attr_filter.as_deref(),
+        range: tq.as_ref().filter(|_| push_instances).map(|t| {
+            antares_sql::compile::temporal::InstanceRange {
+                timerel: &t.timerel,
+                time_at: &t.time_at,
+                end_time_at: t.end_time_at.as_deref(),
+                timeproperty: &t.timeproperty,
+            }
+        }),
+        last_n: match (last_n, push_instances) {
+            (Some(n), true) => Some(n as i64),
+            _ => None,
+        },
+        timeproperty: tq
+            .as_ref()
+            .map_or("observedAt", |t| t.timeproperty.as_str()),
+    };
+    let all = st.store.query_temporal(&tenant, &tf)?;
     let mut matches = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -1154,7 +1182,24 @@ pub async fn retrieve_temporal(
         let trepr = parse_trepr(&params, &ctx)?;
         let last_n = trepr.last_n;
         antares_model::EntityId::new(&id)?;
-        let doc = st.store.get(&tenant, Kind::Temporal, &id)?.ok_or_else(|| {
+        // C11: instance pruning pushed into the store (no q=/geo on retrieve,
+        // so it is always safe here); window() below stays the arbiter.
+        let tf = antares_sql::store::pg_temporal::TemporalFilter {
+            range: tq
+                .as_ref()
+                .map(|t| antares_sql::compile::temporal::InstanceRange {
+                    timerel: &t.timerel,
+                    time_at: &t.time_at,
+                    end_time_at: t.end_time_at.as_deref(),
+                    timeproperty: &t.timeproperty,
+                }),
+            last_n: last_n.map(|n| n as i64),
+            timeproperty: tq
+                .as_ref()
+                .map_or("observedAt", |t| t.timeproperty.as_str()),
+            ..Default::default()
+        };
+        let doc = st.store.get_temporal(&tenant, &id, &tf)?.ok_or_else(|| {
             NgsiError::ResourceNotFound(format!("temporal entity {id} not found"))
         })?;
         let attrs_filter = selection(&trepr);

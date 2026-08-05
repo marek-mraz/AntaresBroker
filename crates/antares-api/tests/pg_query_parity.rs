@@ -232,7 +232,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
         expected.sort();
 
         let spec = gq.to_sql_spec(&ctx);
-        let got = ids(&store
+        let outcome = store
             .query_entities(
                 &t,
                 &EntityFilter {
@@ -240,7 +240,16 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                     ..Default::default()
                 },
             )
-            .expect("sql query"));
+            .expect("sql query");
+        // C11: geo carries a metric residual (near geography vs haversine) —
+        // it narrows, it never decides. When the spec declined to compile the
+        // store never saw a geo predicate and truthfully claims decided; the
+        // API layer forfeits every pushdown in that case (geo_uncompiled gate
+        // in filter_entities_paged) — asserted by the all_ids check below.
+        if spec.is_some() {
+            assert!(!outcome.decided, "geo must never claim decided");
+        }
+        let got = ids(&outcome.rows);
 
         for want in &expected {
             assert!(
@@ -270,7 +279,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
             .collect();
         expected.sort();
 
-        let got = ids(&store
+        let outcome = store
             .query_entities(
                 &t,
                 &EntityFilter {
@@ -278,7 +287,9 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                     ..Default::default()
                 },
             )
-            .expect("sql query"));
+            .expect("sql query");
+        assert!(!outcome.decided, "scopeQ is loose-or-equal, never decided");
+        let got = ids(&outcome.rows);
 
         for want in &expected {
             assert!(
@@ -314,11 +325,237 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                 ..Default::default()
             },
         )
-        .expect("sql query"));
+        .expect("sql query")
+        .rows);
     // only the two rows with no extractable geometry survive the guard
     assert_eq!(
         got,
         ["urn:p:multi", "urn:p:nogeo"],
         "the geo predicate must run in SQL, keeping only the IS NULL guard rows"
     );
+}
+
+/// C11: the pushdown ladder — when every present predicate compiles exactly,
+/// SQL DECIDES (equality, not superset), pages, counts and projects; any
+/// inexact predicate forfeits all of it and falls back to narrowing.
+#[tokio::test(flavor = "multi_thread")]
+async fn exactness_gated_pushdown_pages_projects_and_counts() {
+    let url = require_db!();
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("pushdown").expect("tenant");
+    antares_sql::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool));
+
+    // ten Rooms with a temperature, one Place without
+    let temp = format!("{NS}temperature");
+    let mut docs: Vec<(String, Value)> = (0..10)
+        .map(|i| {
+            (
+                format!("urn:room:{i:02}"),
+                json!({
+                    "id": format!("urn:room:{i:02}"),
+                    "type": [format!("{NS}Room")],
+                    "createdAt": "2026-08-05T09:00:00Z",
+                    "modifiedAt": "2026-08-05T09:00:00Z",
+                    &temp: [{"type": "Property", "value": i}]
+                }),
+            )
+        })
+        .collect();
+    docs.push((
+        "urn:room:zz-place".into(),
+        json!({
+            "id": "urn:room:zz-place",
+            "type": [format!("{NS}Place")],
+            "createdAt": "2026-08-05T09:00:00Z",
+            "modifiedAt": "2026-08-05T09:00:00Z"
+        }),
+    ));
+    for (id, doc) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        assert!(store
+            .create(&t, antares_sql::store::Kind::Entity, id, doc.clone())
+            .expect("seed"));
+    }
+
+    let room_types = vec![vec![format!("{NS}Room")]];
+
+    // 1. type filter is exact ⇒ page + total in SQL
+    let outcome = store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                types: Some(&room_types),
+                page: Some(antares_sql::store::pg_entity::Page {
+                    offset: 2,
+                    limit: 3,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("paged query");
+    assert!(outcome.decided && outcome.paged);
+    assert_eq!(outcome.total, Some(10), "pre-LIMIT match count");
+    assert_eq!(
+        ids(&outcome.rows),
+        ["urn:room:02", "urn:room:03", "urn:room:04"],
+        "ORDER BY id, OFFSET 2 LIMIT 3"
+    );
+
+    // 2. an off-the-end page still reports the true total for links/count
+    let outcome = store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                types: Some(&room_types),
+                page: Some(antares_sql::store::pg_entity::Page {
+                    offset: 50,
+                    limit: 3,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("off-the-end page");
+    assert!(outcome.paged && outcome.rows.is_empty());
+    assert_eq!(outcome.total, Some(10));
+
+    // 3. compiled q= keeps decided; SQL answer EQUALS the evaluator's
+    let ast = antares_ql::parse_q("temperature>=5").expect("parses");
+    let expand = |t: &str| format!("{NS}{t}");
+    let outcome = store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                types: Some(&room_types),
+                q: Some(&ast),
+                expand: &expand,
+                ..Default::default()
+            },
+        )
+        .expect("q query");
+    assert!(outcome.decided, "compiled q= is exact by contract");
+    assert_eq!(
+        ids(&outcome.rows),
+        (5..10)
+            .map(|i| format!("urn:room:{i:02}"))
+            .collect::<Vec<_>>(),
+        "decided means equality, not superset"
+    );
+
+    // 4. projection: pick keeps the picked attr + every non-IRI member
+    let keep = vec![temp.clone()];
+    let outcome = store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                types: Some(&room_types),
+                keep_attrs: Some(&keep),
+                ..Default::default()
+            },
+        )
+        .expect("projected query");
+    assert!(outcome.decided);
+    for row in &outcome.rows {
+        let obj = row.as_object().expect("object");
+        assert!(obj.contains_key("id") && obj.contains_key("type"));
+        assert!(obj.contains_key(&temp), "picked attr survives");
+    }
+
+    // 5. any inexact predicate (scopeQ) forfeits paging even when requested
+    let outcome = store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                types: Some(&room_types),
+                scope_q: Some("/A/#"),
+                page: Some(antares_sql::store::pg_entity::Page {
+                    offset: 0,
+                    limit: 3,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("inexact query");
+    assert!(!outcome.decided && !outcome.paged && outcome.total.is_none());
+}
+
+/// C11: temporal instance pruning is byte-exact against instance_matches, and
+/// the lastN RANK() cap keeps timestamp ties.
+#[tokio::test(flavor = "multi_thread")]
+async fn temporal_pruning_matches_the_window_and_keeps_ties() {
+    let url = require_db!();
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("tpruning").expect("tenant");
+    antares_sql::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool));
+
+    let temp = format!("{NS}temperature");
+    let inst = |v: i64, at: &str, iid: &str| {
+        json!({"type": "Property", "value": v, "observedAt": at,
+               "instanceId": format!("urn:ngsi-ld:Instance:{iid}"),
+               "createdAt": at, "modifiedAt": at})
+    };
+    let doc = json!({
+        "id": "urn:troom:1",
+        "type": [format!("{NS}Room")],
+        "createdAt": "2026-01-01T00:00:00Z",
+        "modifiedAt": "2026-01-01T00:00:00Z",
+        &temp: [
+            inst(1, "2026-01-01T00:00:00Z", "a"),
+            inst(2, "2026-02-01T00:00:00Z", "b"),
+            // a timestamp TIE at the newest instant — RANK must keep both
+            inst(3, "2026-03-01T00:00:00Z", "c"),
+            inst(4, "2026-03-01T00:00:00Z", "d"),
+        ]
+    });
+    let _ = store.delete(&t, antares_sql::store::Kind::Temporal, "urn:troom:1");
+    assert!(store
+        .create(&t, antares_sql::store::Kind::Temporal, "urn:troom:1", doc)
+        .expect("seed temporal"));
+
+    // range: between [Feb, Mar) keeps exactly the February instance
+    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+        range: Some(antares_sql::compile::temporal::InstanceRange {
+            timerel: "between",
+            time_at: "2026-02-01T00:00:00Z",
+            end_time_at: Some("2026-03-01T00:00:00Z"),
+            timeproperty: "observedAt",
+        }),
+        ..Default::default()
+    };
+    let got = store
+        .get_temporal(&t, "urn:troom:1", &tf)
+        .expect("get")
+        .expect("present");
+    let arr = got[&temp].as_array().expect("array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "between [Feb,Mar) is exactly February: {arr:?}"
+    );
+    assert_eq!(arr[0]["value"], 2);
+
+    // lastN=1 with a tie at the top: BOTH tied instances survive the SQL cap
+    // (the API's per-attr lastN then picks per its own stable order)
+    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+        last_n: Some(1),
+        ..Default::default()
+    };
+    let got = store
+        .get_temporal(&t, "urn:troom:1", &tf)
+        .expect("get")
+        .expect("present");
+    let arr = got[&temp].as_array().expect("array");
+    assert_eq!(arr.len(), 2, "RANK keeps the tie: {arr:?}");
+    for i in arr {
+        assert_eq!(i["observedAt"], "2026-03-01T00:00:00Z");
+    }
+
+    // meta members are never pruned
+    assert_eq!(got["id"], "urn:troom:1");
+    assert!(got.get("type").is_some() && got.get("createdAt").is_some());
 }

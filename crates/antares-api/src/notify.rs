@@ -24,6 +24,74 @@ enum ChangeClass {
     Deleted,
 }
 
+/// F4/F5: a per-instance tenant-keyed document mirror (bus=nats). One
+/// instance holds subscriptions (fed by the KV watcher), another holds
+/// registrations (fed by `ANTARES_REGISTRY` deltas). Postgres stays the
+/// system of record — this map is a cache with exactly one writer (the
+/// watcher task); readers only snapshot.
+#[derive(Default)]
+pub struct DocMirror {
+    map: std::sync::RwLock<
+        std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
+    >,
+}
+
+/// The subscription mirror's role name (F4) — kept as a distinct alias so
+/// call sites say what they hold.
+pub type SubMirror = DocMirror;
+
+impl DocMirror {
+    /// Apply one KV delta: `None` doc = deleted.
+    pub fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
+        let mut map = self.map.write().expect("sub mirror lock");
+        match doc {
+            Some(d) => {
+                map.entry(tenant.to_owned())
+                    .or_default()
+                    .insert(id.to_owned(), d);
+            }
+            None => {
+                if let Some(t) = map.get_mut(tenant) {
+                    t.remove(id);
+                    if t.is_empty() {
+                        map.remove(tenant);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn docs(&self, tenant: &str) -> Vec<Value> {
+        self.map
+            .read()
+            .expect("sub mirror lock")
+            .get(tenant)
+            .map(|t| t.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn tenants(&self) -> Vec<String> {
+        self.map
+            .read()
+            .expect("sub mirror lock")
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
+/// Where the matcher reads subscriptions from: the KV mirror when wired
+/// (bus=nats), else the store (bus=local — the store IS this process).
+fn subs_for(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+    match &st.sub_mirror {
+        Some(m) => m.docs(tenant.as_str()),
+        None => st
+            .store
+            .list(tenant, Kind::Subscription)
+            .unwrap_or_default(),
+    }
+}
+
 /// Wire the store hook and background tasks. Call once at startup.
 pub fn wire(state: &AppState) {
     let (tx, mut rx) =
@@ -547,7 +615,7 @@ fn build_data(
     data
 }
 
-async fn process_change(
+pub async fn process_change(
     st: &AppState,
     tenant_str: &str,
     before: Option<Value>,
@@ -556,10 +624,7 @@ async fn process_change(
     let Ok(tenant) = TenantId::new(tenant_str) else {
         return;
     };
-    let subs = st
-        .store
-        .list(&tenant, Kind::Subscription)
-        .unwrap_or_default();
+    let subs = subs_for(st, &tenant);
     if subs.is_empty() {
         return;
     }
@@ -644,7 +709,53 @@ async fn process_change(
 }
 
 /// timeInterval subscriptions: fire when due, with all matching entities.
-async fn interval_tick(st: &AppState) {
+/// F6 multi-instance: claim one interval firing under the subscription row
+/// lock — N matcher pods race, exactly one wins (§3.1.6: single-winner by
+/// lock, no leader election). The due-check reruns INSIDE the lock; the
+/// winner stamps `lastNotification` as its claim, losers see not-due and
+/// roll back. Only engaged in bus=nats mode — single-process behaviour (and
+/// its 046_12 bookkeeping ordering) is untouched.
+fn claim_interval(
+    st: &AppState,
+    tenant: &TenantId,
+    kind: Kind,
+    sub: &Value,
+    interval: f64,
+) -> bool {
+    let Some(id) = sub.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    let res = st.store.mutate(tenant, kind, id, |doc| {
+        let anchor = doc
+            .get("notification")
+            .and_then(|n| n.get("lastNotification"))
+            .and_then(Value::as_str)
+            .or_else(|| doc.get("createdAt").and_then(Value::as_str));
+        let due = match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+            Some(last) => {
+                (chrono::Utc::now() - last.with_timezone(&chrono::Utc)).num_milliseconds()
+                    >= (interval * 1000.0) as i64
+            }
+            None => true,
+        };
+        if !due {
+            return Err(());
+        }
+        if let Some(n) = doc
+            .as_object_mut()
+            .expect("subscription object")
+            .entry("notification")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+        {
+            n.insert("lastNotification".into(), Value::String(now_iso()));
+        }
+        Ok(())
+    });
+    matches!(res, Ok(Some(Ok(()))))
+}
+
+pub async fn interval_tick(st: &AppState) {
     for tenant_str in st.store.subscription_tenants().unwrap_or_default() {
         let Ok(tenant) = TenantId::new(&tenant_str) else {
             continue;
@@ -673,6 +784,11 @@ async fn interval_tick(st: &AppState) {
                 None => true,
             };
             if !due {
+                continue;
+            }
+            if st.sub_mirror.is_some()
+                && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval)
+            {
                 continue;
             }
             let ctx = sub_context(st, &sub).await;
@@ -716,6 +832,11 @@ async fn interval_tick(st: &AppState) {
                 None => true,
             };
             if !due {
+                continue;
+            }
+            if st.sub_mirror.is_some()
+                && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval)
+            {
                 continue;
             }
             let ctx = sub_context(st, &sub).await;

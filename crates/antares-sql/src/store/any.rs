@@ -91,6 +91,32 @@ impl AnyStore {
         }
     }
 
+    /// F3: turn the same-tx outbox producer on (bus=nats). The memory arm has
+    /// no outbox — the broker's wiring rejects bus=nats without a Pg store,
+    /// so this is unreachable there by construction.
+    pub fn set_outbox(&self, on: bool) {
+        match self {
+            AnyStore::Mem(_) => {}
+            AnyStore::Pg(p) => p.entities.set_outbox(on),
+        }
+    }
+
+    /// F3 drain: oldest-first page of pending outbox rows `(seq, tenant, event)`.
+    pub fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+        match self {
+            AnyStore::Mem(_) => Ok(Vec::new()),
+            AnyStore::Pg(p) => super::outbox::peek(p.docs.pool(), limit).map_err(db),
+        }
+    }
+
+    /// F3 drain: delete everything published up to and including `seq`.
+    pub fn outbox_ack(&self, seq: i64) -> Result<u64, NgsiError> {
+        match self {
+            AnyStore::Mem(_) => Ok(0),
+            AnyStore::Pg(p) => super::outbox::ack(p.docs.pool(), seq).map_err(db),
+        }
+    }
+
     /// §3.1.4/6.3.14 implicit tenant creation on Pg write paths.
     fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
         super::pg_entity::wait(async {
@@ -291,19 +317,51 @@ impl AnyStore {
         }
     }
 
-    /// C10: Query Entities with the filter pushed down where the backend can
-    /// take it. `memory`/`file` have nothing to push into — their entities
-    /// are already in RAM — so they return the same snapshot `list` does.
-    /// Either way the caller applies the exact filter afterwards, which is
-    /// what keeps every store mode answering identically.
+    /// C10/C11: Query Entities with the filter pushed down where the backend
+    /// can take it. `memory`/`file` have nothing to push into — their
+    /// entities are already in RAM — so they return the same snapshot `list`
+    /// does (never `decided`, never `paged`). Either way the caller applies
+    /// the exact filter afterwards unless the outcome says SQL already did.
     pub fn query_entities(
         &self,
         tenant: &TenantId,
         f: &crate::store::pg_entity::EntityFilter<'_>,
+    ) -> Result<crate::store::pg_entity::QueryOutcome, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(crate::store::pg_entity::QueryOutcome {
+                rows: s.list(tenant, Kind::Entity),
+                decided: false,
+                paged: false,
+                total: None,
+            }),
+            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db),
+        }
+    }
+
+    /// C11: Query Temporal Evolution with entity narrowing + instance-window
+    /// pruning pushed down. Same contract: the API's window() is the arbiter;
+    /// the memory arm returns the full snapshot.
+    pub fn query_temporal(
+        &self,
+        tenant: &TenantId,
+        f: &crate::store::pg_temporal::TemporalFilter<'_>,
     ) -> Result<Vec<Value>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Entity)),
-            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db),
+            AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Temporal)),
+            AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db),
+        }
+    }
+
+    /// C11: Retrieve Temporal Evolution with the same instance pruning.
+    pub fn get_temporal(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        f: &crate::store::pg_temporal::TemporalFilter<'_>,
+    ) -> Result<Option<Value>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.get(tenant, Kind::Temporal, id)),
+            AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).map_err(db),
         }
     }
 

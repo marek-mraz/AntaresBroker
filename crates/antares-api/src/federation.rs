@@ -158,10 +158,16 @@ pub fn matching_regs(
     ctx: &Context,
 ) -> Vec<FedReg> {
     let now = crate::state::now_iso();
-    st.store
-        .list(tenant, Kind::Registration)
-        .unwrap_or_default()
-        .into_iter()
+    // F5: the ONE compiled mirror when wired (bus=nats), the store otherwise.
+    // Expiry is filtered HERE and only here — the single yield point (§4.1).
+    let regs = match &st.reg_mirror {
+        Some(m) => m.docs(tenant.as_str()),
+        None => st
+            .store
+            .list(tenant, Kind::Registration)
+            .unwrap_or_default(),
+    };
+    regs.into_iter()
         .filter_map(|doc| {
             if doc
                 .get("expiresAt")

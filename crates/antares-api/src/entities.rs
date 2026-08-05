@@ -99,7 +99,12 @@ pub fn compact_for(
 // ---------- temporal mirroring (auto-recording; Scorpio ENTITY-topic parity) ----------
 
 /// Record an entity write into the temporal store (5.6.11 auto-recording).
+/// F8: in bus=nats mode the api role skips this — the temporal role's
+/// durable recorder reproduces it from the change stream, idempotently.
 pub fn mirror_record(st: &AppState, tenant: &TenantId, expanded: &Value) {
+    if !st.record_locally {
+        return;
+    }
     let Some(obj) = expanded.as_object() else {
         return;
     };
@@ -149,8 +154,12 @@ pub fn mirror_record(st: &AppState, tenant: &TenantId, expanded: &Value) {
 }
 
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
-/// representation too (suite configuration parity).
+/// representation too (suite configuration parity). F8: skipped on bus=nats
+/// api pods — the recorder applies the entityDeleted fence instead.
 pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
+    if !st.record_locally {
+        return;
+    }
     if let Err(e) = st.store.delete(tenant, Kind::Temporal, id) {
         tracing::warn!("temporal mirror delete failed: {e}");
     }
@@ -777,11 +786,36 @@ async fn query_entities_inner(
     } else {
         Vec::new()
     };
-    let mut matches = filter_entities_fed(st, &tenant, params, &ctx, fed)?;
+    // C11 pushdown gates. Pagination: only when every filter the store cannot
+    // see is absent — no federation candidates, no idPattern, no orderBy (its
+    // 4.23 datatype comparison order is evaluator-owned), and a real limit
+    // (limit=0 is the count-only shape). Projection additionally excludes
+    // join (linked-entity walks read page docs) and GeoJSON output.
+    let (p_offset, p_limit, _) = page_params(st, params)?;
+    let push_page = fed.is_empty()
+        && params.get("idPattern").is_none()
+        && params.get("orderBy").is_none()
+        && p_limit > 0;
+    let push_proj = join.is_none() && accept != Accept::GeoJson;
+    let filtered = filter_entities_paged(
+        st,
+        &tenant,
+        params,
+        &ctx,
+        fed,
+        push_page.then_some((p_offset, p_limit)),
+        push_proj.then_some(&repr),
+    )?;
+    let mut matches = filtered.docs;
     if let Some(spec) = params.get("orderBy") {
         order_entities(&mut matches, spec, &ctx)?;
     }
-    let (page, count_hdr, links) = paginate(st, params, matches, "/ngsi-ld/v1/entities")?;
+    let (page, count_hdr, links) = if filtered.paged {
+        let total = filtered.total.unwrap_or(matches.len());
+        paginate_pre(st, params, matches, "/ngsi-ld/v1/entities", total)?
+    } else {
+        paginate(st, params, matches, "/ngsi-ld/v1/entities")?
+    };
 
     let mut payload: Vec<Value> = page
         .iter()
@@ -853,6 +887,36 @@ pub fn filter_entities_fed(
     ctx: &antares_jsonld::Context,
     fed: Vec<(bool, Value)>,
 ) -> ApiResult<Vec<Value>> {
+    Ok(filter_entities_paged(st, tenant, params, ctx, fed, None, None)?.docs)
+}
+
+/// C11: what the paged variant produced. `paged` = the store already applied
+/// ORDER BY id + LIMIT/OFFSET (and `total` is the pre-LIMIT match count), so
+/// the caller must NOT slice again.
+pub struct Filtered {
+    pub docs: Vec<Value>,
+    pub paged: bool,
+    pub total: Option<usize>,
+}
+
+/// The full filtering path (5.7.2). `page` = (offset, limit) to push into the
+/// store — pass it ONLY when every filter the store cannot see is absent
+/// (idPattern, federation, orderBy); the store still refuses unless its own
+/// predicates compiled exactly. `proj` = the parsed representation, offered
+/// for projection pushdown (pick/omit/attrs top-level heads) under the same
+/// exactness gate.
+pub fn filter_entities_paged(
+    st: &AppState,
+    tenant: &TenantId,
+    params: &HashMap<String, String>,
+    ctx: &antares_jsonld::Context,
+    fed: Vec<(bool, Value)>,
+    page: Option<(usize, usize)>,
+    proj: Option<&crate::repr::Repr>,
+) -> ApiResult<Filtered> {
+    // a pushed page over local rows cannot be merged with federated
+    // candidates — refuse here so no caller can create that page
+    let page = if fed.is_empty() { page } else { None };
     let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
     if let Some(ids) = &ids {
         for id in ids {
@@ -894,13 +958,42 @@ pub fn filter_entities_fed(
     let scope_q = params.get("scopeQ");
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    // C10: hand the store what it can filter on. A backend that can push the
-    // predicate down (postgres/timescale) returns fewer rows; one that cannot
-    // (memory/file) returns the snapshot. Either way the loop below is what
-    // decides — the store narrows, it never answers.
+    // C10/C11: hand the store what it can filter on. A backend that can push
+    // the predicate down (postgres/timescale) returns fewer rows — and says
+    // via `decided` whether it applied EVERY present predicate exactly, which
+    // is what licenses pagination/projection pushdown and lets the loop below
+    // skip re-deciding. A backend that cannot (memory/file) returns the
+    // snapshot and the loop stays the arbiter.
     let expand = |t: &str| ctx.expand_key(t);
     let geo_spec = geo.as_ref().and_then(|g| g.to_sql_spec(ctx));
-    let local = st.store.query_entities(
+    // A geo query whose spec declined to compile (non-default geoproperty) is
+    // INVISIBLE to the store — the store would truthfully claim `decided`
+    // about what it saw, projection would strip the very member the evaluator
+    // still needs, and a pushed page would page over the wrong set. Forfeit
+    // every pushdown up front and mask `decided` after.
+    let geo_uncompiled = geo.is_some() && geo_spec.is_none();
+    let page = if geo_uncompiled { None } else { page };
+    // pick (or attrs) heads to keep / whole-attr omit heads to drop; core
+    // members are never SQL-dropped (only `://` IRIs qualify) — repr::apply
+    // stays the decider for those.
+    let keep_attrs: Option<Vec<String>> = proj.and_then(|r| {
+        r.pick
+            .as_ref()
+            .map(|nodes| nodes.iter().map(|n| n.iri.clone()).collect())
+            .or_else(|| r.attrs.clone())
+    });
+    let drop_attrs: Option<Vec<String>> = proj
+        .and_then(|r| {
+            r.omit.as_ref().map(|nodes| {
+                nodes
+                    .iter()
+                    .filter(|n| n.children.is_none() && n.iri.contains("://"))
+                    .map(|n| n.iri.clone())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .filter(|v| !v.is_empty());
+    let outcome = st.store.query_entities(
         tenant,
         &antares_sql::store::pg_entity::EntityFilter {
             ids: ids.as_deref(),
@@ -910,57 +1003,81 @@ pub fn filter_entities_fed(
             scope_q: scope_q.map(String::as_str),
             geo: geo_spec.as_ref(),
             expand: &expand,
+            page: page.map(|(offset, limit)| antares_sql::store::pg_entity::Page {
+                offset: offset as i64,
+                limit: limit as i64,
+            }),
+            keep_attrs: if geo_uncompiled {
+                None
+            } else {
+                keep_attrs.as_deref()
+            },
+            drop_attrs: if geo_uncompiled {
+                None
+            } else {
+                drop_attrs.as_deref()
+            },
         },
     )?;
-    let all = crate::federation::merge_candidates(local, fed);
+    let decided = outcome.decided && fed.is_empty() && !geo_uncompiled;
+    let paged = outcome.paged && fed.is_empty();
+    let total = outcome.total.map(|t| t as usize);
+    let all = crate::federation::merge_candidates(outcome.rows, fed);
     let mut out = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
         if let Some(ids) = &ids {
-            if !ids.contains(&id) {
+            if !decided && !ids.contains(&id) {
                 continue;
             }
         }
         if let Some(re) = &id_pattern {
+            // idPattern is invisible to the store — applied even when decided
             if !re.is_match(id) {
                 continue;
             }
         }
-        if let Some(sel) = &type_sel {
-            let etypes: Vec<&str> = doc["type"]
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            let matched = sel
-                .iter()
-                .any(|and_group| and_group.iter().all(|w| etypes.contains(&w.as_str())));
-            if !matched {
-                continue;
+        if !decided {
+            if let Some(sel) = &type_sel {
+                let etypes: Vec<&str> = doc["type"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let matched = sel
+                    .iter()
+                    .any(|and_group| and_group.iter().all(|w| etypes.contains(&w.as_str())));
+                if !matched {
+                    continue;
+                }
             }
-        }
-        if let Some(attrs) = &attr_filter {
-            if !attrs.iter().any(|a| doc.get(a).is_some()) {
-                continue;
+            if let Some(attrs) = &attr_filter {
+                if !attrs.iter().any(|a| doc.get(a).is_some()) {
+                    continue;
+                }
             }
-        }
-        if let Some(ast) = &q_ast {
-            if !eval_q(ast, &doc, ctx) {
-                continue;
+            if let Some(ast) = &q_ast {
+                if !eval_q(ast, &doc, ctx) {
+                    continue;
+                }
             }
-        }
-        if let Some(sq) = scope_q {
-            if !crate::scope_matches(sq, &doc) {
-                continue;
+            if let Some(sq) = scope_q {
+                if !crate::scope_matches(sq, &doc) {
+                    continue;
+                }
             }
-        }
-        if let Some(g) = &geo {
-            if !g.matches(&doc, ctx) {
-                continue;
+            if let Some(g) = &geo {
+                if !g.matches(&doc, ctx) {
+                    continue;
+                }
             }
         }
         out.push(doc);
     }
-    Ok(out)
+    Ok(Filtered {
+        docs: out,
+        paged,
+        total,
+    })
 }
 
 /// limit/offset/count handling (6.3.10). Returns (page, count, link headers).
@@ -970,18 +1087,28 @@ pub fn paginate(
     matches: Vec<Value>,
     path: &str,
 ) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
-    paginate_accept(st, params, matches, path, Accept::Json)
+    paginate_impl(st, params, matches, path, Accept::Json, None)
 }
 
-/// 6.3.10: next/prev Links carry the response media type; the suite asserts
-/// `;type="application/ld+json"` on ld+json list responses (031_02).
-pub fn paginate_accept(
+/// C11: the store already applied ORDER BY id + LIMIT/OFFSET and counted the
+/// match set — `matches` IS the page; only count/links remain.
+pub fn paginate_pre(
     st: &AppState,
     params: &HashMap<String, String>,
-    matches: Vec<Value>,
+    page: Vec<Value>,
     path: &str,
-    accept: Accept,
+    total: usize,
 ) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
+    paginate_impl(st, params, page, path, Accept::Json, Some(total))
+}
+
+/// The limit/offset/count triple of 6.3.10, validated (I2 ceilings included).
+/// Shared by `paginate_impl` and the C11 pushdown gate so the two paths can
+/// never disagree on what a page is.
+pub fn page_params(
+    st: &AppState,
+    params: &HashMap<String, String>,
+) -> ApiResult<(usize, usize, bool)> {
     let count = params.get("count").map(String::as_str) == Some("true");
     let limit: usize = match params.get("limit") {
         Some(l) => l
@@ -1008,8 +1135,35 @@ pub fn paginate_accept(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid offset {o:?}")))?,
         None => 0,
     };
-    let total = matches.len();
-    let page: Vec<Value> = matches.into_iter().skip(offset).take(limit).collect();
+    Ok((offset, limit, count))
+}
+
+/// 6.3.10: next/prev Links carry the response media type; the suite asserts
+/// `;type="application/ld+json"` on ld+json list responses (031_02).
+pub fn paginate_accept(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    matches: Vec<Value>,
+    path: &str,
+    accept: Accept,
+) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
+    paginate_impl(st, params, matches, path, accept, None)
+}
+
+fn paginate_impl(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    matches: Vec<Value>,
+    path: &str,
+    accept: Accept,
+    pre: Option<usize>,
+) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
+    let (offset, limit, count) = page_params(st, params)?;
+    let total = pre.unwrap_or(matches.len());
+    let page: Vec<Value> = match pre {
+        Some(_) => matches, // already exactly the page (C11 pushdown)
+        None => matches.into_iter().skip(offset).take(limit).collect(),
+    };
     let mut links = Vec::new();
     // csource resources: the suite string-compares links against
     // `?other…&limit=N&offset=M` order with an unconditional ld+json type

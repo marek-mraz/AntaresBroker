@@ -492,8 +492,12 @@ pub async fn create(
             }
         }
     }
-    if !st.store.create(&tenant, kind, &id, Value::Object(norm))? {
+    let doc = Value::Object(norm);
+    if !st.store.create(&tenant, kind, &id, doc.clone())? {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
+    }
+    if kind == Kind::Subscription {
+        st.sub_changed(&tenant, &id, Some(&doc));
     }
     if kind == Kind::CSourceSubscription {
         // initial CSourceNotification with all matching registrations (5.11.2.4)
@@ -625,6 +629,10 @@ pub async fn update(
                     crate::notify::csource_initial(&st2, &t2, &id2).await;
                 });
             }
+            if kind == Kind::Subscription && st.sub_sync.is_some() {
+                let doc = st.store.get(&tenant, kind, id)?;
+                st.sub_changed(&tenant, id, doc.as_ref());
+            }
             Ok(no_content(&tenant))
         }
     }
@@ -642,6 +650,9 @@ pub async fn delete(
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     if st.store.delete(&tenant, kind, id)? {
+        if kind == Kind::Subscription {
+            st.sub_changed(&tenant, id, None);
+        }
         Ok(no_content(&tenant))
     } else {
         Err(NgsiError::ResourceNotFound(format!("subscription {id} not found")).into())

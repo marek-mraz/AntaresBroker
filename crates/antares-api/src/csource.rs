@@ -324,6 +324,7 @@ pub async fn create_registration(
                 NgsiError::AlreadyExists(format!("registration {id} already exists")).into(),
             );
         }
+        st.reg_changed(&tenant, &id, Some(&doc));
         {
             // Prepare in the request path (ordering), spawn only the send
             // (the ack must not block on the receiver).
@@ -803,6 +804,7 @@ pub async fn update_registration(
             Some(Err(e)) => Err(ApiError::from(e)),
             Some(Ok(())) => {
                 let after = st.store.get(&tenant, Kind::Registration, &id)?;
+                st.reg_changed(&tenant, &id, after.as_ref());
                 let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, after).await;
                 let (st2, t2) = (st.clone(), tenant.clone());
                 tokio::spawn(async move {
@@ -828,6 +830,7 @@ pub async fn delete_registration(
         check_params(&params, &["local"])?;
         let before = st.store.get(&tenant, Kind::Registration, &id)?;
         if st.store.delete(&tenant, Kind::Registration, &id)? {
+            st.reg_changed(&tenant, &id, None);
             let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, None).await;
             let (st2, t2) = (st.clone(), tenant.clone());
             tokio::spawn(async move {

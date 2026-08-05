@@ -34,3 +34,18 @@ suite + curl via `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE`
 (pipeline). Remove both wirings when ETSI fixes their server
 (`openssl s_client -connect forge.etsi.org:443 | grep -c CERTIFICATE` — more
 than one cert = fixed). Intermediate expires 2027-11-02.
+
+### 2026-08-05 — MqttUtils launches mosquitto with no readiness wait (tool bug, fixed in fork)
+
+`Start Mqtt Server` (resources/mqttUtils/MqttUtils.resource) does
+`docker rm -f` + `docker run -d` and returns immediately; the test's first
+MQTT connect races the mosquitto daemon start. On a cold docker daemon the
+race is lost reliably: `058_02_02` fails with
+`ConnectionRefusedError: [Errno 111]` while `058_02_01` (image already warm)
+passes. Fixed in the fork: `Wait Until Keyword Succeeds` polling the broker
+port (15 s / 0.5 s) after the `docker run`, before the keyword returns. Also
+load-bearing: the mosquitto container must be the ONLY occupant of
+`compose-files_default` (it is addressed by the hardcoded 172.29.9.2 mapping)
+— the ETSI compose therefore keeps the db containers on their own `dbs`
+network, and the pipeline creates `compose-files_default` for every run since
+the compose now references it as external.

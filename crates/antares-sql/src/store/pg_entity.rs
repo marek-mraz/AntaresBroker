@@ -17,6 +17,12 @@ use sqlx::Row;
 
 pub struct PgEntityStore {
     pool: PgPool,
+    /// F3: when on, every entity write enqueues its change event into the
+    /// outbox INSIDE the write transaction (§10 — a crash between commit and
+    /// publish can never lose an event). Off by default: with `bus = local`
+    /// events flow through the in-process hook and undrained rows would only
+    /// grow the table (R4). The broker turns this on when `bus = nats`.
+    outbox: std::sync::atomic::AtomicBool,
 }
 
 /// What a Query Entities call can push into SQL (C10). Every member is
@@ -38,6 +44,36 @@ pub struct EntityFilter<'a> {
     pub geo: Option<&'a crate::compile::geo::GeoSpec<'a>>,
     /// term → IRI, the request context's expander (the AST holds terms)
     pub expand: &'a dyn Fn(&str) -> String,
+    /// C11 pagination pushdown: applied ONLY when every present predicate
+    /// compiled exactly (`decided`) — otherwise the caller's evaluator still
+    /// has rows to drop and a SQL LIMIT would page over the wrong set. The
+    /// caller passes it only when its own store-invisible filters (idPattern,
+    /// federation, orderBy) are absent.
+    pub page: Option<Page>,
+    /// C11 projection pushdown (4.21 `pick`, top-level): keep these expanded
+    /// attr IRIs + every non-attribute member. Applied only when `decided` —
+    /// a projected doc can no longer answer a q= re-check.
+    pub keep_attrs: Option<&'a [String]>,
+    /// C11 projection pushdown (`omit`, top-level entries only): drop exactly
+    /// these attr IRIs. Same `decided` gate.
+    pub drop_attrs: Option<&'a [String]>,
+}
+
+/// One page: OFFSET/LIMIT in row units, ORDER BY id (the store's stable
+/// default order, same as the memory snapshot).
+pub struct Page {
+    pub offset: i64,
+    pub limit: i64,
+}
+
+/// What `query` produced. `decided` = SQL applied every present predicate
+/// exactly, so re-evaluation cannot drop a row; `paged` = LIMIT/OFFSET
+/// happened in SQL (implies `decided`), `total` = the pre-LIMIT match count.
+pub struct QueryOutcome {
+    pub rows: Vec<Value>,
+    pub decided: bool,
+    pub paged: bool,
+    pub total: Option<i64>,
 }
 
 impl Default for EntityFilter<'_> {
@@ -50,6 +86,9 @@ impl Default for EntityFilter<'_> {
             scope_q: None,
             geo: None,
             expand: &|t: &str| t.to_owned(),
+            page: None,
+            keep_attrs: None,
+            drop_attrs: None,
         }
     }
 }
@@ -63,6 +102,8 @@ enum Bind {
     Path(String),
     /// a distance in metres (C11b `near`)
     Num(f64),
+    /// LIMIT/OFFSET (C11 pagination pushdown)
+    Int(i64),
 }
 
 /// Run an async block from sync code without stalling a tokio worker
@@ -118,9 +159,50 @@ fn extract(doc: &Value) -> Extracted {
     }
 }
 
+/// The outbox row's event JSON (F2/F3): what the drain turns into a
+/// `ChangeEvent`. Field names are the bus crate's serde names; `seq` and the
+/// claim check are the drain's business.
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_change(
+    tx: &mut sqlx::postgres::PgConnection,
+    tenant: &TenantId,
+    op: &str,
+    id: &str,
+    types: &[String],
+    prev: Option<&Value>,
+    next: Option<&Value>,
+    version: i64,
+    incarnation: &str,
+) -> Result<(), sqlx::Error> {
+    let ev = serde_json::json!({
+        "tenant": tenant.as_str(),
+        "entity_id": id,
+        "types": types,
+        "op": op,
+        "changed_attrs": [],
+        "payload": next,
+        "prev_payload": prev,
+        "version": version,
+        "incarnation": incarnation,
+    });
+    super::outbox::enqueue(tx, tenant, &ev).await.map(|_| ())
+}
+
 impl PgEntityStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            outbox: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// F3 producer switch — the broker enables this exactly when `bus=nats`.
+    pub fn set_outbox(&self, on: bool) {
+        self.outbox.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn outbox_on(&self) -> bool {
+        self.outbox.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 5.6.1-shaped create: `false` when the id already exists (→ 409).
@@ -150,6 +232,20 @@ impl PgEntityStore {
             .execute(&mut *tx)
             .await?
             .rows_affected();
+            if done == 1 && self.outbox_on() {
+                enqueue_change(
+                    &mut tx,
+                    tenant,
+                    "create",
+                    id,
+                    &e.types,
+                    None,
+                    Some(doc),
+                    1,
+                    &e.created,
+                )
+                .await?;
+            }
             tx.commit().await?;
             Ok(done == 1)
         })
@@ -173,14 +269,34 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            let n = sqlx::query("DELETE FROM entities WHERE tenant_id = $1 AND id = $2")
-                .bind(tenant.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+            let row = sqlx::query(
+                "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
+                 RETURNING entity, types, version, created_at::text",
+            )
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(r) = &row {
+                if self.outbox_on() {
+                    let prev: Value = r.get(0);
+                    let types: Vec<String> = r.get(1);
+                    enqueue_change(
+                        &mut tx,
+                        tenant,
+                        "delete",
+                        id,
+                        &types,
+                        Some(&prev),
+                        None,
+                        r.get::<i64, _>(2),
+                        r.get::<&str, _>(3),
+                    )
+                    .await?;
+                }
+            }
             tx.commit().await?;
-            Ok(n == 1)
+            Ok(row.is_some())
         })
     }
 
@@ -196,9 +312,15 @@ impl PgEntityStore {
         &self,
         tenant: &TenantId,
         f: &EntityFilter<'_>,
-    ) -> Result<Vec<Value>, sqlx::Error> {
+    ) -> Result<QueryOutcome, sqlx::Error> {
         let mut binds: Vec<Bind> = vec![Bind::Text(tenant.as_str().to_owned())];
         let mut wheres = vec!["tenant_id = $1".to_owned()];
+        // C11 exactness ledger: ids/types/attrs translate exactly by
+        // construction; q is exact IF it compiles (the compiler's contract);
+        // scopeQ is documented loose-or-equal, geo has a metric residual
+        // (`near` geography vs haversine) — both therefore forfeit
+        // `decided`, they only narrow.
+        let mut decided = true;
 
         if let Some(ids) = f.ids {
             binds.push(Bind::TextArr(ids.iter().map(|s| s.to_string()).collect()));
@@ -223,19 +345,23 @@ impl PgEntityStore {
             wheres.push(format!("entity ?| ${}", binds.len()));
         }
         if let Some(node) = f.q {
-            if let Some(c) = crate::compile::q::compile_q(node, "entity", binds.len() + 1, f.expand)
-            {
-                wheres.push(c.sql);
-                binds.extend(c.binds.into_iter().map(Bind::Path));
+            match crate::compile::q::compile_q(node, "entity", binds.len() + 1, f.expand) {
+                Some(c) => {
+                    wheres.push(c.sql);
+                    binds.extend(c.binds.into_iter().map(Bind::Path));
+                }
+                None => decided = false,
             }
         }
         if let Some(sq) = f.scope_q {
+            decided = false;
             if let Some(c) = crate::compile::scope::compile_scope_q(sq, "scopes", binds.len() + 1) {
                 wheres.push(c.sql);
                 binds.extend(c.binds.into_iter().map(Bind::Text));
             }
         }
         if let Some(spec) = f.geo {
+            decided = false;
             // A client may send a self-intersecting polygon. GEOS raises on
             // one (`side location conflict`), which would turn a query into a
             // 500 in `postgres` mode while `memory` mode answers happily from
@@ -254,10 +380,58 @@ impl PgEntityStore {
             }
         }
 
-        let sql = format!(
-            "SELECT entity FROM entities WHERE {} ORDER BY id",
-            wheres.join(" AND ")
-        );
+        // every bind up to here belongs to the WHERE clause — the count-only
+        // fallback statement below reuses exactly this prefix
+        let where_binds = binds.len();
+
+        // C11 projection pushdown, only once SQL decides row membership: the
+        // kept doc must only need to feed `repr::apply`, never a re-check.
+        // `pick` keeps listed attrs + every non-attribute member (attribute
+        // keys are expanded IRIs — `http…` — so core members never match the
+        // LIKE and always survive; a non-http attr IRI merely stays
+        // unprojected, which is the safe direction). `omit` drops exactly the
+        // listed top-level IRIs.
+        let mut select = "entity".to_owned();
+        if decided {
+            if let Some(keep) = f.keep_attrs {
+                binds.push(Bind::TextArr(keep.to_vec()));
+                select = format!(
+                    "(SELECT COALESCE(jsonb_object_agg(t.k, t.v), '{{}}'::jsonb) \
+                      FROM jsonb_each(entity) AS t(k, v) \
+                      WHERE t.k NOT LIKE 'http%' OR t.k = ANY(${}))",
+                    binds.len()
+                );
+            } else if let Some(drop) = f.drop_attrs {
+                binds.push(Bind::TextArr(drop.to_vec()));
+                select = format!(
+                    "(SELECT COALESCE(jsonb_object_agg(t.k, t.v), '{{}}'::jsonb) \
+                      FROM jsonb_each(entity) AS t(k, v) \
+                      WHERE NOT (t.k = ANY(${})))",
+                    binds.len()
+                );
+            }
+        }
+
+        // C11 pagination pushdown: ORDER BY id is the store's default order
+        // either way; `count(*) OVER ()` rides the same statement so the
+        // caller gets the pre-LIMIT total for count= and the next/prev links.
+        let paged = decided && f.page.is_some();
+        let sql = if let Some(p) = f.page.as_ref().filter(|_| decided) {
+            binds.push(Bind::Int(p.limit));
+            let lim = binds.len();
+            binds.push(Bind::Int(p.offset));
+            format!(
+                "SELECT {select} AS entity, count(*) OVER () AS total \
+                 FROM entities WHERE {} ORDER BY id LIMIT ${lim} OFFSET ${}",
+                wheres.join(" AND "),
+                binds.len()
+            )
+        } else {
+            format!(
+                "SELECT {select} AS entity FROM entities WHERE {} ORDER BY id",
+                wheres.join(" AND ")
+            )
+        };
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
@@ -271,11 +445,42 @@ impl PgEntityStore {
                     Bind::Text(s) | Bind::Path(s) => qy.bind(s),
                     Bind::TextArr(v) => qy.bind(v),
                     Bind::Num(n) => qy.bind(n),
+                    Bind::Int(n) => qy.bind(n),
                 };
             }
             let rows = qy.fetch_all(&mut *tx).await?;
+            let mut total = if paged {
+                rows.first().map(|r| r.get::<i64, _>(1))
+            } else {
+                None
+            };
+            // an off-the-end page returns zero rows and no window total —
+            // count the match set separately so links/count stay correct
+            if paged && total.is_none() {
+                let count_sql = format!(
+                    "SELECT count(*) FROM entities WHERE {}",
+                    wheres.join(" AND ")
+                );
+                let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+                // same wheres ⇒ same bind prefix; stop before the
+                // projection/page binds, which the count statement lacks
+                for b in binds.iter().take(where_binds) {
+                    cq = match b {
+                        Bind::Text(s) | Bind::Path(s) => cq.bind(s),
+                        Bind::TextArr(v) => cq.bind(v),
+                        Bind::Num(n) => cq.bind(n),
+                        Bind::Int(n) => cq.bind(n),
+                    };
+                }
+                total = Some(cq.fetch_one(&mut *tx).await?);
+            }
             tx.commit().await?;
-            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+            Ok(QueryOutcome {
+                rows: rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
+                decided,
+                paged,
+                total,
+            })
         })
     }
 
@@ -339,16 +544,18 @@ impl PgEntityStore {
                 return Ok(None);
             };
             let mut doc: Value = row.get(0);
+            let before = self.outbox_on().then(|| doc.clone());
             match f(&mut doc) {
                 Ok(t) => {
                     let e = extract(&doc);
-                    sqlx::query(
+                    let updated = sqlx::query(
                         "UPDATE entities SET entity = $3, types = $4, scopes = $5,
                            modified_at = $6::timestamptz, expires_at = $7::timestamptz,
                            location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))
                                            THEN ST_SetSRID(ST_GeomFromGeoJSON($8), 4326) END,
                            version = version + 1
-                         WHERE tenant_id = $1 AND id = $2",
+                         WHERE tenant_id = $1 AND id = $2
+                         RETURNING version, created_at::text",
                     )
                     .bind(tenant.as_str())
                     .bind(id)
@@ -358,8 +565,22 @@ impl PgEntityStore {
                     .bind(&e.modified)
                     .bind(&e.expires)
                     .bind(&e.location)
-                    .execute(&mut *tx)
+                    .fetch_one(&mut *tx)
                     .await?;
+                    if let Some(before) = &before {
+                        enqueue_change(
+                            &mut tx,
+                            tenant,
+                            "update",
+                            id,
+                            &e.types,
+                            Some(before),
+                            Some(&doc),
+                            updated.get::<i64, _>(0),
+                            updated.get::<&str, _>(1),
+                        )
+                        .await?;
+                    }
                     tx.commit().await?;
                     Ok(Some(Ok(t)))
                 }
@@ -417,9 +638,30 @@ impl PgEntityStore {
             .bind(Value::Array(payload))
             .fetch_all(&mut *tx)
             .await?;
-            tx.commit().await?;
-            let mut created: std::collections::HashSet<String> =
+            let created_now: std::collections::HashSet<String> =
                 rows.into_iter().map(|r| r.get::<String, _>(0)).collect();
+            if self.outbox_on() {
+                let mut seen_ev = std::collections::HashSet::new();
+                for (id, doc) in items {
+                    if created_now.contains(id.as_str()) && seen_ev.insert(id.as_str()) {
+                        let e = extract(doc);
+                        enqueue_change(
+                            &mut tx,
+                            tenant,
+                            "create",
+                            id,
+                            &e.types,
+                            None,
+                            Some(doc),
+                            1,
+                            &e.created,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            tx.commit().await?;
+            let mut created = created_now;
             // consume-once: a duplicate of a created id still reports false
             Ok(items
                 .iter()
@@ -440,12 +682,31 @@ impl PgEntityStore {
             crate::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
-                 RETURNING id, entity",
+                 RETURNING id, entity, types, version, created_at::text",
             )
             .bind(tenant.as_str())
             .bind(ids)
             .fetch_all(&mut *tx)
             .await?;
+            if self.outbox_on() {
+                for r in &rows {
+                    let id: String = r.get(0);
+                    let prev: Value = r.get(1);
+                    let types: Vec<String> = r.get(2);
+                    enqueue_change(
+                        &mut tx,
+                        tenant,
+                        "delete",
+                        &id,
+                        &types,
+                        Some(&prev),
+                        None,
+                        r.get::<i64, _>(3),
+                        r.get::<&str, _>(4),
+                    )
+                    .await?;
+                }
+            }
             tx.commit().await?;
             Ok(rows
                 .into_iter()

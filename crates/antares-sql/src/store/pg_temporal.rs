@@ -117,6 +117,93 @@ async fn sync_instances(
     Ok(())
 }
 
+/// C11: what a temporal query can push into SQL. Everything is a NARROWING —
+/// the API's `window()`/`any_instance` remain the arbiter — with one twist:
+/// the instance-range predicate is byte-exact by construction (see
+/// `compile::temporal`), so pruning cannot change an answer, only its cost.
+pub struct TemporalFilter<'a> {
+    /// exact entity ids
+    pub ids: Option<&'a [&'a str]>,
+    /// flat OR list of expanded type IRIs (temporal query has no AND groups)
+    pub types: Option<&'a [String]>,
+    /// `attrs=`: the entity must carry at least one, expanded IRIs
+    pub attrs: Option<&'a [String]>,
+    /// the 4.11 window; `None` = no instance pruning
+    pub range: Option<crate::compile::temporal::InstanceRange<'a>>,
+    /// `lastN`: per-(attr, datasetId) RANK() cap — ties all kept, so the
+    /// per-attr lastN the API applies afterwards always finds its instances
+    pub last_n: Option<i64>,
+    /// ordering key for the lastN cap (the request's timeproperty)
+    pub timeproperty: &'a str,
+}
+
+impl Default for TemporalFilter<'_> {
+    fn default() -> Self {
+        Self {
+            ids: None,
+            types: None,
+            attrs: None,
+            range: None,
+            last_n: None,
+            timeproperty: "observedAt",
+        }
+    }
+}
+
+/// The SELECT expression that prunes instance arrays inside the doc, plus its
+/// text binds (numbered from `first_bind`). `None` = nothing to prune (no
+/// range, no lastN) or a range shape the compiler refuses — select `doc`.
+///
+/// Meta members (including instance-shaped `scope`, which is in DOC_META)
+/// pass through unpruned — looser is fine, the window refilters. The DOC_META
+/// name list is inlined as literals: it is a compiler constant, never user
+/// input (§16.2). lastN uses RANK(), not ROW_NUMBER(): ties share a rank, so
+/// every instance the API's per-attr lastN could keep survives the cut.
+fn pruned_doc_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String, Vec<String>)> {
+    if f.range.is_none() && f.last_n.is_none() {
+        return None;
+    }
+    // $first_bind is always the timeproperty (predicate member / order key)
+    let mut binds = vec![f.timeproperty.to_owned()];
+    let tp = first_bind;
+    let mut where_clause = String::new();
+    if let Some(r) = &f.range {
+        let c = crate::compile::temporal::compile_instance_range(r, "el", first_bind)?;
+        where_clause = format!("WHERE {}", c.sql);
+        debug_assert_eq!(c.binds[0], f.timeproperty);
+        binds.extend(c.binds.into_iter().skip(1));
+    }
+    let arr = match f.last_n {
+        Some(n) => {
+            let n_bind = first_bind + binds.len();
+            binds.push(n.to_string());
+            format!(
+                "(SELECT COALESCE(jsonb_agg(s.el), '[]'::jsonb) FROM \
+                   (SELECT el, rank() OVER (PARTITION BY el ->> 'datasetId' \
+                      ORDER BY (el ->> ${tp}) COLLATE \"C\" DESC NULLS LAST) AS rk \
+                    FROM jsonb_array_elements(t.v) AS el {where_clause}) AS s \
+                 WHERE s.rk <= ${n_bind}::bigint)"
+            )
+        }
+        None => format!(
+            "(SELECT COALESCE(jsonb_agg(el), '[]'::jsonb) \
+              FROM jsonb_array_elements(t.v) AS el {where_clause})"
+        ),
+    };
+    let meta = DOC_META
+        .iter()
+        .map(|m| format!("'{m}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let expr = format!(
+        "(SELECT COALESCE(jsonb_object_agg(t.k, CASE \
+            WHEN jsonb_typeof(t.v) = 'array' AND t.k NOT IN ({meta}) \
+            THEN {arr} ELSE t.v END), '{{}}'::jsonb) \
+          FROM jsonb_each(doc) AS t(k, v))"
+    );
+    Some((expr, binds))
+}
+
 impl PgTemporalStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -190,6 +277,94 @@ impl PgTemporalStore {
         })
     }
 
+    /// C11 temporal query pushdown: entity narrowing (ids/types/attrs) in the
+    /// WHERE, instance pruning (range + lastN cap) in the SELECT. Rows come
+    /// back as bridge-shaped docs — the API's window() stays the arbiter.
+    pub fn query(
+        &self,
+        tenant: &TenantId,
+        f: &TemporalFilter<'_>,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        enum B {
+            Text(String),
+            Arr(Vec<String>),
+        }
+        let mut binds: Vec<B> = vec![B::Text(tenant.as_str().to_owned())];
+        let mut wheres = vec!["tenant_id = $1".to_owned()];
+        if let Some(ids) = f.ids {
+            binds.push(B::Arr(ids.iter().map(|s| s.to_string()).collect()));
+            wheres.push(format!("id = ANY(${})", binds.len()));
+        }
+        if let Some(types) = f.types {
+            // overlap: entity has ANY of the wanted types (flat OR list)
+            binds.push(B::Arr(types.to_vec()));
+            wheres.push(format!("types && ${}", binds.len()));
+        }
+        if let Some(attrs) = f.attrs {
+            binds.push(B::Arr(attrs.to_vec()));
+            wheres.push(format!("doc ?| ${}", binds.len()));
+        }
+        let select = match pruned_doc_expr(f, binds.len() + 1) {
+            Some((expr, extra)) => {
+                binds.extend(extra.into_iter().map(B::Text));
+                expr
+            }
+            None => "doc".to_owned(),
+        };
+        let sql = format!(
+            "SELECT {select} FROM temporal_entities WHERE {} ORDER BY id",
+            wheres.join(" AND ")
+        );
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            // §16.2 audit: `sql` is compiler literals + $n placeholders only.
+            let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
+            for b in &binds {
+                qy = match b {
+                    B::Text(s) => qy.bind(s),
+                    B::Arr(v) => qy.bind(v),
+                };
+            }
+            let rows = qy.fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+        })
+    }
+
+    /// C11: single-entity fetch with the same instance pruning (Retrieve
+    /// Temporal Evolution, 5.7.3). `None` = entity absent.
+    pub fn get_range(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        f: &TemporalFilter<'_>,
+    ) -> Result<Option<Value>, sqlx::Error> {
+        let mut binds: Vec<String> = Vec::new();
+        let select = match pruned_doc_expr(f, 3) {
+            Some((expr, extra)) => {
+                binds = extra;
+                expr
+            }
+            None => "doc".to_owned(),
+        };
+        let sql =
+            format!("SELECT {select} FROM temporal_entities WHERE tenant_id = $1 AND id = $2");
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                .bind(tenant.as_str())
+                .bind(id);
+            for b in &binds {
+                qy = qy.bind(b);
+            }
+            let row = qy.fetch_optional(&mut *tx).await?;
+            tx.commit().await?;
+            Ok(row.map(|r| r.get::<Value, _>(0)))
+        })
+    }
+
     pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
@@ -253,5 +428,79 @@ impl PgTemporalStore {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::temporal::InstanceRange;
+
+    fn between<'a>() -> TemporalFilter<'a> {
+        TemporalFilter {
+            range: Some(InstanceRange {
+                timerel: "between",
+                time_at: "2026-01-01T00:00:00Z",
+                end_time_at: Some("2026-02-01T00:00:00Z"),
+                timeproperty: "observedAt",
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_window_means_no_pruning_expression() {
+        assert!(pruned_doc_expr(&TemporalFilter::default(), 2).is_none());
+    }
+
+    #[test]
+    fn range_prunes_arrays_but_never_meta_members() {
+        let (expr, binds) = pruned_doc_expr(&between(), 2).expect("prunes");
+        // meta members pass through the ELSE branch untouched
+        for m in DOC_META {
+            assert!(expr.contains(&format!("'{m}'")), "meta {m} missing: {expr}");
+        }
+        assert!(expr.contains("jsonb_typeof(t.v) = 'array'"), "{expr}");
+        // binds: timeproperty, timeAt, endTimeAt — numbered from first_bind
+        assert_eq!(
+            binds,
+            vec!["observedAt", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]
+        );
+        assert!(
+            expr.contains("$2") && expr.contains("$3") && expr.contains("$4"),
+            "{expr}"
+        );
+    }
+
+    #[test]
+    fn last_n_caps_with_rank_per_dataset_never_row_number() {
+        let f = TemporalFilter {
+            last_n: Some(5),
+            ..Default::default()
+        };
+        let (expr, binds) = pruned_doc_expr(&f, 1).expect("prunes");
+        // RANK keeps timestamp ties; ROW_NUMBER would cut an instance the
+        // API-side per-attr lastN still wants (the tie-break divergence bug)
+        assert!(expr.contains("rank() OVER"), "{expr}");
+        assert!(!expr.contains("row_number"), "{expr}");
+        assert!(expr.contains("PARTITION BY el ->> 'datasetId'"), "{expr}");
+        assert!(expr.contains("COLLATE \"C\" DESC NULLS LAST"), "{expr}");
+        assert_eq!(binds, vec!["observedAt", "5"]);
+    }
+
+    #[test]
+    fn refused_range_shape_refuses_the_whole_pruning() {
+        let f = TemporalFilter {
+            range: Some(InstanceRange {
+                timerel: "since", // not a 4.11 relation
+                time_at: "t",
+                end_time_at: None,
+                timeproperty: "observedAt",
+            }),
+            last_n: Some(3),
+            ..Default::default()
+        };
+        // half-pruning would silently skip the range: refuse instead
+        assert!(pruned_doc_expr(&f, 1).is_none());
     }
 }

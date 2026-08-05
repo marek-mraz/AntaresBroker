@@ -273,7 +273,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     let all: Vec<String> = seed.iter().map(|(id, ..)| (*id).to_owned()).collect();
 
     let q = |f: &antares_sql::store::pg_entity::EntityFilter<'_>| {
-        ids_of(&s.query(&t, f).expect("query"))
+        ids_of(&s.query(&t, f).expect("query").rows)
     };
     let base = || antares_sql::store::pg_entity::EntityFilter {
         expand: &ex,

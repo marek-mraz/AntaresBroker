@@ -31,6 +31,11 @@ x-broker: &broker
 x-postgres: &postgres
   image: ${DB_IMAGE:-timescale/timescaledb-ha:pg17}
   profiles: ["db"]
+  # NOT the default network: the suite's mosquitto container must stay the
+  # only occupant of compose-files_default so it always lands on .2 (the
+  # extra_hosts mapping above). The brokers are host-networked and reach the
+  # databases via their published 543N ports either way.
+  networks: [dbs]
   environment:
     POSTGRES_USER: antares
     POSTGRES_PASSWORD: antares
@@ -145,3 +150,15 @@ volumes:
   antares3-data:
   antares4-data:
   antares5-data:
+
+networks:
+  # Created by dev/etsi-pipeline.sh (fixed subnet 172.29.9.0/24) BEFORE
+  # compose up, because the suite's MqttUtils launches its mosquitto container
+  # onto it by name with `docker run` — external keeps compose from fighting
+  # over ownership labels on a network it did not create.
+  default:
+    name: compose-files_default
+    external: true
+  # The db containers' own bridge — see the x-postgres note.
+  dbs:
+

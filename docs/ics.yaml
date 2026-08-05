@@ -156,13 +156,13 @@ clause4_languages:
   - clause: "4.11"
     name: "Temporal Query Language"
     status: implemented
-    evidence: "crates/antares-api/src/temporal.rs (timerel/timeAt/endTimeAt/timeproperty)"
-    notes: ""
+    evidence: "crates/antares-api/src/temporal.rs (timerel/timeAt/endTimeAt/timeproperty); antares-sql/src/compile/temporal.rs (C11 instance pruning)"
+    notes: "window() stays the arbiter; postgres/timescale prune instance arrays byte-exactly (COLLATE \"C\" string compare mirroring instance_matches) plus a RANK()-capped lastN that keeps ties; pruning withheld when q=/geo need the full instance set"
   - clause: "4.12–4.13"
     name: "Pagination; counting results"
     status: implemented
-    evidence: "crates/antares-api/src/entities.rs::paginate (6.3.10), NGSILD-Results-Count"
-    notes: ""
+    evidence: "crates/antares-api/src/entities.rs::paginate (6.3.10), NGSILD-Results-Count; pg_entity.rs::query (C11 LIMIT/OFFSET pushdown)"
+    notes: "postgres/timescale page in SQL (ORDER BY id + count(*) OVER ()) ONLY when every present predicate compiled exactly (the decided gate); idPattern/federation/orderBy or any inexact predicate falls back to evaluator paging"
   - clause: "4.14"
     name: "Multiple tenants"
     status: implemented
@@ -196,8 +196,8 @@ clause4_languages:
   - clause: "4.21"
     name: "Attribute Projection Language (pick/omit)"
     status: implemented
-    evidence: "crates/antares-api/src/repr.rs (pick/omit, dotted paths)"
-    notes: ""
+    evidence: "crates/antares-api/src/repr.rs (pick/omit, dotted paths); pg_entity.rs::query (C11 top-level projection pushdown)"
+    notes: "repr::apply stays the decider; SQL drops/keeps only top-level attr IRIs under the decided gate — core members always survive, dotted paths stay evaluator-side"
   - clause: "4.22"
     name: "Transient storage (expiresAt) of Entities and Attributes"
     status: missing

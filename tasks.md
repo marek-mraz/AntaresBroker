@@ -246,15 +246,25 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       decision), `~=` (regex dialects differ) and string ordering (Rust
       byte-wise vs DB collation). SQL narrows, qeval answers, so a refusal
       costs a scan and never a wrong row.)*
-- [ ] C11. geo (`ST_DWithin`/`ST_Within`/`ST_Intersects`, geozero
+- [x] C11. geo (`ST_DWithin`/`ST_Within`/`ST_Intersects`, geozero
       GeoJSON→EWKB binds §6.5), scopeQ, projection (attrs/pick/omit), entity
       ordering (4.23), temporal ranges + 206/`Content-Range` bounds (U3),
       pagination (limit/offset; keyset for temporal §8.2).
-      *(geo (C11b) and scopeQ (compile/scope.rs) DONE and wired. Still open:
-      projection, ordering, temporal ranges, pagination — all four are
-      answer-shaping rather than row-narrowing, so each is only sound once
-      the predicate under it is EXACT; the pushdown is deliberately partial
-      today, which is why they cannot simply be appended to the WHERE.)*
+      *(2026-08-05, exactness-gated: the store now reports `decided` — SQL
+      applied every present predicate exactly — and only then pagination
+      (ORDER BY id + LIMIT/OFFSET + count(*) OVER ()) and projection
+      (pick/attrs keep-heads, whole-attr omit drops) run in SQL; any inexact
+      predicate (scopeQ loose, geo metric residual, uncompiled q=, non-default
+      geoproperty) forfeits the whole ladder and falls back to narrow-only.
+      Temporal: entity narrowing (ids/types/attrs) + byte-exact instance
+      pruning (compile/temporal.rs mirrors `instance_matches` with COLLATE
+      "C") + RANK()-capped lastN that keeps timestamp ties; withheld when
+      q=/geo need the full instance set. Ordering (4.23) stays DELIBERATELY
+      evaluator-owned — its cross-datatype comparison order has no faithful
+      SQL collation, so orderBy simply forfeits the pushdown (SQL narrows,
+      the evaluator answers; same partial-compiler contract as C10). Proof:
+      pg_query_parity.rs pushdown+pruning tests vs live PostGIS, and the full
+      postgres pipeline 1037/1037 incl. MQTT TPs, RSS peak 138 MiB.)*
 - [x] C11b. Geo completeness for the SQL path: `near` compiles to
       `ST_DWithin(location::geography, $n::geography, N)` (geography cast =
       real meters, GIST-indexable); query geometry ALWAYS a bind

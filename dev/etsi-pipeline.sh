@@ -23,6 +23,17 @@
 #                                    (dev/etsi-local.sh gives each serial
 #                                    matrix cell its own dir)
 #   SAMPLE_INTERVAL=1                seconds between CPU/RSS samples (E9g)
+#   HA=1                             layer the K2 overlay: haproxy owns 9090,
+#                                    two broker1 replicas behind it — the
+#                                    suite talks to the LB and cannot tell
+#   ROLL_DURING_RUN=1                (needs HA=1) K8: roll the two replicas in
+#                                    a loop for the whole run via
+#                                    dev/rolling-update.sh. The suite has no
+#                                    retries and asserts exact single
+#                                    responses, so ANY failure is a real K1
+#                                    drain bug, not flake. postgres/timescale
+#                                    only (shared state makes replicas one
+#                                    broker; K10: file cannot roll)
 #
 # Locally run ONE cell at a time:   STORE=postgres SUITES=Consumption dev/etsi-pipeline.sh
 # (dev/etsi-local.sh loops the full store × suite matrix serially; CI builds
@@ -59,7 +70,21 @@ case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
 esac
 export BACKED_NOTE
 export STORE DB_IMAGE
-COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml "${PROFILE[@]}")
+COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml)
+# K2/K8: the HA overlay moves antares1 behind an LB on 9090; with
+# ROLL_DURING_RUN the replicas roll continuously under the running suite.
+if [ "${HA:-0}" = 1 ]; then
+  COMPOSE+=(-f compose-files/docker-compose-ha.yml)
+  if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
+    case "$STORE" in
+      postgres|timescale) ;;
+      *) echo "ROLL_DURING_RUN needs shared state: STORE=postgres|timescale (file: K10 lock; memory: replicas diverge)"; exit 2 ;;
+    esac
+  fi
+elif [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
+  echo "ROLL_DURING_RUN=1 requires HA=1 (nothing to roll without the LB)"; exit 2
+fi
+COMPOSE+=("${PROFILE[@]}")
 RESULTS="${RESULTS_DIR:-results/$STORE}"
 MEM_LIMIT_MB="${MEM_LIMIT_MB:-350}"
 mkdir -p "$RESULTS"
@@ -67,21 +92,30 @@ mkdir -p "$RESULTS"
 # 1. The image under test (the exact artifact CI publishes on green).
 [ "${SKIP_BUILD:-}" = 1 ] || docker build -t antares-local:latest .
 
-# 2. MQTT prerequisites (G4). The suite launches its OWN mosquitto per 058
-# test (MqttUtils.resource: `docker run --network compose-files_default
+# 2. The mosquitto network. The compose file references it as external, so it
+# must exist for EVERY run (MQTT or not): the suite's MqttUtils launches its
+# mosquitto container onto it by name, and the db containers deliberately live
+# on their own bridge so mosquitto stays this network's only occupant and
+# always lands on .2 (the brokers' extra_hosts mapping counts on that).
+docker network inspect compose-files_default >/dev/null 2>&1 \
+  || docker network create --subnet 172.29.9.0/24 compose-files_default
+
+# MQTT prerequisites (G4). The suite launches its OWN mosquitto per 058 test
+# (MqttUtils.resource: `docker run --network compose-files_default
 # --name ngsi-ld-test-suite-mosquitto-container scorpio-test-mosquitto`).
-# Provide what it expects: the image (built from the suite's own confs — the
-# single source), the network (fixed subnet: the only container on it always
-# gets .2), and name resolution for the runner; the host-networked brokers
-# get the same mapping via extra_hosts in the compose.
+# Provide the image (built from the suite's own confs — the single source) and
+# name resolution for the runner.
 if [ "${MQTT:-1}" = 1 ]; then
   docker build -t scorpio-test-mosquitto:latest \
     -f compose-files/mosquitto/Dockerfile \
     ngsi-ld-test-suite/resources/mqttUtils/mosquitto
-  docker network inspect compose-files_default >/dev/null 2>&1 \
-    || docker network create --subnet 172.29.9.0/24 compose-files_default
   grep -q ngsi-ld-test-suite-mosquitto-container /etc/hosts \
     || echo "172.29.9.2 ngsi-ld-test-suite-mosquitto-container" | sudo tee -a /etc/hosts >/dev/null
+  # Vendored overlay (error.md 2026-08-05): the suite's Start Mqtt Server has
+  # no readiness wait after `docker run -d`, so the first connect races the
+  # mosquitto start and loses on a cold daemon. Same E7 pattern as
+  # variables.py — applied for the run, restored in teardown.
+  cp dev/MqttUtils.resource ngsi-ld-test-suite/resources/mqttUtils/MqttUtils.resource
 fi
 export MQTT="${MQTT:-1}"
 
@@ -118,6 +152,19 @@ for port in 9090 9091 9092 9093 9094; do
   curl -sf "localhost:$port/q/health" >/dev/null || { echo "broker on :$port not healthy"; exit 1; }
 done
 
+# K8: roll the HA pair in a loop underneath the whole run. The suite is a
+# brutally strict drain client (no retries, exact single responses) — any red
+# TP here is a real K1 bug. The loop's log lands in the results dir.
+ROLL_PID=""
+if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
+  ( while :; do
+      STORE="$STORE" bash dev/rolling-update.sh || echo "ROLL FAILED rc=$? at $(date +%T)"
+      sleep 5
+    done > "$RESULTS/roll-loop.log" 2>&1 ) &
+  ROLL_PID=$!
+  echo "K8: rolling antares1/antares1b continuously (pid $ROLL_PID)"
+fi
+
 # 4. Resource monitor: CPU + RSS of every antares container, every second, for
 # the whole run. PHASE_FILE carries the suite currently under test so each
 # sample can be traced back to what caused it; the report step then joins the
@@ -133,9 +180,12 @@ MONITOR_PID=$!
 
 teardown() {
   kill "$MONITOR_PID" 2>/dev/null || true
+  [ -n "$ROLL_PID" ] && { kill "$ROLL_PID" 2>/dev/null || true; }
   rm -f "$PHASE_FILE"
-  # Leave the suite submodule clean (E7) — the IOP step seds variables.py.
-  git -C ngsi-ld-test-suite checkout -- resources/variables.py 2>/dev/null || true
+  # Leave the suite submodule clean (E7) — the IOP step seds variables.py and
+  # the MQTT step overlays MqttUtils.resource.
+  git -C ngsi-ld-test-suite checkout -- resources/variables.py \
+    resources/mqttUtils/MqttUtils.resource 2>/dev/null || true
   [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
 }
 trap teardown EXIT

@@ -40,6 +40,31 @@ pub struct AppState {
     /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
     /// takes this instance out while its socket still works.
     pub draining: Arc<std::sync::atomic::AtomicBool>,
+    /// F4 (bus=nats): called after every Subscription CUD so the wiring can
+    /// push the change into the KV mirror bucket. `None` in local mode — this
+    /// process's store already IS the truth every consumer reads.
+    #[allow(clippy::type_complexity)]
+    pub sub_sync: Option<
+        Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
+    >,
+    /// F4 (bus=nats): the KV-watched compiled-subscription mirror the matcher
+    /// reads, so the hot path never touches Postgres (§6.4). `None` in local
+    /// mode (the matcher reads the store directly).
+    pub sub_mirror: Option<Arc<crate::notify::SubMirror>>,
+    /// F5 (bus=nats): called after every Registration CUD so the wiring can
+    /// publish the delta on `ANTARES_REGISTRY`. `None` in local mode.
+    #[allow(clippy::type_complexity)]
+    pub reg_sync: Option<
+        Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
+    >,
+    /// F5 (bus=nats): the ONE per-process compiled registration mirror,
+    /// delta-fed from `ANTARES_REGISTRY`; expiry stays filtered at the single
+    /// yield point (`federation::matching_regs`). `None` in local mode.
+    pub reg_mirror: Option<Arc<crate::notify::DocMirror>>,
+    /// F8: record temporal history synchronously in the write path. True in
+    /// local mode; bus=nats api pods turn it off — the temporal role's
+    /// durable recorder owns auto-recording there.
+    pub record_locally: bool,
 }
 
 impl AppState {
@@ -86,6 +111,35 @@ impl AppState {
             mem_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sub_sync: None,
+            sub_mirror: None,
+            reg_sync: None,
+            reg_mirror: None,
+            record_locally: true,
+        }
+    }
+
+    /// Fire the F4 subscription-sync hook (no-op in local mode).
+    pub fn sub_changed(
+        &self,
+        tenant: &antares_model::TenantId,
+        id: &str,
+        doc: Option<&serde_json::Value>,
+    ) {
+        if let Some(h) = &self.sub_sync {
+            h(tenant, id, doc);
+        }
+    }
+
+    /// Fire the F5 registration-delta hook (no-op in local mode).
+    pub fn reg_changed(
+        &self,
+        tenant: &antares_model::TenantId,
+        id: &str,
+        doc: Option<&serde_json::Value>,
+    ) {
+        if let Some(h) = &self.reg_sync {
+            h(tenant, id, doc);
         }
     }
 }
