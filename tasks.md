@@ -645,9 +645,16 @@ these as tasks.*
       (licenses+advisories) gates ci.yml; workspace forbids unsafe (no sonic
       module exists yet to except); grep finds no accept-invalid-certs
       anywhere.)*
-- [ ] I7. Security regression suite: cache caps asserted, bookkeeping delete
+- [x] I7. Security regression suite: cache caps asserted, bookkeeping delete
       paths tested (L6), size-check-before-parse on HTTP bodies (WS-44
       class), cross-tenant probes in e2e per release (§16.6).
+      *(crates/antares-api/tests/security_regression.rs: R4-class cache cap
+      (400 client-keyed @context puts stay ≤256 entries, via new
+      Loader::cache_stats()), L6-class deleted-subscription-stops-notifying
+      with a live loopback receiver proving delivery both ways, WS-44-class
+      5 MB non-JSON body answers bare 413 before any parse. Cross-tenant
+      probes run PER-COMMIT in tenant_isolation.rs (I5) — stricter than the
+      per-release cadence §16.6 asks for.)*
 
 ## J. Performance & the phase-0 spike debts (§12, §13)
 

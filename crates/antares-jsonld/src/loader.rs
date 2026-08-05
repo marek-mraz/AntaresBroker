@@ -572,6 +572,22 @@ impl Loader {
         self.merged_urls.invalidate_all();
     }
 
+    /// Cache occupancy (entries per cache). Feeds /q/health today and the
+    /// K12 `antares_context_cache_entries` metric later; also what the I7
+    /// security regression asserts the R4-class size caps against.
+    pub fn cache_stats(&self) -> serde_json::Value {
+        for c in [&self.fetched] {
+            c.run_pending_tasks();
+        }
+        self.merged.run_pending_tasks();
+        self.merged_urls.run_pending_tasks();
+        serde_json::json!({
+            "fetched": self.fetched.entry_count(),
+            "merged": self.merged.entry_count(),
+            "mergedUrls": self.merged_urls.entry_count(),
+        })
+    }
+
     pub async fn evict(&self, url: &str) {
         self.fetched.invalidate(url);
         self.merged.invalidate_all();
