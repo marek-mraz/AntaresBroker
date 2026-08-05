@@ -84,6 +84,13 @@ jobs:
           printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
           sudo systemctl restart mosquitto
           echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
+      # Live NATS (JetStream) for the F9 bus tests + the 2-instance roles e2e.
+      # A `docker run` step, not a service: services cannot pass the `-js`
+      # command argument the JetStream engine needs.
+      - name: Start NATS (JetStream) for the bus tests
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2-alpine -js
+          echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

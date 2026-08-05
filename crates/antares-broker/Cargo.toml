@@ -17,6 +17,8 @@ hyper-util = { workspace = true }
 antares-bus = { workspace = true }
 antares-model = { workspace = true }
 antares-sql = { workspace = true }
+antares-temporal = { workspace = true }
+futures-util = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

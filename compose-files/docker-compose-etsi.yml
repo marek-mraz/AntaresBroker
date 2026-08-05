@@ -74,7 +74,7 @@ services:
   antares1:
     <<: *broker
     container_name: antares1
-    volumes: ["antares1-data:/data", "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"]
+    volumes: ["antares1-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9090"
       ANTARES_HOST_ALIAS: antares1
@@ -82,13 +82,11 @@ services:
       ANTARES_DATA_DIR: /data
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
   antares2:
     <<: *broker
     container_name: antares2
-    volumes: ["antares2-data:/data", "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"]
+    volumes: ["antares2-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9091"
       ANTARES_HOST_ALIAS: antares2
@@ -96,13 +94,11 @@ services:
       ANTARES_DATA_DIR: /data
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5434/antares
   antares3:
     <<: *broker
     container_name: antares3
-    volumes: ["antares3-data:/data", "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"]
+    volumes: ["antares3-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9092"
       ANTARES_HOST_ALIAS: antares3
@@ -110,13 +106,11 @@ services:
       ANTARES_DATA_DIR: /data
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5435/antares
   antares4:
     <<: *broker
     container_name: antares4
-    volumes: ["antares4-data:/data", "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"]
+    volumes: ["antares4-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9093"
       ANTARES_HOST_ALIAS: antares4
@@ -124,13 +118,11 @@ services:
       ANTARES_DATA_DIR: /data
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5436/antares
   antares5:
     <<: *broker
     container_name: antares5
-    volumes: ["antares5-data:/data", "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"]
+    volumes: ["antares5-data:/data"]
     environment:
       ANTARES_HTTP_PORT: "9094"
       ANTARES_HOST_ALIAS: antares5
@@ -138,8 +130,6 @@ services:
       ANTARES_DATA_DIR: /data
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares
 
 # One volume per broker: `file` mode keeps its redb file here, and the volume

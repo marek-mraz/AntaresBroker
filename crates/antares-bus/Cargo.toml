@@ -1,6 +1,6 @@
 [package]
 name = "antares-bus"
-description = "Change-event bus: ChangeEvent + ChangeBus (local in-process impl; NATS JetStream impl lands in phase 2)."
+description = "Change-event bus: ChangeEvent + the local in-process impl and the NATS JetStream impl (F1)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,9 @@ antares-model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+async-nats = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

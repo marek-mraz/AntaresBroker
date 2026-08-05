@@ -4,6 +4,7 @@
 //! figment in phase 1). Unknown ANTARES_* keys are fatal (§14.3).
 
 mod shutdown;
+mod wiring;
 
 use antares_api::AppState;
 use antares_bus::LocalBus;
@@ -30,6 +31,11 @@ const KNOWN_KEYS: &[&str] = &[
     // §16.4: optional PEM bundle of extra TLS trust anchors (private CAs,
     // incomplete-chain servers — see error.md). Never disables verification.
     "ANTARES_EXTRA_CA_FILE",
+    // F1/§9.2: the bus seam. local (default, single process, all roles) or
+    // nats (the JetStream spine — requires a postgres/timescale store and
+    // ANTARES_NATS_URL).
+    "ANTARES_BUS",
+    "ANTARES_NATS_URL",
 ];
 
 /// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2
@@ -173,8 +179,34 @@ async fn run(
     store: antares_sql::store::any::AnyStore,
     store_mode: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _bus = LocalBus::new(1024); // consumers attach as phases land
-    tracing::info!(port, %host_alias, %roles, %store_mode, "starting antares (v0 skeleton)");
+    let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
+    let roles = wiring::Roles::parse(&roles)?;
+    // F1/§9.2 bus seam: local (default) or nats. Unknown value fatal (§14.3).
+    let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());
+    match bus_mode.as_str() {
+        "local" => {
+            // §9.2: bus=local means ONE process running every role — a role
+            // split without a shared bus would silently drop whole concerns.
+            if !roles.all() {
+                return Err(
+                    "ANTARES_BUS=local requires all roles in one process (ANTARES_ROLES=all); \
+                     role splits need ANTARES_BUS=nats"
+                        .into(),
+                );
+            }
+        }
+        "nats" => {
+            if !matches!(store_mode.as_str(), "postgres" | "timescale") {
+                return Err(format!(
+                    "ANTARES_BUS=nats requires a shared store (ANTARES_STORE=postgres|timescale); \
+                     {store_mode} state is per-process and cannot back multiple instances"
+                )
+                .into());
+            }
+        }
+        other => return Err(format!("unknown ANTARES_BUS={other} (local|nats)").into()),
+    }
+    tracing::info!(port, %store_mode, %bus_mode, ?roles, "starting antares");
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
@@ -188,7 +220,15 @@ async fn run(
             "residentBytes": stats::resident::read().unwrap_or(0),
         })
     }));
-    antares_api::notify::wire(&state); // matcher + notifier + interval firing
+    if bus_mode == "nats" {
+        // F1..F8: outbox producer + drain, KV/registry mirrors, durable
+        // consumers per role, topology asserted before traffic (F7).
+        let url = std::env::var("ANTARES_NATS_URL")
+            .map_err(|_| "ANTARES_BUS=nats requires ANTARES_NATS_URL")?;
+        wiring::wire_nats(&mut state, &url, roles).await?;
+    } else {
+        antares_api::notify::wire(&state); // in-process matcher + notifier + interval firing
+    }
 
     // J2: Cached-@context write-through + boot preload — fetched contexts
     // are persisted as kind='Cached' rows and reloaded on start, so the

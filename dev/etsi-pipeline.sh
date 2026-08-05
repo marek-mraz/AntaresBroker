@@ -75,6 +75,14 @@ COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml)
 # ROLL_DURING_RUN the replicas roll continuously under the running suite.
 if [ "${HA:-0}" = 1 ]; then
   COMPOSE+=(-f compose-files/docker-compose-ha.yml)
+  # F10: replicas of one broker talk over NATS (shared matcher durable,
+  # claimed interval firings). memory mode keeps bus=local — it exercises
+  # only the LB/drain mechanics, and ANTARES_BUS=nats refuses per-process
+  # state by design.
+  case "$STORE" in
+    postgres|timescale) export HA_BUS=nats ;;
+    *) export HA_BUS=local ;;
+  esac
   if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
     case "$STORE" in
       postgres|timescale) ;;
@@ -118,14 +126,6 @@ if [ "${MQTT:-1}" = 1 ]; then
   cp dev/MqttUtils.resource ngsi-ld-test-suite/resources/mqttUtils/MqttUtils.resource
 fi
 export MQTT="${MQTT:-1}"
-
-# TLS trust for the SUITE's own fetches: forge.etsi.org serves an incomplete
-# chain (leaf only — error.md 2026-08-05), which python/requests and curl
-# reject. Hand them the system bundle + the missing intermediate. The brokers
-# get the same anchor via ANTARES_EXTRA_CA_FILE in the compose.
-CA_BUNDLE="$RESULTS/ca-bundle.crt"
-cat /etc/ssl/certs/ca-certificates.crt dev/ca-extra.pem > "$CA_BUNDLE"
-export REQUESTS_CA_BUNDLE="$PWD/$CA_BUNDLE" CURL_CA_BUNDLE="$PWD/$CA_BUNDLE" SSL_CERT_FILE="$PWD/$CA_BUNDLE"
 
 # E9a: which suites this invocation runs (default: all serial + IOP).
 SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"

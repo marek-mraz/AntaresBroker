@@ -22,11 +22,31 @@
 # table says Recreate, never RollingUpdate, for that rung. `memory` mode
 # comes up but the replicas have independent state — good enough to exercise
 # the LB/drain mechanics, meaningless for data consistency.
+#
+# F10/K4: the replicas run ANTARES_BUS=nats against the overlay's own NATS.
+# That is what makes two instances ONE broker for notifications too: the
+# matcher is a shared durable (each change matched once, wherever it was
+# written), interval firings are single-winner by row-lock claim, and the
+# temporal recorder is a balanced consumer — bus=local replicas would each
+# tick their own intervals and double-fire (§9.2: local means one process).
 
 services:
+  nats:
+    image: nats:2-alpine
+    container_name: antares-nats
+    network_mode: host
+    restart: unless-stopped
+    command: ["-js"]
+
   antares1:
     environment:
       ANTARES_HTTP_PORT: "9095"
+      # HA_BUS: nats for postgres/timescale (the real replica semantics);
+      # the pipeline sets local for memory-mode LB/drain mechanics drills,
+      # where ANTARES_BUS=nats would refuse to boot (per-process state).
+      ANTARES_BUS: ${HA_BUS:-nats}
+      ANTARES_NATS_URL: nats://localhost:4222
+    depends_on: [nats]
     # K1 contract: stop_grace_period must exceed drain delay (0.5 s) +
     # drain deadline (20 s), or `docker stop` turns the drain into a kill.
     stop_grace_period: 30s
@@ -37,6 +57,7 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on: [nats]
     extra_hosts:
       - "ngsi-ld-test-suite-mosquitto-container:172.29.9.2"
     environment:
@@ -47,13 +68,12 @@ services:
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
+      ANTARES_BUS: ${HA_BUS:-nats}
+      ANTARES_NATS_URL: nats://localhost:4222
       # Shares antares1's database — that is the whole point.
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
-      # forge.etsi.org serves an incomplete chain (error.md 2026-08-05)
-      ANTARES_EXTRA_CA_FILE: /etc/antares/ca-extra.pem
     volumes:
       - "antares1b-data:/data"
-      - "../dev/ca-extra.pem:/etc/antares/ca-extra.pem:ro"
 
   lb:
     image: haproxy:3.0-alpine

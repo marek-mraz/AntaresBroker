@@ -59,6 +59,10 @@ sonic-rs = "0.5"
 tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "json", "chrono", "uuid", "migrate", "macros"] }
+# F1 (§6.4): the JetStream change spine — official client, KV + streams in core
+# (0.50 verified on crates.io 2026-08-03, §6.1; pre-1.0 pin — upgrade in dedicated PRs)
+async-nats = "0.50"
+futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

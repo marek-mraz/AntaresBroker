@@ -27,13 +27,18 @@ forge and every suite-side resolve fails, turning the whole run red with
 `LdContextNotAvailable` (first seen as 33/33 CommonBehaviours failures; runs
 on 2026-08-04 were green, so the server changed in between).
 
-Not a broker bug and not hacked around: verification stays on. Fix is a
+Not a broker bug and not hacked around: verification stays on. Fix was a
 deliberate trust-anchor addition of the PUBLIC DigiCert intermediate
 (`dev/ca-extra.pem`): brokers via `ANTARES_EXTRA_CA_FILE` (compose), the
 suite + curl via `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`SSL_CERT_FILE`
-(pipeline). Remove both wirings when ETSI fixes their server
-(`openssl s_client -connect forge.etsi.org:443 | grep -c CERTIFICATE` — more
-than one cert = fixed). Intermediate expires 2027-11-02.
+(pipeline).
+
+**RESOLVED 2026-08-05, same day**: ETSI fixed their server — `openssl
+s_client -connect forge.etsi.org:443 -showcerts` now returns the full
+3-cert chain (leaf + GeoTrust TLS RSA CA G1 + DigiCert Global Root G2).
+Both wirings and `dev/ca-extra.pem` removed. The `ANTARES_EXTRA_CA_FILE`
+knob itself stays in the broker — it is the documented mechanism for
+private CAs (§16.4).
 
 ### 2026-08-05 — MqttUtils launches mosquitto with no readiness wait (tool bug, fixed in fork)
 

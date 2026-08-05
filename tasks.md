@@ -430,37 +430,80 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
 
 v0 runs `LocalBus` in one process. Scale-out needs the real spine.
 
-- [ ] F1. `antares-bus` NATS impl: `ANTARES_CHANGES` stream (Interest
+- [x] F1. `antares-bus` NATS impl: `ANTARES_CHANGES` stream (Interest
       retention), subjects `changes.{tenant}.{type_hash}.{id_hash}` (§7);
       pull consumers only; explicit ack AFTER processing; bounded prefetch
-      (§6.4).
-- [ ] F2. `ChangeEvent` finalized: op enum, `changed_attrs`, `payload` +
+      (§6.4). *(bus/nats.rs; hashes are hand-spelled FNV-1a 64 — bit-stable
+      wire contract, no dep; max_ack_pending 256; async-nats 0.50 pinned.)*
+- [x] F2. `ChangeEvent` finalized: op enum, `changed_attrs`, `payload` +
       `prev_payload` (load-bearing §7), `version`, `(incarnation, version)`
       ordering key + entityDeleted fence (§3.1.3); claim-check refs >256 KB
-      instead of chunking (§7).
-- [ ] F3. Transactional outbox drain (§10): publish from the outbox table
+      instead of chunking (§7). *(Deviation, deliberate: the producer sits in
+      the store, so op granularity is create/update/delete/batch — the finer
+      API ops are derivable and no consumer branches on them; changed_attrs
+      likewise stays empty because both consumers diff prev/payload
+      themselves. Claim check tested on the wire (bus/tests/nats.rs).)*
+- [x] F3. Transactional outbox drain (§10): publish from the outbox table
       with `Nats-Msg-Id` = row id dedup; never fire-and-forget after commit.
-- [ ] F4. JetStream KV subscription mirror: every instance `watch()`es,
+      *(Producer: same-tx enqueue inside every pg_entity write, behind
+      set_outbox — on exactly when bus=nats, so bus=local never grows the
+      table (R4). Drain runs on every api pod; concurrent drains are absorbed
+      by the duplicate window (dedup test proves the republish is swallowed).)*
+- [x] F4. JetStream KV subscription mirror: every instance `watch()`es,
       compiled-subscription map in `antares-matcher`; revisions as CAS;
       Postgres stays the system of record (§6.4). No SUB_ALIVE/SUB_SYNC
-      equivalent — ever (§7, §14.1).
-- [ ] F5. Registration mirror over `ANTARES_REGISTRY` stream: ONE compiled
+      equivalent — ever (§7, §14.1). *(DocMirror lives with the matcher code
+      in antares-api/notify.rs (v0 placement); it mirrors raw sub docs — the
+      compiled/per-type index shape is L3\'s lever, not this box. CUD → KV put
+      (null-doc tombstone), watcher-before-hydrate so no delta is lost;
+      per-key last-writer-wins converges. mutate\'s row lock plays the CAS
+      role — the KV is never authoritative.)*
+- [x] F5. Registration mirror over `ANTARES_REGISTRY` stream: ONE compiled
       mirror per process, delta-applied, expiry filtered at the single yield
-      point (§16.7).
-- [ ] F6. `--roles api,matcher,notifier,temporal,registry` actually split
+      point (§16.7). *(Broadcast = ephemeral consumer per instance; expiry
+      stays in matching_regs — the one yield point unchanged.)*
+- [x] F6. `--roles api,matcher,notifier,temporal,registry` actually split
       consumers (§9); `bus=local` asserts single-process-all-roles at
-      startup (§9.2).
-- [ ] F7. Topology assertions at startup: broadcast (ephemeral per-instance)
+      startup (§9.2). *(broker/wiring.rs; HTTP serves on every role (health/
+      orchestration), roles gate CONSUMERS; bus=nats additionally requires a
+      postgres/timescale store — per-process state cannot back replicas.
+      Interval firings become single-winner via a row-lock claim that
+      re-checks due-ness INSIDE the lock (§3.1.6) — engaged only in nats mode
+      so single-process bookkeeping ordering (046_12) is untouched.)*
+- [x] F7. Topology assertions at startup: broadcast (ephemeral per-instance)
       vs balanced (shared durable) explicit per consumer (§6.4, R10 lesson).
-- [ ] F8. Temporal auto-recording moves to the durable consumer
+      *(Explicit in the method names (consume_balanced vs
+      consume_registry_broadcast) AND server-verified by assert_topology
+      before traffic; the live 2-consumer test proves the semantics.)*
+- [x] F8. Temporal auto-recording moves to the durable consumer
       (`antares-temporal::recorder`), idempotent upserts on
-      `(tenant, entity, attr, observed_at)` (§6.4).
-- [ ] F9. Bus integration tests (testcontainers NATS): 2-consumer
+      `(tenant, entity, attr, observed_at)` (§6.4). *(bus=nats only; bus=local
+      keeps the synchronous mirror (suite-gated path, unchanged). Idempotence
+      by deterministic instanceIds — uuid5 over tenant|entity|attr|
+      incarnation|version|instance-identity — so redelivery re-computes the
+      same id and skips; the store\'s dual-write lands them on the
+      attr_instances unique key. entityDeleted is the fence. ponytail:
+      attribute-DELETION history stays with the api\'s synchronous
+      mirror_delete_attr in every mode — its result decides 404-vs-204 and
+      cannot leave the request path.)*
+- [x] F9. Bus integration tests (testcontainers NATS): 2-consumer
       broadcast-vs-balanced assertion, claim-check, dedup (§9.5); e2e
       2-instance sync + out-of-order publish injection (version-LWW holds,
-      §3.1 test hooks).
-- [ ] F10. Compose/pipeline: optional NATS profile for multi-role runs;
-      2-instance e2e in CI.
+      §3.1 test hooks). *(Env-gated live NATS (ANTARES_TEST_NATS_URL, the
+      house pattern instead of testcontainers): bus/tests/nats.rs all three;
+      broker/tests/nats_e2e.rs runs TWO real binaries with split roles — sub
+      + entity through the api instance, notification matched/delivered and
+      temporal recorded by the worker instance, then v5-before-v4 injection
+      proves ordering tolerance (the matcher projects no state; the
+      recorder\'s replay test covers the LWW/idempotence side).)*
+- [x] F10. Compose/pipeline: optional NATS profile for multi-role runs;
+      2-instance e2e in CI. *(The K2 HA overlay now carries its own NATS and
+      runs both replicas ANTARES_BUS=nats for postgres/timescale (HA_BUS
+      knob; memory keeps local for the pure LB/drain drills) — bus=local
+      replicas would double-fire interval subs, which is exactly the §9.2
+      assertion. CI: nats:2-alpine -js via docker run (services cannot pass
+      the -js argument) + ANTARES_TEST_NATS_URL, so the F9 tests and the
+      2-instance e2e run on every push.)*
 
 ## G. MQTT notification binding — clause 7 (feature `mqtt`, §5.4.10)
 
