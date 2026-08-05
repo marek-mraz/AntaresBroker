@@ -1,0 +1,104 @@
+# `postgres`-mode reference shape (§9/§10): stateless pods, RollingUpdate,
+# roles split — 2× api (HTTP, produces outbox + drains it) and 2× worker
+# (matcher,notifier,temporal — shared durables load-balance, interval
+# firings single-winner by row-lock claim). ANTARES_BUS=nats is what makes N
+# replicas ONE broker (F10); ANTARES_NATS_REPLICAS=3 puts the streams at R3
+# on the 3-node cluster (§10).
+#
+# ANTARES_DATABASE_URL points at CNPG's -rw service (postgres-cnpg.yaml); the
+# kind smoke overrides it to the postgres-dev service via kustomize-free env
+# (CI patches with sed — one line, no tooling).
+apiVersion: v1
+kind: Service
+metadata:
+  name: antares
+  namespace: antares
+spec:
+  selector: { app: antares, role: api }
+  ports:
+    - { port: 9090 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antares-api
+  namespace: antares
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: antares, role: api }
+  template:
+    metadata:
+      labels: { app: antares, role: api }
+    spec:
+      terminationGracePeriodSeconds: 30 # K1: > drain delay + deadline
+      containers:
+        - name: antares
+          image: antares-local:latest
+          imagePullPolicy: IfNotPresent
+          args: []
+          env:
+            - { name: ANTARES_STORE, value: postgres }
+            - name: ANTARES_DATABASE_URL
+              value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+            - { name: ANTARES_BUS, value: nats }
+            - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
+            - { name: ANTARES_NATS_REPLICAS, value: "3" }
+            - { name: ANTARES_ROLES, value: api }
+          ports:
+            - { containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            periodSeconds: 1
+          livenessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits: { memory: 350Mi } # the CI RSS gate's ceiling (R1/R2)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antares-worker
+  namespace: antares
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 1 }
+  selector:
+    matchLabels: { app: antares, role: worker }
+  template:
+    metadata:
+      labels: { app: antares, role: worker }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: antares
+          image: antares-local:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: ANTARES_STORE, value: postgres }
+            - name: ANTARES_DATABASE_URL
+              value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+            - { name: ANTARES_BUS, value: nats }
+            - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
+            - { name: ANTARES_NATS_REPLICAS, value: "3" }
+            - { name: ANTARES_ROLES, value: "matcher,notifier,temporal" }
+          ports:
+            - { containerPort: 9090 } # health only; no Service routes here
+          readinessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits: { memory: 350Mi }

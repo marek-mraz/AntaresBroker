@@ -1,0 +1,43 @@
+# kind/CI smoke ONLY: one PostGIS pod, no HA, no failover — the real shape is
+# postgres-cnpg.yaml. Recreate on purpose: two postgres pods on one PVC would
+# corrupt.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: antares
+spec:
+  selector: { app: postgres-dev }
+  ports:
+    - { port: 5432 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-dev
+  namespace: antares
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: postgres-dev }
+  template:
+    metadata:
+      labels: { app: postgres-dev }
+    spec:
+      containers:
+        - name: postgres
+          image: ghcr.io/baosystems/postgis:17-3.5
+          env:
+            - { name: POSTGRES_USER, value: antares }
+            - { name: POSTGRES_PASSWORD, value: antares }
+            - { name: POSTGRES_DB, value: antares }
+          ports:
+            - { containerPort: 5432 }
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "antares"]
+            periodSeconds: 5
+          resources:
+            requests: { memory: 256Mi, cpu: 100m }
+            limits: { memory: 1Gi }

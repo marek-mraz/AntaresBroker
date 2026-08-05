@@ -36,6 +36,9 @@ const KNOWN_KEYS: &[&str] = &[
     // ANTARES_NATS_URL).
     "ANTARES_BUS",
     "ANTARES_NATS_URL",
+    // §10 K5: stream/KV replication factor on a clustered JetStream (3 for
+    // the reference manifests' R3; default 1 for single-node).
+    "ANTARES_NATS_REPLICAS",
 ];
 
 /// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2

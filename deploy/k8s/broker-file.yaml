@@ -1,0 +1,67 @@
+# `file`-mode broker: ONE replica, strategy Recreate — HARD-CODED, not a
+# preference (tasks.md K-table): redb takes an exclusive file lock per volume
+# (K10 proved the refusal), so a RollingUpdate would spawn a second pod that
+# dies on "Database already open. Cannot acquire lock." forever. The restart
+# gap is the price of this rung and it is small: rebuild measured at 257k
+# entities/s + ~1 s process start (K10).
+apiVersion: v1
+kind: Service
+metadata:
+  name: antares-file
+  namespace: antares
+spec:
+  selector: { app: antares-file }
+  ports:
+    - { port: 9090 }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: antares-file-data
+  namespace: antares
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antares-file
+  namespace: antares
+spec:
+  replicas: 1 # the redb lock makes >1 structurally impossible
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: antares-file }
+  template:
+    metadata:
+      labels: { app: antares-file }
+    spec:
+      # K1: must exceed ANTARES_DRAIN_DELAY_MS + ANTARES_DRAIN_DEADLINE_SECS,
+      # or the kubelet turns a drain into a kill.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: antares
+          image: antares-local:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: ANTARES_STORE, value: file }
+            - { name: ANTARES_DATA_DIR, value: /data }
+          ports:
+            - { containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /q/health, port: 9090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            # the same ceiling the CI RSS gate enforces (R1/R2 lesson)
+            limits: { memory: 350Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: antares-file-data }

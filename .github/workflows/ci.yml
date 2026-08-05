@@ -149,6 +149,52 @@ jobs:
           echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
           echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
 
+  k8s-manifests:
+    # K5: lint every reference manifest, then kind-deploy the self-contained
+    # subset (nats + postgres-dev + both broker shapes) with the image the
+    # build job produced. `rollout status` green == readiness probes
+    # (/q/health) answered. The CNPG Cluster is lint-only here — the operator
+    # belongs to a real cluster (🖥, tasks.md K5/K11).
+    name: K8s reference manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform lint
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas deploy/k8s/
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: antares-smoke
+      - uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+      - name: Load the image under test
+        run: |
+          gunzip antares-image.tgz
+          kind load image-archive antares-image.tar --name antares-smoke
+      - name: Deploy the self-contained subset
+        run: |
+          kubectl apply -f deploy/k8s/namespace.yaml
+          kubectl apply -f deploy/k8s/nats.yaml -f deploy/k8s/postgres-dev.yaml
+          # kind has one PG: point the brokers at postgres-dev instead of CNPG,
+          # and a single-node NATS quorum: R1 streams
+          sed -e 's|antares-pg-rw.antares.svc|postgres.antares.svc|' \
+              -e 's|value: "3"|value: "1"|' deploy/k8s/broker-postgres.yaml \
+            | kubectl apply -f -
+          kubectl apply -f deploy/k8s/broker-file.yaml
+      - name: Wait for every rollout
+        run: |
+          kubectl -n antares rollout status statefulset/nats --timeout=180s
+          kubectl -n antares rollout status deploy/postgres-dev --timeout=180s
+          kubectl -n antares rollout status deploy/antares-api --timeout=300s
+          kubectl -n antares rollout status deploy/antares-worker --timeout=300s
+          kubectl -n antares rollout status deploy/antares-file --timeout=300s
+          kubectl -n antares get pods -o wide
+
   etsi-cell:
     # E9: full-granularity store × suite matrix — the per-commit conformance
     # signal. Each cell brings up its OWN fresh stack via the SAME pipeline

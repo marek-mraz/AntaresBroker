@@ -59,6 +59,13 @@ impl NatsBus {
     }
 
     async fn ensure_streams(&self) -> Result<(), BusError> {
+        // §10: R3 on a 3-node JetStream cluster. Stream replication is a
+        // CLIENT-side stream setting, so the K5 manifests set
+        // ANTARES_NATS_REPLICAS=3; single-node dev/CI keeps 1.
+        let replicas: usize = std::env::var("ANTARES_NATS_REPLICAS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         self.js
             .get_or_create_stream(stream::Config {
                 name: CHANGES_STREAM.into(),
@@ -68,6 +75,7 @@ impl NatsBus {
                 // (WorkQueue would forbid multiple consumer groups, §6.4.)
                 retention: stream::RetentionPolicy::Interest,
                 duplicate_window: std::time::Duration::from_secs(120),
+                num_replicas: replicas,
                 ..Default::default()
             })
             .await
@@ -80,6 +88,7 @@ impl NatsBus {
                 // consumers carry no interest, so bound by age instead.
                 retention: stream::RetentionPolicy::Limits,
                 max_age: std::time::Duration::from_secs(600),
+                num_replicas: replicas,
                 ..Default::default()
             })
             .await
@@ -87,6 +96,7 @@ impl NatsBus {
         self.js
             .create_key_value(async_nats::jetstream::kv::Config {
                 bucket: SUBS_BUCKET.into(),
+                num_replicas: replicas,
                 ..Default::default()
             })
             .await

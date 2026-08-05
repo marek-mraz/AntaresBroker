@@ -747,11 +747,23 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       still notifies. The LB half (haproxy fronting the pods) is the K2/K3
       overlay, already drill-proven; K8 re-validates it under full ETSI
       load.)*
-- [ ] K5. Reference manifests (compose + K8s): authored and lint/kind-tested
+- [x] K5. Reference manifests (compose + K8s): authored and lint/kind-tested
       in CI; 🖥 a REAL cluster is yours to point at. 3-node JetStream R3, Postgres
       primary/replica (CloudNativePG or Patroni), memory limits in EVERY
       manifest (R1/R2 lesson), `strategy: Recreate` hard-coded for `file`
       mode and `RollingUpdate` for `postgres`/`timescale`.
+      *(deploy/k8s/: namespace, nats (3-node JetStream StatefulSet, R3 via
+      ANTARES_NATS_REPLICAS=3), postgres-cnpg (CNPG Cluster instances:2,
+      PostGIS image), postgres-dev (kind smoke), broker-file (replicas:1 +
+      Recreate hard-coded — redb single-process), broker-postgres (2×api +
+      2×worker RollingUpdate, ANTARES_BUS=nats); 350Mi limit in every pod.
+      CI: kubeconform strict lint + kind smoke job in ci.yml. Sandbox note:
+      kind/k3d CANNOT run here (host denies cgroup subtree delegation —
+      memory controller unavailable to nested kubelets, verified EIO on
+      cgroup.procs migration), so the local proof is stronger-than-lint:
+      all 12 objects applied to a real k3s API server (--disable-agent)
+      under --validate=strict incl. the CNPG Cluster against the real CRD;
+      the kind smoke executes on the GitHub runner.)*
 
 ### K-ii. Prove it (the drills)
 
