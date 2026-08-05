@@ -606,8 +606,10 @@ antares/
 ├── rust-toolchain.toml         # pinned toolchain; MSRV policy = latest-stable minus 2
 ├── deny.toml                   # cargo-deny: license allowlist (TSL never linked!), advisories
 ├── .github/workflows/
-│   ├── ci.yml                  # fmt + clippy + unit/integration tests × feature matrix (§9.5)
-│   └── etsi.yml                # conformance serial run + 350 MiB RSS gate (port of Scorpio's)
+│   ├── ci.yml                  # ONE pipeline: fmt+clippy+workspace tests × feature
+│   │                           #   matrix → image → 4×8 ETSI matrix + 350 MiB RSS
+│   │                           #   gate → publish dev; +serial +release on a v* tag
+│   └── fuzz.yml                # weekly cargo-fuzz over the q/geo/scope parsers
 ├── crates/
 │   ├── antares-model/          # publishable as `ngsild-model`
 │   ├── antares-jsonld/
@@ -790,7 +792,7 @@ src/
 | Store integration | `antares-sql/tests/` via `sqlx::test` + testcontainers Postgres (PostGIS, ±Timescale) | every store × **both** temporal modes; RLS cross-tenant denial tests |
 | Bus integration | `antares-bus/tests/` (testcontainers NATS) | broadcast-vs-balanced 2-consumer assertion (R10), claim-check, dedup |
 | End-to-end | `antares-e2e` crate | full binary against docker Postgres+NATS: 2-instance sync, failover drill, notification delivery, `bus=local` single-node smoke |
-| Conformance | `etsi/` in `etsi.yml` CI | the 8 Robot suites + 350 MiB RSS gate; per-suite pass counts are the progress metric (§13) |
+| Conformance | `etsi/` in `ci.yml` CI | the 8 Robot suites + 350 MiB RSS gate; per-suite pass counts are the progress metric (§13) |
 | Load | `xtask load-rig` | phase-4 10M/1000-tenant soak (§13) |
 
 Workspace hygiene, enforced not aspirational: all dependency versions live in `[workspace.dependencies]` only; `[workspace.lints]` sets `unsafe_code = "forbid"` (exception: the `sonic` feature module, locally allowed and reviewed), `unwrap_used`/`expect_used` denied outside tests; `cargo deny` gates licenses (nothing links TSL — Timescale is talked to over SQL, never linked) and advisories; CI builds the feature matrix `--no-default-features`, default, `--all-features`, and runs stores against both temporal modes and both buses. Doc rule: every `docs/adr/` entry records one irreversible decision (tenancy model, bus choice, WS deferral) — this analysis stays the map, ADRs are the ledger.
@@ -1080,11 +1082,15 @@ Test rig: the phase-4 load rig (§13) gains a federation scenario — 1 tenant �
 > + that mode's 8 suite cells), or `STORE=<mode> STOP_ON_ERROR=1
 > dev/etsi-pipeline.sh` for the tight debug loop. Local cells run serially,
 > so running all four costs ~4× wall-clock for a signal CI already produces.
-> **CI runs all four modes in parallel** — `.github/workflows/etsi.yml` fans
-> out a 4 × 8 store × suite matrix (`fail-fast: false`, one image build feeds
-> all 32 cells) and is the authority; `:latest` publishes only when every
-> cell is green. `STORE=all dev/etsi-local.sh` reproduces the matrix locally
-> on the rare occasion that is worth the wall-clock.
+> **CI runs all four modes in parallel** — ONE pipeline,
+> `.github/workflows/ci.yml`, fans out a 4 × 8 store × suite matrix
+> (`fail-fast: false`, one image build feeds all 32 cells) and is the
+> authority. Per commit: workspace tests → build → matrix → matrix summary →
+> publish `:dev` + `:<sha>`. On a `v*` tag it additionally runs the serial
+> all-suites job (E9d) and publishes `:<version>` + `:latest` — so `:latest`
+> is a released version, never an untagged master build, and the serial run
+> never lengthens a commit. `STORE=all dev/etsi-local.sh` reproduces the
+> matrix locally on the rare occasion that is worth the wall-clock.
 > Never build (cargo or docker) while a measured ETSI run is in flight — CPU
 > contention manufactures phantom mock-502 and notification-timeout failures.
 

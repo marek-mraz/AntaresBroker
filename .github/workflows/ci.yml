@@ -1,18 +1,52 @@
 name: ci
+
+# ONE pipeline. Two outcomes, chosen by what you pushed:
+#
+#   every commit      workspace tests → image build → 32-cell store × suite
+#                     matrix → matrix summary → publish the DEV image.
+#                     No serial run, no :latest, no version tag.
+#
+#   version tag (v*)  the same, PLUS the serial all-suites run, and the
+#                     publish mints the PRODUCTION image: the tag itself and
+#                     :latest.
+#
+# Why the serial run is release-only (E9d): the matrix gives each cell its own
+# fresh stack, so it is fast and pollution-free but proves nothing about
+# `reset_state()` (clean_db.sh + dev/reset-broker.sh between suites) — the
+# exact place phantom state hides. The serial run is the authoritative gate and
+# costs all-suites wall-clock, so it guards releases and the nightly, never a
+# commit.
+
 on:
   push:
     branches: [master]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 2 * * *" # nightly serial run (E9d), 02:23 UTC
+
+# A newer commit supersedes a running pipeline — but never cancel a release.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
-  CARGO_TERM_COLOR: always
-  # Live PostGIS for the antares-sql integration tests (C14) — without this
-  # they skip vacuously and CI proves nothing about the Pg store.
-  ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54329/antares
+  MEM_LIMIT_MB: 350 # per-broker peak-RSS gate, same limit as ScorpioBroker's pipeline
 
 jobs:
-  check:
+  workspace:
+    # fmt + clippy + the workspace test suite across the feature matrix, with
+    # live PostGIS / TimescaleDB / mosquitto so no integration test skips
+    # vacuously. Nothing expensive fans out until this is green.
+    name: Workspace tests
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      # Live PostGIS for the antares-sql integration tests (C14) — without this
+      # they skip vacuously and CI proves nothing about the Pg store.
+      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54329/antares
+      CARGO_TERM_COLOR: always
     services:
       postgis:
         image: ghcr.io/baosystems/postgis:17-3.5
@@ -70,8 +104,252 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses advisories
+      # E9g: the ETSI resource sampler + its sample↔TP join fail silently when
+      # broken (an empty column reads as "nothing happened") — check them here.
+      - name: ETSI sampling self-check
+        run: python3 dev/etsi-selftest.py
       # SQL-injection guard (§16.2): no string-built queries outside antares-sql
       - name: no format! into SQL outside the compiler
         run: |
           ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
             | grep -v 'crates/antares-sql/'
+
+  build:
+    # ONE image for the whole run. Every store mode tests the SAME bytes, and
+    # the image that ships is the image the suites ran against. Runs alongside
+    # the workspace job (one runner, no fan-out) — only the 32-cell matrix
+    # waits for tests to be green.
+    name: Build the image under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build antares-local:latest
+        run: docker build -t antares-local:latest .
+
+      - name: Export it for the mode jobs
+        run: docker save antares-local:latest | gzip > antares-image.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antares-image
+          path: antares-image.tgz
+          retention-days: 3
+
+      - name: Report image size
+        run: |
+          echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
+
+  etsi-cell:
+    # E9: full-granularity store × suite matrix — the per-commit conformance
+    # signal. Each cell brings up its OWN fresh stack via the SAME pipeline
+    # script (E9c: cross-suite pollution gone by construction), filtered with
+    # SUITES=. ONE image build feeds all 32 cells (E9b, via the build job's
+    # artifact). Not finer than per-suite (E9f): intra-suite sharding only pays
+    # once a cell exceeds ~15 min, and then each shard needs its own stack.
+    name: ${{ matrix.store }} × ${{ matrix.suite }}
+    needs: [workspace, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, file, postgres, timescale]
+        suite: [CommonBehaviours, Consumption, Provision, Subscription,
+                ContextSource, jsonldContext, DistributedOperations, IOP]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all cells
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Run this cell through the ONE pipeline
+        env:
+          STORE: ${{ matrix.store }}
+          SUITES: ${{ matrix.suite }}
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload cell results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-cell-${{ matrix.store }}-${{ matrix.suite }}
+          path: |
+            results/${{ matrix.store }}/run-summary.md
+            results/${{ matrix.store }}/gate-status.txt
+            results/${{ matrix.store }}/failures.csv
+            results/${{ matrix.store }}/resource-samples.csv
+            results/${{ matrix.store }}/resource-by-test.csv
+            results/${{ matrix.store }}/**/log.html
+          retention-days: 7
+
+      - name: Gate — this cell 100% green
+        run: |
+          gate=$(cat "results/${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "gate(${{ matrix.store }} × ${{ matrix.suite }}) = $gate"
+          [ "$gate" = PASS ]
+
+  etsi-serial:
+    # E9d: the authoritative run — every suite, IN ORDER, against ONE stack,
+    # so `reset_state()` (clean_db.sh + dev/reset-broker.sh) is exercised
+    # between suites. The matrix cells each get a fresh stack and therefore
+    # prove nothing about reset; a broker that leaks state across suites is
+    # green there and red here. Four store modes in parallel, one job each.
+    #
+    # Release tags, nightly, and manual only — a plain commit gets the matrix
+    # and nothing else.
+    name: serial ${{ matrix.store }} (all suites, one stack)
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+    needs: [workspace, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, file, postgres, timescale]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Run EVERY suite serially through the ONE pipeline
+        env:
+          STORE: ${{ matrix.store }}
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/serial-${{ matrix.store }}
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload serial results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-serial-${{ matrix.store }}
+          path: |
+            results/serial-${{ matrix.store }}/run-summary.md
+            results/serial-${{ matrix.store }}/gate-status.txt
+            results/serial-${{ matrix.store }}/failures.csv
+            results/serial-${{ matrix.store }}/resource-samples.csv
+            results/serial-${{ matrix.store }}/resource-by-test.csv
+            results/serial-${{ matrix.store }}/**/log.html
+          retention-days: 14
+
+      - name: Gate — the serial run is 100% green
+        run: |
+          gate=$(cat "results/serial-${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "serial gate(${{ matrix.store }}) = $gate"
+          cat "results/serial-${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
+  etsi-aggregate:
+    # Concat all 32 cells into 4 per-store tables (same | Suite | Pass |
+    # Fail | Skip | shape as run-summary.md) — the single required status
+    # check; any red/missing cell fails it.
+    name: Matrix summary
+    if: always()
+    needs: etsi-cell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all cell results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ETSI-cell-*
+          path: cells
+
+      - name: Build the 4 per-store tables (shared with dev/etsi-local.sh)
+        run: ./dev/etsi-matrix-summary.py cells
+
+  publish-dev:
+    # Every green commit on master ships a DEV image: the sha and a moving
+    # `dev` tag. Never `latest` — that belongs to a released version, so
+    # `docker pull …:latest` can't silently land on an untagged master build.
+    # success() is EXPLICIT: a custom `if` replaces the implicit needs-check,
+    # and etsi-aggregate runs under always() so it can be a failure here.
+    name: Publish the dev image to GHCR
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push' && success()
+    needs: etsi-aggregate
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - name: Push the EXACT image the matrix tested
+        run: |
+          docker load < antares-image.tgz
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
+          docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
+          docker tag antares-local:latest "$IMG:dev"
+          docker push "$IMG:${GITHUB_SHA::7}"
+          docker push "$IMG:dev"
+          echo -e "\n## Published dev: \`$IMG:dev\` + \`$IMG:${GITHUB_SHA::7}\` (32/32 matrix cells green)" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-release:
+    # A version tag is the only thing that mints a production image, and it
+    # needs BOTH gates: the 32-cell matrix AND the serial all-suites run.
+    name: Publish the release image to GHCR
+    if: startsWith(github.ref, 'refs/tags/v') && success()
+    needs: [etsi-aggregate, etsi-serial]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - name: Push the EXACT image both gates tested
+        run: |
+          docker load < antares-image.tgz
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
+          VER="${GITHUB_REF#refs/tags/}"
+          docker tag antares-local:latest "$IMG:$VER"
+          docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
+          docker tag antares-local:latest "$IMG:latest"
+          docker push "$IMG:$VER"
+          docker push "$IMG:${GITHUB_SHA::7}"
+          docker push "$IMG:latest"
+          echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"

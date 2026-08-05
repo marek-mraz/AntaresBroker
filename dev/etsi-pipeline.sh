@@ -22,13 +22,21 @@
 #   RESULTS_DIR=results/$STORE       where this invocation writes its results
 #                                    (dev/etsi-local.sh gives each serial
 #                                    matrix cell its own dir)
+#   SAMPLE_INTERVAL=1                seconds between CPU/RSS samples (E9g)
 #
 # Locally run ONE cell at a time:   STORE=postgres SUITES=Consumption dev/etsi-pipeline.sh
 # (dev/etsi-local.sh loops the full store × suite matrix serially; CI builds
 # the image ONCE and runs the same 32 cells in parallel with SKIP_BUILD=1.)
 #
-# Output per mode: results/$STORE/{<suite>/output.xml, resource-samples.csv,
-#                  run-summary.md, gate-status.txt}
+# Output per mode, under results/$STORE/ (all uploaded as CI artifacts):
+#   <suite>/output.xml + log.html   Robot's own results and drill-down
+#   resource-samples.csv            EVERY 1 Hz CPU/RSS sample, each labelled
+#                                   with the suite AND the TP that was running
+#   resource-by-test.csv            per test × broker rollup: avg/peak CPU+RSS
+#   failures.csv                    every failing TP with its full message
+#   run-summary.md                  the human view incl. the top-10 spike
+#                                   tables (which test caused the peak)
+#   gate-status.txt                 PASS/FAIL — suites green AND RSS ≤ limit
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -102,30 +110,22 @@ for port in 9090 9091 9092 9093 9094; do
   curl -sf "localhost:$port/q/health" >/dev/null || { echo "broker on :$port not healthy"; exit 1; }
 done
 
-# 4. Resource monitor (CPU + RSS, every antares container) for the whole run.
-# Nested docker daemons report 0B memory in `docker stats` (no cgroup memory
-# accounting) — fall back to VmRSS from /proc/<container pid>/status, which is
-# visible here because the daemon is our child.
-( while :; do
-    ids=$(docker ps -q --filter name=antares)
-    if [ -n "$ids" ]; then
-      docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $ids \
-        | while IFS=, read -r name cpu mem; do
-            case "$mem" in
-              "0B / 0B"|0B*)
-                pid=$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)
-                kb=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
-                [ -n "${kb:-}" ] && mem="$((kb / 1024))MiB / 0B" ;;
-            esac
-            echo "$(date +%s),$name,$cpu,$mem"
-          done
-    fi
-    sleep 2
-  done > "$RESULTS/resource-samples.csv" ) &
+# 4. Resource monitor: CPU + RSS of every antares container, every second, for
+# the whole run. PHASE_FILE carries the suite currently under test so each
+# sample can be traced back to what caused it; the report step then joins the
+# samples to individual TPs on their Robot timestamps.
+PHASE_FILE="$RESULTS/.current-phase"
+echo "startup" > "$PHASE_FILE"
+export PHASE_FILE
+python3 dev/etsi-sampler.py \
+  --out "$RESULTS/resource-samples.csv" \
+  --phase-file "$PHASE_FILE" \
+  --interval "${SAMPLE_INTERVAL:-1}" &
 MONITOR_PID=$!
 
 teardown() {
   kill "$MONITOR_PID" 2>/dev/null || true
+  rm -f "$PHASE_FILE"
   # Leave the suite submodule clean (E7) — the IOP step seds variables.py.
   git -C ngsi-ld-test-suite checkout -- resources/variables.py 2>/dev/null || true
   [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
@@ -152,6 +152,7 @@ fi
 # variables.py HERE — etsi-run.sh restores it on exit (E7), so this step must
 # never rely on that sed surviving.
 if [ "$RUN_IOP" = 1 ]; then
+echo "IOP" > "$PHASE_FILE"
 ( cd ngsi-ld-test-suite/resources
   sed -i "s|^url = .*|url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
   sed -i "s|^temporal_api_url = .*|temporal_api_url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
@@ -167,87 +168,11 @@ if [ "$RUN_IOP" = 1 ]; then
     IOP_TP ) || true
 fi
 
-# 7. Report: suite table + per-broker CPU/RSS + image size + memory gate.
+# 7. Report: suite table, per-broker CPU/RSS, spike attribution, downloadable
+# failure + sample CSVs, image size and the memory gate.
 kill "$MONITOR_PID" 2>/dev/null || true
 IMAGE_BYTES=$(docker image inspect antares-local:latest --format '{{.Size}}' 2>/dev/null || echo 0)
 RESULTS="$RESULTS" STORE="$STORE" MEM_LIMIT_MB="$MEM_LIMIT_MB" IMAGE_BYTES="$IMAGE_BYTES" \
-python3 - <<'EOF'
-import collections, glob, os, re, xml.etree.ElementTree as ET
-
-results, store = os.environ["RESULTS"], os.environ["STORE"]
-limit = float(os.environ["MEM_LIMIT_MB"])
-image_mb = int(os.environ["IMAGE_BYTES"]) / 1024 / 1024
-
-suites, fails, total_pass, total_fail = [], [], 0, 0
-for path in sorted(glob.glob(f"{results}/*/output.xml")):
-    name = path.split("/")[-2]
-    try:
-        root = ET.parse(path).getroot()
-    except Exception as e:
-        suites.append((name, "—", "—", f"unreadable: {e}")); total_fail += 1; continue
-    stat = root.find("./statistics/total/stat")
-    p, f, s = (int(stat.get(k, "0")) for k in ("pass", "fail", "skip"))
-    suites.append((name, p, f, s)); total_pass += p; total_fail += f + s
-    for test in root.iter("test"):
-        st = test.find("status")
-        txt = (st.text or "").strip()
-        if st.get("status") == "FAIL" and "exit-on-failure" not in txt:
-            fails.append((name, test.get("name"), txt[:200]))
-
-rows = collections.defaultdict(lambda: {"cpu": [], "mem": []})
-def mib(v):
-    m = re.match(r"\s*([\d.]+)\s*([KMG])iB", v)
-    if not m: return None
-    x, u = float(m.group(1)), m.group(2)
-    return x / 1024 if u == "K" else x * 1024 if u == "G" else x
-try:
-    for line in open(f"{results}/resource-samples.csv"):
-        parts = line.strip().split(",")
-        if len(parts) < 4: continue
-        try: rows[parts[1]]["cpu"].append(float(parts[2].rstrip("%")))
-        except ValueError: pass
-        v = mib(parts[3].split("/")[0])
-        if v is not None: rows[parts[1]]["mem"].append(v)
-except OSError:
-    pass
-
-peaks = {n: max(d["mem"], default=0) for n, d in rows.items()}
-# Some daemons (DinD without a delegated memory cgroup) report "0B / 0B" —
-# say so rather than letting an unmeasured gate pass silently; CI runners
-# report real values and DO enforce the limit.
-measurable = any(p > 0 for p in peaks.values())
-mem_ok = bool(peaks) and (not measurable or all(p <= limit for p in peaks.values()))
-gate = "PASS" if mem_ok and total_fail == 0 and total_pass > 0 else "FAIL"
-open(f"{results}/gate-status.txt", "w").write(gate + "\n")
-
-avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
-with open(f"{results}/run-summary.md", "w") as out:
-    out.write(f"## ETSI results — store: `{store}`\n\n")
-    out.write(f"**{total_pass} passed, {total_fail} failed/skipped — gate {gate}** · "
-              f"image {image_mb:.0f} MB · peak RSS limit {limit:.0f} MiB\n\n")
-    if os.environ.get("BACKED_NOTE"):
-        out.write(f"> ⚠️ {os.environ['BACKED_NOTE']}\n\n")
-    if peaks and not measurable:
-        out.write("> ⚠️ RSS not measurable on this docker daemon (stats reported 0B) — "
-                  "the memory gate was not evaluated in this run\n\n")
-    out.write("| Suite | Pass | Fail | Skip |\n|---|---|---|---|\n")
-    for name, p, f, s in suites:
-        out.write(f"| {name} | {p} | {f} | {s} |\n")
-    if fails:
-        out.write(f"\n### Failures ({len(fails)}) — first 50\n\n")
-        for name, test, msg in fails[:50]:
-            out.write(f"- **{name} / {test}**: {msg}\n")
-    out.write("\n### Broker resources\n\n")
-    out.write("| Broker | Samples | CPU avg | CPU peak | RSS avg | RSS peak |\n|---|---|---|---|---|---|\n")
-    for name in sorted(rows):
-        c, m = rows[name]["cpu"], rows[name]["mem"]
-        out.write(f"| {name} | {max(len(c), len(m))} | {avg(c):.1f}% | {max(c, default=0):.1f}% "
-                  f"| {avg(m):.0f} MiB | {max(m, default=0):.0f} MiB |\n")
-    if not mem_ok and peaks:
-        worst = max(peaks, key=peaks.get)
-        out.write(f"\n**memory gate: {worst} peaked at {peaks[worst]:.0f} MiB vs limit {limit:.0f} MiB**\n")
-
-print(open(f"{results}/run-summary.md").read())
-EOF
+  python3 dev/etsi-report.py
 
 grep -q '^PASS$' "$RESULTS/gate-status.txt"
