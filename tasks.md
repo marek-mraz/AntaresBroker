@@ -477,15 +477,22 @@ v0 runs `LocalBus` in one process. Scale-out needs the real spine.
       before traffic; the live 2-consumer test proves the semantics.)*
 - [x] F8. Temporal auto-recording moves to the durable consumer
       (`antares-temporal::recorder`), idempotent upserts on
-      `(tenant, entity, attr, observed_at)` (§6.4). *(bus=nats only; bus=local
-      keeps the synchronous mirror (suite-gated path, unchanged). Idempotence
-      by deterministic instanceIds — uuid5 over tenant|entity|attr|
-      incarnation|version|instance-identity — so redelivery re-computes the
-      same id and skips; the store\'s dual-write lands them on the
-      attr_instances unique key. entityDeleted is the fence. ponytail:
-      attribute-DELETION history stays with the api\'s synchronous
-      mirror_delete_attr in every mode — its result decides 404-vs-204 and
-      cannot leave the request path.)*
+      `(tenant, entity, attr, observed_at)` (§6.4). *(SUPERSEDED 2026-08-05,
+      K8 lesson: the recorder consumer is REMOVED and auto-recording is
+      synchronous in the write path in every bus mode. Every write goes
+      through an api pod that has the shared store, so in-request recording
+      gives read-your-writes — the ETSI suite asserts history immediately
+      after a write — and kills the late-replay resurrection race (a consumer
+      re-applying a pre-delete event after a direct temporal delete). The
+      consumer double-applied by design and bought nothing but the races;
+      `antares-temporal` is deleted, the `temporal` role keeps only the
+      plain-mode partition job. The temporal_writer durable is gone — that
+      durable-name contract change is this note (§9.1). The normative
+      property F8 wanted — history recorded in every mode, idempotently —
+      holds: the store\'s dual-write lands instances on the attr_instances
+      unique key under the entity row lock. nats_e2e proves history reads
+      correctly cross-pod; the outbox drain gains a same-process nudge so
+      publish latency is ~1 ms instead of the 250 ms poll.)*
 - [x] F9. Bus integration tests (testcontainers NATS): 2-consumer
       broadcast-vs-balanced assertion, claim-check, dedup (§9.5); e2e
       2-instance sync + out-of-order publish injection (version-LWW holds,

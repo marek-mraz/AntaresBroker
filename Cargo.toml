@@ -9,7 +9,6 @@ members = [
     "crates/antares-api",
     "crates/antares-matcher",
     "crates/antares-notifier",
-    "crates/antares-temporal",
     "crates/antares-registry",
     "crates/antares-broker",
 ]
@@ -32,7 +31,6 @@ antares-bus = { path = "crates/antares-bus" }
 antares-api = { path = "crates/antares-api" }
 antares-matcher = { path = "crates/antares-matcher" }
 antares-notifier = { path = "crates/antares-notifier", default-features = false }
-antares-temporal = { path = "crates/antares-temporal" }
 antares-registry = { path = "crates/antares-registry" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }

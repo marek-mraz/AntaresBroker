@@ -14,7 +14,9 @@
 //!   matcher /     one shared DURABLE ("matcher"): decode → process_change →
 //!   notifier      ack AFTER processing; the KV-watched subscription mirror;
 //!                 the interval loop (single-winner by row-lock claim).
-//!   temporal      one shared DURABLE ("temporal_writer"): the F8 recorder.
+//!   temporal      no bus consumer — auto-recording is synchronous in the
+//!                 write path (K8 lesson); the role only carries the
+//!                 plain-mode partition job, wired in main.rs.
 //!
 //! Concurrent drains on N api pods double-publish only within the stream's
 //! duplicate window, where `Nats-Msg-Id` = outbox seq absorbs them — that is
@@ -99,9 +101,25 @@ pub async fn wire_nats(
     let bus = Arc::new(NatsBus::connect(url).await?);
     // F3: entity writes now enqueue their events in the write transaction.
     state.store.set_outbox(true);
-    // F8: the temporal role's recorder owns auto-recording — api pods stop
-    // writing history synchronously (mirror_delete_attr stays, see recorder).
-    state.record_locally = false;
+    // Auto-recording stays SYNCHRONOUS in the write path in every bus mode
+    // (K8 lesson): every write goes through an api-role pod that has the
+    // shared store, so recording in-request gives read-your-writes — the
+    // ETSI suite asserts history immediately after a write — and kills the
+    // late-replay resurrection race (a consumer re-applying a pre-delete
+    // event AFTER a direct temporal delete). The F8 recorder consumer this
+    // replaced double-applied by design; it bought nothing but the races.
+
+    // The drain nudge: a same-process write pokes its own drain, so publish
+    // latency is ~1 ms, not the idle-poll interval. Cross-pod writes are
+    // still covered by each pod's own nudge; the poll below stays as the
+    // crash-recovery fallback.
+    let nudge = Arc::new(tokio::sync::Notify::new());
+    {
+        let n = nudge.clone();
+        state
+            .store
+            .set_change_hook(Box::new(move |_, _, _| n.notify_one()));
+    }
 
     let mut durables: Vec<&'static str> = Vec::new();
 
@@ -161,49 +179,65 @@ pub async fn wire_nats(
 
         // F3: the outbox drain. Runs on every api pod; concurrent drains are
         // absorbed by Nats-Msg-Id dedup within the duplicate window.
-        let store = state.store.clone();
-        let bus_for_drain = bus.clone();
-        tokio::spawn(async move {
-            loop {
-                let rows = match store.outbox_peek(64) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!("outbox peek failed: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // ANTARES_OUTBOX_DRAIN=off leaves the rows for another pod's drain —
+        // the K9 crash-drill lever and the dedicated-drainer split.
+        let drain_on = std::env::var("ANTARES_OUTBOX_DRAIN")
+            .map(|v| v != "off")
+            .unwrap_or(true);
+        if !drain_on {
+            tracing::warn!("outbox drain OFF on this pod (ANTARES_OUTBOX_DRAIN=off)");
+        }
+        if drain_on {
+            let store = state.store.clone();
+            let bus_for_drain = bus.clone();
+            tokio::spawn(async move {
+                loop {
+                    let rows = match store.outbox_peek(64) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!("outbox peek failed: {e}");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+                    if rows.is_empty() {
+                        // woken by the same-process write hook, or the fallback
+                        // poll for rows another pod failed to publish
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(250),
+                            nudge.notified(),
+                        )
+                        .await;
                         continue;
                     }
-                };
-                if rows.is_empty() {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    continue;
-                }
-                let mut acked = 0i64;
-                for (seq, _tenant, event) in rows {
-                    match serde_json::from_value::<ChangeEvent>(event) {
-                        Ok(mut ev) => {
-                            ev.seq = seq;
-                            match bus_for_drain.publish(&ev).await {
-                                Ok(()) => acked = seq,
-                                Err(e) => {
-                                    tracing::warn!("outbox publish of seq {seq} failed: {e}");
-                                    break; // retry from here next round
+                    let mut acked = 0i64;
+                    for (seq, _tenant, event) in rows {
+                        match serde_json::from_value::<ChangeEvent>(event) {
+                            Ok(mut ev) => {
+                                ev.seq = seq;
+                                match bus_for_drain.publish(&ev).await {
+                                    Ok(()) => acked = seq,
+                                    Err(e) => {
+                                        tracing::warn!("outbox publish of seq {seq} failed: {e}");
+                                        break; // retry from here next round
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                // an undecodable row would wedge the drain forever
+                                tracing::error!("outbox row {seq} undecodable ({e}) — skipped");
+                                acked = seq;
+                            }
                         }
-                        Err(e) => {
-                            // an undecodable row would wedge the drain forever
-                            tracing::error!("outbox row {seq} undecodable ({e}) — skipped");
-                            acked = seq;
+                    }
+                    if acked > 0 {
+                        if let Err(e) = store.outbox_ack(acked) {
+                            tracing::warn!("outbox ack {acked} failed: {e}");
                         }
                     }
                 }
-                if acked > 0 {
-                    if let Err(e) = store.outbox_ack(acked) {
-                        tracing::warn!("outbox ack {acked} failed: {e}");
-                    }
-                }
-            }
-        });
+            });
+        }
     }
 
     if roles.matcher || roles.notifier {
@@ -261,29 +295,9 @@ pub async fn wire_nats(
         });
     }
 
-    if roles.temporal {
-        durables.push("temporal_writer");
-        let consumer = bus.consume_balanced("temporal_writer").await?;
-        let store = state.store.clone();
-        tokio::spawn(async move {
-            loop {
-                let mut msgs = match consumer.messages().await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!("temporal consumer stream failed: {e}");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
-                    }
-                };
-                while let Some(Ok(msg)) = msgs.next().await {
-                    if let Some(ev) = nats::decode(&msg) {
-                        antares_temporal::recorder::apply(&store, &ev);
-                    }
-                    let _ = msg.ack().await;
-                }
-            }
-        });
-    }
+    // The temporal role carries no bus consumer: auto-recording is
+    // synchronous in the write path (see above), and plain-mode partition
+    // maintenance runs from main.rs regardless of bus mode.
 
     // F7: the server must agree these are shared durables (R10 lesson).
     bus.assert_topology(&durables).await?;

@@ -39,6 +39,10 @@ const KNOWN_KEYS: &[&str] = &[
     // §10 K5: stream/KV replication factor on a clustered JetStream (3 for
     // the reference manifests' R3; default 1 for single-node).
     "ANTARES_NATS_REPLICAS",
+    // F3/K9: outbox drain on this pod, on (default) | off. `off` is the
+    // crash-drill lever (rows commit but this pod never publishes them —
+    // another pod's drain must) and the knob for a dedicated-drainer split.
+    "ANTARES_OUTBOX_DRAIN",
 ];
 
 /// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2

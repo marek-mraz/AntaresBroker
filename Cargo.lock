@@ -73,7 +73,6 @@ dependencies = [
  "antares-bus",
  "antares-model",
  "antares-sql",
- "antares-temporal",
  "axum",
  "futures-util",
  "hyper",
@@ -171,18 +170,6 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "antares-temporal"
-version = "0.1.0"
-dependencies = [
- "antares-bus",
- "antares-model",
- "antares-sql",
- "serde_json",
- "tracing",
- "uuid",
 ]
 
 [[package]]

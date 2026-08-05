@@ -2,8 +2,9 @@
 //! one shared Postgres + one NATS. Instance A serves the API only; instance B
 //! runs matcher+notifier+temporal only. A subscription and an entity created
 //! through A must produce a notification matched and delivered BY B (the KV
-//! mirror + outbox drain + durable consumer spine, end to end), and B's
-//! recorder must materialize the temporal evolution A no longer writes.
+//! mirror + outbox drain + durable consumer spine, end to end). Temporal
+//! auto-recording is synchronous in A's write path (every mode — K8 lesson),
+//! so the evolution must be readable immediately through A.
 //! Plus the §3.1 ordering-tolerance hook: events injected out of order still
 //! both notify (the matcher projects no state).
 //!
@@ -33,18 +34,22 @@ fn free_port() -> u16 {
 }
 
 fn start(port: u16, roles: &str, db: &str, nats: &str) -> Broker {
-    Broker(
-        Command::new(env!("CARGO_BIN_EXE_antares"))
-            .env("ANTARES_HTTP_PORT", port.to_string())
-            .env("ANTARES_STORE", "postgres")
-            .env("ANTARES_DATABASE_URL", db)
-            .env("ANTARES_BUS", "nats")
-            .env("ANTARES_NATS_URL", nats)
-            .env("ANTARES_ROLES", roles)
-            .env("ANTARES_EGRESS_ALLOW_PRIVATE", "true")
-            .spawn()
-            .expect("spawn antares"),
-    )
+    start_env(port, roles, db, nats, &[])
+}
+
+fn start_env(port: u16, roles: &str, db: &str, nats: &str, extra: &[(&str, &str)]) -> Broker {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_antares"));
+    cmd.env("ANTARES_HTTP_PORT", port.to_string())
+        .env("ANTARES_STORE", "postgres")
+        .env("ANTARES_DATABASE_URL", db)
+        .env("ANTARES_BUS", "nats")
+        .env("ANTARES_NATS_URL", nats)
+        .env("ANTARES_ROLES", roles)
+        .env("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    Broker(cmd.spawn().expect("spawn antares"))
 }
 
 fn wait_healthy(port: u16) {
@@ -145,8 +150,19 @@ fn wait_for<F: Fn() -> bool>(what: &str, secs: u64, f: F) {
     }
 }
 
+/// One test at a time: the tests share one database and one NATS, and a
+/// sibling test's api pod (drain ON) would legitimately publish the sigkill
+/// drill's deliberately-unpublished outbox rows — the product recovering
+/// rows is exactly what makes the parallel run flaky.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn roles_split_across_two_instances_notifies_and_records() {
+    let _serial = serial();
     let (Ok(db), Ok(nats)) = (
         std::env::var("ANTARES_TEST_DATABASE_URL"),
         std::env::var("ANTARES_TEST_NATS_URL"),
@@ -202,8 +218,8 @@ fn roles_split_across_two_instances_notifies_and_records() {
         seen.lock().expect("seen").iter().any(|b| b.contains(&eid))
     });
 
-    // temporal evolution recorded by B's recorder (A skips local recording)
-    wait_for("the recorder's temporal doc", 30, || {
+    // temporal evolution recorded synchronously in A's write path
+    wait_for("the temporal doc", 30, || {
         http(
             api_port,
             "GET",
@@ -261,6 +277,7 @@ fn roles_split_across_two_instances_notifies_and_records() {
 /// keep flowing without it.
 #[test]
 fn api_pods_interchangeable_and_worker_group_survives_a_kill() {
+    let _serial = serial();
     let (Ok(db), Ok(nats)) = (
         std::env::var("ANTARES_TEST_DATABASE_URL"),
         std::env::var("ANTARES_TEST_NATS_URL"),
@@ -346,6 +363,7 @@ fn api_pods_interchangeable_and_worker_group_survives_a_kill() {
 /// never about winning a race.
 #[test]
 fn sigkill_between_commit_and_publish_republishes_from_outbox() {
+    let _serial = serial();
     let (Ok(db), Ok(nats)) = (
         std::env::var("ANTARES_TEST_DATABASE_URL"),
         std::env::var("ANTARES_TEST_NATS_URL"),
@@ -375,56 +393,56 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
     wait_healthy(worker_port);
     let (rx_port, seen) = receiver();
 
-    let mut caught: Vec<String> = Vec::new();
-    for attempt in 0..10 {
-        let api_port = free_port();
-        let mut api = start(api_port, "api", &db, &nats);
-        wait_healthy(api_port);
-        if attempt == 0 {
-            let sub = format!(
-                r#"{{"id":"urn:ngsi-ld:Subscription:k9:{run}","type":"Subscription",
-                    "entities":[{{"type":"K9Probe"}}],
-                    "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
-            );
-            let resp = http(
-                api_port,
-                "POST",
-                "/ngsi-ld/v1/subscriptions",
-                Some(&tenant),
-                Some(&sub),
-            );
-            assert!(resp.starts_with("HTTP/1.1 201"), "sub: {resp}");
-        }
-        // burst of acked writes, then die instantly — try to beat the drain
-        let ids: Vec<String> = (0..20)
-            .map(|i| format!("urn:ngsi-ld:K9Probe:{run}:{attempt}:{i}"))
-            .collect();
-        for id in &ids {
-            let resp = http(
-                api_port,
-                "POST",
-                "/ngsi-ld/v1/entities",
-                Some(&tenant),
-                Some(&format!(
-                    r#"{{"id":"{id}","type":"K9Probe","temperature":{{"type":"Property","value":9}}}}"#
-                )),
-            );
-            assert!(resp.starts_with("HTTP/1.1 201"), "create {id}: {resp}");
-        }
-        api.0.kill().expect("SIGKILL api");
-        let _ = api.0.wait();
-        let pending = store.outbox_peek(1000).expect("peek").len();
-        if pending > 0 {
-            eprintln!("attempt {attempt}: caught {pending} unpublished rows at death");
-            caught = ids;
-            break;
-        }
-        eprintln!("attempt {attempt}: drain won the race — retrying");
-    }
-    assert!(
-        !caught.is_empty(),
-        "never caught the drain with pending rows in 10 attempts — widen the burst"
+    // The victim pod's own drain is OFF — the deterministic stand-in for a
+    // crash in the commit→publish window (with the drain nudge the live race
+    // is ~1 ms wide and unwinnable from outside). Rows commit, nothing
+    // publishes them, the pod dies: exactly the state F3 must recover from.
+    let api_port = free_port();
+    let mut api = start_env(
+        api_port,
+        "api",
+        &db,
+        &nats,
+        &[("ANTARES_OUTBOX_DRAIN", "off")],
     );
+    wait_healthy(api_port);
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:k9:{run}","type":"Subscription",
+            "entities":[{{"type":"K9Probe"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+    );
+    let resp = http(
+        api_port,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "sub: {resp}");
+    // burst of acked writes, then die with every event still unpublished
+    let caught: Vec<String> = (0..20)
+        .map(|i| format!("urn:ngsi-ld:K9Probe:{run}:0:{i}"))
+        .collect();
+    for id in &caught {
+        let resp = http(
+            api_port,
+            "POST",
+            "/ngsi-ld/v1/entities",
+            Some(&tenant),
+            Some(&format!(
+                r#"{{"id":"{id}","type":"K9Probe","temperature":{{"type":"Property","value":9}}}}"#
+            )),
+        );
+        assert!(resp.starts_with("HTTP/1.1 201"), "create {id}: {resp}");
+    }
+    api.0.kill().expect("SIGKILL api");
+    let _ = api.0.wait();
+    let pending = store.outbox_peek(1000).expect("peek").len();
+    assert!(
+        pending >= caught.len(),
+        "expected every acked write unpublished at death, found {pending}"
+    );
+    eprintln!("caught {pending} unpublished rows at death");
 
     // a fresh api pod restarts the drain: every acked write must notify
     let api_port = free_port();
