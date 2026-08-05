@@ -209,9 +209,31 @@ impl NatsBus {
 
 /// Decode one JetStream message into a `ChangeEvent`. `None` = alien bytes —
 /// log-and-ack territory for the consumer (redelivering garbage forever is
-/// the alternative).
+/// the alternative). §16.1.5: the subject's tenant segment must agree with
+/// the event body — consumers re-verify so a subject-mapping bug can never
+/// route one tenant's change into another tenant's processing.
 pub fn decode(msg: &async_nats::jetstream::Message) -> Option<ChangeEvent> {
-    serde_json::from_slice(&msg.payload).ok()
+    let ev: ChangeEvent = serde_json::from_slice(&msg.payload).ok()?;
+    if !subject_tenant_agrees(msg.subject.as_str(), &ev) {
+        tracing::error!(
+            subject = %msg.subject,
+            tenant = %ev.tenant.as_str(),
+            "dropping change event: subject tenant segment disagrees with body (§16.1.5)"
+        );
+        return None;
+    }
+    Some(ev)
+}
+
+/// The §16.1.5 check, unit-testable: `changes.{tenant}.…` must carry the
+/// event's own tenant. Non-`changes` subjects pass (registry deltas carry
+/// tenant in the body only).
+pub fn subject_tenant_agrees(subject: &str, ev: &ChangeEvent) -> bool {
+    let mut parts = subject.split('.');
+    if parts.next() != Some("changes") {
+        return true;
+    }
+    parts.next() == Some(ev.tenant.as_str())
 }
 
 /// Drive a pull consumer as a message stream. Thin wrapper so wiring code
@@ -246,5 +268,39 @@ pub async fn next_delta(
         if parsed.is_some() {
             return parsed;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ChangeOp;
+    use antares_model::{EntityId, TenantId};
+
+    #[test]
+    fn subject_tenant_reverification_drops_mismatches() {
+        let ev = ChangeEvent {
+            tenant: TenantId::new("acme").expect("tenant"),
+            entity_id: EntityId::new("urn:x:1").expect("id"),
+            types: vec!["T".into()],
+            op: ChangeOp::Create,
+            changed_attrs: vec![],
+            payload: None,
+            prev_payload: None,
+            version: 1,
+            incarnation: String::new(),
+            seq: 1,
+            payload_ref: None,
+            prev_payload_ref: None,
+        };
+        assert!(subject_tenant_agrees("changes.acme.aa.bb", &ev));
+        assert!(
+            !subject_tenant_agrees("changes.other.aa.bb", &ev),
+            "a mis-mapped subject must be dropped, not processed (§16.1.5)"
+        );
+        assert!(
+            subject_tenant_agrees("registry.other", &ev),
+            "non-changes subjects carry tenant in the body only"
+        );
     }
 }

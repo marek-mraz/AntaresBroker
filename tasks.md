@@ -627,10 +627,15 @@ these as tasks.*
       server, asserts MAX_REDIRECTS+1 accepts), scheme_allowlist_and_
       private_deny, breaker_trips_after_consecutive_failures. ETSI memory
       mode 1025/1025 after the gate landed.)*
-- [ ] I5. Tenant isolation test pack: RLS denial per store, cross-tenant
+- [x] I5. Tenant isolation test pack: RLS denial per store, cross-tenant
       404-indistinguishability (no existence oracle, §16.1.6), tenant-keyed
       in-memory structures audit (§16.1.4), NATS subject re-verification
-      (§16.1.5).
+      (§16.1.5). *(antares-api/tests/tenant_isolation.rs: entity/sub/CSR
+      cross-tenant probes byte-compare against ghost 404s; store + DocMirror
+      tenant-keying incl. cross-tenant-delete-is-a-no-op; RLS denial was
+      C14\'s pg.rs suite (non-superuser role); §16.1.5 lands in
+      bus::nats::decode — the subject\'s tenant segment must agree with the
+      event body or the event is dropped loudly (unit-tested).)*
 - [x] I6. Supply chain: distroless non-root read-only rootfs (done —
       verify), SBOM via cargo-auditable in release builds, `cargo deny`
       advisories in CI, `unsafe_code = "forbid"` (+ reviewed sonic
