@@ -14,8 +14,11 @@ name: ci
 # fresh stack, so it is fast and pollution-free but proves nothing about
 # `reset_state()` (clean_db.sh + dev/reset-broker.sh between suites) — the
 # exact place phantom state hides. The serial run is the authoritative gate and
-# costs all-suites wall-clock, so it guards releases and the nightly, never a
-# commit.
+# costs all-suites wall-clock, so it guards releases (v* tags) only.
+#
+#   manual dispatch   build → 32-cell matrix → summary → publish :dev.
+#                     No workspace tests, no wasm build, no serial tiers
+#                     (2026-08-06 decision).
 
 on:
   push:
@@ -23,8 +26,8 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-  # No schedule: per-commit CI is the cell matrix + summary only; the serial,
-  # roll and wasm tiers run on v* tags or manual dispatch (2026-08-06).
+  # No schedule. Serial/roll/wasm tiers run on v* tags only; a manual
+  # dispatch is the lean matrix shape described above (2026-08-06).
 
 # A newer commit supersedes a running pipeline — but never cancel a release.
 concurrency:
@@ -38,8 +41,10 @@ jobs:
   workspace:
     # fmt + clippy + the workspace test suite across the feature matrix, with
     # live PostGIS / TimescaleDB / mosquitto so no integration test skips
-    # vacuously. Nothing expensive fans out until this is green.
+    # vacuously. Skipped on manual dispatch — that run shape is build →
+    # cell matrix → summary → dev image, nothing else (2026-08-06).
     name: Workspace tests
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
@@ -122,12 +127,14 @@ jobs:
             | grep -v 'crates/antares-sql/'
 
   wasm:
+    # Skipped on manual dispatch (dispatch = ETSI cell matrix only).
     # §N: the browser artifact. Build (size budget enforced by the script,
     # N5), then prove it in BOTH runtimes (dev/wasm-test.sh, N6/N7a): the
     # Node shim does a create + a real-HTTP notification; headless Chromium
     # runs the demo page — Service Worker broker, entity, subscription,
     # in-page notification, second tab. Same scripts as local runs (§E).
     name: Browser build (wasm32)
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -235,7 +242,7 @@ jobs:
     # artifact). Not finer than per-suite (E9f): intra-suite sharding only pays
     # once a cell exceeds ~15 min, and then each shard needs its own stack.
     name: ${{ matrix.store }} × ${{ matrix.suite }}
-    needs: [workspace, build]
+    needs: [build]
     strategy:
       fail-fast: false
       matrix:
@@ -301,10 +308,7 @@ jobs:
     # Release tags, nightly, and manual only — a plain commit gets the matrix
     # and nothing else.
     name: serial ${{ matrix.store }} (all suites, one stack)
-    if: >-
-      startsWith(github.ref, 'refs/tags/v')
-      || github.event_name == 'schedule'
-      || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [workspace, build]
     strategy:
       fail-fast: false
@@ -368,10 +372,7 @@ jobs:
     # size budget is the artifact's own gate). Serial-tier cadence: tags,
     # nightly, manual.
     name: N7a wasm Node tier (serial suites)
-    if: >-
-      startsWith(github.ref, 'refs/tags/v')
-      || github.event_name == 'schedule'
-      || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [workspace, wasm]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
@@ -428,10 +429,7 @@ jobs:
     # flake. Runs with the serial tier (nightly / tags / dispatch) — it is
     # a full-suite wall-clock cost, not a per-commit one.
     name: K8 roll-under-suite (postgres)
-    if: >-
-      startsWith(github.ref, 'refs/tags/v')
-      || github.event_name == 'schedule'
-      || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [workspace, build]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -511,8 +509,14 @@ jobs:
     # success() is EXPLICIT: a custom `if` replaces the implicit needs-check,
     # and etsi-aggregate runs under always() so it can be a failure here.
     name: Publish the dev image to GHCR
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push' && success()
-    needs: etsi-aggregate
+    # Pushes AND manual dispatches on master publish :dev; PRs never do.
+    # workspace is 'skipped' on dispatch (that run shape is build → matrix →
+    # summary → dev image) and must be green on pushes.
+    if: >-
+      github.ref == 'refs/heads/master' && !cancelled()
+      && needs.etsi-aggregate.result == 'success'
+      && (needs.workspace.result == 'success' || needs.workspace.result == 'skipped')
+    needs: [workspace, etsi-aggregate]
     runs-on: ubuntu-latest
     permissions:
       packages: write
