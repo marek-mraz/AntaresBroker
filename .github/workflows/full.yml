@@ -1,0 +1,402 @@
+name: full
+
+# The EVERYTHING pipeline — manual dispatch, or automatically on a v* tag:
+# workspace tests, the browser/wasm artifact + N7a Node tier, the reusable
+# cell matrix, the serial all-suites runs (the reset_state() oracle), K8
+# roll-under-suite and the k8s manifest smoke. A green v* tag publishes the
+# release image (:<version> + :latest); manual dispatches publish nothing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: full-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  MEM_LIMIT_MB: 350
+
+jobs:
+  workspace:
+    # fmt + clippy + the workspace test suite across the feature matrix, with
+    # live PostGIS / TimescaleDB / mosquitto so no integration test skips
+    # vacuously.
+    name: Workspace tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      # Live PostGIS for the antares-sql integration tests (C14) — without this
+      # they skip vacuously and CI proves nothing about the Pg store.
+      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54329/antares
+      CARGO_TERM_COLOR: always
+    services:
+      postgis:
+        image: ghcr.io/baosystems/postgis:17-3.5
+        env:
+          POSTGRES_USER: antares
+          POSTGRES_PASSWORD: antares
+          POSTGRES_DB: antares
+        ports: ["54329:5432"]
+        options: >-
+          --health-cmd "pg_isready -U antares"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      # D5: the store integration tests run against BOTH temporal modes —
+      # this one carries the timescaledb extension (plus PostGIS).
+      timescaledb:
+        image: timescale/timescaledb-ha:pg17
+        env:
+          POSTGRES_USER: antares
+          POSTGRES_PASSWORD: antares
+          POSTGRES_DB: antares
+        ports: ["54330:5432"]
+        options: >-
+          --health-cmd "pg_isready -U antares"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # Live MQTT server for the clause-7 e2e (G1) — without the env var the
+      # test skips vacuously and CI proves nothing about MQTT delivery.
+      - name: Start mosquitto for the MQTT e2e
+        run: |
+          sudo apt-get install -y -qq mosquitto
+          printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
+          sudo systemctl restart mosquitto
+          echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
+      # Live NATS (JetStream) for the F9 bus tests + the 2-instance roles e2e.
+      # A `docker run` step, not a service: services cannot pass the `-js`
+      # command argument the JetStream engine needs.
+      - name: Start NATS (JetStream) for the bus tests
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2-alpine -js
+          echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # feature matrix (§9.5): no defaults + all features
+      - run: cargo test --workspace --no-default-features
+      - run: cargo test --workspace --all-features
+      # D5: same store tests, timescale temporal mode (hypertable DDL branch,
+      # compression-vs-RLS ordering, D3 detection).
+      - name: Store tests against the timescale temporal mode
+        env:
+          ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54330/antares
+        run: |
+          PGPASSWORD=antares psql -h localhost -p 54330 -U antares -d antares \
+            -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
+          cargo test -p antares-sql
+      # D4/§16.5: license gate (nothing links TSL — Timescale is talked to
+      # over SQL only) + advisories.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories
+      # E9g: the ETSI resource sampler + its sample↔TP join fail silently when
+      # broken (an empty column reads as "nothing happened") — check them here.
+      - name: ETSI sampling self-check
+        run: python3 dev/etsi-selftest.py
+      # SQL-injection guard (§16.2): no string-built queries outside antares-sql
+      - name: no format! into SQL outside the compiler
+        run: |
+          ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
+            | grep -v 'crates/antares-sql/'
+
+  wasm:
+    # §N: the browser artifact. Build (size budget enforced by the script,
+    # N5), then prove it in BOTH runtimes (dev/wasm-test.sh, N6/N7a): the
+    # Node shim does a create + a real-HTTP notification; headless Chromium
+    # runs the demo page — Service Worker broker, entity, subscription,
+    # in-page notification, second tab. Same scripts as local runs (§E).
+    name: Browser build (wasm32)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (lockfile-matched) + binaryen
+        run: |
+          ./dev/install-wasm-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build + size budget (N5)
+        run: |
+          ./dev/wasm-build.sh | tee wasm-size.txt
+          echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
+          tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Demo page deps + chromium
+        working-directory: www
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps chromium
+      - name: Node tier smoke + browser tier (N6)
+        run: ./dev/wasm-test.sh
+
+  matrix:
+    # The reusable 32-cell store × suite matrix (build → cells → summary) —
+    # shared with full.yml so both pipelines test the same shape.
+    name: ETSI cell matrix
+    uses: ./.github/workflows/etsi-matrix.yml
+
+  k8s-manifests:
+    # K5: lint every reference manifest, then kind-deploy the self-contained
+    # subset (nats + postgres-dev + both broker shapes) with the image the
+    # build job produced. `rollout status` green == readiness probes
+    # (/q/health) answered. The CNPG Cluster is lint-only here — the operator
+    # belongs to a real cluster (🖥, tasks.md K5/K11).
+    name: K8s reference manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: matrix
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubeconform lint
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas deploy/k8s/
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: antares-smoke
+      - uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+      - name: Load the image under test
+        run: |
+          gunzip antares-image.tgz
+          kind load image-archive antares-image.tar --name antares-smoke
+      - name: Deploy the self-contained subset
+        run: |
+          kubectl apply -f deploy/k8s/namespace.yaml
+          kubectl apply -f deploy/k8s/nats.yaml -f deploy/k8s/postgres-dev.yaml
+          # kind has one PG: point the brokers at postgres-dev instead of CNPG,
+          # and a single-node NATS quorum: R1 streams
+          sed -e 's|antares-pg-rw.antares.svc|postgres.antares.svc|' \
+              -e 's|value: "3"|value: "1"|' deploy/k8s/broker-postgres.yaml \
+            | kubectl apply -f -
+          kubectl apply -f deploy/k8s/broker-file.yaml
+      - name: Wait for every rollout
+        run: |
+          kubectl -n antares rollout status statefulset/nats --timeout=180s
+          kubectl -n antares rollout status deploy/postgres-dev --timeout=180s
+          kubectl -n antares rollout status deploy/antares-api --timeout=300s
+          kubectl -n antares rollout status deploy/antares-worker --timeout=300s
+          kubectl -n antares rollout status deploy/antares-file --timeout=300s
+          kubectl -n antares get pods -o wide
+
+  etsi-serial:
+    # E9d: the authoritative run — every suite, IN ORDER, against ONE stack,
+    # so `reset_state()` (clean_db.sh + dev/reset-broker.sh) is exercised
+    # between suites. The matrix cells each get a fresh stack and therefore
+    # prove nothing about reset; a broker that leaks state across suites is
+    # green there and red here. Four store modes in parallel, one job each.
+    #
+    # Release tags, nightly, and manual only — a plain commit gets the matrix
+    # and nothing else.
+    name: serial ${{ matrix.store }} (all suites, one stack)
+    needs: [workspace, matrix]
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [memory, file, postgres, timescale]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Run EVERY suite serially through the ONE pipeline
+        env:
+          STORE: ${{ matrix.store }}
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/serial-${{ matrix.store }}
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload serial results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-serial-${{ matrix.store }}
+          path: |
+            results/serial-${{ matrix.store }}/run-summary.md
+            results/serial-${{ matrix.store }}/gate-status.txt
+            results/serial-${{ matrix.store }}/failures.csv
+            results/serial-${{ matrix.store }}/resource-samples.csv
+            results/serial-${{ matrix.store }}/resource-by-test.csv
+            results/serial-${{ matrix.store }}/**/log.html
+          retention-days: 14
+
+      - name: Gate — the serial run is 100% green
+        run: |
+          gate=$(cat "results/serial-${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "serial gate(${{ matrix.store }}) = $gate"
+          cat "results/serial-${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
+  etsi-wasm:
+    # N7a: the Node tier — the serial ETSI suites against the BROWSER
+    # artifact: five node shims serving the same .wasm a page loads
+    # (WASM=1 in the one pipeline). MQTT stays excluded (no MQTT sink in a
+    # browser build — N7c/N8 document it) and there is no RSS gate (N5's
+    # size budget is the artifact's own gate). Serial-tier cadence: tags,
+    # nightly, manual.
+    name: N7a wasm Node tier (serial suites)
+    needs: [workspace, wasm]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm toolchain
+        run: |
+          ./dev/install-wasm-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Serial suites against the wasm shims
+        env:
+          WASM: "1"
+          STORE: memory
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/wasm-node
+        run: ./dev/etsi-pipeline.sh || true
+      - name: Upload wasm-tier results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-wasm-node
+          path: |
+            results/wasm-node/run-summary.md
+            results/wasm-node/gate-status.txt
+            results/wasm-node/failures.csv
+            results/wasm-node/**/log.html
+          retention-days: 14
+      - name: Gate — the wasm Node tier is green
+        run: |
+          gate=$(cat results/wasm-node/gate-status.txt 2>/dev/null || echo MISSING)
+          echo "wasm Node tier gate = $gate"
+          cat results/wasm-node/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
+  etsi-roll:
+    # K8: the ETSI-during-roll gate. The FULL suite runs through the K2
+    # haproxy while dev/rolling-update.sh rolls the two broker1 replicas
+    # underneath it in a loop, postgres mode (shared state + bus=nats — the
+    # only rung where a roll is defined, see the K-table). The suite has no
+    # retries and asserts exact single responses, which makes it a brutally
+    # strict drain client: ANY red TP here is a real K1 drain bug, never
+    # flake. Runs with the serial tier (nightly / tags / dispatch) — it is
+    # a full-suite wall-clock cost, not a per-commit one.
+    name: K8 roll-under-suite (postgres)
+    needs: [workspace, matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built once for all jobs
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Full suite through the LB while the brokers roll
+        env:
+          STORE: postgres
+          HA: "1"
+          ROLL_DURING_RUN: "1"
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/roll-postgres
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload roll results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-roll-postgres
+          path: |
+            results/roll-postgres/run-summary.md
+            results/roll-postgres/gate-status.txt
+            results/roll-postgres/failures.csv
+            results/roll-postgres/roll-loop.log
+            results/roll-postgres/**/log.html
+          retention-days: 14
+
+      - name: Gate — green under continuous rolls
+        run: |
+          gate=$(cat results/roll-postgres/gate-status.txt 2>/dev/null || echo MISSING)
+          echo "K8 roll gate = $gate"
+          cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
+
+  publish-release:
+    # A version tag is the only thing that mints a production image, and it
+    # needs ALL THREE gates: the 32-cell matrix, the serial all-suites run,
+    # and the K8 roll-under-suite drill.
+    name: Publish the release image to GHCR
+    if: startsWith(github.ref, 'refs/tags/v') && success()
+    needs: [matrix, etsi-serial, etsi-roll]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image
+
+      - name: Push the EXACT image both gates tested
+        run: |
+          docker load < antares-image.tgz
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
+          VER="${GITHUB_REF#refs/tags/}"
+          docker tag antares-local:latest "$IMG:$VER"
+          docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
+          docker tag antares-local:latest "$IMG:latest"
+          docker push "$IMG:$VER"
+          docker push "$IMG:${GITHUB_SHA::7}"
+          docker push "$IMG:latest"
+          echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"
