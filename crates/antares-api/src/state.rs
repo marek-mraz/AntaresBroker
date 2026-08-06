@@ -97,10 +97,35 @@ impl AppState {
         // the gate (scheme/breakers) and the clients (DNS pinning, redirect
         // cap) can never disagree about what is allowed (§16.4).
         let egress_policy = antares_jsonld::EgressPolicy::from_env();
+        // J2/K8: Cached-@context rows are the ONE source of truth for 5.13
+        // existence — wire the write-through HERE so every composition
+        // (native binary, wasm, tests) gets it; a composition that forgets
+        // the writer is the L4b "expiry checked in some paths" disease with
+        // @contexts instead of expiry.
+        let loader = Arc::new(Loader::new());
+        {
+            let store = store.clone();
+            loader.set_cache_writer(Box::new(move |url, ctx_value| {
+                if url.contains("/ngsi-ld/v1/jsonldContexts/") {
+                    return; // broker-local (Hosted/Implicit) URLs are not Cached entries
+                }
+                let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
+                let doc = serde_json::json!({
+                    "url": url,
+                    "localId": id.to_string(),
+                    "kind": "Cached",
+                    "createdAt": now_iso(),
+                    "body": {"@context": ctx_value},
+                });
+                if let Err(e) = store.context_put(&id.to_string(), doc) {
+                    tracing::warn!("@context write-through failed for {url}: {e}");
+                }
+            }));
+        }
         Self {
             store,
             store_mode,
-            loader: Arc::new(Loader::new()),
+            loader,
             started: Instant::now(),
             started_at: now_iso(),
             host_alias,

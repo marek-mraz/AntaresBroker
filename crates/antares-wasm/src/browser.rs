@@ -25,12 +25,20 @@ impl AntaresBroker {
     /// wasm32, so the env route cannot work). The Node tier (N7a) needs it:
     /// the ETSI suite's notification receivers live on 127.0.0.1, which the
     /// I4 egress policy denies by default.
+    /// `hostAlias` names THIS instance in `Via` chains (5.2.40). Every
+    /// instance in a federation needs a distinct one, or loop detection
+    /// reads a peer's hop as its own and 508s every forward (N7a lesson —
+    /// five shims all called "antares-wasm" federate with nobody).
     #[wasm_bindgen(constructor)]
-    pub fn new(allow_private_egress: Option<bool>) -> Self {
+    pub fn new(allow_private_egress: Option<bool>, host_alias: Option<String>) -> Self {
         console_error_panic_hook::set_once();
         antares_jsonld::loader::allow_private_egress(allow_private_egress == Some(true));
         Self {
-            inner: crate::Broker::new(),
+            inner: crate::Broker::with_store_alias(
+                antares_sql::store::Store::default(),
+                "memory",
+                host_alias,
+            ),
         }
     }
 
@@ -44,6 +52,7 @@ impl AntaresBroker {
     pub async fn persistent(
         file: Option<String>,
         allow_private_egress: Option<bool>,
+        host_alias: Option<String>,
     ) -> Result<AntaresBroker, JsValue> {
         console_error_panic_hook::set_once();
         antares_jsonld::loader::allow_private_egress(allow_private_egress == Some(true));
@@ -57,7 +66,7 @@ impl AntaresBroker {
         let store = antares_sql::store::Store::from_database(db, &format!("opfs:{name}"))
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(Self {
-            inner: crate::Broker::with_store(store, "file"),
+            inner: crate::Broker::with_store_alias(store, "file", host_alias),
         })
     }
 
@@ -146,6 +155,6 @@ impl AntaresBroker {
 
 impl Default for AntaresBroker {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, None)
     }
 }

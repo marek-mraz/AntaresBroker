@@ -126,6 +126,8 @@ version = "0.1.0"
 dependencies = [
  "antares-model",
  "chrono",
+ "futures-util",
+ "gloo-timers",
  "moka",
  "reqwest 0.12.28",
  "send_wrapper",

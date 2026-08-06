@@ -1497,7 +1497,10 @@ async fn deliver_as(
                 if page_handled {
                     true
                 } else {
-                    matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
+                    matches!(
+                        antares_jsonld::io_deadline(req.body(bytes).send(), 5_000).await,
+                        Some(Ok(r)) if r.status().is_success()
+                    )
                 }
             }
             #[cfg(feature = "mqtt")]

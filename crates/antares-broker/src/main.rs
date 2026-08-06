@@ -244,26 +244,11 @@ async fn run(
     }
     telemetry::spawn_sampler(state.clone());
 
-    // J2: Cached-@context write-through + boot preload — fetched contexts
-    // are persisted as kind='Cached' rows and reloaded on start, so the
-    // parsed-context cache and the 5.13 listing survive a restart.
+    // J2 boot preload — Cached rows persisted by the AppState write-through
+    // re-seed the parsed-context cache on start, so expansion doesn't refetch
+    // what a previous life already downloaded. (The writer itself is wired in
+    // AppState::with_store — rows are the 5.13 source of truth, K8 lesson.)
     {
-        let store = state.store.clone();
-        state
-            .loader
-            .set_cache_writer(Box::new(move |url, ctx_value| {
-                let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
-                let doc = serde_json::json!({
-                    "url": url,
-                    "localId": id.to_string(),
-                    "kind": "Cached",
-                    "createdAt": antares_api::state::now_iso(),
-                    "body": {"@context": ctx_value},
-                });
-                if let Err(e) = store.context_put(&id.to_string(), doc) {
-                    tracing::warn!("@context write-through failed for {url}: {e}");
-                }
-            }));
         for row in state.store.context_list().unwrap_or_default() {
             if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
                 continue;

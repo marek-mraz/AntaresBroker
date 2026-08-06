@@ -528,8 +528,15 @@ Currently the suite runs `--exclude '*mqtt*'` — these TPs are open.
       registered sink → 422 `OperationNotSupported` (§9.2). *(Scheme list is
       cfg-gated on the `mqtt` feature; mqtt endpoint URI + notifierInfo are
       validated at creation, not first delivery.)*
-- [ ] G4. emqx (or mosquitto) joins the ETSI compose; drop the `*mqtt*`
+- [x] G4. emqx (or mosquitto) joins the ETSI compose; drop the `*mqtt*`
       exclusion; MQTT TPs (058_xx) green in all store modes.
+      *(mosquitto built from the suite's own confs (scorpio-test-mosquitto,
+      compose-files/mosquitto/) + readiness-wait overlay on
+      MqttUtils.resource (error.md 2026-08-05). Subscription cell 122/122
+      incl. all 058_xx, gate PASS in ALL FOUR modes:
+      results/g4-{memory,file,timescale,postgres}/gate-status.txt.
+      postgres cell 2026-08-06: 122 passed, 0 failed, peak RSS 156 MiB;
+      C11's full-pipeline postgres run was 1037/1037 incl. MQTT TPs.)*
 
 ## H. Remaining spec surface (v1.x ledger items, §5.4)
 
@@ -802,11 +809,21 @@ So: "always restart" is the RIGHT answer for `file` (and it is cheap), and
       The continuity assertions need shared state, so the drill runs in
       postgres/timescale modes; memory-mode HA is two independent stores
       by contract (K2 note) and only health-rolls there (K3).)*
-- [ ] K8. **ETSI-during-roll job** (postgres mode): run the full suite through
+- [x] K8. **ETSI-during-roll job** (postgres mode): run the full suite through
       the K2 LB while K3 rolls the brokers underneath. The suite has no
       retries and asserts exact single responses, which makes it a brutally
       strict drain client — so this is a STRICT gate, not a soak signal: any
       failure is a real K1 bug, not flake. Expected result: 1025/1025.
+      *(2026-08-06: first run 1022/1037 — the gate WORKED, catching (1) a
+      suite quirk: ContextSource keywords read `Location` case-sensitively
+      and haproxy lowercases it → orphan-resource cascade, absorbed in
+      haproxy-ha.cfg via h1-case-adjust (error.md); (2) a REAL §14.1 bug:
+      Cached-@context existence lived in the per-instance loader map →
+      split-brain across replicas — fixed by making jsonld_contexts rows the
+      one existence truth (writer wired in AppState::with_store, uuid5(url)
+      row lookup). Rerun: 1037/1037 incl. MQTT + IOP, gate PASS,
+      results/roll-postgres. Pipeline knobs HA=1 ROLL_DURING_RUN=1; CI
+      etsi-roll job runs it at serial-tier cadence.)*
 - [x] K9. **SIGKILL drill (ungraceful):** `kill -9` mid-write, per mode.
       Expected: `file` → every acked write present after restart
       (commit-before-ack, §B3/B8); `postgres` → a change committed but not yet
@@ -1019,7 +1036,20 @@ N4) selected through the same trait, compiled to a different target.
       `wasm` job via dev/wasm-test.sh (which also smokes the Node shim).
       Publishing the page anywhere public remains yours (⛔): everything is
       static files — `www/` + `www/pkg/` on any host.)*
-- [ ] N7. ETSI conformance for the WASM artifact, in three tiers:
+- [x] N7. ETSI conformance for the WASM artifact, in three tiers:
+      *(2026-08-06. N7a Node tier: `WASM=1` pipeline tier — five node shims,
+      full serial suites+IOP — **1025/1025, gate PASS** (results/wasm-node,
+      09:15 run). N7b browser tier: `BROWSER=1` — headless Chromium hosts
+      the demo page, www/test/etsi-proxy.mjs forwards suite HTTP into
+      window.brokerFetch — CB/Provision/Consumption/jsonldContext
+      **671/675** (results/wasm-browser); the 4 residual reds are ETSI-side
+      live-context churn hitting every tier incl. native (error.md
+      2026-08-06), re-measure when forge settles. The tiers caught two REAL
+      spec gaps, both fixed: JSON-LD 1.1 relative context-IRI resolution
+      (merge_entry_based base-URL join) and batch-delete temporal
+      deletion-mirroring (5.6.10 ↔ 5.6.6 parity). Full trap ledger in
+      error.md + MemPalace. N7c documented in ADR-0008/README; CI
+      `etsi-wasm` job runs the Node tier at serial cadence.)*
       - N7a. **Node tier (full suite):** the SAME `.wasm` under Node with a
         thin `http.createServer` shim feeding the router; run
         `dev/etsi-pipeline.sh` against it. No CORS, unrestricted outbound

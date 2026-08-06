@@ -18,6 +18,6 @@ pub use expand::{
     is_ngsi_null_langmap, parse_datetime, ExpandOpts,
 };
 pub use loader::{
-    client_builder, http_interaction, with_timeouts, wrap_client, CtxUsage, EgressPolicy,
-    HttpClient, Loader, CORE_CONTEXT, MAX_REDIRECTS,
+    client_builder, http_interaction, io_deadline, with_timeouts, wrap_client, CtxUsage,
+    EgressPolicy, HttpClient, Loader, CORE_CONTEXT, MAX_REDIRECTS,
 };

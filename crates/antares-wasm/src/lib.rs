@@ -36,9 +36,19 @@ impl Broker {
     /// The same wiring over an externally-constructed store — the OPFS-backed
     /// store (N4) enters here; `mode` is what `/q/health` reports (A4).
     pub fn with_store(store: antares_sql::store::Store, mode: &str) -> Self {
+        Self::with_store_alias(store, mode, None)
+    }
+
+    /// `host_alias` names this instance in Via chains — must be distinct per
+    /// instance in a federation, or loop detection 508s every forward.
+    pub fn with_store_alias(
+        store: antares_sql::store::Store,
+        mode: &str,
+        host_alias: Option<String>,
+    ) -> Self {
         let store = antares_sql::store::any::AnyStore::Mem(store);
         let mut state = antares_api::AppState::with_store(
-            "antares-wasm".to_owned(),
+            host_alias.unwrap_or_else(|| "antares-wasm".to_owned()),
             std::sync::Arc::new(store),
             mode.to_owned(),
         );
@@ -54,7 +64,23 @@ impl Broker {
     /// to: the Service Worker (N3), the in-page API, and the Node shim (N7a)
     /// all funnel here.
     pub async fn handle(&mut self, req: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
-        let (parts, body) = req.into_parts();
+        let (mut parts, body) = req.into_parts();
+        // The native binary routes under NormalizePathLayer::trim_trailing_slash
+        // (6.3 URLs arrive both with and without a trailing '/'); this seam is
+        // the wasm equivalent — same trim, applied before the router sees it.
+        if let Some(pq) = parts.uri.path_and_query() {
+            let path = pq.path();
+            let trimmed = path.trim_end_matches('/');
+            if trimmed.len() != path.len() && !trimmed.is_empty() {
+                let new = match pq.query() {
+                    Some(q) => format!("{trimmed}?{q}"),
+                    None => trimmed.to_owned(),
+                };
+                if let Ok(uri) = new.parse() {
+                    parts.uri = uri;
+                }
+            }
+        }
         let req = http::Request::from_parts(parts, Body::from(body));
         let resp = match self.router.call(req).await {
             Ok(r) => r,

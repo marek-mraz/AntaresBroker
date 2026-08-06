@@ -16,14 +16,25 @@ const log = (line, cls = "") => {
 };
 
 // ---- transport ladder: OPFS worker (persistent) → SW → in-page ------------
+// ?allowPrivateEgress=1 — harness knob (N7b): the ETSI mocks live on
+// loopback, which the §16.4 egress policy denies by default. The demo keeps
+// the deny; the ETSI proxy opens the page with the override.
+const ALLOW_PRIVATE_EGRESS = new URLSearchParams(location.search).has(
+  "allowPrivateEgress",
+);
 let pageBroker = null;
 let worker = null;
+let workerDead = null; // Error once the worker has crashed (fail fast)
 let mode = "in-page";
 let workerSeq = 0;
 const workerWaiters = new Map();
 
 function callWorker(msg, transfer = []) {
   return new Promise((resolve, reject) => {
+    if (workerDead) {
+      reject(workerDead);
+      return;
+    }
     const id = ++workerSeq;
     workerWaiters.set(id, { resolve, reject });
     worker.postMessage({ id, ...msg }, transfer);
@@ -73,8 +84,25 @@ async function bootPersistent() {
       workerWaiters.delete(m.id);
       m.ok ? w.resolve(m) : w.reject(new Error(m.error));
     };
+    // A dead worker must FAIL every pending and future call, loudly — a
+    // silent crash otherwise leaves callers pending forever (N7b: the ETSI
+    // run froze for an hour on a worker that had died without a trace).
+    worker.onerror = (e) => {
+      const msg = `opfs worker error: ${e.message ?? e}`;
+      console.error(msg);
+      log(msg, "err");
+      workerDead = new Error(msg);
+      for (const [id, w] of workerWaiters) {
+        workerWaiters.delete(id);
+        w.reject(workerDead);
+      }
+    };
     try {
-      await callWorker({ kind: "init", file: "antares.redb" });
+      await callWorker({
+        kind: "init",
+        file: "antares.redb",
+        allowPrivateEgress: ALLOW_PRIVATE_EGRESS,
+      });
       mode = "opfs-worker";
       return true;
     } catch (e) {
@@ -124,7 +152,7 @@ async function boot() {
       showNotification(e.data.body);
   } else if (mode !== "opfs-worker") {
     await init();
-    pageBroker = new AntaresBroker();
+    pageBroker = new AntaresBroker(ALLOW_PRIVATE_EGRESS);
     pageBroker.onNotification(NOTIFY_ENDPOINT, (url, body) => {
       showNotification(JSON.parse(body));
       return true;
@@ -212,4 +240,7 @@ async function refresh() {
 $("create").onclick = createEntity;
 $("subscribe").onclick = subscribe;
 $("refresh").onclick = refresh;
+// N7b: the ETSI browser-tier proxy drives the broker through this hook —
+// the same transport ladder the buttons use, whatever mode won.
+window.brokerFetch = brokerFetch;
 boot().catch((e) => log(`boot failed: ${e}`, "err"));

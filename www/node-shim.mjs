@@ -7,8 +7,82 @@
 //
 // Build www/pkg first: dev/wasm-build.sh
 import { readFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import dns from "node:dns";
 import init, { AntaresBroker } from "./pkg/antares_wasm.js";
+
+// The ETSI mocks (HttpCtrl receivers, context servers) bind IPv4-only;
+// Node's default resolution order tries ::1 first and the connect refusal
+// surfaces as a 502 on every federation forward. Prefer IPv4 like the
+// suite's own python-requests does.
+dns.setDefaultResultOrder("ipv4first");
+
+// Transport fidelity: the JS Headers class lowercases every header name,
+// but the broker emits RFC-cased names natively ("Location", "Via",
+// "X-Additional-Key") and several ETSI keywords assert them
+// CASE-SENSITIVELY (error.md 2026-08-06 — same class as the K8 haproxy
+// h1-case-adjust). node:http sends names verbatim, so this shim restores
+// the conventional case on both directions instead of shipping whatever
+// the Headers class kept.
+const CASE = new Map([
+  ["ngsild-tenant", "NGSILD-Tenant"],
+  ["ngsild-results-count", "NGSILD-Results-Count"],
+  ["ngsild-entitymap", "NGSILD-EntityMap"],
+  ["etag", "ETag"],
+]);
+const recase = (k) => CASE.get(k) ?? k.replace(/(^|-)[a-z]/g, (m) => m.toUpperCase());
+
+// The broker's own egress (notifications, forwards, @context fetches) runs
+// through global fetch; replace it with a node:http-backed equivalent that
+// keeps header case. GET/HEAD follow up to 5 redirects (fetch semantics for
+// the @context path); bodies are buffered — every payload here is small.
+globalThis.fetch = async (input, init) => {
+  const req = new Request(input, init);
+  const body =
+    req.method === "GET" || req.method === "HEAD"
+      ? null
+      : Buffer.from(await req.arrayBuffer());
+  const headers = {};
+  req.headers.forEach((v, k) => {
+    headers[recase(k)] = v;
+  });
+  if (body?.length) headers["Content-Length"] = String(body.length);
+  let url = new URL(req.url);
+  for (let hop = 0; ; hop++) {
+    const res = await new Promise((resolve, reject) => {
+      const mk = url.protocol === "https:" ? httpsRequest : httpRequest;
+      const r = mk(url, { method: req.method, headers }, (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve({ res, buf: Buffer.concat(chunks) }));
+      });
+      r.on("error", reject);
+      if (body?.length) r.write(body);
+      r.end();
+    });
+    const status = res.res.statusCode;
+    const loc = res.res.headers.location;
+    if ([301, 302, 303, 307, 308].includes(status) && loc && hop < 5
+        && (req.method === "GET" || req.method === "HEAD")) {
+      url = new URL(loc, url);
+      continue;
+    }
+    const respHeaders = new Headers();
+    for (let i = 0; i < res.res.rawHeaders.length; i += 2) {
+      respHeaders.append(res.res.rawHeaders[i], res.res.rawHeaders[i + 1]);
+    }
+    const noBody = [101, 103, 204, 205, 304].includes(status);
+    const out = new Response(noBody ? null : res.buf, {
+      status,
+      headers: respHeaders,
+    });
+    // A constructed Response has url:"" — reqwest's wasm backend does
+    // Url::parse(resp.url()).expect("url parse") and aborts on it.
+    Object.defineProperty(out, "url", { value: url.href });
+    return out;
+  }
+};
 
 const port = Number(process.argv[2] ?? 9090);
 
@@ -17,7 +91,9 @@ await init({
 });
 // allowPrivateEgress: the suite's mocks (notification receivers, context
 // servers) live on loopback/private nets — same knob the container sets.
-const broker = new AntaresBroker(true);
+// The per-port hostAlias keeps Via loop detection honest across the five
+// shims of the federation tier (five instances named alike = 508 storm).
+const broker = new AntaresBroker(true, `antares-wasm-${port}`);
 
 const server = createServer(async (req, res) => {
   try {
@@ -32,7 +108,7 @@ const server = createServer(async (req, res) => {
     });
     const resp = await broker.fetch(request);
     const headers = [];
-    resp.headers.forEach((v, k) => headers.push([k, v]));
+    resp.headers.forEach((v, k) => headers.push([recase(k), v]));
     res.writeHead(resp.status, Object.fromEntries(headers));
     res.end(Buffer.from(await resp.arrayBuffer()));
   } catch (e) {

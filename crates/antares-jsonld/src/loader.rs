@@ -288,6 +288,31 @@ pub fn with_timeouts(
     b
 }
 
+/// Hard wall-clock bound for an outbound interaction. Native clients carry
+/// the U1 timeouts at construction, so this passes through; on wasm32 the
+/// browser fetch has no client-level timeout (and reqwest's AbortController
+/// timer does not arm inside a dedicated worker), so an unresolved fetch
+/// would pend FOREVER — and a pending context fetch holds its resolve
+/// permit, which eventually stalls ALL context resolution (N7b: robot froze
+/// over 1 h on a stopped context server, then every later fetch queued behind
+/// the leaked permits). `None` = deadline exceeded.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, _ms: u32) -> Option<T> {
+    Some(fut.await)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, ms: u32) -> Option<T> {
+    use futures_util::future::{select, Either};
+    use futures_util::pin_mut;
+    let t = gloo_timers::future::TimeoutFuture::new(ms);
+    pin_mut!(fut);
+    match select(fut, t).await {
+        Either::Left((v, _)) => Some(v),
+        Either::Right(_) => None,
+    }
+}
+
 /// 6.3.16: cache lifetime of a downloaded @context comes from its response
 /// headers. `None` = no explicit lifetime (cache until evicted/reloaded).
 fn ttl_from_headers(
@@ -545,6 +570,21 @@ impl Loader {
         depth: usize,
         urls: &'a std::sync::Mutex<Vec<String>>,
     ) -> BoxFut<'a, Result<(), NgsiError>> {
+        self.merge_entry_based(ctx, entry, depth, urls, None)
+    }
+
+    fn merge_entry_based<'a>(
+        &'a self,
+        ctx: &'a mut Context,
+        entry: &'a Value,
+        depth: usize,
+        urls: &'a std::sync::Mutex<Vec<String>>,
+        // JSON-LD 1.1 §3.1: a relative context IRI inside a fetched context
+        // document resolves against THAT document's URL. The ETSI compound
+        // context references "ngsi-ld-test-suite.jsonld" relatively — without
+        // this every request using it dies with LdContextNotAvailable.
+        base: Option<std::sync::Arc<String>>,
+    ) -> BoxFut<'a, Result<(), NgsiError>> {
         Box::pin(async move {
             if depth > 8 {
                 return Err(NgsiError::LdContextNotAvailable(
@@ -554,16 +594,40 @@ impl Loader {
             match entry {
                 Value::Array(items) => {
                     for item in items {
-                        self.merge_entry(ctx, item, depth + 1, urls).await?;
+                        self.merge_entry_based(ctx, item, depth + 1, urls, base.clone())
+                            .await?;
                     }
                     Ok(())
                 }
                 Value::String(url) => {
-                    let doc = self.fetch(url).await?;
+                    let resolved: String = if url.starts_with("http://")
+                        || url.starts_with("https://")
+                    {
+                        url.clone()
+                    } else if let Some(b) = base.as_deref() {
+                        reqwest::Url::parse(b)
+                            .and_then(|b| b.join(url))
+                            .map(String::from)
+                            .map_err(|e| {
+                                NgsiError::LdContextNotAvailable(format!(
+                                    "cannot resolve @context URL {url} against {b}: {e}"
+                                ))
+                            })?
+                    } else {
+                        url.clone()
+                    };
+                    let doc = self.fetch(&resolved).await?;
                     if let Ok(mut u) = urls.lock() {
-                        u.push(url.clone());
+                        u.push(resolved.clone());
                     }
-                    self.merge_entry(ctx, &doc, depth + 1, urls).await
+                    self.merge_entry_based(
+                        ctx,
+                        &doc,
+                        depth + 1,
+                        urls,
+                        Some(std::sync::Arc::new(resolved)),
+                    )
+                    .await
                 }
                 Value::Object(obj) => ctx.merge_object(obj),
                 Value::Null => Ok(()),
@@ -607,7 +671,7 @@ impl Loader {
             .map_err(|e| err(format!("fetching {url}: {e}")))?;
         // N2: the whole HTTP interaction is one Send unit (http_interaction);
         // only Send data (ttl + bytes) crosses back out.
-        let (ttl, bytes) = http_interaction(async {
+        let interact = async {
             let resp = self
                 .http
                 .get(url)
@@ -636,6 +700,12 @@ impl Loader {
                 .await
                 .map_err(|e| err(format!("reading {url}: {e}")))?;
             Ok((ttl, bytes))
+        };
+        let (ttl, bytes) = http_interaction(async {
+            match io_deadline(interact, 10_000).await {
+                Some(r) => r,
+                None => Err(err(format!("fetching {url}: deadline exceeded"))),
+            }
         })
         .await?;
         if bytes.len() > MAX_CONTEXT_BYTES {

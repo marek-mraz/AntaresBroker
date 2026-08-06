@@ -568,6 +568,11 @@ pub async fn batch_delete(
             if flags.next().unwrap_or(false) || proxied {
                 // proxied entities are never stored locally — a local miss is
                 // not an error under exclusive/redirect (4.3.6.3)
+                // 5.6.10 deletes carry the same temporal-deletion semantics
+                // as 5.6.6 — without this, batch-deleted entities live on in
+                // the temporal store (N7b: the reset's batch delete leaked
+                // every prior suite's Buildings into the orderBy queries).
+                crate::entities::mirror_delete_entity(&st, &tenant, id);
                 out.success.push(Value::String(id.to_owned()));
             } else {
                 out.errors.push(err_entry(

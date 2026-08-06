@@ -48,10 +48,34 @@
 #   run-summary.md                  the human view incl. the top-10 spike
 #                                   tables (which test caused the peak)
 #   gate-status.txt                 PASS/FAIL — suites green AND RSS ≤ limit
+#   WASM=1                           N7a Node tier: the suite runs against the
+#                                    BROWSER artifact — five node shims
+#                                    (www/node-shim.mjs, the same .wasm a page
+#                                    loads) on 9090..9094 instead of the
+#                                    docker brokers. Forces STORE=memory
+#                                    semantics (the wasm build has no other
+#                                    backend), MQTT=0 (no MQTT sink in a
+#                                    browser build — documented N7c/N8), and
+#                                    refuses HA/ROLL (nothing to roll).
+#   BROWSER=1                        (needs WASM=1) N7b browser tier: ONE
+#                                    headless-Chromium page hosts the module
+#                                    (www/test/etsi-proxy.mjs forwards suite
+#                                    HTTP into it) instead of the node shims.
+#                                    Run with the N7b green set:
+#                                    SUITES=CommonBehaviours,Provision,Consumption,jsonldContext
+#                                    (Subscription/ContextSource/DO/IOP stay
+#                                    Node-tier-only — N7c).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 STORE="${STORE:-memory}"
+if [ "${WASM:-0}" = 1 ]; then
+  [ "${HA:-0}" = 1 ] || [ "${ROLL_DURING_RUN:-0}" = 1 ] && { echo "WASM=1 has no HA/roll story"; exit 2; }
+  [ "$STORE" = memory ] || { echo "WASM=1 implies STORE=memory (the artifact's only backend here)"; exit 2; }
+  export MQTT=0
+elif [ "${BROWSER:-0}" = 1 ]; then
+  echo "BROWSER=1 needs WASM=1 (it is the browser tier of the wasm artifact)"; exit 2
+fi
 case "$STORE" in
   memory)    DB_IMAGE="" ; PROFILE=() ;;
   file)      DB_IMAGE="" ; PROFILE=() ;;   # brokers only; redb lives on the per-broker volume
@@ -97,15 +121,27 @@ RESULTS="${RESULTS_DIR:-results/$STORE}"
 MEM_LIMIT_MB="${MEM_LIMIT_MB:-350}"
 mkdir -p "$RESULTS"
 
-# 1. The image under test (the exact artifact CI publishes on green).
-[ "${SKIP_BUILD:-}" = 1 ] || docker build -t antares-local:latest .
+# 1. The artifact under test: the docker image — or, WASM=1, the browser
+# build (the exact bytes a page loads, served through the Node shim).
+if [ "${WASM:-0}" = 1 ]; then
+  # A failed build MUST abort — the script runs under set -uo (no -e), and
+  # falling through here once ran the whole suite against a stale artifact.
+  if [ "${SKIP_BUILD:-}" != 1 ]; then
+    ./dev/wasm-build.sh || { echo "wasm build failed — aborting"; exit 1; }
+  fi
+  [ -f www/pkg/antares_wasm_bg.wasm ] || { echo "www/pkg missing — run dev/wasm-build.sh"; exit 1; }
+else
+  if [ "${SKIP_BUILD:-}" != 1 ]; then
+    docker build -t antares-local:latest . || { echo "image build failed — aborting"; exit 1; }
+  fi
+fi
 
 # 2. The mosquitto network. The compose file references it as external, so it
 # must exist for EVERY run (MQTT or not): the suite's MqttUtils launches its
 # mosquitto container onto it by name, and the db containers deliberately live
 # on their own bridge so mosquitto stays this network's only occupant and
 # always lands on .2 (the brokers' extra_hosts mapping counts on that).
-docker network inspect compose-files_default >/dev/null 2>&1 \
+[ "${WASM:-0}" = 1 ] || docker network inspect compose-files_default >/dev/null 2>&1 \
   || docker network create --subnet 172.29.9.0/24 compose-files_default
 
 # MQTT prerequisites (G4). The suite launches its OWN mosquitto per 058 test
@@ -145,8 +181,23 @@ if [ -n "${SUITES:-}" ]; then
   done
 fi
 
-# 3. The ONE stack.
-"${COMPOSE[@]}" up -d --wait
+# 3. The ONE stack (WASM=1: five node shims instead — same ports, same suite;
+# BROWSER=1: one Chromium page behind www/test/etsi-proxy.mjs).
+WASM_PIDS=()
+if [ "${WASM:-0}" = 1 ]; then
+  mkdir -p "$RESULTS"
+  if [ "${BROWSER:-0}" = 1 ]; then
+    node www/test/etsi-proxy.mjs > "$RESULTS/browser-proxy.log" 2>&1 &
+    WASM_PIDS+=($!)
+  else
+    for port in 9090 9091 9092 9093 9094; do
+      node www/node-shim.mjs "$port" > "$RESULTS/shim-$port.log" 2>&1 &
+      WASM_PIDS+=($!)
+    done
+  fi
+else
+  "${COMPOSE[@]}" up -d --wait
+fi
 for port in 9090 9091 9092 9093 9094; do
   for t in $(seq 1 30); do curl -sf "localhost:$port/q/health" >/dev/null && break || sleep 1; done
   curl -sf "localhost:$port/q/health" >/dev/null || { echo "broker on :$port not healthy"; exit 1; }
@@ -186,7 +237,11 @@ teardown() {
   # the MQTT step overlays MqttUtils.resource.
   git -C ngsi-ld-test-suite checkout -- resources/variables.py \
     resources/mqttUtils/MqttUtils.resource 2>/dev/null || true
-  [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
+  if [ "${WASM:-0}" = 1 ]; then
+    kill "${WASM_PIDS[@]}" 2>/dev/null || true
+  else
+    [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
+  fi
 }
 trap teardown EXIT
 

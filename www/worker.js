@@ -12,7 +12,11 @@ self.onmessage = async (e) => {
   try {
     if (msg.kind === "init") {
       await init();
-      broker = await AntaresBroker.persistent(msg.file ?? "antares.redb", false);
+      broker = await AntaresBroker.persistent(
+        msg.file ?? "antares.redb",
+        msg.allowPrivateEgress === true,
+        msg.hostAlias,
+      );
       broker.onNotification("http://page.local/", (url, body) => {
         self.postMessage({ kind: "notification", url, body });
         return true;

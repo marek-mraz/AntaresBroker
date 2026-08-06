@@ -286,7 +286,18 @@ pub async fn forward(
     // N2: the whole HTTP interaction is one Send unit (http_interaction) so
     // the handler futures above stay Send on wasm32 too.
     antares_jsonld::http_interaction(async {
-        match req.send().await {
+        // wasm has no client-level timeout — bound the forward per request
+        // (mirrors the native fed_http 8 s total, §16.7); a timed-out
+        // forward counts against the peer like any 5xx.
+        let sent = antares_jsonld::io_deadline(req.send(), 8_000).await;
+        let sent = match sent {
+            Some(r) => r,
+            None => {
+                st.egress.record_failure(&url);
+                return (504, Value::Null);
+            }
+        };
+        match sent {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 // 5xx from a peer counts against it too — a peer answering 500

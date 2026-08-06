@@ -85,8 +85,30 @@ enum CtxEntry {
     Core(String),
 }
 
+/// Build the Cached-entry view of a store row: identity from the row (the
+/// shared truth), lastUsage/hits overlaid from THIS instance's loader stats.
+async fn cached_from_row(st: &AppState, doc: &Value) -> CtxEntry {
+    let url = doc["url"].as_str().unwrap_or_default().to_owned();
+    let created_at = doc["createdAt"].as_str().unwrap_or_default().to_owned();
+    let local = st.loader.usage_get(&url).await;
+    CtxEntry::Cached(antares_jsonld::CtxUsage {
+        local_id: doc["localId"].as_str().unwrap_or_default().to_owned(),
+        last_usage: local
+            .as_ref()
+            .map(|u| u.last_usage.clone())
+            .unwrap_or_else(|| created_at.clone()),
+        hits: local.map(|u| u.hits).unwrap_or(0),
+        url,
+        created_at,
+    })
+}
+
 async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
     if let Some(doc) = st.store.context_get(id).ok()? {
+        // Cached rows are addressable by their deterministic localId too.
+        if doc["kind"].as_str() == Some("Cached") {
+            return Some(cached_from_row(st, &doc).await);
+        }
         return Some(CtxEntry::Stored(doc));
     }
     // stored entries are also addressable by their full URL
@@ -104,10 +126,15 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
     if Loader::is_pinned_core(id) {
         return Some(CtxEntry::Core(id.to_owned()));
     }
-    if let Some(u) = st.loader.usage_get(id).await {
-        // broker-local URLs (hosted/implicit) are not Cached entries
-        if !u.url.contains("/ngsi-ld/v1/jsonldContexts/") {
-            return Some(CtxEntry::Cached(u));
+    // Cached entries: the persisted row is the ONE existence truth (K8: the
+    // per-instance usage map split-brains behind a load balancer). The row id
+    // is uuid5(url), so a URL-shaped id resolves in O(1).
+    if id.starts_with("http://") || id.starts_with("https://") {
+        let rid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id.as_bytes()).to_string();
+        if let Some(doc) = st.store.context_get(&rid).ok()? {
+            if doc["kind"].as_str() == Some("Cached") {
+                return Some(cached_from_row(st, &doc).await);
+            }
         }
     }
     None
@@ -203,10 +230,15 @@ pub async fn list_contexts(
                 usage,
             ));
         }
+        // Cached entries come from the store rows walked above — the shared
+        // truth every instance sees (K8). Loader-only usage entries are NOT
+        // listed (an entry another instance deleted must not resurface),
+        // with one exception: pinned core contexts never get a row and stay
+        // listable from local usage.
         if keep("Cached") {
             for u in st.loader.usage_list().await {
-                if u.url.contains("/ngsi-ld/v1/jsonldContexts/") {
-                    continue; // broker-local (hosted/implicit) URLs
+                if !Loader::is_pinned_core(&u.url) {
+                    continue;
                 }
                 entries.push((
                     u.url.clone(),
