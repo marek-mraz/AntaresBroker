@@ -27,4 +27,3 @@ __pycache__
 # N: wasm build artifacts + demo page deps (built by dev/wasm-build.sh / npm)
 www/pkg/
 www/node_modules/
-www/package-lock.json

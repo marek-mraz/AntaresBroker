@@ -121,6 +121,38 @@ jobs:
           ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
             | grep -v 'crates/antares-sql/'
 
+  wasm:
+    # §N: the browser artifact. Build (size budget enforced by the script,
+    # N5), then prove it in BOTH runtimes (dev/wasm-test.sh, N6/N7a): the
+    # Node shim does a create + a real-HTTP notification; headless Chromium
+    # runs the demo page — Service Worker broker, entity, subscription,
+    # in-page notification, second tab. Same scripts as local runs (§E).
+    name: Browser build (wasm32)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (lockfile-matched) + binaryen
+        run: |
+          ./dev/install-wasm-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build + size budget (N5)
+        run: |
+          ./dev/wasm-build.sh | tee wasm-size.txt
+          echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
+          tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Demo page deps + chromium
+        working-directory: www
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps chromium
+      - name: Node tier smoke + browser tier (N6)
+        run: ./dev/wasm-test.sh
+
   build:
     # ONE image for the whole run. Every store mode tests the SAME bytes, and
     # the image that ships is the image the suites ran against. Runs alongside

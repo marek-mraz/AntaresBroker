@@ -62,6 +62,25 @@ commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit
 once per entity write, and redb has a single writer, so this is a per-process
 ceiling (tasks.md B13).
 
+## Browser build (WebAssembly)
+
+The same broker compiles to `wasm32-unknown-unknown` and runs entirely in a
+web page — no server, no install (tasks.md §N, ADR-0008). A module Service
+Worker answers `/ngsi-ld/v1/*` in-tab; `www/index.html` is the demo (create
+entities, subscribe, watch notifications arrive in-page).
+
+```bash
+./dev/install-wasm-tools.sh   # wasm-bindgen (lockfile-matched) + wasm-opt
+./dev/wasm-build.sh           # → www/pkg (≤8 MB raw / ≤3 MB gzip budget; ~2.4/0.9 today)
+node www/node-shim.mjs 9090   # the SAME .wasm behind a real TCP port (Node ≥18)
+./dev/wasm-test.sh            # Node smoke + headless-Chromium page test
+```
+
+Scope: memory store + local bus only — no NATS, MQTT, Postgres or roles in a
+page. Conformance: the **Node tier** (shim) is the gate for the serial ETSI
+suites; in-browser, federation and external HTTP callbacks are structurally
+out of reach (no inbound sockets, CORS) and stay covered by the Node tier.
+
 ## Build & test
 
 ```bash

@@ -959,10 +959,18 @@ N4) selected through the same trait, compiled to a different target.
       in a page the browser's CORS sandbox is the egress boundary (N8).
       Proof: cargo check green for antares-wasm on wasm32-unknown-unknown
       AND the full native workspace + clippy -D warnings + tests.)*
-- [ ] N3. Service Worker glue: intercept `fetch` on a virtual
+- [x] N3. Service Worker glue: intercept `fetch` on a virtual
       `/ngsi-ld/v1/*` origin path → `http::Request` → module → `Response`,
       so page JS talks to what looks like a normal broker URL. Plus a direct
       in-page API (`await broker.fetch(...)`) for pages that skip the SW.
+      *(www/sw.js — MODULE service worker (Chromium; Firefox lacks module
+      SWs, the page falls back to the in-page API automatically); broker
+      state shared by every tab of the origin, proven by the two-tab
+      browser test. Extra seam the letter of the box didn't name:
+      `broker.onNotification(prefix, cb)` — a page cannot host an HTTP
+      endpoint, so subscription endpoints under the reserved prefix deliver
+      to page JS (wasm-only page_sink hook consulted before the HTTP
+      client), and the SW fans them out via BroadcastChannel.)*
 - [ ] N4. Browser persistence. **Verified 2026-08-04:** redb 4.1.0 DOES
       compile to `wasm32-unknown-unknown` (627 KB `.wasm` for the engine) and
       runs there with `backends::InMemoryBackend` — what it cannot do is open
@@ -979,12 +987,25 @@ N4) selected through the same trait, compiled to a different target.
       an `unsafe impl` wrapper → a reviewed exception to
       `unsafe_code = "forbid"` (§9.5), same treatment as the `sonic` module.
       Sync access handles are Worker-only, never the main thread.
-- [ ] N5. Build + budget: `wasm-pack` + `wasm-opt -Oz`; ≤8 MB raw, ≤3 MB
+- [x] N5. Build + budget: `wasm-pack` + `wasm-opt -Oz`; ≤8 MB raw, ≤3 MB
       compressed; size printed in the CI summary next to the image size.
-- [ ] N6. Page builds in-repo and is CI-tested; ⛔ NEEDS-YOU only to publish
+      *(dev/wasm-build.sh: wasm-release profile (opt-z, fat LTO, panic
+      abort) → wasm-bindgen --target web → wasm-opt -Oz, budgets ENFORCED
+      by the script (fail, not warn). wasm-pack itself skipped — it wraps
+      exactly these two tools and pins nothing; dev/install-wasm-tools.sh
+      fetches wasm-bindgen LOCKFILE-MATCHED + binaryen. Measured: 2.38 MB
+      raw / 0.93 MB gzip. CI `wasm` job prints the size line to the step
+      summary.)*
+- [x] N6. Page builds in-repo and is CI-tested; ⛔ NEEDS-YOU only to publish
       it (your docs site / domain). Create entities, subscribe, watch
       notifications fire in-page. Zero install, no server. No other NGSI-LD
       broker can do this (JVM brokers can't; Orion-LD needs Mongo).
+      *(www/index.html + app.js; www/test/browser-test.mjs drives it in
+      headless Chromium — SW mode, health, create, subscribe, notification
+      observed in-page, second tab sees the same broker — run by the CI
+      `wasm` job via dev/wasm-test.sh (which also smokes the Node shim).
+      Publishing the page anywhere public remains yours (⛔): everything is
+      static files — `www/` + `www/pkg/` on any host.)*
 - [ ] N7. ETSI conformance for the WASM artifact, in three tiers:
       - N7a. **Node tier (full suite):** the SAME `.wasm` under Node with a
         thin `http.createServer` shim feeding the router; run
@@ -1007,9 +1028,15 @@ N4) selected through the same trait, compiled to a different target.
       (SharedWorker owning the handle and serving other tabs, or leader
       election with a clear "another tab owns this store" error) before N6 —
       a demo page that dies on the user's second tab is worse than no demo.
-- [ ] N8. Docs/ADR: browser build is memory (or OPFS-file) only — no NATS,
+- [x] N8. Docs/ADR: browser build is memory (or OPFS-file) only — no NATS,
       no MQTT, no Postgres, no roles; state which suites gate it and which
       are structurally out of reach.
+      *(ADR-0008 (the portability ledger + conformance scope table) +
+      README "Browser build (WebAssembly)" section. Node tier = the
+      conformance gate for serial suites; browser tier = Provision/
+      Consumption/CommonBehaviours/jsonldContext class + the page demo;
+      external HTTP callbacks and federation are structurally out of reach
+      in a page (no inbound sockets, CORS) and stay Node-tier-covered.)*
 
 ---
 
