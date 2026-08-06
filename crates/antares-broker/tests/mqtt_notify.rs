@@ -78,11 +78,23 @@ fn mqtt_notification_carries_metadata_and_body() {
     client
         .subscribe(&topic, rumqttc::QoS::AtLeastOnce)
         .expect("subscribe");
+    // Drive the connection until the SUBACK: subscribe() only queues the
+    // packet, and a notification published before the subscription is live
+    // on the server is silently lost (no persistent session buffers it).
+    for event in conn.iter() {
+        if matches!(
+            event.expect("mqtt connect"),
+            rumqttc::Event::Incoming(rumqttc::Packet::SubAck(_))
+        ) {
+            break;
+        }
+    }
 
     let mut broker = Command::new(env!("CARGO_BIN_EXE_antares"))
         .env_remove("ANTARES_TEST_DATABASE_URL")
         .env_remove("ANTARES_TEST_MQTT_URL")
         .env("ANTARES_HTTP_PORT", http_port.to_string())
+        .env("ANTARES_EGRESS_ALLOW_PRIVATE", "true")
         .spawn()
         .expect("spawn antares");
     wait_healthy(http_port);
