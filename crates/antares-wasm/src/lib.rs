@@ -30,11 +30,17 @@ impl Broker {
     /// Build the router over an in-memory store. Mirrors the native wiring
     /// minus the pieces that need a socket or a pool.
     pub fn new() -> Self {
-        let store = antares_sql::store::any::AnyStore::Mem(antares_sql::store::Store::default());
+        Self::with_store(antares_sql::store::Store::default(), "memory")
+    }
+
+    /// The same wiring over an externally-constructed store — the OPFS-backed
+    /// store (N4) enters here; `mode` is what `/q/health` reports (A4).
+    pub fn with_store(store: antares_sql::store::Store, mode: &str) -> Self {
+        let store = antares_sql::store::any::AnyStore::Mem(store);
         let mut state = antares_api::AppState::with_store(
             "antares-wasm".to_owned(),
             std::sync::Arc::new(store),
-            "memory".to_owned(),
+            mode.to_owned(),
         );
         // Same in-process matcher/notifier path as bus=local (§9.2): the
         // store's change hook feeds it, no bus process exists to talk to.
@@ -73,5 +79,7 @@ impl Broker {
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
+#[cfg(target_arch = "wasm32")]
+mod opfs;
 #[cfg(target_arch = "wasm32")]
 pub use browser::*;

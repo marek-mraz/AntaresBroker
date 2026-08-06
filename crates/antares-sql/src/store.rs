@@ -191,7 +191,14 @@ impl Store {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let path = dir.join("antares.redb");
         let db = Database::create(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        Self::from_database(db, &path.display().to_string())
+    }
 
+    /// The target-independent half of `open_file` (N4): format check (B11) +
+    /// boot rebuild (B4) over an already-constructed redb `Database`. The
+    /// browser build calls this with an OPFS-backed database — same shadow,
+    /// same commit-before-ack, different `StorageBackend`.
+    pub fn from_database(db: Database, label: &str) -> Result<Self, String> {
         // B11: format marker. Absent marker + existing data = a file this
         // binary cannot vouch for; refuse rather than guess.
         let stored_format = {
@@ -209,9 +216,8 @@ impl Store {
             Some(FORMAT_VERSION) => {}
             Some(other) => {
                 return Err(format!(
-                    "data file {} has format {other}, this binary supports {FORMAT_VERSION} — \
-                     refusing to start",
-                    path.display()
+                    "data file {label} has format {other}, this binary supports {FORMAT_VERSION} — \
+                     refusing to start"
                 ));
             }
             None => {
@@ -220,8 +226,7 @@ impl Store {
                     if let Ok(t) = rt.open_table(table_for(kind)) {
                         if t.len().map_err(|e| e.to_string())? > 0 {
                             return Err(format!(
-                                "data file {} holds data but no format marker — refusing to start",
-                                path.display()
+                                "data file {label} holds data but no format marker — refusing to start"
                             ));
                         }
                     }

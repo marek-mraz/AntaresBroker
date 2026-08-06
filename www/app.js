@@ -15,18 +15,84 @@ const log = (line, cls = "") => {
   $("log").prepend(el);
 };
 
-// ---- transport: SW when possible, in-page module otherwise ----------------
+// ---- transport ladder: OPFS worker (persistent) → SW → in-page ------------
 let pageBroker = null;
+let worker = null;
 let mode = "in-page";
+let workerSeq = 0;
+const workerWaiters = new Map();
 
-async function brokerFetch(path, opts) {
+function callWorker(msg, transfer = []) {
+  return new Promise((resolve, reject) => {
+    const id = ++workerSeq;
+    workerWaiters.set(id, { resolve, reject });
+    worker.postMessage({ id, ...msg }, transfer);
+  });
+}
+
+async function brokerFetch(path, opts = {}) {
+  if (mode === "opfs-worker") {
+    const body = opts.body ? new TextEncoder().encode(opts.body) : null;
+    const r = await callWorker(
+      {
+        kind: "fetch",
+        req: {
+          method: opts.method ?? "GET",
+          url: new URL(path, location.origin).href,
+          headers: opts.headers ?? {},
+          body,
+        },
+      },
+      body ? [body.buffer] : [],
+    );
+    // 204-class statuses reject a body in the Response constructor.
+    const noBody = [101, 103, 204, 205, 304].includes(r.status);
+    return new Response(noBody ? null : r.body, {
+      status: r.status,
+      headers: r.headers,
+    });
+  }
   if (mode === "service-worker") return fetch(path, opts);
   const req = new Request(new URL(path, location.origin), opts);
   return pageBroker.fetch(req);
 }
 
+// N4: try to own the OPFS store from a dedicated worker. Retried once — a
+// just-closed tab's handle releases asynchronously on navigation.
+async function bootPersistent() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    worker = new Worker("./worker.js", { type: "module" });
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.kind === "notification") {
+        showNotification(JSON.parse(m.body));
+        return;
+      }
+      const w = workerWaiters.get(m.id);
+      if (!w) return;
+      workerWaiters.delete(m.id);
+      m.ok ? w.resolve(m) : w.reject(new Error(m.error));
+    };
+    try {
+      await callWorker({ kind: "init", file: "antares.redb" });
+      mode = "opfs-worker";
+      return true;
+    } catch (e) {
+      worker.terminate();
+      worker = null;
+      log(`persistence unavailable: ${e.message}`, "err");
+      // Only the exclusive-owner case is worth one retry.
+      if (!String(e.message).includes("another tab")) return false;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  return false;
+}
+
 async function boot() {
-  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  if (await bootPersistent()) {
+    // fallthrough to shared boot tail below
+  } else if ("serviceWorker" in navigator && location.protocol !== "file:") {
     try {
       await navigator.serviceWorker.register("./sw.js", { type: "module" });
       await navigator.serviceWorker.ready;
@@ -53,17 +119,17 @@ async function boot() {
       console.warn("module service worker unavailable, using in-page broker", e);
     }
   }
-  if (mode !== "service-worker") {
+  if (mode === "service-worker") {
+    new BroadcastChannel("antares-notifications").onmessage = (e) =>
+      showNotification(e.data.body);
+  } else if (mode !== "opfs-worker") {
     await init();
     pageBroker = new AntaresBroker();
     pageBroker.onNotification(NOTIFY_ENDPOINT, (url, body) => {
       showNotification(JSON.parse(body));
       return true;
     });
-  } else {
-    new BroadcastChannel("antares-notifications").onmessage = (e) =>
-      showNotification(e.data.body);
-  }
+  } // opfs-worker: notifications arrive on the worker port (bootPersistent)
   $("mode").textContent = mode;
   const health = await (await brokerFetch("/q/health")).json();
   $("health").textContent = JSON.stringify(health);

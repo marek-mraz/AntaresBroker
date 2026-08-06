@@ -204,6 +204,7 @@ dependencies = [
  "http",
  "http-body-util",
  "js-sys",
+ "redb",
  "send_wrapper",
  "serde_json",
  "tokio",

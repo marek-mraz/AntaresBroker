@@ -971,7 +971,7 @@ N4) selected through the same trait, compiled to a different target.
       endpoint, so subscription endpoints under the reserved prefix deliver
       to page JS (wasm-only page_sink hook consulted before the HTTP
       client), and the SW fans them out via BroadcastChannel.)*
-- [ ] N4. Browser persistence. **Verified 2026-08-04:** redb 4.1.0 DOES
+- [x] N4. Browser persistence. **Verified 2026-08-04:** redb 4.1.0 DOES
       compile to `wasm32-unknown-unknown` (627 KB `.wasm` for the engine) and
       runs there with `backends::InMemoryBackend` — what it cannot do is open
       a file, because that target has no filesystem. `StorageBackend` is six
@@ -987,6 +987,19 @@ N4) selected through the same trait, compiled to a different target.
       an `unsafe impl` wrapper → a reviewed exception to
       `unsafe_code = "forbid"` (§9.5), same treatment as the `sonic` module.
       Sync access handles are Worker-only, never the main thread.
+      *(DONE 2026-08-06 — antares-wasm/src/opfs.rs: OpfsBackend implements
+      redb::StorageBackend over FileSystemSyncAccessHandle (short-read/write
+      loops, truncate zero-extends per the trait contract);
+      `AntaresBroker.persistent(file?)` builds the SAME Shadow via the new
+      Store::from_database split (format check B11 + boot rebuild B4 +
+      commit-before-ack B3 all shared with native file mode). The
+      anticipated unsafe exception was NOT needed: send_wrapper provides
+      Send+Sync soundly with a runtime thread check — unsafe_code stays
+      forbid everywhere. The broker lives in a dedicated worker
+      (www/worker.js) because sync handles exist nowhere else; page ↔ worker
+      via postMessage. Proof in www/test/browser-test.mjs: store=file,
+      entity SURVIVES a page reload; InMemoryBackend fallback = the
+      pre-existing memory ladder (SW / in-page modes).)*
 - [x] N5. Build + budget: `wasm-pack` + `wasm-opt -Oz`; ≤8 MB raw, ≤3 MB
       compressed; size printed in the CI summary next to the image size.
       *(dev/wasm-build.sh: wasm-release profile (opt-z, fat LTO, panic
@@ -1022,12 +1035,21 @@ N4) selected through the same trait, compiled to a different target.
         browser tier (covered by N7a) until the harness proxies them.
         A 5-broker federation stack in-browser needs the proxy regardless:
         no inbound sockets means no broker-to-broker HTTP.
-- [ ] N4b. OPFS has the same single-writer property as the native file
+- [x] N4b. OPFS has the same single-writer property as the native file
       (§K10): a sync access handle is exclusive per file, so a SECOND TAB on
       the same origin cannot open the store. Decide the owner story
       (SharedWorker owning the handle and serving other tabs, or leader
       election with a clear "another tab owns this store" error) before N6 —
       a demo page that dies on the user's second tab is worse than no demo.
+      *(Decision FORCED by the platform: sync access handles exist only in
+      DEDICATED workers — a SharedWorker cannot hold one — so the owner
+      story is first-tab-wins + the clear error. The second tab logs
+      "another tab or worker already owns the store file … close the other
+      tab, or run without persistence" and falls back down the transport
+      ladder (SW / in-page, non-persistent) instead of dying. bootPersistent
+      retries once after 400 ms so tab-close → tab-open handovers succeed.
+      Proof: browser-test.mjs opens a second tab, asserts the refusal +
+      fallback, then proves the reload handover.)*
 - [x] N8. Docs/ADR: browser build is memory (or OPFS-file) only — no NATS,
       no MQTT, no Postgres, no roles; state which suites gate it and which
       are structurally out of reach.

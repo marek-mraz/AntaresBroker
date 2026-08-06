@@ -29,6 +29,8 @@ axum = { version = "0.8", default-features = false, features = [
 # it to crypto.getRandomValues via wasm-bindgen (feature unification applies
 # it to every uuid user in this build).
 uuid = { workspace = true, features = ["js"] }
+# N4: redb over the OPFS StorageBackend (src/opfs.rs)
+redb = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
@@ -38,6 +40,15 @@ web-sys = { workspace = true, features = [
     "RequestInit",
     "Response",
     "ResponseInit",
+    # N4 OPFS surface (dedicated-worker sync access handles)
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetFileOptions",
+    "FileSystemReadWriteOptions",
+    "FileSystemSyncAccessHandle",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
 ] }
 console_error_panic_hook = { workspace = true }
 send_wrapper = { workspace = true }

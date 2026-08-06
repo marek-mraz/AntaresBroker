@@ -34,6 +34,33 @@ impl AntaresBroker {
         }
     }
 
+    /// `await AntaresBroker.persistent(file?, allowPrivateEgress?)` — the
+    /// N4 OPFS-backed broker: the same redb write-through shadow as native
+    /// `file` mode (commit-before-ack, format check, boot rebuild), storage
+    /// supplied by an exclusive OPFS sync access handle. Dedicated workers
+    /// only; a second opener gets the N4b "another tab owns this store"
+    /// error instead of a torn file.
+    #[wasm_bindgen]
+    pub async fn persistent(
+        file: Option<String>,
+        allow_private_egress: Option<bool>,
+    ) -> Result<AntaresBroker, JsValue> {
+        console_error_panic_hook::set_once();
+        antares_jsonld::loader::allow_private_egress(allow_private_egress == Some(true));
+        let name = file.unwrap_or_else(|| "antares.redb".to_owned());
+        let backend = crate::opfs::OpfsBackend::acquire(&name)
+            .await
+            .map_err(|e| JsValue::from_str(&e))?;
+        let db = redb::Database::builder()
+            .create_with_backend(backend)
+            .map_err(|e| JsValue::from_str(&format!("opening redb over OPFS: {e}")))?;
+        let store = antares_sql::store::Store::from_database(db, &format!("opfs:{name}"))
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(Self {
+            inner: crate::Broker::with_store(store, "file"),
+        })
+    }
+
     /// `broker.onNotification(prefix, callback)` — subscription endpoints
     /// whose URL starts with `prefix` are delivered to `callback(url,
     /// bodyText)` instead of the network (a page has no inbound socket, N3).
