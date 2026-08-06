@@ -113,6 +113,9 @@ jobs:
     # shared with full.yml so both pipelines test the same shape.
     name: ETSI cell matrix
     uses: ./.github/workflows/etsi-matrix.yml
+    permissions:
+      contents: read
+      actions: write # the summary job deletes the merged per-cell artifacts
 
   publish-dev:
     # Every green commit on master ships a DEV image: the sha and a moving
