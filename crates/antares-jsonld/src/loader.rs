@@ -14,10 +14,10 @@ use std::time::Instant;
 use web_time::Instant;
 // N2: moka's clock panics on wasm32 (std Instant); the browser build swaps
 // in the FIFO minicache behind the same call surface.
-#[cfg(not(target_arch = "wasm32"))]
-use moka::sync::Cache as BoundedCache;
 #[cfg(target_arch = "wasm32")]
 use crate::minicache::Cache as BoundedCache;
+#[cfg(not(target_arch = "wasm32"))]
+use moka::sync::Cache as BoundedCache;
 
 /// Core context versions served from the build, never the network
 /// (uri.etsi.org serves an HTML landing page to plain HTTP clients).
@@ -600,22 +600,21 @@ impl Loader {
                     Ok(())
                 }
                 Value::String(url) => {
-                    let resolved: String = if url.starts_with("http://")
-                        || url.starts_with("https://")
-                    {
-                        url.clone()
-                    } else if let Some(b) = base.as_deref() {
-                        reqwest::Url::parse(b)
-                            .and_then(|b| b.join(url))
-                            .map(String::from)
-                            .map_err(|e| {
-                                NgsiError::LdContextNotAvailable(format!(
-                                    "cannot resolve @context URL {url} against {b}: {e}"
-                                ))
-                            })?
-                    } else {
-                        url.clone()
-                    };
+                    let resolved: String =
+                        if url.starts_with("http://") || url.starts_with("https://") {
+                            url.clone()
+                        } else if let Some(b) = base.as_deref() {
+                            reqwest::Url::parse(b)
+                                .and_then(|b| b.join(url))
+                                .map(String::from)
+                                .map_err(|e| {
+                                    NgsiError::LdContextNotAvailable(format!(
+                                        "cannot resolve @context URL {url} against {b}: {e}"
+                                    ))
+                                })?
+                        } else {
+                            url.clone()
+                        };
                     let doc = self.fetch(&resolved).await?;
                     if let Ok(mut u) = urls.lock() {
                         u.push(resolved.clone());

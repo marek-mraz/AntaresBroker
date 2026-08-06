@@ -29,7 +29,12 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         K: std::borrow::Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
-        self.inner.lock().expect("minicache lock").0.get(key).cloned()
+        self.inner
+            .lock()
+            .expect("minicache lock")
+            .0
+            .get(key)
+            .cloned()
     }
 
     pub fn insert(&self, key: K, value: V) {

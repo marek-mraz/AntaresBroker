@@ -26,11 +26,22 @@ const ENTITY: &str = r#"{
 async fn create_then_retrieve_round_trips() {
     let mut broker = Broker::new();
 
-    let resp = broker.handle(req("POST", "/ngsi-ld/v1/entities", ENTITY)).await;
-    assert_eq!(resp.status(), 201, "{}", String::from_utf8_lossy(resp.body()));
+    let resp = broker
+        .handle(req("POST", "/ngsi-ld/v1/entities", ENTITY))
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "{}",
+        String::from_utf8_lossy(resp.body())
+    );
 
     let resp = broker
-        .handle(req("GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:wasm-1", ""))
+        .handle(req(
+            "GET",
+            "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:wasm-1",
+            "",
+        ))
         .await;
     assert_eq!(resp.status(), 200);
     let doc: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();

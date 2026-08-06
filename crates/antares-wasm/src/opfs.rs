@@ -37,19 +37,16 @@ impl OpfsBackend {
     /// exclusive sync access handle. Dedicated-worker-only by platform rule.
     pub async fn acquire(name: &str) -> Result<Self, String> {
         let global = js_sys::global();
-        let scope: web_sys::WorkerGlobalScope = global
-            .dyn_into()
-            .map_err(|_| {
-                "OPFS persistence needs a dedicated worker: sync access handles do not exist on \
+        let scope: web_sys::WorkerGlobalScope = global.dyn_into().map_err(|_| {
+            "OPFS persistence needs a dedicated worker: sync access handles do not exist on \
                  the main thread or in a Service Worker"
-                    .to_owned()
-            })?;
+                .to_owned()
+        })?;
         let storage = scope.navigator().storage();
-        let dir: web_sys::FileSystemDirectoryHandle =
-            JsFuture::from(storage.get_directory())
-                .await
-                .map_err(|e| format!("origin-private file system unavailable: {e:?}"))?
-                .into();
+        let dir: web_sys::FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
+            .await
+            .map_err(|e| format!("origin-private file system unavailable: {e:?}"))?
+            .into();
         let opts = web_sys::FileSystemGetFileOptions::new();
         opts.set_create(true);
         let file: web_sys::FileSystemFileHandle =
