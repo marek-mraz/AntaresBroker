@@ -23,8 +23,8 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "23 2 * * *" # nightly serial run (E9d), 02:23 UTC
+  # No schedule: per-commit CI is the cell matrix + summary only; the serial,
+  # roll and wasm tiers run on v* tags or manual dispatch (2026-08-06).
 
 # A newer commit supersedes a running pipeline — but never cancel a release.
 concurrency:
