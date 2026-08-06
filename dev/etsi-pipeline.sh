@@ -266,6 +266,15 @@ fi
 # never rely on that sed surviving.
 if [ "$RUN_IOP" = 1 ]; then
 echo "IOP" > "$PHASE_FILE"
+# The venv bootstrap lives in etsi-run.sh — which an IOP-only invocation
+# (CI cell SUITES=IOP) never executes, so ../.venv/bin/robot simply did not
+# exist there: robot died instantly, || true swallowed it, and the cell
+# reported an empty "0 passed — gate FAIL" (run #18's 1 KB artifacts).
+# Same recipe as etsi-run.sh: pip runs FROM the suite dir (relative paths).
+if [ ! -x .venv/bin/robot ]; then
+  python3 -m venv .venv
+  (cd ngsi-ld-test-suite && ../.venv/bin/pip -q install -r requirements.txt)
+fi
 ( cd ngsi-ld-test-suite/resources
   sed -i "s|^url = .*|url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
   sed -i "s|^temporal_api_url = .*|temporal_api_url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py
