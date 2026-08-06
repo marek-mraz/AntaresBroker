@@ -1,6 +1,11 @@
 # Multi-stage: build on the target arch (arm64/amd64 both fine), run distroless
 # (non-root, read-only rootfs friendly — deep-analysis §16.5).
-FROM rust:1-slim AS build
+#
+# cargo-chef splits the build so the ~400 dependency crates compile in their
+# own layer, keyed by Cargo.lock via recipe.json — a source-only commit reuses
+# it and rebuilds just the antares-* crates. CI persists the layer with a
+# BuildKit gha cache (etsi-matrix.yml), cutting the image build ~10 min → ~3.
+FROM rust:1-slim AS chef
 WORKDIR /src
 # jemalloc (§2.1 allocator) ships C sources that configure+make themselves;
 # rust:1-slim carries a linker but no make, so tikv-jemalloc-sys' build script
@@ -10,9 +15,24 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 # §16.5: release binaries embed their dependency list (SBOM) via
 # cargo-auditable — `cargo audit bin /antares` can then verify a shipped
-# broker against advisories with no source tree at hand. Installed BEFORE
-# the source COPY so the layer caches across source changes.
-RUN cargo install cargo-auditable --locked
+# broker against advisories with no source tree at hand. Installed (with chef)
+# BEFORE any source COPY so the layer caches across source changes.
+RUN cargo install cargo-chef cargo-auditable --locked
+# The pinned toolchain must be present from the first cargo invocation —
+# otherwise the dep layer compiles with the image's default toolchain and the
+# final build recompiles everything under the pinned one, defeating the cache.
+COPY rust-toolchain.toml .
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS build
+COPY --from=planner /src/recipe.json recipe.json
+# Cook scoped to the shipped package so feature unification matches the real
+# build below — a workspace-wide cook can resolve different features and
+# quietly recompile deps anyway.
+RUN cargo chef cook --release -p antares-broker --recipe-path recipe.json
 COPY . .
 RUN cargo auditable build --release -p antares-broker \
  && mkdir /data-init

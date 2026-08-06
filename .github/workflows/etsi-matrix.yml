@@ -22,8 +22,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build antares-local:latest
-        run: docker build -t antares-local:latest .
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:latest (dep layer cached across runs)
+        # cargo-chef in the Dockerfile isolates the ~400 dependency crates in
+        # their own layer; type=gha persists it between runs, so a source-only
+        # commit rebuilds just the antares-* crates (~10 min → ~3).
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Export it for the mode jobs
         run: docker save antares-local:latest | gzip > antares-image.tgz
