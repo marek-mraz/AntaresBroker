@@ -96,6 +96,16 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # client/futures are !Send but axum demands Send everywhere.
 send_wrapper = { version = "0.6", features = ["futures"] }
 
+# N5: the browser artifact optimizes for size (opt-level z + fat LTO); the
+# native release profile stays throughput-tuned and untouched.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

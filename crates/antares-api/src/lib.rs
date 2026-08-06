@@ -43,6 +43,32 @@ where
     wasm_bindgen_futures::spawn_local(fut);
 }
 
+/// N3 (wasm only): a page-registered notification sink. A browser page has no
+/// inbound socket to receive notification callbacks on, so a subscription
+/// whose endpoint matches the registered URL prefix is delivered to page JS
+/// instead of the network. Endpoints outside the prefix still leave via
+/// fetch — the N7a Node tier registers nothing and keeps pure HTTP delivery.
+#[cfg(target_arch = "wasm32")]
+pub mod page_sink {
+    use std::sync::OnceLock;
+
+    type Hook = (String, Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>);
+    static HOOK: OnceLock<Hook> = OnceLock::new();
+
+    /// Register the sink (once per module instance).
+    pub fn set(prefix: String, h: Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>) {
+        let _ = HOOK.set((prefix, h));
+    }
+
+    /// True when the page sink claimed (and thus delivered) this endpoint.
+    pub fn try_deliver(url: &str, body: &[u8]) -> bool {
+        match HOOK.get() {
+            Some((prefix, h)) if url.starts_with(prefix.as_str()) => h(url, body),
+            _ => false,
+        }
+    }
+}
+
 use antares_model::{NgsiError, API_ROOT};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};

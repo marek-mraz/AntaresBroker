@@ -12,6 +12,12 @@ use tokio::sync::RwLock;
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
+// N2: moka's clock panics on wasm32 (std Instant); the browser build swaps
+// in the FIFO minicache behind the same call surface.
+#[cfg(not(target_arch = "wasm32"))]
+use moka::sync::Cache as BoundedCache;
+#[cfg(target_arch = "wasm32")]
+use crate::minicache::Cache as BoundedCache;
 
 /// Core context versions served from the build, never the network
 /// (uri.etsi.org serves an HTML landing page to plain HTTP clients).
@@ -72,11 +78,24 @@ pub struct EgressPolicy {
     pub allow_private: bool,
 }
 
+/// N: programmatic stand-in for `ANTARES_EGRESS_ALLOW_PRIVATE` — wasm32 has
+/// NO process environment (`std::env::var` always errs there), so the
+/// browser/Node embedder sets this before constructing the broker.
+static ALLOW_PRIVATE_OVERRIDE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Grant egress to private/loopback ranges for policies created AFTER this
+/// call (the wasm constructor path; native deployments use the env var).
+pub fn allow_private_egress(v: bool) {
+    ALLOW_PRIVATE_OVERRIDE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl EgressPolicy {
     pub fn from_env() -> Self {
         Self {
             allow_private: std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
-                .is_ok_and(|v| v == "true" || v == "1"),
+                .is_ok_and(|v| v == "true" || v == "1")
+                || ALLOW_PRIVATE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -314,10 +333,10 @@ pub struct Loader {
     policy: EgressPolicy,
     /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
     /// J2: bounded LRU — every cache has a max size (R4/L7 lesson).
-    fetched: moka::sync::Cache<String, FetchedDoc>,
+    fetched: BoundedCache<String, FetchedDoc>,
     /// cache key (serialized user context) → merged+frozen Context (the
     /// parsed-context LRU of §6.3 — the centerpiece, size-capped at 256).
-    merged: moka::sync::Cache<String, Arc<Context>>,
+    merged: BoundedCache<String, Arc<Context>>,
     /// Core context, pre-merged and PINNED outside the LRU (never evicted).
     core_only: Arc<Context>,
     /// URL → usage stats for every external @context referenced by requests
@@ -326,7 +345,7 @@ pub struct Loader {
     usage: RwLock<HashMap<String, CtxUsage>>,
     /// merged-cache key → every URL that resolution touched (so cache hits
     /// still bump numberOfHits for nested references).
-    merged_urls: moka::sync::Cache<String, Arc<Vec<String>>>,
+    merged_urls: BoundedCache<String, Arc<Vec<String>>>,
     /// J3: bounded concurrency on cold context resolution — a burst of
     /// exotic-context requests can't blow the JSON working-set budget.
     resolve_permits: tokio::sync::Semaphore,
@@ -366,11 +385,11 @@ impl Loader {
                 .expect("reqwest client"),
             ),
             policy,
-            fetched: moka::sync::Cache::new(256),
-            merged: moka::sync::Cache::new(256),
+            fetched: BoundedCache::new(256),
+            merged: BoundedCache::new(256),
             core_only: Arc::new(core),
             usage: RwLock::new(HashMap::new()),
-            merged_urls: moka::sync::Cache::new(256),
+            merged_urls: BoundedCache::new(256),
             resolve_permits: tokio::sync::Semaphore::new(32),
             cache_writer: std::sync::RwLock::new(None),
         }

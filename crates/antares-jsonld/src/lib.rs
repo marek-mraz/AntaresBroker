@@ -8,6 +8,8 @@ pub mod compact;
 pub mod context;
 pub mod expand;
 pub mod loader;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod minicache;
 
 pub use compact::{compact_entity, compact_entity_shallow, compact_types};
 pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};

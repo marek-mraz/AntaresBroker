@@ -1488,7 +1488,17 @@ async fn deliver_as(
     } else {
         match outbound {
             Outbound::Http(req, bytes) => {
-                matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
+                // N3 (wasm): the page sink takes matching endpoints — a page
+                // cannot listen on a socket, so this IS its delivery channel.
+                #[cfg(target_arch = "wasm32")]
+                let page_handled = crate::page_sink::try_deliver(uri, &bytes);
+                #[cfg(not(target_arch = "wasm32"))]
+                let page_handled = false;
+                if page_handled {
+                    true
+                } else {
+                    matches!(req.body(bytes).send().await, Ok(r) if r.status().is_success())
+                }
             }
             #[cfg(feature = "mqtt")]
             Outbound::Mqtt(endpoint, params, bytes) => {

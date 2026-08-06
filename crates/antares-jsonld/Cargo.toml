@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 antares-model = { workspace = true }
 serde_json = { workspace = true }
-moka = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 
@@ -21,6 +20,8 @@ workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+# N2: moka's clock panics on wasm32 — the browser build uses src/minicache.rs
+moka = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }

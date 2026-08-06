@@ -18,13 +18,44 @@ pub struct AntaresBroker {
 
 #[wasm_bindgen]
 impl AntaresBroker {
-    /// `new AntaresBroker()` — one broker per JS context.
+    /// `new AntaresBroker(allowPrivateEgress?)` — one broker per JS context.
+    ///
+    /// `allowPrivateEgress: true` is `ANTARES_EGRESS_ALLOW_PRIVATE` for a
+    /// target with NO process environment (`std::env::var` always errs on
+    /// wasm32, so the env route cannot work). The Node tier (N7a) needs it:
+    /// the ETSI suite's notification receivers live on 127.0.0.1, which the
+    /// I4 egress policy denies by default.
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
+    pub fn new(allow_private_egress: Option<bool>) -> Self {
         console_error_panic_hook::set_once();
+        antares_jsonld::loader::allow_private_egress(allow_private_egress == Some(true));
         Self {
             inner: crate::Broker::new(),
         }
+    }
+
+    /// `broker.onNotification(prefix, callback)` — subscription endpoints
+    /// whose URL starts with `prefix` are delivered to `callback(url,
+    /// bodyText)` instead of the network (a page has no inbound socket, N3).
+    /// One registration per module instance; endpoints outside the prefix
+    /// still leave via fetch.
+    #[wasm_bindgen(js_name = onNotification)]
+    pub fn on_notification(&self, prefix: String, callback: js_sys::Function) {
+        // send_wrapper: js_sys::Function is !Send; the module is
+        // single-threaded (same argument as HttpClient, N2).
+        let cb = send_wrapper::SendWrapper::new(callback);
+        antares_api::page_sink::set(
+            prefix,
+            Box::new(move |url, body| {
+                let body = String::from_utf8_lossy(body).into_owned();
+                cb.call2(
+                    &wasm_bindgen::JsValue::NULL,
+                    &wasm_bindgen::JsValue::from_str(url),
+                    &wasm_bindgen::JsValue::from_str(&body),
+                )
+                .is_ok()
+            }),
+        );
     }
 
     /// `await broker.fetch(request)` — takes and returns the browser's own
@@ -74,13 +105,20 @@ impl AntaresBroker {
         let init = web_sys::ResponseInit::new();
         init.set_status(parts.status.as_u16());
         init.set_headers(&headers);
-        let body = js_sys::Uint8Array::from(bytes.as_slice());
-        web_sys::Response::new_with_opt_buffer_source_and_init(Some(&body.into()), &init)
+        // The web Response constructor REJECTS a body (even empty) for the
+        // null-body statuses — 204 in particular is all over the binding.
+        let status = parts.status.as_u16();
+        if matches!(status, 101 | 103 | 204 | 205 | 304) {
+            web_sys::Response::new_with_opt_buffer_source_and_init(None, &init)
+        } else {
+            let body = js_sys::Uint8Array::from(bytes.as_slice());
+            web_sys::Response::new_with_opt_buffer_source_and_init(Some(&body.into()), &init)
+        }
     }
 }
 
 impl Default for AntaresBroker {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

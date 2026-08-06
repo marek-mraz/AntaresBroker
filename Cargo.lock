@@ -197,12 +197,14 @@ name = "antares-wasm"
 version = "0.1.0"
 dependencies = [
  "antares-api",
+ "antares-jsonld",
  "antares-sql",
  "axum",
  "console_error_panic_hook",
  "http",
  "http-body-util",
  "js-sys",
+ "send_wrapper",
  "serde_json",
  "tokio",
  "tower",

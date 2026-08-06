@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Antares — NGSI-LD broker in your browser</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    header small { opacity: .7; }
+    button { margin-right: .5rem; }
+    #log { font-family: ui-monospace, monospace; font-size: .85rem; max-height: 18rem;
+           overflow-y: auto; border: 1px solid #8884; padding: .5rem; }
+    .ok { color: #2a7; } .err { color: #d44; } .notif { color: #48f; font-weight: 600; }
+    code { background: #8882; padding: 0 .25rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Antares in the browser</h1>
+    <p>A full <a href="https://www.etsi.org/committee/cim">NGSI-LD</a> context
+    broker — the same Rust code as the native binary — compiled to
+    WebAssembly and running in this tab. No server, no install: the
+    <code>/ngsi-ld/v1/*</code> requests below are answered by a Service
+    Worker (mode: <strong id="mode">…</strong>).
+    <small id="health"></small></p>
+  </header>
+  <section>
+    <button id="create">Create a Room entity</button>
+    <button id="subscribe">Subscribe to Room changes</button>
+    <button id="refresh">Refresh list</button>
+    <ul id="entities"></ul>
+  </section>
+  <section>
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

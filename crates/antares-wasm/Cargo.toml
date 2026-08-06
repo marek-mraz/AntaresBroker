@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 # (workspace decls are default-features=false; NOTHING re-enables them here.)
 antares-api = { workspace = true }
 antares-sql = { workspace = true }
+antares-jsonld = { workspace = true }
 tower = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
@@ -39,6 +40,7 @@ web-sys = { workspace = true, features = [
     "ResponseInit",
 ] }
 console_error_panic_hook = { workspace = true }
+send_wrapper = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -1,0 +1,9 @@
+{
+  "name": "antares-www",
+  "private": true,
+  "type": "module",
+  "description": "N: browser demo page + Node shim + browser-tier test for the antares-wasm build",
+  "devDependencies": {
+    "playwright-core": "1.61.1"
+  }
+}
