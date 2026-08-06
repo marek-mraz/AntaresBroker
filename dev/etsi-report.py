@@ -80,6 +80,39 @@ for path in sorted(glob.glob(f"{RESULTS}/*/output.xml")):
         if s is not None and e is not None:
             suite_spans.append((s, e, name))
 
+    def failing_keyword(test_el):
+        """(what-ran, fail-log) for a FAILed test: the DEEPEST failing keyword
+        call with its arguments — the actual request the suite made — plus
+        every FAIL-level log message underneath it (expected-vs-got detail)."""
+        def failed(kw):
+            kst = kw.find("status")
+            return kst is not None and kst.get("status") == "FAIL"
+
+        fail_kws = [kw for kw in test_el.iter("kw") if failed(kw)]
+        # first LEAF of the fail chain = the call where it actually broke
+        # (iter() is document order and covers kws nested under if/for/try)
+        deepest = next(
+            (kw for kw in fail_kws
+             if not any(c is not kw and failed(c) for c in kw.iter("kw"))),
+            None,
+        )
+        if deepest is None:
+            return "", ""
+
+        def call(kw):
+            args = "  ".join((a.text or "") for a in kw.findall("arg"))
+            return " ".join(((kw.get("name") or "") + (f"  {args}" if args else "")).split())
+
+        # top = the test's own failing step ("Retrieve Details Of …  expectation.json"),
+        # leaf = the assertion/request call where it actually broke.
+        top = next((kw for kw in test_el.findall("kw") if failed(kw)), deepest)
+        ran = call(top) if top is deepest else f"{call(top)} → {call(deepest)}"
+        msgs = []
+        for m in deepest.iter("msg"):
+            if m.get("level") == "FAIL" and m.text:
+                msgs.append(" ".join(m.text.split()))
+        return ran, " | ".join(dict.fromkeys(msgs))
+
     for test in root.iter("test"):
         st = test.find("status")
         if st is None:
@@ -89,12 +122,15 @@ for path in sorted(glob.glob(f"{RESULTS}/*/output.xml")):
         if start is not None and end is not None:
             intervals.append((start, end, name, test.get("name") or "?"))
         if st.get("status") == "FAIL" and "exit-on-failure" not in msg:
+            ran, fail_log = failing_keyword(test)
             failures.append({
                 "suite": name,
                 "test": test.get("name") or "?",
                 "tags": ";".join(t.text or "" for t in test.iter("tag")),
                 "start": st.get("start") or st.get("starttime") or "",
                 "elapsed_s": st.get("elapsed") or "",
+                "keyword": ran,
+                "fail_log": fail_log,
                 "message": " ".join(msg.split()),
             })
 
@@ -128,7 +164,8 @@ def label(ts):
 
 
 with open(f"{RESULTS}/failures.csv", "w", newline="") as fh:
-    w = csv.DictWriter(fh, ["suite", "test", "tags", "start", "elapsed_s", "message"])
+    w = csv.DictWriter(fh, ["suite", "test", "tags", "start", "elapsed_s",
+                            "keyword", "fail_log", "message"])
     w.writeheader()
     w.writerows(failures)
 

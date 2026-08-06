@@ -104,13 +104,17 @@ jobs:
           [ "$gate" = PASS ]
 
   etsi-aggregate:
-    # Concat all 32 cells into 4 per-store tables (same | Suite | Pass |
-    # Fail | Skip | shape as run-summary.md) — the single required status
-    # check; any red/missing cell fails it.
+    # Fold all 32 cells into ONE downloadable bundle + ONE report: per-store
+    # tables (pass/fail/skip + RSS/CPU rollups), the combined per-second
+    # resource samples, the combined all-failures file, and a detailed error
+    # list. The single required status check; any red/missing cell fails it.
     name: Matrix summary
     if: always()
     needs: etsi-cell
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # to delete the merged per-cell artifacts
     steps:
       - uses: actions/checkout@v4
 
@@ -120,5 +124,40 @@ jobs:
           pattern: ETSI-cell-*
           path: cells
 
-      - name: Build the 4 per-store tables (shared with dev/etsi-local.sh)
-        run: ./dev/etsi-matrix-summary.py cells
+      - name: Fold the cells into the combined bundle + report
+        # Gate result captured, not enforced here — the bundle must upload
+        # and the summary must render even when cells are red.
+        run: ./dev/etsi-matrix-summary.py cells || echo "RED_CELLS=$?" >> "$GITHUB_ENV"
+
+      - name: Upload the ONE results bundle
+        id: bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ETSI-matrix-results
+          path: cells
+          retention-days: 14
+
+      - name: Write the step summary (download link first)
+        run: |
+          {
+            echo "# ETSI matrix"
+            echo
+            echo "⬇️ **[Download ALL results (one bundle)](${{ steps.bundle.outputs.artifact-url }})** — every cell's Robot log.html, \`_combined/all-resource-samples.csv\` (every 1 Hz CPU/RSS sample from every run), \`_combined/all-failures.csv\` (every error with run, keyword ran, expected-vs-got)."
+            echo
+            cat cells/_combined/matrix-summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete the merged per-cell artifacts
+        # The bundle supersedes them — one download link, not 33.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --paginate -q '.artifacts[] | select(.name | startswith("ETSI-cell-")) | .id' |
+          while read -r id; do
+            gh api --method DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+          done
+
+      - name: Gate — all 32 cells green
+        run: test -z "${RED_CELLS:-}"
