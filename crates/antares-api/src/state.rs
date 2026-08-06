@@ -4,7 +4,11 @@ use antares_jsonld::Loader;
 use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
 use std::sync::Arc;
+// N2 clock rule: std Instant panics on wasm32.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,10 +26,10 @@ pub struct AppState {
     /// Hard ceiling on limit (TooManyResults guard).
     pub max_limit: usize,
     /// One shared outbound client, timeouts at construction (U1 lesson).
-    pub http: reqwest::Client,
+    pub http: antares_jsonld::HttpClient,
     /// Federation-forwarding client — longer deadline: the ETSI mock replies
     /// to unstubbed forwards only when the robot side wakes (up to ~5 s).
-    pub fed_http: reqwest::Client,
+    pub fed_http: antares_jsonld::HttpClient,
     /// Clause 7 MQTT delivery: bounded pooled sink (L5/U1 lessons).
     #[cfg(feature = "mqtt")]
     pub mqtt: Arc<antares_notifier::mqtt::MqttSink>,
@@ -102,20 +106,8 @@ impl AppState {
             host_alias,
             default_limit: 1000,
             max_limit: 1000,
-            http: antares_jsonld::client_builder(egress_policy)
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(5))
-                // the suite's notification receiver asserts header names
-                // case-sensitively ("Link", "X-Additional-Key")
-                .http1_title_case_headers()
-                .build()
-                .expect("http client"),
-            fed_http: antares_jsonld::client_builder(egress_policy)
-                .connect_timeout(std::time::Duration::from_secs(2))
-                .timeout(std::time::Duration::from_secs(8))
-                .http1_title_case_headers()
-                .build()
-                .expect("fed http client"),
+            http: outbound_client(egress_policy, std::time::Duration::from_secs(5)),
+            fed_http: outbound_client(egress_policy, std::time::Duration::from_secs(8)),
             #[cfg(feature = "mqtt")]
             mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
             limits: Arc::new(crate::bounds::LimitStats::default()),
@@ -155,6 +147,26 @@ impl AppState {
             h(tenant, id, doc);
         }
     }
+}
+
+/// The ONE outbound-client construction for this crate (U1: timeouts at
+/// construction). Title-case headers are an http1 knob and timeouts are
+/// client-level knobs — both native-only; the browser's fetch supplies its
+/// own transport on wasm32 (§N, N2).
+fn outbound_client(
+    policy: antares_jsonld::EgressPolicy,
+    total: std::time::Duration,
+) -> antares_jsonld::HttpClient {
+    let b = antares_jsonld::with_timeouts(
+        antares_jsonld::client_builder(policy),
+        std::time::Duration::from_secs(2),
+        total,
+    );
+    // the suite's notification receiver asserts header names
+    // case-sensitively ("Link", "X-Additional-Key")
+    #[cfg(not(target_arch = "wasm32"))]
+    let b = b.http1_title_case_headers();
+    antares_jsonld::wrap_client(b.build().expect("http client"))
 }
 
 /// Server-managed timestamp, ISO 8601 UTC with milliseconds.

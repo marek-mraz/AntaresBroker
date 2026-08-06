@@ -330,7 +330,7 @@ pub async fn create_registration(
             // (the ack must not block on the receiver).
             let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, None, Some(doc)).await;
             let (st2, t2) = (st.clone(), tenant.clone());
-            tokio::spawn(async move {
+            crate::spawn(async move {
                 crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
             });
         }
@@ -808,7 +808,7 @@ pub async fn update_registration(
                 st.reg_changed(&tenant, &id, after.as_ref());
                 let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, after).await;
                 let (st2, t2) = (st.clone(), tenant.clone());
-                tokio::spawn(async move {
+                crate::spawn(async move {
                     crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
                 });
                 Ok(no_content(&tenant))
@@ -834,7 +834,7 @@ pub async fn delete_registration(
             st.reg_changed(&tenant, &id, None);
             let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, None).await;
             let (st2, t2) = (st.clone(), tenant.clone());
-            tokio::spawn(async move {
+            crate::spawn(async move {
                 crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
             });
             Ok(no_content(&tenant))

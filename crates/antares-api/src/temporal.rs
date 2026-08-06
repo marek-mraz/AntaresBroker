@@ -992,7 +992,7 @@ async fn query_temporal_inner(
     // over the FULL instance set, and a pruned doc would flip their verdicts
     // (memory mode would answer differently — the one unforgivable bug).
     let push_instances = q_ast.is_none() && geo.is_none();
-    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+    let tf = antares_sql::store::filter::TemporalFilter {
         ids: ids.as_deref(),
         types: types.as_deref(),
         attrs: entity_attr_filter.as_deref(),
@@ -1184,7 +1184,7 @@ pub async fn retrieve_temporal(
         antares_model::EntityId::new(&id)?;
         // C11: instance pruning pushed into the store (no q=/geo on retrieve,
         // so it is always safe here); window() below stays the arbiter.
-        let tf = antares_sql::store::pg_temporal::TemporalFilter {
+        let tf = antares_sql::store::filter::TemporalFilter {
             range: tq
                 .as_ref()
                 .map(|t| antares_sql::compile::temporal::InstanceRange {

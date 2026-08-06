@@ -2,6 +2,8 @@
 
 **An NGSI-LD Context Broker in Rust.**
 
+/goal Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in all four store modes as the proof.
+
 
 Antares is the brightest star in the Scorpius constellation — and a rust-red
 supergiant. It follows the NGSI-LD broker naming tradition (Orion, Scorpio,

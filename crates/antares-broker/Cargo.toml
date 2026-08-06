@@ -10,13 +10,15 @@ name = "antares"
 path = "src/main.rs"
 
 [dependencies]
-antares-api = { workspace = true }
+# N2: the workspace dep is default-features=false so the wasm crate can shed
+# the Pg arm; the native binary turns everything back on here.
+antares-api = { workspace = true, features = ["mqtt", "postgres"] }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 antares-bus = { workspace = true }
 antares-model = { workspace = true }
-antares-sql = { workspace = true }
+antares-sql = { workspace = true, features = ["postgres"] }
 futures-util = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }

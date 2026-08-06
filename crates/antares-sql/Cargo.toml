@@ -10,10 +10,25 @@ antares-model = { workspace = true }
 antares-ql = { workspace = true }
 serde_json = { workspace = true }
 redb = { workspace = true }
-sqlx = { workspace = true }
+sqlx = { workspace = true, optional = true }
 futures-util = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
+
+# N2: tokio carries sockets natively; on wasm32 only the sync primitives —
+# the on_blocking helper compiles to a plain inline call there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+
+[features]
+# N2: the Pg arm is the only part of this crate that cannot cross to wasm32
+# (sqlx needs sockets). Default-on everywhere else; the browser build turns
+# it off and gets the memory store through the same seam. A FEATURE GATE,
+# not a logic change — every gated item keeps its behaviour verbatim.
+default = ["postgres"]
+postgres = ["dep:sqlx"]
 
 [lints]
 workspace = true

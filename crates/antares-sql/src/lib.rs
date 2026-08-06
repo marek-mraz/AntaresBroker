@@ -6,7 +6,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compile;
+#[cfg(feature = "postgres")]
 pub mod maintenance;
+#[cfg(feature = "postgres")]
 pub mod pg;
 pub mod store;
 

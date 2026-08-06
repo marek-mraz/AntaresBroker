@@ -60,16 +60,20 @@ dependencies = [
  "geo",
  "geo-types",
  "geojson",
+ "gloo-timers",
  "http-body-util",
  "metrics",
  "regex",
  "reqwest 0.12.28",
+ "send_wrapper",
  "serde_json",
  "sonic-rs",
  "tokio",
  "tower",
  "tracing",
  "uuid",
+ "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]
@@ -124,9 +128,11 @@ dependencies = [
  "chrono",
  "moka",
  "reqwest 0.12.28",
+ "send_wrapper",
  "serde_json",
  "tokio",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -184,6 +190,26 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "antares-wasm"
+version = "0.1.0"
+dependencies = [
+ "antares-api",
+ "antares-sql",
+ "axum",
+ "console_error_panic_hook",
+ "http",
+ "http-body-util",
+ "js-sys",
+ "serde_json",
+ "tokio",
+ "tower",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -493,6 +519,16 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1131,6 +1167,18 @@ dependencies = [
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
  "wasm-bindgen",
 ]
 
@@ -2888,6 +2936,15 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "send_wrapper"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
+dependencies = [
+ "futures-core",
+]
 
 [[package]]
 name = "serde"

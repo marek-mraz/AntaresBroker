@@ -23,6 +23,26 @@ pub mod types_attrs;
 
 pub use state::AppState;
 
+/// N2: spawn for both targets — tokio natively, the JS microtask queue on
+/// wasm32 (no tokio runtime exists in a browser). Call sites are identical;
+/// only the executor differs. Send is required natively (worker threads) and
+/// meaningless on single-threaded wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(fut);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
 use antares_model::{NgsiError, API_ROOT};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -266,7 +286,11 @@ async fn http_metrics_layer(
     next: axum::middleware::Next,
 ) -> Response {
     let method = req.method().as_str().to_owned();
+    // N2 clock rule: std Instant panics on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    let start = web_time::Instant::now();
     let resp = next.run(req).await;
     let class = match resp.status().as_u16() {
         100..=199 => "1xx",

@@ -283,28 +283,33 @@ pub async fn forward(
             .header("Content-Type", "application/json")
             .body(serde_json::to_vec(&b).unwrap_or_default());
     }
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            // 5xx from a peer counts against it too — a peer answering 500
-            // on every forward is as dead as one that times out.
-            if status >= 500 {
-                st.egress.record_failure(&url);
-            } else {
-                st.egress.record_success(&url);
+    // N2: the whole HTTP interaction is one Send unit (http_interaction) so
+    // the handler futures above stay Send on wasm32 too.
+    antares_jsonld::http_interaction(async {
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                // 5xx from a peer counts against it too — a peer answering 500
+                // on every forward is as dead as one that times out.
+                if status >= 500 {
+                    st.egress.record_failure(&url);
+                } else {
+                    st.egress.record_success(&url);
+                }
+                let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+                (status, body)
             }
-            let body = resp.json::<Value>().await.unwrap_or(Value::Null);
-            (status, body)
+            Err(e) if e.is_timeout() => {
+                st.egress.record_failure(&url);
+                (504, Value::Null)
+            }
+            Err(_) => {
+                st.egress.record_failure(&url);
+                (502, Value::Null)
+            }
         }
-        Err(e) if e.is_timeout() => {
-            st.egress.record_failure(&url);
-            (504, Value::Null)
-        }
-        Err(_) => {
-            st.egress.record_failure(&url);
-            (502, Value::Null)
-        }
-    }
+    })
+    .await
 }
 
 /// Expand + registration-scope-filter one remote compacted entity.

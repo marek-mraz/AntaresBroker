@@ -25,73 +25,9 @@ pub struct PgEntityStore {
     outbox: std::sync::atomic::AtomicBool,
 }
 
-/// What a Query Entities call can push into SQL (C10). Every member is
-/// optional and every omission is safe: a filter left out only widens the
-/// result set, and the caller filters exactly afterwards.
-pub struct EntityFilter<'a> {
-    /// exact entity ids (`id=` / the ids of a batch query)
-    pub ids: Option<&'a [&'a str]>,
-    /// Entity Type Selection (4.17) as OR-of-AND groups, expanded IRIs
-    pub types: Option<&'a [Vec<String>]>,
-    /// `attrs=`: the entity must carry at least one, expanded IRIs
-    pub attrs: Option<&'a [String]>,
-    /// `q=` AST; compiled when its shape is exactly reproducible, else skipped
-    pub q: Option<&'a antares_ql::QNode>,
-    /// `scopeQ=` verbatim (4.19); compiled over the `scopes` column (C11)
-    pub scope_q: Option<&'a str>,
-    /// `georel`/`geometry`/`coordinates`/`geoproperty` (4.10), compiled over
-    /// the extracted `location` column (C11b)
-    pub geo: Option<&'a crate::compile::geo::GeoSpec<'a>>,
-    /// term → IRI, the request context's expander (the AST holds terms)
-    pub expand: &'a dyn Fn(&str) -> String,
-    /// C11 pagination pushdown: applied ONLY when every present predicate
-    /// compiled exactly (`decided`) — otherwise the caller's evaluator still
-    /// has rows to drop and a SQL LIMIT would page over the wrong set. The
-    /// caller passes it only when its own store-invisible filters (idPattern,
-    /// federation, orderBy) are absent.
-    pub page: Option<Page>,
-    /// C11 projection pushdown (4.21 `pick`, top-level): keep these expanded
-    /// attr IRIs + every non-attribute member. Applied only when `decided` —
-    /// a projected doc can no longer answer a q= re-check.
-    pub keep_attrs: Option<&'a [String]>,
-    /// C11 projection pushdown (`omit`, top-level entries only): drop exactly
-    /// these attr IRIs. Same `decided` gate.
-    pub drop_attrs: Option<&'a [String]>,
-}
-
-/// One page: OFFSET/LIMIT in row units, ORDER BY id (the store's stable
-/// default order, same as the memory snapshot).
-pub struct Page {
-    pub offset: i64,
-    pub limit: i64,
-}
-
-/// What `query` produced. `decided` = SQL applied every present predicate
-/// exactly, so re-evaluation cannot drop a row; `paged` = LIMIT/OFFSET
-/// happened in SQL (implies `decided`), `total` = the pre-LIMIT match count.
-pub struct QueryOutcome {
-    pub rows: Vec<Value>,
-    pub decided: bool,
-    pub paged: bool,
-    pub total: Option<i64>,
-}
-
-impl Default for EntityFilter<'_> {
-    fn default() -> Self {
-        Self {
-            ids: None,
-            types: None,
-            attrs: None,
-            q: None,
-            scope_q: None,
-            geo: None,
-            expand: &|t: &str| t.to_owned(),
-            page: None,
-            keep_attrs: None,
-            drop_attrs: None,
-        }
-    }
-}
+// N2: EntityFilter/Page/QueryOutcome moved to `store::filter` (pure data,
+// shared with the wasm32 build); re-exported here so existing paths hold.
+pub use super::filter::{EntityFilter, Page, QueryOutcome};
 
 /// A bound value. Enumerated because the bind list is built dynamically while
 /// the SQL is assembled — the alternative is string interpolation (§16.2: no).

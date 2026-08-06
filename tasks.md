@@ -930,17 +930,35 @@ crate behind a feature, core crates untouched (§9.2 pluggability rule).
 Needs A (the store seam) first: the browser build is `memory` (or `file`, see
 N4) selected through the same trait, compiled to a different target.
 
-- [ ] N1. `crates/antares-wasm`: `wasm-bindgen` entry that builds `AppState`
+- [x] N1. `crates/antares-wasm`: `wasm-bindgen` entry that builds `AppState`
       with the memory store + `LocalBus` and exposes
       `handle(request) -> response` by calling `tower::Service::call` on the
       axum router directly (v0's `main.rs` already drives the router this way,
       the listener is the only thing dropped).
-- [ ] N2. Portability audit of the core crates for `wasm32`: clock
+      *(Broker::new + handle in antares-wasm/src/lib.rs; the wasm-bindgen
+      Request/Response bridge in browser.rs. tests/handle.rs proves the seam
+      natively — create → retrieve round-trip + /q/health "memory" — the
+      code above the executor is target-identical.)*
+- [x] N2. Portability audit of the core crates for `wasm32`: clock
       (`Instant`/`SystemTime` → js time), `uuid`/`getrandom` `js` features,
       `reqwest` wasm backend for outbound notifications, `tokio` reduced to
       `rt + sync + macros` (no net/fs/threads), timers via `gloo`; anything
       else gated `#[cfg(not(target_arch = "wasm32"))]`. No core-crate logic
       may change to accommodate the target.
+      *(Landed as: `postgres` feature gates sqlx out of antares-sql/api
+      (filter types moved to the ungated store::filter so the AnyStore query
+      surface is identical); target-section deps (tokio sync+macros, reqwest
+      json, axum minus http1+tokio, uuid js); web-time for Instant (std
+      panics on wasm32); gloo-timers for the interval tick;
+      crate::spawn = tokio::spawn native / spawn_local wasm. The one wasm
+      REALITY the audit had to add: axum demands Send futures + Send+Sync
+      state while reqwest's wasm client is neither — send_wrapper (runtime
+      thread-checked) fences each whole HTTP interaction behind
+      jsonld::http_interaction / HttpClient; sound because the target is
+      single-threaded. Egress DNS-pinning/redirect-cap stay native-only —
+      in a page the browser's CORS sandbox is the egress boundary (N8).
+      Proof: cargo check green for antares-wasm on wasm32-unknown-unknown
+      AND the full native workspace + clippy -D warnings + tests.)*
 - [ ] N3. Service Worker glue: intercept `fetch` on a virtual
       `/ngsi-ld/v1/*` origin path → `http::Request` → module → `Response`,
       so page JS talks to what looks like a normal broker URL. Plus a direct

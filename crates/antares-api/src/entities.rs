@@ -995,7 +995,7 @@ pub fn filter_entities_paged(
         .filter(|v| !v.is_empty());
     let outcome = st.store.query_entities(
         tenant,
-        &antares_sql::store::pg_entity::EntityFilter {
+        &antares_sql::store::filter::EntityFilter {
             ids: ids.as_deref(),
             types: type_sel.as_deref(),
             attrs: attr_filter.as_deref(),
@@ -1003,7 +1003,7 @@ pub fn filter_entities_paged(
             scope_q: scope_q.map(String::as_str),
             geo: geo_spec.as_ref(),
             expand: &expand,
-            page: page.map(|(offset, limit)| antares_sql::store::pg_entity::Page {
+            page: page.map(|(offset, limit)| antares_sql::store::filter::Page {
                 offset: offset as i64,
                 limit: limit as i64,
             }),

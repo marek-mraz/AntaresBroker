@@ -9,7 +9,13 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// N2 clock rule: std Instant panics on wasm32; web-time is the std re-export
+// natively and performance.now() in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 /// Consecutive failures before a destination is tripped.
 const TRIP_AFTER: u32 = 5;

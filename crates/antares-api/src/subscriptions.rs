@@ -502,7 +502,7 @@ pub async fn create(
     if kind == Kind::CSourceSubscription {
         // initial CSourceNotification with all matching registrations (5.11.2.4)
         let (st2, t2, id2) = (st.clone(), tenant.clone(), id.clone());
-        tokio::spawn(async move {
+        crate::spawn(async move {
             crate::notify::csource_initial(&st2, &t2, &id2).await;
         });
     }
@@ -625,7 +625,7 @@ pub async fn update(
             if kind == Kind::CSourceSubscription {
                 // 5.11.3.4: after update, notify with all currently matching
                 let (st2, t2, id2) = (st.clone(), tenant.clone(), id.to_owned());
-                tokio::spawn(async move {
+                crate::spawn(async move {
                     crate::notify::csource_initial(&st2, &t2, &id2).await;
                 });
             }

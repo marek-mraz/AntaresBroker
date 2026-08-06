@@ -11,15 +11,20 @@
 use antares_model::{NgsiError, TenantId};
 use serde_json::Value;
 
+#[cfg(feature = "postgres")]
 use super::pg_doc::{DocKind, PgDocStore};
+#[cfg(feature = "postgres")]
 use super::pg_entity::PgEntityStore;
+#[cfg(feature = "postgres")]
 use super::pg_temporal::PgTemporalStore;
 use super::{ChangeHook, Kind, Store};
 
+#[cfg(feature = "postgres")]
 fn db(e: sqlx::Error) -> NgsiError {
     NgsiError::InternalError(format!("database error: {e}"))
 }
 
+#[cfg(feature = "postgres")]
 fn doc_kind(kind: Kind) -> Option<DocKind> {
     match kind {
         Kind::Subscription => Some(DocKind::Subscription),
@@ -31,6 +36,7 @@ fn doc_kind(kind: Kind) -> Option<DocKind> {
 
 /// Postgres backend bundle: one pool, three table-family stores, plus the
 /// change hook (the memory store emits its own; here the seam emits).
+#[cfg(feature = "postgres")]
 pub struct PgBackend {
     pub entities: PgEntityStore,
     pub temporal: PgTemporalStore,
@@ -38,6 +44,7 @@ pub struct PgBackend {
     hook: std::sync::RwLock<Option<ChangeHook>>,
 }
 
+#[cfg(feature = "postgres")]
 impl PgBackend {
     pub fn new(pool: sqlx::postgres::PgPool) -> Self {
         Self {
@@ -60,6 +67,7 @@ impl PgBackend {
 #[allow(clippy::large_enum_variant)]
 pub enum AnyStore {
     Mem(Store),
+    #[cfg(feature = "postgres")]
     Pg(PgBackend),
 }
 
@@ -69,6 +77,7 @@ impl AnyStore {
     pub fn commit_queue(&self) -> Option<(usize, usize)> {
         match self {
             AnyStore::Mem(s) => Some(s.commit_queue()),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(_) => None,
         }
     }
@@ -80,6 +89,7 @@ impl AnyStore {
     pub async fn close(&self) {
         match self {
             AnyStore::Mem(_) => {}
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.docs.pool().close().await,
         }
     }
@@ -87,6 +97,7 @@ impl AnyStore {
     pub fn set_change_hook(&self, h: ChangeHook) {
         match self {
             AnyStore::Mem(s) => s.set_change_hook(h),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => *p.hook.write().expect("hook lock") = Some(h),
         }
     }
@@ -94,30 +105,43 @@ impl AnyStore {
     /// F3: turn the same-tx outbox producer on (bus=nats). The memory arm has
     /// no outbox — the broker's wiring rejects bus=nats without a Pg store,
     /// so this is unreachable there by construction.
-    pub fn set_outbox(&self, on: bool) {
+    pub fn set_outbox(
+        &self,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] on: bool,
+    ) {
         match self {
             AnyStore::Mem(_) => {}
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.entities.set_outbox(on),
         }
     }
 
     /// F3 drain: oldest-first page of pending outbox rows `(seq, tenant, event)`.
-    pub fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+    pub fn outbox_peek(
+        &self,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] limit: i64,
+    ) -> Result<Vec<(i64, String, Value)>, NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(Vec::new()),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => super::outbox::peek(p.docs.pool(), limit).map_err(db),
         }
     }
 
     /// F3 drain: delete everything published up to and including `seq`.
-    pub fn outbox_ack(&self, seq: i64) -> Result<u64, NgsiError> {
+    pub fn outbox_ack(
+        &self,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seq: i64,
+    ) -> Result<u64, NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(0),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => super::outbox::ack(p.docs.pool(), seq).map_err(db),
         }
     }
 
     /// §3.1.4/6.3.14 implicit tenant creation on Pg write paths.
+    #[cfg(feature = "postgres")]
     fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
         super::pg_entity::wait(async {
             crate::pg::ensure_tenant(p.docs.pool(), tenant)
@@ -135,6 +159,7 @@ impl AnyStore {
     ) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.create(tenant, kind, id, doc)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 Self::ensure_tenant(p, tenant)?;
                 let created = match kind {
@@ -170,6 +195,7 @@ impl AnyStore {
                 .into_iter()
                 .map(|(id, doc)| s.create(tenant, Kind::Entity, &id, doc))
                 .collect()),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 Self::ensure_tenant(p, tenant)?;
                 let flags = p.entities.batch_create(tenant, &items).map_err(db)?;
@@ -192,6 +218,7 @@ impl AnyStore {
                 .iter()
                 .map(|id| s.delete(tenant, Kind::Entity, id))
                 .collect()),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 let deleted = p.entities.batch_delete(tenant, ids).map_err(db)?;
                 let mut prev: std::collections::HashMap<String, Value> =
@@ -219,6 +246,7 @@ impl AnyStore {
     ) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.upsert(tenant, kind, id, doc)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 _ if Self::ensure_tenant(p, tenant).is_err() => Err(NgsiError::InternalError(
                     "tenant provisioning failed".into(),
@@ -271,6 +299,7 @@ impl AnyStore {
     pub fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.get(tenant, kind, id)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.get(tenant, id).map_err(db),
                 Kind::Temporal => p.temporal.get(tenant, id).map_err(db),
@@ -285,6 +314,7 @@ impl AnyStore {
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.delete(tenant, kind, id)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
                     let prev = p.entities.get(tenant, id).map_err(db)?;
@@ -306,6 +336,7 @@ impl AnyStore {
     pub fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.list(tenant, kind)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.list(tenant).map_err(db),
                 Kind::Temporal => p.temporal.list(tenant).map_err(db),
@@ -325,15 +356,17 @@ impl AnyStore {
     pub fn query_entities(
         &self,
         tenant: &TenantId,
-        f: &crate::store::pg_entity::EntityFilter<'_>,
-    ) -> Result<crate::store::pg_entity::QueryOutcome, NgsiError> {
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+        f: &crate::store::filter::EntityFilter<'_>,
+    ) -> Result<crate::store::filter::QueryOutcome, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(crate::store::pg_entity::QueryOutcome {
+            AnyStore::Mem(s) => Ok(crate::store::filter::QueryOutcome {
                 rows: s.list(tenant, Kind::Entity),
                 decided: false,
                 paged: false,
                 total: None,
             }),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db),
         }
     }
@@ -344,10 +377,12 @@ impl AnyStore {
     pub fn query_temporal(
         &self,
         tenant: &TenantId,
-        f: &crate::store::pg_temporal::TemporalFilter<'_>,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+        f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<Vec<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Temporal)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db),
         }
     }
@@ -357,10 +392,12 @@ impl AnyStore {
         &self,
         tenant: &TenantId,
         id: &str,
-        f: &crate::store::pg_temporal::TemporalFilter<'_>,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+        f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<Option<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.get(tenant, Kind::Temporal, id)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).map_err(db),
         }
     }
@@ -374,6 +411,7 @@ impl AnyStore {
     ) -> Result<Option<Result<T, E>>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.mutate(tenant, kind, id, f)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
                     // before/after captured for the change hook (§7 prev_payload).
@@ -415,6 +453,7 @@ impl AnyStore {
             AnyStore::Mem(s) => Ok(s.subscription_tenants()),
             // Pg: all known tenants (tenants table carries no RLS); the
             // interval scan lists per tenant under set_tenant anyway.
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => super::pg_entity::wait(async {
                 let rows =
                     sqlx::query_scalar::<_, String>("SELECT tenant_id FROM tenants ORDER BY 1")
@@ -432,6 +471,7 @@ impl AnyStore {
                 let _: () = s.context_put(id, doc);
                 Ok(())
             }
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 let kind = doc
                     .get("kind")
@@ -446,6 +486,7 @@ impl AnyStore {
     pub fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.context_get(id)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.docs.context_get(id).map_err(db),
         }
     }
@@ -453,6 +494,7 @@ impl AnyStore {
     pub fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.context_delete(id)),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.docs.context_delete(id).map_err(db),
         }
     }
@@ -460,6 +502,7 @@ impl AnyStore {
     pub fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.context_list()),
+            #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.docs.context_list().map_err(db),
         }
     }

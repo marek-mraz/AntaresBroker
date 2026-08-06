@@ -11,6 +11,7 @@ members = [
     "crates/antares-notifier",
     "crates/antares-registry",
     "crates/antares-broker",
+    "crates/antares-wasm",
 ]
 # §16.2 fuzz harness: own lockfile/profile, built only by cargo-fuzz on
 # nightly (.github/workflows/fuzz.yml) — never part of the normal build.
@@ -26,9 +27,9 @@ repository = "https://github.com/AntaresBroker/AntaresBroker"
 antares-model = { path = "crates/antares-model" }
 antares-jsonld = { path = "crates/antares-jsonld" }
 antares-ql = { path = "crates/antares-ql" }
-antares-sql = { path = "crates/antares-sql" }
+antares-sql = { path = "crates/antares-sql", default-features = false }
 antares-bus = { path = "crates/antares-bus" }
-antares-api = { path = "crates/antares-api" }
+antares-api = { path = "crates/antares-api", default-features = false }
 antares-matcher = { path = "crates/antares-matcher" }
 antares-notifier = { path = "crates/antares-notifier", default-features = false }
 antares-registry = { path = "crates/antares-registry" }
@@ -79,6 +80,21 @@ console-subscriber = "0.5"
 
 # dev
 http-body-util = "0.1"
+
+# N: browser build (antares-wasm + the wasm32 target sections of core crates)
+http = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+# std::time re-export natively; performance.now()-backed on wasm32 —
+# std::time::Instant::now() PANICS on wasm32-unknown-unknown (N2 clock rule).
+web-time = "1"
+gloo-timers = { version = "0.3", features = ["futures"] }
+# Sound single-thread Send/Sync bridge (runtime-checked) — reqwest's wasm
+# client/futures are !Send but axum demands Send everywhere.
+send_wrapper = { version = "0.6", features = ["futures"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

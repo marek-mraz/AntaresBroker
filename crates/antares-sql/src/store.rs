@@ -11,10 +11,16 @@
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
 pub mod any;
+#[cfg(feature = "postgres")]
 pub mod entity_map;
+pub mod filter;
+#[cfg(feature = "postgres")]
 pub mod outbox;
+#[cfg(feature = "postgres")]
 pub mod pg_doc;
+#[cfg(feature = "postgres")]
 pub mod pg_entity;
+#[cfg(feature = "postgres")]
 pub mod pg_temporal;
 
 use antares_model::TenantId;
@@ -90,12 +96,14 @@ fn split_key(key: &[u8]) -> Option<(String, String)> {
 /// (B1b): a per-commit fsync must never stall an async worker. Outside a
 /// runtime (unit tests, startup) it just runs inline.
 fn on_blocking<T>(f: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(f)
+    // wasm32 (§N): single-threaded, no tokio runtime — always inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return tokio::task::block_in_place(f);
         }
-        _ => f(),
     }
+    f()
 }
 
 struct Shadow {

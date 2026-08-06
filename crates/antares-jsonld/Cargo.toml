@@ -8,11 +8,23 @@ license.workspace = true
 [dependencies]
 antares-model = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
 moka = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-tokio = { workspace = true }
 
 [lints]
 workspace = true
+
+# N2: same crates, target-appropriate backends (sockets + rustls natively,
+# the browser's own fetch/timers on wasm32). A dependency TARGET section, not
+# a logic change.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+web-time = { workspace = true }
+send_wrapper = { workspace = true }
+

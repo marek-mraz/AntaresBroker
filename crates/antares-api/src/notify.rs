@@ -151,26 +151,23 @@ impl SubMirror {
                 }
             }
         }
-        match doc {
-            Some(d) => {
-                match index_keys(&d) {
-                    Keys::Types(ts) => {
-                        for ty in ts {
-                            t.by_type.entry(ty).or_default().insert(id.to_owned());
-                        }
-                    }
-                    Keys::Attrs(ats) => {
-                        for a in ats {
-                            t.by_attr.entry(a).or_default().insert(id.to_owned());
-                        }
-                    }
-                    Keys::Broad => {
-                        t.broad.insert(id.to_owned());
+        if let Some(d) = doc {
+            match index_keys(&d) {
+                Keys::Types(ts) => {
+                    for ty in ts {
+                        t.by_type.entry(ty).or_default().insert(id.to_owned());
                     }
                 }
-                t.docs.insert(id.to_owned(), d);
+                Keys::Attrs(ats) => {
+                    for a in ats {
+                        t.by_attr.entry(a).or_default().insert(id.to_owned());
+                    }
+                }
+                Keys::Broad => {
+                    t.broad.insert(id.to_owned());
+                }
             }
-            None => {}
+            t.docs.insert(id.to_owned(), d);
         }
         if map.get(tenant).is_some_and(|t| t.docs.is_empty()) {
             map.remove(tenant);
@@ -313,16 +310,20 @@ pub fn wire(state: &mut AppState) {
             let _ = tx.send((tenant.as_str().to_owned(), before, after));
         }));
     let st = state.clone();
-    tokio::spawn(async move {
+    crate::spawn(async move {
         while let Some((tenant, before, after)) = rx.recv().await {
             process_change(&st, &tenant, before, after).await;
         }
     });
     let st = state.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    crate::spawn(async move {
         loop {
-            tick.tick().await;
+            // N2: tokio's timer natively; the browser's own timer on wasm32
+            // (tokio time never fires without a reactor there).
+            #[cfg(not(target_arch = "wasm32"))]
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            #[cfg(target_arch = "wasm32")]
+            gloo_timers::future::TimeoutFuture::new(500).await;
             interval_tick(&st).await;
         }
     });

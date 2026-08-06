@@ -1,0 +1,47 @@
+[package]
+name = "antares-wasm"
+description = "The Antares broker compiled to WebAssembly: the same router, fed by a Service Worker instead of a TCP listener (tasks.md §N)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The memory store through the same seam; `postgres` off — sqlx needs sockets.
+# (workspace decls are default-features=false; NOTHING re-enables them here.)
+antares-api = { workspace = true }
+antares-sql = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+serde_json = { workspace = true }
+
+# default axum minus "http1"+"tokio": the router without the listener (§N).
+axum = { version = "0.8", default-features = false, features = [
+    "form", "json", "matched-path", "original-uri", "query", "tower-log", "tracing",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# uuid v4 needs a randomness source the target cannot autodetect: `js` routes
+# it to crypto.getRandomValues via wasm-bindgen (feature unification applies
+# it to every uuid user in this build).
+uuid = { workspace = true, features = ["js"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "Response",
+    "ResponseInit",
+] }
+console_error_panic_hook = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

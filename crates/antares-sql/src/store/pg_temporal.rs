@@ -117,38 +117,8 @@ async fn sync_instances(
     Ok(())
 }
 
-/// C11: what a temporal query can push into SQL. Everything is a NARROWING —
-/// the API's `window()`/`any_instance` remain the arbiter — with one twist:
-/// the instance-range predicate is byte-exact by construction (see
-/// `compile::temporal`), so pruning cannot change an answer, only its cost.
-pub struct TemporalFilter<'a> {
-    /// exact entity ids
-    pub ids: Option<&'a [&'a str]>,
-    /// flat OR list of expanded type IRIs (temporal query has no AND groups)
-    pub types: Option<&'a [String]>,
-    /// `attrs=`: the entity must carry at least one, expanded IRIs
-    pub attrs: Option<&'a [String]>,
-    /// the 4.11 window; `None` = no instance pruning
-    pub range: Option<crate::compile::temporal::InstanceRange<'a>>,
-    /// `lastN`: per-(attr, datasetId) RANK() cap — ties all kept, so the
-    /// per-attr lastN the API applies afterwards always finds its instances
-    pub last_n: Option<i64>,
-    /// ordering key for the lastN cap (the request's timeproperty)
-    pub timeproperty: &'a str,
-}
-
-impl Default for TemporalFilter<'_> {
-    fn default() -> Self {
-        Self {
-            ids: None,
-            types: None,
-            attrs: None,
-            range: None,
-            last_n: None,
-            timeproperty: "observedAt",
-        }
-    }
-}
+// N2: TemporalFilter moved to `store::filter`; re-exported for path compat.
+pub use super::filter::TemporalFilter;
 
 /// The SELECT expression that prunes instance arrays inside the doc, plus its
 /// text binds (numbered from `first_bind`). `None` = nothing to prune (no

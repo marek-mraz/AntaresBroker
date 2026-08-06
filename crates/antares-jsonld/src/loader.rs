@@ -6,6 +6,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+// N2 clock rule: std Instant panics on wasm32; web-time is the std re-export
+// natively and performance.now() in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 /// Core context versions served from the build, never the network
 /// (uri.etsi.org serves an HTML landing page to plain HTTP clients).
@@ -108,20 +114,66 @@ impl EgressPolicy {
             }
             return Ok(());
         }
-        let addrs = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|e| format!("resolving {host}: {e}"))?;
-        for a in addrs {
-            if Self::ip_is_private(a.ip()) {
-                return Err(format!(
-                    "egress to {host} denied ({} is a private range)",
-                    a.ip()
-                ));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|e| format!("resolving {host}: {e}"))?;
+            for a in addrs {
+                if Self::ip_is_private(a.ip()) {
+                    return Err(format!(
+                        "egress to {host} denied ({} is a private range)",
+                        a.ip()
+                    ));
+                }
             }
         }
+        // wasm32 (§N): a page cannot resolve DNS — the browser does, and its
+        // same-origin/CORS machinery is the egress boundary there (N8).
+        #[cfg(target_arch = "wasm32")]
+        let _ = port;
         Ok(())
     }
 }
+
+/// N2: axum handlers require `Send` futures and axum state requires
+/// `Send + Sync`, but reqwest's wasm client and futures are neither — the
+/// browser build is single-threaded, so `send_wrapper` bridges the gap
+/// soundly (it still panics at runtime on any actual cross-thread use).
+/// Natively these are the identity types.
+#[cfg(not(target_arch = "wasm32"))]
+pub type HttpClient = reqwest::Client;
+#[cfg(target_arch = "wasm32")]
+pub type HttpClient = send_wrapper::SendWrapper<reqwest::Client>;
+
+pub fn wrap_client(c: reqwest::Client) -> HttpClient {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        c
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        send_wrapper::SendWrapper::new(c)
+    }
+}
+
+/// N2: run one whole HTTP interaction (build → send → read body) as a unit
+/// whose future is Send on every target. Native: the identity. The inputs
+/// must move INTO the future and only Send data may come out.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn http_interaction<F: std::future::Future>(fut: F) -> F {
+    fut
+}
+#[cfg(target_arch = "wasm32")]
+pub fn http_interaction<F: std::future::Future>(fut: F) -> send_wrapper::SendWrapper<F> {
+    send_wrapper::SendWrapper::new(fut)
+}
+
+/// The recursion box for `merge_entry` — Send on every target: the only
+/// un-Send piece (reqwest's wasm fetch) is already fenced inside
+/// `http_interaction`, so the box itself can stay Send and the axum handler
+/// futures above it keep their required Send bound (N2).
+type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// §16.4 redirect cap: a fetch may not be bounced more than this many times.
 /// Each hop is a fresh destination the policy has to clear, so the cap is what
@@ -134,9 +186,11 @@ pub const MAX_REDIRECTS: usize = 3;
 /// client's resolver closes it: the addresses the connector dials are the ones
 /// this filter passed, so the check and the connect see the same answer by
 /// construction. Redirect hops go through it too.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct PolicyResolver(EgressPolicy);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl reqwest::dns::Resolve for PolicyResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let allow_private = self.0.allow_private;
@@ -164,6 +218,7 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// chain, see error.md on forge.etsi.org). Verification itself is never
 /// disableable (§16.5); this only widens what it trusts, per deployment.
 /// Read once per builder call — the wiring constructs clients at startup.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
     let mut b = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
@@ -182,6 +237,35 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
             Err(e) => eprintln!("ANTARES_EXTRA_CA_FILE {path}: unreadable ({e})"),
         }
     }
+    b
+}
+
+/// wasm32 (§N): the browser owns TLS trust, redirects and name resolution —
+/// reqwest's wasm `ClientBuilder` exposes none of those knobs, and the page's
+/// CORS sandbox is the egress boundary (N8). The policy still gates URLs via
+/// `check_host` before any fetch.
+#[cfg(target_arch = "wasm32")]
+pub fn client_builder(_policy: EgressPolicy) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+}
+
+/// Client timeouts are native knobs (§16.4 U1); the browser's fetch has no
+/// client-level equivalent, so on wasm32 this is a no-op by design.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn with_timeouts(
+    b: reqwest::ClientBuilder,
+    connect: std::time::Duration,
+    total: std::time::Duration,
+) -> reqwest::ClientBuilder {
+    b.connect_timeout(connect).timeout(total)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn with_timeouts(
+    b: reqwest::ClientBuilder,
+    _connect: std::time::Duration,
+    _total: std::time::Duration,
+) -> reqwest::ClientBuilder {
     b
 }
 
@@ -222,11 +306,11 @@ const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
 struct FetchedDoc {
     value: Arc<Value>,
     /// 6.3.16 expiry deadline; `None` = cache until evicted.
-    stale_at: Option<std::time::Instant>,
+    stale_at: Option<Instant>,
 }
 
 pub struct Loader {
-    http: reqwest::Client,
+    http: HttpClient,
     policy: EgressPolicy,
     /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
     /// J2: bounded LRU — every cache has a max size (R4/L7 lesson).
@@ -272,11 +356,15 @@ impl Loader {
         core.freeze();
         core.source = Value::String(CORE_CONTEXT.to_owned());
         Self {
-            http: client_builder(policy)
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(10))
+            http: wrap_client(
+                with_timeouts(
+                    client_builder(policy),
+                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(10),
+                )
                 .build()
                 .expect("reqwest client"),
+            ),
             policy,
             fetched: moka::sync::Cache::new(256),
             merged: moka::sync::Cache::new(256),
@@ -437,8 +525,7 @@ impl Loader {
         entry: &'a Value,
         depth: usize,
         urls: &'a std::sync::Mutex<Vec<String>>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NgsiError>> + Send + 'a>>
-    {
+    ) -> BoxFut<'a, Result<(), NgsiError>> {
         Box::pin(async move {
             if depth > 8 {
                 return Err(NgsiError::LdContextNotAvailable(
@@ -481,7 +568,7 @@ impl Loader {
         let mut stale_value: Option<Arc<Value>> = None;
         if let Some(hit) = self.fetched.get(url) {
             match hit.stale_at {
-                Some(deadline) if std::time::Instant::now() >= deadline => {
+                Some(deadline) if Instant::now() >= deadline => {
                     stale_value = Some(Arc::clone(&hit.value));
                 }
                 _ => return Ok(hit.value),
@@ -499,33 +586,39 @@ impl Loader {
             .check_host(&host, port)
             .await
             .map_err(|e| err(format!("fetching {url}: {e}")))?;
-        let resp = self
-            .http
-            .get(url)
-            .header("Accept", "application/ld+json, application/json")
-            .send()
-            .await
-            .map_err(|e| err(format!("fetching {url}: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(err(format!("fetching {url}: HTTP {}", resp.status())));
-        }
-        let ttl = ttl_from_headers(
-            resp.headers()
-                .get("cache-control")
-                .and_then(|v| v.to_str().ok()),
-            resp.headers().get("expires").and_then(|v| v.to_str().ok()),
-        );
-        // §16.4: bounded response size (504 LdContextNotAvailable on breach).
-        if resp
-            .content_length()
-            .is_some_and(|l| l as usize > MAX_CONTEXT_BYTES)
-        {
-            return Err(err(format!("{url}: @context document too large")));
-        }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| err(format!("reading {url}: {e}")))?;
+        // N2: the whole HTTP interaction is one Send unit (http_interaction);
+        // only Send data (ttl + bytes) crosses back out.
+        let (ttl, bytes) = http_interaction(async {
+            let resp = self
+                .http
+                .get(url)
+                .header("Accept", "application/ld+json, application/json")
+                .send()
+                .await
+                .map_err(|e| err(format!("fetching {url}: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(err(format!("fetching {url}: HTTP {}", resp.status())));
+            }
+            let ttl = ttl_from_headers(
+                resp.headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok()),
+                resp.headers().get("expires").and_then(|v| v.to_str().ok()),
+            );
+            // §16.4: bounded response size (504 LdContextNotAvailable on breach).
+            if resp
+                .content_length()
+                .is_some_and(|l| l as usize > MAX_CONTEXT_BYTES)
+            {
+                return Err(err(format!("{url}: @context document too large")));
+            }
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| err(format!("reading {url}: {e}")))?;
+            Ok((ttl, bytes))
+        })
+        .await?;
         if bytes.len() > MAX_CONTEXT_BYTES {
             return Err(err(format!("{url}: @context document too large")));
         }
@@ -546,7 +639,7 @@ impl Loader {
             url.to_owned(),
             FetchedDoc {
                 value: Arc::clone(&arc),
-                stale_at: ttl.map(|d| std::time::Instant::now() + d),
+                stale_at: ttl.map(|d| Instant::now() + d),
             },
         );
         // J2 write-through: persist what was just fetched.
@@ -576,9 +669,7 @@ impl Loader {
     /// K12 `antares_context_cache_entries` metric later; also what the I7
     /// security regression asserts the R4-class size caps against.
     pub fn cache_stats(&self) -> serde_json::Value {
-        for c in [&self.fetched] {
-            c.run_pending_tasks();
-        }
+        self.fetched.run_pending_tasks();
         self.merged.run_pending_tasks();
         self.merged_urls.run_pending_tasks();
         serde_json::json!({
