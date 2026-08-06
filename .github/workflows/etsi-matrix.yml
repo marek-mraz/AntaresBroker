@@ -105,6 +105,7 @@ jobs:
             results/${{ matrix.store }}/failures.csv
             results/${{ matrix.store }}/resource-samples.csv
             results/${{ matrix.store }}/resource-by-test.csv
+            results/${{ matrix.store }}/*-console.log
             results/${{ matrix.store }}/**/log.html
           retention-days: 7
 

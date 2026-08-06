@@ -272,13 +272,16 @@ echo "IOP" > "$PHASE_FILE"
   sed -i "s|^notification_server_host = .*|notification_server_host = '${CALLBACK_HOST:-localhost}'|" variables.py
   sed -i "s|^context_source_host = .*|context_source_host = '${CALLBACK_HOST:-localhost}'|" variables.py
   sed -i "s|^context_server_host = .*|context_server_host = '${CALLBACK_HOST:-localhost}'|" variables.py )
+# Console tee'd into the results dir: when robot dies before writing
+# output.xml (import error, unreachable broker), the artifact must still
+# say why — a 1 KB artifact with no clue is undebuggable in CI.
 ( cd ngsi-ld-test-suite && ../.venv/bin/robot --outputdir "../$RESULTS/IOP" \
     --variable b1_url:http://localhost:9090/ngsi-ld/v1 \
     --variable b2_url:http://localhost:9091/ngsi-ld/v1 \
     --variable b3_url:http://localhost:9092/ngsi-ld/v1 \
     --variable b4_url:http://localhost:9093/ngsi-ld/v1 \
     --variable b5_url:http://localhost:9094/ngsi-ld/v1 \
-    IOP_TP ) || true
+    IOP_TP ) 2>&1 | tee "$RESULTS/IOP-console.log" || true
 fi
 
 # 7. Report: suite table, per-broker CPU/RSS, spike attribution, downloadable

@@ -56,10 +56,13 @@ for s in $SUITES; do
   # written before the reset so the reset's own churn is attributed too.
   [ -n "${PHASE_FILE:-}" ] && echo "$name" > "$PHASE_FILE"
   bash dev/reset-broker.sh "$BROKER_URL"   # state reset between suites
+  # Console tee'd next to output.xml: when robot dies before writing it,
+  # the CI artifact must still say why (see the IOP step's twin note).
   (cd "$SUITE" && "$VENV/bin/robot" \
       --outputdir "$OLDPWD/$RESULTS_DIR/$name" \
       --exclude iop \
       "${EXTRA[@]}" \
-      "TP/NGSI-LD/$s") || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }
+      "TP/NGSI-LD/$s") 2>&1 | tee "$RESULTS_DIR/$name-console.log" \
+    || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }
 done
 exit $status
