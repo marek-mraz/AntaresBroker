@@ -377,13 +377,44 @@ jobs:
           cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
 
+  build-arm:
+    # The arm64 half of the released manifest — BUILT, never tested
+    # (decision 2026-08-07): all gates run amd64 only; the arm signal is
+    # ci.yml's workspace job testing natively on arm. No QEMU.
+    name: Build the arm64 image (untested)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:arm64 (own cache scope)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:arm64
+          load: true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+      - name: Export it for the publish job
+        run: docker save antares-local:arm64 | gzip > antares-image-arm64.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antares-image-arm64
+          path: antares-image-arm64.tgz
+          retention-days: 3
+
   publish-release:
     # A version tag is the only thing that mints a production image, and it
     # needs ALL THREE gates: the store matrix, the serial all-suites run,
     # and the K8 roll-under-suite drill.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()
-    needs: [matrix, etsi-serial, etsi-roll]
+    needs: [matrix, etsi-serial, etsi-roll, build-arm]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -394,16 +425,24 @@ jobs:
         with:
           name: antares-image
 
-      - name: Push the EXACT image both gates tested
+      - name: Download the arm64 image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image-arm64
+
+      - name: Push amd64 (the EXACT image both gates tested) + arm64, stitch the manifest
         run: |
           docker load < antares-image.tgz
+          docker load < antares-image-arm64.tgz
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
           VER="${GITHUB_REF#refs/tags/}"
-          docker tag antares-local:latest "$IMG:$VER"
-          docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
-          docker tag antares-local:latest "$IMG:latest"
-          docker push "$IMG:$VER"
-          docker push "$IMG:${GITHUB_SHA::7}"
-          docker push "$IMG:latest"
-          echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"
+          SHA=${GITHUB_SHA::7}
+          docker tag antares-local:latest "$IMG:$SHA-amd64"
+          docker tag antares-local:arm64 "$IMG:$SHA-arm64"
+          docker push "$IMG:$SHA-amd64"
+          docker push "$IMG:$SHA-arm64"
+          docker buildx imagetools create \
+            -t "$IMG:$VER" -t "$IMG:$SHA" -t "$IMG:latest" \
+            "$IMG:$SHA-amd64" "$IMG:$SHA-arm64"
+          echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (multi-arch amd64+arm64; amd64 = the tested bytes, matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"

@@ -125,6 +125,38 @@ jobs:
       contents: read
       actions: write # the summary job deletes the merged per-cell artifacts
 
+  build-arm:
+    # The arm64 half of the published manifest — BUILT, never tested
+    # (decision 2026-08-07): the ETSI matrix + RSS gates run amd64 only.
+    # The only arm signal is the workspace job, which compiles and tests the
+    # same code natively on ubuntu-24.04-arm. Native-arch runner, no QEMU.
+    name: Build the arm64 image (untested)
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:arm64 (own cache scope)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:arm64
+          load: true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+      - name: Export it for the publish job
+        run: docker save antares-local:arm64 | gzip > antares-image-arm64.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antares-image-arm64
+          path: antares-image-arm64.tgz
+          retention-days: 3
+
   publish-dev:
     # Every green commit on master ships a DEV image: the sha and a moving
     # `dev` tag. Never `latest` — that belongs to a released version, so
@@ -133,7 +165,7 @@ jobs:
     # Master pushes/dispatches publish :dev; PRs never do. Both signals —
     # workspace tests AND the cell matrix — must be green.
     if: github.ref == 'refs/heads/master' && success()
-    needs: [workspace, matrix]
+    needs: [workspace, matrix, build-arm]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -143,15 +175,23 @@ jobs:
         with:
           name: antares-image
 
-      - name: Push the EXACT image the matrix tested
+      - name: Download the arm64 image
+        uses: actions/download-artifact@v4
+        with:
+          name: antares-image-arm64
+
+      - name: Push amd64 (the EXACT image the matrix tested) + arm64, stitch the manifest
         run: |
           docker load < antares-image.tgz
+          docker load < antares-image-arm64.tgz
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
-          docker tag antares-local:latest "$IMG:${GITHUB_SHA::7}"
-          docker tag antares-local:latest "$IMG:dev"
-          docker tag antares-local:latest "$IMG:dev-${{ github.run_number }}"
-          docker push "$IMG:${GITHUB_SHA::7}"
-          docker push "$IMG:dev"
-          docker push "$IMG:dev-${{ github.run_number }}"
-          echo -e "\n## Published dev: \`$IMG:dev\` + \`$IMG:dev-${{ github.run_number }}\` + \`$IMG:${GITHUB_SHA::7}\` (all store gates green)" >> "$GITHUB_STEP_SUMMARY"
+          SHA=${GITHUB_SHA::7}
+          docker tag antares-local:latest "$IMG:$SHA-amd64"
+          docker tag antares-local:arm64 "$IMG:$SHA-arm64"
+          docker push "$IMG:$SHA-amd64"
+          docker push "$IMG:$SHA-arm64"
+          docker buildx imagetools create \
+            -t "$IMG:$SHA" -t "$IMG:dev" -t "$IMG:dev-${{ github.run_number }}" \
+            "$IMG:$SHA-amd64" "$IMG:$SHA-arm64"
+          echo -e "\n## Published dev: \`$IMG:dev\` + \`$IMG:dev-${{ github.run_number }}\` + \`$IMG:$SHA\` (multi-arch amd64+arm64; amd64 = the tested bytes, all store gates green)" >> "$GITHUB_STEP_SUMMARY"

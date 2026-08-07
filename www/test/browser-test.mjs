@@ -202,6 +202,11 @@ try {
   const csrCount = await page.evaluate(
     () => document.querySelectorAll("#ov-body .tag").length);
   if (csrCount !== 2) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
+  // Template round-trip: export the demo structure, wipe, apply → restored.
+  const tpl = await page.evaluate(() => window.boardTemplate());
+  if ((tpl.csrs?.length ?? 0) < 2 || (tpl.pipelines?.length ?? 0) < 2) {
+    await fail(`template export incomplete: ${JSON.stringify(tpl).slice(0, 200)}`);
+  }
   await page.click("#ov-reset");
   await page.waitForFunction(
     () => {
@@ -213,8 +218,24 @@ try {
     { timeout: 30_000 },
   );
   console.log("remove everything: board wiped and reseeded, all spaces at 0 local");
+  await page.evaluate((t) => window.applyBoardTemplate(t), tpl);
+  await page.waitForFunction(
+    () => {
+      const b = window.boardTemplate();
+      return b.csrs.length >= 2 && b.pipelines.length >= 2;
+    },
+    { timeout: 30_000 },
+  );
+  console.log("template round-trip: export → wipe → apply restored the structure");
 
-  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation, board demo/reset`);
+  // Request logging (on by default outside the ETSI harness): the 📜 log must
+  // carry [tenant] METHOD path → status lines for the traffic just generated.
+  const reqLines = await page.evaluate(
+    () => document.querySelectorAll("#log .req").length);
+  if (reqLines < 5) await fail(`request log expected many entries, got ${reqLines}`);
+  console.log(`request log carries ${reqLines}+ NGSI-LD calls`);
+
+  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation, board demo/reset, template round-trip, request log`);
   await browser.close();
   server.close();
 } catch (e) {

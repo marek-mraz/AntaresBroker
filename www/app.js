@@ -22,6 +22,13 @@ const log = (line, cls = "") => {
   while ($("log").childElementCount > 200) $("log").lastChild.remove();
 };
 $("logbtn").onclick = () => $("logwrap").classList.toggle("min");
+$("reqlog").onclick = () => {
+  REQLOG = !REQLOG;
+  save("antares.reqlog", REQLOG);
+  $("reqlog").textContent = `🛰 requests: ${REQLOG ? "on" : "off"}`;
+  if (REQLOG) $("logwrap").classList.remove("min");
+  log(`request logging ${REQLOG ? "ON — every NGSI-LD call shows here and in the console" : "off"}`, "ok");
+};
 
 // ---- transport ladder: OPFS worker (persistent) → SW → in-page ------------
 // ?allowPrivateEgress=1 — harness knob (N7b): the ETSI mocks live on
@@ -49,7 +56,25 @@ function callWorker(msg, transfer = []) {
   });
 }
 
+// Request log: EVERY NGSI-LD/broker call through brokerFetch lands in the 📜
+// log and the browser console (method, tenant, path, status). Toggleable via
+// the 🛰 header button; defaults ON (off under the ETSI harness — thousands
+// of requests would just churn the DOM).
+let REQLOG =
+  JSON.parse(localStorage.getItem("antares.reqlog") ?? "null") ?? !ALLOW_PRIVATE_EGRESS;
+
 async function brokerFetch(path, opts = {}) {
+  const r = await rawBrokerFetch(path, opts);
+  if (REQLOG) {
+    const line = `[${opts.headers?.["NGSILD-Tenant"] ?? "default"}] ${
+      (opts.method ?? "GET").toUpperCase()} ${path} → ${r.status}`;
+    console.debug("[ngsi-ld]", line);
+    log(line, r.ok || r.status === 207 ? "req" : "err");
+  }
+  return r;
+}
+
+async function rawBrokerFetch(path, opts = {}) {
   if (mode === "opfs-worker") {
     const body = opts.body ? new TextEncoder().encode(opts.body) : null;
     const r = await callWorker(
@@ -176,7 +201,22 @@ async function boot() {
       return true;
     });
   } // opfs-worker: notifications arrive on the worker port (bootPersistent)
+  // First visit: the board demos itself — a small federated city instead of
+  // an empty canvas. Once per browser (flag), only on a pristine board,
+  // never under the ETSI harness. Runs before the health pill shows so
+  // automation (browser-test) sees a settled board.
+  if (!localStorage.getItem("antares.demoed") && !ALLOW_PRIVATE_EGRESS) {
+    await refreshAll();
+    const pristine =
+      !pipes.length &&
+      ![...links.values()].some((ls) => ls.length) &&
+      ![...ents.values()].some((c) => c.local.length);
+    if (pristine) await createDemo();
+    localStorage.setItem("antares.demoed", "1");
+  }
   $("mode").textContent = mode;
+  $("reqlog").textContent = `🛰 requests: ${REQLOG ? "on" : "off"}`;
+  if (REQLOG) $("logwrap").classList.remove("min");
   if (mode !== "opfs-worker") {
     // Non-OPFS modes have NO durable store: a service worker is torn down by
     // the browser when idle and takes the in-memory entities with it.
@@ -1278,6 +1318,115 @@ async function resetBoard() {
   await refreshAll();
   log("board reset — all entities/subscriptions/CSRs/pipelines removed, spaces reseeded", "ok");
 }
+
+// ---- board template: the whole structure as JSON, exportable + applyable --
+function boardTemplate() {
+  return {
+    app: "antares-playground-board",
+    version: 1,
+    mode,
+    contextSpaces: spaces.map((s) => ({
+      name: s.name,
+      icon: avatar(s.name),
+      local: ents.get(s.name)?.local.length ?? 0,
+      ...(fedView.has(s.name)
+        ? { fedView: true, federated: ents.get(s.name)?.remote.length ?? 0 }
+        : {}),
+    })),
+    csrs: [...links].flatMap(([from, ls]) =>
+      ls.map((l) => ({
+        kind: "federation", protocol: "CSR", from, peer: l.to,
+        type: l.type && TYPES[l.type] ? l.type : "all",
+      }))),
+    pipelines: pipes.map((p) =>
+      p.kind === "source"
+        ? { kind: "device", gen: p.gen, type: p.type, into: p.into,
+            secs: p.secs, running: p.running, ticks: p.ticks ?? 0 }
+        : { kind: "copy", from: p.from, into: p.into, type: p.type,
+            secs: p.secs, running: p.running, ticks: p.ticks ?? 0 }),
+    selected: selSpace(),
+  };
+}
+
+// Apply is additive + idempotent: missing spaces/CSRs/pipes are created,
+// existing ones left alone, malformed rows skipped. Entities never travel in
+// a template — structure only.
+async function applyBoardTemplate(tpl) {
+  for (const s of tpl.contextSpaces ?? []) {
+    const name = s.name ?? s.id;
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(name ?? "")) continue;
+    if (!spaces.some((x) => x.name === name)) spaces.push({ name });
+    if (s.fedView) fedView.add(name);
+  }
+  save("antares.spaces", spaces);
+  save("antares.fedview", [...fedView]);
+  await refreshAll();
+  for (const c of tpl.csrs ?? []) {
+    const from = c.from;
+    const to = c.peer ?? c.to;
+    if (!spaces.some((x) => x.name === from) || !spaces.some((x) => x.name === to)) continue;
+    if ((links.get(from) ?? []).some((l) => l.to === to)) continue;
+    await registerLink(from, to, c.type && TYPES[c.type] ? c.type : null);
+  }
+  for (const t of tpl.pipelines ?? []) {
+    const kind = t.kind === "device" || t.kind === "source" ? "source" : "sync";
+    if (!TYPES[t.type] || !spaces.some((x) => x.name === t.into)) continue;
+    const dup = kind === "source"
+      ? pipes.some((p) => p.kind === "source" && p.into === t.into && p.type === t.type)
+      : pipes.some((p) => p.kind === "sync" && p.from === t.from && p.into === t.into && p.type === t.type);
+    if (dup) continue;
+    if (kind === "sync" && (!spaces.some((x) => x.name === t.from) || t.from === t.into)) continue;
+    const p = {
+      id: crypto.randomUUID().slice(0, 8), kind,
+      into: t.into, type: t.type,
+      secs: Math.max(1, Number(t.secs) || 3),
+      running: t.running !== false, ticks: 0,
+    };
+    if (kind === "source") p.gen = t.gen ?? `${TYPES[t.type].emoji} ${t.type}`;
+    else p.from = t.from;
+    pipes.push(p);
+    if (p.running) startPipe(p);
+  }
+  save("antares.pipes", pipes);
+  resolveOverlaps();
+  await refreshAll();
+  renderInspector();
+  log("template applied — spaces, CSRs and pipelines materialized", "ok");
+}
+
+$("ov-template").onclick = async () => {
+  await refreshAll();
+  $("tpl-text").value = JSON.stringify(boardTemplate(), null, 2);
+  $("dlg-template").showModal();
+};
+$("tpl-copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($("tpl-text").value);
+    log("template JSON copied to clipboard", "ok");
+  } catch {
+    $("tpl-text").select();
+    log("clipboard blocked by the browser — JSON selected, press ⌘C / Ctrl-C", "err");
+  }
+};
+$("tpl-apply").onclick = async () => {
+  let tpl;
+  try {
+    tpl = JSON.parse($("tpl-text").value);
+  } catch (e) {
+    log(`template is not valid JSON: ${e.message}`, "err");
+    return;
+  }
+  $("tpl-apply").disabled = true;
+  try {
+    await applyBoardTemplate(tpl);
+  } finally {
+    $("tpl-apply").disabled = false;
+  }
+  renderOverview();
+};
+// Test hooks, same contract as window.brokerFetch (browser-test.mjs).
+window.boardTemplate = boardTemplate;
+window.applyBoardTemplate = applyBoardTemplate;
 
 $("overview").onclick = async () => {
   await refreshAll();

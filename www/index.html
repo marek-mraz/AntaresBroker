@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Antares — context-space playground</title>
+  <title>Antares — NGSI-LD context broker playground</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -124,6 +124,10 @@
     #pipes .item .x:hover, #links .item .x:hover { color: var(--err); }
 
     /* ---- editor -------------------------------------------------------- */
+    #tpl-text { font-family: ui-monospace, monospace; font-size: .72rem;
+                width: 32rem; max-width: 74vw; min-height: 17rem;
+                border: 1px solid var(--line); border-radius: 8px;
+                background: var(--bg); color: var(--ink); padding: .5rem; }
     #editor { font-family: ui-monospace, monospace; font-size: .74rem;
               width: 100%; min-height: 9.5rem; resize: vertical;
               border: 1px solid var(--line); border-radius: 8px;
@@ -143,6 +147,7 @@
            backdrop-filter: blur(4px);
            border-radius: 10px; padding: .4rem .6rem; margin-top: .3rem; }
     #log .ok { color: var(--ok); } #log .err { color: var(--err); }
+    #log .req { color: var(--muted); }
     #log .notif { color: var(--notif); font-weight: 600; }
     #log .fed { color: var(--fed); }
     #toasts { position: fixed; top: .8rem; right: 356px; z-index: 50;
@@ -179,10 +184,12 @@
 </head>
 <body>
   <header>
-    <h1>⭐ Antares <span>context-space playground</span></h1>
+    <h1>⭐ Antares <span>NGSI-LD</span> context-space playground</h1>
+    <span class="pill" title="ETSI CIM 009 — NGSI-LD API, running as WebAssembly in this tab">ETSI NGSI-LD broker · in-browser wasm</span>
     <span class="pill">mode: <strong id="mode">…</strong></span>
     <span class="pill" id="health"></span>
     <span class="grow"></span>
+    <button id="reqlog">🛰 requests: on</button>
     <button id="overview">🗺 board</button>
     <button id="newspace" class="primary">＋ context space</button>
     <button id="addpipe">＋ pipeline</button>
@@ -237,7 +244,21 @@
     <div id="ov-body" class="ovbody"></div>
     <div class="row">
       <button id="ov-demo" class="primary">▶ create demo</button>
+      <button id="ov-template">{&#8202;} template</button>
       <button id="ov-reset">🧨 remove everything</button>
+      <button onclick="this.closest('dialog').close()">close</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-template">
+    <h4>{&#8202;} Board template — JSON</h4>
+    <p class="sub" style="margin:.2rem 0 .5rem">The structure as data: spaces,
+      CSRs, pipelines. Copy it, edit it, apply it — entities are data, not
+      template, so counts are informative only.</p>
+    <textarea id="tpl-text" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="tpl-copy">⧉ copy</button>
+      <button id="tpl-apply" class="primary">⇪ apply template</button>
       <button onclick="this.closest('dialog').close()">close</button>
     </div>
   </dialog>
