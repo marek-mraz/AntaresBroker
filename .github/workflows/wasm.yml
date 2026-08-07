@@ -8,17 +8,9 @@ name: wasm
 # GitHub Pages (requires Pages to be enabled with "GitHub Actions" source).
 
 on:
-  # Every master push that can change the playground redeploys Pages after a
-  # green build+test — the live site must never trail master again (the
-  # stale-bundle glue↔wasm skew of 2026-08-07 is the incident behind this).
-  push:
-    branches: [master]
-    paths:
-      - "www/**"
-      - "crates/**"
-      - "Cargo.lock"
-      - "dev/wasm-*.sh"
-      - ".github/workflows/wasm.yml"
+  # Manual only (decision 2026-08-07): no push trigger. Deploying the
+  # playground is always an explicit `Run workflow` with deploy_pages ticked —
+  # so remember the live site trails master until someone dispatches this.
   workflow_dispatch:
     inputs:
       deploy_pages:
@@ -68,15 +60,14 @@ jobs:
           name: antares-www
           path: site
       - name: Upload Pages artifact
-        if: inputs.deploy_pages || github.event_name == 'push'
+        if: inputs.deploy_pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
     name: Deploy to GitHub Pages
-    # master pushes deploy automatically; dispatches only when asked to.
-    if: inputs.deploy_pages || github.event_name == 'push'
+    if: inputs.deploy_pages
     needs: build-test
     runs-on: ubuntu-latest
     permissions:

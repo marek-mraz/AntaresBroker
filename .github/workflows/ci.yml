@@ -10,9 +10,9 @@ name: ci
 # (manual dispatch or v* tags). The matrix itself is the reusable
 # etsi-matrix.yml, shared by both pipelines.
 
+# Manual/PR only (decision 2026-08-07): no push trigger — a master push runs
+# nothing by itself; run the pipeline via PRs or `Run workflow`.
 on:
-  push:
-    branches: [master]
   pull_request:
   workflow_dispatch:
 
