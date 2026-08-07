@@ -98,6 +98,13 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 
 # N5: the browser artifact optimizes for size (opt-level z + fat LTO); the
 # native release profile stays throughput-tuned and untouched.
+[profile.release]
+# §2.1: resident code is the largest idle-RSS consumer (measured 10.9 MiB
+# of a 37.5 MB unstripped binary). Symbols stripped (cargo-auditable's
+# .dep-v0 section survives), thin LTO for smaller + slightly faster code.
+strip = "symbols"
+lto = "thin"
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"
