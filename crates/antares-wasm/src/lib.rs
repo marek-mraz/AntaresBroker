@@ -63,7 +63,12 @@ impl Broker {
     /// Serve ONE request. The signature is the seam every front end reduces
     /// to: the Service Worker (N3), the in-page API, and the Node shim (N7a)
     /// all funnel here.
-    pub async fn handle(&mut self, req: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+    ///
+    /// `&self` on purpose: a federation forward to the loopback host re-enters
+    /// this same instance WHILE an outer `handle` is suspended (N9) — `&mut`
+    /// would make that a wasm-bindgen recursive-borrow error. Router clone is
+    /// a cheap Arc bump and shares all state.
+    pub async fn handle(&self, req: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
         let (mut parts, body) = req.into_parts();
         // The native binary routes under NormalizePathLayer::trim_trailing_slash
         // (6.3 URLs arrive both with and without a trailing '/'); this seam is
@@ -82,7 +87,8 @@ impl Broker {
             }
         }
         let req = http::Request::from_parts(parts, Body::from(body));
-        let resp = match self.router.call(req).await {
+        let mut router = self.router.clone();
+        let resp = match router.call(req).await {
             Ok(r) => r,
             // The router is Infallible; keep the arm honest rather than
             // unwrapping (workspace lints deny unwrap outside tests).

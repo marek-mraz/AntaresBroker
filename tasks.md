@@ -1090,6 +1090,25 @@ N4) selected through the same trait, compiled to a different target.
       external HTTP callbacks and federation are structurally out of reach
       in a page (no inbound sockets, CORS) and stay Node-tier-covered.)*
 
+- [x] N9. Cross-tenant federation inside ONE broker + the loopback host
+      (2026-08-07). Spec side: CSR `tenant` (5.2.9) selects the peer tenant
+      on every forward; `contextSourceInfo` (4.3.6.5) pairs travel as forward
+      headers (`urn:ngsi-ld:request` passthrough; reserved/connection keys
+      and the 4.3.6.6 processed keys skipped — see CSI_SKIP). Browser side:
+      requests to `http://self.antares.internal` re-enter the same broker
+      (www/loopback.js patches global fetch — a fetch made inside a SW/worker
+      never re-enters its own handler), `Broker::handle`/`AntaresBroker::fetch`
+      take `&self` (router cloned per call) so the re-entrant forward can't
+      trip wasm-bindgen's recursive-borrow guard. The www page is the
+      "context spaces" playground (spaces = tenants, federation links = CSRs,
+      source/sync pipelines); `.github/workflows/wasm.yml` is the manual
+      build+test+Pages pipeline.
+      *(Proof: antares-wasm/tests/handle.rs
+      csr_tenant_federates_across_tenants_in_one_broker — real TCP loopback
+      listener feeding the same Broker, asserts peer-tenant header, csi
+      passthrough, request-echo, tenant-smuggle rejection, local=true
+      isolation; browser-test.mjs federation step over the loopback host.)*
+
 ---
 
 ## Sequencing

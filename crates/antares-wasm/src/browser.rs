@@ -98,8 +98,11 @@ impl AntaresBroker {
     /// `Request`/`Response`, so a caller cannot tell this from a network
     /// broker. The Service Worker's `fetch` handler passes its event request
     /// straight through.
+    /// `&self` (not `&mut`): the loopback host (N9) re-enters this method
+    /// while an outer call awaits a forward — shared borrows are re-entrant,
+    /// a mutable one aborts with "recursive use of an object".
     #[wasm_bindgen]
-    pub async fn fetch(&mut self, request: web_sys::Request) -> Result<web_sys::Response, JsValue> {
+    pub async fn fetch(&self, request: web_sys::Request) -> Result<web_sys::Response, JsValue> {
         let method = request.method();
         let url = request.url();
         // Path + query only: the router is mounted at the origin's root, and

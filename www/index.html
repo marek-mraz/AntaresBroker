@@ -3,38 +3,216 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Antares — NGSI-LD broker in your browser</title>
+  <title>Antares — NGSI-LD playground in your browser</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    header small { opacity: .7; }
-    button { margin-right: .5rem; }
-    #log { font-family: ui-monospace, monospace; font-size: .85rem; max-height: 18rem;
-           overflow-y: auto; border: 1px solid #8884; padding: .5rem; }
-    .ok { color: #2a7; } .err { color: #d44; } .notif { color: #48f; font-weight: 600; }
-    code { background: #8882; padding: 0 .25rem; border-radius: 3px; }
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+      --bg: #f4f6fb; --card: #ffffff; --ink: #1c2333; --muted: #67708a;
+      --line: #dfe4f0; --accent: #6d5ef1; --ok: #19a974; --err: #e14d4d;
+      --notif: #3b82f6; --fed: #b45fd9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #10131c; --card: #1a1f2e; --ink: #e8ebf5; --muted: #8b93ad;
+              --line: #2a3147; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background:
+        radial-gradient(1200px 500px at 80% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent),
+        var(--bg);
+      color: var(--ink); line-height: 1.45; }
+    main { max-width: 72rem; margin: 0 auto; padding: 1rem 1rem 4rem; }
+    header { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem;
+             padding: 1.2rem 0 .4rem; }
+    header h1 { margin: 0; font-size: 1.5rem; letter-spacing: .3px; }
+    header h1 span { color: var(--accent); }
+    .pill { font-size: .72rem; padding: .15rem .55rem; border-radius: 99px;
+            border: 1px solid var(--line); color: var(--muted);
+            background: var(--card); }
+    header p { flex-basis: 100%; margin: .2rem 0 0; color: var(--muted);
+               font-size: .9rem; max-width: 60rem; }
+
+    /* ---- space board ------------------------------------------------- */
+    #board { position: relative; display: grid; gap: 1rem; margin-top: 1rem;
+             grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); }
+    #wires { position: absolute; inset: 0; pointer-events: none; z-index: 1;
+             overflow: visible; }
+    .space { position: relative; z-index: 2; background: var(--card);
+             border: 1px solid var(--line); border-radius: 14px;
+             padding: .8rem .9rem 1rem; box-shadow: 0 6px 18px #0001;
+             border-top: 4px solid var(--space-color, var(--accent));
+             transition: box-shadow .2s; }
+    .space.pulse { box-shadow: 0 0 0 3px color-mix(in srgb, var(--space-color) 45%, transparent); }
+    .space h2 { margin: 0 0 .1rem; font-size: 1.05rem; display: flex;
+                align-items: center; gap: .4rem; }
+    .space h2 .x { margin-left: auto; }
+    .space .sub { font-size: .72rem; color: var(--muted); margin-bottom: .5rem; }
+    .space ul { list-style: none; margin: .5rem 0; padding: 0; display: flex;
+                flex-direction: column; gap: .3rem; min-height: 1.5rem; }
+    .space li { display: flex; align-items: center; gap: .45rem;
+                font-size: .82rem; background: color-mix(in srgb, var(--space-color) 7%, transparent);
+                border-radius: 8px; padding: .3rem .5rem; cursor: pointer;
+                border: 1px solid transparent; }
+    .space li:hover { border-color: var(--space-color); }
+    .space li .val { margin-left: auto; font-variant-numeric: tabular-nums;
+                     font-weight: 600; }
+    .space li.remote { opacity: .8; border: 1px dashed var(--fed);
+                       background: transparent; cursor: default; }
+    .space li.flash .val { animation: pop .5s; }
+    @keyframes pop { 0% { transform: scale(1.6); color: var(--ok); } 100% { transform: none; } }
+    .row { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
+    button { font: inherit; font-size: .78rem; padding: .32rem .6rem;
+             border-radius: 8px; border: 1px solid var(--line);
+             background: var(--card); color: var(--ink); cursor: pointer; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent);
+                     color: #fff; }
+    button.primary:hover { filter: brightness(1.1); color: #fff; }
+    button.ghost { border-style: dashed; color: var(--muted); }
+    .tag { font-size: .68rem; padding: .1rem .45rem; border-radius: 99px;
+           background: color-mix(in srgb, var(--fed) 14%, transparent);
+           color: var(--fed); border: 1px solid color-mix(in srgb, var(--fed) 40%, transparent); }
+    #newspace { display: grid; place-items: center; min-height: 9rem;
+                border: 2px dashed var(--line); border-radius: 14px;
+                color: var(--muted); cursor: pointer; font-size: .95rem;
+                z-index: 2; position: relative; background: transparent; }
+    #newspace:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ---- pipelines ---------------------------------------------------- */
+    section h3 { margin: 1.6rem 0 .5rem; font-size: 1rem; }
+    #pipes { display: flex; flex-direction: column; gap: .45rem; }
+    .pipe { display: flex; align-items: center; gap: .6rem; background: var(--card);
+            border: 1px solid var(--line); border-radius: 10px;
+            padding: .45rem .7rem; font-size: .82rem; }
+    .pipe .dot { width: .55rem; height: .55rem; border-radius: 50%;
+                 background: var(--muted); }
+    .pipe.running .dot { background: var(--ok); animation: beat 1.2s infinite; }
+    @keyframes beat { 50% { transform: scale(1.7); opacity: .5; } }
+    .pipe .meta { color: var(--muted); font-size: .72rem; }
+    .pipe .x, .space .x { border: none; background: none; color: var(--muted);
+                          font-size: .85rem; padding: .1rem .3rem; }
+    .pipe .x:hover, .space .x:hover { color: var(--err); }
+    .pipe .count { margin-left: auto; font-variant-numeric: tabular-nums;
+                   color: var(--muted); }
+    #addpipe { align-self: flex-start; }
+
+    /* ---- toasts & log -------------------------------------------------- */
+    #toasts { position: fixed; top: .8rem; right: .8rem; z-index: 50;
+              display: flex; flex-direction: column; gap: .4rem; max-width: 22rem; }
+    .toast { background: var(--card); border-left: 4px solid var(--notif);
+             border-radius: 8px; padding: .5rem .7rem; font-size: .78rem;
+             box-shadow: 0 8px 20px #0003; animation: slidein .25s; }
+    @keyframes slidein { from { transform: translateX(120%); } }
+    #log { font-family: ui-monospace, monospace; font-size: .78rem;
+           max-height: 14rem; overflow-y: auto; border: 1px solid var(--line);
+           background: var(--card); border-radius: 10px; padding: .5rem .7rem; }
+    #log .ok { color: var(--ok); } #log .err { color: var(--err); }
+    #log .notif { color: var(--notif); font-weight: 600; }
+    #log .fed { color: var(--fed); }
+    dialog { border: 1px solid var(--line); border-radius: 14px;
+             background: var(--card); color: var(--ink); padding: 1rem 1.2rem;
+             min-width: 20rem; }
+    dialog::backdrop { background: #0006; backdrop-filter: blur(2px); }
+    dialog h4 { margin: 0 0 .7rem; }
+    dialog label { display: block; font-size: .8rem; margin: .5rem 0 .15rem;
+                   color: var(--muted); }
+    dialog input, dialog select { font: inherit; font-size: .85rem; width: 100%;
+             padding: .35rem .5rem; border-radius: 8px;
+             border: 1px solid var(--line); background: var(--bg);
+             color: var(--ink); }
+    dialog .row { justify-content: flex-end; margin-top: .9rem; }
+    code { background: color-mix(in srgb, var(--accent) 10%, transparent);
+           padding: 0 .25rem; border-radius: 4px; }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Antares in the browser</h1>
-    <p>A full <a href="https://www.etsi.org/committee/cim">NGSI-LD</a> context
-    broker — the same Rust code as the native binary — compiled to
-    WebAssembly and running in this tab. No server, no install: the
-    <code>/ngsi-ld/v1/*</code> requests below are answered by a Service
-    Worker (mode: <strong id="mode">…</strong>).
-    <small id="health"></small></p>
-  </header>
-  <section>
-    <button id="create">Create a Room entity</button>
-    <button id="subscribe">Subscribe to Room changes</button>
-    <button id="refresh">Refresh list</button>
-    <ul id="entities"></ul>
-  </section>
-  <section>
-    <h2>Log</h2>
-    <div id="log"></div>
-  </section>
+  <main>
+    <header>
+      <h1>✦ Antares <span>context-space playground</span></h1>
+      <span class="pill">mode: <strong id="mode">…</strong></span>
+      <span class="pill" id="health"></span>
+      <p>A full NGSI-LD context broker — the same Rust code as the native
+      binary — compiled to WebAssembly, running in this tab. Each
+      <strong>context space</strong> below is a tenant of this one broker.
+      Spaces can <span class="tag">🔗 federate</span> (a Context Source
+      Registration pointing at another space, spec-clean per CIM 009 5.2.9
+      <code>tenant</code>) and <strong>pipelines</strong> stream or copy data
+      between them. No server, no install.</p>
+    </header>
+
+    <div id="board">
+      <svg id="wires"></svg>
+      <!-- space cards render here -->
+      <div id="newspace">＋ new context space</div>
+    </div>
+
+    <section>
+      <h3>⛓ Data pipelines</h3>
+      <div id="pipes"></div>
+      <div class="row"><button id="addpipe" class="primary">＋ new pipeline</button></div>
+    </section>
+
+    <section>
+      <h3>📜 Log</h3>
+      <div id="log"></div>
+    </section>
+  </main>
+
+  <div id="toasts"></div>
+
+  <dialog id="dlg-space">
+    <h4>New context space</h4>
+    <label>Name (tenant)</label>
+    <input id="space-name" placeholder="smart-city" pattern="[a-zA-Z0-9_-]+" />
+    <div class="row">
+      <button onclick="this.closest('dialog').close()">cancel</button>
+      <button class="primary" id="space-create">create</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-link">
+    <h4>Federate: link a peer space</h4>
+    <label>From (the space whose queries will see more)</label>
+    <select id="link-from"></select>
+    <label>To (the space that has the data)</label>
+    <select id="link-to"></select>
+    <label>Entity type (what the peer offers)</label>
+    <select id="link-type"></select>
+    <div class="row">
+      <button onclick="this.closest('dialog').close()">cancel</button>
+      <button class="primary" id="link-create">register</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-pipe">
+    <h4>New pipeline</h4>
+    <label>Kind</label>
+    <select id="pipe-kind">
+      <option value="source">🌡 data source → space (simulated sensor)</option>
+      <option value="sync">🔁 space → space (periodic copy)</option>
+    </select>
+    <div id="pipe-source-opts">
+      <label>Generator</label>
+      <select id="pipe-gen"></select>
+    </div>
+    <div id="pipe-sync-opts" hidden>
+      <label>From space</label>
+      <select id="pipe-from"></select>
+      <label>Entity type filter</label>
+      <select id="pipe-type"></select>
+    </div>
+    <label>Into space</label>
+    <select id="pipe-into"></select>
+    <label>Every (seconds)</label>
+    <input id="pipe-secs" type="number" min="1" max="60" value="3" />
+    <div class="row">
+      <button onclick="this.closest('dialog').close()">cancel</button>
+      <button class="primary" id="pipe-create">start</button>
+    </div>
+  </dialog>
+
+  <!-- test-contract hooks (browser-test.mjs / etsi-proxy.mjs): these act on
+       the default space; #entities is the default space's entity list. -->
   <script type="module" src="./app.js"></script>
 </body>
 </html>

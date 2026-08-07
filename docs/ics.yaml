@@ -27,7 +27,7 @@ clause4_foundations:
     name: "Distributed-operation semantics (additive/proxied/cascade/extra-info)"
     status: partial
     evidence: "crates/antares-api/src/federation.rs (modes, Via, hop limit, 508)"
-    notes: "contextSourceInfo (4.3.6.5/6) not implemented; NGSILD-EntityMap not implemented (see 5.14)"
+    notes: "4.3.6.5 implemented 2026-08-07: contextSourceInfo pairs sent as forward headers incl. urn:ngsi-ld:request passthrough, reserved/connection keys ignored; CSR `tenant` (5.2.9) selects the peer tenant on every forward (tested: antares-wasm/tests/handle.rs csr_tenant_federates_across_tenants_in_one_broker). 4.3.6.6 processed keys (accept/contentType/jsonldContext/ngsildConformance) still not implemented — skipped, not passed through; NGSILD-EntityMap not implemented (see 5.14)"
   - clause: "4.3.7"
     name: "Snapshots concept"
     status: staged-v1x

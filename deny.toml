@@ -10,7 +10,30 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # webpki-roots: Mozilla CA-bundle DATA under the permissive CDLA — no code
+    # licensing implications (pulled via reqwest/hyper-rustls and async-nats).
+    "CDLA-Permissive-2.0",
 ]
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # paste: unmaintained proc-macro, build-time only, via tikv-jemalloc-ctl.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc-macro via tikv-jemalloc-ctl; no runtime code" },
+    # rustls-pemfile: unmaintained; pinned by every rumqttc version incl.
+    # upstream main. Drops only when upstream migrates off it.
+    { id = "RUSTSEC-2025-0134", reason = "via rumqttc (all versions incl. upstream main); no fixed release exists" },
+    # rustls-webpki 0.102.x (no fixed 0.102 exists): rumqttc pins ^0.102.8
+    # DIRECTLY on every release and on upstream main (verified 2026-08-07) —
+    # a 0.25 bump does NOT remove it, and use-rustls on 0.25 additionally
+    # drags in aws-lc-sys (C/cmake, against §6.1 rustls+ring-only; a future
+    # bump must use use-rustls-no-provider + ring). Scope: mqtts notification
+    # egress server-cert checks only; the CRL-parsing panic needs CRLs
+    # configured (rumqttc configures none) and the name-constraint bypasses
+    # need constrained CAs. Exit: upstream bumps to webpki 0.103, or the
+    # MQTT client is swapped. Re-review at each rumqttc release.
+    { id = "RUSTSEC-2026-0049", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
+    { id = "RUSTSEC-2026-0098", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
+    { id = "RUSTSEC-2026-0099", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
+    { id = "RUSTSEC-2026-0104", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
+]

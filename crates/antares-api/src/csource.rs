@@ -192,6 +192,30 @@ pub fn normalize_registration(
                 }
                 out.insert("expiresAt".into(), v.clone());
             }
+            // 5.2.9 `tenant`: the Tenant to use in all requests to this
+            // source — validated with the same rules as the header (4.14).
+            "tenant" => {
+                let t = v
+                    .as_str()
+                    .ok_or_else(|| bad("tenant must be a string (5.2.9)".into()))?;
+                antares_model::TenantId::new(t)?;
+                out.insert("tenant".into(), v.clone());
+            }
+            // 4.3.6.5: KeyValuePair[] conveyed when contacting the source.
+            "contextSourceInfo" => {
+                let arr = v
+                    .as_array()
+                    .ok_or_else(|| bad("contextSourceInfo must be an array (5.2.9)".into()))?;
+                for kv in arr {
+                    if kv.get("key").and_then(Value::as_str).is_none() || kv.get("value").is_none()
+                    {
+                        return Err(bad(
+                            "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
+                        ));
+                    }
+                }
+                out.insert("contextSourceInfo".into(), v.clone());
+            }
             "observationInterval" | "managementInterval" => {
                 let o = v
                     .as_object()

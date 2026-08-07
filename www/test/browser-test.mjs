@@ -124,14 +124,61 @@ try {
       timeout: 15_000,
     });
     const rooms = await page2.evaluate(async () => {
-      const r = await fetch("/ngsi-ld/v1/entities?type=Room&limit=100");
+      const r = await fetch(
+        "/ngsi-ld/v1/entities?type=Room,TemperatureSensor,ParkingSpot,Streetlight&limit=100",
+      );
       return (await r.json()).length;
     });
     if (rooms < 1) await fail("second tab does not see the first tab's entity");
     await page2.close();
   }
 
-  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification`);
+  // N9: cross-tenant federation inside the ONE in-browser broker — space-a
+  // holds a CSR whose endpoint is the loopback host and whose `tenant`
+  // member (5.2.9) names space-b; a federated query in space-a must return
+  // space-b's entity, and local=true must not.
+  const fed = await page.evaluate(async () => {
+    const CTX =
+      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+    const api = (tenant, path, opts = {}) =>
+      window.brokerFetch(path, {
+        ...opts,
+        headers: { ...(opts.headers ?? {}), "NGSILD-Tenant": tenant },
+      });
+    const post = (tenant, path, body) =>
+      api(tenant, path, {
+        method: "POST",
+        headers: { "Content-Type": "application/ld+json" },
+        body: JSON.stringify({ ...body, "@context": CTX }),
+      });
+    let r = await post("space-b", "/ngsi-ld/v1/entities", {
+      id: "urn:ngsi-ld:FedCar:bt-1",
+      type: "FedCar",
+      speed: { type: "Property", value: 1 },
+    });
+    if (r.status !== 201) return `space-b create → ${r.status}`;
+    r = await post("space-a", "/ngsi-ld/v1/csourceRegistrations", {
+      id: "urn:ngsi-ld:ContextSourceRegistration:browser-a-to-b",
+      type: "ContextSourceRegistration",
+      information: [{ entities: [{ type: "FedCar" }] }],
+      endpoint: "http://self.antares.internal",
+      mode: "inclusive",
+      tenant: "space-b",
+    });
+    if (r.status !== 201) return `space-a CSR → ${r.status}`;
+    r = await api("space-a", "/ngsi-ld/v1/entities?type=FedCar");
+    const docs = await r.json();
+    if (!docs.some((e) => e.id === "urn:ngsi-ld:FedCar:bt-1")) {
+      return `federated query missed the entity: ${JSON.stringify(docs)}`;
+    }
+    r = await api("space-a", "/ngsi-ld/v1/entities?type=FedCar&local=true");
+    if ((await r.json()).length !== 0) return "local=true leaked the peer";
+    return "OK";
+  });
+  if (fed !== "OK") await fail(`cross-tenant federation: ${fed}`);
+  console.log("cross-tenant federation over the loopback host holds");
+
+  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation`);
   await browser.close();
   server.close();
 } catch (e) {

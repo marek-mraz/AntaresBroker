@@ -352,6 +352,7 @@ async fn create_entity_inner(
                     &[],
                     headers,
                     &tenant,
+                    &reg,
                     &ctx_url,
                     Some(frag),
                 )
@@ -1261,6 +1262,7 @@ pub async fn delete_entity(
                         &[],
                         &headers,
                         &tenant,
+                        reg,
                         &ctx_url,
                         None,
                     )
@@ -1411,6 +1413,7 @@ async fn purge_inner(
                     &query,
                     headers,
                     &tenant,
+                    reg,
                     &ctx_url,
                     None,
                 )
@@ -1536,6 +1539,7 @@ async fn merge_entity_inner(
                     &[],
                     headers,
                     &tenant,
+                    reg,
                     &ctx_url,
                     Some(frag),
                 )
@@ -1749,6 +1753,7 @@ pub async fn replace_entity(
                     &[],
                     &headers,
                     &tenant,
+                    reg,
                     &ctx_url,
                     Some(frag),
                 )

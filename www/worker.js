@@ -4,8 +4,10 @@
 // clear error) and runs the same broker over the same redb shadow as native
 // `file` mode: commit-before-ack, format check, boot rebuild.
 import init, { AntaresBroker } from "./pkg/antares_wasm.js";
+import { installLoopback } from "./loopback.js";
 
 let broker = null;
+installLoopback(() => broker);
 
 self.onmessage = async (e) => {
   const msg = e.data;

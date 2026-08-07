@@ -9,10 +9,12 @@
 // instance per SW lifetime — memory store, so state survives page reloads
 // but not a SW restart (persistence is the OPFS story, tasks.md N4).
 import init, { AntaresBroker } from "./pkg/antares_wasm.js";
+import { installLoopback } from "./loopback.js";
 
 const ready = (async () => {
   await init();
   const broker = new AntaresBroker();
+  installLoopback(() => broker);
   // Notifications to the reserved page endpoint fan out to every open tab.
   const channel = new BroadcastChannel("antares-notifications");
   broker.onNotification("http://page.local/", (url, body) => {

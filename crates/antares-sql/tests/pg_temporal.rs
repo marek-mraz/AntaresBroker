@@ -18,6 +18,15 @@ macro_rules! require_db {
     };
 }
 
+/// `occupied_range_…` drops the current week's partition as setup — destroying
+/// any sibling's rows parked there (the decomposition doc's modifiedAt
+/// fallback lands in the current week whenever "now" crosses into its ISO
+/// week) — and conversely a sibling's maintenance pass can recreate the
+/// partition it just dropped. Tests that insert into or DDL the current-week
+/// partition therefore serialize on this lock.
+static PARTITION_DDL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Maintenance is single-winner by design (§3.1.6 `FOR UPDATE SKIP LOCKED`),
 /// so a concurrent caller legitimately gets "skipped" — including a sibling
 /// test. A real deployment retries on the next tick; so do we, rather than
@@ -88,6 +97,7 @@ async fn temporal_doc_roundtrip_and_instance_append() {
 #[tokio::test(flavor = "multi_thread")]
 async fn attr_instances_decomposition_and_maintenance() {
     let url = require_db!();
+    let _ddl = PARTITION_DDL.lock().await;
     let pool = pg::connect(&url, 5).await.expect("pool");
     let t = TenantId::new("pgtempdec").expect("tenant");
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
@@ -176,6 +186,7 @@ async fn attr_instances_decomposition_and_maintenance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn occupied_range_is_skipped_without_poisoning_the_pass() {
     let url = require_db!();
+    let _ddl = PARTITION_DDL.lock().await;
     let pool = pg::connect(&url, 5).await.expect("connect");
     if antares_sql::maintenance::timescale_present(&pool)
         .await

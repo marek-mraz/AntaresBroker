@@ -500,6 +500,7 @@ async fn batch_write(
                     &query,
                     headers,
                     &tenant,
+                    reg,
                     &ctx_url,
                     Some(Value::Array(arr)),
                 )
@@ -603,6 +604,7 @@ pub async fn batch_delete(
                         &[],
                         &headers,
                         &tenant,
+                        reg,
                         &ctx_url,
                         Some(Value::Array(ids.clone())),
                     )

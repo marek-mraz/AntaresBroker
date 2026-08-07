@@ -1,0 +1,78 @@
+name: wasm
+
+# Manual CI/CD for the browser build ALONE — the same build + test steps as
+# full.yml's wasm job (dev/wasm-build.sh size budget, dev/wasm-test.sh Node
+# tier + headless-Chromium tier incl. the N9 cross-tenant federation check)
+# without dragging the ETSI matrix along. Publishes the ready-to-serve www/
+# bundle as an artifact; `deploy_pages: true` additionally deploys it to
+# GitHub Pages (requires Pages to be enabled with "GitHub Actions" source).
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_pages:
+        description: "Deploy the playground to GitHub Pages after a green run"
+        type: boolean
+        default: false
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build + test (wasm32)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (lockfile-matched) + binaryen
+        run: |
+          ./dev/install-wasm-tools.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build + size budget (N5)
+        run: |
+          ./dev/wasm-build.sh | tee wasm-size.txt
+          echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
+          tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Demo page deps + chromium
+        working-directory: www
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps chromium
+      - name: Node tier + browser tier (N6/N7a, incl. cross-tenant federation)
+        run: ./dev/wasm-test.sh
+      - name: Bundle the site (page + pkg + Node shim, no node_modules)
+        run: |
+          mkdir -p site
+          cp www/index.html www/app.js www/worker.js www/sw.js \
+             www/loopback.js www/node-shim.mjs site/
+          cp -r www/pkg site/pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antares-www
+          path: site
+      - name: Upload Pages artifact
+        if: inputs.deploy_pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: inputs.deploy_pages
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

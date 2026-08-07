@@ -55,6 +55,10 @@ send_wrapper = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# N9 test: a real TCP listener that feeds the SAME broker instance — the
+# native stand-in for the browser loopback host (tests/handle.rs).
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true }
 
 [lints]
 workspace = true

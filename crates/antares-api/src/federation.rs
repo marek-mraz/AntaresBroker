@@ -71,7 +71,7 @@ const UPDATE_OPS: &[&str] = &[
 const RETRIEVE_OPS: &[&str] = &["retrieveEntity", "queryEntity"];
 
 /// One matching registration, compiled for forwarding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FedReg {
     pub endpoint: String,
     pub mode: String, // inclusive | auxiliary | exclusive | redirect
@@ -81,6 +81,12 @@ pub struct FedReg {
     /// EntityInfo ids/types of the matched RegistrationInfo elements.
     pub ent_ids: Vec<String>,
     pub ent_types: Vec<String>,
+    /// 5.2.9 `tenant`: the Tenant to specify in all requests to this Context
+    /// Source. None ⇒ the requesting tenant is carried through unchanged.
+    pub tenant: Option<String>,
+    /// 4.3.6.5 `contextSourceInfo` key/value pairs, conveyed as headers on
+    /// every forward to this source (string values only — headers).
+    pub csi: Vec<(String, String)>,
 }
 
 impl FedReg {
@@ -229,6 +235,21 @@ pub fn matching_regs(
                     }
                 }
             }
+            let tenant = doc.get("tenant").and_then(Value::as_str).map(str::to_owned);
+            let csi = doc
+                .get("contextSourceInfo")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|kv| {
+                            Some((
+                                kv.get("key")?.as_str()?.to_owned(),
+                                kv.get("value")?.as_str()?.to_owned(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(FedReg {
                 endpoint,
                 mode,
@@ -236,10 +257,33 @@ pub fn matching_regs(
                 attrs,
                 ent_ids,
                 ent_types,
+                tenant,
+                csi,
             })
         })
         .collect()
 }
+
+/// contextSourceInfo keys the forward must NOT copy into headers: the tenant
+/// travels via the registration's own `tenant` member (4.3.6.5 "shall not be
+/// part of contextSourceInfo"), connection/binding-managed headers cannot be
+/// overridden ("shall be ignored"), and the 4.3.6.6 processed keys (accept,
+/// contentType, jsonldContext, ngsildConformance) have transformation
+/// semantics this broker does not implement yet — passing them through raw
+/// would corrupt negotiation instead.
+const CSI_SKIP: &[&str] = &[
+    "ngsild-tenant",
+    "content-length",
+    "content-type",
+    "host",
+    "via",
+    "link",
+    "connection",
+    "accept",
+    "contenttype",
+    "jsonldcontext",
+    "ngsildconformance",
+];
 
 /// One forwarded request. `body` is compacted JSON (no @context member).
 #[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
@@ -250,6 +294,7 @@ pub async fn forward(
     query: &[(String, String)],
     headers: &HeaderMap,
     tenant: &TenantId,
+    reg: &FedReg,
     ctx_url: &str,
     body: Option<Value>,
 ) -> (u16, Value) {
@@ -275,8 +320,29 @@ pub async fn forward(
     if !query.is_empty() {
         req = req.query(query);
     }
-    if tenant.as_str() != "default" {
-        req = req.header("NGSILD-Tenant", tenant.as_str());
+    // 5.2.9 `tenant`: requests related to this registration carry the
+    // registration's Tenant; absent ⇒ the requesting tenant flows through
+    // (4.3.6.4: each Tenant in a registered source is considered separately).
+    let peer_tenant = reg.tenant.as_deref().unwrap_or(tenant.as_str());
+    if peer_tenant != "default" {
+        req = req.header("NGSILD-Tenant", peer_tenant);
+    }
+    // 4.3.6.5 contextSourceInfo ⇒ extra headers; the special value
+    // "urn:ngsi-ld:request" copies the header from the triggering request
+    // (dropped when the triggering request did not carry it).
+    for (k, v) in &reg.csi {
+        if CSI_SKIP.contains(&k.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        let val = if v == "urn:ngsi-ld:request" {
+            match headers.get(k.as_str()).and_then(|h| h.to_str().ok()) {
+                Some(h) => h.to_owned(),
+                None => continue,
+            }
+        } else {
+            v.clone()
+        };
+        req = req.header(k.as_str(), val);
     }
     if let Some(b) = body {
         req = req
@@ -430,6 +496,7 @@ pub async fn fed_retrieve(
                     &query,
                     headers,
                     tenant,
+                    &reg,
                     &ctx_url,
                     None,
                 )
@@ -450,6 +517,7 @@ pub async fn fed_retrieve(
                     &query,
                     headers,
                     tenant,
+                    &reg,
                     &ctx_url,
                     None,
                 )
@@ -469,6 +537,7 @@ pub async fn fed_retrieve(
                     &query,
                     headers,
                     tenant,
+                    &reg,
                     &ctx_url,
                     Some(json!({"type": "Query", "entities": [Value::Object(sel)]})),
                 )
@@ -533,6 +602,7 @@ pub async fn fed_query(
                 &[("options".into(), "sysAttrs".into())],
                 headers,
                 tenant,
+                &reg,
                 &ctx_url,
                 Some(json!({"type": "Query", "entities": [Value::Object(sel)]})),
             )
@@ -560,6 +630,7 @@ pub async fn fed_query(
                 &query,
                 headers,
                 tenant,
+                &reg,
                 &ctx_url,
                 None,
             )
@@ -753,6 +824,7 @@ pub async fn forward_part(
     query: &[(String, String)],
     headers: &HeaderMap,
     tenant: &TenantId,
+    reg: &FedReg,
     ctx_url: &str,
     body: Option<Value>,
 ) -> Part {
@@ -763,6 +835,7 @@ pub async fn forward_part(
         query,
         headers,
         tenant,
+        reg,
         ctx_url,
         body,
     )
@@ -802,6 +875,7 @@ pub async fn fed_attr_parts(
                 query,
                 headers,
                 tenant,
+                reg,
                 &ctx_url,
                 body.clone(),
             )
