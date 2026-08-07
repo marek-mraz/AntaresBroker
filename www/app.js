@@ -252,6 +252,9 @@ const TYPES = {
   TrafficCounter: { emoji: "🚦", attr: "vehiclesPerMin", gen: () => Math.round(Math.random() * 45) },
   BikeStation: { emoji: "🚲", attr: "availableBikes", gen: () => Math.round(Math.random() * 20) },
   WasteContainer: { emoji: "🗑", attr: "fillLevel", gen: () => Math.round(Math.random() * 100) },
+  // Decidim (participatory democracy platform): proposal support counts as a
+  // live signal — participation is city data too.
+  CitizenProposal: { emoji: "🗳", attr: "supports", gen: () => Math.round(Math.random() * 500) },
 };
 const ALL_TYPES = Object.keys(TYPES).join(",");
 
@@ -1279,12 +1282,12 @@ function renderOverview() {
 // twice. Only real API calls; every flow obeys the evidence rules.
 const DEMO = {
   spaces: ["default", "smart-city", "old-town", "harbor", "airport",
-    "university", "energy-grid", "transit"],
+    "university", "energy-grid", "transit", "decidim"],
   // hub-and-spoke default positions, as fractions of the canvas
   layout: {
-    "smart-city": [0.5, 0.45], "old-town": [0.28, 0.2], harbor: [0.72, 0.18],
+    "smart-city": [0.5, 0.45], "old-town": [0.3, 0.2], harbor: [0.72, 0.18],
     airport: [0.88, 0.45], university: [0.12, 0.48], "energy-grid": [0.28, 0.78],
-    transit: [0.72, 0.8], default: [0.5, 0.1],
+    transit: [0.72, 0.8], decidim: [0.1, 0.16], default: [0.52, 0.08],
   },
   devices: [ // [space, sensor type, seconds] — each is one simulated source
     ["old-town", "TemperatureSensor", 3], ["old-town", "NoiseSensor", 4],
@@ -1293,18 +1296,23 @@ const DEMO = {
     ["university", "Room", 5], ["university", "EnergyMeter", 3],
     ["energy-grid", "EnergyMeter", 2], ["energy-grid", "Streetlight", 4],
     ["transit", "BikeStation", 3], ["transit", "TrafficCounter", 3],
+    ["decidim", "CitizenProposal", 5],
   ],
-  csrs: [ // 5 registrations — the hub sees the districts
+  // EVERY data path terminates in smart-city: five all-type CSRs, two
+  // deliberately type-scoped ones (their excluded types arrive as copies).
+  csrs: [
     ["smart-city", "old-town", null],
     ["smart-city", "harbor", null],
+    ["smart-city", "university", null],
+    ["smart-city", "energy-grid", null],
+    ["smart-city", "decidim", null],
     ["smart-city", "airport", "AirQualitySensor"],
     ["smart-city", "transit", "BikeStation"],
-    ["smart-city", "energy-grid", "EnergyMeter"],
   ],
-  copies: [ // 3 periodic copies — materialized data next to the federated view
-    ["old-town", "default", "TemperatureSensor", 6],
-    ["university", "energy-grid", "EnergyMeter", 8],
+  copies: [ // 3 periodic copies — each closes a gap the scoped CSRs leave
+    ["airport", "smart-city", "TrafficCounter", 6],
     ["transit", "smart-city", "TrafficCounter", 7],
+    ["university", "energy-grid", "EnergyMeter", 8],
   ],
 };
 
@@ -1357,7 +1365,7 @@ async function createDemo() {
   resolveOverlaps();
   await refreshAll();
   renderGraph();
-  log("demo ready — 12 sensors → 6 districts → 5 CSRs + 3 copies into the hub", "ok");
+  log("demo ready — 13 sources → 7 districts (incl. decidim) → 7 CSRs + 3 copies, everything ends in smart-city", "ok");
 }
 
 // Remove EVERYTHING: API-level wipe of every space, pipelines stopped and

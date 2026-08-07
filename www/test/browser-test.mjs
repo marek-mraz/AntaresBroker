@@ -189,22 +189,22 @@ try {
       const t = document.getElementById("ov-body").textContent;
       const csrs = document.querySelectorAll("#ov-body .tag").length;
       return t.includes("smart-city") && t.includes("old-town") &&
-        t.includes("harbor") && csrs >= 5 && t.includes("simulated device") &&
-        t.includes("copy · TemperatureSensor");
+        t.includes("decidim") && csrs >= 7 && t.includes("simulated device") &&
+        t.includes("copy · TrafficCounter");
     },
     { timeout: 30_000 },
   );
-  console.log("demo built: 8 spaces + 5 CSRs + 12 devices + 3 copies visible on the board");
+  console.log("demo built: 9 spaces + 7 CSRs + 13 devices + 3 copies visible on the board");
   // Second click must not duplicate anything (idempotence).
   await page.click("#ov-demo");
   await page.waitForFunction(
     () => !document.getElementById("ov-demo").disabled, { timeout: 30_000 });
   const csrCount = await page.evaluate(
     () => document.querySelectorAll("#ov-body .tag").length);
-  if (csrCount !== 5) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
+  if (csrCount !== 7) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
   // Template round-trip: export the demo structure, wipe, apply → restored.
   const tpl = await page.evaluate(() => window.boardTemplate());
-  if ((tpl.csrs?.length ?? 0) < 5 || (tpl.pipelines?.length ?? 0) < 10) {
+  if ((tpl.csrs?.length ?? 0) < 7 || (tpl.pipelines?.length ?? 0) < 12) {
     await fail(`template export incomplete: ${JSON.stringify(tpl).slice(0, 200)}`);
   }
   await page.click("#ov-reset");
@@ -222,7 +222,7 @@ try {
   await page.waitForFunction(
     () => {
       const b = window.boardTemplate();
-      return b.csrs.length >= 5 && b.pipelines.length >= 10;
+      return b.csrs.length >= 7 && b.pipelines.length >= 12;
     },
     { timeout: 30_000 },
   );
