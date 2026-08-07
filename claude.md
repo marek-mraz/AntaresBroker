@@ -55,6 +55,13 @@ Rules that make the budget hold:
 2. **Backpressure over buffering** — slow WS consumer ⇒ notification coalescing then disconnect with `1013 Try Again Later`, never unbounded queueing (see WS binding close-code registry).
 3. **One copy of the truth in memory** — entities live in Postgres, period. The broker holds no entity cache in v1. (`ponytail:` no entity cache; add a per-request read-through cache only if p99 read latency measurably needs it.)
 
+**Measured memory profile (release binary, 2026-08-07)** — the facts future optimization work starts from:
+- Idle RSS 16.7 MiB: **resident binary code 10.9 MiB** (largest idle consumer — hence `strip = "symbols"` + `lto = "thin"` in `[profile.release]`; tradeoff: panic backtraces show addresses, not names), live heap ~5.4 MB (core context, runtime, caches), libc ~1.5 MiB.
+- **jemalloc purges only on allocation activity**: after a burst + purge, ~48 MiB of dead pages parked forever on an idle broker. Fix shipped in the Dockerfile: `MALLOC_CONF`/`_RJEM_MALLOC_CONF=background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000` (measured: 50 → 33 MiB and decaying). Steady load is unaffected (working set never idles 10 s); the only cost is page re-faulting after >10 s quiet spells.
+- **Memory store costs ~9.4 KB/entity** (pointer-heavy expanded `serde_json::Value` trees) — fine for its dev/ETSI role; postgres/timescale hold entities in the DB, not broker RAM. Storing serialized bytes would be ~5× cheaper but taxes every read; don't, unless the store's role changes.
+- **Telemetry is a runtime switch**: `ANTARES_TELEMETRY=1` builds the Prometheus recorder + sampler + OTLP at startup; the default (CI/ETSI, dev image) constructs none of it — zero telemetry RAM, `/q/metrics` → 404. Cost when on at idle: <1 MiB. One build for both states.
+- tokio-console (`console` feature) only arms under `cfg(tokio_unstable)` — an `--all-features` build without the RUSTFLAGS must boot as a no-op, never panic (this panic was the recurring CI workspace failure).
+
 ### 2.2 Postgres — 16 GB memory budget
 
 | Setting | Value | Why |
