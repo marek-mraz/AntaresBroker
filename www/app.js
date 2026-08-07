@@ -179,7 +179,8 @@ async function boot() {
 
 // ---- context spaces --------------------------------------------------------
 // A space IS a tenant. "default" always exists (the spec's default tenant).
-const PALETTE = ["#6d5ef1", "#19a974", "#e8850c", "#d9534f", "#3b82f6", "#b45fd9"];
+const PALETTE = ["#6d5ef1", "#19a974", "#e8850c", "#d9534f", "#3b82f6", "#b45fd9",
+  "#0ea5a3", "#b8860b"];
 const EMOJI = ["🏙", "🏔", "🛰", "🏭", "🌊", "🌳", "🎡", "🚉"];
 const TYPES = {
   Room: { emoji: "🚪", attr: "temperature", gen: () => Math.round(15 + Math.random() * 15) },
@@ -191,8 +192,17 @@ const ALL_TYPES = Object.keys(TYPES).join(",");
 
 const load = (k, d) => JSON.parse(localStorage.getItem(k) ?? "null") ?? d;
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
-let spaces = load("antares.spaces", [{ name: "default" }, { name: "smart-city" }]);
+// The default board shows a small federated city: at least 7 tenants.
+const SEED_SPACES = ["default", "smart-city", "old-town", "harbor", "airport",
+  "university", "energy-grid", "transit"];
+let spaces = load("antares.spaces", SEED_SPACES.map((name) => ({ name })));
 if (!spaces.some((s) => s.name === "default")) spaces.unshift({ name: "default" });
+// Existing saved boards top up to the 7-tenant minimum from the seed list.
+for (const name of SEED_SPACES) {
+  if (spaces.length >= 7) break;
+  if (!spaces.some((s) => s.name === name)) spaces.push({ name });
+}
+save("antares.spaces", spaces);
 let pipes = load("antares.pipes", []);
 const fedView = new Set(load("antares.fedview", []));
 const links = new Map(); // space -> [{id, to, type}]
@@ -295,12 +305,12 @@ function edgeList() {
   for (const [from, ls] of links) {
     for (const l of ls) {
       // data flows peer → registrant
-      out.push({ kind: "fed", a: `s:${l.to}`, b: `s:${from}`, label: l.type ?? "all types", reg: { space: from, id: l.id, to: l.to } });
+      out.push({ kind: "fed", key: `fed:${l.id}`, a: `s:${l.to}`, b: `s:${from}`, label: l.type ?? "all types", reg: { space: from, id: l.id, to: l.to } });
     }
   }
   for (const p of pipes) {
-    if (p.kind === "sync") out.push({ kind: "pipe", a: `s:${p.from}`, b: `s:${p.into}`, label: `${p.type} / ${p.secs}s`, pipe: p });
-    if (p.kind === "source") out.push({ kind: "pipe", a: `p:${p.id}`, b: `s:${p.into}`, label: `${p.secs}s`, pipe: p });
+    if (p.kind === "sync") out.push({ kind: "pipe", key: `pipe:${p.id}`, a: `s:${p.from}`, b: `s:${p.into}`, label: `${p.type} / ${p.secs}s`, pipe: p });
+    if (p.kind === "source") out.push({ kind: "pipe", key: `pipe:${p.id}`, a: `p:${p.id}`, b: `s:${p.into}`, label: `${p.secs}s`, pipe: p });
   }
   const groups = new Map();
   for (const e of out) {
@@ -363,10 +373,20 @@ function renderGraph() {
       "stroke-dasharray": e.kind === "fed" ? "7 6" : "2 7",
       "marker-end": `url(#arrow-${e.kind === "fed" ? "fed" : "pipe"})`,
     }, eg);
-    p.innerHTML = `<animate attributeName="stroke-dashoffset" from="26" to="0" dur="1.2s" repeatCount="indefinite"/>`;
+    // Flow animation is EVIDENCE, not decoration: an edge pulses only while
+    // a real transfer just happened on it (fed query that returned entities,
+    // pipe tick that wrote). Idle edges stay static — dashes mark the kind.
+    const b = bursts.get(e.key);
+    const bursting = b && b.until > Date.now();
+    if (bursting) {
+      p.innerHTML = `<animate attributeName="stroke-dashoffset" from="26" to="0" dur="0.45s" repeatCount="indefinite"/>`;
+      p.setAttribute("opacity", "1");
+      p.setAttribute("stroke-width", "3.5");
+    }
     if (e.pipe && !e.pipe.running) p.setAttribute("opacity", "0.25");
     const lab = el("text", { class: "edgelabel", x: mx, y: my - 5, "text-anchor": "middle" }, eg);
-    lab.textContent = e.kind === "fed" ? `CSR · ${e.label}` : `⏱ ${e.label}`;
+    lab.textContent = (e.kind === "fed" ? `CSR · ${e.label}` : `⏱ ${e.label}`) +
+      (bursting && b.count ? `  ·  ${b.count} ⇢` : "");
     const title = el("title", {}, hit);
     title.textContent = e.kind === "fed"
       ? `Context Source Registration: queries in "${e.reg.space}" include "${e.reg.to}" (${e.label}) — click to delete`
@@ -392,8 +412,8 @@ function renderGraph() {
       const cur = ents.get(nd.name) ?? { local: [], remote: [] };
       const ct = el("text", { class: "count", y: 32, "text-anchor": "middle" }, g);
       ct.textContent = fedView.has(nd.name)
-        ? `${cur.local.length} local · +${cur.remote.length} fed`
-        : `${cur.local.length} ${cur.local.length === 1 ? "entity" : "entities"}`;
+        ? `🏠 ${cur.local.length} · 🌐 ${cur.remote.length}`
+        : `🏠 ${cur.local.length} local`;
     } else {
       el("circle", { class: "halo", r: nd.r + 6, fill: "none" }, g);
       el("circle", { class: "body", r: nd.r, fill: "color-mix(in srgb, var(--ok) 18%, var(--card))",
@@ -433,6 +453,22 @@ addEventListener("resize", () => {
   resolveOverlaps();
   renderGraph();
 });
+
+// ---- real-flow bursts ------------------------------------------------------
+// bursts[edgeKey] marks "data actually crossed this edge just now"; the
+// render loop shows motion only while a mark is fresh.
+const bursts = new Map(); // edgeKey -> { until, count }
+function burst(edgeKey, count = 0) {
+  bursts.set(edgeKey, { until: Date.now() + 1400, count });
+  renderGraph();
+  setTimeout(() => {
+    const cur = bursts.get(edgeKey);
+    if (cur && cur.until <= Date.now()) {
+      bursts.delete(edgeKey);
+      renderGraph();
+    }
+  }, 1500);
+}
 
 function pulse(name) {
   const g = graph.querySelector(`.bubble[data-key="s:${CSS.escape(name)}"]`) ??
@@ -486,6 +522,12 @@ function renderEntities(name) {
   const cur = ents.get(name) ?? { local: [], remote: [] };
   const prev = new Map([...ul.children].map((li) => [li.dataset.id, li.dataset.val]));
   ul.replaceChildren();
+  // The always-on count line: how many live HERE vs arrive via federation.
+  const stats = document.createElement("li");
+  stats.className = "sep";
+  stats.innerHTML = `<span class="sub">🏠 ${cur.local.length} local · 🌐 ${
+    fedView.has(name) ? `${cur.remote.length} federated` : "fed view off"}</span>`;
+  ul.appendChild(stats);
   for (const e of cur.local) {
     const { emoji, val } = entLabel(e);
     const li = document.createElement("li");
@@ -650,6 +692,19 @@ async function refreshSpace(space) {
   }
   ents.set(space, { local, remote });
   await refreshLinks(space);
+  // Real flow only: pulse exactly the CSR edges that just carried entities
+  // into this federated query, with the count that crossed.
+  if (remote.length) {
+    const perOrigin = new Map();
+    for (const e of remote) {
+      const o = originOf(e.id, space);
+      if (o) perOrigin.set(o, (perOrigin.get(o) ?? 0) + 1);
+    }
+    for (const l of links.get(space) ?? []) {
+      const n = perOrigin.get(l.to);
+      if (n) burst(`fed:${l.id}`, n);
+    }
+  }
   if (selSpace() === space) {
     renderEntities(space);
     renderLinksPanel(space);
@@ -858,8 +913,10 @@ $("newspace").onclick = () => {
 };
 $("space-create").onclick = () => {
   const name = $("space-name").value.trim();
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-    log(`invalid space name ${name || "(empty)"} — letters, digits, - _`, "err");
+  // Tenant charset: A-Za-z0-9 and dash only (no spaces, no underscore) —
+  // a strict subset of the broker's TenantId rule, so UI and API never argue.
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(name)) {
+    log(`invalid space name ${name || "(empty)"} — use A-Za-z0-9 and "-" (max 64)`, "err");
     return;
   }
   if (!spaces.some((s) => s.name === name)) {
@@ -947,6 +1004,7 @@ function deletePipe(id) {
 }
 
 async function tickPipe(p) {
+  let synced = 1; // entities that actually moved this tick (source: 1 reading)
   if (p.kind === "source") {
     // A simulated device: one stable entity per pipeline, fresh reading per
     // tick — "convert a data source and insert it into a space".
@@ -978,7 +1036,8 @@ async function tickPipe(p) {
     // target space — same broker, two tenants, one HTTP call each way.
     const r = await api(p.from, `/ngsi-ld/v1/entities?type=${p.type}&limit=100&local=true`);
     const list = r.ok ? await r.json() : [];
-    if (!list.length) return;
+    if (!list.length) return; // nothing moved — no burst, no tick
+    synced = list.length;
     const body = list.map((e) => ({ ...e, "@context": CORE_CTX }));
     await api(p.into, "/ngsi-ld/v1/entityOperations/upsert", {
       method: "POST",
@@ -988,6 +1047,7 @@ async function tickPipe(p) {
   }
   p.ticks = (p.ticks ?? 0) + 1;
   save("antares.pipes", pipes);
+  burst(`pipe:${p.id}`, p.kind === "sync" ? synced : 1);
   pulse(p.into);
   await refreshSpace(p.into);
   renderGraph();

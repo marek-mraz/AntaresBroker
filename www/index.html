@@ -213,8 +213,9 @@
 
   <dialog id="dlg-space">
     <h4>New context space</h4>
-    <label for="space-name">name (becomes the NGSILD-Tenant)</label>
-    <input id="space-name" placeholder="smart-city" pattern="[a-zA-Z0-9_-]+" />
+    <label for="space-name">name (becomes the NGSILD-Tenant) — A-Za-z0-9 and “-” only</label>
+    <input id="space-name" placeholder="smart-city" maxlength="64"
+           pattern="[A-Za-z0-9-]+" title="letters, digits and - only (no spaces)" />
     <div class="row">
       <button onclick="this.closest('dialog').close()">cancel</button>
       <button class="primary" id="space-create">create</button>
