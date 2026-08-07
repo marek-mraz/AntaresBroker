@@ -138,7 +138,7 @@ jobs:
         run: ./dev/wasm-test.sh
 
   matrix:
-    # The reusable 32-cell store × suite matrix (build → cells → summary) —
+    # The reusable 3-store (file postgres timescale) all-suites matrix (build → cells → summary) —
     # shared with full.yml so both pipelines test the same shape.
     name: ETSI cell matrix
     uses: ./.github/workflows/etsi-matrix.yml
@@ -375,7 +375,7 @@ jobs:
 
   publish-release:
     # A version tag is the only thing that mints a production image, and it
-    # needs ALL THREE gates: the 32-cell matrix, the serial all-suites run,
+    # needs ALL THREE gates: the store matrix, the serial all-suites run,
     # and the K8 roll-under-suite drill.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()

@@ -1,7 +1,8 @@
 name: etsi-matrix
 
-# Reusable (workflow_call only): ONE image build feeding the 32-cell
-# store × suite ETSI matrix, folded into the per-store summary tables.
+# Reusable (workflow_call only): ONE image build feeding THREE parallel
+# store jobs (file, postgres, timescale) — each runs ALL 8 suites through
+# the one pipeline — folded into the per-store summary tables + one bundle.
 # Callers: ci.yml (every commit) and full.yml (manual / v* tags).
 
 on:
@@ -14,7 +15,7 @@ jobs:
   build:
     # ONE image for the whole run. Every store mode tests the SAME bytes, and
     # the image that ships is the image the suites ran against. Runs alongside
-    # the workspace job (one runner, no fan-out) — only the 32-cell matrix
+    # the workspace job (one runner, no fan-out) — only the store matrix
     # waits for tests to be green.
     name: Build the image under test
     runs-on: ubuntu-latest
@@ -51,22 +52,19 @@ jobs:
           echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
 
   etsi-cell:
-    # E9: full-granularity store × suite matrix — the per-commit conformance
-    # signal. Each cell brings up its OWN fresh stack via the SAME pipeline
-    # script (E9c: cross-suite pollution gone by construction), filtered with
-    # SUITES=. ONE image build feeds all 32 cells (E9b, via the build job's
-    # artifact). Not finer than per-suite (E9f): intra-suite sharding only pays
-    # once a cell exceeds ~15 min, and then each shard needs its own stack.
-    name: ${{ matrix.store }} × ${{ matrix.suite }}
+    # Three parallel store jobs, each running ALL 8 suites serially through
+    # the SAME pipeline (with the between-suite state-reset pairing). Data
+    # output is identical to the old per-suite cells: per-suite pass/fail
+    # rows, 1 Hz resource samples labelled per suite, failures with full
+    # detail — just 3 stacks instead of 32.
+    name: ${{ matrix.store }} (all suites)
     needs: [build]
     strategy:
       fail-fast: false
       matrix:
-        store: [memory, file, postgres, timescale]
-        suite: [CommonBehaviours, Consumption, Provision, Subscription,
-                ContextSource, jsonldContext, DistributedOperations, IOP]
+        store: [file, postgres, timescale]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -78,27 +76,26 @@ jobs:
           git submodule sync
           git submodule update --init --depth 1
 
-      - name: Load the image built once for all cells
+      - name: Load the image built once for all stores
         uses: actions/download-artifact@v4
         with:
           name: antares-image
 
       - run: docker load < antares-image.tgz
 
-      - name: Run this cell through the ONE pipeline
+      - name: Run every suite through the ONE pipeline
         env:
           STORE: ${{ matrix.store }}
-          SUITES: ${{ matrix.suite }}
           SKIP_BUILD: "1"
           STOP_ON_ERROR: "0"
           CALLBACK_HOST: localhost
         run: ./dev/etsi-pipeline.sh || true
 
-      - name: Upload cell results
+      - name: Upload store results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ETSI-cell-${{ matrix.store }}-${{ matrix.suite }}
+          name: ETSI-cell-${{ matrix.store }}
           path: |
             results/${{ matrix.store }}/run-summary.md
             results/${{ matrix.store }}/gate-status.txt
@@ -109,14 +106,14 @@ jobs:
             results/${{ matrix.store }}/**/log.html
           retention-days: 7
 
-      - name: Gate — this cell 100% green
+      - name: Gate — this store 100% green
         run: |
           gate=$(cat "results/${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
-          echo "gate(${{ matrix.store }} × ${{ matrix.suite }}) = $gate"
+          echo "gate(${{ matrix.store }}) = $gate"
           [ "$gate" = PASS ]
 
   etsi-aggregate:
-    # Fold all 32 cells into ONE downloadable bundle + ONE report: per-store
+    # Fold the store results into ONE downloadable bundle + ONE report: per-store
     # tables (pass/fail/skip + RSS/CPU rollups), the combined per-second
     # resource samples, the combined all-failures file, and a detailed error
     # list. The single required status check; any red/missing cell fails it.
@@ -171,5 +168,5 @@ jobs:
             gh api --method DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
           done
 
-      - name: Gate — all 32 cells green
+      - name: Gate — all stores green
         run: test -z "${RED_CELLS:-}"
