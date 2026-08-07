@@ -65,6 +65,10 @@
     #graph .bubble.pulse circle.body { animation: bpulse .6s; }
     @keyframes bpulse { 30% { stroke-width: 8; } }
     #graph path.edge { fill: none; stroke-width: 2; opacity: .65; }
+    /* CSR edges are the product's point — they must be unmissable */
+    #graph path.edge.fed { stroke-width: 3; opacity: .9; }
+    #graph .edgelabel { paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+    #graph .edgelabel.fed { font-size: 11px; font-weight: 650; fill: var(--fed); }
     #graph path.hit { fill: none; stroke: transparent; stroke-width: 14;
                       cursor: pointer; pointer-events: stroke; }
     #graph path.hit:hover + path.edge { opacity: 1; stroke-width: 3; }
@@ -160,6 +164,17 @@
              border: 1px solid var(--line); background: var(--bg);
              color: var(--ink); }
     dialog .row { justify-content: flex-end; margin-top: .9rem; }
+    .ovbody { min-width: 28rem; max-width: 34rem; max-height: 55vh;
+              overflow-y: auto; display: flex; flex-direction: column; gap: .3rem; }
+    .ovbody h5 { margin: .55rem 0 .1rem; font-size: .7rem; color: var(--muted);
+                 text-transform: uppercase; letter-spacing: .5px; }
+    .ovbody .item { display: flex; align-items: center; gap: .45rem;
+                    border: 1px solid var(--line); border-radius: 8px;
+                    padding: .3rem .5rem; font-size: .78rem; }
+    .ovbody .item .x { margin-left: auto; border: none; background: none;
+                       color: var(--muted); padding: 0 .2rem; }
+    .ovbody .item .x + .x { margin-left: 0; }
+    .ovbody .item .x:hover { color: var(--err); }
   </style>
 </head>
 <body>
@@ -168,6 +183,7 @@
     <span class="pill">mode: <strong id="mode">…</strong></span>
     <span class="pill" id="health"></span>
     <span class="grow"></span>
+    <button id="overview">🗺 board</button>
     <button id="newspace" class="primary">＋ context space</button>
     <button id="addpipe">＋ pipeline</button>
   </header>
@@ -216,11 +232,23 @@
 
   <div id="toasts"></div>
 
+  <dialog id="dlg-overview">
+    <h4>🗺 Board — the whole structure</h4>
+    <div id="ov-body" class="ovbody"></div>
+    <div class="row">
+      <button id="ov-demo" class="primary">▶ create demo</button>
+      <button id="ov-reset">🧨 remove everything</button>
+      <button onclick="this.closest('dialog').close()">close</button>
+    </div>
+  </dialog>
+
   <dialog id="dlg-space">
     <h4>New context space</h4>
     <label for="space-name">name (becomes the NGSILD-Tenant) — A-Za-z0-9 and “-” only</label>
+    <!-- \- because pattern compiles with the regex v-flag in modern Chrome,
+         where a bare trailing hyphen in a class is a SyntaxError -->
     <input id="space-name" placeholder="smart-city" maxlength="64"
-           pattern="[A-Za-z0-9-]+" title="letters, digits and - only (no spaces)" />
+           pattern="[A-Za-z0-9\-]+" title="letters, digits and - only (no spaces)" />
     <div class="row">
       <button onclick="this.closest('dialog').close()">cancel</button>
       <button class="primary" id="space-create">create</button>

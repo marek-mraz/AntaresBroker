@@ -178,7 +178,43 @@ try {
   if (fed !== "OK") await fail(`cross-tenant federation: ${fed}`);
   console.log("cross-tenant federation over the loopback host holds");
 
-  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation`);
+  // Board overview: ▶ create demo must materialize spaces + CSRs + pipelines
+  // (idempotently), 🧨 remove everything must wipe them all and reseed.
+  page.on("dialog", (d) => d.accept()); // the reset confirm()
+  await page.click("#overview");
+  await page.waitForSelector("#dlg-overview[open]", { timeout: 10_000 });
+  await page.click("#ov-demo");
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("ov-body").textContent;
+      const csrs = document.querySelectorAll("#ov-body .tag").length;
+      return t.includes("smart-city") && t.includes("old-town") &&
+        t.includes("harbor") && csrs >= 2 && t.includes("simulated device") &&
+        t.includes("copy · ParkingSpot");
+    },
+    { timeout: 30_000 },
+  );
+  console.log("demo built: spaces + 2 CSRs + device & copy pipelines visible on the board");
+  // Second click must not duplicate anything (idempotence).
+  await page.click("#ov-demo");
+  await page.waitForFunction(
+    () => !document.getElementById("ov-demo").disabled, { timeout: 30_000 });
+  const csrCount = await page.evaluate(
+    () => document.querySelectorAll("#ov-body .tag").length);
+  if (csrCount !== 2) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
+  await page.click("#ov-reset");
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("ov-body").textContent;
+      return t.includes("pipelines (0)") && t.includes("none — 🔗") &&
+        ![...document.querySelectorAll("#ov-body .item")].some((i) =>
+          /🏠 [1-9]/.test(i.textContent));
+    },
+    { timeout: 30_000 },
+  );
+  console.log("remove everything: board wiped and reseeded, all spaces at 0 local");
+
+  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation, board demo/reset`);
   await browser.close();
   server.close();
 } catch (e) {

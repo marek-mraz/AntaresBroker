@@ -148,7 +148,17 @@ async function boot() {
         });
       }
       if (navigator.serviceWorker.controller) {
-        mode = "service-worker";
+        // Trust but verify: a controlling SW whose in-worker broker failed to
+        // boot (stale cache / glue-wasm skew) intercepts nothing — API calls
+        // would fall through to the real server as 404s. Probe before
+        // committing; on failure the in-page broker takes over.
+        try {
+          const probe = await fetch("/q/health");
+          if (!probe.ok) throw new Error(`health ${probe.status}`);
+          mode = "service-worker";
+        } catch (e) {
+          log(`service worker controls the page but its broker is dead (${e.message}) — using the in-page broker`, "err");
+        }
       }
     } catch (e) {
       console.warn("module service worker unavailable, using in-page broker", e);
@@ -167,6 +177,14 @@ async function boot() {
     });
   } // opfs-worker: notifications arrive on the worker port (bootPersistent)
   $("mode").textContent = mode;
+  if (mode !== "opfs-worker") {
+    // Non-OPFS modes have NO durable store: a service worker is torn down by
+    // the browser when idle and takes the in-memory entities with it.
+    $("mode").textContent = `${mode} ⚠ ephemeral`;
+    $("mode").parentElement.title =
+      "no persistence — this mode's store resets whenever its worker restarts; close the tab holding antares.redb and reload to get opfs-worker";
+    log("⚠ ephemeral store: entities vanish when this worker restarts (close the other tab owning antares.redb, then reload)", "err");
+  }
   const health = await (await brokerFetch("/q/health")).json();
   // Compact — but keep the '"store":' shape browser-test.mjs keys on.
   $("health").textContent = JSON.stringify({ store: health.store, status: health.status });
@@ -368,7 +386,7 @@ function renderGraph() {
     const dpath = `M ${s.x} ${s.y} Q ${mx} ${my} ${t.x} ${t.y}`;
     const hit = el("path", { d: dpath, class: "hit" }, eg);
     const p = el("path", {
-      d: dpath, class: "edge",
+      d: dpath, class: `edge ${e.kind}`,
       stroke: e.kind === "fed" ? "var(--fed)" : "var(--ok)",
       "stroke-dasharray": e.kind === "fed" ? "7 6" : "2 7",
       "marker-end": `url(#arrow-${e.kind === "fed" ? "fed" : "pipe"})`,
@@ -384,7 +402,7 @@ function renderGraph() {
       p.setAttribute("stroke-width", "3.5");
     }
     if (e.pipe && !e.pipe.running) p.setAttribute("opacity", "0.25");
-    const lab = el("text", { class: "edgelabel", x: mx, y: my - 5, "text-anchor": "middle" }, eg);
+    const lab = el("text", { class: `edgelabel ${e.kind}`, x: mx, y: my - 5, "text-anchor": "middle" }, eg);
     lab.textContent = (e.kind === "fed" ? `CSR · ${e.label}` : `⏱ ${e.label}`) +
       (bursting && b.count ? `  ·  ${b.count} ⇢` : "");
     const title = el("title", {}, hit);
@@ -856,17 +874,12 @@ function openLinkDialog(from) {
   dlg.showModal();
 }
 
-$("link-create").onclick = async () => {
-  const from = $("link-from").value;
-  const to = $("link-to").value;
-  const type = $("link-type").value;
-  const entities =
-    type === "(all playground types)"
-      ? Object.keys(TYPES).map((t) => ({ type: t }))
-      : [{ type }];
-  // The spec-clean cross-tenant link: endpoint = this same broker via the
-  // loopback host, `tenant` = the peer space (5.2.9). Queries in `from`
-  // now transparently include `to`'s matching entities (4.3.6.2 inclusive).
+// The spec-clean cross-tenant link: endpoint = this same broker via the
+// loopback host, `tenant` = the peer space (5.2.9). Queries in `from`
+// now transparently include `to`'s matching entities (4.3.6.2 inclusive).
+// `type` null ⇒ all playground types.
+async function registerLink(from, to, type) {
+  const entities = type ? [{ type }] : Object.keys(TYPES).map((t) => ({ type: t }));
   const body = {
     id: `urn:ngsi-ld:ContextSourceRegistration:${from}-to-${to}-${crypto.randomUUID().slice(0, 6)}`,
     type: "ContextSourceRegistration",
@@ -883,10 +896,20 @@ $("link-create").onclick = async () => {
     body: JSON.stringify(body),
   });
   log(`[${from}] 🔗 federated → ${to} (${r.status})`, r.status === 201 ? "fed" : "err");
-  $("dlg-link").close();
-  if (r.status === 201 && !fedView.has(from)) fedView.add(from);
+  if (r.status === 201) fedView.add(from);
   save("antares.fedview", [...fedView]);
   await refreshSpace(from);
+  return r.status === 201;
+}
+
+$("link-create").onclick = async () => {
+  const type = $("link-type").value;
+  await registerLink(
+    $("link-from").value,
+    $("link-to").value,
+    type === "(all playground types)" ? null : type,
+  );
+  $("dlg-link").close();
   renderInspector();
   renderGraph();
 };
@@ -930,12 +953,9 @@ $("space-create").onclick = () => {
   $("dlg-space").close();
 };
 
-async function removeSpace(name) {
-  // Full cleanup in the broker, then forget the bubble: pipelines touching
-  // the space stop, its subs + CSRs are deleted, its entities batch-deleted.
-  for (const p of [...pipes]) {
-    if (p.into === name || p.from === name) deletePipe(p.id);
-  }
+// API-level wipe of one space: subscriptions, CSRs, entities. The bubble and
+// pipelines are the caller's business.
+async function cleanupSpace(name) {
   const subs = await (await api(name, "/ngsi-ld/v1/subscriptions?limit=100")).json().catch(() => []);
   for (const s of subs ?? []) {
     await api(name, `/ngsi-ld/v1/subscriptions/${encodeURIComponent(s.id)}`, { method: "DELETE" });
@@ -952,6 +972,15 @@ async function removeSpace(name) {
       body: JSON.stringify(list.map((e) => e.id)),
     });
   }
+}
+
+async function removeSpace(name) {
+  // Full cleanup in the broker, then forget the bubble: pipelines touching
+  // the space stop, its subs + CSRs are deleted, its entities batch-deleted.
+  for (const p of [...pipes]) {
+    if (p.into === name || p.from === name) deletePipe(p.id);
+  }
+  await cleanupSpace(name);
   spaces = spaces.filter((s) => s.name !== name);
   save("antares.spaces", spaces);
   links.delete(name);
@@ -1008,6 +1037,8 @@ async function tickPipe(p) {
   if (p.kind === "source") {
     // A simulated device: one stable entity per pipeline, fresh reading per
     // tick — "convert a data source and insert it into a space".
+    // A tick only COUNTS if the broker accepted the write (real flow rule):
+    // failures go to the log instead of silently inflating the counter.
     const t = TYPES[p.type];
     const id = `urn:ngsi-ld:${p.type}:pipe-${p.id}`;
     const patch = await api(
@@ -1020,7 +1051,7 @@ async function tickPipe(p) {
       },
     );
     if (patch.status === 404) {
-      await api(p.into, "/ngsi-ld/v1/entities", {
+      const post = await api(p.into, "/ngsi-ld/v1/entities", {
         method: "POST",
         headers: { "Content-Type": "application/ld+json" },
         body: JSON.stringify({
@@ -1030,6 +1061,13 @@ async function tickPipe(p) {
           "@context": CORE_CTX,
         }),
       });
+      if (post.status !== 201) {
+        log(`pipeline ${p.gen} → ${p.into}: POST ${id} → ${post.status} ${(await post.text()).slice(0, 120)}`, "err");
+        return;
+      }
+    } else if (patch.status !== 204) {
+      log(`pipeline ${p.gen} → ${p.into}: PATCH ${t.attr} → ${patch.status} ${(await patch.text()).slice(0, 120)}`, "err");
+      return;
     }
   } else {
     // Periodic copy: batch-upsert the source space's entities into the
@@ -1107,6 +1145,163 @@ $("pipe-create").onclick = () => {
     "ok",
   );
   $("dlg-pipe").close();
+};
+
+// ---- board overview: the whole structure in one dialog ----------------------
+function renderOverview() {
+  const box = $("ov-body");
+  box.replaceChildren();
+  const h = (t) => {
+    const e = document.createElement("h5");
+    e.textContent = t;
+    box.appendChild(e);
+  };
+  const item = (html) => {
+    const d = document.createElement("div");
+    d.className = "item";
+    d.innerHTML = html;
+    box.appendChild(d);
+    return d;
+  };
+
+  h(`context spaces (${spaces.length})`);
+  for (const s of spaces) {
+    const cur = ents.get(s.name) ?? { local: [], remote: [] };
+    const it = item(`<span>${avatar(s.name)}</span><strong>${s.name}</strong>
+      <span class="sub">🏠 ${cur.local.length} local${
+        fedView.has(s.name) ? ` · 🌐 ${cur.remote.length} fed` : ""}</span>
+      ${s.name === "default" ? "" : `<button class="x" title="remove this space">✕</button>`}`);
+    it.querySelector(".x")?.addEventListener("click", async () => {
+      await removeSpace(s.name);
+      renderOverview();
+    });
+  }
+
+  h("federation — CSR edges (data flows peer → registrant)");
+  let anyLink = false;
+  for (const [from, ls] of links) {
+    for (const l of ls) {
+      anyLink = true;
+      const it = item(`<span class="tag">CSR</span>
+        <span>${avatar(l.to)} ${l.to} → ${avatar(from)} ${from}</span>
+        <span class="sub">${l.type ?? "all types"}</span>
+        <button class="x" title="delete registration">✕</button>`);
+      it.querySelector(".x").onclick = async () => {
+        await unlink({ space: from, id: l.id, to: l.to });
+        renderOverview();
+      };
+    }
+  }
+  if (!anyLink) item(`<span class="sub">none — 🔗 federate registers a CSR between two spaces</span>`);
+
+  h(`pipelines (${pipes.length})`);
+  if (!pipes.length) {
+    item(`<span class="sub">none — ＋ pipeline adds a simulated device or a periodic copy</span>`);
+  }
+  for (const p of pipes) {
+    const label = p.kind === "source"
+      ? `${p.gen} → <strong>${p.into}</strong> <span class="sub">simulated device</span>`
+      : `🔁 ${p.from} → <strong>${p.into}</strong> <span class="sub">copy · ${p.type}</span>`;
+    const it = item(`<span>${label}</span>
+      <span class="sub">${p.secs}s · ${p.ticks ?? 0} ticks</span>
+      <button class="x t" title="pause/resume">${p.running ? "⏸" : "▶"}</button>
+      <button class="x" title="delete">✕</button>`);
+    it.querySelector(".t").onclick = () => {
+      togglePipe(p.id);
+      renderOverview();
+    };
+    it.querySelectorAll(".x")[1].onclick = () => {
+      deletePipe(p.id);
+      renderOverview();
+    };
+  }
+}
+
+// One-click demo — idempotent: running it twice adds nothing twice. Only real
+// API calls; every flow it causes shows up through the normal evidence rules.
+async function createDemo() {
+  log("▶ demo: old-town & harbor feed smart-city over CSRs + pipelines", "ok");
+  for (const n of ["smart-city", "old-town", "harbor"]) {
+    if (!spaces.some((s) => s.name === n)) spaces.push({ name: n });
+  }
+  save("antares.spaces", spaces);
+  await refreshAll(); // fresh links/ents for the idempotence checks below
+  if ((ents.get("old-town")?.local.length ?? 0) < 2) {
+    await createEntity("old-town", "Room");
+    await createEntity("old-town", "TemperatureSensor");
+  }
+  if ((ents.get("harbor")?.local.length ?? 0) < 2) {
+    await createEntity("harbor", "ParkingSpot");
+    await createEntity("harbor", "Streetlight");
+  }
+  const linked = (from, to) => (links.get(from) ?? []).some((l) => l.to === to);
+  if (!linked("smart-city", "old-town")) await registerLink("smart-city", "old-town", null);
+  if (!linked("smart-city", "harbor")) await registerLink("smart-city", "harbor", "ParkingSpot");
+  const subs = await (await api("smart-city", "/ngsi-ld/v1/subscriptions?limit=100"))
+    .json().catch(() => []);
+  if (!(subs ?? []).length) await subscribe("smart-city");
+  if (!pipes.some((p) => p.kind === "source" && p.into === "old-town")) {
+    const p = { id: crypto.randomUUID().slice(0, 8), kind: "source",
+      gen: "🌡 city temperature (sine)", type: "TemperatureSensor",
+      into: "old-town", secs: 3, running: true, ticks: 0 };
+    pipes.push(p);
+    startPipe(p);
+  }
+  if (!pipes.some((p) => p.kind === "sync" && p.from === "harbor" && p.into === "smart-city")) {
+    const p = { id: crypto.randomUUID().slice(0, 8), kind: "sync",
+      from: "harbor", into: "smart-city", type: "ParkingSpot",
+      secs: 5, running: true, ticks: 0 };
+    pipes.push(p);
+    startPipe(p);
+  }
+  save("antares.pipes", pipes);
+  select("s:smart-city");
+  resolveOverlaps();
+  await refreshAll();
+  log("demo ready — watch smart-city: CSR edges pulse on federated queries, pipes on real writes", "ok");
+}
+
+// Remove EVERYTHING: API-level wipe of every space, pipelines stopped and
+// dropped, board reseeded to the default spaces.
+async function resetBoard() {
+  for (const p of [...pipes]) deletePipe(p.id);
+  for (const s of [...spaces]) await cleanupSpace(s.name);
+  spaces = SEED_SPACES.map((name) => ({ name }));
+  save("antares.spaces", spaces);
+  links.clear();
+  ents.clear();
+  fedView.clear();
+  save("antares.fedview", []);
+  for (const k of Object.keys(positions)) delete positions[k];
+  save("antares.pos", positions);
+  select("s:default");
+  await refreshAll();
+  log("board reset — all entities/subscriptions/CSRs/pipelines removed, spaces reseeded", "ok");
+}
+
+$("overview").onclick = async () => {
+  await refreshAll();
+  renderOverview();
+  $("dlg-overview").showModal();
+};
+$("ov-demo").onclick = async () => {
+  $("ov-demo").disabled = true;
+  try {
+    await createDemo();
+  } finally {
+    $("ov-demo").disabled = false;
+  }
+  renderOverview();
+};
+$("ov-reset").onclick = async () => {
+  if (!confirm("Remove EVERYTHING? Entities, subscriptions, CSRs and pipelines in every space are deleted; the board reseeds.")) return;
+  $("ov-reset").disabled = true;
+  try {
+    await resetBoard();
+  } finally {
+    $("ov-reset").disabled = false;
+  }
+  renderOverview();
 };
 
 // ---- notifications ---------------------------------------------------------
