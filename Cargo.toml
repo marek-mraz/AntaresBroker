@@ -108,6 +108,10 @@ strip = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# tokio_unstable is tokio's own out-of-band cfg (RUSTFLAGS="--cfg
+# tokio_unstable"); declare it so the console-feature guard doesn't trip
+# the unexpected-cfg lint.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

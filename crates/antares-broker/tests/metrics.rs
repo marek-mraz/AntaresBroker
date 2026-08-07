@@ -1,6 +1,9 @@
 //! K12: the observability surface, proven against the real binary.
 //! /q/metrics serves the Prometheus text format with antares_-prefixed,
 //! unit-suffixed instruments (§9.1) and the counters actually move.
+//! The stack is a runtime switch (ANTARES_TELEMETRY=1, default OFF —
+//! nothing telemetry-shaped is allocated); this spawns the broker with
+//! the switch ON, plus proves the off-default answers 404.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -43,11 +46,33 @@ fn http(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
 }
 
 #[test]
+fn q_metrics_off_by_default_costs_nothing_and_404s() {
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .spawn()
+            .expect("spawn antares"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !http(port, "GET", "/q/health", None).starts_with("HTTP/1.1 200") {
+        assert!(Instant::now() < deadline, "broker never got healthy");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let metrics = http(port, "GET", "/q/metrics", None);
+    assert!(
+        metrics.starts_with("HTTP/1.1 404"),
+        "switch off must mean no recorder and a 404: {metrics}"
+    );
+}
+
+#[test]
 fn q_metrics_serves_prometheus_text_and_counters_move() {
     let port = free_port();
     let _broker = Broker(
         Command::new(env!("CARGO_BIN_EXE_antares"))
             .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_TELEMETRY", "1")
             .spawn()
             .expect("spawn antares"),
     );

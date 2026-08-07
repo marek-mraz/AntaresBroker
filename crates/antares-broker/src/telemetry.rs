@@ -4,17 +4,40 @@
 //! unit suffixes. The `metrics` facade is what core crates speak; THIS
 //! module is the only place an exporter exists (§9.2 — only the
 //! composition root knows). `/q/metrics` renders the Prometheus text
-//! format via the handle wired onto AppState.
+//! format via the closure wired onto AppState.
+//!
+//! ALL of it sits behind a RUNTIME switch: ANTARES_TELEMETRY=1 installs
+//! the recorder, the sampler and (with ANTARES_OTLP_ENDPOINT) the OTLP
+//! pipeline at startup; the default constructs NONE of it — `metrics::`
+//! macro calls no-op without a recorder (zero allocations), and
+//! /q/metrics answers 404. One build, lean by default (§2.1); flip the
+//! env and restart where a dashboard actually scrapes.
 //!
 //! OTLP: set ANTARES_OTLP_ENDPOINT (e.g. http://collector:4318/v1/traces)
 //! and spans flow out over OTLP/HTTP; unset (the default) costs nothing.
-//! tokio-console: cargo feature `console` + RUSTFLAGS="--cfg tokio_unstable".
+//! tokio-console: cargo feature `console` + RUSTFLAGS="--cfg tokio_unstable"
+//! (the layer only arms when BOTH are present — an --all-features build
+//! without the RUSTFLAGS must not panic at startup).
 
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::sync::Arc;
 
-/// Install the tracing subscriber stack and the Prometheus recorder.
-/// Call once, before the runtime spins up anything measurable.
-pub fn init() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
+/// What /q/metrics renders through — exporter type erased so `main` builds
+/// identically with and without the `telemetry` feature.
+pub type MetricsRender = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// Is the observability stack switched on for this process?
+pub fn enabled() -> bool {
+    matches!(
+        std::env::var("ANTARES_TELEMETRY").as_deref(),
+        Ok("1" | "true" | "on")
+    )
+}
+
+/// Install the tracing subscriber stack and (ANTARES_TELEMETRY=1) the
+/// Prometheus recorder. Call once, before the runtime spins up anything
+/// measurable. Returns the /q/metrics render closure, or None when the
+/// switch is off — in which case nothing telemetry-shaped is allocated.
+pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -22,9 +45,9 @@ pub fn init() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let fmt = tracing_subscriber::fmt::layer();
 
-    // Env-gated OTLP span pipeline — absent endpoint = no OTLP anywhere.
+    // Env-gated OTLP span pipeline — needs the switch AND an endpoint.
     let otlp = match std::env::var("ANTARES_OTLP_ENDPOINT") {
-        Ok(endpoint) => {
+        Ok(endpoint) if enabled() => {
             use opentelemetry::trace::TracerProvider as _;
             use opentelemetry_otlp::WithExportConfig as _;
             let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -43,12 +66,12 @@ pub fn init() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
             tracing::info!(endpoint, "OTLP span export enabled");
             Some(tracing_opentelemetry::layer().with_tracer(tracer))
         }
-        Err(_) => None,
+        _ => None,
     };
 
-    #[cfg(feature = "console")]
+    #[cfg(all(feature = "console", tokio_unstable))]
     let console = Some(console_subscriber::spawn());
-    #[cfg(not(feature = "console"))]
+    #[cfg(not(all(feature = "console", tokio_unstable)))]
     let console: Option<tracing_subscriber::layer::Identity> = None;
 
     tracing_subscriber::registry()
@@ -58,9 +81,12 @@ pub fn init() -> Result<PrometheusHandle, Box<dyn std::error::Error>> {
         .with(console)
         .init();
 
-    let handle = PrometheusBuilder::new().install_recorder()?;
+    if !enabled() {
+        return Ok(None); // the recorder, registry and sampler are never built
+    }
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
     describe();
-    Ok(handle)
+    Ok(Some(Arc::new(move || handle.render())))
 }
 
 /// Metric metadata — names per §9.1 (antares_ prefix, unit suffixes).
@@ -124,8 +150,12 @@ fn describe() {
 }
 
 /// The 5 s gauge sampler: process-level state that has no natural
-/// increment site. Spawned once per process from `run`.
+/// increment site. Spawned once per process from `run`. With the switch
+/// off there is no recorder to feed — no task is spawned at all.
 pub fn spawn_sampler(state: antares_api::AppState) {
+    if !enabled() {
+        return;
+    }
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {

@@ -43,6 +43,7 @@ const KNOWN_KEYS: &[&str] = &[
     // K12: OTLP/HTTP span export endpoint (e.g. http://collector:4318/v1/traces);
     // unset = no OTLP anywhere.
     "ANTARES_OTLP_ENDPOINT",
+    "ANTARES_TELEMETRY",
     // F3/K9: outbox drain on this pod, on (default) | off. `off` is the
     // crash-drill lever (rows commit but this pod never publishes them —
     // another pod's drain must) and the knob for a dedicated-drainer split.
@@ -56,9 +57,9 @@ const KNOWN_KEYS: &[&str] = &[
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // K12: tracing (fmt + env-gated OTLP [+ console feature]) and the
-    // Prometheus recorder. The handle renders /q/metrics.
-    let prometheus = telemetry::init()?;
+    // K12: tracing (fmt + env-gated OTLP [+ console feature]) and, with the
+    // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
+    let metrics_render = telemetry::init()?;
 
     // Unknown-config-is-fatal (§14.3): catch typos before they become Scorpio's
     // $[quarkus.uuid} class of silent misconfiguration. ANTARES_TEST_* is the
@@ -93,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(async {
             let (store, store_mode) = build_store(&mode).await?;
-            run(port, host_alias, roles, store, store_mode, prometheus).await
+            run(port, host_alias, roles, store, store_mode, metrics_render).await
         })
 }
 
@@ -187,7 +188,7 @@ async fn run(
     roles: String,
     store: antares_sql::store::any::AnyStore,
     store_mode: String,
-    prometheus: metrics_exporter_prometheus::PrometheusHandle,
+    metrics_render: Option<telemetry::MetricsRender>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
     let roles = wiring::Roles::parse(&roles)?;
@@ -221,9 +222,10 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
-    // K12: /q/metrics renders through this closure; the sampler feeds the
-    // process-level gauges the whole run.
-    state.metrics_render = Some(std::sync::Arc::new(move || prometheus.render()));
+    // K12: /q/metrics renders through this closure (None without the
+    // `telemetry` feature — the endpoint answers 404); the sampler feeds
+    // the process-level gauges the whole run.
+    state.metrics_render = metrics_render;
     // J7: heap stats on /q/health (allocated/resident bytes via jemalloc-ctl)
     state.mem_stats = Some(std::sync::Arc::new(|| {
         use tikv_jemalloc_ctl::{epoch, stats};
