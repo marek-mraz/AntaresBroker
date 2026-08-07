@@ -75,6 +75,11 @@
     #graph .edgelabel { font-size: 9.5px; fill: var(--muted); pointer-events: none; }
     #hint { position: absolute; left: .8rem; bottom: .6rem; color: var(--muted);
             font-size: .72rem; pointer-events: none; }
+    #zoomctl { position: absolute; right: .8rem; bottom: .6rem; display: flex;
+               align-items: center; gap: .35rem; }
+    #zoomctl button { font-size: .9rem; line-height: 1; padding: .2rem .55rem; }
+    #zoomctl span { font-size: .7rem; color: var(--muted); min-width: 2.6rem;
+                    text-align: center; }
 
     /* ---- inspector ----------------------------------------------------- */
     #inspector { width: 340px; border-left: 1px solid var(--line);
@@ -204,6 +209,11 @@
       </div>
       <div id="hint">drag bubbles · click a bubble to inspect · click an edge to remove it ·
         <span class="tag">dashed = CSR federation</span> <span style="color:var(--ok)">dotted = pipeline</span></div>
+      <div id="zoomctl">
+        <button id="zoomout" title="zoom out">−</button>
+        <span id="zoomlvl">100%</span>
+        <button id="zoomin" title="zoom in">＋</button>
+      </div>
     </div>
 
     <aside id="inspector">

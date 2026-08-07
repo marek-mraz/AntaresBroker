@@ -315,10 +315,32 @@ function nodeList() {
   return out;
 }
 
+// Zoom = a viewBox scale. bounds() reports the WORLD rect (screen ÷ zoom), so
+// zooming out genuinely gives bubbles more room instead of just shrinking
+// pixels; all node coordinates live in world space.
+let zoom = load("antares.zoom", 1);
+
 function bounds() {
   const r = graph.getBoundingClientRect();
-  return { w: Math.max(r.width, 320), h: Math.max(r.height, 320) };
+  return { w: Math.max(r.width, 320) / zoom, h: Math.max(r.height, 320) / zoom };
 }
+
+function applyZoom() {
+  const { w, h } = bounds();
+  graph.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  $("zoomlvl").textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function setZoom(z) {
+  zoom = Math.min(1.5, Math.max(0.4, Math.round(z * 100) / 100));
+  save("antares.zoom", zoom);
+  applyZoom();
+  resolveOverlaps(); // zooming IN shrinks the world — clamp bubbles back
+  renderGraph();
+}
+$("zoomout").onclick = () => setZoom(zoom - 0.15);
+$("zoomin").onclick = () => setZoom(zoom + 0.15);
+applyZoom();
 
 function pos(key, i = 0, n = 1) {
   if (!positions[key]) {
@@ -501,14 +523,16 @@ graph.addEventListener("pointerdown", (ev) => {
   const g = ev.target.closest?.(".bubble");
   if (!g) return;
   const P = pos(g.dataset.key);
-  dragging = { key: g.dataset.key, dx: P.x - ev.clientX, dy: P.y - ev.clientY, moved: false };
+  // screen deltas ÷ zoom = world deltas
+  dragging = { key: g.dataset.key, x0: ev.clientX, y0: ev.clientY,
+    px: P.x, py: P.y, moved: false };
   graph.setPointerCapture(ev.pointerId);
 });
 graph.addEventListener("pointermove", (ev) => {
   if (!dragging) return;
   const P = pos(dragging.key);
-  P.x = ev.clientX + dragging.dx;
-  P.y = ev.clientY + dragging.dy;
+  P.x = dragging.px + (ev.clientX - dragging.x0) / zoom;
+  P.y = dragging.py + (ev.clientY - dragging.y0) / zoom;
   dragging.moved = true;
   requestAnimationFrame(renderGraph);
 });
@@ -525,6 +549,7 @@ graph.addEventListener("pointerup", () => {
   renderGraph();
 });
 addEventListener("resize", () => {
+  applyZoom();
   resolveOverlaps();
   renderGraph();
 });
