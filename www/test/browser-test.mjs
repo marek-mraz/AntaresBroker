@@ -189,8 +189,8 @@ try {
       const t = document.getElementById("ov-body").textContent;
       const csrs = document.querySelectorAll("#ov-body .tag").length;
       return t.includes("smart-city") && t.includes("old-town") &&
-        t.includes("harbor") && csrs >= 2 && t.includes("simulated device") &&
-        t.includes("copy · ParkingSpot");
+        t.includes("harbor") && csrs >= 5 && t.includes("simulated device") &&
+        t.includes("copy · TemperatureSensor");
     },
     { timeout: 30_000 },
   );
@@ -201,10 +201,10 @@ try {
     () => !document.getElementById("ov-demo").disabled, { timeout: 30_000 });
   const csrCount = await page.evaluate(
     () => document.querySelectorAll("#ov-body .tag").length);
-  if (csrCount !== 2) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
+  if (csrCount !== 5) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
   // Template round-trip: export the demo structure, wipe, apply → restored.
   const tpl = await page.evaluate(() => window.boardTemplate());
-  if ((tpl.csrs?.length ?? 0) < 2 || (tpl.pipelines?.length ?? 0) < 2) {
+  if ((tpl.csrs?.length ?? 0) < 5 || (tpl.pipelines?.length ?? 0) < 10) {
     await fail(`template export incomplete: ${JSON.stringify(tpl).slice(0, 200)}`);
   }
   await page.click("#ov-reset");
@@ -222,7 +222,7 @@ try {
   await page.waitForFunction(
     () => {
       const b = window.boardTemplate();
-      return b.csrs.length >= 2 && b.pipelines.length >= 2;
+      return b.csrs.length >= 5 && b.pipelines.length >= 10;
     },
     { timeout: 30_000 },
   );

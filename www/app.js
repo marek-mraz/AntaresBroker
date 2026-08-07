@@ -245,6 +245,13 @@ const TYPES = {
   TemperatureSensor: { emoji: "🌡", attr: "temperature", gen: (t) => Math.round(180 + 60 * Math.sin(t / 20e3) + 20 * Math.random()) / 10 },
   ParkingSpot: { emoji: "🚗", attr: "occupied", gen: () => (Math.random() < 0.5 ? 0 : 1) },
   Streetlight: { emoji: "💡", attr: "powerDraw", gen: () => Math.round(Math.random() * 60) },
+  AirQualitySensor: { emoji: "🌫", attr: "pm25", gen: (t) => Math.round(250 + 180 * Math.sin(t / 45e3) + 70 * Math.random()) / 10 },
+  NoiseSensor: { emoji: "🔊", attr: "decibels", gen: () => Math.round(35 + Math.random() * 50) },
+  WaterLevelSensor: { emoji: "🌊", attr: "level", gen: (t) => Math.round(220 + 160 * Math.sin(t / 60e3) + 20 * Math.random()) / 100 },
+  EnergyMeter: { emoji: "⚡", attr: "consumption", gen: (t) => Math.round(300 + 220 * Math.sin(t / 30e3) + 90 * Math.random()) / 10 },
+  TrafficCounter: { emoji: "🚦", attr: "vehiclesPerMin", gen: () => Math.round(Math.random() * 45) },
+  BikeStation: { emoji: "🚲", attr: "availableBikes", gen: () => Math.round(Math.random() * 20) },
+  WasteContainer: { emoji: "🗑", attr: "fillLevel", gen: () => Math.round(Math.random() * 100) },
 };
 const ALL_TYPES = Object.keys(TYPES).join(",");
 
@@ -481,32 +488,39 @@ function renderGraph() {
       const ct = el("text", { class: "count", y: 16, "text-anchor": "middle" }, g);
       ct.textContent = `${nd.pipe.ticks ?? 0}`;
     }
-    g.addEventListener("pointerdown", (ev) => {
-      const P0 = pos(nd.key);
-      dragging = { key: nd.key, dx: P0.x - ev.clientX, dy: P0.y - ev.clientY, moved: false };
-      g.setPointerCapture(ev.pointerId);
-    });
-    g.addEventListener("pointermove", (ev) => {
-      if (!dragging || dragging.key !== nd.key) return;
-      const P = pos(nd.key);
-      P.x = ev.clientX + dragging.dx;
-      P.y = ev.clientY + dragging.dy;
-      dragging.moved = true;
-      requestAnimationFrame(renderGraph);
-    });
-    g.addEventListener("pointerup", () => {
-      if (!dragging) return;
-      const wasDrag = dragging.moved;
-      dragging = null;
-      if (wasDrag) {
-        resolveOverlaps(nd.key);
-      } else {
-        select(nd.key);
-      }
-      renderGraph();
-    });
   }
 }
+
+// Dragging lives on the SVG ROOT, never on bubbles: renderGraph replaces all
+// bubble nodes, and a pointer capture on a replaced node dies with it — the
+// "sometimes I can't move bubbles" bug. The <svg> survives every re-render.
+graph.addEventListener("pointerdown", (ev) => {
+  const g = ev.target.closest?.(".bubble");
+  if (!g) return;
+  const P = pos(g.dataset.key);
+  dragging = { key: g.dataset.key, dx: P.x - ev.clientX, dy: P.y - ev.clientY, moved: false };
+  graph.setPointerCapture(ev.pointerId);
+});
+graph.addEventListener("pointermove", (ev) => {
+  if (!dragging) return;
+  const P = pos(dragging.key);
+  P.x = ev.clientX + dragging.dx;
+  P.y = ev.clientY + dragging.dy;
+  dragging.moved = true;
+  requestAnimationFrame(renderGraph);
+});
+graph.addEventListener("pointerup", () => {
+  if (!dragging) return;
+  const { key, moved } = dragging;
+  dragging = null;
+  if (moved) {
+    resolveOverlaps(key);
+    save("antares.pos", positions);
+  } else {
+    select(key);
+  }
+  renderGraph();
+});
 addEventListener("resize", () => {
   resolveOverlaps();
   renderGraph();
@@ -772,8 +786,10 @@ async function refreshSpace(space) {
 
 async function refreshAll() {
   await Promise.all(spaces.map((s) => refreshSpace(s.name)));
-  resolveOverlaps();
-  renderGraph();
+  // No overlap pass here: the 3s poll must never shove user-placed bubbles
+  // around (it made positions feel "stuck"). Overlaps resolve on structural
+  // changes only. And never re-render under an active drag.
+  if (!dragging) renderGraph();
 }
 
 // ---- the entity editor -----------------------------------------------------
@@ -1033,11 +1049,11 @@ async function removeSpace(name) {
 }
 
 // ---- pipelines -------------------------------------------------------------
-const GENERATORS = {
-  "🌡 city temperature (sine)": { type: "TemperatureSensor" },
-  "🚗 parking occupancy (random)": { type: "ParkingSpot" },
-  "💡 streetlight power (random)": { type: "Streetlight" },
-};
+// One simulated-device generator per sensor type — derived, so a new TYPES
+// entry automatically becomes a pipeline option.
+const GENERATORS = Object.fromEntries(
+  Object.keys(TYPES).map((t) => [`${TYPES[t].emoji} ${t}`, { type: t }]),
+);
 const timers = new Map(); // pipe.id -> interval handle
 
 function startPipe(p) {
@@ -1257,48 +1273,91 @@ function renderOverview() {
   }
 }
 
-// One-click demo — idempotent: running it twice adds nothing twice. Only real
-// API calls; every flow it causes shows up through the normal evidence rules.
+// One-click demo — a meaningful city: 8 spaces (smart-city is the hub),
+// 12 simulated sensors/sources across the districts, 5 CSRs federating into
+// the hub, 3 periodic copies. Idempotent: running it twice adds nothing
+// twice. Only real API calls; every flow obeys the evidence rules.
+const DEMO = {
+  spaces: ["default", "smart-city", "old-town", "harbor", "airport",
+    "university", "energy-grid", "transit"],
+  // hub-and-spoke default positions, as fractions of the canvas
+  layout: {
+    "smart-city": [0.5, 0.45], "old-town": [0.28, 0.2], harbor: [0.72, 0.18],
+    airport: [0.88, 0.45], university: [0.12, 0.48], "energy-grid": [0.28, 0.78],
+    transit: [0.72, 0.8], default: [0.5, 0.1],
+  },
+  devices: [ // [space, sensor type, seconds] — each is one simulated source
+    ["old-town", "TemperatureSensor", 3], ["old-town", "NoiseSensor", 4],
+    ["harbor", "WaterLevelSensor", 4], ["harbor", "ParkingSpot", 3],
+    ["airport", "AirQualitySensor", 3], ["airport", "TrafficCounter", 2],
+    ["university", "Room", 5], ["university", "EnergyMeter", 3],
+    ["energy-grid", "EnergyMeter", 2], ["energy-grid", "Streetlight", 4],
+    ["transit", "BikeStation", 3], ["transit", "TrafficCounter", 3],
+  ],
+  csrs: [ // 5 registrations — the hub sees the districts
+    ["smart-city", "old-town", null],
+    ["smart-city", "harbor", null],
+    ["smart-city", "airport", "AirQualitySensor"],
+    ["smart-city", "transit", "BikeStation"],
+    ["smart-city", "energy-grid", "EnergyMeter"],
+  ],
+  copies: [ // 3 periodic copies — materialized data next to the federated view
+    ["old-town", "default", "TemperatureSensor", 6],
+    ["university", "energy-grid", "EnergyMeter", 8],
+    ["transit", "smart-city", "TrafficCounter", 7],
+  ],
+};
+
 async function createDemo() {
-  log("▶ demo: old-town & harbor feed smart-city over CSRs + pipelines", "ok");
-  for (const n of ["smart-city", "old-town", "harbor"]) {
+  log("▶ demo: a federated city — districts sense, smart-city sees", "ok");
+  for (const n of DEMO.spaces) {
     if (!spaces.some((s) => s.name === n)) spaces.push({ name: n });
   }
   save("antares.spaces", spaces);
+  // default positions: the hub layout (only touches demo spaces)
+  const { w, h } = bounds();
+  for (const [name, [fx, fy]] of Object.entries(DEMO.layout)) {
+    positions[`s:${name}`] = { x: fx * w, y: fy * h };
+  }
   await refreshAll(); // fresh links/ents for the idempotence checks below
-  if ((ents.get("old-town")?.local.length ?? 0) < 2) {
-    await createEntity("old-town", "Room");
-    await createEntity("old-town", "TemperatureSensor");
-  }
-  if ((ents.get("harbor")?.local.length ?? 0) < 2) {
-    await createEntity("harbor", "ParkingSpot");
-    await createEntity("harbor", "Streetlight");
-  }
   const linked = (from, to) => (links.get(from) ?? []).some((l) => l.to === to);
-  if (!linked("smart-city", "old-town")) await registerLink("smart-city", "old-town", null);
-  if (!linked("smart-city", "harbor")) await registerLink("smart-city", "harbor", "ParkingSpot");
+  for (const [from, to, type] of DEMO.csrs) {
+    if (!linked(from, to)) await registerLink(from, to, type);
+  }
   const subs = await (await api("smart-city", "/ngsi-ld/v1/subscriptions?limit=100"))
     .json().catch(() => []);
   if (!(subs ?? []).length) await subscribe("smart-city");
-  if (!pipes.some((p) => p.kind === "source" && p.into === "old-town")) {
+  for (const [into, type, secs] of DEMO.devices) {
+    if (pipes.some((p) => p.kind === "source" && p.into === into && p.type === type)) continue;
     const p = { id: crypto.randomUUID().slice(0, 8), kind: "source",
-      gen: "🌡 city temperature (sine)", type: "TemperatureSensor",
-      into: "old-town", secs: 3, running: true, ticks: 0 };
+      gen: `${TYPES[type].emoji} ${type}`, type, into, secs, running: true, ticks: 0 };
     pipes.push(p);
     startPipe(p);
   }
-  if (!pipes.some((p) => p.kind === "sync" && p.from === "harbor" && p.into === "smart-city")) {
+  for (const [from, into, type, secs] of DEMO.copies) {
+    if (pipes.some((p) => p.kind === "sync" && p.from === from && p.into === into && p.type === type)) continue;
     const p = { id: crypto.randomUUID().slice(0, 8), kind: "sync",
-      from: "harbor", into: "smart-city", type: "ParkingSpot",
-      secs: 5, running: true, ticks: 0 };
+      from, into, type, secs, running: true, ticks: 0 };
     pipes.push(p);
     startPipe(p);
   }
   save("antares.pipes", pipes);
+  // park each device bubble beside the space it feeds (golden-angle scatter)
+  let di = 0;
+  for (const p of pipes) {
+    if (p.kind !== "source") continue;
+    const base = positions[`s:${p.into}`];
+    if (base) {
+      const ang = di++ * 2.399963;
+      positions[`p:${p.id}`] = { x: base.x + 100 * Math.cos(ang), y: base.y + 100 * Math.sin(ang) };
+    }
+  }
+  save("antares.pos", positions);
   select("s:smart-city");
   resolveOverlaps();
   await refreshAll();
-  log("demo ready — watch smart-city: CSR edges pulse on federated queries, pipes on real writes", "ok");
+  renderGraph();
+  log("demo ready — 12 sensors → 6 districts → 5 CSRs + 3 copies into the hub", "ok");
 }
 
 // Remove EVERYTHING: API-level wipe of every space, pipelines stopped and
