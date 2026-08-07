@@ -32,7 +32,7 @@ jobs:
     env:
       # Live PostGIS for the antares-sql integration tests (C14) — without this
       # they skip vacuously and CI proves nothing about the Pg store.
-      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54329/antares
+      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15432/antares
       CARGO_TERM_COLOR: always
     services:
       postgis:
@@ -41,7 +41,9 @@ jobs:
           POSTGRES_USER: antares
           POSTGRES_PASSWORD: antares
           POSTGRES_DB: antares
-        ports: ["54329:5432"]
+        # host ports must stay below 32768: the ephemeral range (32768-60999)
+        # collides with random outbound source ports -> "address already in use"
+        ports: ["15432:5432"]
         options: >-
           --health-cmd "pg_isready -U antares"
           --health-interval 5s --health-timeout 3s --health-retries 20
@@ -53,7 +55,7 @@ jobs:
           POSTGRES_USER: antares
           POSTGRES_PASSWORD: antares
           POSTGRES_DB: antares
-        ports: ["54330:5432"]
+        ports: ["15433:5432"]
         options: >-
           --health-cmd "pg_isready -U antares"
           --health-interval 5s --health-timeout 3s --health-retries 20
@@ -88,11 +90,11 @@ jobs:
       # compression-vs-RLS ordering, D3 detection).
       - name: Store tests against the timescale temporal mode
         env:
-          ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:54330/antares
+          ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15433/antares
         run: |
           # psql is not preinstalled on the arm runner image (exit 127)
           which psql >/dev/null || sudo apt-get install -y -qq postgresql-client
-          PGPASSWORD=antares psql -h localhost -p 54330 -U antares -d antares \
+          PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
           cargo test -p antares-sql
       # D4/§16.5: license gate (nothing links TSL — Timescale is talked to

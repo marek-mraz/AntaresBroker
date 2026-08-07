@@ -4,8 +4,8 @@
 //!
 //! Local:  docker run -d --name pgdev -e POSTGRES_USER=antares \
 //!           -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
-//!           -p 54329:5432 ghcr.io/baosystems/postgis:17-3.5
-//!         ANTARES_TEST_DATABASE_URL=postgresql://antares:antares@localhost:54329/antares \
+//!           -p 15432:5432 ghcr.io/baosystems/postgis:17-3.5
+//!         ANTARES_TEST_DATABASE_URL=postgresql://antares:antares@localhost:15432/antares \
 //!           cargo test -p antares-sql --test pg
 
 use antares_model::TenantId;
