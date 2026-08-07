@@ -44,8 +44,8 @@ COPY --from=build /src/target/release/antares /antares
 # after a burst parked ~48 MiB of dead pages forever; with it, RSS decays
 # back toward live×1.2 within seconds. Both env spellings: tikv-jemalloc
 # reads _RJEM_MALLOC_CONF (prefixed build), MALLOC_CONF covers unprefixed.
-ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000 \
-    _RJEM_MALLOC_CONF=background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:10000
+ENV MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000 \
+    _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
 # Pre-create /data owned by nonroot (65532): a fresh named volume inherits the
 # mountpoint's ownership, so `file` mode can write without running as root —
 # distroless has no shell to chown at runtime (§16.5 posture).
