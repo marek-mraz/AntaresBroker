@@ -194,7 +194,7 @@ try {
     },
     { timeout: 30_000 },
   );
-  console.log("demo built: spaces + 2 CSRs + device & copy pipelines visible on the board");
+  console.log("demo built: 8 spaces + 5 CSRs + 12 devices + 3 copies visible on the board");
   // Second click must not duplicate anything (idempotence).
   await page.click("#ov-demo");
   await page.waitForFunction(
