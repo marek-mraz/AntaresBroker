@@ -56,12 +56,17 @@ async function tickPipe(p) {
     const patch = await patchAttr(p.into, id, t.attr, {
       type: "Property",
       value: t.gen(Date.now()),
+      observedAt: new Date().toISOString(),
     });
     if (patch.status === 404) {
       const post = await createEntity(p.into, {
         id,
         type: p.type,
-        [t.attr]: { type: "Property", value: t.gen(Date.now()) },
+        [t.attr]: {
+          type: "Property",
+          value: t.gen(Date.now()),
+          observedAt: new Date().toISOString(),
+        },
       });
       if (post.status !== 201) return; // rejected — no tick, log has the row
     } else if (patch.status !== 204) {

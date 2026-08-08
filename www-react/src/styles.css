@@ -75,6 +75,7 @@ tbody tr.picked { background: color-mix(in srgb, var(--accent) 14%, transparent)
 td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 td.empty { color: var(--muted); text-align: center; padding: 1rem; }
 .chip { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px; border: 1px solid var(--line); }
+.row-spark { vertical-align: middle; margin-left: .25rem; opacity: .85; }
 .chip.fed { border-style: dashed; color: var(--fed); }
 
 /* history */

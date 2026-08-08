@@ -78,6 +78,17 @@ describe("<TenantSheet>", () => {
     expect(screen.getAllByTestId("sheet-row")).toHaveLength(1);
   });
 
+  it("name leads with icon, then value, then origin; type and id close the row", () => {
+    render(<TenantSheet space="smart-city" picked={null} onPick={() => {}} />);
+    const cells = screen.getAllByTestId("sheet-row")[0].querySelectorAll("td");
+    expect(cells).toHaveLength(6);
+    expect(cells[0]).toHaveTextContent("Room a1");     // name = type + short id
+    expect(cells[1]).toHaveTextContent("21");          // current value after the name
+    expect(cells[2]).toHaveTextContent("local");       // origin after the value
+    expect(cells[4]).toHaveTextContent("Room");        // type at the end
+    expect(cells[5]).toHaveTextContent("a1");          // id at the end
+  });
+
   it("row click reports the picked entity for the history panel", () => {
     let picked = null;
     render(<TenantSheet space="smart-city" picked={null} onPick={(p) => (picked = p)} />);

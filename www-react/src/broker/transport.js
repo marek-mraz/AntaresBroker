@@ -42,6 +42,12 @@ function dispatchNotification(body) {
   for (const fn of noteHandlers) fn(doc);
 }
 
+// ?allowPrivateEgress=1 — harness knob (N7b): the ETSI mocks live on
+// private/loopback addresses the broker's egress policy denies by default.
+const ALLOW_PRIVATE_EGRESS = new URLSearchParams(location.search).get(
+  "allowPrivateEgress",
+) === "1";
+
 let worker = null;
 let workerDead = null;
 let seq = 0;
@@ -78,7 +84,11 @@ async function bootWorker() {
       emit();
     };
     try {
-      await callWorker({ kind: "init", file: "antares.redb" });
+      await callWorker({
+        kind: "init",
+        file: "antares.redb",
+        allowPrivateEgress: ALLOW_PRIVATE_EGRESS,
+      });
       return true;
     } catch (err) {
       worker.terminate();
@@ -97,7 +107,7 @@ async function bootInPage() {
   const pkgUrl = new URL("pkg/antares_wasm.js", document.baseURI).href;
   const mod = await import(/* @vite-ignore */ pkgUrl);
   await mod.default();
-  pageBroker = new mod.AntaresBroker(false);
+  pageBroker = new mod.AntaresBroker(ALLOW_PRIVATE_EGRESS);
   const lbUrl = new URL("loopback.js", document.baseURI).href;
   const { installLoopback } = await import(/* @vite-ignore */ lbUrl);
   installLoopback(() => pageBroker);

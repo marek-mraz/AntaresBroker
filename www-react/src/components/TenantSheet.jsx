@@ -1,13 +1,44 @@
 // The spreadsheet: every entity of the selected tenant with filters — free
 // text, type, origin (local / a specific CSR peer). Every row always carries
 // its origin (README rule 2). Row click opens the temporal history.
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { uuid } from "../uuid.js";
 import { board, originOf, refreshSpace, removeSpace, setFedView, emit, toast } from "../state/board.js";
 import { useBoard } from "../hooks.js";
 import { avatarOf, colorOf, entLabel, TENANT_RE, TYPES } from "../model.js";
-import { createEntity, registerLink, subscribeAll } from "../broker/api.js";
+import { attrHistory, createEntity, registerLink, subscribeAll } from "../broker/api.js";
 import { deletePipe } from "../state/pipes.js";
+
+// Inline historical values next to the current one — refetched when the
+// visible value changes, so it stays as fresh as the cell without polling.
+function RowSpark({ space, id, attr, value }) {
+  const [pts, setPts] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    attrHistory(space, id, attr, 20)
+      .then((p) => alive && setPts(p))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [space, id, attr, value]);
+  if (pts.length < 2) return null;
+  const W = 64, H = 16, PAD = 2;
+  const xs = pts.map((p) => p.at), ys = pts.map((p) => p.value);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const d = pts
+    .map((p) =>
+      `${(PAD + ((p.at - x0) / Math.max(1, x1 - x0)) * (W - 2 * PAD)).toFixed(1)},` +
+      `${(H - PAD - ((p.value - y0) / Math.max(1e-9, y1 - y0)) * (H - 2 * PAD)).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg width={W} height={H} className="row-spark" data-testid="row-spark">
+      <polyline points={d} fill="none" stroke="var(--accent)" strokeWidth="1.5" />
+      <title>{pts.map((p) => p.value).join(" → ")}</title>
+    </svg>
+  );
+}
 
 export function filterRows(rows, { text, type, origin }) {
   return rows.filter((r) => {
@@ -31,6 +62,7 @@ export default function TenantSheet({ space, picked, onPick }) {
       const { type: t, emoji, attr, value } = entLabel(doc);
       return {
         id: doc.id, type: t, emoji, attr, value,
+        name: `${t} ${doc.id.split(":").pop()}`,
         origin: org, modifiedAt: doc.modifiedAt,
         space: org === "local" ? space : org,
       };
@@ -63,7 +95,11 @@ export default function TenantSheet({ space, picked, onPick }) {
               await createEntity(space, {
                 id: `urn:ngsi-ld:${t}:${uuid().slice(0, 8)}`,
                 type: t,
-                [TYPES[t].attr]: { type: "Property", value: TYPES[t].gen(Date.now()) },
+                [TYPES[t].attr]: {
+                  type: "Property",
+                  value: TYPES[t].gen(Date.now()),
+                  observedAt: new Date().toISOString(),
+                },
               });
               await refreshSpace(space);
               emit();
@@ -126,7 +162,7 @@ export default function TenantSheet({ space, picked, onPick }) {
       <div className="sheet-table">
         <table>
           <thead>
-            <tr><th>type</th><th>id</th><th>attribute</th><th>value</th><th>origin</th></tr>
+            <tr><th>name</th><th>value</th><th>origin</th><th>attribute</th><th>type</th><th>id</th></tr>
           </thead>
           <tbody>
             {shown.map((r) => (
@@ -136,19 +172,23 @@ export default function TenantSheet({ space, picked, onPick }) {
                 className={picked?.id === r.id ? "picked" : ""}
                 onClick={() => onPick({ space: r.space, viewer: space, id: r.id, attr: r.attr, emoji: r.emoji, type: r.type })}
               >
-                <td>{r.emoji} {r.type}</td>
-                <td className="mono" title={r.id}>{r.id.split(":").pop()}</td>
-                <td>{r.attr ?? "—"}</td>
-                <td className="num">{r.value ?? "·"}</td>
+                <td data-testid="cell-name">{r.emoji} {r.name}</td>
+                <td className="num">
+                  {r.value ?? "·"}{" "}
+                  {r.attr && <RowSpark space={r.space} id={r.id} attr={r.attr} value={r.value} />}
+                </td>
                 <td>
                   {r.origin === "local"
                     ? <span className="chip">🏠 local</span>
                     : <span className="chip fed" style={{ borderColor: colorOf(r.origin) }}>🌐 ← {avatarOf(r.origin)} {r.origin}</span>}
                 </td>
+                <td>{r.attr ?? "—"}</td>
+                <td>{r.type}</td>
+                <td className="mono" title={r.id}>{r.id.split(":").pop()}</td>
               </tr>
             ))}
             {!shown.length && (
-              <tr><td colSpan={5} className="empty">no entities match — create one or turn on 🌐 fed view</td></tr>
+              <tr><td colSpan={6} className="empty">no entities match — create one or turn on 🌐 fed view</td></tr>
             )}
           </tbody>
         </table>
