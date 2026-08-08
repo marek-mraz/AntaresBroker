@@ -1,6 +1,7 @@
 // Pipeline timers. A tick counts ONLY when the broker accepted the write —
 // failures land in the request log (red rows), never in the counter.
 import { batchUpsert, createEntity, listEntities, patchAttr } from "../broker/api.js";
+import { uuid } from "../uuid.js";
 import { TYPES } from "../model.js";
 import { board, burst, emit, refreshSpace, save } from "./board.js";
 
@@ -38,7 +39,7 @@ export function deletePipe(id) {
 }
 
 export function addPipe(spec) {
-  const p = { id: crypto.randomUUID().slice(0, 8), running: true, ticks: 0, ...spec };
+  const p = { id: uuid().slice(0, 8), running: true, ticks: 0, ...spec };
   board.pipes.push(p);
   save("antares.pipes", board.pipes);
   startPipe(p);

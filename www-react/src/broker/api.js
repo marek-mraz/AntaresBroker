@@ -2,6 +2,7 @@
 // attribution lives here so the /entityMaps upgrade (exact provenance,
 // clause 5.14) later changes this file alone.
 import { brokerFetch } from "./transport.js";
+import { uuid } from "../uuid.js";
 import { ALL_TYPES, CORE_CTX, LOOPBACK } from "../model.js";
 
 // Tenant-scoped call; the default tenant sends no header (6.3.14).
@@ -70,7 +71,7 @@ export function batchDelete(space, ids) {
 export async function registerLink(from, to, type, types) {
   const entities = type ? [{ type }] : Object.keys(types).map((t) => ({ type: t }));
   const r = await postLd(from, "/ngsi-ld/v1/csourceRegistrations", {
-    id: `urn:ngsi-ld:ContextSourceRegistration:${from}-to-${to}-${crypto.randomUUID().slice(0, 6)}`,
+    id: `urn:ngsi-ld:ContextSourceRegistration:${from}-to-${to}-${uuid().slice(0, 6)}`,
     type: "ContextSourceRegistration",
     information: [{ entities }],
     endpoint: LOOPBACK,
@@ -86,7 +87,7 @@ export const deleteCsr = (space, id) =>
 
 export async function subscribeAll(space, endpoint, typeNames) {
   const r = await postLd(space, "/ngsi-ld/v1/subscriptions", {
-    id: `urn:ngsi-ld:Subscription:${space}-${crypto.randomUUID().slice(0, 8)}`,
+    id: `urn:ngsi-ld:Subscription:${space}-${uuid().slice(0, 8)}`,
     type: "Subscription",
     entities: typeNames.map((type) => ({ type })),
     notification: { endpoint: { uri: endpoint, accept: "application/json" } },

@@ -2,6 +2,7 @@
 // text, type, origin (local / a specific CSR peer). Every row always carries
 // its origin (README rule 2). Row click opens the temporal history.
 import React, { useMemo, useState } from "react";
+import { uuid } from "../uuid.js";
 import { board, originOf, refreshSpace, removeSpace, setFedView, emit, toast } from "../state/board.js";
 import { useBoard } from "../hooks.js";
 import { avatarOf, colorOf, entLabel, TENANT_RE, TYPES } from "../model.js";
@@ -60,7 +61,7 @@ export default function TenantSheet({ space, picked, onPick }) {
               const names = Object.keys(TYPES);
               const t = names[Math.floor(Math.random() * names.length)];
               await createEntity(space, {
-                id: `urn:ngsi-ld:${t}:${crypto.randomUUID().slice(0, 8)}`,
+                id: `urn:ngsi-ld:${t}:${uuid().slice(0, 8)}`,
                 type: t,
                 [TYPES[t].attr]: { type: "Property", value: TYPES[t].gen(Date.now()) },
               });

@@ -2,6 +2,7 @@
 // through useSyncExternalStore. Persistence keys are shared with www/ so
 // both UIs show the same board when served from the same origin.
 import * as apiMod from "../broker/api.js";
+import { uuid } from "../uuid.js";
 import { DEMO, SEED_SPACES, TENANT_RE, TYPES, arrangeBoard, buildTemplate, normalizeTemplate } from "../model.js";
 import { transport } from "../broker/transport.js";
 
@@ -142,7 +143,7 @@ export function setFedView(space, on) {
 }
 
 export function toast(text) {
-  board.toasts.push({ id: crypto.randomUUID(), text });
+  board.toasts.push({ id: uuid(), text });
   emit();
   setTimeout(() => {
     board.toasts.shift();
@@ -181,7 +182,7 @@ export async function applyBoardTemplate(tpl, { startPipe }) {
       ? board.pipes.some((p) => p.kind === "source" && p.into === t.into && p.type === t.type)
       : board.pipes.some((p) => p.kind === "sync" && p.from === t.from && p.into === t.into && p.type === t.type);
     if (dup) continue;
-    const p = { id: crypto.randomUUID().slice(0, 8), ticks: 0, ...t };
+    const p = { id: uuid().slice(0, 8), ticks: 0, ...t };
     board.pipes.push(p);
     if (p.running) startPipe(p);
   }
@@ -207,14 +208,14 @@ export async function createDemo({ startPipe }) {
   }
   for (const [into, type, secs] of DEMO.devices) {
     if (board.pipes.some((p) => p.kind === "source" && p.into === into && p.type === type)) continue;
-    const p = { id: crypto.randomUUID().slice(0, 8), kind: "source",
+    const p = { id: uuid().slice(0, 8), kind: "source",
       gen: `${TYPES[type].emoji} ${type}`, type, into, secs, running: true, ticks: 0 };
     board.pipes.push(p);
     startPipe(p);
   }
   for (const [from, into, type, secs] of DEMO.copies) {
     if (board.pipes.some((p) => p.kind === "sync" && p.from === from && p.into === into && p.type === type)) continue;
-    const p = { id: crypto.randomUUID().slice(0, 8), kind: "sync",
+    const p = { id: uuid().slice(0, 8), kind: "sync",
       from, into, type, secs, running: true, ticks: 0 };
     board.pipes.push(p);
     startPipe(p);

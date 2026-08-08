@@ -9,6 +9,22 @@
 import init, { AntaresBroker } from "./pkg/antares_wasm.js";
 import { LOOPBACK, installLoopback } from "./loopback.js";
 
+// uuid() is secure-context-AND-modern-browser only — it throws on
+// plain HTTP and on older browsers/webviews. Fall back to getRandomValues (no
+// secure-context requirement), then Math.random, so the playground never
+// hard-fails on `crypto.randomUUID is not a function`.
+function uuid() {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  const b = new Uint8Array(16);
+  if (c && typeof c.getRandomValues === "function") c.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 const CORE_CTX =
   "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
 const NOTIFY_ENDPOINT = "http://page.local/demo";
@@ -726,7 +742,7 @@ function renderPipesPanel(name) {
 async function createEntity(space, type) {
   type ??= Object.keys(TYPES)[Math.floor(Math.random() * 4)];
   const t = TYPES[type];
-  const id = `urn:ngsi-ld:${type}:${crypto.randomUUID().slice(0, 8)}`;
+  const id = `urn:ngsi-ld:${type}:${uuid().slice(0, 8)}`;
   const body = {
     id,
     type,
@@ -762,7 +778,7 @@ async function bump(space, e) {
 
 async function subscribe(space) {
   const body = {
-    id: `urn:ngsi-ld:Subscription:${space}-${crypto.randomUUID().slice(0, 8)}`,
+    id: `urn:ngsi-ld:Subscription:${space}-${uuid().slice(0, 8)}`,
     type: "Subscription",
     entities: Object.keys(TYPES).map((type) => ({ type })),
     notification: { endpoint: { uri: NOTIFY_ENDPOINT, accept: "application/json" } },
@@ -831,7 +847,7 @@ function editorTemplate() {
   const t = TYPES[type];
   $("editor").value = JSON.stringify(
     {
-      id: `urn:ngsi-ld:${type}:${crypto.randomUUID().slice(0, 8)}`,
+      id: `urn:ngsi-ld:${type}:${uuid().slice(0, 8)}`,
       type,
       [t.attr]: { type: "Property", value: t.gen(Date.now()) },
       "@context": CORE_CTX,
@@ -965,7 +981,7 @@ function openLinkDialog(from) {
 async function registerLink(from, to, type) {
   const entities = type ? [{ type }] : Object.keys(TYPES).map((t) => ({ type: t }));
   const body = {
-    id: `urn:ngsi-ld:ContextSourceRegistration:${from}-to-${to}-${crypto.randomUUID().slice(0, 6)}`,
+    id: `urn:ngsi-ld:ContextSourceRegistration:${from}-to-${to}-${uuid().slice(0, 6)}`,
     type: "ContextSourceRegistration",
     information: [{ entities }],
     endpoint: LOOPBACK,
@@ -1198,7 +1214,7 @@ $("pipe-kind").onchange = () => {
 $("pipe-create").onclick = () => {
   const kind = $("pipe-kind").value;
   const p = {
-    id: crypto.randomUUID().slice(0, 8),
+    id: uuid().slice(0, 8),
     kind,
     into: $("pipe-into").value,
     secs: Math.max(1, Number($("pipe-secs").value) || 3),
@@ -1362,14 +1378,14 @@ async function createDemo() {
   if (!(subs ?? []).length) await subscribe("smart-city");
   for (const [into, type, secs] of DEMO.devices) {
     if (pipes.some((p) => p.kind === "source" && p.into === into && p.type === type)) continue;
-    const p = { id: crypto.randomUUID().slice(0, 8), kind: "source",
+    const p = { id: uuid().slice(0, 8), kind: "source",
       gen: `${TYPES[type].emoji} ${type}`, type, into, secs, running: true, ticks: 0 };
     pipes.push(p);
     startPipe(p);
   }
   for (const [from, into, type, secs] of DEMO.copies) {
     if (pipes.some((p) => p.kind === "sync" && p.from === from && p.into === into && p.type === type)) continue;
-    const p = { id: crypto.randomUUID().slice(0, 8), kind: "sync",
+    const p = { id: uuid().slice(0, 8), kind: "sync",
       from, into, type, secs, running: true, ticks: 0 };
     pipes.push(p);
     startPipe(p);
@@ -1469,7 +1485,7 @@ async function applyBoardTemplate(tpl) {
     if (dup) continue;
     if (kind === "sync" && (!spaces.some((x) => x.name === t.from) || t.from === t.into)) continue;
     const p = {
-      id: crypto.randomUUID().slice(0, 8), kind,
+      id: uuid().slice(0, 8), kind,
       into: t.into, type: t.type,
       secs: Math.max(1, Number(t.secs) || 3),
       running: t.running !== false, ticks: 0,
