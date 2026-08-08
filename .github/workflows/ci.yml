@@ -1,18 +1,23 @@
 name: ci
 
-# The DEV pipeline — fastest possible signal on every commit:
+# The DEV pipeline — workspace tests GATE everything downstream:
 #
-#   workspace tests  ∥  [image build → 3-store (file postgres timescale) all-suites matrix → summary]
-#                     └────────────→ publish :dev (master, both green)
+#   workspace tests ──→ [image build → 3-store (file postgres timescale) all-suites matrix → summary]
+#                   └──→ build arm64 image ──────────────────────────────→ publish :dev (master, all green)
+#
+# fmt + clippy + the full workspace suite run FIRST. If any of them fail the
+# image is never built and the ETSI matrix never runs — the whole pipeline
+# stops at the gate (matrix + build-arm `needs: workspace`).
 #
 # Nothing else lives here. The browser/wasm artifact, the serial all-suites
 # runs, K8 roll-under-suite, N7a and the k8s manifest smoke are full.yml
 # (manual dispatch or v* tags). The matrix itself is the reusable
 # etsi-matrix.yml, shared by both pipelines.
 
-# Manual/PR only (decision 2026-08-07): no push trigger — a master push runs
-# nothing by itself; run the pipeline via PRs or `Run workflow`.
+# Runs on push to master, on pull requests, and on manual dispatch.
 on:
+  push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -120,6 +125,8 @@ jobs:
     # The reusable 3-store (file postgres timescale) all-suites matrix (build → cells → summary) —
     # shared with full.yml so both pipelines test the same shape.
     name: ETSI cell matrix
+    # GATE: no image build / ETSI run unless the workspace suite is green.
+    needs: workspace
     uses: ./.github/workflows/etsi-matrix.yml
     permissions:
       contents: read
@@ -131,6 +138,8 @@ jobs:
     # The only arm signal is the workspace job, which compiles and tests the
     # same code natively on ubuntu-24.04-arm. Native-arch runner, no QEMU.
     name: Build the arm64 image (untested)
+    # GATE: only build after the workspace suite passes.
+    needs: workspace
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
