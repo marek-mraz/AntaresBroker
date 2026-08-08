@@ -146,7 +146,13 @@ export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", satellites
     let ux = c.x - cx, uy = c.y - cy;
     const d = Math.hypot(ux, uy);
     if (d < 1) { ux = 0; uy = 1; } else { ux /= d; uy /= d; }
-    const px = -uy, py = ux;
+    let px = -uy, py = ux;
+    // a satellite-parent's outward corridor is occupied by its sub-space
+    // edges — its devices swing 90° to the perpendicular side instead
+    if (byParent.has(space)) {
+      ux = px; uy = py;
+      px = -uy; py = ux;
+    }
     list.forEach((p, i) => {
       const off = (i - (list.length - 1) / 2) * 122;
       pos[`p:${p.id}`] = {
