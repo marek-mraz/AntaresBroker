@@ -1572,13 +1572,21 @@ async fn deliver_as(
         });
     // I4: the notification endpoint is an egress destination like any other
     // — policy check once, breaker consulted before the attempt (§16.4).
-    if let Err(e) = st.egress.check_url(uri).await {
-        tracing::warn!("notification endpoint {uri} refused by egress policy: {e}");
-        return;
-    }
-    let breaker_open = st.egress.is_open(uri);
-    let ok = if breaker_open {
-        tracing::debug!("notification to {uri} short-circuited (breaker open)");
+    // A refusal is a delivery failure for bookkeeping (status "failed",
+    // lastSuccess rolled back below) but never breaker state: the policy
+    // verdict says nothing about the endpoint's health.
+    let refused = match st.egress.check_url(uri).await {
+        Ok(()) => false,
+        Err(e) => {
+            tracing::warn!("notification endpoint {uri} refused by egress policy: {e}");
+            true
+        }
+    };
+    let breaker_open = !refused && st.egress.is_open(uri);
+    let ok = if refused || breaker_open {
+        if breaker_open {
+            tracing::debug!("notification to {uri} short-circuited (breaker open)");
+        }
         false
     } else {
         match outbound {
@@ -1610,7 +1618,7 @@ async fn deliver_as(
             }
         }
     };
-    if !breaker_open {
+    if !refused && !breaker_open {
         if ok {
             st.egress.record_success(uri);
         } else {

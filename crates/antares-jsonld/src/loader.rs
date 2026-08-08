@@ -69,8 +69,10 @@ pub struct CtxUsage {
 /// §16.4 egress policy hook for @context fetches: scheme allowlist is
 /// enforced in `fetch`; this adds the private-range deny (loopback,
 /// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
-/// `ANTARES_EGRESS_ALLOW_PRIVATE=true` opts out — the ETSI/IOP stacks host
-/// their mock context servers on private addresses and need it.
+/// Private egress is ALLOWED by default (decision 2026-08-08: notifications
+/// must reach private nets out of the box — dev boxes, compose stacks and the
+/// ETSI/IOP mocks all live there); `ANTARES_EGRESS_ALLOW_PRIVATE=false`
+/// turns the deny on for internet-exposed deployments.
 /// The DNS-pinning resolver and redirect cap that enforce it on the wire
 /// are `PolicyResolver` / `client_builder` below.
 #[derive(Clone, Copy, Debug)]
@@ -94,7 +96,7 @@ impl EgressPolicy {
     pub fn from_env() -> Self {
         Self {
             allow_private: std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
-                .is_ok_and(|v| v == "true" || v == "1")
+                .map_or(true, |v| v != "false" && v != "0")
                 || ALLOW_PRIVATE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed),
         }
     }

@@ -1027,7 +1027,7 @@ Every request-shaped resource has a configured cap, rejected with the spec error
 
 ### 16.4 Outbound safety (SSRF) — three egress classes, one policy
 
-The broker makes outbound requests for: notification endpoints, @context fetches, and federation forwards. One `EgressPolicy` governs all three: scheme allowlist (http/https/mqtt(s)), **deny-by-default for loopback/link-local/RFC 1918/metadata ranges** with a config override (`egress.allow_private = true` — required by ETSI/IOP test stacks whose mocks live on private nets; Scorpio hard-coded permissiveness, Antares makes it a deliberate switch), redirect cap, DNS-pinned re-resolution (resolve once, connect to the resolved IP), response-size caps on @context fetches (LdContextNotAvailable 504 on breach), and per-destination circuit breakers (§16.7).
+The broker makes outbound requests for: notification endpoints, @context fetches, and federation forwards. One `EgressPolicy` governs all three: scheme allowlist (http/https/mqtt(s)), a private-range guard for loopback/link-local/RFC 1918/metadata ranges — **allow-by-default since 2026-08-08** (notifications must reach private nets out of the box: dev boxes, compose stacks, ETSI/IOP mocks), with `ANTARES_EGRESS_ALLOW_PRIVATE=false` as the deliberate lockdown switch for internet-exposed deployments, redirect cap, DNS-pinned re-resolution (resolve once, connect to the resolved IP), response-size caps on @context fetches (LdContextNotAvailable 504 on breach), and per-destination circuit breakers (§16.7).
 
 ### 16.5 Supply chain & platform
 
