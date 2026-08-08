@@ -364,7 +364,6 @@ async fn batch_write(
                             Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
                             Some(Ok(())) => {
                                 any_updated = true;
-                                crate::entities::mirror_record(st, &tenant, expanded);
                                 if !out.success.contains(&Value::String(id.clone())) {
                                     out.success.push(Value::String(id.clone()));
                                 }
@@ -380,7 +379,7 @@ async fn batch_write(
                         stamp_new(doc, &ts);
                     }
                     let flags = st.store.batch_upsert(&tenant, replaces.clone())?;
-                    for ((id, expanded), created) in replaces.iter().zip(flags) {
+                    for ((id, _), created) in replaces.iter().zip(flags) {
                         if created {
                             any_created = true;
                             if !created_ids.contains(id) {
@@ -389,7 +388,6 @@ async fn batch_write(
                         } else {
                             any_updated = true;
                         }
-                        crate::entities::mirror_record(st, &tenant, expanded);
                         if !out.success.contains(&Value::String(id.clone())) {
                             out.success.push(Value::String(id.clone()));
                         }
@@ -442,7 +440,7 @@ async fn batch_write(
                     }
                     Ok::<(), NgsiError>(())
                 })?;
-                for ((id, expanded), r) in round.iter().zip(res) {
+                for ((id, _), r) in round.iter().zip(res) {
                     match r {
                         None => out.errors.push(err_entry(
                             Some(id),
@@ -451,7 +449,6 @@ async fn batch_write(
                         Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
                         Some(Ok(())) => {
                             any_updated = true;
-                            crate::entities::mirror_record(st, &tenant, expanded);
                             if skipped.get(id).copied().unwrap_or(false) {
                                 out.errors.push(err_entry(
                                     Some(id),
@@ -471,13 +468,12 @@ async fn batch_write(
     // C5: the collected creates, one multi-row statement, one transaction.
     if !pending_creates.is_empty() {
         let flags = st.store.batch_create(&tenant, pending_creates.clone())?;
-        for ((id, expanded), created) in pending_creates.iter().zip(flags) {
+        for ((id, _), created) in pending_creates.iter().zip(flags) {
             if created {
                 any_created = true;
                 if !created_ids.contains(id) {
                     created_ids.push(id.clone());
                 }
-                crate::entities::mirror_record(st, &tenant, expanded);
                 if !out.success.contains(&Value::String(id.clone())) {
                     out.success.push(Value::String(id.clone()));
                 }

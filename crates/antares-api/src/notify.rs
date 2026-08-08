@@ -304,9 +304,14 @@ pub fn wire(state: &mut AppState) {
 
     let (tx, mut rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Option<Value>, Option<Value>)>();
+    // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
+    // the ETSI suite queries history immediately after a write); the matcher
+    // work is handed to the async task below. One choke point for every write.
+    let st_rec = state.clone();
     state
         .store
         .set_change_hook(Box::new(move |tenant, before, after| {
+            record_temporal_change(&st_rec, tenant, before.as_ref(), after.as_ref());
             let _ = tx.send((tenant.as_str().to_owned(), before, after));
         }));
     let st = state.clone();
@@ -399,6 +404,96 @@ fn diff(before: Option<&Value>, after: Option<&Value>) -> Vec<(String, ChangeCla
         }
     }
     out
+}
+
+/// Auto-record a current-state change into the temporal representation
+/// (5.6.11). Driven by the store's SYNCHRONOUS change hook, which fires inside
+/// every entity write (create, update, partial update, merge, replace, batch)
+/// for both the memory and postgres stores — so a new write path records
+/// without the handler having to remember. The per-handler `mirror_record`
+/// this replaced was the forgettable trap that left Partial Attribute Update
+/// (5.6.4) and Replace Attribute (5.6.19) silently unrecorded.
+///
+/// Append-only, instance-precise: only the instances that are new or changed
+/// (by datasetId, ignoring volatile members) are appended, so a multi-instance
+/// attribute does not re-record unchanged datasets. Entity and attribute
+/// DELETIONS keep their dedicated typed-null mirrors (`mirror_delete_entity` /
+/// `mirror_delete_attr`), which the delete handlers still call — their deletion
+/// shape is not derivable from a plain append.
+pub fn record_temporal_change(
+    st: &AppState,
+    tenant: &TenantId,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) {
+    if !st.record_locally {
+        return;
+    }
+    let Some(after) = after else {
+        return; // entity deletion — handled by mirror_delete_entity
+    };
+    let Some(id) = after.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let mut additions = Map::new();
+    for (k, class) in diff(before, Some(after)) {
+        if !matches!(class, ChangeClass::Created | ChangeClass::Updated) {
+            continue; // attribute deletion — handled by mirror_delete_attr
+        }
+        let Some(av) = after.get(&k) else { continue };
+        let mut incoming = changed_instances(before.and_then(|b| b.get(&k)), av);
+        if incoming.is_empty() {
+            continue;
+        }
+        for inst in &mut incoming {
+            if let Some(o) = inst.as_object_mut() {
+                o.entry("instanceId".to_owned()).or_insert_with(|| {
+                    Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
+                });
+            }
+        }
+        additions.insert(k, Value::Array(incoming));
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let mut shell = Map::new();
+    for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
+        if let Some(v) = after.get(k) {
+            shell.insert(k.to_string(), v.clone());
+        }
+    }
+    if let Err(e) =
+        st.store
+            .temporal_append(tenant, id, &Value::Object(shell), &Value::Object(additions))
+    {
+        tracing::warn!("temporal auto-record failed: {e}");
+    }
+}
+
+/// The instances in `after` that are new or changed vs `before` — matched by
+/// datasetId, compared via `stable` (volatile members ignored). A newly
+/// created attribute (`before` None) contributes every instance.
+fn changed_instances(before: Option<&Value>, after: &Value) -> Vec<Value> {
+    let before_arr: Vec<&Value> = before
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    after
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ai| {
+            match before_arr
+                .iter()
+                .find(|bi| instance_ds(bi) == instance_ds(ai))
+            {
+                None => true,
+                Some(bi) => stable(bi) != stable(ai),
+            }
+        })
+        .collect()
 }
 
 fn sub_str<'a>(sub: &'a Value, key: &str) -> Option<&'a str> {

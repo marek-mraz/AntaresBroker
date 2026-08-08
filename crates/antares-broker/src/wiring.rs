@@ -120,9 +120,21 @@ pub async fn wire_nats(
     let nudge = Arc::new(tokio::sync::Notify::new());
     {
         let n = nudge.clone();
+        // Auto-recording rides the same synchronous hook here as in bus=local
+        // (one choke point for every write, no handler can forget), then nudges
+        // the outbox drain.
+        let st_rec = state.clone();
         state
             .store
-            .set_change_hook(Box::new(move |_, _, _| n.notify_one()));
+            .set_change_hook(Box::new(move |tenant, before, after| {
+                antares_api::notify::record_temporal_change(
+                    &st_rec,
+                    tenant,
+                    before.as_ref(),
+                    after.as_ref(),
+                );
+                n.notify_one();
+            }));
     }
 
     let mut durables: Vec<&'static str> = Vec::new();

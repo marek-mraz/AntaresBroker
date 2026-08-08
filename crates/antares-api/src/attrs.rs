@@ -179,10 +179,7 @@ async fn append_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => {
-                crate::entities::mirror_record(st, &tenant, &fragment);
-                Ok(update_result(&tenant, updated, not_updated, &parsed.ctx))
-            }
+            Some(Ok(())) => Ok(update_result(&tenant, updated, not_updated, &parsed.ctx)),
         })
     };
     if regs.is_empty() {
@@ -447,10 +444,7 @@ async fn update_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => {
-                crate::entities::mirror_record(st, &tenant, &fragment);
-                Ok(update_result(&tenant, updated, not_updated, &parsed.ctx))
-            }
+            Some(Ok(())) => Ok(update_result(&tenant, updated, not_updated, &parsed.ctx)),
         })
     };
     if regs.is_empty() {

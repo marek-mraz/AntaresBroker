@@ -97,52 +97,12 @@ pub fn compact_for(
 }
 
 // ---------- temporal mirroring (auto-recording; Scorpio ENTITY-topic parity) ----------
-
-/// Record an entity write into the temporal store (5.6.11 auto-recording).
-/// F8: in bus=nats mode the api role skips this — the temporal role's
-/// durable recorder reproduces it from the change stream, idempotently.
-pub fn mirror_record(st: &AppState, tenant: &TenantId, expanded: &Value) {
-    if !st.record_locally {
-        return;
-    }
-    let Some(obj) = expanded.as_object() else {
-        return;
-    };
-    let Some(id) = obj.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    let r = (|| -> Result<(), antares_model::NgsiError> {
-        // C9/D append fast path (audit 2026-08-08): shell + additions in one
-        // store call — Pg records instances with a pure multi-row INSERT.
-        let mut shell = Map::new();
-        for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
-            if let Some(v) = obj.get(k) {
-                shell.insert(k.into(), v.clone());
-            }
-        }
-        let mut additions = Map::new();
-        for (k, v) in obj {
-            if is_meta(k) {
-                continue;
-            }
-            let mut incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
-            for inst in &mut incoming {
-                if let Some(o) = inst.as_object_mut() {
-                    o.entry("instanceId".to_owned()).or_insert_with(|| {
-                        Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
-                    });
-                }
-            }
-            additions.insert(k.clone(), Value::Array(incoming));
-        }
-        st.store
-            .temporal_append(tenant, id, &Value::Object(shell), &Value::Object(additions))?;
-        Ok(())
-    })();
-    if let Err(e) = r {
-        tracing::warn!("temporal mirror failed: {e}");
-    }
-}
+//
+// Append-side auto-recording (create/update/partial/merge/replace/batch) is
+// driven centrally off the store's change hook — see
+// `notify::record_temporal_change`. Only the DELETION mirrors below stay as
+// explicit handler calls (their typed-null deletion shape is not derivable
+// from a plain before/after append).
 
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
 /// representation too (suite configuration parity). F8: skipped on bus=nats
@@ -320,7 +280,6 @@ async fn create_entity_inner(
                 .store
                 .create(&tenant, Kind::Entity, &id, local_exp.clone())?
             {
-                mirror_record(st, &tenant, &local_exp);
                 parts.push(crate::federation::Part {
                     status: 201,
                     detail: "created locally".into(),
@@ -364,7 +323,6 @@ async fn create_entity_inner(
     {
         return Err(NgsiError::AlreadyExists(format!("entity {id} already exists")).into());
     }
-    mirror_record(st, &tenant, &expanded);
     Ok(created(format!("/ngsi-ld/v1/entities/{id}"), &tenant))
 }
 
@@ -1506,13 +1464,10 @@ async fn merge_entity_inner(
                 Ok::<(), NgsiError>(())
             })?;
             parts.push(match res {
-                Some(Ok(())) => {
-                    mirror_record(st, &tenant, &local_frag);
-                    crate::federation::Part {
-                        status: 204,
-                        detail: "merged locally".into(),
-                    }
-                }
+                Some(Ok(())) => crate::federation::Part {
+                    status: 204,
+                    detail: "merged locally".into(),
+                },
                 _ => crate::federation::Part {
                     status: 404,
                     detail: format!("entity {id} not found locally"),
@@ -1557,10 +1512,7 @@ async fn merge_entity_inner(
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
-        Some(Ok(())) => {
-            mirror_record(st, &tenant, &fragment);
-            Ok(no_content(&tenant))
-        }
+        Some(Ok(())) => Ok(no_content(&tenant)),
     }
 }
 
@@ -1688,7 +1640,6 @@ pub async fn replace_entity(
             }
             st.store
                 .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
-            mirror_record(&st, &tenant, &expanded);
             return Ok::<_, ApiError>(no_content(&tenant));
         }
         if crate::federation::via_loop(&headers, &st.host_alias) {
@@ -1721,7 +1672,6 @@ pub async fn replace_entity(
                     }
                     st.store
                         .upsert(&tenant, Kind::Entity, &id, local_exp.clone())?;
-                    mirror_record(&st, &tenant, &local_exp);
                     parts.push(crate::federation::Part {
                         status: 204,
                         detail: "replaced locally".into(),
