@@ -76,6 +76,9 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600
 td.empty { color: var(--muted); text-align: center; padding: 1rem; }
 .chip { font-size: .68rem; padding: .05rem .45rem; border-radius: 99px; border: 1px solid var(--line); }
 .row-spark { vertical-align: middle; margin-left: .25rem; opacity: .85; }
+/* CSR read animation: the arrow shows the query direction (reader → source),
+   the dashes flow the other way — data returning from the context source. */
+.react-flow__edge.fed-edge.animated path { animation-direction: reverse; }
 .chip.fed { border-style: dashed; color: var(--fed); }
 
 /* history */

@@ -167,17 +167,22 @@ export default function Board({ selected, onSelectSpace }) {
       for (const l of ls) {
         const key = `fed:${l.id}`;
         const b = board.bursts.get(key);
-        const on = b && b.until > now;
+        // Animate a CSR only while the user is FOCUSED on the space doing the
+        // reading — background polling refreshes every space, and an always-
+        // pulsing board says nothing.
+        const on = b && b.until > now && from === selected;
         out.push({
           id: key,
           type: "bubble",
-          // registration/query direction: the registering space points at the
-          // peer it reads (smart-city → old-town); the animated dashes flow
-          // the same way, and ONLY while a federated read actually runs
-          // (burst-gated below) — the return traffic is the `N ⇢` counter.
+          // Arrow = registration/query direction: the registering space
+          // points at the peer it reads (smart-city → old-town). The animated
+          // dashes run the OPPOSITE way (data flowing from the context source
+          // back to the reader — animation-direction: reverse in styles.css),
+          // and only while a focused federated read actually runs.
           source: `s:${from}`,
           target: `s:${l.to}`,
           animated: !!on,
+          className: "fed-edge",
           label: `CSR · ${l.type ?? "all"}${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
           labelStyle: { fill: FED, fontWeight: 650 },
           style: { stroke: FED, strokeWidth: on ? 3.5 : 2.5, strokeDasharray: "7 6" },
@@ -217,11 +222,16 @@ export default function Board({ selected, onSelectSpace }) {
     }
     for (const g of groups.values()) {
       g.forEach((e, i) => {
-        e.data.slot = i - (g.length - 1) / 2;
+        // BubbleEdge bends along its own source→target perpendicular, which
+        // mirrors for opposite-direction edges — negate the slot for the
+        // non-canonical orientation so a CSR and a COPY between the same
+        // pair fan out to opposite sides instead of overlapping.
+        const flip = e.source > e.target ? -1 : 1;
+        e.data.slot = (i - (g.length - 1) / 2) * flip;
       });
     }
     return out;
-  }, [v]);
+  }, [v, selected]);
 
   const onNodesChange = useCallback((changes) => {
     let moved = false;
