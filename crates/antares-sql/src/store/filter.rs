@@ -86,6 +86,13 @@ pub struct TemporalFilter<'a> {
     pub last_n: Option<i64>,
     /// ordering key for the lastN cap (the request's timeproperty)
     pub timeproperty: &'a str,
+    /// Entity-level LIMIT/OFFSET pushdown (audit 2026-08-08: a temporal query
+    /// used to materialize the tenant's ENTIRE history). Passed only when the
+    /// caller has no store-invisible entity filters (idPattern, q, geo) —
+    /// when honoured, SQL also applies the caller's entity-qualification rule
+    /// (≥1 instance, in-window when a range is given), so the paged set is
+    /// exactly the set the evaluator would keep.
+    pub page: Option<Page>,
 }
 
 impl Default for TemporalFilter<'_> {
@@ -97,6 +104,96 @@ impl Default for TemporalFilter<'_> {
             range: None,
             last_n: None,
             timeproperty: "observedAt",
+            page: None,
         }
+    }
+}
+
+/// 4.22 transient storage: is this doc/instance past its `expiresAt`?
+/// Byte-compare of RFC 3339 strings against a UTC-Z `now` — the same
+/// comparison the subscription-expiry check has always used (exact for the
+/// UTC-Z stamps the broker writes; an exotic-offset expiresAt errs on the
+/// side of staying visible until the SQL sweep, which compares timestamptz).
+pub fn expired_at(v: &Value, now: &str) -> bool {
+    v.get("expiresAt")
+        .and_then(Value::as_str)
+        .is_some_and(|e| e < now)
+}
+
+/// Apply 4.22 invalidity to a read: `true` = the ENTITY is expired (caller
+/// drops it entirely); otherwise expired attribute INSTANCES are stripped in
+/// place (an attribute left with zero instances disappears).
+pub fn strip_expired(doc: &mut Value, now: &str) -> bool {
+    if expired_at(doc, now) {
+        return true;
+    }
+    if let Some(obj) = doc.as_object_mut() {
+        let mut empty: Vec<String> = Vec::new();
+        for (k, v) in obj.iter_mut() {
+            if let Some(arr) = v.as_array_mut() {
+                let before = arr.len();
+                arr.retain(|inst| !expired_at(inst, now));
+                if before > 0 && arr.is_empty() {
+                    empty.push(k.clone());
+                }
+            }
+        }
+        for k in empty {
+            obj.remove(&k);
+        }
+    }
+    false
+}
+
+/// What a temporal query produced. `paged` = LIMIT/OFFSET (and the
+/// entity-qualification EXISTS) ran in SQL; `total` = pre-LIMIT match count.
+pub struct TemporalOutcome {
+    pub rows: Vec<Value>,
+    pub paged: bool,
+    pub total: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: &str = "2026-08-08T12:00:00.000Z";
+
+    #[test]
+    fn expired_entity_is_dropped_whole() {
+        let mut doc = serde_json::json!({
+            "id": "urn:x", "type": ["T"], "expiresAt": "2026-08-08T11:00:00Z",
+            "https://a/attr": [{"value": 1, "instanceId": "i1"}]
+        });
+        assert!(strip_expired(&mut doc, NOW));
+    }
+
+    #[test]
+    fn expired_instances_are_stripped_and_empty_attrs_disappear() {
+        let mut doc = serde_json::json!({
+            "id": "urn:x", "type": ["T"], "expiresAt": "2026-08-09T00:00:00Z",
+            "https://a/keep": [
+                {"value": 1, "instanceId": "i1"},
+                {"value": 2, "instanceId": "i2", "expiresAt": "2026-08-08T11:00:00Z"}
+            ],
+            "https://a/gone": [{"value": 3, "instanceId": "i3",
+                                "expiresAt": "2026-08-08T00:00:00Z"}]
+        });
+        assert!(!strip_expired(&mut doc, NOW));
+        assert_eq!(doc["https://a/keep"].as_array().map(Vec::len), Some(1));
+        assert!(doc.get("https://a/gone").is_none(), "emptied attr removed");
+        // meta arrays (type) are never instance-filtered
+        assert_eq!(doc["type"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn no_expiry_means_untouched() {
+        let mut doc = serde_json::json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [{"value": 1, "instanceId": "i1"}]
+        });
+        let before = doc.clone();
+        assert!(!strip_expired(&mut doc, NOW));
+        assert_eq!(doc, before);
     }
 }

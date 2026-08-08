@@ -25,12 +25,64 @@ pub async fn timescale_present(pool: &PgPool) -> Result<bool, sqlx::Error> {
     Ok(row.is_some())
 }
 
+/// What the migrations actually built `attr_instances` as. Detected ONCE at
+/// startup from the catalog and pinned — never re-probed per tick, so the
+/// maintenance branch can never disagree with the DDL on disk (the
+/// "extension installed after first boot" trap).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporalBackend {
+    /// timescale hypertable (relkind 'r' + timescaledb catalog entry)
+    Hypertable,
+    /// native PARTITION BY RANGE (relkind 'p')
+    Partitioned,
+}
+
+/// Inspect the catalog. Errors when `attr_instances` is neither a hypertable
+/// nor a partitioned table — that means the database was migrated under one
+/// extension state and is now running under another; refusing beats running
+/// the wrong maintenance jobs against mismatched DDL.
+pub async fn detect_temporal_backend(pool: &PgPool) -> Result<TemporalBackend, String> {
+    let relkind: Option<String> = sqlx::query_scalar(
+        "SELECT c.relkind::text FROM pg_class c
+         WHERE c.relname = 'attr_instances' AND c.relnamespace = 'public'::regnamespace",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    match relkind.as_deref() {
+        Some("p") => Ok(TemporalBackend::Partitioned),
+        Some("r") => {
+            let hyper = sqlx::query(
+                "SELECT 1 FROM timescaledb_information.hypertables
+                 WHERE hypertable_name = 'attr_instances'",
+            )
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if hyper.is_some() {
+                Ok(TemporalBackend::Hypertable)
+            } else {
+                Err(
+                    "attr_instances is a plain table — the database was migrated as a \
+                     hypertable and the timescaledb extension has since been removed, or \
+                     the catalog is damaged; refusing to run temporal maintenance"
+                        .into(),
+                )
+            }
+        }
+        other => Err(format!(
+            "attr_instances has unexpected relkind {other:?} — migrations did not run?"
+        )),
+    }
+}
+
 /// One maintenance pass. Returns a short human-readable summary ("skipped"
 /// when another instance holds the claim). `retention_days = None` keeps
 /// history forever — retention is a deliberate deployment knob, never a
 /// default.
 pub async fn temporal_maintenance(
     pool: &PgPool,
+    backend: TemporalBackend,
     retention_days: Option<i64>,
 ) -> Result<String, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -43,9 +95,21 @@ pub async fn temporal_maintenance(
     if claimed.is_none() {
         return Ok("skipped: another instance holds the claim".into());
     }
-    let timescale = timescale_present(pool).await?;
+    // retention DML is cross-tenant service work (see migration 0005)
+    crate::pg::set_service(&mut tx).await?;
     let mut done: Vec<String> = Vec::new();
-    if timescale {
+    // 4.22 garbage collection: expired transient entities are reaped here —
+    // reads already refuse them, so the lag this job runs at is invisible
+    // (the clause itself sanctions lagging deletion). Runs on both backends.
+    let reaped =
+        sqlx::query("DELETE FROM entities WHERE expires_at IS NOT NULL AND expires_at < now()")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    if reaped > 0 {
+        done.push(format!("reaped {reaped} expired transient entities (4.22)"));
+    }
+    if backend == TemporalBackend::Hypertable {
         if let Some(days) = retention_days {
             sqlx::query("SELECT public.drop_chunks('attr_instances', older_than => make_interval(days => $1::int))")
                 .bind(days)
@@ -86,9 +150,12 @@ pub async fn temporal_maintenance(
                 }
                 Err(e) => {
                     // rows for this range already sit in the DEFAULT partition —
-                    // fine, they stay there (see module docs).
+                    // fine, they stay there (see module docs). warn, not debug:
+                    // a PERMANENTLY failing create (permissions) must be visible
+                    // at default log level, or it silently degrades to
+                    // "everything lands in DEFAULT".
                     sp.rollback().await?;
-                    tracing::debug!("partition attr_instances_{suffix} not created: {e}");
+                    tracing::warn!("partition attr_instances_{suffix} not created: {e}");
                     done.push(format!("partition {suffix}: left in default"));
                 }
             }
@@ -129,6 +196,23 @@ pub async fn temporal_maintenance(
                         .await?;
                     done.push(format!("dropped expired partition {name}"));
                 }
+            }
+            // The DEFAULT partition has no upper bound and is never dropped —
+            // reclaim its expired rows (historic backfill that landed there
+            // before its week partition existed) by DELETE, or they are
+            // retained forever.
+            let purged = sqlx::query(
+                "DELETE FROM attr_instances_default
+                 WHERE observed_at < now() - make_interval(days => $1::int)",
+            )
+            .bind(days)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if purged > 0 {
+                done.push(format!(
+                    "purged {purged} expired rows from DEFAULT partition"
+                ));
             }
         }
     }

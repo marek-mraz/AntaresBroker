@@ -34,6 +34,27 @@ pub async fn set_tenant(
         .map(|_| ())
 }
 
+/// §16.1: does the connected role bypass RLS (superuser or BYPASSRLS)? RLS is
+/// a belt only when the role wears it — the broker warns at startup when the
+/// belt is off.
+pub async fn role_bypasses_rls(pool: &PgPool) -> bool {
+    sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+}
+
+/// Arm the transaction-scoped `antares.service` escape (migration 0005) for
+/// the two internal cross-tenant jobs: outbox drain and temporal retention.
+/// NEVER call from a request path — request queries carry explicit tenant
+/// predicates and run under `set_tenant` only.
+pub async fn set_service(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('antares.service', 'on', true)")
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
+}
+
 /// §3.1.4: tenant auto-create is one idempotent upsert — two concurrent
 /// first-writes both succeed (vs Scorpio's CREATE DATABASE + Flyway deadlock).
 pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) -> Result<(), sqlx::Error> {

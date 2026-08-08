@@ -201,9 +201,9 @@ clause4_languages:
     notes: "repr::apply stays the decider; SQL drops/keeps only top-level attr IRIs under the decided gate — core members always survive, dotted paths stay evaluator-side"
   - clause: "4.22"
     name: "Transient storage (expiresAt) of Entities and Attributes"
-    status: missing
-    evidence: ""
-    notes: "expiresAt is recognised as a system key but no expiry enforcement/sweep exists for entities or attributes; subscriptions/registrations DO enforce expiry at match time"
+    status: implemented
+    evidence: "antares-sql store/filter.rs::strip_expired (read-boundary invalidity, both arms); pg_entity.rs read predicates; maintenance.rs 4.22 reap + Store::sweep_expired (memory/file), migration 0007"
+    notes: "reads refuse expired entities and strip expired attribute instances at the AnyStore boundary; GC sweeps run per backend on the 15-min maintenance tick (deletion lag is clause-sanctioned). Known lag artifact: re-creating an expired-but-unswept id answers 409 until the sweep. No deletion notifications are emitted for reaped entities (no TP covers this); temporal history is not reaped"
   - clause: "4.23"
     name: "Entity Ordering (orderBy/orderFrom/orderGeometry/collation)"
     status: partial

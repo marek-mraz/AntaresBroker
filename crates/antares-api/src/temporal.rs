@@ -70,66 +70,81 @@ pub async fn upsert_temporal(
         let id = expanded["id"].as_str().expect("validated").to_owned();
         let ts = now_iso();
         stamp_instances(&mut expanded, &ts);
-        let existed = st.store.get(&tenant, Kind::Temporal, &id)?.is_some();
-        if existed {
-            let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
-                let target = doc.as_object_mut().expect("temporal object");
-                for (k, v) in expanded.as_object().expect("expanded") {
-                    if is_meta(k) {
-                        continue;
-                    }
-                    let incoming = v.as_array().cloned().unwrap_or_default();
-                    match target.get_mut(k).and_then(Value::as_array_mut) {
-                        Some(cur) => {
-                            // 5.6.11: instances merge by (datasetId, observedAt)
-                            for ni in incoming {
-                                let key = (
-                                    ni.get("datasetId")
-                                        .and_then(Value::as_str)
-                                        .map(String::from),
-                                    ni.get("observedAt")
-                                        .and_then(Value::as_str)
-                                        .map(String::from),
-                                );
-                                let pos = cur.iter().position(|ci| {
-                                    (
-                                        ci.get("datasetId")
+        // get→create/mutate is a TOCTOU pair: two concurrent first-upserts
+        // both see "absent", and the loser's create must NOT be silently
+        // dropped (201 with a discarded payload). Loop: a lost create retries
+        // as a merge, a mutate on a just-deleted doc retries as a create.
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 16 {
+                return Err(NgsiError::InternalError("upsert retry storm".into()).into());
+            }
+            let existed = st.store.get(&tenant, Kind::Temporal, &id)?.is_some();
+            if existed {
+                let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+                    let target = doc.as_object_mut().expect("temporal object");
+                    for (k, v) in expanded.as_object().expect("expanded") {
+                        if is_meta(k) {
+                            continue;
+                        }
+                        let incoming = v.as_array().cloned().unwrap_or_default();
+                        match target.get_mut(k).and_then(Value::as_array_mut) {
+                            Some(cur) => {
+                                // 5.6.11: instances merge by (datasetId, observedAt)
+                                for ni in incoming {
+                                    let key = (
+                                        ni.get("datasetId")
                                             .and_then(Value::as_str)
                                             .map(String::from),
-                                        ci.get("observedAt")
+                                        ni.get("observedAt")
                                             .and_then(Value::as_str)
                                             .map(String::from),
-                                    ) == key
-                                        && key.1.is_some()
-                                });
-                                match pos {
-                                    Some(p) => cur[p] = ni,
-                                    None => cur.push(ni),
+                                    );
+                                    let pos = cur.iter().position(|ci| {
+                                        (
+                                            ci.get("datasetId")
+                                                .and_then(Value::as_str)
+                                                .map(String::from),
+                                            ci.get("observedAt")
+                                                .and_then(Value::as_str)
+                                                .map(String::from),
+                                        ) == key
+                                            && key.1.is_some()
+                                    });
+                                    match pos {
+                                        Some(p) => cur[p] = ni,
+                                        None => cur.push(ni),
+                                    }
                                 }
                             }
-                        }
-                        None => {
-                            target.insert(k.clone(), Value::Array(incoming));
+                            None => {
+                                target.insert(k.clone(), Value::Array(incoming));
+                            }
                         }
                     }
+                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    Ok::<(), NgsiError>(())
+                })?;
+                match res {
+                    Some(Err(e)) => return Err(ApiError::from(e)),
+                    Some(Ok(())) => return Ok(no_content(&tenant)),
+                    None => continue, // deleted between get and mutate — retry as create
                 }
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                Ok::<(), NgsiError>(())
-            })?;
-            if let Some(Err(e)) = res {
-                return Err(ApiError::from(e));
+            } else {
+                let mut doc = expanded.clone();
+                if let Some(o) = doc.as_object_mut() {
+                    o.insert("createdAt".into(), Value::String(ts.clone()));
+                    o.insert("modifiedAt".into(), Value::String(ts.clone()));
+                }
+                if st.store.create(&tenant, Kind::Temporal, &id, doc)? {
+                    return Ok::<_, ApiError>(created(
+                        format!("/ngsi-ld/v1/temporal/entities/{id}"),
+                        &tenant,
+                    ));
+                }
+                // lost the create race — the doc exists now; retry as a merge
             }
-            Ok(no_content(&tenant))
-        } else {
-            if let Some(o) = expanded.as_object_mut() {
-                o.insert("createdAt".into(), Value::String(ts.clone()));
-                o.insert("modifiedAt".into(), Value::String(ts.clone()));
-            }
-            st.store.create(&tenant, Kind::Temporal, &id, expanded)?;
-            Ok::<_, ApiError>(created(
-                format!("/ngsi-ld/v1/temporal/entities/{id}"),
-                &tenant,
-            ))
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -821,9 +836,13 @@ fn render_aggregated(
                     AggrPeriod::Months(m) => {
                         let mut start = anchor;
                         loop {
-                            let next = start
-                                .checked_add_months(chrono::Months::new(m))
-                                .expect("date range");
+                            // saturate instead of panic: a huge month period or
+                            // far-future timeAt overflows chrono's range — treat
+                            // the remainder as one open-ended bucket
+                            let Some(next) = start.checked_add_months(chrono::Months::new(m))
+                            else {
+                                break (start, chrono::DateTime::<chrono::Utc>::MAX_UTC.into());
+                            };
                             if next > t {
                                 break (start, next);
                             }
@@ -992,6 +1011,12 @@ async fn query_temporal_inner(
     // over the FULL instance set, and a pruned doc would flip their verdicts
     // (memory mode would answer differently — the one unforgivable bug).
     let push_instances = q_ast.is_none() && geo.is_none();
+    // Entity-page pushdown (audit 2026-08-08): a temporal query used to
+    // materialize the tenant's ENTIRE history. Pushed only when every filter
+    // the store cannot see is absent — same gate family as C11 entities.
+    let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
+    let push_page =
+        push_instances && id_pattern.is_none() && params.get("orderBy").is_none() && p_limit > 0;
     let tf = antares_sql::store::filter::TemporalFilter {
         ids: ids.as_deref(),
         types: types.as_deref(),
@@ -1011,8 +1036,13 @@ async fn query_temporal_inner(
         timeproperty: tq
             .as_ref()
             .map_or("observedAt", |t| t.timeproperty.as_str()),
+        page: push_page.then_some(antares_sql::store::filter::Page {
+            offset: p_offset as i64,
+            limit: p_limit as i64,
+        }),
     };
-    let all = st.store.query_temporal(&tenant, &tf)?;
+    let outcome = st.store.query_temporal(&tenant, &tf)?;
+    let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
     let mut matches = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -1068,8 +1098,12 @@ async fn query_temporal_inner(
     if let Some(spec) = params.get("orderBy") {
         crate::entities::order_entities(&mut matches, spec, &ctx)?;
     }
-    let (page, count_hdr, links) =
-        crate::entities::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?;
+    let (page, count_hdr, links) = if pre_paged {
+        let total = pre_total.map(|t| t as usize).unwrap_or(matches.len());
+        crate::entities::paginate_pre(st, params, matches, "/ngsi-ld/v1/temporal/entities", total)?
+    } else {
+        crate::entities::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?
+    };
     let timeprop = tq
         .as_ref()
         .map_or("observedAt", |t| t.timeproperty.as_str())

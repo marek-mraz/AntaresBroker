@@ -86,7 +86,7 @@ async fn entity_crud_roundtrip_with_extracted_columns() {
     );
     assert_eq!(s.version(&t, id).expect("v"), Some(2));
 
-    assert!(s.delete(&t, id).expect("delete"));
+    assert!(s.delete(&t, id).expect("delete").is_some());
     assert!(s.get(&t, id).expect("get").is_none());
     assert!(s
         .mutate(&t, id, |_| Ok::<(), ()>(()))

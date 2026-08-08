@@ -10,9 +10,11 @@
 //!    GeoProperty and only when the entity carries exactly one instance of it
 //!    (§4.5.5 multi-instance sets have no single-geometry spelling, and a
 //!    GEOMETRYCOLLECTION would make `within` mean "all of them", which is
-//!    stricter). Every predicate is therefore guarded by `location IS NULL OR
-//!    …`, so an entity we could not extract is handed to the evaluator
-//!    instead of being dropped.
+//!    stricter). Rows that CARRY the geoproperty but defeated extraction are
+//!    flagged `location_ambiguous` at write time; every predicate ORs that
+//!    flag, so those rows reach the evaluator, while rows with no geoproperty
+//!    at all (which can never match) are excluded in SQL. Both OR arms are
+//!    index-shaped (GIST + partial index → BitmapOr).
 //! 2. **`near` metric.** The evaluator measures haversine on a sphere;
 //!    PostGIS `geography` measures on the WGS84 spheroid. They differ by up
 //!    to ~0.5 %, which at the boundary of a radius is the difference between
@@ -127,10 +129,14 @@ pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<C
         Rel::Overlaps => format!("ST_Overlaps({col}, {g})"),
         Rel::Equals => format!("ST_Equals({col}, {g})"),
     };
-    // The un-extractable row always survives (module docs, point 1).
+    // The un-extractable row always survives (module docs, point 1) — via the
+    // `location_ambiguous` column, not `location IS NULL`: rows WITHOUT any
+    // default GeoProperty can never match and are excluded in SQL, and the OR
+    // over two indexable conditions BitmapOrs (GIST + partial index) instead
+    // of forcing a sequential scan (audit 2026-08-08).
     geo_binds.shrink_to_fit();
     Some(CompiledGeo {
-        sql: format!("({col} IS NULL OR ({pred}))"),
+        sql: format!("(({pred}) OR location_ambiguous)"),
         geo_binds,
         num_binds,
     })
@@ -208,8 +214,8 @@ mod tests {
             let c =
                 compile_geo(&spec(rel, "Point", &coords(), ""), "location", 1).expect("compiles");
             assert!(
-                c.sql.starts_with("(location IS NULL OR "),
-                "a row with no extracted geometry must reach the evaluator: {}",
+                c.sql.ends_with(" OR location_ambiguous)"),
+                "a row carrying an unextractable geoproperty must reach the evaluator: {}",
                 c.sql
             );
         }

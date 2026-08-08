@@ -1,8 +1,10 @@
 //! C10 — NGSI-LD `q=` (CIM 009 clause 4.9) compiled to SQL jsonpath.
 //!
 //! Strategy is Scorpio's, proven against the ETSI suite (§8.1): the predicate
-//! becomes `jsonb_path_exists(entity, $n::jsonpath)` over the stored expanded
-//! document. §16.2 is absolute here — **the jsonpath travels as a bind, never
+//! becomes `entity @? $n::jsonpath` over the stored expanded document (the
+//! operator spelling of `jsonb_path_exists`, because only the operator form
+//! matches the GIN `jsonb_path_ops` index). §16.2 is absolute here — **the
+//! jsonpath travels as a bind, never
 //! as SQL text**. Nothing a client typed is ever concatenated into a
 //! statement; the compiler emits `$n` placeholders and hands the paths back
 //! as a separate list.
@@ -126,10 +128,10 @@ fn value_or(
             Some(f) => format!("{prefix}.\"{key}\"{f}"),
             None => format!("{prefix}.\"{key}\""),
         };
-        parts.push(format!(
-            "jsonb_path_exists({col}, ${}::jsonpath)",
-            first + binds.len()
-        ));
+        // the OPERATOR form of jsonb_path_exists: identical lax semantics,
+        // but the planner can match `@?` against the GIN jsonb_path_ops
+        // index — the function form never uses it (audit 2026-08-08)
+        parts.push(format!("{col} @? ${}::jsonpath", first + binds.len()));
         binds.push(jp);
     }
     Some(format!("({})", parts.join(" OR ")))
@@ -243,9 +245,11 @@ mod tests {
             got.binds[0],
             "$.\"https://uri.etsi.org/ngsi-ld/default-context/temperature\"[*].\"value\" ? (@ > 20)"
         );
-        assert!(got
-            .sql
-            .starts_with("(jsonb_path_exists(entity, $2::jsonpath)"));
+        assert!(
+            got.sql.starts_with("(entity @? $2::jsonpath"),
+            "sql: {}",
+            got.sql
+        );
     }
 
     #[test]

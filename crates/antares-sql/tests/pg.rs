@@ -29,13 +29,25 @@ async fn migrations_apply_and_indexes_exist() {
     let url = require_db!();
     let pool = pg::connect(&url, 5).await.expect("connect+migrate");
 
-    // C3: the §8.1 index set on entities (PK + 5 secondary).
-    let n: i64 = sqlx::query("SELECT count(*) FROM pg_indexes WHERE tablename = 'entities'")
+    // C3: the LIVE index set on entities — the exact indexes the compiled
+    // statements route through (0005 dropped the dead scopes/modified pair;
+    // pg_explain.rs proves usability, this proves existence).
+    for idx in [
+        "i_entities_location",
+        "i_entities_jsonb",
+        "i_entities_types",
+        "i_entities_loc_ambiguous",
+    ] {
+        let n: i64 = sqlx::query(
+            "SELECT count(*) FROM pg_indexes WHERE tablename = 'entities' AND indexname = $1",
+        )
+        .bind(idx)
         .fetch_one(&pool)
         .await
         .expect("pg_indexes")
         .get(0);
-    assert!(n >= 6, "expected >= 6 indexes on entities, found {n}");
+        assert_eq!(n, 1, "index {idx} missing on entities");
+    }
 
     // C2: every §8.3 table exists.
     for table in [

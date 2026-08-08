@@ -261,7 +261,7 @@ Languages — each a parser + in-memory evaluator (matcher) + SQL compiler (`ant
 - [ ] 4.18 Scopes; 4.19 Scope Query Language (`scopeQ`)
 - [ ] 4.20 Distributed Operation names (the Operation enum + operation groups → the `ops` bitmask, §8.3)
 - [ ] 4.21 Attribute Projection Language (`pick`/`omit`, dotted paths)
-- [ ] 4.22 Transient storage of Entities and Attributes (`expiresAt`)
+- [x] 4.22 Transient storage of Entities and Attributes (`expiresAt`) — read-boundary invalidity + per-backend GC sweep (2026-08-08)
 - [ ] 4.23 Entity Ordering: datatype comparison order (4.23.2), ordering language (`orderBy`, `orderFrom`, `orderGeometry`, `collation`) (4.23.3)
 
 #### 5.4.2 Clause 5.2–5.4 — data types (`antares-model`, one Rust type per clause, §9.1 naming)
@@ -499,7 +499,7 @@ Scorpio's `q=` engine (QQueryTerm, 4k LOC) compiles to `jsonb_path_query`/`jsonb
 
 ### 8.2 Temporal — two modes: with TimescaleDB and without
 
-**Hard requirement: Antares runs with OR without TimescaleDB.** Not a fallback — both are supported, CI-tested modes selected by one config switch (`temporal.store = timescale | plain`), auto-detected at startup via `SELECT ... FROM pg_extension`. The `TemporalStore` trait in `antares-sql` has exactly these two implementations; the *table shape and every query are identical* — the modes differ only in DDL bootstrap and maintenance jobs:
+**Hard requirement: Antares runs with OR without TimescaleDB.** Not a fallback — both are supported, CI-tested modes selected by `ANTARES_STORE=timescale|postgres`. *(As built — deviation recorded in tasks.md D1: there is no Rust `TemporalStore` trait; because table shape and every query are IDENTICAL across modes, the two "implementations" are the two DDL branches of migration 0003 plus the maintenance-job branch, which is PINNED at startup from the actual `attr_instances` relkind — `detect_temporal_backend` — never re-probed per tick. `ANTARES_STORE=timescale` against a database migrated without the extension is a fatal, named error. Since ADR-0009 (2026-08-08) the rows are the READ path in both modes: reads reconstruct the doc shape from `attr_instances`, writes are per-instance deltas, and retention/compression act on data queries actually consume.)* The modes differ only in DDL bootstrap and maintenance jobs:
 
 | Concern | `timescale` mode (default when extension present) | `plain` mode (vanilla PostgreSQL) |
 |---|---|---|

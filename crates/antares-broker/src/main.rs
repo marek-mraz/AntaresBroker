@@ -81,20 +81,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let host_alias = std::env::var("ANTARES_HOST_ALIAS").unwrap_or_else(|_| "antares".into());
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
-    // A2: unknown store mode is fatal BEFORE the runtime spins up.
-    let mode = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
-    if !["memory", "file", "postgres", "timescale"].contains(&mode.as_str()) {
-        return Err(
-            format!("unknown ANTARES_STORE={mode} (memory|file|postgres|timescale)").into(),
-        );
-    }
+    // A2: unknown store mode is fatal BEFORE the runtime spins up. The mode
+    // is decided ONCE here as a typed value and threaded everywhere — no
+    // string comparisons, no runtime re-probing downstream.
+    let mode: antares_sql::StoreMode = std::env::var("ANTARES_STORE")
+        .unwrap_or_else(|_| "memory".into())
+        .parse()
+        .map_err(|e| format!("unknown ANTARES_STORE: {e}"))?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async {
-            let (store, store_mode) = build_store(&mode).await?;
-            run(port, host_alias, roles, store, store_mode, metrics_render).await
+            let (store, backend) = build_store(mode).await?;
+            run(
+                port,
+                host_alias,
+                roles,
+                store,
+                mode,
+                backend,
+                metrics_render,
+            )
+            .await
         })
 }
 
@@ -103,21 +112,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// timescale require ANTARES_DATABASE_URL, connect ONE shared pool, run the
 /// embedded migrations at start (§C-i) and serve from the Pg backend (C13).
 async fn build_store(
-    mode: &str,
-) -> Result<(antares_sql::store::any::AnyStore, String), Box<dyn std::error::Error>> {
+    mode: antares_sql::StoreMode,
+) -> Result<
+    (
+        antares_sql::store::any::AnyStore,
+        Option<antares_sql::maintenance::TemporalBackend>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    use antares_sql::maintenance::TemporalBackend;
     use antares_sql::store::any::{AnyStore, PgBackend};
     use antares_sql::store::Store;
+    use antares_sql::StoreMode;
     match mode {
-        "file" => {
+        StoreMode::Memory => Ok((AnyStore::Mem(Store::default()), None)),
+        StoreMode::File => {
             let dir = std::env::var("ANTARES_DATA_DIR").map_err(|_| {
                 "ANTARES_STORE=file requires ANTARES_DATA_DIR (a mounted volume — data \
                  must never live inside the image)"
             })?;
             let dir = std::path::PathBuf::from(dir);
             warn_if_not_mount_point(&dir);
-            Ok((AnyStore::Mem(Store::open_file(&dir)?), "file".into()))
+            Ok((AnyStore::Mem(Store::open_file(&dir)?), None))
         }
-        "postgres" | "timescale" => {
+        StoreMode::Postgres | StoreMode::Timescale => {
             let url = std::env::var("ANTARES_DATABASE_URL")
                 .map_err(|_| format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL"))?;
             // The DB container may still be booting — bounded retry, then die.
@@ -125,28 +143,47 @@ async fn build_store(
             for _ in 0..30 {
                 match antares_sql::pg::connect(&url, 20).await {
                     Ok(pool) => {
-                        let ts = antares_sql::maintenance::timescale_present(&pool).await?;
-                        // D3: never silently fall back — timescale mode without
-                        // the extension is a config error, not a downgrade.
-                        if mode == "timescale" && !ts {
-                            return Err("ANTARES_STORE=timescale but the timescaledb extension \
-                                 is not CREATEd in this database — install it (CREATE EXTENSION \
-                                 timescaledb) or use ANTARES_STORE=postgres"
-                                .into());
+                        // The temporal backend is what the migrations actually
+                        // BUILT, detected once from the catalog and pinned —
+                        // the maintenance branch can never disagree with the
+                        // DDL on disk, whatever happened to the extension since.
+                        let backend = antares_sql::maintenance::detect_temporal_backend(&pool)
+                            .await
+                            .map_err(|e| format!("ANTARES_STORE={mode}: {e}"))?;
+                        // D3: never silently fall back — timescale mode whose
+                        // database is not hypertable-shaped is a config error,
+                        // not a downgrade (extension missing at first boot, or
+                        // installed only after the migrations ran).
+                        if mode == StoreMode::Timescale && backend != TemporalBackend::Hypertable {
+                            return Err(format!(
+                                "ANTARES_STORE=timescale but attr_instances is {backend:?} — \
+                                 the timescaledb extension was not CREATEd when the migrations \
+                                 first ran. Install it in a fresh database (CREATE EXTENSION \
+                                 timescaledb before first boot) or use ANTARES_STORE=postgres"
+                            )
+                            .into());
                         }
-                        if mode == "postgres" && ts {
+                        if mode == StoreMode::Postgres && backend == TemporalBackend::Hypertable {
                             tracing::info!(
-                                "timescaledb extension detected: attr_instances runs as a \
-                                 hypertable (§8.2 auto-detection); the plain-mode partition \
-                                 job stands down"
+                                "attr_instances is a hypertable (§8.2 — migrations ran with \
+                                 the timescaledb extension present); the plain-mode partition \
+                                 job stands down, retention runs via drop_chunks"
+                            );
+                        }
+                        // §16.1: RLS is a belt only when the role wears it —
+                        // superuser/BYPASSRLS makes every policy inert.
+                        if antares_sql::pg::role_bypasses_rls(&pool).await {
+                            tracing::warn!(
+                                "database role bypasses row-level security (superuser or \
+                                 BYPASSRLS) — tenant isolation rests on the explicit \
+                                 predicates only; use a non-superuser role in production"
                             );
                         }
                         tracing::info!(
                             "ANTARES_STORE={mode}: pool up, migrations applied, serving \
-                             from postgres (temporal: {})",
-                            if ts { "timescale" } else { "plain partitions" }
+                             from postgres (temporal backend: {backend:?})"
                         );
-                        return Ok((AnyStore::Pg(PgBackend::new(pool)), mode.to_owned()));
+                        return Ok((AnyStore::Pg(PgBackend::new(pool)), Some(backend)));
                     }
                     Err(e) => {
                         last = e.to_string();
@@ -156,7 +193,6 @@ async fn build_store(
             }
             Err(format!("ANTARES_STORE={mode}: database not reachable after 30 s: {last}").into())
         }
-        _ => Ok((AnyStore::Mem(Store::default()), "memory".into())),
     }
 }
 
@@ -187,7 +223,8 @@ async fn run(
     host_alias: String,
     roles: String,
     store: antares_sql::store::any::AnyStore,
-    store_mode: String,
+    store_mode: antares_sql::StoreMode,
+    temporal_backend: Option<antares_sql::maintenance::TemporalBackend>,
     metrics_render: Option<telemetry::MetricsRender>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
@@ -207,7 +244,7 @@ async fn run(
             }
         }
         "nats" => {
-            if !matches!(store_mode.as_str(), "postgres" | "timescale") {
+            if !store_mode.is_pg() {
                 return Err(format!(
                     "ANTARES_BUS=nats requires a shared store (ANTARES_STORE=postgres|timescale); \
                      {store_mode} state is per-process and cannot back multiple instances"
@@ -268,9 +305,32 @@ async fn run(
         }
     }
 
+    // 4.22 GC on the memory/file arm: reads already refuse expired entities;
+    // this reaps them (spec-sanctioned lag). The Pg arm's sweep runs inside
+    // the maintenance job below — one job per backend, mode-switched.
+    if matches!(
+        state.store.as_ref(),
+        antares_sql::store::any::AnyStore::Mem(_)
+    ) {
+        let store = state.store.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            loop {
+                tick.tick().await;
+                let n = store.sweep_expired();
+                if n > 0 {
+                    tracing::debug!("4.22 sweep reaped {n} expired entities");
+                }
+            }
+        });
+    }
     // C9/D4: temporal maintenance — plain-mode partition pre-creation and the
     // (opt-in) retention horizon, single-winner via SKIP LOCKED (§3.1.6).
-    if let antares_sql::store::any::AnyStore::Pg(p) = state.store.as_ref() {
+    // The branch is PINNED to the detected backend (never re-probed): memory
+    // and file modes have no backend and get no job, for sure.
+    if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
+        (state.store.as_ref(), temporal_backend)
+    {
         let pool = p.docs.pool().clone();
         let retention: Option<i64> = std::env::var("ANTARES_TEMPORAL_RETENTION_DAYS")
             .ok()
@@ -283,7 +343,9 @@ async fn run(
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
             loop {
                 tick.tick().await; // first tick is immediate: partitions at boot
-                match antares_sql::maintenance::temporal_maintenance(&pool, retention).await {
+                match antares_sql::maintenance::temporal_maintenance(&pool, backend, retention)
+                    .await
+                {
                     Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),
                     Err(e) => tracing::warn!("temporal maintenance failed: {e}"),
                 }

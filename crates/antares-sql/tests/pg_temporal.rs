@@ -35,8 +35,12 @@ async fn maintenance_winning(
     pool: &sqlx::PgPool,
     retention_days: Option<i64>,
 ) -> Result<String, sqlx::Error> {
+    let backend = antares_sql::maintenance::detect_temporal_backend(pool)
+        .await
+        .expect("temporal backend");
     for _ in 0..50 {
-        let msg = antares_sql::maintenance::temporal_maintenance(pool, retention_days).await?;
+        let msg =
+            antares_sql::maintenance::temporal_maintenance(pool, backend, retention_days).await?;
         if !msg.starts_with("skipped") {
             return Ok(msg);
         }

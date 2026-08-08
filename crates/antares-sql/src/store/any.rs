@@ -24,6 +24,13 @@ fn db(e: sqlx::Error) -> NgsiError {
     NgsiError::InternalError(format!("database error: {e}"))
 }
 
+/// 4.22: the read-boundary "now" — every entity read strips expired docs and
+/// instances against this stamp (UTC Z, millisecond precision, the same form
+/// the broker writes into system timestamps).
+fn now_utc() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 #[cfg(feature = "postgres")]
 fn doc_kind(kind: Kind) -> Option<DocKind> {
     match kind {
@@ -252,25 +259,26 @@ impl AnyStore {
                     "tenant provisioning failed".into(),
                 )),
                 Kind::Entity => {
-                    let prev = p.entities.get(tenant, id).map_err(db)?;
-                    let existed = prev.is_some();
-                    if existed {
-                        let r = p
-                            .entities
-                            .mutate(tenant, id, |d| {
-                                *d = doc.clone();
-                                Ok::<(), std::convert::Infallible>(())
-                            })
-                            .map_err(db)?;
-                        debug_assert!(r.is_some());
-                    } else if !p.entities.create(tenant, id, &doc).map_err(db)? {
-                        // lost the create race — replace instead
-                        p.entities
-                            .mutate(tenant, id, |d| {
-                                *d = doc.clone();
-                                Ok::<(), std::convert::Infallible>(())
-                            })
-                            .map_err(db)?;
+                    // replace-or-create without a pre-read: try the replace
+                    // first (captures the true before-image under the row
+                    // lock), fall back to create, and on a lost create race
+                    // replace after all.
+                    let mut prev: Option<Value> = None;
+                    let replace = |prev: &mut Option<Value>| {
+                        p.entities.mutate(tenant, id, |d| {
+                            *prev = Some(d.clone());
+                            *d = doc.clone();
+                            Ok::<(), std::convert::Infallible>(())
+                        })
+                    };
+                    let mut existed = replace(&mut prev).map_err(db)?.is_some();
+                    if !existed {
+                        if p.entities.create(tenant, id, &doc).map_err(db)? {
+                            existed = false;
+                        } else {
+                            // lost the create race — replace instead
+                            existed = replace(&mut prev).map_err(db)?.is_some();
+                        }
                     }
                     p.emit(tenant, prev, Some(doc));
                     Ok(existed)
@@ -297,18 +305,31 @@ impl AnyStore {
     }
 
     pub fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
-        match self {
-            AnyStore::Mem(s) => Ok(s.get(tenant, kind, id)),
+        let doc = match self {
+            AnyStore::Mem(s) => s.get(tenant, kind, id),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
-                Kind::Entity => p.entities.get(tenant, id).map_err(db),
-                Kind::Temporal => p.temporal.get(tenant, id).map_err(db),
+                Kind::Entity => p.entities.get(tenant, id).map_err(db)?,
+                Kind::Temporal => p.temporal.get(tenant, id).map_err(db)?,
                 _ => p
                     .docs
                     .get(tenant, doc_kind(kind).expect("doc kind"), id)
-                    .map_err(db),
+                    .map_err(db)?,
             },
+        };
+        // 4.22: an expired entity is invalid context — a read serves it to
+        // no one, whichever arm stored it (the Pg sweep lags by design).
+        if kind == Kind::Entity {
+            let now = now_utc();
+            if let Some(mut d) = doc {
+                if crate::store::filter::strip_expired(&mut d, &now) {
+                    return Ok(None);
+                }
+                return Ok(Some(d));
+            }
+            return Ok(None);
         }
+        Ok(doc)
     }
 
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
@@ -317,8 +338,10 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
-                    let prev = p.entities.get(tenant, id).map_err(db)?;
-                    let hit = p.entities.delete(tenant, id).map_err(db)?;
+                    // the before-image comes from the DELETE's own RETURNING —
+                    // same transaction, never a separate racy read
+                    let prev = p.entities.delete(tenant, id).map_err(db)?;
+                    let hit = prev.is_some();
                     if hit {
                         p.emit(tenant, prev, None);
                     }
@@ -334,18 +357,23 @@ impl AnyStore {
     }
 
     pub fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
-        match self {
-            AnyStore::Mem(s) => Ok(s.list(tenant, kind)),
+        let mut rows = match self {
+            AnyStore::Mem(s) => s.list(tenant, kind),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
-                Kind::Entity => p.entities.list(tenant).map_err(db),
-                Kind::Temporal => p.temporal.list(tenant).map_err(db),
+                Kind::Entity => p.entities.list(tenant).map_err(db)?,
+                Kind::Temporal => p.temporal.list(tenant).map_err(db)?,
                 _ => p
                     .docs
                     .list(tenant, doc_kind(kind).expect("doc kind"))
-                    .map_err(db),
+                    .map_err(db)?,
             },
+        };
+        if kind == Kind::Entity {
+            let now = now_utc();
+            rows.retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
         }
+        Ok(rows)
     }
 
     /// C10/C11: Query Entities with the filter pushed down where the backend
@@ -359,31 +387,85 @@ impl AnyStore {
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
         f: &crate::store::filter::EntityFilter<'_>,
     ) -> Result<crate::store::filter::QueryOutcome, NgsiError> {
-        match self {
-            AnyStore::Mem(s) => Ok(crate::store::filter::QueryOutcome {
+        let mut outcome = match self {
+            AnyStore::Mem(s) => crate::store::filter::QueryOutcome {
                 rows: s.list(tenant, Kind::Entity),
                 decided: false,
                 paged: false,
                 total: None,
-            }),
+            },
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db),
-        }
+            AnyStore::Pg(p) => p.entities.query(tenant, f).map_err(db)?,
+        };
+        // 4.22: the Pg arm already excludes expired ENTITIES in SQL (so
+        // paging/totals stay exact); instance stripping — and the whole job
+        // on the memory arm — happens here at the read boundary.
+        let now = now_utc();
+        outcome
+            .rows
+            .retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
+        Ok(outcome)
     }
 
-    /// C11: Query Temporal Evolution with entity narrowing + instance-window
-    /// pruning pushed down. Same contract: the API's window() is the arbiter;
-    /// the memory arm returns the full snapshot.
+    /// C11: Query Temporal Evolution with entity narrowing, instance-window
+    /// pruning AND (audit 2026-08-08) entity paging pushed down. Same
+    /// contract: the API's window() is the arbiter; the memory arm returns
+    /// the full snapshot, never paged.
     pub fn query_temporal(
         &self,
         tenant: &TenantId,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
         f: &crate::store::filter::TemporalFilter<'_>,
-    ) -> Result<Vec<Value>, NgsiError> {
+    ) -> Result<crate::store::filter::TemporalOutcome, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Temporal)),
+            AnyStore::Mem(s) => Ok(crate::store::filter::TemporalOutcome {
+                rows: s.list(tenant, Kind::Temporal),
+                paged: false,
+                total: None,
+            }),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db),
+        }
+    }
+
+    /// Auto-recording fast path (audit 2026-08-08): append instances to an
+    /// entity's temporal evolution, creating the meta shell on first touch.
+    /// Pg: pure multi-row INSERT — no history read, no doc rewrite. Memory:
+    /// the create-or-extend the mirror always did, under the store lock.
+    /// `shell` carries the meta members; `additions` maps attr IRI →
+    /// instance array (instanceIds already stamped by the caller).
+    pub fn temporal_append(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        shell: &Value,
+        additions: &Value,
+    ) -> Result<(), NgsiError> {
+        match self {
+            AnyStore::Mem(s) => {
+                if s.get(tenant, Kind::Temporal, id).is_none() {
+                    // loser of a concurrent create race just extends below
+                    let _ = s.create(tenant, Kind::Temporal, id, shell.clone());
+                }
+                s.mutate(tenant, Kind::Temporal, id, |doc| {
+                    let target = doc.as_object_mut().ok_or(())?;
+                    if let Some(adds) = additions.as_object() {
+                        for (k, v) in adds {
+                            let incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+                            match target.get_mut(k).and_then(Value::as_array_mut) {
+                                Some(cur) => cur.extend(incoming),
+                                None => {
+                                    target.insert(k.clone(), Value::Array(incoming));
+                                }
+                            }
+                        }
+                    }
+                    Ok::<(), ()>(())
+                });
+                Ok(())
+            }
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => p.temporal.append(tenant, id, shell, additions).map_err(db),
         }
     }
 
@@ -414,12 +496,16 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
-                    // before/after captured for the change hook (§7 prev_payload).
-                    let before = p.entities.get(tenant, id).map_err(db)?;
+                    // before/after captured for the change hook (§7
+                    // prev_payload) INSIDE the row lock — a before-image read
+                    // in its own transaction can belong to a different version
+                    // than the one the lock serialized on.
+                    let mut before: Option<Value> = None;
                     let mut after: Option<Value> = None;
                     let r = p
                         .entities
                         .mutate(tenant, id, |d| {
+                            before = Some(d.clone());
                             let r = f(d);
                             if r.is_ok() {
                                 after = Some(d.clone());
@@ -445,6 +531,83 @@ impl AnyStore {
                     }
                 }
             },
+        }
+    }
+
+    /// Batch upsert with REPLACE semantics for entities (audit 2026-08-08):
+    /// one statement + one transaction on the Pg arm, per-item loop on the
+    /// memory arm. Created-flags in input order.
+    pub fn batch_upsert(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(items
+                .into_iter()
+                .map(|(id, doc)| !s.upsert(tenant, Kind::Entity, &id, doc))
+                .collect()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => {
+                Self::ensure_tenant(p, tenant)
+                    .map_err(|_| NgsiError::InternalError("tenant provisioning failed".into()))?;
+                let out = p
+                    .entities
+                    .batch_upsert_replace(tenant, &items)
+                    .map_err(db)?;
+                for ((id, doc), (_, prev)) in items.iter().zip(&out) {
+                    let _ = id;
+                    p.emit(tenant, prev.clone(), Some(doc.clone()));
+                }
+                Ok(out.into_iter().map(|(created, _)| created).collect())
+            }
+        }
+    }
+
+    /// Batch read-modify-write for entities: one transaction + one ordered
+    /// lock set + one multi-row writeback on the Pg arm; per-item mutate on
+    /// the memory arm. Results align with `ids` (`None` = absent).
+    pub fn batch_mutate<E>(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+        mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
+    ) -> Result<Vec<Option<Result<(), E>>>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(ids
+                .iter()
+                .map(|id| s.mutate(tenant, Kind::Entity, id, |d| f(id, d)))
+                .collect()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => {
+                // hook images captured inside the lock, same as single mutate
+                let mut images: Vec<(Value, Value)> = Vec::new();
+                let r = p
+                    .entities
+                    .batch_mutate(tenant, ids, |id, d| {
+                        let before = d.clone();
+                        let r = f(id, d);
+                        if r.is_ok() && *d != before {
+                            images.push((before, d.clone()));
+                        }
+                        r
+                    })
+                    .map_err(db)?;
+                for (before, after) in images {
+                    p.emit(tenant, Some(before), Some(after));
+                }
+                Ok(r)
+            }
+        }
+    }
+
+    /// 4.22 GC for the memory/file arm (the Pg arm's sweep lives in the
+    /// maintenance job, mode-switched in the broker). Returns reaped count.
+    pub fn sweep_expired(&self) -> usize {
+        match self {
+            AnyStore::Mem(s) => s.sweep_expired(&now_utc()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(_) => 0,
         }
     }
 

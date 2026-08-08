@@ -7,7 +7,6 @@ use crate::repr::{apply, parse_repr};
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, ExpandOpts};
 use antares_model::NgsiError;
-use antares_sql::store::Kind;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -262,8 +261,9 @@ async fn batch_write(
     let proxies: Vec<&crate::federation::FedReg> =
         fed_regs.iter().filter(|r| r.is_proxy()).collect();
     // C5: creates are collected and written as ONE multi-row statement (§4);
-    // the other modes are per-item read-modify-write under the row lock.
+    // upsert/update/merge run batched per round below (C5+, audit 2026-08-08).
     let mut pending_creates: Vec<(String, Value)> = Vec::new();
+    let mut prepped: Vec<(String, Value)> = Vec::new();
     for (item, ctx) in items {
         let id_hint = item.get("id").and_then(Value::as_str).map(str::to_owned);
         let ctx = match ctx {
@@ -301,12 +301,15 @@ async fn batch_write(
             }
             continue;
         }
-        let run = || -> Result<(String, bool, bool), NgsiError> {
+        // C5+ phase 1 (audit 2026-08-08): expansion/validation per item only;
+        // the store operations run BATCHED below — one transaction per round
+        // instead of one per item.
+        let prep = || -> Result<(String, Value), NgsiError> {
             let obj = item
                 .as_object()
                 .ok_or_else(|| NgsiError::BadRequestData("entity must be an object".into()))?;
             let fragment_ok = mode == BatchMode::Merge;
-            let mut expanded = expand_entity(
+            let expanded = expand_entity(
                 obj,
                 &ctx,
                 ExpandOpts {
@@ -317,106 +320,152 @@ async fn batch_write(
                 },
             )?;
             let id = expanded["id"].as_str().expect("validated").to_owned();
-            let ts = now_iso();
-            match mode {
-                BatchMode::Create => unreachable!("creates take the batch path above"),
-                BatchMode::Upsert => {
-                    let existed = st.store.get(&tenant, Kind::Entity, &id)?.is_some();
-                    if existed && update_mode == Some("update") {
-                        let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                            merge_into(doc, &expanded, &ts);
-                            Ok::<(), NgsiError>(())
-                        })?;
-                        if let Some(Err(e)) = res {
-                            return Err(e);
-                        }
-                        crate::entities::mirror_record(st, &tenant, &expanded);
-                    } else {
-                        stamp_new(&mut expanded, &ts);
-                        st.store
-                            .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
-                        crate::entities::mirror_record(st, &tenant, &expanded);
-                    }
-                    Ok((id, !existed, false))
-                }
-                BatchMode::Update | BatchMode::Merge => {
-                    if st.store.get(&tenant, Kind::Entity, &id)?.is_none() {
-                        return Err(NgsiError::ResourceNotFound(format!(
-                            "entity {id} not found"
-                        )));
-                    }
-                    // batch update with noOverwrite: existing attributes are
-                    // left alone; if any existed, the entity is a partial
-                    // failure (005_02 ⇒ 207)
-                    let mut skipped_existing = false;
-                    let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                        if mode == BatchMode::Update && no_overwrite {
-                            // noOverwrite is instance-level: only instances
-                            // whose datasetId already exists are skipped
-                            let target = doc.as_object_mut().expect("entity object");
-                            for (k, v) in expanded.as_object().expect("expanded") {
-                                if matches!(
-                                    k.as_str(),
-                                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
-                                ) {
-                                    continue;
+            Ok((id, expanded))
+        };
+        match prep() {
+            Ok(pair) => prepped.push(pair),
+            Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
+        }
+    }
+    // C5+ phase 2: duplicates of one id keep their sequential semantics by
+    // splitting into rounds — the Nth occurrence of an id lands in round N,
+    // rounds execute in order, and within a round every id is unique.
+    let mut rounds: Vec<Vec<(String, Value)>> = Vec::new();
+    {
+        let mut occurrence: HashMap<String, usize> = HashMap::new();
+        for (id, doc) in prepped {
+            let n = occurrence.entry(id.clone()).or_insert(0);
+            if rounds.len() <= *n {
+                rounds.push(Vec::new());
+            }
+            rounds[*n].push((id, doc));
+            *n += 1;
+        }
+    }
+    for round in rounds {
+        let ts = now_iso();
+        match mode {
+            BatchMode::Create => unreachable!("creates take the batch path above"),
+            BatchMode::Upsert => {
+                // options=update: merge into existing rows first; ids that
+                // turn out absent (or vanish mid-flight) fall through to the
+                // replace batch — never a silent success (TOCTOU fix).
+                let mut replaces: Vec<(String, Value)> = Vec::new();
+                if update_mode == Some("update") {
+                    let ids: Vec<String> = round.iter().map(|(id, _)| id.clone()).collect();
+                    let docs: HashMap<&str, &Value> =
+                        round.iter().map(|(id, d)| (id.as_str(), d)).collect();
+                    let res = st.store.batch_mutate(&tenant, &ids, |id, doc| {
+                        merge_into(doc, docs[id], &ts);
+                        Ok::<(), NgsiError>(())
+                    })?;
+                    for ((id, expanded), r) in round.iter().zip(res) {
+                        match r {
+                            Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
+                            Some(Ok(())) => {
+                                any_updated = true;
+                                crate::entities::mirror_record(st, &tenant, expanded);
+                                if !out.success.contains(&Value::String(id.clone())) {
+                                    out.success.push(Value::String(id.clone()));
                                 }
-                                let incoming: Vec<Value> =
-                                    v.as_array().cloned().unwrap_or_default();
-                                match target.get_mut(k).and_then(Value::as_array_mut) {
-                                    None => {
-                                        target.insert(k.clone(), Value::Array(incoming));
-                                    }
-                                    Some(cur) => {
-                                        for ni in incoming {
-                                            let ds = ni.get("datasetId").and_then(Value::as_str);
-                                            if cur.iter().any(|ci| {
-                                                ci.get("datasetId").and_then(Value::as_str) == ds
-                                            }) {
-                                                skipped_existing = true;
-                                            } else {
-                                                cur.push(ni);
-                                            }
+                            }
+                            None => replaces.push((id.clone(), expanded.clone())),
+                        }
+                    }
+                } else {
+                    replaces = round;
+                }
+                if !replaces.is_empty() {
+                    for (_, doc) in replaces.iter_mut() {
+                        stamp_new(doc, &ts);
+                    }
+                    let flags = st.store.batch_upsert(&tenant, replaces.clone())?;
+                    for ((id, expanded), created) in replaces.iter().zip(flags) {
+                        if created {
+                            any_created = true;
+                            if !created_ids.contains(id) {
+                                created_ids.push(id.clone());
+                            }
+                        } else {
+                            any_updated = true;
+                        }
+                        crate::entities::mirror_record(st, &tenant, expanded);
+                        if !out.success.contains(&Value::String(id.clone())) {
+                            out.success.push(Value::String(id.clone()));
+                        }
+                    }
+                }
+            }
+            BatchMode::Update | BatchMode::Merge => {
+                let ids: Vec<String> = round.iter().map(|(id, _)| id.clone()).collect();
+                let docs: HashMap<&str, &Value> =
+                    round.iter().map(|(id, d)| (id.as_str(), d)).collect();
+                // batch update with noOverwrite: existing attribute instances
+                // are left alone; if any existed, the entity is a partial
+                // failure (005_02 ⇒ 207)
+                let mut skipped: HashMap<String, bool> = HashMap::new();
+                let res = st.store.batch_mutate(&tenant, &ids, |id, doc| {
+                    let expanded = docs[id];
+                    if mode == BatchMode::Update && no_overwrite {
+                        // noOverwrite is instance-level: only instances
+                        // whose datasetId already exists are skipped
+                        let target = doc.as_object_mut().expect("entity object");
+                        for (k, v) in expanded.as_object().expect("expanded") {
+                            if matches!(
+                                k.as_str(),
+                                "id" | "type" | "scope" | "createdAt" | "modifiedAt"
+                            ) {
+                                continue;
+                            }
+                            let incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+                            match target.get_mut(k).and_then(Value::as_array_mut) {
+                                None => {
+                                    target.insert(k.clone(), Value::Array(incoming));
+                                }
+                                Some(cur) => {
+                                    for ni in incoming {
+                                        let ds = ni.get("datasetId").and_then(Value::as_str);
+                                        if cur.iter().any(|ci| {
+                                            ci.get("datasetId").and_then(Value::as_str) == ds
+                                        }) {
+                                            skipped.insert(id.to_owned(), true);
+                                        } else {
+                                            cur.push(ni);
                                         }
                                     }
                                 }
                             }
-                            target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                        } else {
-                            merge_into(doc, &expanded, &ts);
                         }
-                        Ok::<(), NgsiError>(())
-                    })?;
-                    if let Some(Err(e)) = res {
-                        return Err(e);
+                        target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                    } else {
+                        merge_into(doc, expanded, &ts);
                     }
-                    crate::entities::mirror_record(st, &tenant, &expanded);
-                    Ok((id, false, skipped_existing))
+                    Ok::<(), NgsiError>(())
+                })?;
+                for ((id, expanded), r) in round.iter().zip(res) {
+                    match r {
+                        None => out.errors.push(err_entry(
+                            Some(id),
+                            &NgsiError::ResourceNotFound(format!("entity {id} not found")),
+                        )),
+                        Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
+                        Some(Ok(())) => {
+                            any_updated = true;
+                            crate::entities::mirror_record(st, &tenant, expanded);
+                            if skipped.get(id).copied().unwrap_or(false) {
+                                out.errors.push(err_entry(
+                                    Some(id),
+                                    &NgsiError::BadRequestData(
+                                        "some attributes already existed (noOverwrite)".into(),
+                                    ),
+                                ));
+                            } else if !out.success.contains(&Value::String(id.clone())) {
+                                out.success.push(Value::String(id.clone()));
+                            }
+                        }
+                    }
                 }
             }
-        };
-        match run() {
-            Ok((id, created_now, partial)) => {
-                if created_now {
-                    any_created = true;
-                    if !created_ids.contains(&id) {
-                        created_ids.push(id.clone());
-                    }
-                } else {
-                    any_updated = true;
-                }
-                if partial {
-                    out.errors.push(err_entry(
-                        Some(&id),
-                        &NgsiError::BadRequestData(
-                            "some attributes already existed (noOverwrite)".into(),
-                        ),
-                    ));
-                } else if !out.success.contains(&Value::String(id.clone())) {
-                    out.success.push(Value::String(id));
-                }
-            }
-            Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
         }
     }
     // C5: the collected creates, one multi-row statement, one transaction.

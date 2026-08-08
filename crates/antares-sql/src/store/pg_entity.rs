@@ -66,10 +66,14 @@ pub(crate) struct Extracted {
     modified: String,
     expires: Option<String>,
     /// C11b: the default GeoProperty as GeoJSON text, for `ST_GeomFromGeoJSON`.
-    /// `None` (→ SQL NULL) whenever it cannot be represented as ONE geometry —
-    /// the compiled geoquery guards on `location IS NULL` so those rows still
-    /// reach the evaluator.
+    /// `None` (→ SQL NULL) whenever it cannot be represented as ONE geometry.
     location: Option<String>,
+    /// True when the doc CARRIES the default GeoProperty but `location` could
+    /// not be extracted (multi-instance, non-GeoJSON value). The compiled
+    /// geoquery ORs on this column — index-shaped (BitmapOr), unlike the old
+    /// `location IS NULL OR …` guard which forced a sequential scan — and
+    /// rows without any geoproperty are excluded in SQL, which is exact.
+    location_ambiguous: bool,
 }
 
 fn extract(doc: &Value) -> Extracted {
@@ -85,19 +89,75 @@ fn extract(doc: &Value) -> Extracted {
     };
     let ts = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
     let now = || "1970-01-01T00:00:00Z".to_owned(); // caller always stamps; belt only
+    let location = crate::compile::geo::extract_location(doc);
+    let location_ambiguous =
+        location.is_none() && doc.get(crate::compile::geo::LOCATION_IRI).is_some();
     Extracted {
         types: doc.get("type").map(&as_vec).unwrap_or_default(),
         scopes: doc.get("scope").map(&as_vec),
         created: ts("createdAt").unwrap_or_else(now),
         modified: ts("modifiedAt").unwrap_or_else(now),
         expires: ts("expiresAt"),
-        location: crate::compile::geo::extract_location(doc),
+        location,
+        location_ambiguous,
     }
 }
 
 /// The outbox row's event JSON (F2/F3): what the drain turns into a
 /// `ChangeEvent`. Field names are the bus crate's serde names; `seq` and the
 /// claim check are the drain's business.
+#[allow(clippy::too_many_arguments)]
+fn change_event(
+    tenant: &TenantId,
+    op: &str,
+    id: &str,
+    types: &[String],
+    prev: Option<&Value>,
+    next: Option<&Value>,
+    version: i64,
+    incarnation: &str,
+) -> Value {
+    // §7: changed_attrs = top-level attribute IRIs that differ between the
+    // before- and after-images (meta members excluded). Create lists every
+    // attr, delete lists every prior attr.
+    let meta = [
+        "id",
+        "type",
+        "scope",
+        "createdAt",
+        "modifiedAt",
+        "deletedAt",
+        "expiresAt",
+    ];
+    fn keys<'a>(v: Option<&'a Value>, meta: &[&str]) -> Vec<&'a str> {
+        v.and_then(Value::as_object)
+            .map(|o| {
+                o.keys()
+                    .map(String::as_str)
+                    .filter(|k| !meta.contains(k))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    let mut changed: Vec<&str> = Vec::new();
+    for k in keys(prev, &meta).into_iter().chain(keys(next, &meta)) {
+        if !changed.contains(&k) && prev.and_then(|p| p.get(k)) != next.and_then(|n| n.get(k)) {
+            changed.push(k);
+        }
+    }
+    serde_json::json!({
+        "tenant": tenant.as_str(),
+        "entity_id": id,
+        "types": types,
+        "op": op,
+        "changed_attrs": changed,
+        "payload": next,
+        "prev_payload": prev,
+        "version": version,
+        "incarnation": incarnation,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn enqueue_change(
     tx: &mut sqlx::postgres::PgConnection,
@@ -110,17 +170,7 @@ async fn enqueue_change(
     version: i64,
     incarnation: &str,
 ) -> Result<(), sqlx::Error> {
-    let ev = serde_json::json!({
-        "tenant": tenant.as_str(),
-        "entity_id": id,
-        "types": types,
-        "op": op,
-        "changed_attrs": [],
-        "payload": next,
-        "prev_payload": prev,
-        "version": version,
-        "incarnation": incarnation,
-    });
+    let ev = change_event(tenant, op, id, types, prev, next, version, incarnation);
     super::outbox::enqueue(tx, tenant, &ev).await.map(|_| ())
 }
 
@@ -150,10 +200,12 @@ impl PgEntityStore {
             let done = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
-                    location)
+                    location, location_ambiguous)
                  VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz,
                          CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($9), 4326))
-                              THEN ST_SetSRID(ST_GeomFromGeoJSON($9), 4326) END)
+                              THEN ST_SetSRID(ST_GeomFromGeoJSON($9), 4326) END,
+                         $10 OR ($9 IS NOT NULL
+                                 AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($9), 4326))))
                  ON CONFLICT (tenant_id, id) DO NOTHING",
             )
             .bind(tenant.as_str())
@@ -165,6 +217,7 @@ impl PgEntityStore {
             .bind(&e.modified)
             .bind(&e.expires)
             .bind(&e.location)
+            .bind(e.location_ambiguous)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -191,17 +244,23 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            let row = sqlx::query("SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2")
-                .bind(tenant.as_str())
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
+            // 4.22: expired rows are invalid context until the sweep reaps them
+            let row = sqlx::query(
+                "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
+                   AND (expires_at IS NULL OR expires_at > now())",
+            )
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
             tx.commit().await?;
             Ok(row.map(|r| r.get::<Value, _>(0)))
         })
     }
 
-    pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
+    /// Returns the deleted document (the before-image, captured in the same
+    /// transaction as the DELETE — never re-read outside it), `None` = absent.
+    pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
@@ -213,9 +272,10 @@ impl PgEntityStore {
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
+            let mut prev_out = None;
             if let Some(r) = &row {
+                let prev: Value = r.get(0);
                 if self.outbox_on() {
-                    let prev: Value = r.get(0);
                     let types: Vec<String> = r.get(1);
                     enqueue_change(
                         &mut tx,
@@ -230,9 +290,10 @@ impl PgEntityStore {
                     )
                     .await?;
                 }
+                prev_out = Some(prev);
             }
             tx.commit().await?;
-            Ok(row.is_some())
+            Ok(prev_out)
         })
     }
 
@@ -250,7 +311,11 @@ impl PgEntityStore {
         f: &EntityFilter<'_>,
     ) -> Result<QueryOutcome, sqlx::Error> {
         let mut binds: Vec<Bind> = vec![Bind::Text(tenant.as_str().to_owned())];
-        let mut wheres = vec!["tenant_id = $1".to_owned()];
+        let mut wheres = vec![
+            "tenant_id = $1".to_owned(),
+            // 4.22: expired entities never enter a result (or a page/total)
+            "(expires_at IS NULL OR expires_at > now())".to_owned(),
+        ];
         // C11 exactness ledger: ids/types/attrs translate exactly by
         // construction; q is exact IF it compiles (the compiler's contract);
         // scopeQ is documented loose-or-equal, geo has a metric residual
@@ -458,10 +523,12 @@ impl PgEntityStore {
             let mut docs: Vec<Value> = Vec::new();
             {
                 use futures_util::TryStreamExt;
-                let mut stream =
-                    sqlx::query("SELECT entity FROM entities WHERE tenant_id = $1 ORDER BY id")
-                        .bind(tenant.as_str())
-                        .fetch(&mut *tx);
+                let mut stream = sqlx::query(
+                    "SELECT entity FROM entities WHERE tenant_id = $1
+                           AND (expires_at IS NULL OR expires_at > now()) ORDER BY id",
+                )
+                .bind(tenant.as_str())
+                .fetch(&mut *tx);
                 while let Some(row) = stream.try_next().await? {
                     docs.push(row.get::<Value, _>(0));
                 }
@@ -504,6 +571,8 @@ impl PgEntityStore {
                            modified_at = $6::timestamptz, expires_at = $7::timestamptz,
                            location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))
                                            THEN ST_SetSRID(ST_GeomFromGeoJSON($8), 4326) END,
+                           location_ambiguous = $9 OR ($8 IS NOT NULL
+                               AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))),
                            version = version + 1
                          WHERE tenant_id = $1 AND id = $2
                          RETURNING version, created_at::text",
@@ -516,6 +585,7 @@ impl PgEntityStore {
                     .bind(&e.modified)
                     .bind(&e.expires)
                     .bind(&e.location)
+                    .bind(e.location_ambiguous)
                     .fetch_one(&mut *tx)
                     .await?;
                     if let Some(before) = &before {
@@ -562,7 +632,7 @@ impl PgEntityStore {
                 payload.push(serde_json::json!({
                     "id": id, "doc": doc, "types": e.types, "scopes": e.scopes,
                     "created": e.created, "modified": e.modified, "expires": e.expires,
-                    "location": e.location,
+                    "location": e.location, "loc_ambiguous": e.location_ambiguous,
                 }));
             }
         }
@@ -572,7 +642,7 @@ impl PgEntityStore {
             let rows = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
-                    location)
+                    location, location_ambiguous)
                  SELECT $1, e->>'id', e->'doc',
                         ARRAY(SELECT jsonb_array_elements_text(e->'types')),
                         CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
@@ -580,7 +650,10 @@ impl PgEntityStore {
                         (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
                         (e->>'expires')::timestamptz,
                         CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
-                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END
+                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                        COALESCE((e->>'loc_ambiguous')::bool, false)
+                          OR (e->>'location' IS NOT NULL
+                              AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326)))
                  FROM jsonb_array_elements($2::jsonb) AS e
                  ON CONFLICT (tenant_id, id) DO NOTHING
                  RETURNING id",
@@ -593,11 +666,11 @@ impl PgEntityStore {
                 rows.into_iter().map(|r| r.get::<String, _>(0)).collect();
             if self.outbox_on() {
                 let mut seen_ev = std::collections::HashSet::new();
+                let mut events = Vec::new();
                 for (id, doc) in items {
                     if created_now.contains(id.as_str()) && seen_ev.insert(id.as_str()) {
                         let e = extract(doc);
-                        enqueue_change(
-                            &mut tx,
+                        events.push(change_event(
                             tenant,
                             "create",
                             id,
@@ -606,10 +679,10 @@ impl PgEntityStore {
                             Some(doc),
                             1,
                             &e.created,
-                        )
-                        .await?;
+                        ));
                     }
                 }
+                super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
             }
             tx.commit().await?;
             let mut created = created_now;
@@ -640,29 +713,255 @@ impl PgEntityStore {
             .fetch_all(&mut *tx)
             .await?;
             if self.outbox_on() {
-                for r in &rows {
-                    let id: String = r.get(0);
-                    let prev: Value = r.get(1);
-                    let types: Vec<String> = r.get(2);
-                    enqueue_change(
-                        &mut tx,
-                        tenant,
-                        "delete",
-                        &id,
-                        &types,
-                        Some(&prev),
-                        None,
-                        r.get::<i64, _>(3),
-                        r.get::<&str, _>(4),
-                    )
-                    .await?;
-                }
+                let events: Vec<Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let id: String = r.get(0);
+                        let prev: Value = r.get(1);
+                        let types: Vec<String> = r.get(2);
+                        change_event(
+                            tenant,
+                            "delete",
+                            &id,
+                            &types,
+                            Some(&prev),
+                            None,
+                            r.get::<i64, _>(3),
+                            r.get::<&str, _>(4),
+                        )
+                    })
+                    .collect();
+                super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
             }
             tx.commit().await?;
             Ok(rows
                 .into_iter()
                 .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
                 .collect())
+        })
+    }
+
+    /// C5+ (audit 2026-08-08): batch upsert in REPLACE semantics — ONE
+    /// `INSERT … ON CONFLICT DO UPDATE` for the whole batch, one transaction.
+    /// Returns a created-flag per input item (input order; duplicates of one
+    /// id report the first outcome). Before-images for the change events are
+    /// captured by a single `FOR UPDATE` select in the same transaction.
+    /// Returns per input item: (created?, before-image) — the before-image is
+    /// for the caller's change hook and comes from the same-tx FOR UPDATE.
+    pub fn batch_upsert_replace(
+        &self,
+        tenant: &TenantId,
+        items: &[(String, Value)],
+    ) -> Result<Vec<(bool, Option<Value>)>, sqlx::Error> {
+        let mut seen = std::collections::HashSet::new();
+        let mut payload = Vec::new();
+        let mut ids = Vec::new();
+        for (id, doc) in items {
+            if seen.insert(id.as_str()) {
+                let e = extract(doc);
+                ids.push(id.clone());
+                payload.push(serde_json::json!({
+                    "id": id, "doc": doc, "types": e.types, "scopes": e.scopes,
+                    "created": e.created, "modified": e.modified, "expires": e.expires,
+                    "location": e.location, "loc_ambiguous": e.location_ambiguous,
+                }));
+            }
+        }
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            // lock + before-images in one statement (ordered: stable lock order)
+            let prev_rows = sqlx::query(
+                "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                 ORDER BY id FOR UPDATE",
+            )
+            .bind(tenant.as_str())
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            let prevs: std::collections::HashMap<String, Value> = prev_rows
+                .into_iter()
+                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+                .collect();
+            let rows = sqlx::query(
+                "INSERT INTO entities
+                   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
+                    location, location_ambiguous)
+                 SELECT $1, e->>'id', e->'doc',
+                        ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                        CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                             ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                        (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
+                        (e->>'expires')::timestamptz,
+                        CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
+                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                        COALESCE((e->>'loc_ambiguous')::bool, false)
+                          OR (e->>'location' IS NOT NULL
+                              AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326)))
+                 FROM jsonb_array_elements($2::jsonb) AS e
+                 ON CONFLICT (tenant_id, id) DO UPDATE SET
+                        entity = EXCLUDED.entity, types = EXCLUDED.types,
+                        scopes = EXCLUDED.scopes, modified_at = EXCLUDED.modified_at,
+                        expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
+                        location_ambiguous = EXCLUDED.location_ambiguous,
+                        version = entities.version + 1
+                 RETURNING id, (xmax = 0) AS inserted, version, created_at::text",
+            )
+            .bind(tenant.as_str())
+            .bind(Value::Array(payload))
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut created: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            let mut events = Vec::new();
+            for r in &rows {
+                let id: String = r.get(0);
+                let inserted: bool = r.get(1);
+                if self.outbox_on() {
+                    let doc = items
+                        .iter()
+                        .find(|(i, _)| *i == id)
+                        .map(|(_, d)| d)
+                        .expect("row id came from items");
+                    let e = extract(doc);
+                    events.push(change_event(
+                        tenant,
+                        if inserted { "create" } else { "update" },
+                        &id,
+                        &e.types,
+                        prevs.get(&id),
+                        Some(doc),
+                        r.get::<i64, _>(2),
+                        r.get::<&str, _>(3),
+                    ));
+                }
+                created.insert(id, inserted);
+            }
+            super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
+            tx.commit().await?;
+            Ok(items
+                .iter()
+                .map(|(id, _)| {
+                    (
+                        created.get(id).copied().unwrap_or(false),
+                        prevs.get(id).cloned(),
+                    )
+                })
+                .collect())
+        })
+    }
+
+    /// C5+ (audit 2026-08-08): batch read-modify-write — ONE transaction,
+    /// all rows locked in a single ordered `FOR UPDATE` select, the closure
+    /// applied per doc in Rust, and ONE multi-row UPDATE writeback. Per-item
+    /// results align with `ids`: `None` = absent, `Some(Err)` = the closure
+    /// rejected that item (its write is skipped, the rest proceed).
+    pub fn batch_mutate<E>(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+        mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
+    ) -> Result<Vec<Option<Result<(), E>>>, sqlx::Error> {
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(
+                "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                 ORDER BY id FOR UPDATE",
+            )
+            .bind(tenant.as_str())
+            .bind(ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut docs: std::collections::HashMap<String, Value> = rows
+                .into_iter()
+                .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
+                .collect();
+            let mut results: Vec<Option<Result<(), E>>> = Vec::with_capacity(ids.len());
+            let mut payload = Vec::new();
+            let mut changed: Vec<(String, Value, Value)> = Vec::new(); // id, before, after
+            for id in ids {
+                match docs.get_mut(id) {
+                    None => results.push(None),
+                    Some(doc) => {
+                        let before = doc.clone();
+                        match f(id, doc) {
+                            Err(e) => {
+                                *doc = before; // closure failed: discard its edits
+                                results.push(Some(Err(e)));
+                            }
+                            Ok(()) => {
+                                if *doc != before {
+                                    let e = extract(doc);
+                                    payload.push(serde_json::json!({
+                                        "id": id, "doc": &*doc, "types": e.types,
+                                        "scopes": e.scopes, "modified": e.modified,
+                                        "expires": e.expires, "location": e.location,
+                                        "loc_ambiguous": e.location_ambiguous,
+                                    }));
+                                    changed.push((id.clone(), before, doc.clone()));
+                                }
+                                results.push(Some(Ok(())));
+                            }
+                        }
+                    }
+                }
+            }
+            if !payload.is_empty() {
+                let updated = sqlx::query(
+                    "UPDATE entities t SET
+                            entity = e->'doc',
+                            types = ARRAY(SELECT jsonb_array_elements_text(e->'types')),
+                            scopes = CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                                          ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                            modified_at = (e->>'modified')::timestamptz,
+                            expires_at = (e->>'expires')::timestamptz,
+                            location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
+                                            THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                            location_ambiguous = COALESCE((e->>'loc_ambiguous')::bool, false)
+                              OR (e->>'location' IS NOT NULL
+                                  AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))),
+                            version = t.version + 1
+                     FROM jsonb_array_elements($2::jsonb) AS e
+                     WHERE t.tenant_id = $1 AND t.id = e->>'id'
+                     RETURNING t.id, t.version, t.created_at::text",
+                )
+                .bind(tenant.as_str())
+                .bind(Value::Array(payload))
+                .fetch_all(&mut *tx)
+                .await?;
+                if self.outbox_on() {
+                    let meta: std::collections::HashMap<String, (i64, String)> = updated
+                        .into_iter()
+                        .map(|r| {
+                            (
+                                r.get::<String, _>(0),
+                                (r.get::<i64, _>(1), r.get::<String, _>(2)),
+                            )
+                        })
+                        .collect();
+                    let events: Vec<Value> = changed
+                        .iter()
+                        .filter_map(|(id, before, after)| {
+                            let e = extract(after);
+                            let (version, incarnation) = meta.get(id)?;
+                            Some(change_event(
+                                tenant,
+                                "update",
+                                id,
+                                &e.types,
+                                Some(before),
+                                Some(after),
+                                *version,
+                                incarnation,
+                            ))
+                        })
+                        .collect();
+                    super::outbox::enqueue_many(&mut tx, tenant, &events).await?;
+                }
+            }
+            tx.commit().await?;
+            Ok(results)
         })
     }
 

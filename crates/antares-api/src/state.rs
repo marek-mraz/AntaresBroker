@@ -13,9 +13,10 @@ use web_time::Instant;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<AnyStore>,
-    /// Active store backend ("memory" | "file" | …) — reported by `/q/health`
-    /// (A4; NOT in `/info/sourceIdentity`, which is a spec resource).
-    pub store_mode: String,
+    /// Active store backend — reported by `/q/health` (A4; NOT in
+    /// `/info/sourceIdentity`, which is a spec resource). A typed value so
+    /// mode-gated sections switch on an enum, never on strings.
+    pub store_mode: antares_sql::StoreMode,
     pub loader: Arc<Loader>,
     pub started: Instant,
     /// Startup timestamp (createdAt of the built-in core @context entry).
@@ -88,11 +89,15 @@ impl AppState {
         Self::with_store(
             host_alias,
             Arc::new(AnyStore::Mem(Store::default())),
-            "memory".into(),
+            antares_sql::StoreMode::Memory,
         )
     }
 
-    pub fn with_store(host_alias: String, store: Arc<AnyStore>, store_mode: String) -> Self {
+    pub fn with_store(
+        host_alias: String,
+        store: Arc<AnyStore>,
+        store_mode: antares_sql::StoreMode,
+    ) -> Self {
         // I4: one policy value, read once, shared by every outbound path —
         // the gate (scheme/breakers) and the clients (DNS pinning, redirect
         // cap) can never disagree about what is allowed (§16.4).

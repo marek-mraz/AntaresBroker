@@ -327,11 +327,13 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
         )
         .expect("sql query")
         .rows);
-    // only the two rows with no extractable geometry survive the guard
+    // only the row CARRYING an unextractable geoproperty survives (via the
+    // location_ambiguous flag); a row with no geoproperty at all can never
+    // match the evaluator and is excluded in SQL — exact, and index-shaped
     assert_eq!(
         got,
-        ["urn:p:multi", "urn:p:nogeo"],
-        "the geo predicate must run in SQL, keeping only the IS NULL guard rows"
+        ["urn:p:multi"],
+        "the geo predicate must run in SQL, keeping only the ambiguous rows"
     );
 }
 

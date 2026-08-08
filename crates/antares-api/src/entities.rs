@@ -112,40 +112,31 @@ pub fn mirror_record(st: &AppState, tenant: &TenantId, expanded: &Value) {
         return;
     };
     let r = (|| -> Result<(), antares_model::NgsiError> {
-        let exists = st.store.get(tenant, Kind::Temporal, id)?.is_some();
-        if !exists {
-            let mut doc = Map::new();
-            for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
-                if let Some(v) = obj.get(k) {
-                    doc.insert(k.into(), v.clone());
-                }
+        // C9/D append fast path (audit 2026-08-08): shell + additions in one
+        // store call — Pg records instances with a pure multi-row INSERT.
+        let mut shell = Map::new();
+        for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
+            if let Some(v) = obj.get(k) {
+                shell.insert(k.into(), v.clone());
             }
-            st.store
-                .create(tenant, Kind::Temporal, id, Value::Object(doc))?;
         }
-        st.store.mutate(tenant, Kind::Temporal, id, |doc| {
-            let target = doc.as_object_mut().expect("temporal doc");
-            for (k, v) in obj {
-                if is_meta(k) {
-                    continue;
-                }
-                let mut incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
-                for inst in &mut incoming {
-                    if let Some(o) = inst.as_object_mut() {
-                        o.entry("instanceId".to_owned()).or_insert_with(|| {
-                            Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
-                        });
-                    }
-                }
-                match target.get_mut(k).and_then(Value::as_array_mut) {
-                    Some(cur) => cur.extend(incoming),
-                    None => {
-                        target.insert(k.clone(), Value::Array(incoming));
-                    }
+        let mut additions = Map::new();
+        for (k, v) in obj {
+            if is_meta(k) {
+                continue;
+            }
+            let mut incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
+            for inst in &mut incoming {
+                if let Some(o) = inst.as_object_mut() {
+                    o.entry("instanceId".to_owned()).or_insert_with(|| {
+                        Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
+                    });
                 }
             }
-            Ok::<(), std::convert::Infallible>(())
-        })?;
+            additions.insert(k.clone(), Value::Array(incoming));
+        }
+        st.store
+            .temporal_append(tenant, id, &Value::Object(shell), &Value::Object(additions))?;
         Ok(())
     })();
     if let Err(e) = r {

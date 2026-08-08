@@ -366,11 +366,11 @@ async fn health(
     };
     let mut body = serde_json::json!({
         "status": if draining { "DRAINING" } else { "UP" },
-        "store": state.store_mode,
+        "store": state.store_mode.as_str(),
     });
     // B13: in `file` mode commits serialize behind one writer — the queue
     // depth (current, peak) is the signal that decides the group-commit lever.
-    if state.store_mode == "file" {
+    if state.store_mode == antares_sql::StoreMode::File {
         if let Some((depth, peak)) = state.store.commit_queue() {
             body["commitQueueDepth"] = depth.into();
             body["commitQueuePeak"] = peak.into();

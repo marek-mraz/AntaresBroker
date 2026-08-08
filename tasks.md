@@ -232,8 +232,12 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       rows in the SAME tx; weekly partitions pre-created by the broker's
       maintenance task (default catch-all partition holds historic
       backfill); retention = ANTARES_TEMPORAL_RETENTION_DAYS, deliberately
-      no default. Temporal READS stay on the doc bridge until the C-iii
-      compiled-SQL work replaces them.)*
+      no default. CUTOVER COMPLETE 2026-08-08 (ADR-0009): temporal READS
+      now reconstruct from attr_instances rows — the 0002 doc bridge is
+      dropped (migration 0006 keeps only the small `meta` jsonb), writes are
+      per-instance deltas (mirror_record uses the pure-INSERT append seam),
+      TemporalFilter carries entity LIMIT/OFFSET, and retention finally
+      shortens what queries return.)*
 
 ### C-iii. Query compilation (`antares-sql/src/compile/`)
 
@@ -318,6 +322,16 @@ Re-measure per target disk; network-attached cloud SSDs fsync ~3–5× slower.
       on gate-status.txt per mode).)*
 
 ## D. `timescale` mode — TemporalStore second impl (§8.2)
+
+> **Truth-up 2026-08-08 (audit + ADR-0009):** the D checkboxes below were
+> honest about the DDL but not about the read path — until the ADR-0009
+> cutover, `attr_instances` had NO reader and compression/retention were
+> cosmetic. That is fixed: rows are the read path in both Pg modes, the
+> maintenance branch is PINNED at startup from the actual relkind
+> (`detect_temporal_backend`) instead of per-tick pg_extension probes, and
+> `ANTARES_STORE=timescale` on a database whose migrations ran without the
+> extension is a fatal, named error. Retention additionally reaps the
+> DEFAULT partition's expired rows in plain mode.
 
 - [x] D1. `TemporalStore` trait, exactly two impls (`timescale.rs`,
       `plain.rs`); identical table shape and queries — modes differ only in

@@ -300,11 +300,19 @@ impl Store {
     }
 
     /// B13: acquire the write-critical section, counting queued writers.
+    ///
+    /// Poison recovery (`into_inner`) is deliberate: a panic inside a caller's
+    /// mutate closure unwinds one request; poisoning would turn it into a
+    /// whole-process brick (every later store call panicking until restart).
+    /// Consistency holds because mutations work on a clone and swap last.
     fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
         use std::sync::atomic::Ordering;
         let depth = self.write_waiters.fetch_add(1, Ordering::Relaxed) + 1;
         self.write_waiters_peak.fetch_max(depth, Ordering::Relaxed);
-        let guard = self.inner.write().expect("store lock");
+        let guard = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.write_waiters.fetch_sub(1, Ordering::Relaxed);
         guard
     }
@@ -321,18 +329,60 @@ impl Store {
     }
 
     pub fn set_change_hook(&self, h: ChangeHook) {
-        *self.hook.write().expect("hook lock") = Some(h);
+        *self
+            .hook
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h);
     }
 
     fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
-        if let Some(h) = self.hook.read().expect("hook lock").as_ref() {
+        if let Some(h) = self
+            .hook
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             h(tenant, before, after);
         }
     }
 
+    /// 4.22 garbage collection for the memory/file arm: remove entity docs
+    /// whose `expiresAt` (byte-compared against the UTC-Z `now` stamp, same
+    /// as the read filter) has passed. `file` mode persists each removal.
+    /// Returns how many were reaped.
+    pub fn sweep_expired(&self, now: &str) -> usize {
+        let mut inner = self.write_inner();
+        let mut reaped = 0usize;
+        let mut dead: Vec<(String, String)> = Vec::new();
+        for (tenant, docs) in &inner.entities {
+            for (id, doc) in docs {
+                if doc
+                    .get("expiresAt")
+                    .and_then(Value::as_str)
+                    .is_some_and(|e| e < now)
+                {
+                    dead.push((tenant.clone(), id.clone()));
+                }
+            }
+        }
+        for (tenant, id) in dead {
+            if let Ok(t) = TenantId::new(&tenant) {
+                self.persist(T_ENTITIES, &key_bytes(&t, &id), None);
+            }
+            if let Some(docs) = inner.entities.get_mut(&tenant) {
+                docs.remove(&id);
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+
     /// Tenants that hold any subscriptions (interval-firing scan).
     pub fn subscription_tenants(&self) -> Vec<String> {
-        let inner = self.inner.read().expect("store lock");
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out: Vec<String> = inner
             .subscriptions
             .iter()
@@ -405,7 +455,10 @@ impl Store {
     }
 
     pub fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Option<Value> {
-        let inner = self.inner.read().expect("store lock");
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::map(&inner, kind)
             .get(tenant.as_str())
             .and_then(|m| m.get(id))
@@ -434,7 +487,10 @@ impl Store {
 
     /// Snapshot of all docs of a kind for one tenant (id order).
     pub fn list(&self, tenant: &TenantId, kind: Kind) -> Vec<Value> {
-        let inner = self.inner.read().expect("store lock");
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::map(&inner, kind)
             .get(tenant.as_str())
             .map(|m| m.values().cloned().collect())
@@ -488,7 +544,7 @@ impl Store {
     pub fn context_get(&self, id: &str) -> Option<Value> {
         self.inner
             .read()
-            .expect("store lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contexts
             .get(id)
             .cloned()
@@ -508,7 +564,7 @@ impl Store {
     pub fn context_list(&self) -> Vec<Value> {
         self.inner
             .read()
-            .expect("store lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contexts
             .values()
             .cloned()

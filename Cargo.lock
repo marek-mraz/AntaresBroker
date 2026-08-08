@@ -186,6 +186,7 @@ version = "0.1.0"
 dependencies = [
  "antares-model",
  "antares-ql",
+ "chrono",
  "futures-util",
  "redb",
  "serde_json",
