@@ -63,6 +63,36 @@ commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit
 once per entity write, and redb has a single writer, so this is a per-process
 ceiling (tasks.md B13).
 
+## Run with Docker
+
+```bash
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+curl -s localhost:9090/q/health
+```
+
+Defaults need zero infrastructure: `memory` store, `local` bus, all roles.
+Other store modes via env:
+
+```bash
+# file store — durable, no Postgres; the data dir must be a mounted volume
+docker run --rm -p 9090:9090 \
+  -e ANTARES_STORE=file -e ANTARES_DATA_DIR=/data \
+  -v antares-data:/data \
+  ghcr.io/marek-mraz/antares-broker:dev
+
+# postgres / timescale store
+docker run --rm -p 9090:9090 \
+  -e ANTARES_STORE=postgres \
+  -e ANTARES_DATABASE_URL=postgresql://antares:antares@db:5432/antares \
+  ghcr.io/marek-mraz/antares-broker:dev
+```
+
+Tags: `:dev` = latest green master, `:dev-<run>` = a specific CI run,
+`:latest` = latest release. Images are multi-arch (linux/amd64 + linux/arm64).
+The amd64 image is the exact bytes the ETSI gates tested; the arm64 half is
+built natively but not gated (the workspace tests run natively on arm).
+Idle RSS ≈ 9 MiB.
+
 ## Browser build (WebAssembly)
 
 The same broker compiles to `wasm32-unknown-unknown` and runs entirely in a
