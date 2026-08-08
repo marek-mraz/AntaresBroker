@@ -200,7 +200,7 @@ export async function createDemo({ startPipe }) {
   for (const [from, to, type] of DEMO.csrs) {
     if (!linked(from, to)) await apiMod.registerLink(from, to, type, TYPES);
   }
-  board.fedView.add(DEMO.hub);
+  for (const n of DEMO.fedView ?? [DEMO.hub]) board.fedView.add(n);
   save("antares.fedview", [...board.fedView]);
   const subs = await apiMod.listSubscriptions(DEMO.hub);
   if (!(subs ?? []).length) {

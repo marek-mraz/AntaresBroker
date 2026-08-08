@@ -39,11 +39,16 @@ export const SEED_SPACES = ["default", "smart-city", "old-town", "harbor",
 export const DEMO = {
   hub: "smart-city",
   spaces: ["default", "smart-city", "old-town", "harbor", "airport",
-    "university", "energy-grid", "transit", "decidim"],
+    "university", "energy-grid", "transit", "decidim",
+    "old-town-market", "old-town-castle"],
+  // spaces with fed view ON from the start: the hub, plus old-town — a NESTED
+  // federator that reads its own sub-spaces through its own CSRs
+  fedView: ["smart-city", "old-town"],
   layout: {
     "smart-city": [0.5, 0.45], "old-town": [0.3, 0.2], harbor: [0.72, 0.18],
     airport: [0.88, 0.45], university: [0.12, 0.48], "energy-grid": [0.28, 0.78],
     transit: [0.72, 0.8], decidim: [0.1, 0.16], default: [0.52, 0.08],
+    "old-town-market": [0.22, 0.02], "old-town-castle": [0.44, 0.02],
   },
   devices: [
     ["old-town", "TemperatureSensor", 3], ["old-town", "NoiseSensor", 4],
@@ -53,9 +58,15 @@ export const DEMO = {
     ["energy-grid", "EnergyMeter", 2], ["energy-grid", "Streetlight", 4],
     ["transit", "BikeStation", 3], ["transit", "TrafficCounter", 3],
     ["decidim", "CitizenProposal", 5],
+    ["old-town-market", "WasteContainer", 4], ["old-town-castle", "Streetlight", 5],
   ],
   csrs: [
     ["smart-city", "old-town", null],
+    // nested federation: old-town itself federates its sub-spaces —
+    // type-scoped, so the nested CSRs only carry the sub-space's own data
+    // and never attract unrelated write forwarding down the chain
+    ["old-town", "old-town-market", "WasteContainer"],
+    ["old-town", "old-town-castle", "Streetlight"],
     ["smart-city", "harbor", null],
     ["smart-city", "university", null],
     ["smart-city", "energy-grid", null],

@@ -7,6 +7,13 @@ import { board, burst, emit, refreshSpace, save } from "./board.js";
 
 const timers = new Map();
 
+// Rolling retention via NGSI-LD itself (4.22 transient attributes): every
+// simulated reading expires 10 minutes after it was produced, so the broker's
+// own GC prunes old temporal instances — the in-browser store stays bounded
+// without any custom cleanup. Each tick renews the live attribute.
+const RETENTION_MS = 10 * 60_000;
+const expiry = () => new Date(Date.now() + RETENTION_MS).toISOString();
+
 export function startPipe(p) {
   stopTimer(p.id);
   timers.set(p.id, setInterval(() => tickPipe(p).catch(() => {}), p.secs * 1000));
@@ -57,6 +64,7 @@ async function tickPipe(p) {
       type: "Property",
       value: t.gen(Date.now()),
       observedAt: new Date().toISOString(),
+      expiresAt: expiry(),
     });
     if (patch.status === 404) {
       const post = await createEntity(p.into, {
@@ -66,6 +74,7 @@ async function tickPipe(p) {
           type: "Property",
           value: t.gen(Date.now()),
           observedAt: new Date().toISOString(),
+          expiresAt: expiry(),
         },
       });
       if (post.status !== 201) return; // rejected — no tick, log has the row

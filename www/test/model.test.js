@@ -44,13 +44,16 @@ describe("DEMO topology", () => {
   });
 
   it("every device's data reaches the smart-city hub", () => {
-    // (space, type) reaches the hub if a CSR covers it there, or a copy
-    // moves it to a space from which it reaches the hub.
+    // (space, type) reaches the hub if a CSR chain covers it (federation
+    // CASCADES — verified against the broker: a nested CSR hub→mid→leaf
+    // serves the leaf's entities two hops up), or a copy moves it to a
+    // space from which it reaches the hub.
     const reaches = (space, type, hops = 0) => {
       if (hops > 4) return false;
       if (space === DEMO.hub) return true;
-      if (DEMO.csrs.some(([hub, peer, t]) =>
-        hub === DEMO.hub && peer === space && (t === null || t === type))) return true;
+      if (DEMO.csrs.some(([reader, peer, t]) =>
+        peer === space && (t === null || t === type) &&
+        reaches(reader, type, hops + 1))) return true;
       return DEMO.copies.some(([from, into, t]) =>
         from === space && t === type && reaches(into, type, hops + 1));
     };

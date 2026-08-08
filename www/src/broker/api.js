@@ -37,10 +37,14 @@ export async function listSubscriptions(space) {
   return r.ok ? r.json() : [];
 }
 
-export const createEntity = (space, doc) => postLd(space, "/ngsi-ld/v1/entities", doc);
+// Writes are LOCAL by intent (5.5.13 local=true): the playground's devices
+// and copies write into one space — without the flag, any space holding a
+// CSR turns a plain write into a distributed op (207s, forwarded copies).
+export const createEntity = (space, doc) =>
+  postLd(space, "/ngsi-ld/v1/entities?local=true", doc);
 
 export function patchAttr(space, id, attr, fragment) {
-  return api(space, `/ngsi-ld/v1/entities/${encodeURIComponent(id)}/attrs/${attr}`, {
+  return api(space, `/ngsi-ld/v1/entities/${encodeURIComponent(id)}/attrs/${attr}?local=true`, {
     method: "PATCH",
     headers: { "Content-Type": "application/ld+json" },
     body: JSON.stringify({ ...fragment, "@context": CORE_CTX }),
@@ -51,7 +55,7 @@ export const deleteEntity = (space, id) =>
   api(space, `/ngsi-ld/v1/entities/${encodeURIComponent(id)}`, { method: "DELETE" });
 
 export function batchUpsert(space, docs) {
-  return api(space, "/ngsi-ld/v1/entityOperations/upsert", {
+  return api(space, "/ngsi-ld/v1/entityOperations/upsert?local=true", {
     method: "POST",
     headers: { "Content-Type": "application/ld+json" },
     body: JSON.stringify(docs.map((d) => ({ ...d, "@context": CORE_CTX }))),
