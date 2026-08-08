@@ -196,7 +196,7 @@ export default function Board({ selected, onSelectSpace }) {
         source: p.kind === "sync" ? `s:${p.from}` : `p:${p.id}`,
         target: `s:${p.into}`,
         animated: !!on,
-        label: `⏱ ${p.kind === "sync" ? `${p.type} / ` : ""}${p.secs}s${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
+        label: `${p.kind === "sync" ? `COPY · ${p.type} / ` : "⏱ "}${p.secs}s${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
         labelStyle: { fill: OK },
         style: {
           stroke: OK,
@@ -277,7 +277,7 @@ export default function Board({ selected, onSelectSpace }) {
         <span><i className="lg-space" /> context space (tenant)</span>
         <span><i className="lg-device" /> sensor / source</span>
         <span style={{ color: FED }}>┄┄ CSR federation</span>
-        <span style={{ color: OK }}>┈┈ pipeline</span>
+        <span style={{ color: OK }}>┈┈ pipeline (space→space = COPY)</span>
       </div>
     </div>
   );
