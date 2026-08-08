@@ -58,16 +58,26 @@ impl Broker {
         // Same in-process matcher/notifier path as bus=local (§9.2): the
         // store's change hook feeds it, no bus process exists to talk to.
         antares_api::notify::wire(&mut state);
-        // 4.22 GC: the native broker sweeps on a tokio interval (main.rs);
-        // the browser has no such loop, so without this the OPFS file grows
-        // without bound under ticking transient attributes — reads filter
-        // expired instances but nothing would ever delete them.
+        // 4.22 GC: the native broker sweeps on a tokio interval (main.rs,
+        // ANTARES_SWEEP_SECS). The browser has no env, so the SAME variable is
+        // read off `globalThis.ANTARES_SWEEP_SECS` (seconds, set before
+        // construction — the playground forwards a ?ANTARES_SWEEP_SECS= URL
+        // param into both the worker and in-page contexts); absent → 60 s.
+        // Without this loop the OPFS file grows without bound under ticking
+        // transient attributes — reads filter expired instances but nothing
+        // would ever delete them.
         #[cfg(target_arch = "wasm32")]
         {
             let store = state.store.clone();
+            let sweep_ms = js_sys::Reflect::get(&js_sys::global(), &"ANTARES_SWEEP_SECS".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                .filter(|s| *s > 0.0)
+                .map(|s| (s * 1000.0) as u32)
+                .unwrap_or(60_000);
             wasm_bindgen_futures::spawn_local(async move {
                 loop {
-                    gloo_timers::future::TimeoutFuture::new(60_000).await;
+                    gloo_timers::future::TimeoutFuture::new(sweep_ms).await;
                     store.sweep_expired();
                 }
             });

@@ -13,6 +13,9 @@ self.onmessage = async (e) => {
   const msg = e.data;
   try {
     if (msg.kind === "init") {
+      // 4.22 GC cadence — the wasm broker reads globalThis.ANTARES_SWEEP_SECS
+      // at construction (same variable as the native env knob).
+      if (msg.sweepSecs > 0) globalThis.ANTARES_SWEEP_SECS = msg.sweepSecs;
       await init();
       broker = await AntaresBroker.persistent(
         msg.file ?? "antares.redb",

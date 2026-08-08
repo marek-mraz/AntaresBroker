@@ -138,9 +138,12 @@ pub fn expand_entity(
     // `expires_at` column extraction and temporal `meta_of` all expect. Missing
     // this made 4.22 dead code on every backend.
     if let Some(v) = doc.get("expiresAt") {
+        // In a merge/partial fragment an NGSI-LD Null asks for the expiry's
+        // removal (5.5.12) — pass it through for merge_into to act on.
+        let is_null_removal = opts.allow_null && v.as_str() == Some("urn:ngsi-ld:null");
         let s = v
             .as_str()
-            .filter(|s| parse_datetime(s))
+            .filter(|s| is_null_removal || parse_datetime(s))
             .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime"))?;
         out.insert("expiresAt".into(), Value::String(s.to_owned()));
     }

@@ -48,6 +48,12 @@ const ALLOW_PRIVATE_EGRESS = new URLSearchParams(location.search).get(
   "allowPrivateEgress",
 ) === "1";
 
+// ?ANTARES_SWEEP_SECS=2 — 4.22 GC cadence, the SAME variable as the native
+// env knob; the wasm broker reads it off globalThis at construction
+// (default 60 s when unset).
+const SWEEP_SECS =
+  Number(new URLSearchParams(location.search).get("ANTARES_SWEEP_SECS")) || 0;
+
 let worker = null;
 let workerDead = null;
 let seq = 0;
@@ -88,6 +94,7 @@ async function bootWorker() {
         kind: "init",
         file: "antares.redb",
         allowPrivateEgress: ALLOW_PRIVATE_EGRESS,
+        sweepSecs: SWEEP_SECS,
       });
       return true;
     } catch (err) {
@@ -107,6 +114,7 @@ async function bootInPage() {
   const pkgUrl = new URL("pkg/antares_wasm.js", document.baseURI).href;
   const mod = await import(/* @vite-ignore */ pkgUrl);
   await mod.default();
+  if (SWEEP_SECS > 0) globalThis.ANTARES_SWEEP_SECS = SWEEP_SECS;
   pageBroker = new mod.AntaresBroker(ALLOW_PRIVATE_EGRESS);
   const lbUrl = new URL("loopback.js", document.baseURI).href;
   const { installLoopback } = await import(/* @vite-ignore */ lbUrl);

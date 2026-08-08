@@ -1541,6 +1541,18 @@ pub fn merge_into(doc: &mut Value, fragment: &Value, ts: &str) {
             "scope" => {
                 target.insert("scope".into(), v.clone());
             }
+            // 4.22: expiresAt is a settable Entity member (5.2.4, not in the
+            // read-only Table 5.2.2-1) — merge updates the storage expiry;
+            // an NGSI-LD Null removes it (5.5.12). Without this arm it fell
+            // through to the attribute path, where a bare string has no
+            // instances and the member was silently dropped.
+            "expiresAt" => {
+                if is_ngsi_null(v) {
+                    target.remove("expiresAt");
+                } else {
+                    target.insert("expiresAt".into(), v.clone());
+                }
+            }
             _ => {
                 let frag_instances = v.as_array().cloned().unwrap_or_default();
                 let mut cur: Vec<Value> = target
@@ -1944,4 +1956,27 @@ async fn retrieve_attr_inner(
     };
     let accept = parse_accept(headers)?;
     Ok(respond(StatusCode::OK, body, &ctx, accept, &tenant))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_into;
+    use serde_json::json;
+
+    #[test]
+    fn merge_sets_and_null_removes_expires_at() {
+        let mut doc = json!({"id": "urn:x", "type": ["T"]});
+        merge_into(
+            &mut doc,
+            &json!({"expiresAt": "2030-01-01T00:00:00Z"}),
+            "2026-08-08T00:00:00Z",
+        );
+        assert_eq!(doc["expiresAt"], "2030-01-01T00:00:00Z");
+        merge_into(
+            &mut doc,
+            &json!({"expiresAt": "urn:ngsi-ld:null"}),
+            "2026-08-08T00:00:01Z",
+        );
+        assert!(doc.get("expiresAt").is_none(), "NGSI-LD Null removes it");
+    }
 }

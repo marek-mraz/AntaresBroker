@@ -80,6 +80,9 @@ services:
       ANTARES_HOST_ALIAS: antares1
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
+      # not only the read-boundary filter (prod default: 15 min)
+      ANTARES_SWEEP_SECS: "2"
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
@@ -92,6 +95,9 @@ services:
       ANTARES_HOST_ALIAS: antares2
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
+      # not only the read-boundary filter (prod default: 15 min)
+      ANTARES_SWEEP_SECS: "2"
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5434/antares
@@ -104,6 +110,9 @@ services:
       ANTARES_HOST_ALIAS: antares3
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
+      # not only the read-boundary filter (prod default: 15 min)
+      ANTARES_SWEEP_SECS: "2"
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5435/antares
@@ -116,6 +125,9 @@ services:
       ANTARES_HOST_ALIAS: antares4
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
+      # not only the read-boundary filter (prod default: 15 min)
+      ANTARES_SWEEP_SECS: "2"
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5436/antares
@@ -128,6 +140,9 @@ services:
       ANTARES_HOST_ALIAS: antares5
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
+      # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
+      # not only the read-boundary filter (prod default: 15 min)
+      ANTARES_SWEEP_SECS: "2"
       # ETSI mocks (notification receivers, context servers) live on localhost
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares

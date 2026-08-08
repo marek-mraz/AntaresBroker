@@ -28,6 +28,9 @@ const KNOWN_KEYS: &[&str] = &[
     // C9/D4 temporal retention horizon in days; absent = keep forever (a
     // maintenance job must never default to dropping data).
     "ANTARES_TEMPORAL_RETENTION_DAYS",
+    // 4.22 GC interval (memory/file arm); default 900 s, the ETSI stack runs
+    // at 2 s so the transient TPs (422_01) exercise the sweep itself.
+    "ANTARES_SWEEP_SECS",
     // K1 drain: the LB notice window, and the ceiling on waiting for
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",
@@ -326,13 +329,22 @@ async fn run(
     // 4.22 GC on the memory/file arm: reads already refuse expired entities;
     // this reaps them (spec-sanctioned lag). The Pg arm's sweep runs inside
     // the maintenance job below — one job per backend, mode-switched.
+    // ANTARES_SWEEP_SECS paces 4.22 GC identically across ALL store modes —
+    // the Mem/file sweep loop and the Pg/Timescale maintenance job below both
+    // tick on it (the ETSI stack runs at 2 s so transient TPs observe GC, not
+    // just the read filter); default matches the old fixed 15 min.
+    let sweep_secs = std::env::var("ANTARES_SWEEP_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(15 * 60);
     if matches!(
         state.store.as_ref(),
         antares_sql::store::any::AnyStore::Mem(_)
     ) {
         let store = state.store.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
             loop {
                 tick.tick().await;
                 let n = store.sweep_expired();
@@ -367,7 +379,10 @@ async fn run(
             })
             .transpose()?;
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            // Same ANTARES_SWEEP_SECS cadence as the Mem arm — the job's 4.22
+            // reap is the sweep here; the partition/retention steps riding on
+            // the same tick are idempotent and SKIP LOCKED single-winner.
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
             loop {
                 tick.tick().await; // first tick is immediate: partitions at boot
                 match antares_sql::maintenance::temporal_maintenance(&pool, backend, retention)
