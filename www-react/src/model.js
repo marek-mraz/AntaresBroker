@@ -84,6 +84,49 @@ export function entLabel(doc) {
   return { type, emoji: t.emoji, attr: t.attr, value: t.attr ? doc[t.attr]?.value : undefined };
 }
 
+// ---- deterministic board layout ---------------------------------------------
+// Hub-and-spoke, collision-free by construction (unit-tested): the hub sits
+// center, every other space on an ellipse around it, and each space's
+// devices fan OUTWARD on the far side from the hub so device edges never
+// cross the middle. Positions are React-Flow top-left anchored.
+export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", W = 1400, H = 880 } = {}) {
+  const pos = {};
+  const cx = W / 2, cy = H / 2 + 20;
+  const SP = 55, DV = 26; // half node sizes (space 110px, device 52px)
+  const others = spaceNames.filter((n) => n !== hub);
+  const center = new Map(); // space -> center point
+  if (spaceNames.includes(hub)) center.set(hub, { x: cx, y: cy });
+  const n = others.length || 1;
+  others.forEach((name, i) => {
+    const ang = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+    center.set(name, { x: cx + 460 * Math.cos(ang), y: cy + 310 * Math.sin(ang) });
+  });
+  for (const [name, c] of center) pos[`s:${name}`] = { x: c.x - SP, y: c.y - SP };
+
+  const bySpace = new Map();
+  for (const p of pipes) {
+    if (p.kind !== "source") continue;
+    if (!bySpace.has(p.into)) bySpace.set(p.into, []);
+    bySpace.get(p.into).push(p);
+  }
+  for (const [space, list] of bySpace) {
+    const c = center.get(space);
+    if (!c) continue;
+    let ux = c.x - cx, uy = c.y - cy;
+    const d = Math.hypot(ux, uy);
+    if (d < 1) { ux = 0; uy = 1; } else { ux /= d; uy /= d; }
+    const px = -uy, py = ux;
+    list.forEach((p, i) => {
+      const off = (i - (list.length - 1) / 2) * 95;
+      pos[`p:${p.id}`] = {
+        x: c.x + ux * 170 + px * off - DV,
+        y: c.y + uy * 170 + py * off - DV,
+      };
+    });
+  }
+  return pos;
+}
+
 // ---- the board template: structure as JSON ---------------------------------
 export function buildTemplate({ mode, spaces, fedView, links, pipes, ents, selected }) {
   return {

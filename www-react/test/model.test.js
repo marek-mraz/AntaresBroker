@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ALL_TYPES, DEMO, GENERATORS, TENANT_RE, TYPES,
-  buildTemplate, normalizeTemplate,
+  arrangeBoard, buildTemplate, normalizeTemplate,
 } from "../src/model.js";
 
 describe("sensor catalog", () => {
@@ -63,6 +63,54 @@ describe("DEMO topology", () => {
     for (const s of DEMO.spaces) {
       expect(TENANT_RE.test(s), s).toBe(true);
       expect(DEMO.layout[s], `layout for ${s}`).toBeTruthy();
+    }
+  });
+});
+
+describe("arrangeBoard — the demo layout is collision-free by construction", () => {
+  const pipes = [
+    ...DEMO.devices.map(([into, type, secs], i) => ({ id: `d${i}`, kind: "source", type, into, secs })),
+    ...DEMO.copies.map(([from, into, type, secs], i) => ({ id: `c${i}`, kind: "sync", from, into, type, secs })),
+  ];
+  const pos = arrangeBoard(DEMO.spaces, pipes, { hub: DEMO.hub });
+  const SIZE = { s: 110, p: 52 }; // node box sizes
+  const centers = Object.entries(pos).map(([key, p]) => ({
+    key, r: SIZE[key[0]] / 2,
+    x: p.x + SIZE[key[0]] / 2,
+    y: p.y + SIZE[key[0]] / 2,
+  }));
+
+  it("positions every space and every device, nothing else", () => {
+    expect(Object.keys(pos).filter((k) => k.startsWith("s:"))).toHaveLength(DEMO.spaces.length);
+    expect(Object.keys(pos).filter((k) => k.startsWith("p:"))).toHaveLength(DEMO.devices.length);
+  });
+
+  it("no two nodes overlap (min gap 12px between borders)", () => {
+    for (let a = 0; a < centers.length; a++) {
+      for (let b = a + 1; b < centers.length; b++) {
+        const d = Math.hypot(centers[a].x - centers[b].x, centers[a].y - centers[b].y);
+        expect(d, `${centers[a].key} vs ${centers[b].key}`)
+          .toBeGreaterThanOrEqual(centers[a].r + centers[b].r + 12);
+      }
+    }
+  });
+
+  it("the hub sits in the middle of its districts", () => {
+    const hub = centers.find((c) => c.key === `s:${DEMO.hub}`);
+    const spaces = centers.filter((c) => c.key.startsWith("s:") && c.key !== hub.key);
+    const mx = spaces.reduce((a, c) => a + c.x, 0) / spaces.length;
+    const my = spaces.reduce((a, c) => a + c.y, 0) / spaces.length;
+    expect(Math.hypot(hub.x - mx, hub.y - my)).toBeLessThan(80);
+  });
+
+  it("devices sit farther from the hub than the space they feed (fanned outward)", () => {
+    const hub = centers.find((c) => c.key === `s:${DEMO.hub}`);
+    for (const p of pipes.filter((p) => p.kind === "source" && p.into !== DEMO.hub)) {
+      const dev = centers.find((c) => c.key === `p:${p.id}`);
+      const sp = centers.find((c) => c.key === `s:${p.into}`);
+      const dDev = Math.hypot(dev.x - hub.x, dev.y - hub.y);
+      const dSp = Math.hypot(sp.x - hub.x, sp.y - hub.y);
+      expect(dDev, `${p.id} beyond ${p.into}`).toBeGreaterThan(dSp);
     }
   });
 });

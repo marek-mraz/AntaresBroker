@@ -2,7 +2,7 @@
 // through useSyncExternalStore. Persistence keys are shared with www/ so
 // both UIs show the same board when served from the same origin.
 import * as apiMod from "../broker/api.js";
-import { DEMO, SEED_SPACES, TENANT_RE, TYPES, buildTemplate, normalizeTemplate } from "../model.js";
+import { DEMO, SEED_SPACES, TENANT_RE, TYPES, arrangeBoard, buildTemplate, normalizeTemplate } from "../model.js";
 import { transport } from "../broker/transport.js";
 
 export const load = (k, d) => JSON.parse(localStorage.getItem(k) ?? "null") ?? d;
@@ -194,11 +194,6 @@ export async function createDemo({ startPipe }) {
     if (!board.spaces.some((s) => s.name === n)) board.spaces.push({ name: n });
   }
   save("antares.spaces", board.spaces);
-  // hub-and-spoke default positions (world coords ≈ a typical canvas)
-  const w = 1100, h = 760;
-  for (const [name, [fx, fy]] of Object.entries(DEMO.layout)) {
-    board.positions[`s:${name}`] ??= { x: fx * w, y: fy * h };
-  }
   await refreshAll();
   const linked = (from, to) => (board.links.get(from) ?? []).some((l) => l.to === to);
   for (const [from, to, type] of DEMO.csrs) {
@@ -225,18 +220,17 @@ export async function createDemo({ startPipe }) {
     startPipe(p);
   }
   save("antares.pipes", board.pipes);
-  // park each device bubble beside the space it feeds
-  let di = 0;
-  for (const p of board.pipes) {
-    if (p.kind !== "source") continue;
-    const base = board.positions[`s:${p.into}`];
-    if (base) {
-      const ang = di++ * 2.399963;
-      board.positions[`p:${p.id}`] ??= { x: base.x + 120 * Math.cos(ang), y: base.y + 120 * Math.sin(ang) };
-    }
-  }
-  save("antares.pos", board.positions);
+  arrangeAll(); // the demo always lands in a clean hub-and-spoke layout
   await refreshAll();
+}
+
+// Re-layout the whole board deterministically (also the ✳ arrange button).
+export function arrangeAll() {
+  const arranged = arrangeBoard(board.spaces.map((s) => s.name), board.pipes, { hub: DEMO.hub });
+  Object.assign(board.positions, arranged);
+  save("antares.pos", board.positions);
+  board.layoutEpoch = (board.layoutEpoch ?? 0) + 1; // remounts ReactFlow → fitView
+  emit();
 }
 
 export async function resetBoard({ deletePipe }) {

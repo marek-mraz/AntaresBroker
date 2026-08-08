@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import { transport } from "../broker/transport.js";
 import { useTransport } from "../hooks.js";
-import { addSpace, applyBoardTemplate, boardTemplate, board, createDemo, resetBoard, toast } from "../state/board.js";
+import { addSpace, applyBoardTemplate, arrangeAll, boardTemplate, board, createDemo, resetBoard, toast } from "../state/board.js";
 import { addPipe, deletePipe, startPipe } from "../state/pipes.js";
 import { GENERATORS, TENANT_RE, TYPES } from "../model.js";
 
@@ -29,6 +29,8 @@ export default function TopBar({ health }) {
       <span className="grow" />
       <button disabled={busy} data-testid="btn-demo"
         onClick={run(() => createDemo({ startPipe }))}>▶ demo</button>
+      <button data-testid="btn-arrange" title="deterministic hub-and-spoke re-layout"
+        onClick={() => arrangeAll()}>✳ arrange</button>
       <button data-testid="btn-template"
         onClick={() => setTpl(JSON.stringify(boardTemplate("smart-city"), null, 2))}>{"{ } template"}</button>
       <button onClick={() => {

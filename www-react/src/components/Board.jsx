@@ -4,12 +4,15 @@
 import React, { useCallback, useMemo } from "react";
 import {
   Background,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
   Handle,
   MarkerType,
   MiniMap,
   Position,
   ReactFlow,
+  useInternalNode,
 } from "@xyflow/react";
 import { board, emit, save } from "../state/board.js";
 import { useBoard } from "../hooks.js";
@@ -50,6 +53,62 @@ function DeviceNode({ data }) {
 }
 
 const nodeTypes = { space: SpaceNode, device: DeviceNode };
+
+// Center-to-center quadratic edges, trimmed at the bubble borders and aimed
+// at the control point — so edges RADIATE from a node instead of piling
+// into one handle, and parallel edges (a CSR and a copy between the same
+// pair) fan out on distinct curvature slots. Ported from www/'s SVG.
+function BubbleEdge({ id, source, target, style, markerEnd, label, labelStyle, data }) {
+  const a = useInternalNode(source);
+  const b = useInternalNode(target);
+  if (!a || !b) return null;
+  const ca = {
+    x: a.internals.positionAbsolute.x + (a.measured?.width ?? 110) / 2,
+    y: a.internals.positionAbsolute.y + (a.measured?.height ?? 110) / 2,
+    r: (a.measured?.width ?? 110) / 2,
+  };
+  const cb = {
+    x: b.internals.positionAbsolute.x + (b.measured?.width ?? 110) / 2,
+    y: b.internals.positionAbsolute.y + (b.measured?.height ?? 110) / 2,
+    r: (b.measured?.width ?? 110) / 2,
+  };
+  const dx = cb.x - ca.x, dy = cb.y - ca.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const px = -dy / dist, py = dx / dist;
+  const slot = data?.slot ?? 0;
+  const bend = slot * 56 + (slot === 0 ? 0 : Math.sign(slot) * 10);
+  const mx = (ca.x + cb.x) / 2 + px * bend;
+  const my = (ca.y + cb.y) / 2 + py * bend;
+  const aim = (P, r, tx, ty) => {
+    const vx = tx - P.x, vy = ty - P.y, vd = Math.hypot(vx, vy) || 1;
+    return { x: P.x + (vx / vd) * (r + 4), y: P.y + (vy / vd) * (r + 4) };
+  };
+  const s = aim(ca, ca.r, mx, my);
+  const t = aim(cb, cb.r + 5, mx, my);
+  const path = `M ${s.x} ${s.y} Q ${mx} ${my} ${t.x} ${t.y}`;
+  // point ON the curve at t=0.5 for the label
+  const lx = 0.25 * s.x + 0.5 * mx + 0.25 * t.x;
+  const ly = 0.25 * s.y + 0.5 * my + 0.25 * t.y;
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} />
+      {label && (
+        <EdgeLabelRenderer>
+          <div
+            className="edge-label"
+            style={{
+              transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`,
+              color: labelStyle?.fill,
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  );
+}
+const edgeTypes = { bubble: BubbleEdge };
 
 function fallbackPos(key, i) {
   if (!board.positions[key]) {
@@ -105,12 +164,12 @@ export default function Board({ selected, onSelectSpace }) {
         const on = b && b.until > now;
         out.push({
           id: key,
+          type: "bubble",
           source: `s:${l.to}`,
           target: `s:${from}`,
           animated: !!on,
           label: `CSR · ${l.type ?? "all"}${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
           labelStyle: { fill: FED, fontWeight: 650 },
-          labelBgStyle: { fill: "var(--card)", fillOpacity: 0.85 },
           style: { stroke: FED, strokeWidth: on ? 3.5 : 2.5, strokeDasharray: "7 6" },
           markerEnd: { type: MarkerType.ArrowClosed, color: FED },
           data: { kind: "fed", space: from, regId: l.id },
@@ -123,12 +182,12 @@ export default function Board({ selected, onSelectSpace }) {
       const on = b && b.until > now;
       out.push({
         id: key,
+        type: "bubble",
         source: p.kind === "sync" ? `s:${p.from}` : `p:${p.id}`,
         target: `s:${p.into}`,
         animated: !!on,
         label: `⏱ ${p.kind === "sync" ? `${p.type} / ` : ""}${p.secs}s${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
         labelStyle: { fill: OK },
-        labelBgStyle: { fill: "var(--card)", fillOpacity: 0.85 },
         style: {
           stroke: OK,
           strokeWidth: on ? 3 : 2,
@@ -137,6 +196,18 @@ export default function Board({ selected, onSelectSpace }) {
         },
         markerEnd: { type: MarkerType.ArrowClosed, color: OK },
         data: { kind: "pipe", pipeId: p.id },
+      });
+    }
+    // parallel edges between the same pair get distinct curvature slots
+    const groups = new Map();
+    for (const e of out) {
+      const k = [e.source, e.target].sort().join("|");
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+    for (const g of groups.values()) {
+      g.forEach((e, i) => {
+        e.data.slot = i - (g.length - 1) / 2;
       });
     }
     return out;
@@ -175,9 +246,11 @@ export default function Board({ selected, onSelectSpace }) {
   return (
     <div className="board" data-testid="board">
       <ReactFlow
+        key={board.layoutEpoch ?? 0}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}

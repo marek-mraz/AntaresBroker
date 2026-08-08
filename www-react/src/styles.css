@@ -76,6 +76,11 @@ td.empty { color: var(--muted); text-align: center; padding: 1rem; }
 .history h3 { margin: 0 0 .4rem; font-size: .8rem; }
 .spark { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 
+.edge-label { position: absolute; font-size: 10px; font-weight: 600;
+  pointer-events: none; padding: 0 4px; border-radius: 6px;
+  background: color-mix(in srgb, var(--card) 85%, transparent);
+  color: var(--muted); white-space: nowrap; }
+
 /* request log */
 .reqlog { position: fixed; left: .7rem; bottom: .7rem; z-index: 40; max-width: 34rem; }
 .reqlog .entries { margin-top: .3rem; max-height: 12rem; overflow-y: auto;
