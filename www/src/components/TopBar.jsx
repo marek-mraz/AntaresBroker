@@ -27,6 +27,7 @@ export default function TopBar({ health }) {
       <span className="pill" title="ETSI CIM 009 — NGSI-LD API as WebAssembly in this tab">
         in-browser wasm broker
       </span>
+      <span className="pill">Author: Marek Mráz</span>
       <span className="pill" data-mode={transport.mode}>mode: <strong>{transport.mode}</strong></span>
       {health && <span className="pill">store: {health.store} · {health.status}</span>}
       <span className="grow" />
