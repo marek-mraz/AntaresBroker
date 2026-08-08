@@ -110,14 +110,22 @@ impl Default for TemporalFilter<'_> {
 }
 
 /// 4.22 transient storage: is this doc/instance past its `expiresAt`?
-/// Byte-compare of RFC 3339 strings against a UTC-Z `now` — the same
-/// comparison the subscription-expiry check has always used (exact for the
-/// UTC-Z stamps the broker writes; an exotic-offset expiresAt errs on the
-/// side of staying visible until the SQL sweep, which compares timestamptz).
+/// Parses both stamps to instants (so a non-UTC-Z offset expiresAt is judged
+/// correctly, matching the SQL `expires_at`/timestamptz path); byte compare is
+/// only the fallback when a stamp is unparseable.
 pub fn expired_at(v: &Value, now: &str) -> bool {
-    v.get("expiresAt")
-        .and_then(Value::as_str)
-        .is_some_and(|e| e < now)
+    let Some(e) = v.get("expiresAt").and_then(Value::as_str) else {
+        return false;
+    };
+    // Compare instants so a non-UTC-Z offset expiresAt is judged correctly;
+    // fall back to the byte compare only if either stamp is unparseable.
+    match (
+        chrono::DateTime::parse_from_rfc3339(e),
+        chrono::DateTime::parse_from_rfc3339(now),
+    ) {
+        (Ok(exp), Ok(n)) => exp < n,
+        _ => e < now,
+    }
 }
 
 /// Apply 4.22 invalidity to a read: `true` = the ENTITY is expired (caller

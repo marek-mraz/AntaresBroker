@@ -44,6 +44,7 @@ const RESERVED_MEMBERS: &[&str] = &[
     "createdAt",
     "modifiedAt",
     "deletedAt",
+    "expiresAt",
     "instanceId",
     "previousValue",
     "previousObject",
@@ -131,10 +132,23 @@ pub fn expand_entity(
         out.insert("scope".into(), Value::Array(scopes));
     }
 
+    // expiresAt (4.22 transient storage): the one client-settable temporal
+    // meta member. Keep it as a bare top-level DateTime string — the shape the
+    // read-boundary filter (filter::expired_at), the GC sweep, the postgres
+    // `expires_at` column extraction and temporal `meta_of` all expect. Missing
+    // this made 4.22 dead code on every backend.
+    if let Some(v) = doc.get("expiresAt") {
+        let s = v
+            .as_str()
+            .filter(|s| parse_datetime(s))
+            .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime"))?;
+        out.insert("expiresAt".into(), Value::String(s.to_owned()));
+    }
+
     for (key, v) in doc {
         match key.as_str() {
-            "id" | "@id" | "type" | "@type" | "@context" | "scope" | "createdAt" | "modifiedAt"
-            | "deletedAt" => continue,
+            "id" | "@id" | "type" | "@type" | "@context" | "scope" | "expiresAt" | "createdAt"
+            | "modifiedAt" | "deletedAt" => continue,
             _ => {}
         }
         if key.is_empty() {
@@ -448,6 +462,14 @@ fn expand_instance(
             .ok_or_else(|| bad(format!("attribute {name}: invalid observedAt")))?;
         out.insert("observedAt".into(), Value::String(s.to_owned()));
     }
+    if let Some(e) = obj.get("expiresAt") {
+        // 4.22 transient attribute instances carry their own expiresAt.
+        let s = e
+            .as_str()
+            .filter(|s| parse_datetime(s))
+            .ok_or_else(|| bad(format!("attribute {name}: invalid expiresAt")))?;
+        out.insert("expiresAt".into(), Value::String(s.to_owned()));
+    }
     if opts.sys {
         for k in ["createdAt", "modifiedAt"] {
             if let Some(Value::String(s)) = obj.get(k) {
@@ -633,6 +655,28 @@ mod tests {
         );
         let name = &out["https://uri.etsi.org/ngsi-ld/default-context/name"];
         assert_eq!(name[0]["value"], "Eiffel Tower");
+    }
+
+    #[test]
+    fn expires_at_kept_as_meta_not_property() {
+        // 4.22: a top-level expiresAt must survive as a bare DateTime string
+        // (the shape the read-boundary filter / GC / expires_at column read),
+        // never as a Property under its IRI.
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:T:1",
+            "type": "T",
+            "expiresAt": "2020-01-01T00:00:00Z",
+            "foo": {"type": "Property", "value": 1}
+        });
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("expand");
+        assert_eq!(out["expiresAt"], "2020-01-01T00:00:00Z");
+        assert!(out
+            .get("https://uri.etsi.org/ngsi-ld/expiresAt")
+            .is_none());
+        // a non-DateTime expiresAt is rejected
+        let bad = serde_json::json!({"id": "urn:ngsi-ld:T:2", "type": "T", "expiresAt": "soon"});
+        assert!(expand_entity(bad.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     #[test]

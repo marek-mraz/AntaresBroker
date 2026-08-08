@@ -1127,6 +1127,12 @@ pub fn page_params(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid offset {o:?}")))?,
         None => 0,
     };
+    // An offset above i64::MAX wraps negative when bound as SQL `$n::bigint`
+    // (Postgres then rejects a negative OFFSET → 500). Reject it as a bad
+    // precondition instead.
+    if offset > i64::MAX as usize {
+        return Err(NgsiError::BadRequestData(format!("offset {offset} is out of range")).into());
+    }
     Ok((offset, limit, count))
 }
 

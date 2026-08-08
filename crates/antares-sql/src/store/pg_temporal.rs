@@ -303,7 +303,15 @@ impl PgTemporalStore {
             Num(i64),
         }
         let mut binds: Vec<B> = vec![B::Text(tenant.as_str().to_owned())];
-        let mut wheres = vec!["m.tenant_id = $1".to_owned()];
+        // 4.22: an expired ENTITY is invalid on temporal reads too — filter it
+        // in SQL (no bind) so paging/totals stay exact. Expired instances are
+        // stripped at the read boundary (any.rs). Literal, applies to the
+        // fallback count query too.
+        let mut wheres = vec![
+            "m.tenant_id = $1".to_owned(),
+            "(m.meta->>'expiresAt' IS NULL OR (m.meta->>'expiresAt')::timestamptz > now())"
+                .to_owned(),
+        ];
         if let Some(ids) = f.ids {
             binds.push(B::Arr(ids.iter().map(|s| s.to_string()).collect()));
             wheres.push(format!("m.id = ANY(${})", binds.len()));
@@ -426,9 +434,11 @@ impl PgTemporalStore {
             None => attr_object_expr(&TemporalFilter::default(), 3)
                 .expect("no range/lastN always compiles"),
         };
+        // 4.22: an expired entity is invalid → None (404), same as get().
         let sql = format!(
             "SELECT m.meta || {attr_expr} FROM temporal_entities m \
-             WHERE m.tenant_id = $1 AND m.id = $2"
+             WHERE m.tenant_id = $1 AND m.id = $2 \
+             AND (m.meta->>'expiresAt' IS NULL OR (m.meta->>'expiresAt')::timestamptz > now())"
         );
         wait(async {
             let mut tx = self.pool.begin().await?;

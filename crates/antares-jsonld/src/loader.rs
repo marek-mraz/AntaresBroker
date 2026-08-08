@@ -239,8 +239,35 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// Read once per builder call — the wiring constructs clients at startup.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
+    // §16.4 SSRF: `PolicyResolver` only fires for HOSTNAME targets — reqwest
+    // dials IP-LITERAL URLs directly, so a `302 Location: http://169.254.169.254/`
+    // would skip the egress check on every hop. The custom redirect policy
+    // re-checks each hop's URL: an IP literal in a private range is refused,
+    // hostnames still clear through the resolver at connect. Hop count capped.
+    let allow_private = policy.allow_private;
+    let redirect = reqwest::redirect::Policy::custom(move |attempt| {
+        // previous() includes the initial URL, so `> MAX_REDIRECTS` matches
+        // Policy::limited(MAX_REDIRECTS): 1 initial request + MAX_REDIRECTS hops.
+        if attempt.previous().len() > MAX_REDIRECTS {
+            // same shape as Policy::limited: a redirect error, is_redirect()==true
+            return attempt.error(format!("exceeded {MAX_REDIRECTS} redirects"));
+        }
+        if let Ok(ip) = attempt
+            .url()
+            .host_str()
+            .unwrap_or("")
+            .parse::<std::net::IpAddr>()
+        {
+            if !allow_private && EgressPolicy::ip_is_private(ip) {
+                // stop (don't follow) — the caller sees a non-2xx and fails the
+                // fetch, but we never connected to the private target.
+                return attempt.stop();
+            }
+        }
+        attempt.follow()
+    });
     let mut b = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .redirect(redirect)
         .dns_resolver(std::sync::Arc::new(PolicyResolver(policy)));
     if let Ok(path) = std::env::var("ANTARES_EXTRA_CA_FILE") {
         match std::fs::read(&path) {
@@ -862,6 +889,53 @@ mod tests {
             hops.load(std::sync::atomic::Ordering::SeqCst),
             MAX_REDIRECTS + 1,
             "one initial request plus MAX_REDIRECTS hops"
+        );
+    }
+
+    // §16.4 SSRF: a redirect to a private IP LITERAL is refused per hop even
+    // though reqwest's DNS PolicyResolver never sees IP literals. With
+    // allow_private=false the redirect target (127.0.0.1) must not be followed.
+    #[tokio::test]
+    async fn redirect_to_private_ip_literal_is_blocked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                // redirect to a private IP literal (self)
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{addr}/internal\r\nContent-Length: 0\r\n\r\n"
+                );
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let client = client_builder(EgressPolicy {
+            allow_private: false,
+        })
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+        // the initial IP-literal request connects (resolver never runs for it),
+        // gets the 302, and the policy STOPS instead of following to the private
+        // hop — so the server is hit exactly once and we get the 3xx back.
+        let resp = client
+            .get(format!("http://{addr}/start"))
+            .send()
+            .await
+            .expect("stop returns the 3xx, not an error");
+        assert_eq!(resp.status().as_u16(), 302, "redirect was not followed");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "only the initial request; the private-IP hop was refused"
         );
     }
 

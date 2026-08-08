@@ -624,11 +624,13 @@ fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
         } else {
             let n: f64 = num.parse().ok()?;
             num.clear();
+            // saturating: an absurd magnitude must not panic (debug) or wrap
+            // (release) — f64→int `as` casts already saturate, guard the ops.
             match c {
-                'Y' => months += (n as u32) * 12,
-                'M' => months += n as u32,
-                'W' => secs += (n * 604800.0) as i64,
-                'D' => secs += (n * 86400.0) as i64,
+                'Y' => months = months.saturating_add((n as u32).saturating_mul(12)),
+                'M' => months = months.saturating_add(n as u32),
+                'W' => secs = secs.saturating_add((n * 604800.0) as i64),
+                'D' => secs = secs.saturating_add((n * 86400.0) as i64),
                 _ => return None,
             }
         }
@@ -640,9 +642,9 @@ fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
             let n: f64 = num.parse().ok()?;
             num.clear();
             match c {
-                'H' => secs += (n * 3600.0) as i64,
-                'M' => secs += (n * 60.0) as i64,
-                'S' => secs += n as i64,
+                'H' => secs = secs.saturating_add((n * 3600.0) as i64),
+                'M' => secs = secs.saturating_add((n * 60.0) as i64),
+                'S' => secs = secs.saturating_add(n as i64),
                 _ => return None,
             }
         }
@@ -731,10 +733,17 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
         .get("datasetId")
         .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect());
     r.last_n = match params.get("lastN") {
-        Some(n) => Some(
-            n.parse::<usize>()
-                .map_err(|_| NgsiError::BadRequestData(format!("invalid lastN {n:?}")))?,
-        ),
+        Some(n) => {
+            let v = n
+                .parse::<usize>()
+                .map_err(|_| NgsiError::BadRequestData(format!("invalid lastN {n:?}")))?;
+            // Above i64::MAX it wraps negative when bound as the RANK cap
+            // (`rk <= $n::bigint`), silently returning an empty set.
+            if v > i64::MAX as usize {
+                return Err(NgsiError::BadRequestData(format!("lastN {v} is out of range")));
+            }
+            Some(v)
+        }
         None => None,
     };
     if let Some(m) = params.get("aggrMethods") {

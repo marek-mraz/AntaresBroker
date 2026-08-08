@@ -35,15 +35,39 @@ spec:
       labels: { app: antares, role: api }
     spec:
       terminationGracePeriodSeconds: 30 # K1: > drain delay + deadline
+      # §16.5 runtime hardening: non-root (image is uid 65532), read-only
+      # rootfs (postgres mode writes nothing there; /tmp is a tmpfs), all caps
+      # dropped, no privilege escalation.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: antares
           image: antares-local:latest
           imagePullPolicy: IfNotPresent
           args: []
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
+            # §16.1 PRODUCTION: point this at a NON-superuser, non-BYPASSRLS role
+            # (e.g. antares_app) so the RLS tenant-isolation backstop is enforced,
+            # and set ANTARES_REQUIRE_RLS=1 to refuse boot otherwise. Migrations
+            # need a privileged role — run them as a separate bootstrap step, then
+            # run the broker as antares_app (granted DML on the tenant tables).
+            # Left as the superuser DSN here only so the CI kind-smoke (superuser
+            # postgres-dev) boots; a real deployment MUST change both.
             - name: ANTARES_DATABASE_URL
               value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+            # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
             - { name: ANTARES_NATS_REPLICAS, value: "3" }
@@ -78,14 +102,30 @@ spec:
       labels: { app: antares, role: worker }
     spec:
       terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: antares
           image: antares-local:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
+            # §16.1 PRODUCTION: use a non-superuser role + ANTARES_REQUIRE_RLS=1
+            # (see the api Deployment above).
             - name: ANTARES_DATABASE_URL
               value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+            # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
             - { name: ANTARES_NATS_REPLICAS, value: "3" }

@@ -52,6 +52,17 @@ impl NatsBus {
     /// Connect and ensure the streams + KV bucket exist (idempotent).
     pub async fn connect(url: &str) -> Result<Self, BusError> {
         let client = async_nats::connect(url).await.map_err(err)?;
+        // §16.1/§7: the change stream carries every tenant's ChangeEvent bodies
+        // and MUST stay internal. If the server requires no auth, anything that
+        // reaches it can read or forge all-tenant events — warn loudly so an
+        // unauthenticated JetStream cluster is not shipped by accident.
+        if !client.server_info().auth_required {
+            tracing::warn!(
+                "connected to a NATS server that requires NO authentication — the \
+                 ANTARES_CHANGES stream exposes all tenants' change events; require \
+                 nkey/creds/mTLS and network-isolate the JetStream cluster in production"
+            );
+        }
         let js = jetstream::new(client);
         let bus = Self { js };
         bus.ensure_streams().await?;

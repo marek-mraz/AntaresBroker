@@ -417,15 +417,23 @@ impl AnyStore {
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
         f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<crate::store::filter::TemporalOutcome, NgsiError> {
-        match self {
-            AnyStore::Mem(s) => Ok(crate::store::filter::TemporalOutcome {
+        let mut outcome = match self {
+            AnyStore::Mem(s) => crate::store::filter::TemporalOutcome {
                 rows: s.list(tenant, Kind::Temporal),
                 paged: false,
                 total: None,
-            }),
+            },
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db),
-        }
+            AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db)?,
+        };
+        // 4.22 on temporal reads: the Pg arm already dropped expired ENTITIES in
+        // SQL (paging exact); this strips expired attribute INSTANCES, and does
+        // the whole job on the memory arm (no SQL to push into).
+        let now = now_utc();
+        outcome
+            .rows
+            .retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
+        Ok(outcome)
     }
 
     /// Auto-recording fast path (audit 2026-08-08): append instances to an
@@ -477,11 +485,20 @@ impl AnyStore {
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
         f: &crate::store::filter::TemporalFilter<'_>,
     ) -> Result<Option<Value>, NgsiError> {
-        match self {
-            AnyStore::Mem(s) => Ok(s.get(tenant, Kind::Temporal, id)),
+        let mut doc = match self {
+            AnyStore::Mem(s) => s.get(tenant, Kind::Temporal, id),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).map_err(db),
+            AnyStore::Pg(p) => p.temporal.get_range(tenant, id, f).map_err(db)?,
+        };
+        // 4.22: expired entity → None (Pg already did this in SQL); otherwise
+        // strip expired instances.
+        if let Some(d) = &mut doc {
+            let now = now_utc();
+            if crate::store::filter::strip_expired(d, &now) {
+                return Ok(None);
+            }
         }
+        Ok(doc)
     }
 
     pub fn mutate<T, E>(

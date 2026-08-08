@@ -70,12 +70,19 @@ impl EntityId {
     pub fn new(raw: &str) -> Result<Self, NgsiError> {
         // Lazy URI check: a scheme followed by ':'. Full IRI validation happens
         // during JSON-LD expansion; this guards the id-shaped entry points.
-        let scheme_ok = raw.split_once(':').is_some_and(|(s, rest)| {
-            !s.is_empty()
-                && !rest.is_empty()
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-        });
+        // Control chars, DEL and spaces are illegal in a URI (RFC 3986) and are
+        // rejected here so a CRLF/`<script>`/space never reaches storage, a
+        // Location header, or a downstream log/UI.
+        let no_illegal = !raw
+            .chars()
+            .any(|c| c.is_control() || c == ' ' || c == '\u{7f}');
+        let scheme_ok = no_illegal
+            && raw.split_once(':').is_some_and(|(s, rest)| {
+                !s.is_empty()
+                    && !rest.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            });
         if scheme_ok {
             Ok(Self(raw.to_owned()))
         } else {
@@ -131,5 +138,14 @@ mod tests {
         assert!(EntityId::new("urn:ngsi-ld:Vehicle:A123").is_ok());
         assert!(EntityId::new("not a uri").is_err());
         assert!(EntityId::new(":noscheme").is_err());
+    }
+
+    #[test]
+    fn entity_id_rejects_control_chars_and_space() {
+        assert!(EntityId::new("urn:has space").is_err());
+        assert!(EntityId::new("urn:x\r\nX-Injected:1").is_err());
+        assert!(EntityId::new("urn:x\ttab").is_err());
+        assert!(EntityId::new("urn:x\u{7f}").is_err());
+        assert!(EntityId::new("urn:ngsi-ld:ok-1").is_ok());
     }
 }

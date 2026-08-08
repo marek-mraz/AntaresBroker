@@ -22,6 +22,9 @@ const KNOWN_KEYS: &[&str] = &[
     // §16.4 egress: private-range destinations are denied by default; the
     // ETSI/IOP stacks (mock servers on localhost) set this to true.
     "ANTARES_EGRESS_ALLOW_PRIVATE",
+    // §16.1: refuse to start when the DB role bypasses RLS (production gate;
+    // default off so the dev/ETSI superuser stack still boots).
+    "ANTARES_REQUIRE_RLS",
     // C9/D4 temporal retention horizon in days; absent = keep forever (a
     // maintenance job must never default to dropping data).
     "ANTARES_TEMPORAL_RETENTION_DAYS",
@@ -171,12 +174,27 @@ async fn build_store(
                             );
                         }
                         // §16.1: RLS is a belt only when the role wears it —
-                        // superuser/BYPASSRLS makes every policy inert.
+                        // superuser/BYPASSRLS makes every policy inert. Warn
+                        // always; in production set ANTARES_REQUIRE_RLS=1 to turn
+                        // the warning into a hard refusal so a superuser DSN can
+                        // never silently ship (dev/ETSI stacks leave it unset).
                         if antares_sql::pg::role_bypasses_rls(&pool).await {
+                            let strict = std::env::var("ANTARES_REQUIRE_RLS")
+                                .is_ok_and(|v| matches!(v.as_str(), "1" | "true"));
+                            if strict {
+                                return Err(
+                                    "ANTARES_REQUIRE_RLS=1 but the database role bypasses \
+                                     row-level security (superuser or BYPASSRLS) — connect as a \
+                                     non-superuser, non-BYPASSRLS role so the RLS tenant-isolation \
+                                     backstop is enforced"
+                                        .into(),
+                                );
+                            }
                             tracing::warn!(
                                 "database role bypasses row-level security (superuser or \
                                  BYPASSRLS) — tenant isolation rests on the explicit \
-                                 predicates only; use a non-superuser role in production"
+                                 predicates only; use a non-superuser role in production \
+                                 (set ANTARES_REQUIRE_RLS=1 to enforce)"
                             );
                         }
                         tracing::info!(
@@ -335,8 +353,17 @@ async fn run(
         let retention: Option<i64> = std::env::var("ANTARES_TEMPORAL_RETENTION_DAYS")
             .ok()
             .map(|v| {
-                v.parse()
+                v.parse::<i64>()
                     .map_err(|_| "ANTARES_TEMPORAL_RETENTION_DAYS must be an integer")
+                    // A zero/negative horizon inverts `now() - make_interval(days)`
+                    // and would reap all current + future history — a data-loss
+                    // footgun. Retention is opt-in; a bad value must not silently
+                    // delete. Cap at i32 too (bound as $1::int downstream).
+                    .and_then(|d| {
+                        (d > 0 && d <= i64::from(i32::MAX))
+                            .then_some(d)
+                            .ok_or("ANTARES_TEMPORAL_RETENTION_DAYS must be between 1 and 2147483647")
+                    })
             })
             .transpose()?;
         tokio::spawn(async move {
