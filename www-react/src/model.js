@@ -92,7 +92,7 @@ export function entLabel(doc) {
 export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", W = 1400, H = 880 } = {}) {
   const pos = {};
   const cx = W / 2, cy = H / 2 + 20;
-  const SP = 55, DV = 26; // half node sizes (space 110px, device 52px)
+  const SP = 55, DVX = 48, DVY = 22; // half sizes: space 110px circle, device 96×44 chip
   const others = spaceNames.filter((n) => n !== hub);
   const center = new Map(); // space -> center point
   if (spaceNames.includes(hub)) center.set(hub, { x: cx, y: cy });
@@ -117,10 +117,10 @@ export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", W = 1400, 
     if (d < 1) { ux = 0; uy = 1; } else { ux /= d; uy /= d; }
     const px = -uy, py = ux;
     list.forEach((p, i) => {
-      const off = (i - (list.length - 1) / 2) * 95;
+      const off = (i - (list.length - 1) / 2) * 122;
       pos[`p:${p.id}`] = {
-        x: c.x + ux * 170 + px * off - DV,
-        y: c.y + uy * 170 + py * off - DV,
+        x: c.x + ux * 175 + px * off - DVX,
+        y: c.y + uy * 175 + py * off - DVY,
       };
     });
   }

@@ -73,11 +73,12 @@ describe("arrangeBoard — the demo layout is collision-free by construction", (
     ...DEMO.copies.map(([from, into, type, secs], i) => ({ id: `c${i}`, kind: "sync", from, into, type, secs })),
   ];
   const pos = arrangeBoard(DEMO.spaces, pipes, { hub: DEMO.hub });
-  const SIZE = { s: 110, p: 52 }; // node box sizes
+  // space: 110px circle; device: 96×44 chip (bounding-circle radius)
+  const GEOM = { s: { w: 110, h: 110, r: 55 }, p: { w: 96, h: 44, r: 48 } };
   const centers = Object.entries(pos).map(([key, p]) => ({
-    key, r: SIZE[key[0]] / 2,
-    x: p.x + SIZE[key[0]] / 2,
-    y: p.y + SIZE[key[0]] / 2,
+    key, r: GEOM[key[0]].r,
+    x: p.x + GEOM[key[0]].w / 2,
+    y: p.y + GEOM[key[0]].h / 2,
   }));
 
   it("positions every space and every device, nothing else", () => {

@@ -44,12 +44,18 @@ input, select, textarea { font: inherit; font-size: .8rem; padding: .3rem .5rem;
 .space-node .emoji { font-size: 1.5rem; }
 .space-node .name { font-size: .72rem; font-weight: 650; }
 .space-node .counts { font-size: .62rem; color: var(--muted); }
-.device-node { width: 52px; aspect-ratio: 1; border: 2px solid var(--ok); border-radius: 999px;
-  background: color-mix(in srgb, var(--ok) 14%, var(--card));
-  display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: grab; }
-.device-node.paused { border-style: dashed; opacity: .6; }
-.device-node .emoji { font-size: 1rem; }
-.device-node .ticks { font-size: .6rem; color: var(--muted); }
+/* sensors = rectangular chips, deliberately NOT circles (spaces are circles) */
+.device-node { width: 96px; border: 2px solid var(--ok); border-radius: 10px;
+  background: color-mix(in srgb, var(--ok) 10%, var(--card));
+  padding: .25rem .4rem; cursor: grab;
+  box-shadow: 0 3px 8px rgb(0 0 0 / .12); }
+.device-node .head { display: flex; justify-content: space-between; align-items: center; }
+.device-node .emoji { font-size: .95rem; }
+.device-node .ticks { font-size: .58rem; color: var(--ok); font-weight: 700;
+  font-variant-numeric: tabular-nums; }
+.device-node .dtype { font-size: .56rem; color: var(--muted); font-weight: 650;
+  letter-spacing: .2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.device-node.paused { border-style: dashed; opacity: .55; }
 .port { opacity: 0; pointer-events: none; }
 
 /* sheet */
@@ -75,6 +81,18 @@ td.empty { color: var(--muted); text-align: center; padding: 1rem; }
 .history { padding: .6rem .8rem; border-top: 1px solid var(--line); }
 .history h3 { margin: 0 0 .4rem; font-size: .8rem; }
 .spark { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+
+.legend { position: absolute; top: .6rem; left: .6rem; z-index: 5;
+  display: flex; flex-direction: column; gap: .15rem; font-size: .68rem;
+  color: var(--muted); background: color-mix(in srgb, var(--card) 88%, transparent);
+  border: 1px solid var(--line); border-radius: 10px; padding: .35rem .6rem;
+  pointer-events: none; }
+.legend i { display: inline-block; vertical-align: -2px; margin-right: .3rem; }
+.legend .lg-space { width: 12px; height: 12px; border-radius: 999px;
+  border: 2px solid var(--accent); }
+.legend .lg-device { width: 14px; height: 9px; border-radius: 3px;
+  border: 2px solid var(--ok); }
+.board { position: relative; }
 
 .edge-label { position: absolute; font-size: 10px; font-weight: 600;
   pointer-events: none; padding: 0 4px; border-radius: 6px;

@@ -41,12 +41,17 @@ function SpaceNode({ data }) {
   );
 }
 
+// Sensors are rounded-rect CHIPS (hardware), spaces are circles (places) —
+// the shape difference is what keeps the board readable at a glance.
 function DeviceNode({ data }) {
   return (
     <div className={`device-node${data.running ? "" : " paused"}`}>
       <Handle type="target" position={Position.Top} className="port" />
-      <div className="emoji">{data.emoji}</div>
-      <div className="ticks">{data.ticks}</div>
+      <div className="head">
+        <span className="emoji">{data.emoji}</span>
+        <span className="ticks" title="accepted writes">{data.ticks}⇢</span>
+      </div>
+      <div className="dtype">{data.type}</div>
       <Handle type="source" position={Position.Bottom} className="port" />
     </div>
   );
@@ -146,6 +151,7 @@ export default function Board({ selected, onSelectSpace }) {
           position: fallbackPos(`p:${p.id}`, board.spaces.length + i),
           data: {
             emoji: (p.gen ?? "⚙").slice(0, 2).trim(),
+            type: p.type,
             ticks: p.ticks ?? 0,
             running: p.running,
           },
@@ -263,6 +269,12 @@ export default function Board({ selected, onSelectSpace }) {
         <Controls />
         <MiniMap pannable zoomable nodeColor={(n) => (n.type === "space" ? colorOf(n.data.name) : OK)} />
       </ReactFlow>
+      <div className="legend">
+        <span><i className="lg-space" /> context space (tenant)</span>
+        <span><i className="lg-device" /> sensor / source</span>
+        <span style={{ color: FED }}>┄┄ CSR federation</span>
+        <span style={{ color: OK }}>┈┈ pipeline</span>
+      </div>
     </div>
   );
 }
