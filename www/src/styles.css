@@ -33,6 +33,8 @@ input, select, textarea { font: inherit; font-size: .8rem; padding: .3rem .5rem;
 
 .stage { flex: 1; display: flex; min-height: 0; }
 .board { flex: 1; min-width: 0; }
+.drawer-resize { width: 6px; cursor: col-resize; flex: none; background: transparent; }
+.drawer-resize:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 .drawer { width: 420px; border-left: 1px solid var(--line); background: var(--card);
           display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 

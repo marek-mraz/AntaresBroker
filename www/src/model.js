@@ -100,11 +100,13 @@ export function entLabel(doc) {
 // center, every other space on an ellipse around it, and each space's
 // devices fan OUTWARD on the far side from the hub so device edges never
 // cross the middle. Positions are React-Flow top-left anchored.
-export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", W = 1400, H = 880 } = {}) {
+export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", satellites = new Map(), W = 1400, H = 880 } = {}) {
   const pos = {};
   const cx = W / 2, cy = H / 2 + 20;
   const SP = 55, DVX = 48, DVY = 22; // half sizes: space 110px circle, device 96×44 chip
-  const others = spaceNames.filter((n) => n !== hub);
+  // satellites (sub-spaces federated by a NON-hub space) attach to their
+  // parent instead of taking a ring slot
+  const others = spaceNames.filter((n) => n !== hub && !satellites.has(n));
   const center = new Map(); // space -> center point
   if (spaceNames.includes(hub)) center.set(hub, { x: cx, y: cy });
   const n = others.length || 1;
@@ -112,6 +114,24 @@ export function arrangeBoard(spaceNames, pipes, { hub = "smart-city", W = 1400, 
     const ang = -Math.PI / 2 + (i * 2 * Math.PI) / n;
     center.set(name, { x: cx + 460 * Math.cos(ang), y: cy + 310 * Math.sin(ang) });
   });
+  const byParent = new Map();
+  for (const [child, parent] of satellites) {
+    if (!spaceNames.includes(child)) continue;
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(child);
+  }
+  for (const [parent, kids] of byParent) {
+    const c = center.get(parent);
+    if (!c) continue;
+    let ux = c.x - cx, uy = c.y - cy;
+    const d = Math.hypot(ux, uy) || 1;
+    ux /= d; uy /= d;
+    const px = -uy, py = ux;
+    kids.forEach((k, i) => {
+      const off = (i - (kids.length - 1) / 2) * 185;
+      center.set(k, { x: c.x + ux * 250 + px * off, y: c.y + uy * 250 + py * off });
+    });
+  }
   for (const [name, c] of center) pos[`s:${name}`] = { x: c.x - SP, y: c.y - SP };
 
   const bySpace = new Map();

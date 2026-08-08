@@ -167,10 +167,11 @@ export default function Board({ selected, onSelectSpace }) {
       for (const l of ls) {
         const key = `fed:${l.id}`;
         const b = board.bursts.get(key);
-        // Animate a CSR only while the user is FOCUSED on the space doing the
-        // reading — background polling refreshes every space, and an always-
-        // pulsing board says nothing.
-        const on = b && b.until > now && from === selected;
+        // Animate a CSR only while the FOCUSED space is the one whose read
+        // used it — the burst carries its reader, so a nested chain
+        // (smart-city → old-town → market) lights up whole when smart-city
+        // is selected, and background polling of other spaces stays quiet.
+        const on = b && b.until > now && b.reader === selected;
         out.push({
           id: key,
           type: "bubble",

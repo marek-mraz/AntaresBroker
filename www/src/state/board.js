@@ -31,8 +31,8 @@ export function emit() {
 }
 
 // ---- evidence bursts --------------------------------------------------------
-export function burst(edgeKey, count = 0) {
-  board.bursts.set(edgeKey, { until: Date.now() + 1600, count });
+export function burst(edgeKey, count = 0, reader = null) {
+  board.bursts.set(edgeKey, { until: Date.now() + 1600, count, reader });
   emit();
   setTimeout(() => {
     const cur = board.bursts.get(edgeKey);
@@ -84,16 +84,45 @@ export async function refreshSpace(space) {
   board.ents.set(space, { local: local ?? [], remote });
   await refreshLinks(space);
   // Real flow only: pulse exactly the CSR edges that carried entities into
-  // this federated query, with the count that crossed.
+  // this federated query — the WHOLE chain for nested hops (smart-city →
+  // old-town → old-town-market), and only along links whose type scope
+  // covers the data that actually crossed. The reader tag lets the board
+  // animate a chain only while ITS reader is the focused space.
   if (remote.length) {
-    const perOrigin = new Map();
+    const perOriginType = new Map(); // `${origin}|${type}` -> count
     for (const e of remote) {
       const o = originOf(e.id, space);
-      if (o) perOrigin.set(o, (perOrigin.get(o) ?? 0) + 1);
+      if (o) {
+        const k = `${o}|${e.type}`;
+        perOriginType.set(k, (perOriginType.get(k) ?? 0) + 1);
+      }
     }
-    for (const l of board.links.get(space) ?? []) {
-      const n = perOrigin.get(l.to);
-      if (n) burst(`fed:${l.id}`, n);
+    // BFS over type-covering links: fed edge ids along space→…→origin.
+    const pathTo = (from, to, type) => {
+      const prev = new Map([[from, null]]);
+      const q = [from];
+      while (q.length) {
+        const cur = q.shift();
+        for (const l of board.links.get(cur) ?? []) {
+          if (prev.has(l.to) || (l.type && l.type !== type)) continue;
+          prev.set(l.to, { space: cur, link: l });
+          if (l.to === to) {
+            const ids = [];
+            let at = to;
+            while (prev.get(at)) {
+              ids.push(prev.get(at).link.id);
+              at = prev.get(at).space;
+            }
+            return ids;
+          }
+          q.push(l.to);
+        }
+      }
+      return null;
+    };
+    for (const [k, n] of perOriginType) {
+      const [origin, type] = k.split("|");
+      for (const id of pathTo(space, origin, type) ?? []) burst(`fed:${id}`, n, space);
     }
   }
 }
@@ -221,13 +250,22 @@ export async function createDemo({ startPipe }) {
     startPipe(p);
   }
   save("antares.pipes", board.pipes);
+  await refreshAll(); // links must be fresh so arrange sees the satellites
   arrangeAll(); // the demo always lands in a clean hub-and-spoke layout
-  await refreshAll();
 }
 
 // Re-layout the whole board deterministically (also the ✳ arrange button).
 export function arrangeAll() {
-  const arranged = arrangeBoard(board.spaces.map((s) => s.name), board.pipes, { hub: DEMO.hub });
+  // a space federated by a NON-hub space is that parent's satellite
+  const satellites = new Map();
+  for (const [from, ls] of board.links) {
+    if (from === DEMO.hub) continue;
+    for (const l of ls) satellites.set(l.to, from);
+  }
+  const arranged = arrangeBoard(board.spaces.map((s) => s.name), board.pipes, {
+    hub: DEMO.hub,
+    satellites,
+  });
   Object.assign(board.positions, arranged);
   save("antares.pos", board.positions);
   board.layoutEpoch = (board.layoutEpoch ?? 0) + 1; // remounts ReactFlow → fitView

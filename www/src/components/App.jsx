@@ -16,6 +16,9 @@ export default function App() {
   const [health, setHealth] = useState(null);
   const [selectedSpace, setSelectedSpace] = useState("smart-city");
   const [picked, setPicked] = useState(null); // {space,id,attr,emoji,type}
+  const [drawerW, setDrawerW] = useState(
+    () => Number(localStorage.getItem("antares.drawerw")) || 420,
+  );
 
   useEffect(() => {
     let alive = true;
@@ -62,7 +65,26 @@ export default function App() {
             setPicked(null);
           }}
         />
-        <aside className="drawer" data-testid="drawer">
+        <div
+          className="drawer-resize"
+          title="drag to resize"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX, startW = drawerW;
+            const move = (ev) => {
+              const w = Math.min(900, Math.max(300, startW + startX - ev.clientX));
+              setDrawerW(w);
+              localStorage.setItem("antares.drawerw", String(w));
+            };
+            const up = () => {
+              window.removeEventListener("pointermove", move);
+              window.removeEventListener("pointerup", up);
+            };
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up);
+          }}
+        />
+        <aside className="drawer" data-testid="drawer" style={{ width: drawerW }}>
           <TenantSheet space={shownSpace} picked={picked} onPick={setPicked} />
           {picked && <History key={`${picked.space}/${picked.id}`} {...picked} />}
         </aside>
