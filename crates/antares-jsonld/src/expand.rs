@@ -671,9 +671,7 @@ mod tests {
         let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
             .expect("expand");
         assert_eq!(out["expiresAt"], "2020-01-01T00:00:00Z");
-        assert!(out
-            .get("https://uri.etsi.org/ngsi-ld/expiresAt")
-            .is_none());
+        assert!(out.get("https://uri.etsi.org/ngsi-ld/expiresAt").is_none());
         // a non-DateTime expiresAt is rejected
         let bad = serde_json::json!({"id": "urn:ngsi-ld:T:2", "type": "T", "expiresAt": "soon"});
         assert!(expand_entity(bad.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());

@@ -360,9 +360,9 @@ async fn run(
                     // footgun. Retention is opt-in; a bad value must not silently
                     // delete. Cap at i32 too (bound as $1::int downstream).
                     .and_then(|d| {
-                        (d > 0 && d <= i64::from(i32::MAX))
-                            .then_some(d)
-                            .ok_or("ANTARES_TEMPORAL_RETENTION_DAYS must be between 1 and 2147483647")
+                        (d > 0 && d <= i64::from(i32::MAX)).then_some(d).ok_or(
+                            "ANTARES_TEMPORAL_RETENTION_DAYS must be between 1 and 2147483647",
+                        )
                     })
             })
             .transpose()?;

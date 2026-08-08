@@ -740,7 +740,9 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
             // Above i64::MAX it wraps negative when bound as the RANK cap
             // (`rk <= $n::bigint`), silently returning an empty set.
             if v > i64::MAX as usize {
-                return Err(NgsiError::BadRequestData(format!("lastN {v} is out of range")));
+                return Err(NgsiError::BadRequestData(format!(
+                    "lastN {v} is out of range"
+                )));
             }
             Some(v)
         }
