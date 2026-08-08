@@ -1,9 +1,29 @@
 {
   "name": "antares-www",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "description": "N: browser demo page + Node shim + browser-tier test for the antares-wasm build",
+  "description": "The React playground + wasm glue (pkg, worker, node shim) + browser-tier tests",
+  "scripts": {
+    "sync": "rm -rf public/pkg && mkdir -p public && cp -r pkg public/pkg && cp worker.js loopback.js public/",
+    "dev": "vite",
+    "build": "npm run sync && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "e2e": "npm run build && node e2e/smoke.mjs"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12",
+    "react": "^19",
+    "react-dom": "^19"
+  },
   "devDependencies": {
-    "playwright-core": "1.61.1"
+    "@testing-library/jest-dom": "^6",
+    "@testing-library/react": "^16",
+    "@vitejs/plugin-react": "^4",
+    "jsdom": "^26",
+    "playwright-core": "^1.55",
+    "vite": "^7",
+    "vitest": "^3"
   }
 }

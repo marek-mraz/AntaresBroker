@@ -1,6 +1,0 @@
-node_modules/
-dist/
-public/pkg/
-public/worker.js
-public/loopback.js
-e2e/*.png

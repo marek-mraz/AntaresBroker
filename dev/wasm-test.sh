@@ -3,7 +3,7 @@
 # (health + entity round-trip + a real HTTP notification) and headless
 # Chromium (React playground: OPFS worker broker, demo board, in-page
 # notification, second tab, federation). Needs www/pkg (dev/wasm-build.sh),
-# npm deps in www/, a built www-react/dist, and a playwright chromium.
+# npm deps in www/, a built www/dist, and a playwright chromium.
 # One script, local and CI (§E rule).
 set -euo pipefail
 cd "$(dirname "$0")/.."

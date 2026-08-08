@@ -1,6 +1,6 @@
 // N7b: the browser tier — the ETSI suite talks real HTTP to THIS process,
 // and every request is forwarded INTO a headless-Chromium page hosting the
-// React playground (www-react/dist → transport ladder: OPFS worker / in-page).
+// React playground (www/dist → transport ladder: OPFS worker / in-page).
 // The response the suite sees is byte-for-byte what window.brokerFetch
 // returned inside the page. So the suite exercises the same .wasm a user's
 // browser runs, on the engine's own Request/Response/fetch/OPFS plumbing.
@@ -19,7 +19,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { chromium } from "playwright-core";
 
-const ROOT = new URL("../../www-react/dist", import.meta.url).pathname;
+const ROOT = new URL("../dist", import.meta.url).pathname;
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",

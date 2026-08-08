@@ -1,4 +1,4 @@
-// N6: the React playground (www-react/dist), driven headless — the CI proof
+// N6: the React playground (www/dist), driven headless — the CI proof
 // that the browser build actually runs IN A BROWSER: broker up (OPFS worker
 // preferred), the auto-demo populates the board through the real NGSI-LD API,
 // a subscription delivers an in-page notification, N9 cross-tenant federation
@@ -7,15 +7,15 @@
 // a torn store. Run:
 //
 //   node www/test/browser-test.mjs        (needs `npx playwright-core install chromium`
-//                                          and a built www-react/dist — npm run build)
+//                                          and a built www/dist — npm run build)
 import { createServer } from "node:http";
 import { readFile, access } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { chromium } from "playwright-core";
 
-const ROOT = new URL("../../www-react/dist", import.meta.url).pathname;
+const ROOT = new URL("../dist", import.meta.url).pathname;
 await access(join(ROOT, "index.html")).catch(() => {
-  console.error("FAIL: www-react/dist missing — run `npm run build` in www-react first");
+  console.error("FAIL: www/dist missing — run `npm run build` in www first");
   process.exit(1);
 });
 const MIME = {

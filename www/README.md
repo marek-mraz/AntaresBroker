@@ -25,8 +25,8 @@ is the product-shaped one.
 ## Architecture
 
 ```
-www-react/
-├── public/            # runtime-identical assets, copied from ../www by `npm run sync`
+www/
+├── public/            # runtime-identical assets, copied from ./ by `npm run sync`
 │   ├── pkg/           #   wasm-bindgen output (antares_wasm.js + .wasm)
 │   ├── worker.js      #   the OPFS persistence host (dedicated worker)
 │   └── loopback.js    #   the self.antares.internal virtual host
@@ -120,7 +120,7 @@ client knows nothing about React; the vanilla `www/` page could adopt it.
 
 ```bash
 npm install          # once
-npm run sync         # copy pkg/worker/loopback from ../www (after wasm rebuilds)
+npm run sync         # copy pkg/worker/loopback from ./ (after wasm rebuilds)
 npm run dev          # vite dev server
 npm test             # vitest unit + component tests
 npm run build        # production build (dist/)

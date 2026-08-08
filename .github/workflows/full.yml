@@ -134,15 +134,11 @@ jobs:
           ./dev/wasm-build.sh | tee wasm-size.txt
           echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
           tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Test-harness deps + chromium
+      - name: React playground — deps, test, build (www)
         working-directory: www
         run: |
           npm ci --no-audit --no-fund
           npx playwright-core install --with-deps chromium
-      - name: React playground — test + build (www-react)
-        working-directory: www-react
-        run: |
-          npm ci --no-audit --no-fund
           npx vitest run
           npm run build
       - name: Node tier smoke + browser tier (N6)

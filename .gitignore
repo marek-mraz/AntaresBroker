@@ -24,6 +24,6 @@ results-proc/
 .vscode/
 ScorpioBroker/
 __pycache__
-# N: wasm build artifacts + demo page deps (built by dev/wasm-build.sh / npm)
-www/pkg/
-www/node_modules/
+# npm deps (any package dir)
+node_modules
+# generated frontend artifacts live in www/.gitignore (pkg, dist, public sync)
