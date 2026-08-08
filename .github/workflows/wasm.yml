@@ -4,7 +4,8 @@ name: wasm
 # full.yml's wasm job (dev/wasm-build.sh size budget, dev/wasm-test.sh Node
 # tier + headless-Chromium tier incl. the N9 cross-tenant federation check)
 # without dragging the ETSI matrix along, PLUS the React playground
-# (www-react: vitest + vite build, served under /app/). Publishes the
+# (www-react: vitest + vite build, served at / — the vanilla www page is
+# CI-tested but no longer deployed; /app/ redirects to /). Publishes the
 # ready-to-serve bundle as an artifact; `deploy_pages: true` additionally
 # deploys it to GitHub Pages (requires Pages enabled with "GitHub Actions"
 # source) under the custom domain below.
@@ -69,13 +70,20 @@ jobs:
           npm ci --no-audit --no-fund
           npx vitest run
           npm run build
-      - name: Bundle the site (vanilla page at /, React app at /app/)
+      - name: Bundle the site (React app at /; vanilla page no longer deployed)
         run: |
           mkdir -p site
-          cp www/index.html www/app.js www/worker.js www/sw.js \
-             www/loopback.js www/node-shim.mjs site/
-          cp -r www/pkg site/pkg
-          cp -r www-react/dist site/app
+          cp -r www-react/dist/* site/
+          # returning visitors of the old vanilla page still have its broker
+          # service worker registered at root scope — replace it with a
+          # self-destructing one so it unregisters on their next visit
+          cat > site/sw.js <<'EOF'
+          self.addEventListener("install", () => self.skipWaiting());
+          self.addEventListener("activate", (e) => e.waitUntil(self.registration.unregister()));
+          EOF
+          # old /app/ links redirect to the root
+          mkdir -p site/app
+          echo '<!doctype html><meta http-equiv="refresh" content="0; url=../"><a href="../">moved to /</a>' > site/app/index.html
           # custom domain: the CNAME file travels with every deploy
           echo "$PAGES_DOMAIN" > site/CNAME
       - uses: actions/upload-artifact@v4
