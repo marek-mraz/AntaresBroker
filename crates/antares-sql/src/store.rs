@@ -56,6 +56,50 @@ const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 /// or newer file refuses to load rather than being misread as valid data.
 const FORMAT_VERSION: &str = "1";
 
+/// Drop attribute instances whose `expiresAt` passed (4.22) from an internal
+/// entity or temporal doc; an attribute whose last instance expired is
+/// removed entirely. Returns whether the doc changed.
+fn prune_expired_instances(doc: &mut Value, now: &str) -> bool {
+    const DOC_META: [&str; 8] = [
+        "id",
+        "type",
+        "scope",
+        "@context",
+        "createdAt",
+        "modifiedAt",
+        "deletedAt",
+        "expiresAt",
+    ];
+    let Some(obj) = doc.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    let attrs: Vec<String> = obj
+        .keys()
+        .filter(|k| !DOC_META.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for k in attrs {
+        let Some(arr) = obj.get_mut(&k).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = arr.len();
+        arr.retain(|inst| {
+            !inst
+                .get("expiresAt")
+                .and_then(Value::as_str)
+                .is_some_and(|e| e < now)
+        });
+        if arr.len() != before {
+            changed = true;
+            if arr.is_empty() {
+                obj.remove(&k);
+            }
+        }
+    }
+    changed
+}
+
 fn table_for(kind: Kind) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
     match kind {
         Kind::Entity => T_ENTITIES,
@@ -348,8 +392,11 @@ impl Store {
 
     /// 4.22 garbage collection for the memory/file arm: remove entity docs
     /// whose `expiresAt` (byte-compared against the UTC-Z `now` stamp, same
-    /// as the read filter) has passed. `file` mode persists each removal.
-    /// Returns how many were reaped.
+    /// as the read filter) has passed, and prune expired ATTRIBUTE instances
+    /// from current-state and temporal docs — the read filter hides them,
+    /// but without physical removal a long-running store (the browser's OPFS
+    /// file under ticking sensors) grows without bound. `file` mode persists
+    /// each removal. Returns how many docs were reaped or pruned.
     pub fn sweep_expired(&self, now: &str) -> usize {
         let mut inner = self.write_inner();
         let mut reaped = 0usize;
@@ -372,6 +419,27 @@ impl Store {
             if let Some(docs) = inner.entities.get_mut(&tenant) {
                 docs.remove(&id);
                 reaped += 1;
+            }
+        }
+        let Inner {
+            entities, temporal, ..
+        } = &mut *inner;
+        for (table, map) in [
+            (
+                T_ENTITIES,
+                entities as &mut HashMap<String, BTreeMap<String, Value>>,
+            ),
+            (T_TEMPORAL_ENTITIES, temporal),
+        ] {
+            for (tenant, docs) in map.iter_mut() {
+                for (id, doc) in docs.iter_mut() {
+                    if prune_expired_instances(doc, now) {
+                        reaped += 1;
+                        if let Ok(t) = TenantId::new(tenant) {
+                            self.persist(table, &key_bytes(&t, id), Some(doc));
+                        }
+                    }
+                }
             }
         }
         reaped
@@ -701,6 +769,49 @@ mod tests {
         assert_eq!(s.get(&t, Kind::Entity, "urn:b").expect("restored")["v"], 42);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&restore);
+    }
+
+    #[test]
+    fn sweep_prunes_expired_attribute_instances() {
+        let s = Store::default();
+        let t = TenantId::default();
+        s.create(
+            &t,
+            Kind::Entity,
+            "urn:e",
+            json!({"id": "urn:e", "type": ["T"],
+                "attr": [
+                    {"type": "Property", "value": 1, "expiresAt": "2000-01-01T00:00:00Z"},
+                    {"type": "Property", "value": 2, "expiresAt": "2999-01-01T00:00:00Z"}],
+                "gone": [
+                    {"type": "Property", "value": 3, "expiresAt": "2000-01-01T00:00:00Z"}]}),
+        );
+        s.create(
+            &t,
+            Kind::Temporal,
+            "urn:e",
+            json!({"id": "urn:e", "type": ["T"],
+                "attr": [
+                    {"value": 1, "expiresAt": "2000-01-01T00:00:00Z"},
+                    {"value": 2, "expiresAt": "2999-01-01T00:00:00Z"},
+                    {"value": 3}]}),
+        );
+        assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 2);
+        let e = s.get(&t, Kind::Entity, "urn:e").expect("entity survives");
+        assert_eq!(e["attr"].as_array().expect("attr").len(), 1);
+        assert_eq!(e["attr"][0]["value"], 2);
+        assert!(e.get("gone").is_none(), "fully-expired attribute removed");
+        let tp = s
+            .get(&t, Kind::Temporal, "urn:e")
+            .expect("temporal survives");
+        let vals: Vec<i64> = tp["attr"]
+            .as_array()
+            .expect("instances")
+            .iter()
+            .map(|i| i["value"].as_i64().expect("value"))
+            .collect();
+        assert_eq!(vals, [2, 3], "expired pruned, no-expiry instance kept");
+        assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 0, "idempotent");
     }
 
     #[test]

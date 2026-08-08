@@ -58,6 +58,20 @@ impl Broker {
         // Same in-process matcher/notifier path as bus=local (§9.2): the
         // store's change hook feeds it, no bus process exists to talk to.
         antares_api::notify::wire(&mut state);
+        // 4.22 GC: the native broker sweeps on a tokio interval (main.rs);
+        // the browser has no such loop, so without this the OPFS file grows
+        // without bound under ticking transient attributes — reads filter
+        // expired instances but nothing would ever delete them.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let store = state.store.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                loop {
+                    gloo_timers::future::TimeoutFuture::new(60_000).await;
+                    store.sweep_expired();
+                }
+            });
+        }
         Self {
             router: antares_api::router(state),
         }
