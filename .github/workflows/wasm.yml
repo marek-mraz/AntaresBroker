@@ -4,8 +4,8 @@ name: wasm
 # full.yml's wasm job (dev/wasm-build.sh size budget, dev/wasm-test.sh Node
 # tier + headless-Chromium tier incl. the N9 cross-tenant federation check)
 # without dragging the ETSI matrix along, PLUS the React playground
-# (www-react: vitest + vite build, served at / — the vanilla www page is
-# CI-tested but no longer deployed; /app/ redirects to /). Publishes the
+# (www-react: vitest + vite build, served at /; the old /app/ path redirects
+# to /). Publishes the
 # ready-to-serve bundle as an artifact; `deploy_pages: true` additionally
 # deploys it to GitHub Pages (requires Pages enabled with "GitHub Actions"
 # source) under the custom domain below.
@@ -53,16 +53,15 @@ jobs:
           ./dev/wasm-build.sh | tee wasm-size.txt
           echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
           tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Demo page deps + chromium
+      - name: Test-harness deps + chromium
         working-directory: www
         run: |
           npm ci --no-audit --no-fund
           npx playwright-core install --with-deps chromium
-      - name: Node tier + browser tier (N6/N7a, incl. cross-tenant federation)
-        run: ./dev/wasm-test.sh
       # The React playground: unit/component tests + production build. Its
       # `npm run build` syncs pkg/worker/loopback from ../www first, so this
-      # must run AFTER dev/wasm-build.sh. (The playwright e2e is local-dev
+      # must run AFTER dev/wasm-build.sh — and BEFORE dev/wasm-test.sh, whose
+      # browser tier drives the built dist. (The playwright e2e is local-dev
       # tooling — the auto-demo makes it minutes-long; vitest gates CI.)
       - name: React playground — test + build (www-react)
         working-directory: www-react
@@ -70,6 +69,8 @@ jobs:
           npm ci --no-audit --no-fund
           npx vitest run
           npm run build
+      - name: Node tier + browser tier (N6/N7a, incl. cross-tenant federation)
+        run: ./dev/wasm-test.sh
       - name: Bundle the site (React app at /; vanilla page no longer deployed)
         run: |
           mkdir -p site

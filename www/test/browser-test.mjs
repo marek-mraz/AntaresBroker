@@ -1,23 +1,31 @@
-// N6: the demo page, driven headless — the CI proof that the browser build
-// actually runs IN A BROWSER: broker up (OPFS worker preferred), entity
-// created, subscription created, notification observed in-page, and the N4
-// persistence contract: state survives a page reload, and a second tab gets
-// the clear exclusive-owner error instead of a torn store. Run:
+// N6: the React playground (www-react/dist), driven headless — the CI proof
+// that the browser build actually runs IN A BROWSER: broker up (OPFS worker
+// preferred), the auto-demo populates the board through the real NGSI-LD API,
+// a subscription delivers an in-page notification, N9 cross-tenant federation
+// over the loopback host, and the N4 persistence contract: state survives a
+// page reload, and a second tab gets the exclusive-owner fallback instead of
+// a torn store. Run:
 //
 //   node www/test/browser-test.mjs        (needs `npx playwright-core install chromium`
-//                                          and a built www/pkg — dev/wasm-build.sh)
+//                                          and a built www-react/dist — npm run build)
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { chromium } from "playwright-core";
 
-const ROOT = new URL("..", import.meta.url).pathname; // www/
+const ROOT = new URL("../../www-react/dist", import.meta.url).pathname;
+await access(join(ROOT, "index.html")).catch(() => {
+  console.error("FAIL: www-react/dist missing — run `npm run build` in www-react first");
+  process.exit(1);
+});
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
   ".mjs": "text/javascript",
+  ".css": "text/css",
   ".wasm": "application/wasm",
   ".json": "application/json",
+  ".svg": "image/svg+xml",
 };
 
 const server = createServer(async (req, res) => {
@@ -39,9 +47,8 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch();
 // ONE context: browser.newPage() would mint a fresh context per call, and a
 // separate context means a separate origin partition — a different broker.
-const ctx = await browser.newContext();
+const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
 const page = await ctx.newPage();
-page.on("console", (m) => console.log("[page]", m.text()));
 page.on("pageerror", (e) => console.log("[pageerror]", e.message));
 
 const fail = async (msg) => {
@@ -51,87 +58,75 @@ const fail = async (msg) => {
   process.exit(1);
 };
 
-const bootAndMode = async (p) => {
-  await p.waitForFunction(() => document.getElementById("mode").textContent !== "…", {
-    timeout: 30_000,
-  });
+const bootMode = async (p) => {
   await p.waitForFunction(
-    () => document.getElementById("health").textContent.includes('"store":'),
-    { timeout: 15_000 },
+    () => document.querySelector("[data-mode]")?.dataset.mode !== "booting",
+    { timeout: 60_000 },
   );
-  return p.textContent("#mode");
+  return p.evaluate(() => document.querySelector("[data-mode]").dataset.mode);
 };
 
 try {
   await page.goto(base, { waitUntil: "load" });
-  const mode = await bootAndMode(page);
+  const mode = await bootMode(page);
   console.log("broker mode:", mode);
-  const health = await page.textContent("#health");
-  const store = (health.match(/"store":"([a-z]+)"/) ?? [])[1];
+  if (!["opfs-worker", "in-page"].includes(mode)) await fail(`unexpected mode ${mode}`);
+  const store = await page.evaluate(async () => {
+    const h = await (await window.brokerFetch("/q/health")).json();
+    return h.store;
+  });
   console.log("store:", store);
   if (mode === "opfs-worker" && store !== "file") {
     await fail(`opfs-worker must report store=file, got ${store}`);
   }
-  if (!["opfs-worker", "service-worker", "in-page"].includes(mode)) {
-    await fail(`unexpected mode ${mode}`);
-  }
 
-  // Subscribe FIRST, then create — the create must produce a notification.
-  await page.click("#subscribe");
-  await page.click("#create");
+  // Auto-demo (first visit) builds the city through the real API.
   await page.waitForFunction(
-    () => document.querySelectorAll("#entities li").length >= 1,
+    () => document.querySelectorAll(".react-flow__node").length >= 20,
+    { timeout: 60_000 },
+  );
+  console.log(
+    "board:",
+    await page.evaluate(() => document.querySelectorAll(".react-flow__node").length),
+    "nodes",
+  );
+
+  // Subscribe FIRST, then create — the create must produce an in-page
+  // notification (endpoint http://page.local/ fans out to the page).
+  const notif = await page.evaluate(async () => {
+    const CTX = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+    const post = (path, body) =>
+      window.brokerFetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/ld+json" },
+        body: JSON.stringify({ ...body, "@context": CTX }),
+      });
+    let r = await post("/ngsi-ld/v1/subscriptions", {
+      id: "urn:ngsi-ld:Subscription:browser-smoke",
+      type: "Subscription",
+      entities: [{ type: "BrowserSmoke" }],
+      notification: {
+        endpoint: { uri: "http://page.local/", accept: "application/json" },
+      },
+    });
+    if (r.status !== 201) return `subscribe → ${r.status}`;
+    r = await post("/ngsi-ld/v1/entities", {
+      id: "urn:ngsi-ld:BrowserSmoke:1",
+      type: "BrowserSmoke",
+      v: { type: "Property", value: 1 },
+    });
+    if (r.status !== 201) return `create → ${r.status}`;
+    return "OK";
+  });
+  if (notif !== "OK") await fail(`notification setup: ${notif}`);
+  await page.waitForFunction(
+    () =>
+      window.__antares.notifications.some((n) =>
+        (n.data ?? []).some((e) => e.id === "urn:ngsi-ld:BrowserSmoke:1"),
+      ),
     { timeout: 15_000 },
   );
-  await page.waitForFunction(
-    () => [...document.querySelectorAll("#log .notif")].length >= 1,
-    { timeout: 15_000 },
-  );
-  console.log("notification observed:", await page.textContent("#log .notif"));
-
-  if (mode === "opfs-worker") {
-    // N4b: a second tab must get the exclusive-owner refusal and fall back —
-    // never a second writer on the same file.
-    const page2 = await ctx.newPage();
-    page2.on("console", (m) => console.log("[page2]", m.text()));
-    await page2.goto(base, { waitUntil: "load" });
-    const mode2 = await bootAndMode(page2);
-    console.log("second tab mode:", mode2);
-    if (mode2 === "opfs-worker") await fail("two tabs both claim the OPFS store");
-    const log2 = await page2.textContent("#log");
-    if (!log2.includes("another tab")) {
-      await fail(`second tab should surface the owner error, log: ${log2.slice(0, 200)}`);
-    }
-    await page2.close();
-
-    // N4: persistence — reload releases the worker's handle; the fresh
-    // worker must rebuild the SAME store from OPFS (boot rebuild, B4).
-    await page.reload({ waitUntil: "load" });
-    const modeAfter = await bootAndMode(page);
-    if (modeAfter !== "opfs-worker") {
-      await fail(`after reload expected opfs-worker again, got ${modeAfter}`);
-    }
-    await page.waitForFunction(
-      () => document.querySelectorAll("#entities li").length >= 1,
-      { timeout: 15_000 },
-    );
-    console.log("entity survived the reload — OPFS persistence holds");
-  } else if (mode === "service-worker") {
-    // No OPFS in this engine: fall back to the SW cross-tab assertion.
-    const page2 = await ctx.newPage();
-    await page2.goto(base, { waitUntil: "load" });
-    await page2.waitForFunction(() => navigator.serviceWorker.controller !== null, {
-      timeout: 15_000,
-    });
-    const rooms = await page2.evaluate(async () => {
-      const r = await fetch(
-        "/ngsi-ld/v1/entities?type=Room,TemperatureSensor,ParkingSpot,Streetlight&limit=100",
-      );
-      return (await r.json()).length;
-    });
-    if (rooms < 1) await fail("second tab does not see the first tab's entity");
-    await page2.close();
-  }
+  console.log("notification observed in-page");
 
   // N9: cross-tenant federation inside the ONE in-browser broker — space-a
   // holds a CSR whose endpoint is the loopback host and whose `tenant`
@@ -178,67 +173,62 @@ try {
   if (fed !== "OK") await fail(`cross-tenant federation: ${fed}`);
   console.log("cross-tenant federation over the loopback host holds");
 
-  // Board overview: ▶ create demo must materialize spaces + CSRs + pipelines
-  // (idempotently), 🧨 remove everything must wipe them all and reseed.
-  page.on("dialog", (d) => d.accept()); // the reset confirm()
-  await page.click("#overview");
-  await page.waitForSelector("#dlg-overview[open]", { timeout: 10_000 });
-  await page.click("#ov-demo");
-  await page.waitForFunction(
-    () => {
-      const t = document.getElementById("ov-body").textContent;
-      const csrs = document.querySelectorAll("#ov-body .tag").length;
-      return t.includes("smart-city") && t.includes("old-town") &&
-        t.includes("decidim") && csrs >= 7 && t.includes("simulated device") &&
-        t.includes("copy · TrafficCounter");
-    },
-    { timeout: 30_000 },
+  // Temporal chart: a simulated device ticks observedAt-stamped readings, so
+  // clicking its sheet row must render the value line AND the Δ-bars chart
+  // fed by /temporal/entities. Use transit: its local rows are direct source
+  // devices (3 s ticks), so history accrues fast and deterministically.
+  await page.click('[data-id="s:transit"]');
+  await page.waitForSelector('[data-testid="sheet-row"]', { timeout: 30_000 });
+  await page.click('[data-testid="sheet-row"]');
+  await page.waitForSelector('[data-testid="history"]', { timeout: 10_000 });
+  await page.waitForSelector('[data-testid="values-chart"]', { timeout: 60_000 });
+  await page.waitForSelector('[data-testid="changes-chart"]', { timeout: 60_000 });
+  const bars = await page.evaluate(
+    () => document.querySelectorAll('[data-testid="delta-bar"]').length,
   );
-  console.log("demo built: 9 spaces + 7 CSRs + 13 devices + 3 copies visible on the board");
-  // Second click must not duplicate anything (idempotence).
-  await page.click("#ov-demo");
-  await page.waitForFunction(
-    () => !document.getElementById("ov-demo").disabled, { timeout: 30_000 });
-  const csrCount = await page.evaluate(
-    () => document.querySelectorAll("#ov-body .tag").length);
-  if (csrCount !== 7) await fail(`demo is not idempotent: ${csrCount} CSRs after 2nd run`);
-  // Template round-trip: export the demo structure, wipe, apply → restored.
-  const tpl = await page.evaluate(() => window.boardTemplate());
-  if ((tpl.csrs?.length ?? 0) < 7 || (tpl.pipelines?.length ?? 0) < 12) {
-    await fail(`template export incomplete: ${JSON.stringify(tpl).slice(0, 200)}`);
+  console.log(`temporal chart renders (${bars} Δ bars)`);
+
+  if (mode === "opfs-worker") {
+    // N4b: a second tab must get the exclusive-owner refusal and fall back —
+    // never a second writer on the same file.
+    const page2 = await ctx.newPage();
+    page2.on("pageerror", (e) => console.log("[page2 pageerror]", e.message));
+    await page2.goto(base, { waitUntil: "load" });
+    const mode2 = await bootMode(page2);
+    console.log("second tab mode:", mode2);
+    if (mode2 === "opfs-worker") await fail("two tabs both claim the OPFS store");
+    const bootError = await page2.evaluate(() => window.__antares.transport.bootError);
+    if (!String(bootError).includes("another tab")) {
+      await fail(`second tab should surface the owner error, got: ${bootError}`);
+    }
+    await page2.close();
+
+    // N4: persistence — reload releases the worker's handle; the fresh
+    // worker must rebuild the SAME store from OPFS (boot rebuild, B4).
+    // The auto-demo runs only once (localStorage), so surviving state is
+    // proof of OPFS, not of a re-seed.
+    await page.reload({ waitUntil: "load" });
+    const modeAfter = await bootMode(page);
+    if (modeAfter !== "opfs-worker") {
+      await fail(`after reload expected opfs-worker again, got ${modeAfter}`);
+    }
+    const survived = await page.evaluate(async () => {
+      const r = await window.brokerFetch("/ngsi-ld/v1/entities?type=FedCar", {
+        headers: { "NGSILD-Tenant": "space-b" },
+      });
+      return (await r.json()).some((e) => e.id === "urn:ngsi-ld:FedCar:bt-1");
+    });
+    if (!survived) await fail("space-b FedCar entity lost across reload");
+    await page.waitForFunction(
+      () => document.querySelectorAll(".react-flow__node").length >= 20,
+      { timeout: 60_000 },
+    );
+    console.log("state survived the reload — OPFS persistence holds");
   }
-  await page.click("#ov-reset");
-  await page.waitForFunction(
-    () => {
-      const t = document.getElementById("ov-body").textContent;
-      return t.includes("pipelines (0)") && t.includes("none — 🔗") &&
-        ![...document.querySelectorAll("#ov-body .item")].some((i) =>
-          /🏠 [1-9]/.test(i.textContent));
-    },
-    { timeout: 30_000 },
-  );
-  console.log("remove everything: board wiped and reseeded, all spaces at 0 local");
-  await page.evaluate((t) => window.applyBoardTemplate(t), tpl);
-  await page.waitForFunction(
-    () => {
-      const b = window.boardTemplate();
-      return b.csrs.length >= 7 && b.pipelines.length >= 12;
-    },
-    { timeout: 30_000 },
-  );
-  console.log("template round-trip: export → wipe → apply restored the structure");
 
-  // Request logging (on by default outside the ETSI harness): the 📜 log must
-  // carry [tenant] METHOD path → status lines for the traffic just generated.
-  const reqLines = await page.evaluate(
-    () => document.querySelectorAll("#log .req").length);
-  if (reqLines < 5) await fail(`request log expected many entries, got ${reqLines}`);
-  console.log(`request log carries ${reqLines}+ NGSI-LD calls`);
-
-  console.log(`PASS: browser tier (${mode}) — broker, entity, subscription, notification, federation, board demo/reset, template round-trip, request log`);
+  console.log("PASS: browser tier (react app) — boot, demo, notification, federation, persistence");
   await browser.close();
   server.close();
 } catch (e) {
-  console.error(e);
   await fail(String(e));
 }

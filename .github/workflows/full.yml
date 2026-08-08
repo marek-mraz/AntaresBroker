@@ -113,8 +113,9 @@ jobs:
     # §N: the browser artifact. Build (size budget enforced by the script,
     # N5), then prove it in BOTH runtimes (dev/wasm-test.sh, N6/N7a): the
     # Node shim does a create + a real-HTTP notification; headless Chromium
-    # runs the demo page — Service Worker broker, entity, subscription,
-    # in-page notification, second tab. Same scripts as local runs (§E).
+    # runs the React playground — OPFS worker broker, entity, subscription,
+    # in-page notification, second tab, federation. Same scripts as local
+    # runs (§E).
     name: Browser build (wasm32)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -133,11 +134,17 @@ jobs:
           ./dev/wasm-build.sh | tee wasm-size.txt
           echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
           tail -1 wasm-size.txt >> "$GITHUB_STEP_SUMMARY"
-      - name: Demo page deps + chromium
+      - name: Test-harness deps + chromium
         working-directory: www
         run: |
           npm ci --no-audit --no-fund
           npx playwright-core install --with-deps chromium
+      - name: React playground — test + build (www-react)
+        working-directory: www-react
+        run: |
+          npm ci --no-audit --no-fund
+          npx vitest run
+          npm run build
       - name: Node tier smoke + browser tier (N6)
         run: ./dev/wasm-test.sh
 
