@@ -171,8 +171,12 @@ export default function Board({ selected, onSelectSpace }) {
         out.push({
           id: key,
           type: "bubble",
-          source: `s:${l.to}`,
-          target: `s:${from}`,
+          // registration/query direction: the registering space points at the
+          // peer it reads (smart-city → old-town); the animated dashes flow
+          // the same way, and ONLY while a federated read actually runs
+          // (burst-gated below) — the return traffic is the `N ⇢` counter.
+          source: `s:${from}`,
+          target: `s:${l.to}`,
           animated: !!on,
           label: `CSR · ${l.type ?? "all"}${on && b.count ? `  ·  ${b.count} ⇢` : ""}`,
           labelStyle: { fill: FED, fontWeight: 650 },
