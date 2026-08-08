@@ -3,9 +3,16 @@ name: wasm
 # Manual CI/CD for the browser build ALONE — the same build + test steps as
 # full.yml's wasm job (dev/wasm-build.sh size budget, dev/wasm-test.sh Node
 # tier + headless-Chromium tier incl. the N9 cross-tenant federation check)
-# without dragging the ETSI matrix along. Publishes the ready-to-serve www/
-# bundle as an artifact; `deploy_pages: true` additionally deploys it to
-# GitHub Pages (requires Pages to be enabled with "GitHub Actions" source).
+# without dragging the ETSI matrix along, PLUS the React playground
+# (www-react: vitest + vite build, served under /app/). Publishes the
+# ready-to-serve bundle as an artifact; `deploy_pages: true` additionally
+# deploys it to GitHub Pages (requires Pages enabled with "GitHub Actions"
+# source) under the custom domain below.
+#
+# Custom domain (PAGES_DOMAIN): the CNAME file in the artifact pins it per
+# deploy. One-time setup outside this file: a DNS CNAME record
+#   antares-ngsi-ld-demo  →  marek-mraz.github.io
+# and repo Settings → Pages → Custom domain + Enforce HTTPS.
 
 on:
   # Manual only (decision 2026-08-07): no push trigger. Deploying the
@@ -21,6 +28,9 @@ on:
 concurrency:
   group: wasm-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  PAGES_DOMAIN: antares-ngsi-ld-demo.marek-mraz.com
 
 jobs:
   build-test:
@@ -49,12 +59,25 @@ jobs:
           npx playwright-core install --with-deps chromium
       - name: Node tier + browser tier (N6/N7a, incl. cross-tenant federation)
         run: ./dev/wasm-test.sh
-      - name: Bundle the site (page + pkg + Node shim, no node_modules)
+      # The React playground: unit/component tests + production build. Its
+      # `npm run build` syncs pkg/worker/loopback from ../www first, so this
+      # must run AFTER dev/wasm-build.sh. (The playwright e2e is local-dev
+      # tooling — the auto-demo makes it minutes-long; vitest gates CI.)
+      - name: React playground — test + build (www-react)
+        working-directory: www-react
+        run: |
+          npm ci --no-audit --no-fund
+          npx vitest run
+          npm run build
+      - name: Bundle the site (vanilla page at /, React app at /app/)
         run: |
           mkdir -p site
           cp www/index.html www/app.js www/worker.js www/sw.js \
              www/loopback.js www/node-shim.mjs site/
           cp -r www/pkg site/pkg
+          cp -r www-react/dist site/app
+          # custom domain: the CNAME file travels with every deploy
+          echo "$PAGES_DOMAIN" > site/CNAME
       - uses: actions/upload-artifact@v4
         with:
           name: antares-www
