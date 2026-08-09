@@ -22,15 +22,59 @@ pub enum QNode {
     },
 }
 
+impl QNode {
+    /// Every attribute path this expression references, in source order.
+    ///
+    /// Purge (5.6.21.4 b/c) qualifies an `attrs` list or a `q` only when it
+    /// includes "at least one non-system Attribute", so the caller needs the
+    /// paths rather than just "is there a q".
+    pub fn attribute_paths(&self) -> Vec<&[String]> {
+        let mut out = Vec::new();
+        self.collect_paths(&mut out);
+        out
+    }
+
+    fn collect_paths<'a>(&'a self, out: &mut Vec<&'a [String]>) {
+        match self {
+            QNode::And(ns) | QNode::Or(ns) => {
+                for n in ns {
+                    n.collect_paths(out);
+                }
+            }
+            QNode::Cmp { path, .. } | QNode::Exists { path, .. } => out.push(path.as_slice()),
+        }
+    }
+}
+
+/// System-generated members that never count as a "non-system Attribute"
+/// (5.6.21.4). `id`/`type`/`scope` are Entity members, the timestamps are the
+/// system temporal attributes of 6.3.11.
+pub const SYSTEM_ATTRS: &[&str] = &[
+    "id",
+    "type",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+    "expiresAt",
+    "deletedAt",
+    "instanceId",
+];
+
+/// True when `name` is an ordinary (non-system) Attribute name.
+pub fn is_non_system_attr(name: &str) -> bool {
+    !SYSTEM_ATTRS.contains(&name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpOp {
-    Eq,      // ==
-    Ne,      // !=
-    Gt,      // >
-    Ge,      // >=
-    Lt,      // <
-    Le,      // <=
-    Pattern, // ~=
+    Eq,         // ==
+    Ne,         // !=
+    Gt,         // >
+    Ge,         // >=
+    Lt,         // <
+    Le,         // <=
+    Pattern,    // ~=
+    NotPattern, // !~= (4.9 notPatternOp)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +82,13 @@ pub enum QValue {
     Str(String),
     Num(f64),
     Bool(bool),
+    /// 4.9 `ValueList = Value 1*(, Value)` — scalars only, `==`/`!=` only.
+    List(Vec<QValue>),
+    /// 4.9 `Range = ComparableValue dots ComparableValue` — `==`/`!=` only.
+    /// Endpoints are the same scalar variant (Num..Num or Str..Str; dates and
+    /// times ride in Str and order correctly because 4.6.3 pins them to
+    /// fixed-width UTC forms).
+    Range(Box<QValue>, Box<QValue>),
 }
 
 /// Longest `q=` accepted, before parsing. The URI cap is 8 KiB but a POST
@@ -143,7 +194,7 @@ impl<'a> Parser<'a> {
             if negated {
                 return Err(bad(self.rest, "'!' only prefixes an existence check"));
             }
-            let value = self.value()?;
+            let value = self.value(op)?;
             Ok(QNode::Cmp { path, op, value })
         } else {
             Ok(QNode::Exists { path, negated })
@@ -167,6 +218,8 @@ impl<'a> Parser<'a> {
     fn cmp_op(&mut self) -> Option<CmpOp> {
         for (tok, op) in [
             ("==", CmpOp::Eq),
+            // "!~=" before "!=" — the longer token must win the prefix race
+            ("!~=", CmpOp::NotPattern),
             ("!=", CmpOp::Ne),
             ("~=", CmpOp::Pattern),
             (">=", CmpOp::Ge),
@@ -182,7 +235,66 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn value(&mut self) -> Result<QValue, NgsiError> {
+    /// Query Term value for `op` — 4.9 p.84 pairs them precisely:
+    /// `Operator ComparableValue` (ordering), `equal/unequal CompEqualityValue`
+    /// (adds true/false, ValueList, Range, URI), `patternOp/notPatternOp
+    /// RegExp`. Lists and ranges with an ordering or pattern operator are a
+    /// grammar violation, not an empty result.
+    fn value(&mut self, op: CmpOp) -> Result<QValue, NgsiError> {
+        let first = self.scalar()?;
+        let equality = matches!(op, CmpOp::Eq | CmpOp::Ne);
+        self.rest = self.rest.trim_start();
+        if let Some(rest) = self.rest.strip_prefix("..") {
+            if !equality {
+                return Err(bad(
+                    self.rest,
+                    "a Range is only valid with == or != (4.9 CompEqualityValue)",
+                ));
+            }
+            self.rest = rest.trim_start();
+            let hi = self.scalar()?;
+            // Range = ComparableValue..ComparableValue: booleans excluded, and
+            // an order relation needs both endpoints in one value space
+            if std::mem::discriminant(&first) != std::mem::discriminant(&hi)
+                || matches!(first, QValue::Bool(_))
+            {
+                return Err(bad(
+                    self.rest,
+                    "Range endpoints must be two comparable values of the same type",
+                ));
+            }
+            return Ok(QValue::Range(Box::new(first), Box::new(hi)));
+        }
+        if self.rest.starts_with(',') {
+            if !equality {
+                return Err(bad(
+                    self.rest,
+                    "a ValueList is only valid with == or != (4.9 CompEqualityValue)",
+                ));
+            }
+            let mut items = vec![first];
+            while self.eat(',') {
+                self.rest = self.rest.trim_start();
+                items.push(self.scalar()?);
+                self.rest = self.rest.trim_start();
+            }
+            return Ok(QValue::List(items));
+        }
+        if matches!(op, CmpOp::Gt | CmpOp::Ge | CmpOp::Lt | CmpOp::Le)
+            && matches!(first, QValue::Bool(_))
+        {
+            return Err(bad(
+                self.rest,
+                "true/false are only valid with == or != (4.9 OtherValue)",
+            ));
+        }
+        Ok(first)
+    }
+
+    /// One scalar literal. Unquoted tokens stop at a delimiter or at `..`
+    /// (the Range separator) — a decimal like `10.5` has no `..`, so
+    /// `10.5..20.5` still splits at the right place.
+    fn scalar(&mut self) -> Result<QValue, NgsiError> {
         if let Some(rest) = self.rest.strip_prefix('"') {
             let end = rest
                 .find('"')
@@ -191,10 +303,14 @@ impl<'a> Parser<'a> {
             self.rest = &rest[1..];
             return Ok(QValue::Str(s.to_owned()));
         }
-        let end = self
+        let stop = self
             .rest
-            .find(|c: char| ";|()".contains(c))
+            .find(|c: char| ";|(),".contains(c))
             .unwrap_or(self.rest.len());
+        let end = match self.rest.find("..") {
+            Some(d) if d < stop => d,
+            _ => stop,
+        };
         let (raw, rest) = self.rest.split_at(end);
         let raw = raw.trim();
         self.rest = rest;
@@ -290,6 +406,89 @@ mod tests {
         for bad in ["", "==5", "a==\"unterminated", "a==1)"] {
             assert!(parse_q(bad).is_err(), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn value_list_parses_with_equality_ops_only() {
+        // 4.9 p.85 ValueList = Value 1*(, Value); p.84 pairs it with ==/!= only
+        let q = parse_q(r#"color=="black","red""#).expect("parse");
+        assert_eq!(
+            q,
+            QNode::Cmp {
+                path: vec!["color".into()],
+                op: CmpOp::Eq,
+                value: QValue::List(vec![
+                    QValue::Str("black".into()),
+                    QValue::Str("red".into())
+                ])
+            }
+        );
+        // spec's own spacing (`color!= "black", "red"`) must parse too
+        let q = parse_q(r#"color!= "black", "red""#).expect("parse");
+        assert!(matches!(
+            q,
+            QNode::Cmp { op: CmpOp::Ne, value: QValue::List(_), .. }
+        ));
+        // mixed scalar kinds are legal (ValueList is over Value)
+        assert!(parse_q("a==1,2,3").is_ok());
+        // ordering + list is a grammar violation → 400, not empty result
+        assert!(parse_q(r#"a>"x","y""#).is_err());
+        assert!(parse_q("a>=1,2").is_err());
+    }
+
+    #[test]
+    fn range_parses_with_equality_ops_only() {
+        // 4.9 p.85 Range = ComparableValue dots ComparableValue
+        let q = parse_q("temperature==10..20").expect("parse");
+        assert_eq!(
+            q,
+            QNode::Cmp {
+                path: vec!["temperature".into()],
+                op: CmpOp::Eq,
+                value: QValue::Range(
+                    Box::new(QValue::Num(10.0)),
+                    Box::new(QValue::Num(20.0))
+                )
+            }
+        );
+        // decimals keep their fraction; `..` is not mistaken for `.`
+        let q = parse_q("t!=10.5..20.5").expect("parse");
+        assert!(matches!(
+            q,
+            QNode::Cmp { op: CmpOp::Ne, value: QValue::Range(_, _), .. }
+        ));
+        // DateTime endpoints (unquoted, per EXAMPLE 8 style literals)
+        let q = parse_q("observedAt==2021-01-01T00:00:00Z..2021-02-01T00:00:00Z").expect("parse");
+        assert!(matches!(
+            q,
+            QNode::Cmp { value: QValue::Range(_, _), .. }
+        ));
+        // ordering + range violates the grammar; bools are not ComparableValue
+        assert!(parse_q("a>1..5").is_err());
+        assert!(parse_q("a==true..false").is_err());
+        assert!(parse_q("a==1..\"x\"").is_err(), "mixed-type endpoints");
+    }
+
+    #[test]
+    fn not_pattern_op() {
+        // 4.9 p.85 notPatternOp = !~=
+        let q = parse_q(r#"name!~="^Merc""#).expect("parse");
+        assert_eq!(
+            q,
+            QNode::Cmp {
+                path: vec!["name".into()],
+                op: CmpOp::NotPattern,
+                value: QValue::Str("^Merc".into())
+            }
+        );
+    }
+
+    #[test]
+    fn bool_with_ordering_op_is_a_grammar_violation() {
+        // p.84: Operator (ordering) takes ComparableValue; true/false are
+        // OtherValue, reachable only through ==/!=
+        assert!(parse_q("a>true").is_err());
+        assert!(parse_q("a==true").is_ok());
     }
 }
 

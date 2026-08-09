@@ -154,6 +154,40 @@ fn path_expr(path: &[String], expand: &dyn Fn(&str) -> String) -> Option<String>
 }
 
 fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
+    // 4.9 ValueList / Range (CompEqualityValue). Only `==` compiles:
+    // - Eq+List p.90 is "identical to ANY of the list values" — an OR of
+    //   equality filters, existential like jsonpath's lax arrays. Exact.
+    // - Eq+Range p.90 is a closed interval — exact for numbers; string
+    //   endpoints would order through the database collation (see the
+    //   ordering note below), so those stay in memory.
+    // - Ne+List / Ne+Range inherit every `!=` caveat (type-mismatch matches,
+    //   universal quantification over arrays) — declined with it.
+    match want {
+        QValue::List(vals) => {
+            if op != CmpOp::Eq {
+                return None;
+            }
+            let mut parts = Vec::with_capacity(vals.len());
+            for v in vals {
+                parts.push(format!("@ == {}", literal(v)?));
+            }
+            return Some(format!(" ? ({})", parts.join(" || ")));
+        }
+        QValue::Range(lo, hi) => {
+            if op != CmpOp::Eq {
+                return None;
+            }
+            let (QValue::Num(a), QValue::Num(b)) = (lo.as_ref(), hi.as_ref()) else {
+                return None;
+            };
+            let (a, b) = (
+                literal(&QValue::Num(*a))?,
+                literal(&QValue::Num(*b))?,
+            );
+            return Some(format!(" ? (@ >= {a} && @ <= {b})"));
+        }
+        _ => {}
+    }
     // Ordering against a STRING is left to the evaluator: `qeval::compare`
     // orders with Rust's byte-wise `str` comparison, while jsonpath orders
     // through the database collation. They agree on ASCII and can disagree
@@ -166,15 +200,23 @@ fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
     let lit = literal(want)?;
     Some(match op {
         CmpOp::Eq => format!(" ? (@ == {lit})"),
-        CmpOp::Ne => format!(" ? (@ != {lit})"),
+        // 4.9 p.92: "If the data type of the target value and the data type of
+        // the Query Term value are different, then they shall be considered
+        // unequal" — a type mismatch MATCHES `!=`. PostgreSQL jsonpath compares
+        // across types as `unknown`, so `@ != lit` silently DROPS exactly those
+        // rows, and 4.9 p.91 additionally requires every element of an array to
+        // differ (jsonpath quantifies existentially). Neither is reproducible
+        // here, so per this module's contract — decline rather than narrow
+        // wrongly — `!=` is left to the in-memory evaluator.
+        CmpOp::Ne => return None,
         CmpOp::Gt => format!(" ? (@ > {lit})"),
         CmpOp::Ge => format!(" ? (@ >= {lit})"),
         CmpOp::Lt => format!(" ? (@ < {lit})"),
         CmpOp::Le => format!(" ? (@ <= {lit})"),
-        // ~= is a regex over strings; jsonpath's like_regex is POSIX-ish and
-        // does not match Rust's `regex` crate on every pattern, so this one
-        // is left to the in-memory evaluator.
-        CmpOp::Pattern => return None,
+        // ~= / !~= are regexes over strings; jsonpath's like_regex is
+        // POSIX-ish and does not match Rust's `regex` crate on every pattern,
+        // so both are left to the in-memory evaluator.
+        CmpOp::Pattern | CmpOp::NotPattern => return None,
     })
 }
 
@@ -194,6 +236,9 @@ fn literal(v: &QValue) -> Option<String> {
                 return None;
             }
         }
+        // composite values never render as one literal — cmp_filter unfolds
+        // them (Eq) or declines (everything else) before reaching here
+        QValue::List(_) | QValue::Range(..) => return None,
     })
 }
 
@@ -302,5 +347,30 @@ mod tests {
         // ... but equality on strings is collation-free, so it compiles
         assert!(c("name==\"m\"").is_some());
         assert!(c("n>=3").is_some(), "numeric ordering is unambiguous");
+    }
+
+    #[test]
+    fn value_list_and_range_compile_for_eq_and_decline_for_ne() {
+        // Eq+List: an OR of equality filters — existential, exact
+        let got = c(r#"color=="black","red""#).expect("compiles");
+        assert!(
+            got.binds[0].ends_with(r#" ? (@ == "black" || @ == "red")"#),
+            "{}",
+            got.binds[0]
+        );
+        // Eq+Range on numbers: closed interval
+        let got = c("t==10..20").expect("compiles");
+        assert!(
+            got.binds[0].ends_with(" ? (@ >= 10 && @ <= 20)"),
+            "{}",
+            got.binds[0]
+        );
+        // Ne inherits the != caveats (type mismatch, array quantification)
+        assert!(c(r#"color!="black","red""#).is_none());
+        assert!(c("t!=10..20").is_none());
+        // string-endpoint ranges order through the collation — in-memory
+        assert!(c(r#"name=="a".."m""#).is_none());
+        // !~= is a regex — dialect mismatch, in-memory
+        assert!(c(r#"name!~="^ab""#).is_none());
     }
 }
