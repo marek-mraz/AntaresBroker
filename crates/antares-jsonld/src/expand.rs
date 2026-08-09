@@ -608,14 +608,29 @@ pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
     }
 }
 
-/// ISO 8601 DateTime check (4.6.3) — YYYY-MM-DDTHH:MM:SS(.f)?(Z|±HH:MM).
+/// ISO 8601 DateTime check — 4.6.3, `YYYY-MM-DDThh:mm:ss[.ffffff]Z`.
+///
+/// The clause is strict in three ways this used to get wrong:
+/// - "The trailing timestamp component … shall always be equal to the
+///   character `Z`. Therefore, all timestamps shall be expressed in UTC" —
+///   so `+HH:MM`/`-HH:MM` offsets are INVALID, not an alternative form.
+/// - "All the referred components shall appear in the string; reduced
+///   representations are not permitted" — a bare 19-char form has no zone.
+/// - "The Seconds component may optionally contain a decimal fraction …
+///   up to a maximum of six [digits]. … In requests, also a comma instead of a
+///   decimal point may be used as separator for compatibility reasons."
+///
+/// Digit-shape alone is not enough: `2026-13-45T00:00:00Z` is all digits in
+/// the right places, and letting it through let one write make every later
+/// temporal query in that tenant fail on the `::timestamptz` cast.
 pub fn parse_datetime(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() < 19 {
+    // shortest legal form is 19 chars + the mandatory Z
+    if b.len() < 20 || *b.last().expect("non-empty") != b'Z' {
         return false;
     }
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
-    digits(0..4)
+    let shape = digits(0..4)
         && b[4] == b'-'
         && digits(5..7)
         && b[7] == b'-'
@@ -625,12 +640,23 @@ pub fn parse_datetime(s: &str) -> bool {
         && b[13] == b':'
         && digits(14..16)
         && b[16] == b':'
-        && digits(17..19)
-        && (b.len() == 19
-            || s[19..].starts_with('Z')
-            || s[19..].starts_with('.')
-            || s[19..].starts_with('+')
-            || s[19..].starts_with('-'))
+        && digits(17..19);
+    if !shape {
+        return false;
+    }
+    // between second 19 and the trailing Z: nothing, or a fraction of 1..=6
+    let frac = &s[19..s.len() - 1];
+    if !frac.is_empty() {
+        let Some(rest) = frac.strip_prefix('.').or_else(|| frac.strip_prefix(',')) else {
+            return false;
+        };
+        if rest.is_empty() || rest.len() > 6 || !rest.bytes().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    // real calendar date/time, not just digits in the right slots
+    let normalized = format!("{}Z", &s[..19]);
+    chrono::DateTime::parse_from_rfc3339(&normalized).is_ok()
 }
 
 #[cfg(test)]
@@ -744,11 +770,36 @@ mod tests {
 
     #[test]
     fn datetime_validation() {
-        assert!(parse_datetime("2020-09-09T16:40:00.000Z"));
+        // 4.6.3, p.80-81. Accepted forms:
         assert!(parse_datetime("2020-09-09T16:40:00Z"));
-        assert!(parse_datetime("2020-09-09T16:40:00+02:00"));
-        assert!(!parse_datetime("nope"));
+        assert!(parse_datetime("2020-09-09T16:40:00.000Z"));
+        assert!(parse_datetime("2020-09-09T16:40:00.123456Z"), "6 fraction digits");
+        // "In requests, also a comma instead of a decimal point may be used as
+        // separator for compatibility reasons."
+        assert!(parse_datetime("2020-09-09T16:40:00,123Z"), "comma separator");
+        assert!(parse_datetime("2020-02-29T00:00:00Z"), "2020 is a leap year");
+
+        // Rejected. NOTE: the offset case previously asserted the OPPOSITE —
+        // 4.6.3 is explicit that "the trailing timestamp component … shall
+        // always be equal to the character Z. Therefore, all timestamps shall
+        // be expressed in UTC", so an offset is invalid, not an alternative.
+        assert!(!parse_datetime("2020-09-09T16:40:00+02:00"), "offset forbidden");
+        assert!(!parse_datetime("2020-09-09T16:40:00-05:00"), "offset forbidden");
+        // "All the referred components shall appear in the string; reduced
+        // representations are not permitted."
+        assert!(!parse_datetime("2020-09-09T16:40:00"), "no zone");
         assert!(!parse_datetime("2020-09-09"));
+        assert!(!parse_datetime("nope"));
+        // fraction bounds: 1..=6 digits, and a separator is required
+        assert!(!parse_datetime("2020-09-09T16:40:00.Z"), "empty fraction");
+        assert!(!parse_datetime("2020-09-09T16:40:00.1234567Z"), "7 digits");
+        assert!(!parse_datetime("2020-09-09T16:40:00123Z"), "no separator");
+        // calendar reality — digit-shape alone let this through, and one such
+        // write made every later temporal query in the tenant 500 on the
+        // ::timestamptz cast
+        assert!(!parse_datetime("2026-13-45T00:00:00Z"), "month 13, day 45");
+        assert!(!parse_datetime("2021-02-29T00:00:00Z"), "2021 is not a leap year");
+        assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
     }
 }
 
