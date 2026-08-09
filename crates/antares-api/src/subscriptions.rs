@@ -165,7 +165,26 @@ pub fn normalize_subscription(
                         return Err(bad(format!("invalid notification format {f:?}")));
                     }
                 }
+                // Table 5.2.14.1-1 p.120: "showChanges cannot be true in case
+                // format is keyValues" — "simplified" is the declared synonym
+                if n.get("showChanges").and_then(Value::as_bool) == Some(true)
+                    && matches!(
+                        n.get("format").and_then(Value::as_str),
+                        Some("keyValues") | Some("simplified")
+                    )
+                {
+                    return Err(bad(
+                        "showChanges cannot be true when format is keyValues (5.2.14)".into(),
+                    ));
+                }
                 if let Some(attrs) = n.get("attributes").and_then(Value::as_array) {
+                    // Table 5.2.14.1-1 p.119: "Empty array (0 length) is not
+                    // allowed" — same restriction on pick and omit below
+                    if attrs.is_empty() {
+                        return Err(bad(
+                            "notification.attributes must not be empty (5.2.14)".into(),
+                        ));
+                    }
                     let mut na = Vec::new();
                     for a in attrs {
                         let s = a
@@ -174,6 +193,13 @@ pub fn normalize_subscription(
                         na.push(Value::String(ctx.expand_key(s)));
                     }
                     nn.insert("attributes".into(), Value::Array(na));
+                }
+                for key in ["pick", "omit"] {
+                    if n.get(key).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                        return Err(bad(format!(
+                            "notification.{key} must not be empty (5.2.14)"
+                        )));
+                    }
                 }
                 let ep = n
                     .get("endpoint")
@@ -237,6 +263,17 @@ pub fn normalize_subscription(
                     return Err(bad(
                         "notification.pick and omit name the same entity member".into(),
                     ));
+                }
+                // Table 5.2.15-1: cooldown and timeout are Numbers "Greater
+                // than 0" (V-16/V-17)
+                for key in ["cooldown", "timeout"] {
+                    if let Some(v) = ep.get(key) {
+                        v.as_f64().filter(|n| *n > 0.0).ok_or_else(|| {
+                            bad(format!(
+                                "endpoint.{key} must be a number greater than 0 (5.2.15)"
+                            ))
+                        })?;
+                    }
                 }
                 if let Some(acc) = ep.get("accept").and_then(Value::as_str) {
                     if ![
@@ -769,5 +806,59 @@ mod tests {
             "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}}
         });
         assert!(normalize_subscription(past_expiry.as_object().unwrap(), &ctx, false).is_err());
+    }
+
+    /// Table 5.2.14.1-1 p.120: "showChanges cannot be true in case format is
+    /// keyValues" (audit V-20). "simplified" is the table's declared synonym.
+    #[test]
+    fn show_changes_with_key_values_is_rejected() {
+        let ctx = Loader::new().core();
+        let mk = |format: &str, show: bool| {
+            json!({
+                "type": "Subscription",
+                "entities": [{"type": "Building"}],
+                "notification": {
+                    "format": format,
+                    "showChanges": show,
+                    "endpoint": {"uri": "http://localhost:1111/notify"}
+                }
+            })
+        };
+        for f in ["keyValues", "simplified"] {
+            assert!(
+                normalize_subscription(mk(f, true).as_object().unwrap(), &ctx, false).is_err(),
+                "showChanges+{f} must be rejected"
+            );
+            assert!(
+                normalize_subscription(mk(f, false).as_object().unwrap(), &ctx, false).is_ok(),
+                "{f} without showChanges is fine"
+            );
+        }
+        assert!(
+            normalize_subscription(mk("normalized", true).as_object().unwrap(), &ctx, false)
+                .is_ok(),
+            "showChanges+normalized is fine"
+        );
+    }
+
+    /// Table 5.2.14.1-1 p.119: "Empty array (0 length) is not allowed" on
+    /// notification.attributes / pick / omit (audit V-18).
+    #[test]
+    fn empty_projection_arrays_are_rejected() {
+        let ctx = Loader::new().core();
+        for key in ["attributes", "pick", "omit"] {
+            let doc = json!({
+                "type": "Subscription",
+                "entities": [{"type": "Building"}],
+                "notification": {
+                    key: [],
+                    "endpoint": {"uri": "http://localhost:1111/notify"}
+                }
+            });
+            assert!(
+                normalize_subscription(doc.as_object().unwrap(), &ctx, false).is_err(),
+                "empty notification.{key} must be rejected"
+            );
+        }
     }
 }

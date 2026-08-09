@@ -1394,6 +1394,52 @@ fn filter_csr(spec: &crate::csource::CsrSpec, reg: &Value, ctx: &Context) -> Val
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Table 5.2.15-1 `timeout`: per-endpoint delivery deadline in milliseconds.
+/// "The NGSI-LD system can override this value" — clamped to [100 ms, 30 s]
+/// so one subscription cannot park a delivery task for minutes. Default 5 s
+/// (the previous hard-coded deadline). HTTP only: the clause scopes it to
+/// bindings that "always return a response".
+fn endpoint_timeout_ms(ep: &serde_json::Map<String, Value>) -> u32 {
+    ep.get("timeout")
+        .and_then(Value::as_f64)
+        .filter(|t| *t > 0.0)
+        .map(|t| (t as u32).clamp(100, 30_000))
+        .unwrap_or(5_000)
+}
+
+/// Table 5.2.15-1 `cooldown`: "Once a failure has occurred, minimum period of
+/// time in milliseconds which shall elapse before attempting to make a
+/// subsequent notification to the same endpoint after failure. If requests
+/// are received before the cooldown period has expired, no notification is
+/// sent." — i.e. matches inside the window are DROPPED, not queued.
+fn in_cooldown(sub: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let n = sub.get("notification");
+    let Some(cd) = n
+        .and_then(|n| n.get("endpoint"))
+        .and_then(|e| e.get("cooldown"))
+        .and_then(Value::as_f64)
+        .filter(|c| *c > 0.0)
+    else {
+        return false;
+    };
+    // the gate exists only "once a failure has occurred" and only until a
+    // success clears it — notification.status tracks exactly that (5.2.14.2)
+    if n.and_then(|n| n.get("status")).and_then(Value::as_str) != Some("failed") {
+        return false;
+    }
+    let Some(lf) = n.and_then(|n| n.get("lastFailure")).and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(t) = chrono::DateTime::parse_from_rfc3339(lf) else {
+        return false;
+    };
+    let elapsed = now
+        .signed_duration_since(t.with_timezone(&chrono::Utc))
+        .num_milliseconds();
+    (elapsed as f64) < cd
+}
+
+#[allow(clippy::too_many_arguments)] // one param per notification dimension
 async fn deliver_as(
     st: &AppState,
     tenant: &TenantId,
@@ -1418,6 +1464,13 @@ async fn deliver_as(
     let is_mqtt = uri.starts_with("mqtt://") || uri.starts_with("mqtts://");
     if !uri.starts_with("http") && !is_mqtt {
         return; // creation rejects unknown schemes with 422 (§9.2); belt only
+    }
+    // V-16: endpoint.cooldown — drop (never queue) while the window is open.
+    // Before any bookkeeping: a suppressed notification was never sent, so
+    // timesSent/lastNotification must not move.
+    if in_cooldown(sub, chrono::Utc::now()) {
+        tracing::debug!("subscription {sub_id} in cooldown; notification suppressed (5.2.15)");
+        return;
     }
     let accept = ep
         .get("accept")
@@ -1600,8 +1653,13 @@ async fn deliver_as(
                 if page_handled {
                     true
                 } else {
+                    // V-17: endpoint.timeout (Table 5.2.15-1), clamped
                     matches!(
-                        antares_jsonld::io_deadline(req.body(bytes).send(), 5_000).await,
+                        antares_jsonld::io_deadline(
+                            req.body(bytes).send(),
+                            endpoint_timeout_ms(ep)
+                        )
+                        .await,
                         Some(Ok(r)) if r.status().is_success()
                     )
                 }
@@ -1660,5 +1718,65 @@ async fn deliver_as(
                 tracing::warn!("failure-status writeback failed: {e}");
                 None
             });
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ep(v: Value) -> serde_json::Map<String, Value> {
+        v.as_object().expect("map").clone()
+    }
+
+    /// Table 5.2.15-1 `timeout` (audit V-17): honored, clamped, defaulted.
+    #[test]
+    fn endpoint_timeout_is_honored_clamped_and_defaulted() {
+        assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": 1500}))), 1500);
+        assert_eq!(endpoint_timeout_ms(&ep(json!({}))), 5_000, "default");
+        // "The NGSI-LD system can override this value" — the clamp is that
+        // override, keeping delivery tasks bounded
+        assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": 600000}))), 30_000);
+        assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": 1}))), 100);
+        // creation rejects <=0, but a hand-edited row must not panic
+        assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": -5}))), 5_000);
+    }
+
+    /// Table 5.2.15-1 `cooldown` (audit V-16): gate opens only after a
+    /// failure and closes once the window elapses or a success lands.
+    #[test]
+    fn cooldown_gates_only_failed_subscriptions_within_the_window() {
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::milliseconds(500)).to_rfc3339();
+        let old = (now - chrono::Duration::milliseconds(5_000)).to_rfc3339();
+        let sub = |status: &str, last_failure: &str| {
+            json!({
+                "notification": {
+                    "status": status,
+                    "lastFailure": last_failure,
+                    "endpoint": {"uri": "http://x/n", "cooldown": 2000}
+                }
+            })
+        };
+        assert!(
+            in_cooldown(&sub("failed", &recent), now),
+            "failed 0.5s ago, 2s cooldown ⇒ suppressed"
+        );
+        assert!(
+            !in_cooldown(&sub("failed", &old), now),
+            "failure outside the window ⇒ delivered"
+        );
+        assert!(
+            !in_cooldown(&sub("ok", &recent), now),
+            "a success clears the gate — status is not \"failed\""
+        );
+        let no_cooldown = json!({
+            "notification": {
+                "status": "failed", "lastFailure": recent,
+                "endpoint": {"uri": "http://x/n"}
+            }
+        });
+        assert!(!in_cooldown(&no_cooldown, now), "no cooldown member ⇒ no gate");
     }
 }
