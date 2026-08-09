@@ -773,18 +773,33 @@ mod tests {
         // 4.6.3, p.80-81. Accepted forms:
         assert!(parse_datetime("2020-09-09T16:40:00Z"));
         assert!(parse_datetime("2020-09-09T16:40:00.000Z"));
-        assert!(parse_datetime("2020-09-09T16:40:00.123456Z"), "6 fraction digits");
+        assert!(
+            parse_datetime("2020-09-09T16:40:00.123456Z"),
+            "6 fraction digits"
+        );
         // "In requests, also a comma instead of a decimal point may be used as
         // separator for compatibility reasons."
-        assert!(parse_datetime("2020-09-09T16:40:00,123Z"), "comma separator");
-        assert!(parse_datetime("2020-02-29T00:00:00Z"), "2020 is a leap year");
+        assert!(
+            parse_datetime("2020-09-09T16:40:00,123Z"),
+            "comma separator"
+        );
+        assert!(
+            parse_datetime("2020-02-29T00:00:00Z"),
+            "2020 is a leap year"
+        );
 
         // Rejected. NOTE: the offset case previously asserted the OPPOSITE —
         // 4.6.3 is explicit that "the trailing timestamp component … shall
         // always be equal to the character Z. Therefore, all timestamps shall
         // be expressed in UTC", so an offset is invalid, not an alternative.
-        assert!(!parse_datetime("2020-09-09T16:40:00+02:00"), "offset forbidden");
-        assert!(!parse_datetime("2020-09-09T16:40:00-05:00"), "offset forbidden");
+        assert!(
+            !parse_datetime("2020-09-09T16:40:00+02:00"),
+            "offset forbidden"
+        );
+        assert!(
+            !parse_datetime("2020-09-09T16:40:00-05:00"),
+            "offset forbidden"
+        );
         // "All the referred components shall appear in the string; reduced
         // representations are not permitted."
         assert!(!parse_datetime("2020-09-09T16:40:00"), "no zone");
@@ -798,7 +813,10 @@ mod tests {
         // write made every later temporal query in the tenant 500 on the
         // ::timestamptz cast
         assert!(!parse_datetime("2026-13-45T00:00:00Z"), "month 13, day 45");
-        assert!(!parse_datetime("2021-02-29T00:00:00Z"), "2021 is not a leap year");
+        assert!(
+            !parse_datetime("2021-02-29T00:00:00Z"),
+            "2021 is not a leap year"
+        );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
     }
 }

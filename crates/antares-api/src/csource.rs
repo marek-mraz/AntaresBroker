@@ -231,9 +231,7 @@ pub fn normalize_registration(
                             }
                         }
                         "jsonldcontext" => {
-                            if sval.is_none_or(|s| {
-                                antares_model::EntityId::new(s).is_err()
-                            }) {
+                            if sval.is_none_or(|s| antares_model::EntityId::new(s).is_err()) {
                                 return Err(bad(
                                     "contextSourceInfo jsonldContext must be a URL (4.3.6.6)"
                                         .into(),
@@ -241,14 +239,15 @@ pub fn normalize_registration(
                             }
                         }
                         "ngsildconformance"
-                            if sval.is_none_or(|s| crate::conformance::parse_version(s).is_none())
-                            => {
-                                return Err(bad(
-                                    "contextSourceInfo ngsildConformance must be major.minor \
+                            if sval
+                                .is_none_or(|s| crate::conformance::parse_version(s).is_none()) =>
+                        {
+                            return Err(bad(
+                                "contextSourceInfo ngsildConformance must be major.minor \
                                      (4.3.6.6)"
-                                        .into(),
-                                ));
-                            }
+                                    .into(),
+                            ));
+                        }
                         _ => {}
                     }
                 }

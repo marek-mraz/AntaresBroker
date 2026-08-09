@@ -417,17 +417,18 @@ mod tests {
             QNode::Cmp {
                 path: vec!["color".into()],
                 op: CmpOp::Eq,
-                value: QValue::List(vec![
-                    QValue::Str("black".into()),
-                    QValue::Str("red".into())
-                ])
+                value: QValue::List(vec![QValue::Str("black".into()), QValue::Str("red".into())])
             }
         );
         // spec's own spacing (`color!= "black", "red"`) must parse too
         let q = parse_q(r#"color!= "black", "red""#).expect("parse");
         assert!(matches!(
             q,
-            QNode::Cmp { op: CmpOp::Ne, value: QValue::List(_), .. }
+            QNode::Cmp {
+                op: CmpOp::Ne,
+                value: QValue::List(_),
+                ..
+            }
         ));
         // mixed scalar kinds are legal (ValueList is over Value)
         assert!(parse_q("a==1,2,3").is_ok());
@@ -445,23 +446,27 @@ mod tests {
             QNode::Cmp {
                 path: vec!["temperature".into()],
                 op: CmpOp::Eq,
-                value: QValue::Range(
-                    Box::new(QValue::Num(10.0)),
-                    Box::new(QValue::Num(20.0))
-                )
+                value: QValue::Range(Box::new(QValue::Num(10.0)), Box::new(QValue::Num(20.0)))
             }
         );
         // decimals keep their fraction; `..` is not mistaken for `.`
         let q = parse_q("t!=10.5..20.5").expect("parse");
         assert!(matches!(
             q,
-            QNode::Cmp { op: CmpOp::Ne, value: QValue::Range(_, _), .. }
+            QNode::Cmp {
+                op: CmpOp::Ne,
+                value: QValue::Range(_, _),
+                ..
+            }
         ));
         // DateTime endpoints (unquoted, per EXAMPLE 8 style literals)
         let q = parse_q("observedAt==2021-01-01T00:00:00Z..2021-02-01T00:00:00Z").expect("parse");
         assert!(matches!(
             q,
-            QNode::Cmp { value: QValue::Range(_, _), .. }
+            QNode::Cmp {
+                value: QValue::Range(_, _),
+                ..
+            }
         ));
         // ordering + range violates the grammar; bools are not ComparableValue
         assert!(parse_q("a>1..5").is_err());

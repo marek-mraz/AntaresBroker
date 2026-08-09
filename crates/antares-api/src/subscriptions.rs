@@ -182,7 +182,7 @@ pub fn normalize_subscription(
                     // allowed" — same restriction on pick and omit below
                     if attrs.is_empty() {
                         return Err(bad(
-                            "notification.attributes must not be empty (5.2.14)".into(),
+                            "notification.attributes must not be empty (5.2.14)".into()
                         ));
                     }
                     let mut na = Vec::new();
@@ -195,7 +195,10 @@ pub fn normalize_subscription(
                     nn.insert("attributes".into(), Value::Array(na));
                 }
                 for key in ["pick", "omit"] {
-                    if n.get(key).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                    if n.get(key)
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    {
                         return Err(bad(format!(
                             "notification.{key} must not be empty (5.2.14)"
                         )));

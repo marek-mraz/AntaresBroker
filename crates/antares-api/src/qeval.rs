@@ -264,9 +264,9 @@ mod tests {
             ]
         });
         for (q, want) in [
-            ("speed!=10", true),                 // string vs number ⇒ unequal
-            ("speed==10", false),                // …but not equal
-            (r#"brandName!="Mercedes""#, true),  // number vs string ⇒ unequal
+            ("speed!=10", true),                // string vs number ⇒ unequal
+            ("speed==10", false),               // …but not equal
+            (r#"brandName!="Mercedes""#, true), // number vs string ⇒ unequal
             (r#"brandName=="Mercedes""#, false),
             ("speed>10", false), // ordering on a mismatch does NOT match
         ] {
@@ -327,11 +327,23 @@ mod tests {
             (r#"color!="black","red""#, json!("red"), false),
             // Ne p.91 verbatim: matches ["blue","yellow","green"],
             // but not ["blue","red","green"]
-            (r#"color!="black","red""#, json!(["blue", "yellow", "green"]), true),
-            (r#"color!="black","red""#, json!(["blue", "red", "green"]), false),
+            (
+                r#"color!="black","red""#,
+                json!(["blue", "yellow", "green"]),
+                true,
+            ),
+            (
+                r#"color!="black","red""#,
+                json!(["blue", "red", "green"]),
+                false,
+            ),
         ] {
             let ast = parse_q(q).expect(q);
-            assert_eq!(eval_q(&ast, &mk(target.clone()), &ctx), want, "q={q} target={target}");
+            assert_eq!(
+                eval_q(&ast, &mk(target.clone()), &ctx),
+                want,
+                "q={q} target={target}"
+            );
         }
     }
 
@@ -350,17 +362,21 @@ mod tests {
         };
         for (q, target, want) in [
             ("temperature==10..20", json!(15), true),
-            ("temperature==10..20", json!(10), true),  // min included
-            ("temperature==10..20", json!(20), true),  // max included
+            ("temperature==10..20", json!(10), true), // min included
+            ("temperature==10..20", json!(20), true), // max included
             ("temperature==10..20", json!(9), false),
-            ("temperature!=10..20", json!(9), true),   // p.91: "matches 9"
+            ("temperature!=10..20", json!(9), true), // p.91: "matches 9"
             ("temperature!=10..20", json!(15), false),
             // type mismatch: p.92 "considered unequal" ⇒ != matches, == not
             ("temperature==10..20", json!("hot"), false),
             ("temperature!=10..20", json!("hot"), true),
         ] {
             let ast = parse_q(q).expect(q);
-            assert_eq!(eval_q(&ast, &mk(target.clone()), &ctx), want, "q={q} target={target}");
+            assert_eq!(
+                eval_q(&ast, &mk(target.clone()), &ctx),
+                want,
+                "q={q} target={target}"
+            );
         }
         // DateTime range endpoints (Str..Str, temporal == lexicographic in Z
         // form). `eventTime` and not `observedAt`: the latter is a CORE term
@@ -397,10 +413,18 @@ mod tests {
             (r#"brandName!~="^Merc""#, json!(7), false),
             // an array is outside L(R) only if NO element is in it
             (r#"brandName!~="^Merc""#, json!(["Volvo", "Skoda"]), true),
-            (r#"brandName!~="^Merc""#, json!(["Volvo", "Mercedes"]), false),
+            (
+                r#"brandName!~="^Merc""#,
+                json!(["Volvo", "Mercedes"]),
+                false,
+            ),
         ] {
             let ast = parse_q(q).expect(q);
-            assert_eq!(eval_q(&ast, &mk(target.clone()), &ctx), want, "q={q} target={target}");
+            assert_eq!(
+                eval_q(&ast, &mk(target.clone()), &ctx),
+                want,
+                "q={q} target={target}"
+            );
         }
     }
 }

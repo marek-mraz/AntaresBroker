@@ -180,10 +180,7 @@ fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
             let (QValue::Num(a), QValue::Num(b)) = (lo.as_ref(), hi.as_ref()) else {
                 return None;
             };
-            let (a, b) = (
-                literal(&QValue::Num(*a))?,
-                literal(&QValue::Num(*b))?,
-            );
+            let (a, b) = (literal(&QValue::Num(*a))?, literal(&QValue::Num(*b))?);
             return Some(format!(" ? (@ >= {a} && @ <= {b})"));
         }
         _ => {}

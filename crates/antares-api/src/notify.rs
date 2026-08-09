@@ -1777,6 +1777,9 @@ mod endpoint_tests {
                 "endpoint": {"uri": "http://x/n"}
             }
         });
-        assert!(!in_cooldown(&no_cooldown, now), "no cooldown member ⇒ no gate");
+        assert!(
+            !in_cooldown(&no_cooldown, now),
+            "no cooldown member ⇒ no gate"
+        );
     }
 }

@@ -586,7 +586,10 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
-                    .header("Content-Length", ("x".repeat(bounds::MAX_BODY_BYTES + 1)).len())
+                    .header(
+                        "Content-Length",
+                        ("x".repeat(bounds::MAX_BODY_BYTES + 1)).len(),
+                    )
                     .body(Body::from("x".repeat(bounds::MAX_BODY_BYTES + 1)))
                     .expect("req"),
             )
@@ -620,7 +623,10 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entityOperations/create")
                     .header("Content-Type", "application/json")
-                    .header("Content-Length", (serde_json::to_vec(&big).expect("json")).len())
+                    .header(
+                        "Content-Length",
+                        (serde_json::to_vec(&big).expect("json")).len(),
+                    )
                     .body(Body::from(serde_json::to_vec(&big).expect("json")))
                     .expect("req"),
             )
@@ -1083,14 +1089,20 @@ mod tests {
         // 5.6.21.4 b) and c): the Attribute list / query must include "at
         // least one non-system Attribute".
         let app = app();
-        assert_eq!(purge(&app, "attrs=createdAt").await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            purge(&app, "attrs=createdAt").await,
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(
             purge(&app, "q=modifiedAt%3E%222020-01-01T00:00:00Z%22").await,
             StatusCode::BAD_REQUEST
         );
         // a real attribute qualifies
         assert_ne!(purge(&app, "attrs=name").await, StatusCode::BAD_REQUEST);
-        assert_ne!(purge(&app, "q=name%3D%3D%22x%22").await, StatusCode::BAD_REQUEST);
+        assert_ne!(
+            purge(&app, "q=name%3D%3D%22x%22").await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
@@ -1235,10 +1247,12 @@ mod tests {
 
         let resp = app
             .oneshot(
-                Request::get("/ngsi-ld/v1/entities?type=Building&geometryProperty=location&local=true")
-                    .header("Accept", "application/geo+json")
-                    .body(Body::empty())
-                    .expect("req"),
+                Request::get(
+                    "/ngsi-ld/v1/entities?type=Building&geometryProperty=location&local=true",
+                )
+                .header("Accept", "application/geo+json")
+                .body(Body::empty())
+                .expect("req"),
             )
             .await
             .expect("resp");
@@ -1259,7 +1273,10 @@ mod tests {
 
         for (method, uri) in [
             ("POST", "/ngsi-ld/v1/entities"),
-            ("PATCH", "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:cl1/attrs"),
+            (
+                "PATCH",
+                "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:cl1/attrs",
+            ),
             ("PUT", "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:cl1"),
         ] {
             let resp = app
@@ -1325,7 +1342,10 @@ mod tests {
             "timeAt must be a 4.6.3 DateTime, got {:?}",
             doc["contextSourceTimeAt"]
         );
-        assert!(doc.get("hostAlias").is_none(), "hostAlias is not a spec member");
+        assert!(
+            doc.get("hostAlias").is_none(),
+            "hostAlias is not a spec member"
+        );
         assert!(doc.get("uptime").is_none(), "uptime is not a spec member");
     }
 

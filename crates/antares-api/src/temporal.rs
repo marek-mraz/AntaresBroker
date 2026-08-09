@@ -823,7 +823,9 @@ fn classify_instance(inst: &Value) -> AggrClass {
     if inst.get("valueList").is_some() || inst.get("objectList").is_some() {
         return AggrClass::List;
     }
-    if inst.get("vocab").is_some() || inst.get("languageMap").is_some() || inst.get("json").is_some()
+    if inst.get("vocab").is_some()
+        || inst.get("languageMap").is_some()
+        || inst.get("json").is_some()
     {
         // URI / JSON-object valued kinds: only counting methods apply
         return AggrClass::Opaque;

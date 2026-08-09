@@ -253,8 +253,7 @@ async fn create_entity_inner(
         ..Default::default()
     };
     let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
@@ -1453,8 +1452,7 @@ async fn purge_inner(
         ..Default::default()
     };
     let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
@@ -1552,8 +1550,7 @@ async fn merge_entity_inner(
         ..Default::default()
     };
     let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }

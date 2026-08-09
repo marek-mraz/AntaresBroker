@@ -101,8 +101,7 @@ async fn append_attrs_inner(
         },
     )?;
     let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
@@ -480,8 +479,7 @@ async fn update_attrs_inner(
         },
     )?;
     let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
@@ -637,8 +635,7 @@ async fn partial_update_inner(
     let attr_iri = parsed.ctx.expand_key(attr);
     let (mut regs, local_covered) =
         attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &parsed.ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
@@ -711,7 +708,11 @@ async fn partial_update_inner(
     }
     let local_outcome = classify_local(&local_resp);
     let all_attr_iris = vec![attr_iri.clone()];
-    let local_iris = if local_covered { Vec::new() } else { vec![attr_iri.clone()] };
+    let local_iris = if local_covered {
+        Vec::new()
+    } else {
+        vec![attr_iri.clone()]
+    };
     let updated = if matches!(local_outcome, LocalOutcome::Ok) {
         vec![attr_iri.clone()]
     } else {
@@ -924,8 +925,7 @@ async fn delete_attr_inner(
     let want_ds = params.get("datasetId").cloned();
     let (mut regs, local_covered) =
         attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &ctx, params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
     {
         return Ok(r);
     }
