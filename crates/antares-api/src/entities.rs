@@ -252,11 +252,13 @@ async fn create_entity_inner(
         attrs: (!attr_iris.is_empty()).then_some(attr_iris),
         ..Default::default()
     };
-    let regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
+    }
     if !regs.is_empty() {
-        if crate::federation::via_loop(headers, &st.host_alias) {
-            return Ok(crate::federation::loop_508(&tenant));
-        }
         let mut conflicts = Vec::new();
         let mut fwd = Vec::new();
         for reg in &regs {
@@ -371,10 +373,27 @@ async fn retrieve_entity_inner(
     let join = parse_join(params)?;
     antares_model::EntityId::new(id)?;
     let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
-    let fed_on =
-        crate::federation::active(params) && !crate::federation::via_loop(headers, &st.host_alias);
+    let looped = crate::federation::via_loop(headers, &st.host_alias);
+    let fed_on = crate::federation::active(params) && !looped;
+    // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
+    let mut warnings: Vec<String> = Vec::new();
+    if crate::federation::active(params) && looped {
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.to_owned()]),
+            ..Default::default()
+        };
+        // only a loop that suppressed a real forward is abnormal behaviour
+        if !crate::federation::matching_regs(st, &tenant, &spec, &ctx).is_empty() {
+            warnings.push(crate::federation::warning(
+                199,
+                &st.host_alias,
+                "a registration loop has been detected",
+            ));
+        }
+    }
     let doc = if fed_on {
-        let fed = crate::federation::fed_retrieve(st, &tenant, headers, &ctx, id).await;
+        let fed =
+            crate::federation::fed_retrieve(st, &tenant, headers, &ctx, id, &mut warnings).await;
         match local_doc {
             Some(mut base) => {
                 for aux_pass in [false, true] {
@@ -449,7 +468,19 @@ async fn retrieve_entity_inner(
     } else {
         payload
     };
-    Ok(respond(StatusCode::OK, payload, &ctx, accept, &tenant))
+    let mut resp = respond(StatusCode::OK, payload, &ctx, accept, &tenant);
+    attach_warnings(&mut resp, &warnings);
+    Ok(resp)
+}
+
+/// 6.3.17: one `NGSILD-Warning` header per abnormal distributed-GET outcome —
+/// scoped by the clause to /entities and /entities/{id}.
+pub fn attach_warnings(resp: &mut Response, warnings: &[String]) {
+    for w in warnings {
+        if let Ok(v) = axum::http::HeaderValue::from_str(w) {
+            resp.headers_mut().append("NGSILD-Warning", v);
+        }
+    }
 }
 
 /// join/joinLevel params (4.5.23). Returns (mode, level).
@@ -720,6 +751,39 @@ async fn query_entities_inner(
         .iter()
         .any(|k| params.contains_key(*k))
         || params.get("local").map(String::as_str) == Some("true");
+    // 5.7.2.4 validation bullets (p.201), in the spec's own order.
+    if params.get("type").map(String::as_str) == Some("*")
+        && params.get("local").map(String::as_str) == Some("false")
+    {
+        return Err(NgsiError::BadRequestData(
+            "type=* implies local and shall not be combined with local=false \
+             (Table 6.4.3.2-1)"
+                .into(),
+        )
+        .into());
+    }
+    if params.contains_key("geometryProperty") && accept != Accept::GeoJson {
+        return Err(NgsiError::BadRequestData(
+            "geometryProperty requires Accept: application/geo+json (5.7.2.4)".into(),
+        )
+        .into());
+    }
+    // "If the ordering parameter is present and the execution of the operation
+    // is not limited to the local scope then BadRequestData" — reinforced by
+    // 4.23.1: "Sort ordering is never applied to distributed operations."
+    // The subject is the EXECUTION: a query nothing federates to runs locally
+    // regardless of `local=true`, which is why this asks would_federate rather
+    // than active (ETSI 019_19 orders without local — see error.md).
+    if params.contains_key("orderBy")
+        && crate::federation::would_federate(st, &tenant, &ctx, params)
+    {
+        return Err(NgsiError::BadRequestData(
+            "orderBy requires local scope — ordering is never applied to \
+             distributed operations (5.7.2.4, 4.23.1)"
+                .into(),
+        )
+        .into());
+    }
     if !has_filter {
         return Err(NgsiError::BadRequestData(
             "query needs at least one of type, attrs, q, georel (5.7.2)".into(),
@@ -729,11 +793,22 @@ async fn query_entities_inner(
 
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
-    let fed = if crate::federation::active(params)
-        && !crate::federation::via_loop(headers, &st.host_alias)
-    {
-        crate::federation::fed_query(st, &tenant, headers, &ctx, params).await
+    // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
+    let mut warnings: Vec<String> = Vec::new();
+    let looped = crate::federation::via_loop(headers, &st.host_alias);
+    let fed = if crate::federation::active(params) && !looped {
+        crate::federation::fed_query(st, &tenant, headers, &ctx, params, &mut warnings).await
     } else {
+        if crate::federation::active(params)
+            && looped
+            && crate::federation::would_federate(st, &tenant, &ctx, params)
+        {
+            warnings.push(crate::federation::warning(
+                199,
+                &st.host_alias,
+                "a registration loop has been detected",
+            ));
+        }
         Vec::new()
     };
     // C11 pushdown gates. Pagination: only when every filter the store cannot
@@ -816,6 +891,7 @@ async fn query_entities_inner(
             resp.headers_mut().append(axum::http::header::LINK, v);
         }
     }
+    attach_warnings(&mut resp, &warnings);
     Ok(resp)
 }
 
@@ -886,7 +962,10 @@ pub fn filter_entities_paged(
         None => None,
     };
     // Entity Type Selection Language (4.17): `,`/`|` = OR, `(a;b)` = AND.
-    let type_sel: Option<Vec<Vec<String>>> = params.get("type").map(|s| {
+    // Table 6.4.3.2-1: `"*"` selects every Entity Type, i.e. no type predicate
+    // at all. Expanding it as a term yields an IRI nothing matches, which is
+    // how `type=*` silently returned an empty array.
+    let type_sel: Option<Vec<Vec<String>>> = params.get("type").filter(|s| *s != "*").map(|s| {
         s.split([',', '|'])
             .map(|alt| {
                 alt.trim()
@@ -1148,10 +1227,14 @@ fn paginate_impl(
             qp.push(format!("offset={off}"));
             qp.sort(); // deterministic order — the suite string-compares links
         }
+        // 6.3.10: "At least, the type Link Target Attribute shall be included
+        // ... and its value shall be exactly equal to the media type resulting
+        // from the original request" — for EVERY media type, not just ld+json.
         let ty = match accept {
             _ if csource_style => ";type=\"application/ld+json\"",
             Accept::LdJson => ";type=\"application/ld+json\"",
-            _ => "",
+            Accept::Json => ";type=\"application/json\"",
+            Accept::GeoJson => ";type=\"application/geo+json\"",
         };
         links.push(format!("<{path}?{}>; rel=\"{rel}\"{ty}", qp.join("&")));
     };
@@ -1181,11 +1264,13 @@ pub async fn delete_entity(
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
-        let regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params);
+        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params);
+        if let Some(r) =
+            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
+        {
+            return Ok(r);
+        }
         if !regs.is_empty() {
-            if crate::federation::via_loop(&headers, &st.host_alias) {
-                return Ok(crate::federation::loop_508(&tenant));
-            }
             let local_exists = st.store.get(&tenant, Kind::Entity, &id)?.is_some();
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
@@ -1280,14 +1365,40 @@ async fn purge_inner(
         ],
     )?;
     let ctx = request_context(&st.loader, headers).await?;
-    // 5.6.21: local=true alone is a valid "purge everything local" request
-    let has_filter = ["id", "idPattern", "type", "attrs", "q", "georel"]
-        .iter()
-        .any(|k| params.contains_key(*k))
+    // 5.6.21.4: exactly five qualifying conditions —
+    //   a) selector of Entity Types
+    //   b) list of Attribute names, including at least one non-system Attribute
+    //   c) NGSI-LD Query, including at least one non-system Attribute
+    //   d) NGSI-LD GeoQuery
+    //   e) local scope (5.5.13)
+    // "If none of the above is provided, then an error of type BadRequestData
+    // shall be raised (too wide query)."
+    //
+    // id/idPattern are legal input data (5.6.21.3) and DO filter, but they are
+    // never sufficient on their own: "it is not possible to purge a set of
+    // entities by only specifying desired Entity identifiers". Listing them
+    // here is how `DELETE /entities?idPattern=.*` became a tenant wipe.
+    let attrs_qualify = params.get("attrs").is_some_and(|a| {
+        a.split(',')
+            .any(|n| antares_ql::is_non_system_attr(n.trim()))
+    });
+    let q_qualifies = match params.get("q") {
+        Some(q) => parse_q(q)?
+            .attribute_paths()
+            .iter()
+            .any(|p| p.first().is_some_and(|h| antares_ql::is_non_system_attr(h))),
+        None => false,
+    };
+    let has_filter = params.contains_key("type")
+        || attrs_qualify
+        || q_qualifies
+        || params.contains_key("georel")
         || params.get("local").map(String::as_str) == Some("true");
     if !has_filter {
         return Err(NgsiError::BadRequestData(
-            "purge needs at least one filtering condition".into(),
+            "purge needs at least one of: type, attrs or q naming a non-system \
+             Attribute, georel, or local=true (5.6.21.4 — too wide query)"
+                .into(),
         )
         .into());
     }
@@ -1341,11 +1452,13 @@ async fn purge_inner(
             .map(|s| s.split(',').map(str::to_owned).collect()),
         ..Default::default()
     };
-    let regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
+    }
     if !regs.is_empty() {
-        if crate::federation::via_loop(headers, &st.host_alias) {
-            return Ok(crate::federation::loop_508(&tenant));
-        }
         let mut parts = vec![crate::federation::Part {
             status: 204,
             detail: "purged locally".into(),
@@ -1438,11 +1551,13 @@ async fn merge_entity_inner(
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
-    let regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
+    }
     if !regs.is_empty() {
-        if crate::federation::via_loop(headers, &st.host_alias) {
-            return Ok(crate::federation::loop_508(&tenant));
-        }
         let proxies: Vec<&crate::federation::FedReg> =
             regs.iter().filter(|r| r.is_proxy()).collect();
         let mut parts = Vec::new();
@@ -1631,7 +1746,12 @@ pub async fn replace_entity(
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
-        let regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params);
+        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params);
+        if let Some(r) =
+            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
+        {
+            return Ok(r);
+        }
         if regs.is_empty() {
             // 5.6.18: an unknown target is 404 before body validation (057_03)
             let old = local_doc
@@ -1653,9 +1773,6 @@ pub async fn replace_entity(
             st.store
                 .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
             return Ok::<_, ApiError>(no_content(&tenant));
-        }
-        if crate::federation::via_loop(&headers, &st.host_alias) {
-            return Ok(crate::federation::loop_508(&tenant));
         }
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed

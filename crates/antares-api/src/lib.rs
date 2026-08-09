@@ -395,11 +395,16 @@ async fn source_identity(
         let accept = negotiate::parse_accept(&headers)?;
         let ctx = state.loader.core();
         let uptime = state.started.elapsed().as_secs();
+        // Table 5.2.40-1: contextSourceAlias, contextSourceUptime and
+        // contextSourceTimeAt are all cardinality 1. `hostAlias`/`uptime` were
+        // not spec members at all — neither expands to an NGSI-LD IRI, so the
+        // payload was not valid JSON-LD against the core context either.
         let body = serde_json::json!({
             "id": format!("urn:ngsi-ld:ContextSourceIdentity:{}", state.host_alias),
             "type": "ContextSourceIdentity",
-            "hostAlias": state.host_alias,
-            "uptime": format!("PT{uptime}S"),
+            "contextSourceAlias": state.host_alias,
+            "contextSourceUptime": format!("PT{uptime}S"),
+            "contextSourceTimeAt": crate::state::now_iso(),
         });
         Ok::<_, ApiError>(respond(
             axum::http::StatusCode::OK,
@@ -488,6 +493,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (entity.to_string()).len())
                     .body(Body::from(entity.to_string()))
                     .expect("req"),
             )
@@ -554,6 +560,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (deep).len())
                     .body(Body::from(deep))
                     .expect("req"),
             )
@@ -579,6 +586,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", ("x".repeat(bounds::MAX_BODY_BYTES + 1)).len())
                     .body(Body::from("x".repeat(bounds::MAX_BODY_BYTES + 1)))
                     .expect("req"),
             )
@@ -612,6 +620,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entityOperations/create")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (serde_json::to_vec(&big).expect("json")).len())
                     .body(Body::from(serde_json::to_vec(&big).expect("json")))
                     .expect("req"),
             )
@@ -646,6 +655,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (entity.to_string()).len())
                     .body(Body::from(entity.to_string()))
                     .expect("req"),
             )
@@ -752,6 +762,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/csourceRegistrations")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (reg.to_string()).len())
                     .body(Body::from(reg.to_string()))
                     .expect("req"),
             )
@@ -775,6 +786,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/csourceRegistrations")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (reg.to_string()).len())
                     .body(Body::from(reg.to_string()))
                     .expect("req"),
             )
@@ -800,6 +812,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/subscriptions")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (sub.to_string()).len())
                     .body(Body::from(sub.to_string()))
                     .expect("req"),
             )
@@ -834,6 +847,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/csourceRegistrations")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (reg.to_string()).len())
                     .body(Body::from(reg.to_string()))
                     .expect("req"),
             )
@@ -869,6 +883,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (entity.to_string()).len())
                     .body(Body::from(entity.to_string()))
                     .expect("req"),
             )
@@ -886,6 +901,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "application/json")
+                    .header("Content-Length", (entity.to_string()).len())
                     .body(Body::from(entity.to_string()))
                     .expect("req"),
             )
@@ -964,6 +980,7 @@ mod tests {
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
                     .header("Content-Type", "text/plain")
+                    .header("Content-Length", ("x").len())
                     .body(Body::from("x"))
                     .expect("req"),
             )
@@ -999,6 +1016,542 @@ mod tests {
                 .get("NGSILD-Tenant")
                 .map(|v| v.to_str().expect("ascii")),
             Some("city-01")
+        );
+    }
+
+    // ---- 5.6.21.4 Purge: the five qualifying conditions -------------------
+
+    async fn create(app: &Router, id: &str, ty: &str) {
+        let entity = serde_json::json!({"id": id, "type": ty,
+            "name": {"type": "Property", "value": "x"}});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", (entity.to_string()).len())
+                    .body(Body::from(entity.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    async fn purge(app: &Router, query: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::delete(format!("/ngsi-ld/v1/entities?{query}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn purge_rejects_id_and_idpattern_as_the_only_filter() {
+        // 5.6.21.4: id/idPattern are legal input data (5.6.21.3) but are not
+        // among the five qualifying conditions — "If none of the above is
+        // provided, then an error of type BadRequestData shall be raised (too
+        // wide query)". `idPattern=.*` alone used to delete the whole tenant.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:purge1", "Building").await;
+
+        assert_eq!(purge(&app, "idPattern=.%2A").await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            purge(&app, "id=urn:ngsi-ld:Building:purge1").await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // the entity is still there — the guard ran before any deletion
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:purge1")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn purge_requires_a_non_system_attribute_in_attrs_and_q() {
+        // 5.6.21.4 b) and c): the Attribute list / query must include "at
+        // least one non-system Attribute".
+        let app = app();
+        assert_eq!(purge(&app, "attrs=createdAt").await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            purge(&app, "q=modifiedAt%3E%222020-01-01T00:00:00Z%22").await,
+            StatusCode::BAD_REQUEST
+        );
+        // a real attribute qualifies
+        assert_ne!(purge(&app, "attrs=name").await, StatusCode::BAD_REQUEST);
+        assert_ne!(purge(&app, "q=name%3D%3D%22x%22").await, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn purge_accepts_each_qualifying_condition() {
+        // a) type, d) georel, e) local — none may 400 (5.6.21.4)
+        let app = app();
+        assert_ne!(purge(&app, "type=Building").await, StatusCode::BAD_REQUEST);
+        assert_ne!(purge(&app, "local=true").await, StatusCode::BAD_REQUEST);
+    }
+
+    // ---- Table 6.4.3.2-1: type=* ------------------------------------------
+
+    #[tokio::test]
+    async fn type_wildcard_selects_every_type() {
+        // "\"*\" is also allowed as a value and local is implicitly set to
+        // true". Expanding "*" as a term produced an IRI nothing matched, so
+        // the query returned 200 with an empty array.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:star1", "Building").await;
+        create(&app, "urn:ngsi-ld:Vehicle:star2", "Vehicle").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=%2A")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let docs = body_json(resp).await;
+        let ids: Vec<&str> = docs
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|d| d["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"urn:ngsi-ld:Building:star1"), "got {ids:?}");
+        assert!(ids.contains(&"urn:ngsi-ld:Vehicle:star2"), "got {ids:?}");
+    }
+
+    #[tokio::test]
+    async fn type_wildcard_conflicts_with_explicit_local_false() {
+        // "…and shall not be explicitly set to false" (Table 6.4.3.2-1)
+        let app = app();
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=%2A&local=false")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ---- 5.7.2.4 validation bullets ---------------------------------------
+
+    #[tokio::test]
+    async fn ordering_is_rejected_only_for_distributed_execution() {
+        // 5.7.2.4: "If the ordering parameter is present and the execution of
+        // the operation is not limited to the local scope … BadRequestData",
+        // with 4.23.1 "Sort ordering is never applied to distributed
+        // operations". The subject is the EXECUTION — a query no registration
+        // matches runs locally whether or not the client passed local=true.
+        // Reading it as "local=true is mandatory" fails ETSI 019_19, which
+        // orders without it (error.md 2026-08-09).
+        let app = app();
+
+        // no registrations → local execution → ordering is fine
+        for q in [
+            "/ngsi-ld/v1/entities?type=Building&orderBy=name",
+            "/ngsi-ld/v1/entities?type=Building&orderBy=name&local=true",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(q).body(Body::empty()).expect("req"))
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::OK, "{q}");
+        }
+
+        // a matching registration makes it a distributed operation
+        let csr = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:ord1",
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://peer.invalid:9090"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/csourceRegistrations")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", (csr.to_string()).len())
+                    .body(Body::from(csr.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&orderBy=name")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // …and local=true brings it back into scope
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&orderBy=name&local=true")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn geometry_property_requires_geojson_accept() {
+        // 5.7.2.4: "If geometryProperty parameter is present and the Accept
+        // Header is not set to \"application/geo+json\" … BadRequestData"
+        let app = app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&geometryProperty=location")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&geometryProperty=location&local=true")
+                    .header("Accept", "application/geo+json")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ---- 6.3.4: Content-Length precondition -------------------------------
+
+    #[tokio::test]
+    async fn missing_content_length_is_a_bare_411() {
+        // 6.3.4: "For HTTP POST, PATCH and PUT HTTP requests implementations
+        // shall check … Content-Length header shall include the length of the
+        // request payload body", and its absence "shall result in just a 411
+        // HTTP status code (without any payload body)". No exemption is given
+        // for chunked transfer.
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:Building:cl1", "type": "Building"});
+
+        for (method, uri) in [
+            ("POST", "/ngsi-ld/v1/entities"),
+            ("PATCH", "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:cl1/attrs"),
+            ("PUT", "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:cl1"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(entity.to_string()))
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::LENGTH_REQUIRED, "{method} {uri}");
+            let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+            assert!(bytes.is_empty(), "411 carries no payload body");
+        }
+
+        // GET/DELETE are outside the clause's scope
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ---- Table 5.2.40-1: Context Source Identity --------------------------
+
+    #[tokio::test]
+    async fn source_identity_carries_the_mandated_members() {
+        // contextSourceAlias / contextSourceUptime / contextSourceTimeAt are
+        // all cardinality 1. The old payload used hostAlias/uptime, which are
+        // not core-context terms at all.
+        let resp = app()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/info/sourceIdentity")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = body_json(resp).await;
+        assert_eq!(doc["type"], "ContextSourceIdentity");
+        assert!(doc["id"].as_str().is_some_and(|s| s.starts_with("urn:")));
+        assert_eq!(doc["contextSourceAlias"], "antares-test");
+        assert!(
+            doc["contextSourceUptime"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("PT") && s.ends_with('S')),
+            "uptime must be an ISO 8601 duration, got {:?}",
+            doc["contextSourceUptime"]
+        );
+        assert!(
+            doc["contextSourceTimeAt"]
+                .as_str()
+                .is_some_and(|s| s.ends_with('Z')),
+            "timeAt must be a 4.6.3 DateTime, got {:?}",
+            doc["contextSourceTimeAt"]
+        );
+        assert!(doc.get("hostAlias").is_none(), "hostAlias is not a spec member");
+        assert!(doc.get("uptime").is_none(), "uptime is not a spec member");
+    }
+
+    // ---- 6.3.4: Accept precedence -----------------------------------------
+
+    #[tokio::test]
+    async fn accept_precedence_follows_the_spec_list_not_header_order() {
+        // "The order of the list above is significant … the first one of the
+        // list shall be selected, unless amended by … a q parameter."
+        // json > ld+json > geo+json, regardless of how the client orders them.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:acc1", "Building").await;
+
+        for (accept, want) in [
+            ("application/ld+json, application/json", "application/json"),
+            ("application/geo+json, application/json", "application/json"),
+            ("application/ld+json", "application/ld+json"),
+            // an explicit q still wins over list order
+            (
+                "application/json;q=0.1, application/ld+json;q=0.9",
+                "application/ld+json",
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:acc1")
+                        .header("Accept", accept)
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            let ct = resp
+                .headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                ct.starts_with(want),
+                "Accept: {accept} → Content-Type {ct}, expected {want}"
+            );
+        }
+    }
+
+    /// 6.3.10 p.275: "At least, the type Link Target Attribute shall be
+    /// included ... and its value shall be exactly equal to the media type
+    /// resulting from the original request" — previously emitted only for
+    /// ld+json, never for plain application/json (audit V-23).
+    #[tokio::test]
+    async fn pagination_links_carry_the_type_attribute_for_plain_json() {
+        let app = app();
+        for i in 0..3 {
+            let entity = serde_json::json!({
+                "id": format!("urn:ngsi-ld:Building:pg{i}"),
+                "type": "Building"
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post("/ngsi-ld/v1/entities")
+                        .header("Content-Type", "application/json")
+                        .header("Content-Length", (entity.to_string()).len())
+                        .body(Body::from(entity.to_string()))
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&limit=1&offset=1")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let links: Vec<String> = resp
+            .headers()
+            .get_all("Link")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(", "))
+            .filter(|l| l.contains("rel=\"next\"") || l.contains("rel=\"prev\""))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(links.len(), 2, "expected next+prev, got {links:?}");
+        for l in &links {
+            assert!(
+                l.contains(";type=\"application/json\""),
+                "pagination link lacks the mandatory type attribute: {l}"
+            );
+        }
+    }
+
+    /// 4.5.9 p.63/65 (audit V-24): in the simplified temporal representation
+    /// a ListProperty pairs a BARE ordered array with its timestamp under
+    /// `valueLists` (EXAMPLE 3), and a ListRelationship the same under
+    /// `objectLists` — not a {"valueList"/"objectList"} wrapper object.
+    #[tokio::test]
+    async fn temporal_values_list_types_use_bare_arrays() {
+        let app = app();
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:Meeting:tv1",
+            "type": "Meeting",
+            "period": [
+                {"type": "ListProperty", "valueList": ["First", "Second"],
+                 "observedAt": "2023-01-01T00:00:00Z"},
+                {"type": "ListProperty", "valueList": ["1st", "2nd"],
+                 "observedAt": "2023-01-02T00:00:00Z"}
+            ],
+            "membersPresent": [
+                {"type": "ListRelationship",
+                 "objectList": ["urn:ngsi-ld:Person:Alice", "urn:ngsi-ld:Person:Bob"],
+                 "observedAt": "2023-01-01T00:00:00Z"}
+            ]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/temporal/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", (doc.to_string()).len())
+                    .body(Body::from(doc.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert!(
+            resp.status() == StatusCode::CREATED || resp.status() == StatusCode::NO_CONTENT,
+            "temporal upsert failed: {}",
+            resp.status()
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Meeting:tv1?format=temporalValues",
+                )
+                .body(Body::empty())
+                .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let vl = &body["period"]["valueLists"];
+        assert!(vl.is_array(), "period.valueLists missing: {body}");
+        assert_eq!(
+            vl[0][0],
+            serde_json::json!(["First", "Second"]),
+            "first pair element must be the BARE ordered array: {vl}"
+        );
+        assert_eq!(vl[0][1], "2023-01-01T00:00:00Z");
+        let ol = &body["membersPresent"]["objectLists"];
+        assert_eq!(
+            ol[0][0],
+            serde_json::json!(["urn:ngsi-ld:Person:Alice", "urn:ngsi-ld:Person:Bob"]),
+            "objectLists pairs carry the bare URI array: {ol}"
+        );
+    }
+
+    /// V-27 — 4.5.19.1 Table -1 + 5.7.4.4 p.211: string-valued Properties
+    /// aggregate min/max lexicographically ("first/last value in
+    /// lexicographical order"); a method the datatype is not eligible for
+    /// ("sum" on strings is N/A) raises InvalidRequest; and numeric folds
+    /// never leak f64::INFINITY (serialized as null) into the payload.
+    #[tokio::test]
+    async fn aggregation_dispatches_on_datatype_and_rejects_ineligible() {
+        let app = app();
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:Building:agg1",
+            "type": "Building",
+            "operator": [
+                {"type": "Property", "value": "alpha", "observedAt": "2023-01-01T00:00:00Z"},
+                {"type": "Property", "value": "zulu",  "observedAt": "2023-01-02T00:00:00Z"},
+                {"type": "Property", "value": "mike",  "observedAt": "2023-01-03T00:00:00Z"}
+            ]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/temporal/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", (doc.to_string()).len())
+                    .body(Body::from(doc.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let base = "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Building:agg1\
+                    ?options=aggregatedValues&timerel=after&timeAt=2022-01-01T00:00:00Z";
+        // eligible: lexicographic min/max on strings
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{base}&aggrMethods=min,max"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["operator"]["min"][0][0], "alpha", "{body}");
+        assert_eq!(body["operator"]["max"][0][0], "zulu", "{body}");
+        // ineligible: sum over strings is N/A → InvalidRequest (400)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("{base}&aggrMethods=sum"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["type"], "https://uri.etsi.org/ngsi-ld/errors/InvalidRequest",
+            "{body}"
         );
     }
 }

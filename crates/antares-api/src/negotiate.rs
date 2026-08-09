@@ -122,7 +122,8 @@ pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
         return Ok(Accept::Json);
     };
     let raw = raw.to_str().unwrap_or("");
-    let mut best: Option<(f32, u8, Accept)> = None; // (q, specificity, kind)
+    // (q, specificity, 6.3.4 list rank, kind)
+    let mut best: Option<(f32, u8, u8, Accept)> = None;
     for part in raw.split(',') {
         let mut segs = part.split(';');
         let mt = segs.next().unwrap_or("").trim().to_ascii_lowercase();
@@ -132,26 +133,34 @@ pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
                 q = v.parse().unwrap_or(1.0);
             }
         }
+        // 6.3.4: the option list is json > ld+json > geo+json and "the order of
+        // the list above is significant … the first one of the list shall be
+        // selected, unless amended by the HTTP Accept header processing rules,
+        // e.g. the presence of a q parameter". So q wins first, then
+        // specificity, and list rank is the final tie-break — never the order
+        // the client happened to write the tokens in.
         let cand = match mt.as_str() {
-            "application/json" => Some((2, Accept::Json)),
-            "application/ld+json" => Some((2, Accept::LdJson)),
-            "application/geo+json" => Some((2, Accept::GeoJson)),
-            "application/*" => Some((1, Accept::Json)),
-            "*/*" => Some((0, Accept::Json)),
+            "application/json" => Some((2, 0, Accept::Json)),
+            "application/ld+json" => Some((2, 1, Accept::LdJson)),
+            "application/geo+json" => Some((2, 2, Accept::GeoJson)),
+            "application/*" => Some((1, 0, Accept::Json)),
+            "*/*" => Some((0, 0, Accept::Json)),
             _ => None,
         };
-        if let Some((spec, kind)) = cand {
+        if let Some((spec, rank, kind)) = cand {
             let better = match &best {
                 None => true,
-                Some((bq, bspec, _)) => q > *bq || (q == *bq && spec > *bspec),
+                Some((bq, bspec, brank, _)) => {
+                    q > *bq || (q == *bq && (spec > *bspec || (spec == *bspec && rank < *brank)))
+                }
             };
             if better {
-                best = Some((q, spec, kind));
+                best = Some((q, spec, rank, kind));
             }
         }
     }
     match best {
-        Some((q, _, kind)) if q > 0.0 => Ok(kind),
+        Some((q, _, _, kind)) if q > 0.0 => Ok(kind),
         _ => Err(ApiError::Bare(StatusCode::NOT_ACCEPTABLE)),
     }
 }

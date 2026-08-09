@@ -84,6 +84,29 @@ pub async fn bounds_layer(
         st.limits.uri_too_long.fetch_add(1, Ordering::Relaxed);
         return StatusCode::URI_TOO_LONG.into_response(); // bare, like 6.3.4
     }
+    // 6.3.4: "For HTTP POST, PATCH and PUT HTTP requests implementations shall
+    // check … Content-Length header shall include the length of the request
+    // payload body", and its absence "shall result in just a 411 HTTP status
+    // code (without any payload body)" — restated in 6.3.2. Scoped to HTTP/1.x:
+    // HTTP/2 and later carry length in the framing layer and legitimately omit
+    // the header, so demanding it there would reject conformant clients.
+    // The clause grants NO exemption for `Transfer-Encoding: chunked` — a
+    // chunked POST without Content-Length is exactly the case 411 covers, so it
+    // is deliberately not carved out here.
+    //
+    // The ONE deviation, made explicit rather than implied: the check is scoped
+    // to HTTP/1.x. 6.3.4 is written against RFC 7230/7231 and predates any h2
+    // consideration; HTTP/2 carries length in its framing and conformant h2
+    // clients routinely omit the header, so applying it there would reject
+    // requests the spec never meant to describe. Recorded in docs/ics.yaml.
+    if matches!(req.method().as_str(), "POST" | "PATCH" | "PUT")
+        && req.version() <= axum::http::Version::HTTP_11
+        && !req
+            .headers()
+            .contains_key(axum::http::header::CONTENT_LENGTH)
+    {
+        return StatusCode::LENGTH_REQUIRED.into_response(); // bare 411
+    }
     let has_body = matches!(req.method().as_str(), "POST" | "PATCH" | "PUT" | "DELETE");
     if !has_body {
         return next.run(req).await;
