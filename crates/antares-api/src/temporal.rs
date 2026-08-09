@@ -433,9 +433,9 @@ fn present_temporal(
     r: &TRepr,
     tq: Option<&TemporalQ>,
     timeprop: &str,
-) -> Value {
+) -> Result<Value, NgsiError> {
     let Some(obj) = doc.as_object() else {
-        return doc.clone();
+        return Ok(doc.clone());
     };
     let mut out = Map::new();
     for (k, v) in obj {
@@ -466,10 +466,10 @@ fn present_temporal(
         }
     }
     if r.aggregated {
-        for (k, v) in render_aggregated(w, tq, r, ctx, timeprop) {
+        for (k, v) in render_aggregated(w, tq, r, ctx, timeprop)? {
             out.insert(k, v);
         }
-        return Value::Object(out);
+        return Ok(Value::Object(out));
     }
     for (k, instances) in &w.attrs {
         if instances.is_empty() {
@@ -529,9 +529,14 @@ fn present_temporal(
                                 };
                                 serde_json::json!({"vocab": compacted})
                             } else if let Some(l) = inst.get("valueList") {
-                                serde_json::json!({"valueList": l})
+                                // 4.5.9 p.63 EXAMPLE 3: the pair's first element
+                                // is the BARE ordered array, not a {"valueList"}
+                                // wrapper (audit V-24) — unlike languageMap/
+                                // json/vocab, which the clause does wrap
+                                l.clone()
                             } else if let Some(l) = inst.get("objectList") {
-                                serde_json::json!({"objectList": l})
+                                // 4.5.9 p.65: same bare form for ListRelationship
+                                l.clone()
                             } else {
                                 Value::Null
                             };
@@ -581,7 +586,7 @@ fn present_temporal(
             out.insert(ctx.compact_iri(k), Value::Array(presented));
         }
     }
-    Value::Object(out)
+    Ok(Value::Object(out))
 }
 
 /// Parsed temporal representation params (options/format/lastN/pick/omit/
@@ -798,18 +803,113 @@ fn ts_float(v: &Value) -> Value {
 }
 
 /// Aggregated representation (4.5.19): attr → {type, <method>: [[v,start,end]]}.
+/// Aggregation datatype class per 4.5.19.1 (Tables -1, -2, -3). Booleans
+/// count as numbers (1/0, table NOTE); DateTime/Date and plain strings share
+/// the lexicographic min/max column; Time additionally supports avg.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum AggrClass {
+    Number,
+    Text,
+    TimeOfDay,
+    List,
+    Opaque,
+    Relationship,
+}
+
+fn classify_instance(inst: &Value) -> AggrClass {
+    if inst.get("object").is_some() {
+        return AggrClass::Relationship;
+    }
+    if inst.get("valueList").is_some() || inst.get("objectList").is_some() {
+        return AggrClass::List;
+    }
+    if inst.get("vocab").is_some() || inst.get("languageMap").is_some() || inst.get("json").is_some()
+    {
+        // URI / JSON-object valued kinds: only counting methods apply
+        return AggrClass::Opaque;
+    }
+    match inst.get("value") {
+        Some(Value::Number(_)) | Some(Value::Bool(_)) => AggrClass::Number,
+        Some(Value::String(s)) if seconds_of_day(s).is_some() => AggrClass::TimeOfDay,
+        Some(Value::String(_)) => AggrClass::Text,
+        Some(Value::Array(_)) => AggrClass::List,
+        _ => AggrClass::Opaque,
+    }
+}
+
+/// Table 4.5.19.1 eligibility: which methods apply to which datatype class.
+fn aggr_eligible(class: AggrClass, method: &str) -> bool {
+    match method {
+        "totalCount" | "distinctCount" => true,
+        "min" | "max" => !matches!(class, AggrClass::Opaque | AggrClass::Relationship),
+        "avg" => matches!(
+            class,
+            AggrClass::Number | AggrClass::List | AggrClass::TimeOfDay
+        ),
+        "sum" => matches!(class, AggrClass::Number | AggrClass::List),
+        "stddev" | "sumsq" => matches!(class, AggrClass::Number),
+        _ => false,
+    }
+}
+
+/// `HH:MM:SS[.f]` → seconds of day (4.6.3 Time is UTC with optional `Z`).
+fn seconds_of_day(s: &str) -> Option<f64> {
+    let t = s.strip_suffix('Z').unwrap_or(s);
+    let b = t.as_bytes();
+    if b.len() < 8 || b[2] != b':' || b[5] != b':' {
+        return None;
+    }
+    let h: f64 = t.get(0..2)?.parse().ok()?;
+    let m: f64 = t.get(3..5)?.parse().ok()?;
+    let sec: f64 = t.get(6..)?.parse().ok()?;
+    (h < 24.0 && m < 60.0 && sec < 62.0).then_some(h * 3600.0 + m * 60.0 + sec)
+}
+
+/// The raw member an instance carries its data under.
+fn raw_of(inst: &Value) -> Option<&Value> {
+    for k in [
+        "value",
+        "object",
+        "valueList",
+        "objectList",
+        "vocab",
+        "languageMap",
+        "json",
+    ] {
+        if let Some(v) = inst.get(k) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Numeric view of one raw value for the class (None ⇒ excluded from
+/// numeric methods; List aggregates SIZES per Table 4.5.19.1-1).
+fn numeric_of(class: AggrClass, v: &Value) -> Option<f64> {
+    match class {
+        AggrClass::Number => match v {
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => v.as_f64(),
+        },
+        AggrClass::List => v.as_array().map(|a| a.len() as f64),
+        AggrClass::TimeOfDay => v.as_str().and_then(seconds_of_day),
+        _ => None,
+    }
+}
+
 fn render_aggregated(
     w: &Windowed,
     tq: Option<&TemporalQ>,
     r: &TRepr,
     ctx: &Context,
     timeprop: &str,
-) -> Map<String, Value> {
+) -> Result<Map<String, Value>, NgsiError> {
     use chrono::{DateTime, FixedOffset};
     let fmt = |d: DateTime<FixedOffset>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut out = Map::new();
     for (k, instances) in &w.attrs {
-        let mut times: Vec<(DateTime<FixedOffset>, f64)> = Vec::new();
+        let mut times: Vec<(DateTime<FixedOffset>, &Value)> = Vec::new();
+        let mut class: Option<AggrClass> = None;
         for inst in instances {
             let Some(t) = inst
                 .get(timeprop)
@@ -818,14 +918,28 @@ fn render_aggregated(
             else {
                 continue;
             };
-            let v = inst
-                .get("value")
-                .and_then(Value::as_f64)
-                .unwrap_or(f64::NAN);
-            times.push((t, v));
+            if class.is_none() {
+                class = Some(classify_instance(inst));
+            }
+            let Some(raw) = raw_of(inst) else { continue };
+            times.push((t, raw));
         }
         if times.is_empty() {
             continue;
+        }
+        let class = class.expect("set with first instance");
+        // 5.7.4.4 p.211: "If an aggregated temporal representation is
+        // requested and any of the requested Attributes is not eligible for
+        // at least one of the aggregation methods specified in the request
+        // parameters, then an error of type InvalidRequest shall be raised."
+        for method in &r.aggr_methods {
+            if !aggr_eligible(class, method) {
+                return Err(NgsiError::InvalidRequest(format!(
+                    "attribute {} ({class:?}-valued) is not eligible for \
+                     aggregation method {method} (4.5.19.1, 5.7.4.4)",
+                    ctx.compact_iri(k)
+                )));
+            }
         }
         times.sort_by_key(|(t, _)| *t);
         let anchor = tq
@@ -863,12 +977,12 @@ fn render_aggregated(
                 }
             };
         type Bucket = (DateTime<FixedOffset>, DateTime<FixedOffset>);
-        let mut buckets: Vec<(Bucket, Vec<f64>)> = Vec::new();
+        let mut buckets: Vec<(Bucket, Vec<&Value>)> = Vec::new();
         for (t, v) in &times {
             let b = bucket_of(*t);
             match buckets.iter_mut().find(|(bb, _)| bb.0 == b.0) {
-                Some((_, vals)) => vals.push(*v),
-                None => buckets.push((b, vec![*v])),
+                Some((_, vals)) => vals.push(v),
+                None => buckets.push((b, vec![v])),
             }
         }
         buckets.sort_by_key(|((s, _), _)| *s);
@@ -878,39 +992,7 @@ fn render_aggregated(
             let rows: Vec<Value> = buckets
                 .iter()
                 .map(|((bs, be), vals)| {
-                    let nums: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
-                    let val: Value = match method.as_str() {
-                        "totalCount" => serde_json::json!(vals.len()),
-                        "distinctCount" => {
-                            let mut d = vals.clone();
-                            d.sort_by(f64::total_cmp);
-                            d.dedup();
-                            serde_json::json!(d.len())
-                        }
-                        "sum" => serde_json::json!(nums.iter().sum::<f64>()),
-                        "avg" => {
-                            serde_json::json!(nums.iter().sum::<f64>() / nums.len().max(1) as f64)
-                        }
-                        "min" => {
-                            serde_json::json!(nums.iter().copied().fold(f64::INFINITY, f64::min))
-                        }
-                        "max" => serde_json::json!(nums
-                            .iter()
-                            .copied()
-                            .fold(f64::NEG_INFINITY, f64::max)),
-                        "stddev" => {
-                            let n = nums.len().max(1) as f64;
-                            let mean = nums.iter().sum::<f64>() / n;
-                            serde_json::json!((nums
-                                .iter()
-                                .map(|v| (v - mean).powi(2))
-                                .sum::<f64>()
-                                / n)
-                                .sqrt())
-                        }
-                        "sumsq" => serde_json::json!(nums.iter().map(|v| v * v).sum::<f64>()),
-                        _ => Value::Null,
-                    };
+                    let val = aggregate_bucket(method, class, vals);
                     Value::Array(vec![val, Value::String(fmt(*bs)), Value::String(fmt(*be))])
                 })
                 .collect();
@@ -918,7 +1000,91 @@ fn render_aggregated(
         }
         out.insert(ctx.compact_iri(k), Value::Object(attr_out));
     }
-    out
+    Ok(out)
+}
+
+/// One bucket, one method — per-class semantics from Tables 4.5.19.1-1/2/3.
+/// Never emits an out-of-range float (audit V-27: the old fold seeded with
+/// f64::INFINITY, which serde_json serializes as null).
+fn aggregate_bucket(method: &str, class: AggrClass, vals: &[&Value]) -> Value {
+    let nums: Vec<f64> = vals.iter().filter_map(|v| numeric_of(class, v)).collect();
+    let finite = |x: f64| {
+        if x.is_finite() {
+            serde_json::json!(x)
+        } else {
+            Value::Null
+        }
+    };
+    match method {
+        "totalCount" => serde_json::json!(vals.len()),
+        "distinctCount" => {
+            // Relationship: "count of distinct relationship TARGETS" — an
+            // object may be a URI or an array of URIs, so flatten first.
+            let mut seen: Vec<String> = Vec::new();
+            for v in vals {
+                let items: Vec<&Value> = match (class, v) {
+                    (AggrClass::Relationship, Value::Array(a)) => a.iter().collect(),
+                    _ => vec![*v],
+                };
+                for it in items {
+                    let key = it.to_string();
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                    }
+                }
+            }
+            serde_json::json!(seen.len())
+        }
+        "min" | "max" => match class {
+            // lexicographic first/last for strings, dates and times
+            AggrClass::Text | AggrClass::TimeOfDay => {
+                let mut strs: Vec<&str> = vals.iter().filter_map(|v| v.as_str()).collect();
+                strs.sort_unstable();
+                let pick = if method == "min" {
+                    strs.first()
+                } else {
+                    strs.last()
+                };
+                pick.map_or(Value::Null, |s| Value::String((*s).to_owned()))
+            }
+            _ => {
+                let it = nums.iter().copied();
+                let picked = if method == "min" {
+                    it.fold(None, |a: Option<f64>, v| Some(a.map_or(v, |x| x.min(v))))
+                } else {
+                    it.fold(None, |a: Option<f64>, v| Some(a.map_or(v, |x| x.max(v))))
+                };
+                picked.map_or(Value::Null, &finite)
+            }
+        },
+        "sum" => finite(nums.iter().sum::<f64>()),
+        "avg" => {
+            if nums.is_empty() {
+                Value::Null
+            } else if class == AggrClass::TimeOfDay {
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let (h, m, sec) = (
+                    (mean / 3600.0) as u32,
+                    ((mean % 3600.0) / 60.0) as u32,
+                    (mean % 60.0) as u32,
+                );
+                Value::String(format!("{h:02}:{m:02}:{sec:02}"))
+            } else {
+                finite(nums.iter().sum::<f64>() / nums.len() as f64)
+            }
+        }
+        "stddev" => {
+            if nums.is_empty() {
+                Value::Null
+            } else {
+                let n = nums.len() as f64;
+                let mean = nums.iter().sum::<f64>() / n;
+                finite((nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt())
+            }
+        }
+        "sumsq" => finite(nums.iter().map(|v| v * v).sum::<f64>()),
+        _ => Value::Null,
+    }
 }
 
 // ---------- GET /temporal/entities/ (5.7.4) ----------
@@ -1149,7 +1315,7 @@ async fn query_temporal_inner(
         if w.attrs.is_empty() && !core_only_pick {
             continue;
         }
-        let presented = present_temporal(d, &w, &ctx, &trepr, tq.as_ref(), &timeprop);
+        let presented = present_temporal(d, &w, &ctx, &trepr, tq.as_ref(), &timeprop)?;
         if trepr.pick.is_some() && presented.as_object().is_some_and(|o| o.is_empty()) {
             continue;
         }
@@ -1282,7 +1448,7 @@ pub async fn retrieve_temporal(
                 last_n,
             )
         };
-        let payload = present_temporal(&doc, &w, &ctx, &trepr, tq.as_ref(), &timeprop);
+        let payload = present_temporal(&doc, &w, &ctx, &trepr, tq.as_ref(), &timeprop)?;
         if (trepr.pick.is_some() || trepr.omit.is_some())
             && payload.as_object().is_some_and(|o| o.is_empty())
         {
