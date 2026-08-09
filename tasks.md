@@ -568,6 +568,31 @@ audit each against `docs/ics.yaml` and close the gaps.
       missing entirely; 4.22 transient expiresAt not enforced on entities;
       mqtt scheme accepted then silently skipped → G3; contextSourceInfo
       (4.3.6.5/6) missing; orderGeometry/collation absent (4.23).)*
+- [x] H1b. Spec-verified defect sweep (2026-08-09) — every conformance claim in
+      `docs/production-readiness-audit-2026-08-09.md` re-checked clause by
+      clause against CIM 009 V1.9.1, then the unambiguous ones fixed:
+      **5.6.21.4 Purge** — the qualifying set is exactly type / attrs-with-a-
+      non-system-Attribute / q-with-a-non-system-Attribute / georel / local.
+      `id`+`idPattern` filter but never qualify; accepting them made
+      `DELETE /entities?idPattern=.*` an unauthenticated tenant wipe.
+      **Table 6.4.3.2-1 `type=*`** — selects every type, implies local, and
+      `type=*&local=false` is 400 (previously expanded as a term → empty array).
+      **5.7.2.4** — `geometryProperty` outside `application/geo+json` is 400;
+      `orderBy` is refused when the operation actually federates (4.23.1 "Sort
+      ordering is never applied to distributed operations") — keyed on
+      execution, not on `local=true`, or ETSI 019_19 would fail.
+      **Table 5.2.40-1** — `/info/sourceIdentity` now emits `contextSourceAlias`
+      / `contextSourceUptime` / `contextSourceTimeAt` (was `hostAlias`/`uptime`,
+      not core-context terms).
+      **6.3.4** — Accept precedence uses the json > ld+json > geo+json list
+      order as the equal-q tie-break (was header order); and 411 Length Required
+      is implemented, mandated by both 6.3.2 and 6.3.4 with no chunked
+      exemption. Named deviation: scoped to HTTP/1.x.
+      *Tests:* 37 unit tests in `antares-api` + 6 new Robot TPs (060_06, 019_26,
+      019_27, D011_05_inc, 045_02, 061_01, 046_01) — 4.23/5.15/6.3.4-411 have no
+      official ETSI coverage at all. Suite TP 060_05 filtered by `id` alone,
+      contradicting 5.6.21.4 + Table 6.4.3.3-1; corrected in the fork and logged
+      in `error.md`. Remaining findings (V-14…V-30) stay open in the audit.
 - [ ] H2. Snapshots (5.16, 6.36–6.38, 5.2.41/42, 5.3.4) — staged v1.x;
       pre-adopt `202 Accepted` on creation (§15.1). Implementable from the
       clause, but ⏳ has NO validation oracle: the Robot suite has no snapshot

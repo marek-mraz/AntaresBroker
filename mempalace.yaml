@@ -1,0 +1,45 @@
+# MemPalace project config — Antares (verified against mempalace 3.6.0).
+#
+# Wing precedence, from the source rather than folklore:
+#   cli.py:550    "Explicit --wing still wins" (else MEMPALACE_PROJECT)
+#   miner.py:1780 wing = wing_override or config["wing"]
+# =>  --wing  >  MEMPALACE_PROJECT  >  this file's `wing:`  >  directory name
+#
+# So `wing:` below is only the fallback. It does NOT hijack a deliberate
+# `--wing spec` re-mine of the ETSI PDFs. Keep it in sync with
+# MEMPALACE_PROJECT (=AntaresBroker, normalized to `antaresbroker`).
+wing: antaresbroker
+
+# Gitignore-style patterns, relative to this directory.
+# `.gitignore` is ALREADY honoured by default (mine has --no-gitignore to opt
+# out), so target/, node_modules/, results/, results-proc/, ScorpioBroker/ and
+# .venv/ need no entry here. What follows is the set git does *not* ignore but
+# the RAG must never see.
+exclude_patterns:
+  # Robot Framework run artefacts. log.html is base64-blob soup that outranks
+  # real content on any clause-shaped query, because it is stuffed with tags
+  # like "5_6_21" and "since_v1.9.1". A 2026-08-07 mine of one such tree
+  # ("ETSI-matrix-results (1)/", since deleted) is the junk still in the palace
+  # and is why spec lookups returned run logs instead of clause text.
+  - "ETSI-matrix-results*/"
+  - "**/log.html"
+  - "**/report.html"
+  - "**/output.xml"
+
+# Deliberately NOT excluded:
+#
+#   ngsi-ld-test-suite/   Tracked submodule. The .robot TPs are the oracle for
+#                         "what does the suite actually assert" — e.g. proving
+#                         043_01 hardcodes 503 where V1.9.1 Table 6.3.2-1 says
+#                         504. Keep them searchable.
+#
+#   etsi-cim-specs/       The normative PDF. A projects-mode mine SKIPS PDFs
+#                         entirely, which is why 82k drawers contained zero
+#                         pages of it. Mine the spec explicitly:
+#
+#                           mempalace mine /workspace/etsi-cim-specs \
+#                             --mode extract --extract general --wing spec
+#
+#                         Done 2026-08-09: 2072 drawers, wing `spec`,
+#                         pdf_page metadata intact (use mempalace_get_pdf_pages
+#                         to expand a hit to whole pages).

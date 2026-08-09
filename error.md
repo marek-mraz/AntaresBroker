@@ -121,3 +121,53 @@ upstream contexts stabilise.
   suite's context-server port (8087) makes `Start Server` block robot
   FOREVER and poisons context fetches with stub content. Sweep probe
   processes before every measured run.
+
+### 2026-08-09 — PurgeEntities 060_05_01 filters by `id` alone (contradicts 5.6.21.4 + Table 6.4.3.3-1)
+
+`TP/NGSI-LD/ContextInformation/Provision/PurgeEntities/060_05.robot` calls
+`Purge Entities  id=${entity_id}  keep=name  context=…` and asserts **204**.
+That request carries no qualifying filter, so a spec-conformant broker must
+answer **400 BadRequestData**.
+
+Proof, two independent places in CIM 009 V1.9.1:
+
+1. **5.6.21.4 (p.194)** — "At least one of the following input data shall be
+   provided: a) selector of Entity Types; b) list of Attribute names, including
+   at least one non-system Attribute; c) NGSI-LD Query, including at least one
+   non-system Attribute; d) NGSI-LD GeoQuery; e) local scope (see clause
+   5.5.13). **If none of the above is provided, then an error of type
+   BadRequestData shall be raised (too wide query).**"
+   Reinforced by 5.6.21.3: "it is not possible to purge a set of entities by
+   only specifying desired Entity identifiers".
+2. **Table 6.4.3.3-1 (p.286-287)** — the Purge URL-parameter table states, in
+   the Remarks of `geometry`, `q` and `type`: "At least one among: **type,
+   attrs, q, or georel** shall be present, unless the execution of the request
+   is limited to local scope". `keep` and `drop` are defined in the same table
+   purely as projection ("every Entity within the payload body is reduced…"),
+   and neither appears in that constraint.
+
+So `keep` does not qualify as 5.6.21.4(b)'s "list of Attribute names" — that
+maps to `attrs`. (Editorial note: Table 6.4.3.3-1 references `attrs` three
+times in its Remarks but has no `attrs` row — an apparent copy-paste slip from
+Table 6.4.3.2-1. It does not affect the conclusion, since `keep`/`drop` are
+excluded either way.)
+
+**Action taken:** the broker is left correct — `entities.rs` now implements the
+five conditions exactly, and `id`/`idPattern` filter but never qualify (this is
+the fix for the unauthenticated `DELETE /entities?idPattern=.*` tenant wipe).
+The TP was minimally corrected in this fork to add `type=Building`, which keeps
+its actual subject — `keep` projection semantics — intact while making the
+request spec-legal. Status: to be raised upstream.
+
+## 2026-08-09 — CIM 009 V1.9.1 internal inconsistency: Table 6.6.3.2-2 (Update Attributes 207)
+
+Table 6.6.3.2-2 (p.297) declares the 207 Multi-Status response body **Data Type
+= UpdateResult**, but its own Remarks cell says distributed errors are returned
+"in a **BatchOperationResult** structure". Every sibling table — 6.6.3.1-2
+(Append, p.296), 6.7.3.1-2 (Partial Update, p.299), 6.7.3.2-2 (Delete, p.300),
+6.7.3.3 (Replace) — says UpdateResult in both places, and 5.2.18 (p.122) defines
+UpdateResult as the result of attribute update operations "regardless of whether
+local or distributed". The Data Type column and 5.2.18 govern; the Remarks cell
+is a copy-paste error in the spec. Antares returns an UpdateResult on all five
+/attrs methods (audit V-15). Not a test-suite issue (no TP asserts either
+shape), recorded here because ics.yaml cites it.
