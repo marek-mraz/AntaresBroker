@@ -73,9 +73,12 @@ const RETRIEVE_OPS: &[&str] = &["retrieveEntity", "queryEntity"];
 /// One matching registration, compiled for forwarding.
 #[derive(Clone, Debug, Default)]
 pub struct FedReg {
+    /// The registration's @id — carried into `NotUpdatedDetails.registrationId`
+    /// (5.2.19) and `BatchEntityError.registrationId` (5.2.17).
+    pub reg_id: String,
     pub endpoint: String,
     pub mode: String, // inclusive | auxiliary | exclusive | redirect
-    ops: Vec<String>,
+    pub(crate) ops: Vec<String>,
     /// Expanded attribute IRIs the matched RegistrationInfo covers; None ⇒ all.
     pub attrs: Option<Vec<String>>,
     /// EntityInfo ids/types of the matched RegistrationInfo elements.
@@ -117,7 +120,13 @@ impl FedReg {
 }
 
 /// Is federation active for this request? (6.3.18 local param)
+///
+/// Table 6.4.3.2-1: for `type=*`, "local is implicitly set to true and shall
+/// not be explicitly set to false" — so the wildcard alone disables forwarding.
 pub fn active(params: &HashMap<String, String>) -> bool {
+    if params.get("type").map(String::as_str) == Some("*") {
+        return false;
+    }
     params.get("local").map(String::as_str) != Some("true")
 }
 
@@ -129,8 +138,72 @@ pub fn inbound_via(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Does the inbound Via chain already name this broker? (loop, 6.3.18)
+///
+/// RFC 7230: `Via = 1#( received-protocol RWS received-by [ RWS comment ] )`
+/// — received-by is the SECOND whitespace token of each element and is a
+/// token compared for equality, never by suffix (audit V-30: `ends_with`
+/// made alias `b1` match peer `sub-b1`). A malformed element with no
+/// protocol falls back to its first token.
 pub fn via_loop(headers: &HeaderMap, alias: &str) -> bool {
-    inbound_via(headers).is_some_and(|v| v.split(',').any(|t| t.trim().ends_with(alias)))
+    inbound_via(headers).is_some_and(|v| {
+        v.split(',').any(|t| {
+            let mut toks = t.split_whitespace();
+            let first = toks.next();
+            toks.next().or(first) == Some(alias)
+        })
+    })
+}
+
+/// 6.3.17/6.3.18 loop handling for operations with matching registrations.
+/// 508 Loop Detected is mandated ONLY "in the case of an exclusive or
+/// redirect registration, where all of the data is held outside of the
+/// Context Broker and held in a single registered source ... registered to
+/// redirect back on to the Context Broker". Any other loop clears `regs` —
+/// the Via listing "is used when determining matching registrations"
+/// (Table 6.3.18-2), so the operation proceeds locally without re-forwarding.
+pub fn handle_via_loop(
+    headers: &HeaderMap,
+    alias: &str,
+    tenant: &TenantId,
+    regs: &mut Vec<FedReg>,
+) -> Option<Response> {
+    if regs.is_empty() || !via_loop(headers, alias) {
+        return None;
+    }
+    if regs.len() == 1 && regs[0].is_proxy() {
+        return Some(loop_508(tenant));
+    }
+    regs.clear();
+    None
+}
+
+/// One `NGSILD-Warning` header value (6.3.17), in RFC 7234 warn form:
+/// `warn-code SP warn-agent SP quoted warn-text`.
+pub fn warning(code: u16, alias: &str, text: &str) -> String {
+    format!("{code} {alias} \"{text}\"")
+}
+
+/// Classify one forwarded-read outcome per Table 6.3.17-1. A registration
+/// endpoint answering 404 with no data "should not be considered as abnormal
+/// behaviour"; 503/504 means no response arrived within the timeout (199);
+/// any other error status IS a received error response (299); a 2xx whose
+/// payload could not be parsed as NGSI-LD is 111.
+fn read_warning(status: u16, body: &Value) -> Option<(u16, &'static str)> {
+    match status {
+        404 => None,
+        503 | 504 => Some((
+            199,
+            "no response was received from the registration endpoint within the timeout period",
+        )),
+        s if s >= 400 => Some((
+            299,
+            "an error response was received from the registration endpoint",
+        )),
+        s if (200..300).contains(&s) && body.is_null() => {
+            Some((111, "the payload of the response was invalid"))
+        }
+        _ => None,
+    }
 }
 
 fn outbound_via(headers: &HeaderMap, alias: &str) -> String {
@@ -251,6 +324,11 @@ pub fn matching_regs(
                 })
                 .unwrap_or_default();
             Some(FedReg {
+                reg_id: doc
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
                 endpoint,
                 mode,
                 ops,
@@ -268,8 +346,8 @@ pub fn matching_regs(
 /// travels via the registration's own `tenant` member (4.3.6.5 "shall not be
 /// part of contextSourceInfo"), connection/binding-managed headers cannot be
 /// overridden ("shall be ignored"), and the 4.3.6.6 processed keys (accept,
-/// contentType, jsonldContext, ngsildConformance) have transformation
-/// semantics this broker does not implement yet — passing them through raw
+/// contentType, jsonldContext, ngsildConformance) are TRANSFORMED by
+/// `forward` (V-29) rather than passed through raw
 /// would corrupt negotiation instead.
 const CSI_SKIP: &[&str] = &[
     "ngsild-tenant",
@@ -296,7 +374,7 @@ pub async fn forward(
     tenant: &TenantId,
     reg: &FedReg,
     ctx_url: &str,
-    body: Option<Value>,
+    mut body: Option<Value>,
 ) -> (u16, Value) {
     // I4: one policy for every outbound class — scheme allowlist,
     // private-range deny, per-destination circuit breaker (§16.4/§16.7).
@@ -308,17 +386,89 @@ pub async fn forward(
         tracing::debug!("federation forward to {url} short-circuited (breaker open)");
         return (503, Value::Null);
     }
+    // 4.3.6.6 (V-29): the four contextSourceInfo keys with processing
+    // semantics. Values were validated at registration time (5.9.2).
+    let csi_get = |key: &str| {
+        reg.csi
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    };
+    // "accept": the response shall come back in this format (the read path
+    // strips any body @context before expanding, so both forms import).
+    let accept = csi_get("accept").unwrap_or("application/json");
+    // "ngsildConformance": amend the payload to the pinned version (4.3.6.8).
+    if let Some(ver) = csi_get("ngsildConformance").and_then(crate::conformance::parse_version) {
+        if let Some(b) = body.as_mut() {
+            crate::conformance::amend_payload(b, ver);
+        }
+    }
+    // "jsonldContext": recompact payload and term-bearing query parameters
+    // with the registered context, forward THAT context, Content-Type
+    // application/json, no @context member in the payload. Entity-shaped
+    // bodies only — a POST-query body has no entity terms to recompact; if
+    // either context fails to load the forward degrades to the original
+    // context rather than sending terms compacted against the wrong one.
+    let mut link_ctx: String = ctx_url.to_owned();
+    let mut query: Vec<(String, String)> = query.to_vec();
+    if let Some(reg_ctx_url) = csi_get("jsonldContext") {
+        let orig = st
+            .loader
+            .resolve_quiet(&Value::String(ctx_url.to_owned()))
+            .await;
+        let target = st
+            .loader
+            .resolve_quiet(&Value::String(reg_ctx_url.to_owned()))
+            .await;
+        if let (Ok(orig), Ok(target)) = (orig, target) {
+            if let Some(b) = body.as_mut() {
+                let entity_shaped = b
+                    .as_object()
+                    .is_some_and(|o| o.get("type").and_then(Value::as_str) != Some("Query"));
+                if entity_shaped {
+                    if let Some(obj) = b.as_object() {
+                        let opts = antares_jsonld::ExpandOpts {
+                            fragment: obj.get("id").is_none(),
+                            ..Default::default()
+                        };
+                        if let Ok(exp) = antares_jsonld::expand_entity(obj, &orig, opts) {
+                            let mut re = antares_jsonld::compact::compact_entity(&exp, &target);
+                            if let Some(o) = re.as_object_mut() {
+                                o.remove("@context");
+                            }
+                            *b = re;
+                        }
+                    }
+                }
+            }
+            for (k, v) in query.iter_mut() {
+                if matches!(k.as_str(), "attrs" | "type" | "geoproperty") {
+                    *v = v
+                        .split(',')
+                        .map(|t| target.compact_iri(&orig.expand_key(t.trim())))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                }
+            }
+            link_ctx = reg_ctx_url.to_owned();
+        } else {
+            tracing::warn!(
+                "registered jsonldContext {reg_ctx_url} (or the request context) \
+                 failed to load; forwarding with the original context"
+            );
+        }
+    }
     let mut req = st
         .fed_http
         .request(method, &url)
-        .header("Accept", "application/json")
+        .header("Accept", accept)
         .header(
             "Link",
-            format!("<{ctx_url}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""),
+            format!("<{link_ctx}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""),
         )
         .header("Via", outbound_via(headers, &st.host_alias));
     if !query.is_empty() {
-        req = req.query(query);
+        req = req.query(&query);
     }
     // 5.2.9 `tenant`: requests related to this registration carry the
     // registration's Tenant; absent ⇒ the requesting tenant flows through
@@ -344,10 +494,22 @@ pub async fn forward(
         };
         req = req.header(k.as_str(), val);
     }
-    if let Some(b) = body {
-        req = req
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_vec(&b).unwrap_or_default());
+    if let Some(mut b) = body {
+        // 4.3.6.6 "contentType": provide request + @context as the MIME type
+        // requires — ld+json carries the context inline. When "jsonldContext"
+        // is also defined its own mandate wins ("the Content-Type of the
+        // forwarded request shall be application/json").
+        let want_ld = csi_get("contentType") == Some("application/ld+json")
+            && csi_get("jsonldContext").is_none();
+        if want_ld {
+            if let Some(o) = b.as_object_mut() {
+                o.insert("@context".into(), Value::String(link_ctx.clone()));
+            }
+            req = req.header("Content-Type", "application/ld+json");
+        } else {
+            req = req.header("Content-Type", "application/json");
+        }
+        req = req.body(serde_json::to_vec(&b).unwrap_or_default());
     }
     // N2: the whole HTTP interaction is one Send unit (http_interaction) so
     // the handler futures above stay Send on wasm32 too.
@@ -423,10 +585,20 @@ fn recency(inst: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// 4.5.5.3 first step (audit V-19): "if an expiresAt DateTime is present on
+/// the Attribute and the date lies in the past, it shall be discarded" —
+/// BEFORE any recency comparison.
+fn expired(inst: &Value, now: &str) -> bool {
+    inst.get("expiresAt")
+        .and_then(Value::as_str)
+        .is_some_and(|e| e < now)
+}
+
 /// Merge attributes of `add` into `base` (auxiliary sources never override —
-/// base wins; otherwise conflicting instances resolve by most recent
-/// observedAt/modifiedAt per 4.5.5.3).
+/// base wins; otherwise conflicting instances resolve per 4.5.5.3: discard
+/// past-expiresAt instances first, then most recent observedAt/modifiedAt).
 pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
+    let now = crate::state::now_iso();
     let Some(bo) = base.as_object_mut() else {
         return;
     };
@@ -441,6 +613,9 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
                     continue;
                 };
                 for ai in aa {
+                    if expired(ai, &now) {
+                        continue; // 4.5.5.3: discarded before comparison
+                    }
                     let ds = ai.get("datasetId").and_then(Value::as_str);
                     match ca
                         .iter_mut()
@@ -448,7 +623,7 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
                     {
                         None => ca.push(ai.clone()),
                         Some(ci) => {
-                            if recency(ai) > recency(ci) {
+                            if expired(ci, &now) || recency(ai) > recency(ci) {
                                 *ci = ai.clone();
                             }
                         }
@@ -470,6 +645,7 @@ pub async fn fed_retrieve(
     headers: &HeaderMap,
     ctx: &Context,
     id: &str,
+    warnings: &mut Vec<String>,
 ) -> Vec<(bool, Value)> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
@@ -544,6 +720,11 @@ pub async fn fed_retrieve(
                 .await
             }
         };
+        // V-14: abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
+        // as a failed overall response; 404-with-no-data is normal.
+        if let Some((code, text)) = read_warning(status, &body) {
+            warnings.push(warning(code, &st.host_alias, text));
+        }
         if !(200..300).contains(&status) {
             continue;
         }
@@ -556,8 +737,14 @@ pub async fn fed_retrieve(
             if c.get("id").and_then(Value::as_str) != Some(id) {
                 continue;
             }
-            if let Some(doc) = import_entity(c, &reg, ctx) {
-                out.push((reg.mode == "auxiliary", doc));
+            match import_entity(c, &reg, ctx) {
+                Some(doc) => out.push((reg.mode == "auxiliary", doc)),
+                // received in time, but not a parseable NGSI-LD entity (111)
+                None => warnings.push(warning(
+                    111,
+                    &st.host_alias,
+                    "the payload of the response was invalid",
+                )),
             }
         }
     }
@@ -565,24 +752,47 @@ pub async fn fed_retrieve(
 }
 
 /// Federated query: internal docs matching a type query, per registration.
-pub async fn fed_query(
-    st: &AppState,
-    tenant: &TenantId,
-    headers: &HeaderMap,
-    ctx: &Context,
-    params: &HashMap<String, String>,
-) -> Vec<(bool, Value)> {
+/// The `CsrSpec` a Query Entities request matches registrations against.
+fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource::CsrSpec {
     let types: Option<Vec<String>> = params
         .get("type")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
     let ids: Option<Vec<String>> = params
         .get("id")
         .map(|s| s.split(',').map(str::to_owned).collect());
-    let spec = crate::csource::CsrSpec {
+    crate::csource::CsrSpec {
         types,
         ids,
         ..Default::default()
-    };
+    }
+}
+
+/// Will this query actually fan out to a Context Source?
+///
+/// 5.7.2.4 forbids ordering when "the execution of the operation is not
+/// limited to the local scope", and 4.23.1 says "Sort ordering is never
+/// applied to distributed operations". The subject is the *execution*, not the
+/// presence of `local=true`: a query no registration matches executes locally
+/// whether or not the client said so. Reading it as "local=true is mandatory
+/// for orderBy" would fail ETSI's own 019_19, which orders without it.
+pub fn would_federate(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &Context,
+    params: &HashMap<String, String>,
+) -> bool {
+    active(params) && !matching_regs(st, tenant, &query_spec(ctx, params), ctx).is_empty()
+}
+
+pub async fn fed_query(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &Context,
+    params: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Vec<(bool, Value)> {
+    let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx) {
@@ -636,13 +846,22 @@ pub async fn fed_query(
             )
             .await
         };
+        // V-14: same NGSILD-Warning classification as fed_retrieve (6.3.17)
+        if let Some((code, text)) = read_warning(status, &body) {
+            warnings.push(warning(code, &st.host_alias, text));
+        }
         if !(200..300).contains(&status) {
             continue;
         }
         if let Value::Array(a) = &body {
             for c in a {
-                if let Some(doc) = import_entity(c, &reg, ctx) {
-                    out.push((reg.mode == "auxiliary", doc));
+                match import_entity(c, &reg, ctx) {
+                    Some(doc) => out.push((reg.mode == "auxiliary", doc)),
+                    None => warnings.push(warning(
+                        111,
+                        &st.host_alias,
+                        "the payload of the response was invalid",
+                    )),
                 }
             }
         }
@@ -940,4 +1159,111 @@ pub fn strip_proxied(
         any_attr = true;
     }
     (out, any_attr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn hdrs(via: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = via {
+            h.insert("via", v.parse().expect("via"));
+        }
+        h
+    }
+
+    /// RFC 7230 received-by is a TOKEN compared for equality (audit V-30):
+    /// `ends_with` made alias `b1` match pseudonym `sub-b1` (spurious loop)
+    /// and could never catch the converse.
+    #[test]
+    fn via_loop_compares_tokens_not_suffixes() {
+        assert!(via_loop(&hdrs(Some("1.1 b1")), "b1"));
+        assert!(via_loop(&hdrs(Some("1.1 b2, 1.1 b1")), "b1"));
+        assert!(via_loop(&hdrs(Some("HTTP/1.1 b1")), "b1"));
+        assert!(
+            !via_loop(&hdrs(Some("1.1 sub-b1")), "b1"),
+            "suffix must not match — this was the V-30 false positive"
+        );
+        assert!(!via_loop(&hdrs(Some("1.1 b10")), "b1"));
+        assert!(!via_loop(&hdrs(None), "b1"));
+        // malformed element carrying only a pseudonym still detects
+        assert!(via_loop(&hdrs(Some("b1")), "b1"));
+    }
+
+    fn reg(mode: &str) -> FedReg {
+        FedReg {
+            reg_id: "urn:ngsi-ld:ContextSourceRegistration:test".into(),
+            endpoint: "http://peer:9090".into(),
+            mode: mode.into(),
+            ops: vec!["federationOps".into()],
+            attrs: None,
+            ent_ids: vec![],
+            ent_types: vec![],
+            tenant: None,
+            csi: vec![],
+        }
+    }
+
+    /// 6.3.17 p.278 scopes 508 to "an exclusive or redirect registration,
+    /// where all of the data is held ... in a single registered source";
+    /// any other loop clears the forward set and proceeds locally
+    /// (Table 6.3.18-2: the Via listing amends registration matching).
+    #[test]
+    fn loop_508_only_for_a_single_proxy_registration() {
+        let t = antares_model::TenantId::new("default").expect("tenant");
+        let h = hdrs(Some("1.1 me"));
+        // single exclusive source looping back → 508
+        let mut regs = vec![reg("exclusive")];
+        assert!(handle_via_loop(&h, "me", &t, &mut regs).is_some());
+        let mut regs = vec![reg("redirect")];
+        assert!(handle_via_loop(&h, "me", &t, &mut regs).is_some());
+        // inclusive loop → no 508, forwards cleared, local execution proceeds
+        let mut regs = vec![reg("inclusive")];
+        assert!(handle_via_loop(&h, "me", &t, &mut regs).is_none());
+        assert!(regs.is_empty(), "looping forwards must be dropped");
+        // a mixed set is not "a single registered source"
+        let mut regs = vec![reg("exclusive"), reg("inclusive")];
+        assert!(handle_via_loop(&h, "me", &t, &mut regs).is_none());
+        assert!(regs.is_empty());
+        // no loop → untouched
+        let mut regs = vec![reg("exclusive")];
+        assert!(handle_via_loop(&hdrs(None), "me", &t, &mut regs).is_none());
+        assert_eq!(regs.len(), 1);
+    }
+
+    /// 4.5.5.3 p.60 (audit V-19): "if an expiresAt DateTime is present on the
+    /// Attribute and the date lies in the past, it shall be discarded" —
+    /// BEFORE the observedAt/modifiedAt recency comparison.
+    #[test]
+    fn merge_discards_expired_instances_before_recency() {
+        let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let mut base = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 1, "modifiedAt": "2026-01-01T00:00:00Z"}]
+        });
+        // fresher instance, but expired → must NOT win
+        let add = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 2,
+                    "modifiedAt": "2026-06-01T00:00:00Z",
+                    "expiresAt": "2020-01-01T00:00:00Z"}]
+        });
+        merge_docs(&mut base, &add, false);
+        assert_eq!(base[attr][0]["value"], 1, "expired instance was discarded");
+        // an expired BASE instance loses to a live remote one even if fresher
+        let mut base2 = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 1,
+                    "modifiedAt": "2026-06-01T00:00:00Z",
+                    "expiresAt": "2020-01-01T00:00:00Z"}]
+        });
+        let add2 = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 2, "modifiedAt": "2026-01-01T00:00:00Z"}]
+        });
+        merge_docs(&mut base2, &add2, false);
+        assert_eq!(base2[attr][0]["value"], 2, "live instance replaces expired");
+    }
 }

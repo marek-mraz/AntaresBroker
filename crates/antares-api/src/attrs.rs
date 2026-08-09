@@ -100,11 +100,15 @@ async fn append_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if !regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
-        return Ok(crate::federation::loop_508(&tenant));
+    let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
     }
+    let all_attr_iris = attr_iris_of(&fragment);
     let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
+    let local_iris = attr_iris_of(&fragment);
     let ts = now_iso();
     let mut updated = Vec::new();
     let mut not_updated = Vec::new();
@@ -179,39 +183,44 @@ async fn append_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(&tenant, updated, not_updated, &parsed.ctx)),
+            Some(Ok(())) => Ok(update_result(
+                &tenant,
+                updated.clone(),
+                not_updated.clone(),
+                &parsed.ctx,
+            )),
         })
     };
     if regs.is_empty() {
         return local_resp.expect("local path always runs without registrations");
     }
-    let mut parts = Vec::new();
-    if let Some(r) = local_resp {
-        parts.push(part_of(r));
-    }
+    let local_outcome = classify_local(&local_resp);
     let mut query = Vec::new();
     if let Some(o) = params.get("options") {
         query.push(("options".to_string(), o.clone()));
     }
-    parts.extend(
-        crate::federation::fed_attr_parts(
-            st,
-            headers,
-            &tenant,
-            &parsed.ctx.source,
-            &regs,
-            "appendAttrs",
-            reqwest::Method::POST,
-            &format!("/entities/{id}/attrs/"),
-            &query,
-            Some(Value::Object(without_context_map(obj))),
-        )
-        .await,
-    );
-    Ok(crate::federation::combine(
-        parts,
-        no_content(&tenant),
+    let fed_parts = crate::federation::fed_attr_parts(
+        st,
+        headers,
         &tenant,
+        &parsed.ctx.source,
+        &regs,
+        "appendAttrs",
+        reqwest::Method::POST,
+        &format!("/entities/{id}/attrs/"),
+        &query,
+        Some(Value::Object(without_context_map(obj))),
+    )
+    .await;
+    Ok(combine_attr_parts(
+        &tenant,
+        &all_attr_iris,
+        &local_iris,
+        local_outcome,
+        updated,
+        not_updated.into_iter().map(|(a, r)| (a, r, None)).collect(),
+        &regs,
+        &fed_parts,
     ))
 }
 
@@ -264,15 +273,118 @@ fn attr_fed_plan_iris(
     (regs, covered)
 }
 
-fn part_of(resp: ApiResult<Response>) -> crate::federation::Part {
-    let status = match resp {
-        Ok(r) => r.status().as_u16(),
-        Err(e) => e.into_response().status().as_u16(),
-    };
-    crate::federation::Part {
-        status,
-        detail: "local operation".into(),
+/// Attribute IRIs of an expanded fragment (entity meta members excluded).
+fn attr_iris_of(fragment: &Value) -> Vec<String> {
+    fragment
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "id" | "type" | "scope" | "createdAt" | "modifiedAt"
+                    )
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fold the buffered local response into a `LocalOutcome` without losing the
+/// ProblemDetails reason.
+fn classify_local(resp: &Option<ApiResult<Response>>) -> LocalOutcome {
+    match resp {
+        None => LocalOutcome::Skipped,
+        Some(Ok(_)) => LocalOutcome::Ok,
+        Some(Err(ApiError::Ngsi(e))) => {
+            let pd = e.to_problem_details();
+            if pd.status == 404 {
+                LocalOutcome::NotFound(pd.detail)
+            } else {
+                LocalOutcome::Failed(pd.detail)
+            }
+        }
+        Some(Err(_)) => LocalOutcome::Failed("local operation failed".into()),
     }
+}
+
+/// How the LOCAL half of a distributed /attrs operation ended.
+enum LocalOutcome {
+    /// proxies cover every touched attribute — no local write attempted
+    Skipped,
+    /// entity (or the addressed attribute) unknown locally
+    NotFound(String),
+    /// local write failed for another reason
+    Failed(String),
+    Ok,
+}
+
+/// V-15: a distributed /attrs operation answers 204, 404, or **207 with an
+/// UpdateResult** (Tables 6.6.3.1-2, 6.6.3.2-2, 6.7.3.1-2, 6.7.3.2-2,
+/// 6.7.3.3-2; 5.2.18 applies "regardless of whether local or distributed")
+/// — never the batch {success, errors} shape. Per-registration failures are
+/// listed per covered attribute with `registrationId` (5.2.19).
+#[allow(clippy::too_many_arguments)]
+fn combine_attr_parts(
+    tenant: &antares_model::TenantId,
+    attr_iris: &[String],
+    local_iris: &[String],
+    local: LocalOutcome,
+    mut updated: Vec<String>,
+    mut not_updated: Vec<(String, String, Option<String>)>,
+    regs: &[crate::federation::FedReg],
+    fed_parts: &[crate::federation::Part],
+) -> Response {
+    match &local {
+        LocalOutcome::NotFound(d) | LocalOutcome::Failed(d) => {
+            for a in local_iris {
+                not_updated.push((a.clone(), d.clone(), None));
+            }
+        }
+        _ => {}
+    }
+    let mut any_fed_ok = false;
+    for (reg, part) in regs.iter().zip(fed_parts) {
+        let covered: Vec<&String> = attr_iris.iter().filter(|a| reg.covers_attr(a)).collect();
+        if part.ok() {
+            any_fed_ok = true;
+            for a in covered {
+                if !updated.iter().any(|u| u == a.as_str()) {
+                    updated.push(a.clone());
+                }
+            }
+        } else {
+            for a in covered {
+                not_updated.push((a.clone(), part.detail.clone(), Some(reg.reg_id.clone())));
+            }
+        }
+    }
+    // nothing was found anywhere → 404 ProblemDetails (6.6/6.7 tables)
+    if matches!(&local, LocalOutcome::NotFound(_)) && !any_fed_ok && updated.is_empty() {
+        if let LocalOutcome::NotFound(d) = local {
+            return ApiError::from(NgsiError::ResourceNotFound(d)).into_response();
+        }
+    }
+    if not_updated.is_empty() {
+        return no_content(tenant);
+    }
+    let nu: Vec<Value> = not_updated
+        .into_iter()
+        .map(|(a, r, reg_id)| {
+            let mut m = Map::new();
+            m.insert("attributeName".into(), Value::String(a));
+            m.insert("reason".into(), Value::String(r));
+            if let Some(rid) = reg_id.filter(|r| !r.is_empty()) {
+                m.insert("registrationId".into(), Value::String(rid));
+            }
+            Value::Object(m)
+        })
+        .collect();
+    multi_status(
+        serde_json::json!({"updated": updated, "notUpdated": nu}),
+        tenant,
+    )
 }
 
 fn stamp_new_attr(v: &mut Value, ts: &str) {
@@ -367,11 +479,15 @@ async fn update_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if !regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
-        return Ok(crate::federation::loop_508(&tenant));
+    let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
     }
+    let all_attr_iris = attr_iris_of(&fragment);
     let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
+    let local_iris = attr_iris_of(&fragment);
     let ts = now_iso();
     let mut updated = Vec::new();
     let mut not_updated = Vec::new();
@@ -444,39 +560,44 @@ async fn update_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(&tenant, updated, not_updated, &parsed.ctx)),
+            Some(Ok(())) => Ok(update_result(
+                &tenant,
+                updated.clone(),
+                not_updated.clone(),
+                &parsed.ctx,
+            )),
         })
     };
     if regs.is_empty() {
         return local_resp.expect("local path always runs without registrations");
     }
-    let mut parts = Vec::new();
-    if let Some(r) = local_resp {
-        parts.push(part_of(r));
-    }
+    let local_outcome = classify_local(&local_resp);
     let mut query = Vec::new();
     if let Some(o) = params.get("options") {
         query.push(("options".to_string(), o.clone()));
     }
-    parts.extend(
-        crate::federation::fed_attr_parts(
-            st,
-            headers,
-            &tenant,
-            &parsed.ctx.source,
-            &regs,
-            "updateEntity",
-            reqwest::Method::PATCH,
-            &format!("/entities/{id}/attrs/"),
-            &query,
-            Some(Value::Object(without_context_map(obj))),
-        )
-        .await,
-    );
-    Ok(crate::federation::combine(
-        parts,
-        no_content(&tenant),
+    let fed_parts = crate::federation::fed_attr_parts(
+        st,
+        headers,
         &tenant,
+        &parsed.ctx.source,
+        &regs,
+        "updateEntity",
+        reqwest::Method::PATCH,
+        &format!("/entities/{id}/attrs/"),
+        &query,
+        Some(Value::Object(without_context_map(obj))),
+    )
+    .await;
+    Ok(combine_attr_parts(
+        &tenant,
+        &all_attr_iris,
+        &local_iris,
+        local_outcome,
+        updated,
+        not_updated.into_iter().map(|(a, r)| (a, r, None)).collect(),
+        &regs,
+        &fed_parts,
     ))
 }
 
@@ -514,10 +635,12 @@ async fn partial_update_inner(
         .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     let attr_iri = parsed.ctx.expand_key(attr);
-    let (regs, local_covered) =
+    let (mut regs, local_covered) =
         attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &parsed.ctx, params);
-    if !regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
-        return Ok(crate::federation::loop_508(&tenant));
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
     }
     let want_ds = frag_inst
         .get("datasetId")
@@ -586,29 +709,36 @@ async fn partial_update_inner(
     if regs.is_empty() {
         return local_resp.expect("local path always runs without registrations");
     }
-    let mut parts = Vec::new();
-    if let Some(r) = local_resp {
-        parts.push(part_of(r));
-    }
-    parts.extend(
-        crate::federation::fed_attr_parts(
-            st,
-            headers,
-            &tenant,
-            &parsed.ctx.source,
-            &regs,
-            "updateAttrs",
-            reqwest::Method::PATCH,
-            &format!("/entities/{id}/attrs/{attr}"),
-            &[],
-            Some(Value::Object(without_context_map(obj))),
-        )
-        .await,
-    );
-    Ok(crate::federation::combine(
-        parts,
-        no_content(&tenant),
+    let local_outcome = classify_local(&local_resp);
+    let all_attr_iris = vec![attr_iri.clone()];
+    let local_iris = if local_covered { Vec::new() } else { vec![attr_iri.clone()] };
+    let updated = if matches!(local_outcome, LocalOutcome::Ok) {
+        vec![attr_iri.clone()]
+    } else {
+        Vec::new()
+    };
+    let fed_parts = crate::federation::fed_attr_parts(
+        st,
+        headers,
         &tenant,
+        &parsed.ctx.source,
+        &regs,
+        "updateAttrs",
+        reqwest::Method::PATCH,
+        &format!("/entities/{id}/attrs/{attr}"),
+        &[],
+        Some(Value::Object(without_context_map(obj))),
+    )
+    .await;
+    Ok(combine_attr_parts(
+        &tenant,
+        &all_attr_iris,
+        &local_iris,
+        local_outcome,
+        updated,
+        Vec::new(),
+        &regs,
+        &fed_parts,
     ))
 }
 
@@ -663,7 +793,7 @@ pub async fn replace_attr(
             .get("datasetId")
             .and_then(Value::as_str)
             .map(String::from);
-        let (regs, local_covered) = attr_fed_plan_iris(
+        let (mut regs, local_covered) = attr_fed_plan_iris(
             &st,
             &tenant,
             &id,
@@ -671,8 +801,10 @@ pub async fn replace_attr(
             &parsed.ctx,
             &params,
         );
-        if !regs.is_empty() && crate::federation::via_loop(&headers, &st.host_alias) {
-            return Ok(crate::federation::loop_508(&tenant));
+        if let Some(r) =
+            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
+        {
+            return Ok(r);
         }
         let ts = now_iso();
         let mut found = false;
@@ -718,29 +850,40 @@ pub async fn replace_attr(
         if regs.is_empty() {
             return local_resp.expect("local path always runs without registrations");
         }
-        let mut parts = Vec::new();
-        if let Some(r) = local_resp {
-            parts.push(part_of(r));
-        }
-        parts.extend(
-            crate::federation::fed_attr_parts(
-                &st,
-                &headers,
-                &tenant,
-                &parsed.ctx.source,
-                &regs,
-                "replaceAttrs",
-                reqwest::Method::PUT,
-                &format!("/entities/{id}/attrs/{attr}"),
-                &[],
-                Some(Value::Object(without_context_map(obj))),
-            )
-            .await,
-        );
-        Ok(crate::federation::combine(
-            parts,
-            no_content(&tenant),
+        let local_outcome = classify_local(&local_resp);
+        let all_attr_iris = vec![attr_iri.clone()];
+        let local_iris = if local_covered {
+            Vec::new()
+        } else {
+            vec![attr_iri.clone()]
+        };
+        let updated = if matches!(local_outcome, LocalOutcome::Ok) {
+            vec![attr_iri.clone()]
+        } else {
+            Vec::new()
+        };
+        let fed_parts = crate::federation::fed_attr_parts(
+            &st,
+            &headers,
             &tenant,
+            &parsed.ctx.source,
+            &regs,
+            "replaceAttrs",
+            reqwest::Method::PUT,
+            &format!("/entities/{id}/attrs/{attr}"),
+            &[],
+            Some(Value::Object(without_context_map(obj))),
+        )
+        .await;
+        Ok(combine_attr_parts(
+            &tenant,
+            &all_attr_iris,
+            &local_iris,
+            local_outcome,
+            updated,
+            Vec::new(),
+            &regs,
+            &fed_parts,
         ))
     };
     go.await.unwrap_or_else(|e: ApiError| e.into_response())
@@ -779,10 +922,12 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let (regs, local_covered) =
+    let (mut regs, local_covered) =
         attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &ctx, params);
-    if !regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
-        return Ok(crate::federation::loop_508(&tenant));
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
+    {
+        return Ok(r);
     }
     let ts = now_iso();
     let mut found = false;
@@ -844,32 +989,145 @@ async fn delete_attr_inner(
     if regs.is_empty() {
         return local_resp.expect("local path always runs without registrations");
     }
-    let mut parts = Vec::new();
-    if let Some(r) = local_resp {
-        parts.push(part_of(r));
-    }
+    let local_outcome = classify_local(&local_resp);
+    let all_attr_iris = vec![attr_iri.clone()];
+    let local_iris = if local_covered {
+        Vec::new()
+    } else {
+        vec![attr_iri.clone()]
+    };
+    let updated = if matches!(local_outcome, LocalOutcome::Ok) {
+        vec![attr_iri.clone()]
+    } else {
+        Vec::new()
+    };
     let query: Vec<(String, String)> = ["datasetId", "deleteAll"]
         .iter()
         .filter_map(|k| params.get(*k).map(|v| (k.to_string(), v.clone())))
         .collect();
-    parts.extend(
-        crate::federation::fed_attr_parts(
-            st,
-            headers,
-            &tenant,
-            &ctx.source,
-            &regs,
-            "deleteAttrs",
-            reqwest::Method::DELETE,
-            &format!("/entities/{id}/attrs/{attr}"),
-            &query,
-            None,
-        )
-        .await,
-    );
-    Ok(crate::federation::combine(
-        parts,
-        no_content(&tenant),
+    let fed_parts = crate::federation::fed_attr_parts(
+        st,
+        headers,
         &tenant,
+        &ctx.source,
+        &regs,
+        "deleteAttrs",
+        reqwest::Method::DELETE,
+        &format!("/entities/{id}/attrs/{attr}"),
+        &query,
+        None,
+    )
+    .await;
+    Ok(combine_attr_parts(
+        &tenant,
+        &all_attr_iris,
+        &local_iris,
+        local_outcome,
+        updated,
+        Vec::new(),
+        &regs,
+        &fed_parts,
     ))
+}
+
+#[cfg(test)]
+mod update_result_tests {
+    use super::*;
+    use crate::federation::{FedReg, Part};
+    use http_body_util::BodyExt;
+
+    fn reg(reg_id: &str, attrs: Option<Vec<String>>) -> FedReg {
+        FedReg {
+            reg_id: reg_id.into(),
+            endpoint: "http://peer:9090".into(),
+            mode: "inclusive".into(),
+            attrs,
+            ..Default::default()
+        }
+    }
+
+    async fn body_of(resp: Response) -> Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// V-15: Tables 6.6.3.1-2 / 6.7.3.1-2 — the /attrs 207 body is an
+    /// UpdateResult (updated: String[], notUpdated: NotUpdatedDetails[] with
+    /// mandatory attributeName+reason, optional registrationId), never the
+    /// batch {success, errors} shape.
+    #[tokio::test]
+    async fn distributed_attr_207_is_an_update_result() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed".to_owned();
+        let brand = "https://uri.etsi.org/ngsi-ld/default-context/brandName".to_owned();
+        let all = vec![speed.clone(), brand.clone()];
+        let regs = vec![reg(
+            "urn:ngsi-ld:ContextSourceRegistration:csr1",
+            Some(vec![brand.clone()]),
+        )];
+        let parts = vec![Part {
+            status: 504,
+            detail: "distributed operation timed out".into(),
+        }];
+        let resp = combine_attr_parts(
+            &tenant,
+            &all,
+            std::slice::from_ref(&speed),
+            LocalOutcome::Ok,
+            vec![speed.clone()],
+            Vec::new(),
+            &regs,
+            &parts,
+        );
+        assert_eq!(resp.status().as_u16(), 207);
+        let body = body_of(resp).await;
+        assert_eq!(body["updated"], serde_json::json!([speed]));
+        assert_eq!(body["notUpdated"][0]["attributeName"], brand);
+        assert_eq!(
+            body["notUpdated"][0]["registrationId"],
+            "urn:ngsi-ld:ContextSourceRegistration:csr1"
+        );
+        assert!(body["notUpdated"][0]["reason"].is_string());
+        assert!(body.get("success").is_none(), "not the batch shape");
+        assert!(body.get("errors").is_none(), "not the batch shape");
+    }
+
+    /// All halves succeeded → 204; everything missing → 404.
+    #[tokio::test]
+    async fn distributed_attr_success_and_not_found_edges() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed".to_owned();
+        let regs = vec![reg("urn:ngsi-ld:ContextSourceRegistration:csr1", None)];
+        let ok_parts = vec![Part {
+            status: 204,
+            detail: "ok".into(),
+        }];
+        let resp = combine_attr_parts(
+            &tenant,
+            std::slice::from_ref(&speed),
+            std::slice::from_ref(&speed),
+            LocalOutcome::Ok,
+            vec![speed.clone()],
+            Vec::new(),
+            &regs,
+            &ok_parts,
+        );
+        assert_eq!(resp.status().as_u16(), 204);
+        // entity unknown locally AND every forward failed → 404 ProblemDetails
+        let bad_parts = vec![Part {
+            status: 404,
+            detail: "not found".into(),
+        }];
+        let resp = combine_attr_parts(
+            &tenant,
+            std::slice::from_ref(&speed),
+            std::slice::from_ref(&speed),
+            LocalOutcome::NotFound("entity urn:x not found".into()),
+            Vec::new(),
+            Vec::new(),
+            &regs,
+            &bad_parts,
+        );
+        assert_eq!(resp.status().as_u16(), 404);
+    }
 }

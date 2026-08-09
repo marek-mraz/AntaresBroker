@@ -207,11 +207,49 @@ pub fn normalize_registration(
                     .as_array()
                     .ok_or_else(|| bad("contextSourceInfo must be an array (5.2.9)".into()))?;
                 for kv in arr {
-                    if kv.get("key").and_then(Value::as_str).is_none() || kv.get("value").is_none()
-                    {
+                    let Some(key) = kv.get("key").and_then(Value::as_str) else {
                         return Err(bad(
                             "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
                         ));
+                    };
+                    let Some(value) = kv.get("value") else {
+                        return Err(bad(
+                            "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
+                        ));
+                    };
+                    // 4.3.6.6 (V-29): the four processed keys have constrained
+                    // value spaces — reject bad ones at registration, not at
+                    // first forward
+                    let sval = value.as_str();
+                    match key.to_ascii_lowercase().as_str() {
+                        "accept" | "contenttype" => {
+                            if !matches!(sval, Some("application/json" | "application/ld+json")) {
+                                return Err(bad(format!(
+                                    "contextSourceInfo {key} must be application/json or \
+                                     application/ld+json (4.3.6.6)"
+                                )));
+                            }
+                        }
+                        "jsonldcontext" => {
+                            if sval.is_none_or(|s| {
+                                antares_model::EntityId::new(s).is_err()
+                            }) {
+                                return Err(bad(
+                                    "contextSourceInfo jsonldContext must be a URL (4.3.6.6)"
+                                        .into(),
+                                ));
+                            }
+                        }
+                        "ngsildconformance"
+                            if sval.is_none_or(|s| crate::conformance::parse_version(s).is_none())
+                            => {
+                                return Err(bad(
+                                    "contextSourceInfo ngsildConformance must be major.minor \
+                                     (4.3.6.6)"
+                                        .into(),
+                                ));
+                            }
+                        _ => {}
                     }
                 }
                 out.insert("contextSourceInfo".into(), v.clone());
@@ -869,4 +907,40 @@ pub async fn delete_registration(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+#[cfg(test)]
+mod csi_tests {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    /// 4.3.6.6 (audit V-29): the four processed contextSourceInfo keys have
+    /// constrained value spaces, checked at registration time.
+    #[test]
+    fn context_source_info_reserved_keys_are_validated() {
+        let ctx = Loader::new().core();
+        let mk = |key: &str, value: &str| {
+            json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:csi1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": "Building"}]}],
+                "contextSourceInfo": [{"key": key, "value": value}]
+            })
+        };
+        let ok = |key: &str, value: &str| {
+            normalize_registration(mk(key, value).as_object().unwrap(), &ctx, false).is_ok()
+        };
+        assert!(ok("accept", "application/json"));
+        assert!(ok("contentType", "application/ld+json"));
+        assert!(!ok("accept", "text/html"), "MIME outside 4.3.6.6's list");
+        assert!(!ok("contentType", "application/geo+json"));
+        assert!(ok("jsonldContext", "https://example.org/ctx.jsonld"));
+        assert!(!ok("jsonldContext", "not a url"));
+        assert!(ok("ngsildConformance", "1.6"));
+        assert!(!ok("ngsildConformance", "latest"));
+        // ordinary custom keys stay free-form
+        assert!(ok("Authorization", "Bearer abc"));
+    }
 }

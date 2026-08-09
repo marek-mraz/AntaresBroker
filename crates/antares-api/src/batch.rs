@@ -247,9 +247,11 @@ async fn batch_write(
     if !spec_attrs.is_empty() {
         spec.attrs = Some(spec_attrs);
     }
-    let fed_regs = crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params);
-    if !fed_regs.is_empty() && crate::federation::via_loop(headers, &st.host_alias) {
-        return Ok(crate::federation::loop_508(&tenant));
+    let mut fed_regs = crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params);
+    if let Some(r) =
+        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut fed_regs)
+    {
+        return Ok(r);
     }
     let mut out = BatchOutcome {
         success: vec![],
@@ -590,7 +592,13 @@ pub async fn batch_delete(
             ),
             ..Default::default()
         };
-        let regs = crate::federation::write_regs(&st, &tenant, &spec, &st.loader.core(), &params);
+        let mut regs =
+            crate::federation::write_regs(&st, &tenant, &spec, &st.loader.core(), &params);
+        if let Some(r) =
+            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
+        {
+            return Ok(r);
+        }
         let proxied = regs.iter().any(|r| r.is_proxy());
         let mut out = BatchOutcome {
             success: vec![],
@@ -628,9 +636,6 @@ pub async fn batch_delete(
             }
         }
         if !regs.is_empty() {
-            if crate::federation::via_loop(&headers, &st.host_alias) {
-                return Ok(crate::federation::loop_508(&tenant));
-            }
             let ctx_url = crate::federation::ctx_link_url(&headers, &st.loader.core().source);
             let mut parts = vec![crate::federation::Part {
                 status: if out.errors.is_empty() { 204 } else { 207 },
@@ -758,7 +763,16 @@ async fn batch_query_inner(
     let fed = if crate::federation::active(&vp)
         && !crate::federation::via_loop(headers, &st.host_alias)
     {
-        crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp).await
+        // 6.3.17 scopes NGSILD-Warning to GET /entities(/{id}) — collected
+        // here for the log only, never emitted on entityOperations/query
+        let mut warnings = Vec::new();
+        let fed =
+            crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp, &mut warnings)
+                .await;
+        for w in &warnings {
+            tracing::debug!("distributed query warning (batch query): {w}");
+        }
+        fed
     } else {
         Vec::new()
     };
