@@ -99,7 +99,10 @@ for st in STORES:
         cpu_peak = f"{max(cpu):.0f}%" if cpu else "—"
         out_md.append(f"| {name} | {p} | {f} | {s} "
                       f"| {rss_avg} | {rss_peak} | {cpu_peak} | {max(len(rss), len(cpu))} |")
-    if not suite_rows:
+    if suite_rows:
+        tp, tf, ts = (sum(int(row[i]) for row in suite_rows) for i in (1, 2, 3))
+        out_md.append(f"| **Total** | **{tp}/{tp + tf + ts}** | {tf} | {ts} | | | | |")
+    else:
         out_md.append("| _no results produced_ | — | — | — | — | — | — | — |")
     out_md.append("")
 

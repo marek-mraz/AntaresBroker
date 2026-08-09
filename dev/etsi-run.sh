@@ -17,9 +17,11 @@ SUITE="${SUITE:-./ngsi-ld-test-suite}"
 STOP_ON_ERROR="${STOP_ON_ERROR:-1}"
 CALLBACK_HOST="${CALLBACK_HOST:-localhost}"
 RESULTS_DIR="${RESULTS_DIR:-results}"
-SUITES="${SUITES:-CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations}"
+. dev/etsi-suites.sh
+SUITES="${SUITES:-$SERIAL_ALL}"
 
 [ -d "$SUITE" ] || { echo "test suite not found at $SUITE"; exit 1; }
+check_suites_complete "$SUITE" || exit 1
 
 # venv with the suite's requirements (robotframework + vendored HttpCtrl).
 # pip runs FROM the suite dir: requirements.txt uses relative editable paths.
@@ -60,7 +62,6 @@ for s in $SUITES; do
   # the CI artifact must still say why (see the IOP step's twin note).
   (cd "$SUITE" && "$VENV/bin/robot" \
       --outputdir "$OLDPWD/$RESULTS_DIR/$name" \
-      --exclude iop \
       "${EXTRA[@]}" \
       "TP/NGSI-LD/$s") 2>&1 | tee "$RESULTS_DIR/$name-console.log" \
     || { status=$?; [ "$STOP_ON_ERROR" = 1 ] && break; }

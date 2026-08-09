@@ -164,7 +164,8 @@ fi
 export MQTT="${MQTT:-1}"
 
 # E9a: which suites this invocation runs (default: all serial + IOP).
-SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
+. dev/etsi-suites.sh
+check_suites_complete ngsi-ld-test-suite || exit 2
 RUN_IOP=1
 SERIAL_SUITES="$SERIAL_ALL"
 if [ -n "${SUITES:-}" ]; then
