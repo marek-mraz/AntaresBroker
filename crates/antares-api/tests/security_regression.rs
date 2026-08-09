@@ -36,6 +36,9 @@ async fn oversized_body_is_rejected_before_any_parse() {
         .method("POST")
         .uri("/ngsi-ld/v1/entities")
         .header("Content-Type", "application/json")
+        // 6.3.4: absent Content-Length is its own bare 411 — this test is
+        // about the SIZE wall, so declare the (oversized) length honestly
+        .header("Content-Length", garbage.len())
         .body(Body::from(garbage))
         .expect("request");
     assert_eq!(send(&st, req).await, StatusCode::PAYLOAD_TOO_LARGE);
@@ -96,6 +99,7 @@ async fn deleted_subscription_stops_notifying() {
                 .method("POST")
                 .uri(path)
                 .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
                 .body(Body::from(body))
                 .expect("request");
             send(&st, req).await

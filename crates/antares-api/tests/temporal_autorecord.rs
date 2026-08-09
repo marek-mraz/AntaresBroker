@@ -29,6 +29,12 @@ async fn partial_update_appends_temporal_instances() {
             .method("POST")
             .uri("/ngsi-ld/v1/entities")
             .header("Content-Type", "application/json")
+            .header(
+                "Content-Length",
+                r#"{"id":"urn:ngsi-ld:Rec:1","type":"Rec",
+                    "v":{"type":"Property","value":1,"observedAt":"2026-08-08T14:00:00Z"}}"#
+                    .len(),
+            )
             .body(Body::from(
                 r#"{"id":"urn:ngsi-ld:Rec:1","type":"Rec",
                     "v":{"type":"Property","value":1,"observedAt":"2026-08-08T14:00:00Z"}}"#,
@@ -45,6 +51,10 @@ async fn partial_update_appends_temporal_instances() {
                 .method("PATCH")
                 .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:Rec:1/attrs/v")
                 .header("Content-Type", "application/json")
+                .header(
+                    "Content-Length",
+                    format!(r#"{{"type":"Property","value":{i},"observedAt":"{ts}"}}"#).len(),
+                )
                 .body(Body::from(format!(
                     r#"{{"type":"Property","value":{i},"observedAt":"{ts}"}}"#
                 )))

@@ -10,7 +10,10 @@ use antares_wasm::Broker;
 fn req(method: &str, path: &str, body: &str) -> http::Request<Vec<u8>> {
     let mut b = http::Request::builder().method(method).uri(path);
     if !body.is_empty() {
-        b = b.header("Content-Type", "application/ld+json");
+        b = b
+            .header("Content-Type", "application/ld+json")
+            // 6.3.4: body-bearing methods without Content-Length are a bare 411
+            .header("Content-Length", body.len());
     }
     b.body(body.as_bytes().to_vec()).unwrap()
 }

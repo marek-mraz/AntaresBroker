@@ -30,6 +30,7 @@ async fn create(st: &AppState, doc: &str) {
         .method("POST")
         .uri("/ngsi-ld/v1/entities")
         .header("Content-Type", "application/json")
+        .header("Content-Length", doc.len())
         .body(Body::from(doc.to_owned()))
         .expect("request");
     let (status, _, body) = send(st, req).await;

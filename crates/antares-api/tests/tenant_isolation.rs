@@ -20,8 +20,11 @@ async fn send(
     if let Some(t) = tenant {
         req = req.header("NGSILD-Tenant", t);
     }
-    if body.is_some() {
-        req = req.header("Content-Type", "application/json");
+    if let Some(b) = body {
+        req = req
+            .header("Content-Type", "application/json")
+            // 6.3.4: body-bearing methods without Content-Length are a bare 411
+            .header("Content-Length", b.len());
     }
     let req = req
         .body(body.map_or(Body::empty(), |b| Body::from(b.to_owned())))
