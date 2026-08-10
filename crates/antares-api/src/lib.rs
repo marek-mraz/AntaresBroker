@@ -492,6 +492,72 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "UP");
     }
 
+    /// 4.6.1 Supported text encodings: UTF-8 JSON accepted and exposed;
+    /// a non-UTF-8 body is not valid JSON → InvalidRequest 400.
+    #[tokio::test]
+    async fn utf8_encoding_accepted_and_non_utf8_rejected() {
+        let app = app();
+        // multibyte UTF-8 round-trips byte-exact
+        let entity = serde_json::json!({
+            "id": "urn:ngsi-ld:Building:utf8",
+            "type": "Building",
+            "label": {"type": "Property", "value": "žltý kôň — 100 €"}
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", entity.to_string().len())
+                    .body(Body::from(entity.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:utf8")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = resp.into_body().collect().await.expect("body").to_bytes();
+        let text = std::str::from_utf8(&raw).expect("response is valid UTF-8");
+        assert!(!text.contains('\u{FFFD}'), "no mojibake in output");
+        let doc: serde_json::Value = serde_json::from_str(text).expect("json");
+        assert_eq!(doc["label"]["value"], "žltý kôň — 100 €");
+
+        // invalid UTF-8 byte in the body → InvalidRequest, not BadRequestData
+        let mut bad = b"{\"id\": \"urn:ngsi-ld:Building:b\", \"type\": \"".to_vec();
+        bad.extend_from_slice(&[0xFF, 0xFE]);
+        bad.extend_from_slice(b"\"}");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", bad.len())
+                    .body(Body::from(bad.clone()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let err = body_json(resp).await;
+        assert_eq!(
+            err["type"],
+            "https://uri.etsi.org/ngsi-ld/errors/InvalidRequest"
+        );
+        assert_ne!(
+            err["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "syntactic (encoding) failure is InvalidRequest, not BadRequestData"
+        );
+    }
+
     #[tokio::test]
     async fn prefer_ngsild_version_downgrades_and_203s() {
         // 6.3.6/6.3.21 + 4.3.6.8: Prefer: ngsi-ld=1.4 on a retrieve of an

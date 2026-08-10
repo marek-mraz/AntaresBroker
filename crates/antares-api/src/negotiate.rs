@@ -241,6 +241,9 @@ pub async fn parse_body(
     if bytes.is_empty() {
         return Err(NgsiError::InvalidRequest("empty request body".into()).into());
     }
+    // 4.6.1 Supported text encodings: JSON content is UTF-8; serde_json
+    // rejects any non-UTF-8 byte sequence here, so a non-UTF-8 body fails
+    // as InvalidRequest 400 (and all broker output is serde-emitted UTF-8).
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|e| NgsiError::InvalidRequest(format!("request body is not valid JSON: {e}")))?;
     // Every parse_body consumer takes a single JSON object (entities, fragments,
