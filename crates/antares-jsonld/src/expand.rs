@@ -251,6 +251,14 @@ pub fn is_ngsi_null_langmap(v: &Value) -> bool {
             .is_some_and(|m| m.len() == 1 && m.get("@none").is_some_and(is_ngsi_null))
 }
 
+/// 4.5.21.2/4.5.22.2: a List deletion is "an array consisting of a single
+/// NGSI-LD Null" as the valueList/objectList (bare null tolerated too).
+pub fn is_ngsi_null_list(v: &Value) -> bool {
+    is_ngsi_null(v)
+        || v.as_array()
+            .is_some_and(|a| a.len() == 1 && is_ngsi_null(&a[0]))
+}
+
 /// Whole-instance deletion marker (merge patch, 5.5.12).
 pub fn is_deletion_instance(inst: &Value) -> bool {
     is_ngsi_null(inst)
@@ -260,8 +268,8 @@ pub fn is_deletion_instance(inst: &Value) -> bool {
                 || o.get("languageMap").is_some_and(is_ngsi_null_langmap)
                 || o.get("json").is_some_and(is_ngsi_null)
                 || o.get("vocab").is_some_and(is_ngsi_null)
-                || o.get("valueList").is_some_and(is_ngsi_null)
-                || o.get("objectList").is_some_and(is_ngsi_null)
+                || o.get("valueList").is_some_and(is_ngsi_null_list)
+                || o.get("objectList").is_some_and(is_ngsi_null_list)
         })
 }
 
@@ -558,15 +566,49 @@ fn expand_instance(
             out.insert("valueList".into(), l.clone());
         }
         "ListRelationship" => {
+            // 4.5.22.2/4.5.22.3: objectList is an ordered array of
+            // Relationship objects — {"object": <URI>} objects (normalized)
+            // or bare URI strings (concise). Internal form is bare URIs; the
+            // normalized output shape is restored at compaction. The [null]
+            // deletion form (single NGSI-LD Null) passes through under
+            // allow_null.
             let l = obj
                 .get("objectList")
                 .ok_or_else(|| bad(format!("attribute {name}: needs objectList")))?;
-            if !l.is_array() && !(opts.allow_null && is_ngsi_null(l)) {
-                return Err(bad(format!(
-                    "attribute {name}: objectList must be an array"
-                )));
-            }
-            out.insert("objectList".into(), l.clone());
+            let normalized = match l {
+                _ if opts.allow_null && is_ngsi_null_list(l) => l.clone(),
+                Value::Array(items) => {
+                    let mut uris = Vec::with_capacity(items.len());
+                    for it in items {
+                        let uri = match it {
+                            Value::String(s) => s.as_str(),
+                            Value::Object(o)
+                                if o.len() == 1
+                                    && o.get("object").is_some_and(Value::is_string) =>
+                            {
+                                o["object"].as_str().unwrap_or_default()
+                            }
+                            _ => {
+                                return Err(bad(format!(
+                                    "attribute {name}: objectList entries must be URIs \
+                                     or {{\"object\": <URI>}} objects"
+                                )))
+                            }
+                        };
+                        antares_model::EntityId::new(uri).map_err(|_| {
+                            bad(format!("attribute {name}: objectList entry is not a URI"))
+                        })?;
+                        uris.push(Value::String(uri.to_owned()));
+                    }
+                    Value::Array(uris)
+                }
+                _ => {
+                    return Err(bad(format!(
+                        "attribute {name}: objectList must be an array"
+                    )))
+                }
+            };
+            out.insert("objectList".into(), normalized);
         }
         _ => unreachable!(),
     }
@@ -1227,6 +1269,73 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.5.21/4.5.22: ListProperty and ListRelationship — objectList accepts
+    /// bare URIs or {"object": URI} objects (normalized to bare URIs
+    /// internally), non-URIs rejected, [null] deletion form, value/object
+    /// prohibited, concise inference.
+    #[test]
+    fn list_property_and_relationship_rules() {
+        let mk = |name: &str, attr: Value| json!({"id": "urn:x", "type": "T", name: attr});
+        // ListProperty: ordered array of Property Values, value prohibited
+        let doc = mk(
+            "steps",
+            json!({"type": "ListProperty", "valueList": [1, "two", true]}),
+        );
+        expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).expect("valid");
+        let doc = mk(
+            "steps",
+            json!({"type": "ListProperty", "valueList": [1], "value": 2}),
+        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // concise inference
+        let doc = mk("steps", json!({"valueList": [1]}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("concise");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/steps"][0]["type"],
+            "ListProperty"
+        );
+        // ListRelationship: both entry forms normalize to bare URIs
+        let doc = mk(
+            "route",
+            json!({"type": "ListRelationship",
+            "objectList": ["urn:ngsi-ld:R:1", {"object": "urn:ngsi-ld:R:2"}]}),
+        );
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("both forms");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/route"][0]["objectList"],
+            json!(["urn:ngsi-ld:R:1", "urn:ngsi-ld:R:2"])
+        );
+        // non-URI entry rejected
+        let doc = mk(
+            "route",
+            json!({"type": "ListRelationship", "objectList": ["not a uri"]}),
+        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // object prohibited on ListRelationship
+        let doc = mk(
+            "route",
+            json!({"type": "ListRelationship",
+            "objectList": ["urn:ngsi-ld:R:1"], "object": "urn:ngsi-ld:R:2"}),
+        );
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // [null] deletion form accepted under allow_null
+        let doc = mk(
+            "route",
+            json!({"type": "ListRelationship",
+            "objectList": ["urn:ngsi-ld:null"]}),
+        );
+        let opts = ExpandOpts {
+            allow_null: true,
+            fragment: true,
+            ..Default::default()
+        };
+        expand_entity(doc.as_object().unwrap(), &core(), opts).expect("deletion form");
+        assert!(is_ngsi_null_list(&json!(["urn:ngsi-ld:null"])));
+        assert!(!is_ngsi_null_list(&json!(["urn:ngsi-ld:null", "urn:x"])));
     }
 
     /// 4.5.20.2/4.5.20.3: VocabProperty — vocab is a string or array of

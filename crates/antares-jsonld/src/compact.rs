@@ -105,6 +105,22 @@ pub fn compact_instance(inst: &Value, ctx: &Context) -> Value {
             out.insert(k.clone(), compacted);
         } else if k == "objectType" {
             out.insert("objectType".into(), compact_types(v, ctx));
+        } else if k == "objectList" || k == "previousObjectList" {
+            // 4.5.22.2: the normalized objectList is an ordered array of
+            // JSON objects each "containing a single Attribute with a key
+            // called "object"" — the internal form stores bare URIs.
+            let wrapped = match v {
+                Value::Array(a) => Value::Array(
+                    a.iter()
+                        .map(|it| match it {
+                            Value::String(uri) => serde_json::json!({ "object": uri }),
+                            other => other.clone(),
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            };
+            out.insert(k.clone(), wrapped);
         } else if VERBATIM.contains(&k.as_str()) {
             out.insert(k.clone(), v.clone());
         } else {
@@ -224,6 +240,31 @@ mod tests {
         assert_eq!(
             out["mixed"],
             json!({"dataset": {"@none": {"vocab": "rental"}, "urn:ngsi-ld:Dataset:1": 7}})
+        );
+    }
+
+    /// 4.5.22.2: normalized objectList round-trips — {"object": URI} entries
+    /// in, bare URIs internally, {"object": URI} entries out.
+    #[test]
+    fn object_list_normalized_round_trip() {
+        let input = json!({
+            "id": "urn:ngsi-ld:B:1",
+            "type": "T",
+            "route": {"type": "ListRelationship",
+                      "objectList": [{"object": "urn:ngsi-ld:R:1"}, "urn:ngsi-ld:R:2"]}
+        });
+        let ctx = Loader::new().core();
+        let expanded =
+            expand_entity(input.as_object().unwrap(), &ctx, ExpandOpts::default()).unwrap();
+        let route = &expanded["https://uri.etsi.org/ngsi-ld/default-context/route"][0];
+        assert_eq!(
+            route["objectList"],
+            json!(["urn:ngsi-ld:R:1", "urn:ngsi-ld:R:2"])
+        );
+        let compacted = compact_entity(&expanded, &ctx);
+        assert_eq!(
+            compacted["route"]["objectList"],
+            json!([{"object": "urn:ngsi-ld:R:1"}, {"object": "urn:ngsi-ld:R:2"}])
         );
     }
 }
