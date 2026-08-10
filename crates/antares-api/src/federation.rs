@@ -99,6 +99,12 @@ pub struct FedReg {
 }
 
 impl FedReg {
+    /// 4.3.6.1: registered Context Sources "may indicate that they are only
+    /// willing to respond to a limited subset of API operations. Context
+    /// Brokers shall respect this, to avoid unnecessarily sending distributed
+    /// operation requests which are always guaranteed to fail." Matches the
+    /// registration's `operations` list (5.2.9) by name or operation group;
+    /// default when absent is federationOps.
     pub fn supports(&self, op: &str) -> bool {
         self.ops.iter().any(|o| {
             o == op
@@ -1063,6 +1069,9 @@ pub fn combine(parts: Vec<Part>, ok: Response, tenant: &TenantId) -> Response {
     resp
 }
 
+/// 4.3.6.1: "It is the responsibility of the Context Broker to respect the
+/// registration parameters when issuing distributed requests. […] Ultimately,
+/// all constraints specified in the registration shall be respected."
 /// Reduce a compacted entity/fragment to the members a registration covers
 /// (plus id/type); returns None if no attribute member remains.
 pub fn reduce_to_scope(obj: &Map<String, Value>, reg: &FedReg, ctx: &Context) -> Option<Value> {
@@ -1418,6 +1427,67 @@ mod tests {
         let mut regs = vec![reg("exclusive")];
         assert!(handle_via_loop(&hdrs(None), "me", &t, &mut regs).is_none());
         assert_eq!(regs.len(), 1);
+    }
+
+    /// 4.3.6.1: "Context Brokers shall respect" a Context Source's declared
+    /// operations subset — explicit operation names and operation groups
+    /// (5.2.9) both gate; anything outside the list must not be forwarded.
+    #[test]
+    fn operations_subset_gates_forwarding() {
+        let mut r = reg("inclusive"); // ops = ["federationOps"], the 5.2.9 default
+        assert!(r.supports("queryEntity"));
+        assert!(r.supports("createSubscription"));
+        assert!(
+            !r.supports("createEntity"),
+            "federationOps carries no provision operations"
+        );
+        r.ops = vec!["updateOps".into()];
+        assert!(r.supports("updateAttrs"));
+        assert!(!r.supports("queryEntity"));
+        r.ops = vec!["createEntity".into()];
+        assert!(r.supports("createEntity"), "explicit op name matches");
+        assert!(!r.supports("deleteEntity"));
+        r.ops = vec![];
+        assert!(!r.supports("queryEntity"), "empty subset forwards nothing");
+    }
+
+    /// 4.3.6.1: "all constraints specified in the registration shall be
+    /// respected" — a forwarded fragment is reduced to the attributes the
+    /// RegistrationInfo covers; when nothing covered remains there is no
+    /// forward at all (None).
+    #[test]
+    fn forwarded_fragment_reduced_to_registration_scope() {
+        let st = AppState::new("me".into());
+        let ctx = st.loader.core();
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let mut r = reg("inclusive");
+        r.attrs = Some(vec![speed.into()]);
+        let obj = json!({
+            "id": "urn:x", "type": "Vehicle",
+            "speed": {"type": "Property", "value": 3},
+            "color": {"type": "Property", "value": "red"},
+            "@context": "https://example.org/ctx.jsonld"
+        });
+        let out = reduce_to_scope(obj.as_object().expect("obj"), &r, &ctx).expect("covered");
+        let out = out.as_object().expect("out");
+        assert!(out.contains_key("speed"));
+        assert!(out.contains_key("id") && out.contains_key("type"));
+        assert!(
+            !out.contains_key("color"),
+            "uncovered attribute must be dropped"
+        );
+        assert!(!out.contains_key("@context"));
+        // nothing covered ⇒ no forwarded fragment
+        let only_color = json!({
+            "id": "urn:x", "type": "Vehicle",
+            "color": {"type": "Property", "value": "red"}
+        });
+        assert!(reduce_to_scope(only_color.as_object().expect("obj"), &r, &ctx).is_none());
+        // an unscoped registration (attrs: None) passes everything but @context
+        r.attrs = None;
+        let full = reduce_to_scope(obj.as_object().expect("obj"), &r, &ctx).expect("all");
+        let full = full.as_object().expect("full");
+        assert!(full.contains_key("color") && !full.contains_key("@context"));
     }
 
     /// 4.5.5.3 p.60 (audit V-19): "if an expiresAt DateTime is present on the
