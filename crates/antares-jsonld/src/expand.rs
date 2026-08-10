@@ -56,7 +56,11 @@ const RESERVED_MEMBERS: &[&str] = &[
     "json",
     "valueList",
     "objectList",
+    "entity",
     "entityList",
+    "entityIdSealed",
+    "entityTypeSealed",
+    "valueType",
     "createdAt",
     "modifiedAt",
     "deletedAt",
@@ -65,6 +69,10 @@ const RESERVED_MEMBERS: &[&str] = &[
     "previousValue",
     "previousObject",
     "previousLanguageMap",
+    "previousJson",
+    "previousVocab",
+    "previousValueList",
+    "previousObjectList",
 ];
 
 const GEO_TYPES: &[&str] = &[
@@ -374,6 +382,54 @@ fn expand_instance(
     let mut out = Map::new();
     out.insert("type".into(), Value::String(attr_type.to_owned()));
 
+    // 4.5.2.2 Prohibited (mirrored by 4.5.3.2 and the 4.5.18–4.5.24
+    // subclasses): an instance "shall never include" the value-defining
+    // member of a DIFFERENT attribute type, nor the output-only members
+    // produced by inline Linked Entity retrieval and showChanges
+    // notifications; entityIdSealed/entityTypeSealed only under ngsildproof.
+    {
+        const VALUE_OWNERS: &[(&str, &[&str])] = &[
+            ("value", &["Property", "GeoProperty"]),
+            ("object", &["Relationship"]),
+            ("languageMap", &["LanguageProperty"]),
+            ("json", &["JsonProperty"]),
+            ("vocab", &["VocabProperty"]),
+            ("valueList", &["ListProperty"]),
+            ("objectList", &["ListRelationship"]),
+        ];
+        const OUTPUT_ONLY: &[&str] = &[
+            "entity",
+            "entityList",
+            "previousValue",
+            "previousObject",
+            "previousLanguageMap",
+            "previousJson",
+            "previousVocab",
+            "previousValueList",
+            "previousObjectList",
+        ];
+        for (m, owners) in VALUE_OWNERS {
+            if obj.contains_key(*m) && !owners.contains(&attr_type) {
+                return Err(bad(format!(
+                    "attribute {name}: {m} is not allowed on a {attr_type} (4.5.2.2)"
+                )));
+            }
+        }
+        if let Some(m) = OUTPUT_ONLY.iter().find(|m| obj.contains_key(**m)) {
+            return Err(bad(format!(
+                "attribute {name}: {m} is output-only and not allowed in input (4.5.2.2)"
+            )));
+        }
+        if name != "ngsildproof"
+            && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed"))
+        {
+            return Err(bad(format!(
+                "attribute {name}: entityIdSealed/entityTypeSealed are only allowed \
+                 under ngsildproof (4.5.2.2)"
+            )));
+        }
+    }
+
     // required member per type
     match attr_type {
         "Property" => {
@@ -522,6 +578,15 @@ fn expand_instance(
             return Err(bad(format!("attribute {name}: unitCode must be a string")));
         }
         out.insert("unitCode".into(), u.clone());
+    }
+    if let Some(vt) = obj.get("valueType") {
+        // 4.5.2.2: "valueType": a string value which shall be type coerced
+        // into a datatype URI — the non-reified alternative to a native
+        // JSON-LD @type on the Property value.
+        let s = vt
+            .as_str()
+            .ok_or_else(|| bad(format!("attribute {name}: valueType must be a string")))?;
+        out.insert("valueType".into(), Value::String(ctx.expand_key(s)));
     }
     if let Some(l) = obj.get("lang") {
         out.insert("lang".into(), l.clone());
@@ -707,6 +772,49 @@ mod tests {
     use super::*;
     use crate::loader::Loader;
     use serde_json::json;
+
+    /// 4.5.2.2: a normalized Property "shall never include" the value-defining
+    /// members of other attribute types, output-only members, or the sealed
+    /// members outside ngsildproof — and valueType coerces to a datatype URI.
+    #[test]
+    fn property_prohibited_members_rejected() {
+        let mk = |extra: (&str, Value)| {
+            json!({
+                "id": "urn:x", "type": "T",
+                "speed": {"type": "Property", "value": 1, extra.0: extra.1}
+            })
+        };
+        for (m, v) in [
+            ("object", json!("urn:ngsi-ld:other:1")),
+            ("languageMap", json!({"en": "hi"})),
+            ("json", json!({"k": 1})),
+            ("vocab", json!("term")),
+            ("valueList", json!([1, 2])),
+            ("objectList", json!(["urn:a"])),
+            ("entity", json!({"id": "urn:a", "type": "T"})),
+            ("entityList", json!([])),
+            ("previousValue", json!(0)),
+            ("previousObject", json!("urn:a")),
+            ("entityIdSealed", json!(true)),
+        ] {
+            let doc = mk((m, v));
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "{m} must be prohibited on a Property"
+            );
+        }
+        // valueType is a legal optional member and coerces to a datatype URI
+        let doc = json!({
+            "id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1.5, "valueType": "xsd:double"}
+        });
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("valueType is optional");
+        let attr = &out["https://uri.etsi.org/ngsi-ld/default-context/speed"][0];
+        assert!(attr["valueType"]
+            .as_str()
+            .is_some_and(|s| s.contains("double")));
+    }
 
     /// 4.5.1: "Terms defined in the Core Context as non-reified Properties
     /// (such as datasetId, instanceId, etc.) shall not be used as Attribute
