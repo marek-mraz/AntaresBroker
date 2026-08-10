@@ -185,6 +185,10 @@ pub async fn entity_type_info(
 
 // ---------- GET /attributes (5.7.8/5.7.9) ----------
 
+/// 4.5.13 Attribute List Representation: id (URI), fixed type
+/// "AttributeList", attributeList of attribute names — 4.5.14 detailed
+/// Attribute objects (id = attribute URI, fixed type "Attribute",
+/// attributeName, typeNames) when details=true.
 pub async fn attributes(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -225,6 +229,9 @@ pub async fn attributes(
 
 // ---------- GET /attributes/{attrId} (5.7.10) ----------
 
+/// 4.5.15 Attribute Information Representation: id = the attribute URI,
+/// fixed type "Attribute", attributeName (short name under @context), plus
+/// the optional attributeCount/attributeTypes/typeNames detail members.
 pub async fn attribute_info(
     State(st): State<AppState>,
     Path(attr): Path<String>,

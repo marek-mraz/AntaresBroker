@@ -182,3 +182,126 @@ async fn entity_type_info_shape() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+/// 4.5.13/4.5.14/4.5.15: attribute list, detailed attribute list and
+/// attribute information representations — fixed types, URI ids, short
+/// names, and no members beyond the clause lists.
+#[tokio::test(flavor = "multi_thread")]
+async fn attribute_representations_shapes() {
+    let st = AppState::new("test".into());
+    let create = r#"{"id":"urn:ngsi-ld:Disc:4","type":"Building",
+        "v":{"type":"Property","value":1}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // 4.5.13 attribute list
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/attributes")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(doc["type"], "AttributeList");
+    assert!(doc["id"].as_str().is_some_and(|s| s.starts_with("urn:")));
+    assert!(doc["attributeList"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|n| n == "v")));
+    let extra: Vec<&String> = doc
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| !["id", "type", "attributeList", "@context"].contains(&k.as_str()))
+        .collect();
+    assert!(extra.is_empty(), "4.5.13 extra members: {extra:?}");
+
+    // 4.5.14 detailed attribute list
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/attributes?details=true")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let a = doc
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|a| a["attributeName"] == "v")
+        .unwrap_or_else(|| panic!("no v attribute in {body}"));
+    assert_eq!(a["type"], "Attribute");
+    assert_eq!(a["id"], "https://uri.etsi.org/ngsi-ld/default-context/v");
+    assert!(a["typeNames"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|n| n == "Building")));
+    let extra: Vec<&String> = a
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| !["id", "type", "attributeName", "typeNames", "@context"].contains(&k.as_str()))
+        .collect();
+    assert!(extra.is_empty(), "4.5.14 extra members: {extra:?}");
+
+    // 4.5.15 attribute information
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/attributes/v")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(doc["type"], "Attribute");
+    assert_eq!(doc["attributeName"], "v");
+    assert_eq!(doc["attributeCount"], 1);
+    assert!(doc["attributeTypes"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|n| n == "Property")));
+    let extra: Vec<&String> = doc
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| {
+            ![
+                "id",
+                "type",
+                "attributeName",
+                "attributeCount",
+                "attributeTypes",
+                "typeNames",
+                "@context",
+            ]
+            .contains(&k.as_str())
+        })
+        .collect();
+    assert!(extra.is_empty(), "4.5.15 extra members: {extra:?}");
+
+    // unknown attribute → 404
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/attributes/nonexistent")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
