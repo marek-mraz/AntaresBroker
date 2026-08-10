@@ -82,7 +82,6 @@ const GEO_TYPES: &[&str] = &[
     "MultiLineString",
     "Polygon",
     "MultiPolygon",
-    "GeometryCollection",
 ];
 
 /// Entity members that must be GeoProperties (core IRIs).
@@ -825,12 +824,15 @@ fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError
     Ok(())
 }
 
+/// 4.6.3: supported Value geometries are "All the GeoJSON Geometries [8]
+/// with the exception of GeometryCollection" — GEO_TYPES holds exactly that
+/// set, and every geometry carries coordinates.
 pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
     let ok = v.as_object().is_some_and(|o| {
         o.get("type")
             .and_then(Value::as_str)
             .is_some_and(|t| GEO_TYPES.contains(&t))
-            && (o.contains_key("coordinates") || o.contains_key("geometries"))
+            && o.contains_key("coordinates")
     });
     if ok {
         Ok(())
@@ -1312,6 +1314,36 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.6.3 Supported data types for Values: "All the GeoJSON Geometries
+    /// [8] with the exception of GeometryCollection" — a GeoProperty value
+    /// of type GeometryCollection is BadRequestData; plain JSON values and
+    /// a bare JSON null follow 4.5.2 (null rejected outside merge-patch).
+    #[test]
+    fn value_data_types_rules() {
+        let geo = |val: Value| {
+            let doc = json!({"id": "urn:x", "type": "T",
+                "location": {"type": "GeoProperty", "value": val}});
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+        };
+        let out = geo(json!({"type": "Point", "coordinates": [17.1, 48.7]}))
+            .expect("Point is a supported geometry");
+        let loc = &out["https://uri.etsi.org/ngsi-ld/location"][0];
+        assert_eq!(loc["value"]["type"], "Point");
+        let err = geo(json!({"type": "GeometryCollection", "geometries": [
+            {"type": "Point", "coordinates": [1.0, 2.0]}]}))
+        .expect_err("GeometryCollection is excluded by 4.6.3");
+        assert!(matches!(err, NgsiError::BadRequestData(_)), "{err:?}");
+        // a geometry type must still carry coordinates
+        assert!(geo(json!({"type": "Point"})).is_err(), "no coordinates");
+        // bare JSON null is not a legal Value outside merge-patch (4.5.2)
+        let doc = json!({"id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": null}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "bare null value"
+        );
     }
 
     /// 4.6.2 Supported names: name = unicodeLetter *(letter|number|_) —
