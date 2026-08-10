@@ -25,6 +25,22 @@ pub const ATTR_TYPES: &[&str] = &[
     "ListRelationship",
 ];
 
+/// 4.5.1: "Terms defined in the Core Context as non-reified Properties (such
+/// as datasetId, instanceId, etc.) shall not be used as Attribute names."
+/// These are the core terms whose IRI local name equals the term (the reified
+/// value containers like value→hasValue alias away and cannot collide).
+const NON_REIFIED_TERMS: &[&str] = &[
+    "datasetId",
+    "instanceId",
+    "observedAt",
+    "unitCode",
+    "lang",
+    "objectType",
+    "previousValue",
+    "previousObject",
+    "previousLanguageMap",
+];
+
 /// Instance members that are NOT sub-attributes.
 const RESERVED_MEMBERS: &[&str] = &[
     "type",
@@ -158,6 +174,15 @@ pub fn expand_entity(
             return Err(bad("empty attribute name"));
         }
         let iri = ctx.expand_key(key);
+        // 4.5.1: core non-reified terms shall not be used as Attribute names.
+        if iri
+            .strip_prefix(crate::context::NGSI_LD_BASE)
+            .is_some_and(|t| NON_REIFIED_TERMS.contains(&t))
+        {
+            return Err(bad(&format!(
+                "{key} is a core non-reified term and cannot be used as an Attribute name (4.5.1)"
+            )));
+        }
         let instances = expand_attribute(key, v, ctx, opts, 0)?;
         if GEO_ENTITY_MEMBERS.contains(&iri.as_str()) {
             for inst in &instances {
@@ -511,7 +536,15 @@ fn expand_instance(
 
     // sub-attributes
     for (k, sub) in obj {
-        if RESERVED_MEMBERS.contains(&k.as_str()) || k == "@context" {
+        if k == "@context" {
+            // 4.5.1/5.5.7: "Attributes shall not contain any embedded
+            // @context" — a nested user context could override core terms,
+            // so it "should result in an error of type BadRequestData".
+            return Err(bad(format!(
+                "attribute {name}: embedded @context is not allowed (4.5.1/5.5.7)"
+            )));
+        }
+        if RESERVED_MEMBERS.contains(&k.as_str()) {
             continue;
         }
         if k.is_empty() {
@@ -673,6 +706,49 @@ pub fn parse_datetime(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::loader::Loader;
+    use serde_json::json;
+
+    /// 4.5.1: "Terms defined in the Core Context as non-reified Properties
+    /// (such as datasetId, instanceId, etc.) shall not be used as Attribute
+    /// names."
+    #[test]
+    fn core_non_reified_terms_rejected_as_attribute_names() {
+        for name in ["datasetId", "instanceId", "observedAt", "unitCode"] {
+            let doc = json!({
+                "id": "urn:x", "type": "T",
+                name: {"type": "Property", "value": 1}
+            });
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "{name} must be rejected as an Attribute name"
+            );
+        }
+        let ok = json!({
+            "id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1}
+        });
+        assert!(expand_entity(ok.as_object().unwrap(), &core(), ExpandOpts::default()).is_ok());
+    }
+
+    /// 4.5.1: "Attributes shall not contain any embedded @context" — 5.5.7:
+    /// such content "should result in an error of type BadRequestData".
+    #[test]
+    fn embedded_context_in_attribute_rejected() {
+        let doc = json!({
+            "id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                      "@context": {"speed": "https://evil.example/speed"}}
+        });
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // nested inside a sub-attribute as well
+        let doc = json!({
+            "id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                      "source": {"type": "Property", "value": "s",
+                                 "@context": {"x": "https://e/x"}}}
+        });
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
 
     fn core() -> std::sync::Arc<Context> {
         Loader::new().core()
