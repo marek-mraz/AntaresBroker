@@ -2005,6 +2005,15 @@ fn geo_value_of(attr: &Value) -> Value {
         other => other.clone(),
     };
     let v = inst.get("value").cloned().unwrap_or(inst);
+    // 4.5.17.1: in the simplified representation a multi-instance GeoProperty
+    // is the {"dataset": {…}} map — the default ("@none") instance is the
+    // 4.5.16.1 selection.
+    let v = match v.as_object() {
+        Some(o) if o.len() == 1 && o.contains_key("dataset") => {
+            o["dataset"].get("@none").cloned().unwrap_or(Value::Null)
+        }
+        _ => v,
+    };
     match antares_jsonld::expand::validate_geojson("geometry", &v) {
         Ok(()) => v,
         Err(_) => Value::Null,
@@ -2177,6 +2186,23 @@ mod tests {
         // absent GeoProperty -> null geometry
         let f3 = to_geojson_feature(entity.clone(), Some(&"missing".to_string()), &ctx);
         assert_eq!(f3["geometry"], Value::Null);
+
+        // 4.5.17.1: simplified multi-instance GeoProperty = dataset map;
+        // the "@none" (default) entry is the geometry
+        let simplified = json!({
+            "id": "urn:ngsi-ld:V:2", "type": "Vehicle",
+            "location": {"dataset": {
+                "urn:ngsi-ld:Dataset:gps": {"type": "Point", "coordinates": [9.0, 9.0]},
+                "@none": {"type": "Point", "coordinates": [3.0, 4.0]}
+            }},
+            "speed": 5
+        });
+        let fs = to_geojson_feature(simplified, None, &ctx);
+        assert_eq!(
+            fs["geometry"],
+            json!({"type": "Point", "coordinates": [3.0, 4.0]})
+        );
+        assert_eq!(fs["properties"]["speed"], 5);
 
         let fc = to_geojson_collection(vec![entity], None, &ctx);
         assert_eq!(fc["type"], "FeatureCollection");
