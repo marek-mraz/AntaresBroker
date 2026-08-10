@@ -63,7 +63,7 @@ Ledger tooling: `python3 dev/spec.py split|robot|status|gaps` (see `docs/spec/RE
 status` shows ZERO not-implemented. Repeat: take the first
 not-implemented clause in order, do steps 1–9 exactly as written
 (rules 8 and 9 are hard), commit as `<clause>:`, move on without
-stopping. Ask only when rule 9 leaves you genuinely unsure.
+stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. First write the tests, try that if that implementaion is even needed. Use ponytail skill.
 ```
 
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
@@ -148,18 +148,50 @@ stopping. Ask only when rule 9 leaves you genuinely unsure.
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position (2026-08-10, AntaresBroker):** 4.1–4.5.3.3 audited. Status:
-21 implemented · 130 informative · 3 partial (4.3.5 + 4.3.6.7 — both named
-gap = EntityMap subsystem 5.14.x; 6.3.17) · 793 not-implemented. Extension
-TPs this pass: 436_01–436_06, 436_08, 404_01, 451_01, 452_01/02, 453_01.
-Guards added in expand.rs this pass (all clause-cited): non-reified attr
-names + embedded @context (4.5.1), Property/Relationship prohibited-member
-tables incl. unitCode-on-Relationship (4.5.2.2/4.5.3.2), valueType member,
-geometry-value GeoProperty inference (4.5.2.3). localOnly forwarding
-implemented (4.3.6.4); 4.3.6.3 strict validation + 9 official _exc TPs
-fork-fixed (error.md). **Next clause: 4.5.4.** Local dist-ops Robot
-recipe: `ANTARES_EGRESS_ALLOW_PRIVATE=true` on the broker +
-`--variable context_source_host:127.0.0.1` (drawer in the palace).
+**Loop position (2026-08-10, AntaresBroker):** 4.1–4.5.23 audited. Status:
+57 implemented · 149 informative · 3 partial (4.3.5 + 4.3.6.7 — named gap =
+EntityMap 5.14.x; 6.3.17) · 738 not-implemented (last committed count; the
+in-flight 4.5.24 work below is uncommitted). Last commit: d3a5202 (4.5.23).
+
+**IN FLIGHT — 4.5.24 JsonProperty, uncommitted working-tree changes:**
+- expand.rs: unitCode guard extended to JsonProperty; JsonProperty arm now
+  validates json as object|array-of-objects|null-under-allow_null; new unit
+  test `json_property_rules` (RAN GREEN once; fallibility proof NOT done).
+- Remaining per §0.3: prove test fallible, full jsonld+api runs, rule-8
+  Robot (no official JsonProperty TPs beyond 020_15/012_x — check
+  `grep -rl JsonProperty TP/`), ledger 4.5.24{,.1,.2,.3}.md, `dev/spec.py
+  robot`, `cargo fmt -p antares-jsonld`, commit `4.5.24:`. Then next clause
+  = 4.5.25+ (`python3 dev/spec.py status` / the sorted-ls loop query).
+
+**Audited this session (each one commit, code+tests+TPs+ledger):**
+4.5.4 (simplified: wrapped languageMap/json/vocab + vocab term compaction,
+TP 454_01) · 4.5.5.1–.3 (datasetId @none normalization, TP 455_01;
+push_down_expires + entity-expiresAt intersection/max in merge_docs) ·
+4.5.6 (Core-API scope changes recorded as temporal Property instance,
+observedAt=modifiedAt, TP 456_01) · 4.5.7/4.5.8 (deletion-null instances,
+tests) · 4.5.9 (temporalValues renderer first coverage, TP 459_01) ·
+4.5.10–4.5.15 (discovery representations, tests/discovery.rs) · 4.5.16
+(GeoJSON: default-instance geometry + null-for-invalid, TP 4516_01) ·
+4.5.17 (simplified GeoJSON dataset-map @none geometry, TP 4517_01) ·
+4.5.18 (LanguageProperty: empty tags + unitCode rejected) · 4.5.19
+(aggregation: Relationship label fix, eligibility 400 test) · 4.5.20
+(VocabProperty: unitCode rejected) · 4.5.21/4.5.22 (Lists: objectList URI
+validation + both input forms + normalized {"object":URI} output wrap in
+compact.rs + is_ngsi_null_list deletion form, TP 4522_01) · 4.5.23 (linked
+retrieval: ListRelationship joins under entityList inline + flat).
+
+**Local Robot recipes (also drawers in the palace):** temporal TPs need
+`--variable temporal_api_url:http://localhost:9377/ngsi-ld/v1`
+(variables.py hardcodes scorpio1); notification TPs (046_x) need
+`--variable notification_server_host:127.0.0.1` + broker env
+`ANTARES_EGRESS_ALLOW_PRIVATE=true` (else they hang to timeout). Dist-ops:
+`context_source_host:127.0.0.1`. Test-inversion (fallibility) via targeted
+python string replace, never sed. Broker kill-loops exit 144 — harmless;
+verify with `curl :9377/q/health` → 000.
+
+**Session test protocol (user directive, keep):** every new test proven
+fallible (invert → FAILED → restore → green) AND carries at least one
+negative assertion (what must NOT be in the response).
 
 **Pending Mac-side (no ssh in the sandbox):**
 - `git -C /workspace/ngsi-ld-test-suite push origin main` — origin/master
