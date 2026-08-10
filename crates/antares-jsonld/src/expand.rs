@@ -442,6 +442,14 @@ fn expand_instance(
                  under ngsildproof (4.5.2.2)"
             )));
         }
+        // 4.5.3.2: "unitCode shall never be present, as Relationships are
+        // unitless."
+        if obj.contains_key("unitCode") && matches!(attr_type, "Relationship" | "ListRelationship")
+        {
+            return Err(bad(format!(
+                "attribute {name}: unitCode is not allowed on a {attr_type} (4.5.3.2)"
+            )));
+        }
     }
 
     // required member per type
@@ -786,6 +794,35 @@ mod tests {
     use super::*;
     use crate::loader::Loader;
     use serde_json::json;
+
+    /// 4.5.3.2: a normalized Relationship "shall never include" unitCode
+    /// ("Relationships are unitless") or the value-defining members of the
+    /// Property family — while objectType stays a legal optional member.
+    #[test]
+    fn relationship_prohibited_members_rejected() {
+        let mk = |extra: (&str, Value)| {
+            json!({
+                "id": "urn:x", "type": "T",
+                "isParked": {"type": "Relationship", "object": "urn:ngsi-ld:P:1",
+                             extra.0: extra.1}
+            })
+        };
+        for (m, v) in [
+            ("unitCode", json!("MTR")),
+            ("value", json!(1)),
+            ("languageMap", json!({"en": "x"})),
+            ("valueList", json!([1])),
+            ("previousObject", json!("urn:a")),
+        ] {
+            let doc = mk((m, v));
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "{m} must be prohibited on a Relationship"
+            );
+        }
+        let ok = mk(("objectType", json!("Parking")));
+        assert!(expand_entity(ok.as_object().unwrap(), &core(), ExpandOpts::default()).is_ok());
+    }
 
     /// 4.5.2.3: concise Property forms — a geometry-shaped value infers
     /// GeoProperty (both as the whole object and as the value member); an
