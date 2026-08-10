@@ -62,3 +62,55 @@ async fn entity_type_list_shape() {
         .collect();
     assert!(extra.is_empty(), "unexpected members: {extra:?}");
 }
+
+/// 4.5.11: details=true returns an array of EntityType objects — id is the
+/// type URI, fixed type "EntityType", typeName the short name, plus
+/// attributeNames — and nothing else beyond an optional @context.
+#[tokio::test(flavor = "multi_thread")]
+async fn detailed_entity_type_list_shape() {
+    let st = AppState::new("test".into());
+    let create = r#"{"id":"urn:ngsi-ld:Disc:2","type":"Building",
+        "v":{"type":"Property","value":1}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/types?details=true")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let arr = doc.as_array().expect("array of EntityType objects");
+    let et = arr
+        .iter()
+        .find(|e| e["typeName"] == "Building")
+        .unwrap_or_else(|| panic!("no Building EntityType in {body}"));
+    assert_eq!(et["type"], "EntityType");
+    assert_eq!(
+        et["id"], "https://uri.etsi.org/ngsi-ld/default-context/Building",
+        "id must be the type URI"
+    );
+    let names = et["attributeNames"].as_array().expect("attributeNames");
+    assert!(names.iter().any(|n| n == "v"), "{body}");
+    let extra: Vec<&String> = et
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| !["id", "type", "typeName", "attributeNames", "@context"].contains(&k.as_str()))
+        .collect();
+    assert!(extra.is_empty(), "unexpected members: {extra:?}");
+}
