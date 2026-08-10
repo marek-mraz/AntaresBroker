@@ -148,20 +148,10 @@ stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponyt
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position (2026-08-10, AntaresBroker):** 4.1–4.5.23 audited. Status:
-57 implemented · 149 informative · 3 partial (4.3.5 + 4.3.6.7 — named gap =
-EntityMap 5.14.x; 6.3.17) · 738 not-implemented (last committed count; the
-in-flight 4.5.24 work below is uncommitted). Last commit: d3a5202 (4.5.23).
-
-**IN FLIGHT — 4.5.24 JsonProperty, uncommitted working-tree changes:**
-- expand.rs: unitCode guard extended to JsonProperty; JsonProperty arm now
-  validates json as object|array-of-objects|null-under-allow_null; new unit
-  test `json_property_rules` (RAN GREEN once; fallibility proof NOT done).
-- Remaining per §0.3: prove test fallible, full jsonld+api runs, rule-8
-  Robot (no official JsonProperty TPs beyond 020_15/012_x — check
-  `grep -rl JsonProperty TP/`), ledger 4.5.24{,.1,.2,.3}.md, `dev/spec.py
-  robot`, `cargo fmt -p antares-jsonld`, commit `4.5.24:`. Then next clause
-  = 4.5.25+ (`python3 dev/spec.py status` / the sorted-ls loop query).
+**Loop position (2026-08-10, AntaresBroker):** 4.1–4.7.3 audited. 4 partial
+(4.3.5, 4.3.6.7, 4.5.25 — shared named gap = EntityMap 5.14.x+6.3.18, build
+at 5.14 in clause order; 6.3.17). Next clause: 4.8. Test protocol is now
+TEST-FIRST (§0.3 goal prompt + §6 protocol note below).
 
 **Audited this session (each one commit, code+tests+TPs+ledger):**
 4.5.4 (simplified: wrapped languageMap/json/vocab + vocab term compaction,
@@ -178,7 +168,14 @@ tests) · 4.5.9 (temporalValues renderer first coverage, TP 459_01) ·
 (VocabProperty: unitCode rejected) · 4.5.21/4.5.22 (Lists: objectList URI
 validation + both input forms + normalized {"object":URI} output wrap in
 compact.rs + is_ngsi_null_list deletion form, TP 4522_01) · 4.5.23 (linked
-retrieval: ListRelationship joins under entityList inline + flat).
+retrieval: ListRelationship joins under entityList inline + flat) ·
+4.5.24 (JsonProperty: json shape + unitCode/value prohibited, TP 4524_01) ·
+4.5.25 (EntityMap → partial, deferred to 5.14.x) · 4.6.1 (UTF-8, TP 461_01)
+· 4.6.2 (name grammar via valid_name, TP 462_01) · 4.6.3 (GeometryCollection
+excluded, TP 463_01) · 4.6.4 (content verbatim, TP 464_01) · 4.6.5 (langmap
+null gated to allow_null — was creatable, TP 465_01) · 4.6.6 (batch dup
+order, TP 466_01) · 4.7.1–4.7.3 (string-encoded geometries normalized,
+TP 471_01).
 
 **Local Robot recipes (also drawers in the palace):** temporal TPs need
 `--variable temporal_api_url:http://localhost:9377/ngsi-ld/v1`
