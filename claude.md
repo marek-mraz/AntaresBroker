@@ -49,26 +49,11 @@ Ledger tooling: `python3 dev/spec.py split|robot|status|gaps` (see `docs/spec/RE
 ### The /goal prompt — copy-paste this to run the loop to completion
 
 ```
-/goal Run the claude.md §0.3 conformance audit loop until `python3
-dev/spec.py status` reports ZERO not-implemented sections. Each
-iteration: run `python3 dev/spec.py status`, open the FIRST
-not-implemented clause file in order (4.* → 5.* → 6.* → 7.* → annex A,
-B), and complete steps 1–9 for it — clause text + MemPalace first,
-implementation found/annotated with the CIM 009 clause citation (never
-internal docs), every SHALL verified, unit tests written AND run
-targeted (each seen able to fail once), Robot TPs checked-then-written
-in the suite fork with clause tags and mandatory edge cases, ledger
-frontmatter updated (status earned: implemented / partial with named
-gaps / staged-v1x / informative), one clause = one commit with the
-clause-number prefix. Then take the NEXT clause immediately — do not
-stop between clauses. Hard rules: no brokers/stacks (rule 8); no code
-for non-broker surface — umbrella/ontology/architecture clauses get a
-delegation note, and if genuinely unsure whether a SHALL is
-broker-observable, STOP and ask (rule 9); suspected suite/spec defects
-are proven from the clause text and logged in error.md +
-testsuite-doubts.md, never hacked around. File decisions and traps into
-MemPalace as you go. Progress metric: the dev/spec.py status counts in
-each commit's ledger diff.
+/goal Run the claude.md §0.3 audit loop until `python3 dev/spec.py
+status` shows ZERO not-implemented. Repeat: take the first
+not-implemented clause in order, do steps 1–9 exactly as written
+(rules 8 and 9 are hard), commit as `<clause>:`, move on without
+stopping. Ask only when rule 9 leaves you genuinely unsure.
 ```
 
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
