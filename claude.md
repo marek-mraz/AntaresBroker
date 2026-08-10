@@ -6,7 +6,21 @@ Design analysis v0.1 — 2026-08-03. Reference implementation studied: Scorpio B
 ## 0. Ground rules for agents working in this repo
 
 1. **Never touch the host Mac.** Do not use `/var/run/docker.sock` (or any Docker CLI/API against it), do not start/stop/inspect host containers, do not mount host paths, do not install anything Mac-side. Everything needed for development — build, unit/integration tests, the ETSI suite — runs inside this sandbox. If a task appears to require host Docker (e.g. spinning up Postgres/NATS containers), stop and ask the user instead of doing it.
-2. **Spec-first implementation.** Every feature is implemented from its ETSI CIM 009 V1.9.1 clause (the ledger in §5.4 below), NOT from ETSI test-suite failures. The Robot suite (§5.3) is the validation oracle run *after* a clause is implemented — it is never the requirements source. Its 686 TPs cover only part of the normative surface; a broker built test-first ships the untested gaps broken. Working order per feature: read the clause in `/workspace/etsi-cim-specs/gs_cim009v010901p.pdf` → implement the full normative behaviour (cite the clause number in the PR/commit) → unit-test the clause's own rules and edge cases → only then run the Robot suite as confirmation, and update `docs/ics.yaml` (§14.6).
+2. **Spec-first implementation.** Every feature is implemented from its ETSI CIM 009 V1.9.1 clause (the per-clause ledger in `docs/spec/`, §0.3), NOT from ETSI test-suite failures. The Robot suite (§5.3) is the validation oracle run *after* a clause is implemented — it is never the requirements source. Its 686 TPs cover only part of the normative surface; a broker built test-first ships the untested gaps broken. Working order per feature: read the clause text (it is IN the ledger file; the PDF `/workspace/etsi-cim-specs/gs_cim009v010901p.pdf` stays the authority for exact wording) → implement the full normative behaviour → unit-test the clause's own rules and edge cases → only then run the Robot suite as confirmation, and update `docs/spec/<clause>.md`.
+
+## 0.3 GOAL — the conformance audit loop (STRICT, 2026-08-10)
+
+**Goal: every clause file in `docs/spec/` audited — status earned with evidence, code annotated with its CIM 009 clause, Robot TPs (including edge cases) covering its normative surface.** The ledger was deliberately reset to zero (947 sections `not-implemented`, old `docs/ics.yaml` deleted — history in git). Statuses are EARNED by this loop, never assumed from the old ledger or from memory.
+
+Work **file by file, in clause order** (`4.*` → `5.*` → `6.*` → `7.*` → annex `A`, `B`; annexes C–I are informative — mark `status: informative`, nothing to implement). Per file `docs/spec/<ch>/<clause>.md`:
+
+1. **Read the clause text in the file** — the body IS the spec text. For comma-level wording read the PDF pages named in the frontmatter (`mempalace_get_pdf_pages`).
+2. **Find the implementation and annotate it.** Every function implementing normative behaviour carries a doc comment citing **the CIM 009 clause number + a one-line summary of the rule**, e.g. `/// 5.6.6 Delete Entity: 204 on success, ResourceNotFound 404 if absent.` **FORBIDDEN as normative citation: internal documents** — never `(see docs/deep-analysis.md §9.3)`, never `claude.md §…`, never tasks.md. Internal docs may be cited for *architecture* decisions only; the requirement's source is always the spec clause. Existing comments citing internal docs as the requirement are fixed on touch.
+3. **Verify the FULL normative behaviour** against the clause text: every SHALL, every error case (type + status per Table 6.3.2-1), every output member. A gap → implement it now, or set `status: partial` with the gap NAMED in `notes:`. Never mark `implemented` with a known gap.
+4. **Unit tests for the clause's own rules and edge cases** — boundary values, invalid input → the exact spec error type, empty/absent optional members, multi-instance `datasetId` where applicable, tenant isolation. Test names/doc comments cite the clause number.
+5. **Robot Framework TPs — check for existing ones FIRST.** The file's `robot:` list + `grep -r "5_6_6" ngsi-ld-test-suite/TP/` (clause tag form). Only write a NEW TP for normative surface no existing TP covers — duplicating an ETSI TP is noise. New TPs go in the suite fork following its conventions: `[Documentation]` quotes the clause requirement briefly, `[Tags]` carries the clause number (`5_6_6` form) — that tag is what feeds `robot:` back into the ledger. **Edge-case TPs are mandatory**, not optional: error paths, boundary inputs, the cases the official 686 TPs skip (that long tail is exactly where §4.1's Scorpio violations lived).
+6. **Update the ledger file**: `status:` + `evidence:` (code/test anchors) + `notes:` (dates, named gaps, spec doubts); `python3 dev/spec.py robot` refreshes the TP list. Suspected suite/spec defect → prove it from the clause text first, log in `error.md` + `testsuite-doubts.md`, never hack the broker to a broken test (§ETSI guide).
+7. **One clause = one commit**: code, unit tests, Robot TPs, ledger file — message cites the clause number (`5.6.6:` prefix). Validation per run policy: one store mode locally, the CI 4×8 matrix is the authority.
 
 ---
 
@@ -208,7 +222,7 @@ Scorpio gap notes that Antares inherits as scope decisions: Scorpio has **no `/s
 
 ### 5.4 Spec-first implementation ledger — CIM 009 V1.9.1, clause by clause
 
-This is the requirements list (rule §0.2): implement each item from its clause text, check it off only when the full normative behaviour (all SHALLs, error cases, and output data of that clause) is implemented and unit-tested — then validate with the Robot suite. Each checkbox maps to a row in `docs/ics.yaml`. Items marked **v1.x** are deliberately staged after v1.0 (§5.1 scope decisions); everything else is v1.0 scope.
+This is the requirements list (rule §0.2): implement each item from its clause text, check it off only when the full normative behaviour (all SHALLs, error cases, and output data of that clause) is implemented and unit-tested — then validate with the Robot suite. Each checkbox maps to a file in `docs/spec/` (the per-clause full-text ledger, §0.3 — replaced `docs/ics.yaml` 2026-08-10). Items marked **v1.x** are deliberately staged after v1.0 (§5.1 scope decisions); everything else is v1.0 scope.
 
 #### 5.4.1 Clause 4 — framework, representations, languages (`antares-model`, `antares-jsonld`, `antares-ql`)
 
@@ -635,7 +649,9 @@ antares/
 ├── docs/
 │   ├── deep-analysis.md        # this document
 │   ├── adr/                    # one file per irreversible decision (ADR-0001 tenancy, …)
-│   └── ics.yaml                # machine-readable conformance ledger (§14.6), CI-rendered
+│   └── spec/                   # the conformance ledger (§0.3): one file per CIM 009
+│                               #   clause, full spec text + status/evidence/robot
+│                               #   frontmatter; tooling dev/spec.py (replaced ics.yaml)
 └── xtask/                      # cargo-xtask: load-rig, ICS render, synthetic 10M-row seeder
 ```
 
@@ -910,7 +926,7 @@ A vendored fork of jsonld-java (~11 kLOC, upstream package names shadowed) whose
 
 ### 14.6 Spec drift without a tracking instrument
 
-README claims CIM 009 V1.2.2 while the tree targets V1.9.1; `/entityMap` served in the singular where the spec says `/entityMaps`; Snapshots absent; expired-sub behaviour split between the two subscription services (one implements 5.8.1/5.8.2.4, the other forgot). There is no artifact that says "which clause, which version, implemented y/n". **Antares**: a machine-readable ICS file (CIM 029 shape) in-repo, updated per PR, published with releases — the compliance ledger is code-reviewed like code.
+README claims CIM 009 V1.2.2 while the tree targets V1.9.1; `/entityMap` served in the singular where the spec says `/entityMaps`; Snapshots absent; expired-sub behaviour split between the two subscription services (one implements 5.8.1/5.8.2.4, the other forgot). There is no artifact that says "which clause, which version, implemented y/n". **Antares**: `docs/spec/` — the whole of CIM 009 in-repo, one file per clause with full spec text and status/evidence/robot frontmatter (§0.3), updated per PR — the compliance ledger is code-reviewed like code, and a CIM 029-shape ICS export is a `dev/spec.py` render away when a release needs it.
 
 ### 14.7 External evidence (the same defect classes, seen from outside)
 
