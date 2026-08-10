@@ -991,7 +991,14 @@ fn render_aggregated(
         }
         buckets.sort_by_key(|((s, _), _)| *s);
         let mut attr_out = Map::new();
-        attr_out.insert("type".into(), Value::String("Property".into()));
+        // 4.5.19.0: the member is labelled "Property" for Properties and
+        // "Relationship" for Relationships.
+        let label = if class == AggrClass::Relationship {
+            "Relationship"
+        } else {
+            "Property"
+        };
+        attr_out.insert("type".into(), Value::String(label.into()));
         for method in &r.aggr_methods {
             let rows: Vec<Value> = buckets
                 .iter()

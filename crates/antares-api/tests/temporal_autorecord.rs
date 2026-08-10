@@ -364,3 +364,89 @@ async fn simplified_temporal_pairs_per_attribute_type() {
         assert!(extra.is_empty(), "{attr} leaks members: {extra:?}");
     }
 }
+
+/// 4.5.19: aggregated temporal representation — per-method members of
+/// [value, periodStart, periodEnd] triples; Properties labelled "Property",
+/// Relationships "Relationship"; PT0S = one whole-range period; only the
+/// requested methods (plus type) appear.
+#[tokio::test(flavor = "multi_thread")]
+async fn aggregated_temporal_representation() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:6","type":"Rec",
+        "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},
+                 {"type":"Property","value":2,"observedAt":"2026-08-10T00:00:02Z"},
+                 {"type":"Property","value":3,"observedAt":"2026-08-10T00:00:03Z"}],
+        "spouse":[{"type":"Relationship","object":"urn:ngsi-ld:P:1",
+                   "observedAt":"2026-08-10T00:00:01Z"},
+                  {"type":"Relationship","object":"urn:ngsi-ld:P:1",
+                   "observedAt":"2026-08-10T00:00:02Z"}]}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:6?options=aggregatedValues&aggrMethods=sum,avg,totalCount&aggrPeriodDuration=PT0S&attrs=speed&timerel=after&timeAt=2026-08-10T00:00:00Z")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    let speed = &doc["speed"];
+    assert_eq!(speed["type"], "Property");
+    let sum = speed["sum"].as_array().expect("sum rows");
+    assert_eq!(sum.len(), 1, "PT0S = one whole-range period: {body}");
+    let row = sum[0].as_array().expect("triple");
+    assert_eq!(row.len(), 3, "[value, start, end]");
+    assert_eq!(row[0].as_f64(), Some(6.0));
+    assert!(row[1].as_str().is_some_and(|s| s.contains('T')));
+    assert_eq!(speed["avg"][0][0].as_f64(), Some(2.0));
+    assert_eq!(speed["totalCount"][0][0], 3);
+    let extra: Vec<&String> = speed
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| !["type", "sum", "avg", "totalCount"].contains(&k.as_str()))
+        .collect();
+    assert!(extra.is_empty(), "only requested methods: {extra:?}");
+
+    // Relationship label + totalCount eligibility
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:6?options=aggregatedValues&aggrMethods=totalCount&attrs=spouse&timerel=after&timeAt=2026-08-10T00:00:00Z")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(doc["spouse"]["type"], "Relationship");
+    assert_eq!(doc["spouse"]["totalCount"][0][0], 2);
+
+    // ineligible method on a Relationship → 400 InvalidRequest
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:6?options=aggregatedValues&aggrMethods=sum&attrs=spouse&timerel=after&timeAt=2026-08-10T00:00:00Z")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("InvalidRequest"), "{body}");
+}
