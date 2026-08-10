@@ -550,14 +550,20 @@ fn expand_instance(
             let lm = obj
                 .get("languageMap")
                 .ok_or_else(|| bad(format!("attribute {name}: needs languageMap")))?;
-            let ok = lm.as_object().is_some_and(|m| {
-                m.keys().all(|k| !k.is_empty())
-                    && m.values().all(|v| {
-                        v.is_string()
-                            || v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
-                    })
-            }) || (opts.allow_null && is_ngsi_null_langmap(lm))
-                || is_ngsi_null_langmap(lm);
+            // 4.6.5: {"@none": "urn:ngsi-ld:null"} is exclusively the
+            // partial/merge-patch deletion encoding — outside allow_null it
+            // is an NGSI-LD Null in a create and thus BadRequestData.
+            let ok = if is_ngsi_null_langmap(lm) {
+                opts.allow_null
+            } else {
+                lm.as_object().is_some_and(|m| {
+                    m.keys().all(|k| !k.is_empty())
+                        && m.values().all(|v| {
+                            v.is_string()
+                                || v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+                        })
+                })
+            };
             if !ok {
                 return Err(bad(format!("attribute {name}: invalid languageMap")));
             }
@@ -1314,6 +1320,44 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.6.5 Supported data types for LanguageMaps: keys are RFC 5646 tags
+    /// or "@none", values are strings or arrays of strings; the
+    /// {"@none": "urn:ngsi-ld:null"} form is ONLY the partial/merge-patch
+    /// deletion encoding — invalid in a create/append (no allow_null).
+    #[test]
+    fn language_map_data_types() {
+        let lp = |lm: Value, opts: ExpandOpts| {
+            let doc = json!({"id": "urn:x", "type": "T",
+                "brandName": {"type": "LanguageProperty", "languageMap": lm}});
+            expand_entity(doc.as_object().unwrap(), &core(), opts)
+        };
+        let out = lp(
+            json!({"sk": "škola", "en": ["school", "academy"], "@none": "default"}),
+            ExpandOpts::default(),
+        )
+        .expect("strings and arrays of strings");
+        let m = &out["https://uri.etsi.org/ngsi-ld/default-context/brandName"][0]["languageMap"];
+        assert_eq!(m["en"][1], "academy");
+        assert!(m.get("urn:ngsi-ld:null").is_none(), "no null leakage");
+        // non-string value rejected
+        assert!(lp(json!({"en": 5}), ExpandOpts::default()).is_err());
+        assert!(lp(json!({"en": [5]}), ExpandOpts::default()).is_err());
+        // the null encoding is a deletion marker: rejected on create,
+        // accepted under allow_null (patch/merge)
+        assert!(
+            lp(json!({"@none": "urn:ngsi-ld:null"}), ExpandOpts::default()).is_err(),
+            "langmap null form invalid outside patch/merge"
+        );
+        lp(
+            json!({"@none": "urn:ngsi-ld:null"}),
+            ExpandOpts {
+                allow_null: true,
+                ..ExpandOpts::default()
+            },
+        )
+        .expect("deletion form under allow_null");
     }
 
     /// 4.6.3 Supported data types for Values: "All the GeoJSON Geometries
