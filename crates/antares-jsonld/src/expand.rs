@@ -276,6 +276,16 @@ fn looks_like_instance(v: &Value) -> bool {
 }
 
 /// Expand a single instance (normalized or concise) to normalized form.
+///
+/// This is where the 4.2.2 Meta Model's own SHALLs are enforced: "An NGSI-LD
+/// Property shall have a value, stated through hasValue" and "An NGSI-LD
+/// Relationship shall have an object stated through hasObject" — a Property
+/// without `value` (and each specialized property type without its own
+/// value member, 5.2.5/5.2.32/5.2.35–5.2.38) or a Relationship without a
+/// URI `object` is rejected as BadRequestData. "An NGSI-LD Value shall be
+/// either a rdfs:Literal or a node object" — any JSON literal, array or
+/// object is accepted as `value`, a bare JSON `null` is not (4.5.2, the
+/// null sentinel is the string form only).
 fn expand_instance(
     name: &str,
     v: &Value,
@@ -750,6 +760,66 @@ mod tests {
             "rel": {"type": "Relationship", "object": "not a uri"}
         });
         assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
+
+    /// 4.2.2 Meta Model: "An NGSI-LD Property shall have a value, stated
+    /// through hasValue. An NGSI-LD Relationship shall have an object stated
+    /// through hasObject." The member is REQUIRED — a typed attribute
+    /// without it is rejected, per specialized type as well (5.2.32/5.2.38).
+    #[test]
+    fn meta_model_required_member_per_attribute_type() {
+        for (ty, wrong_member) in [
+            ("Property", "object"),
+            ("Relationship", "value"),
+            ("LanguageProperty", "value"),
+            ("JsonProperty", "value"),
+            ("VocabProperty", "value"),
+            ("ListProperty", "value"),
+            ("ListRelationship", "valueList"),
+        ] {
+            let doc = serde_json::json!({
+                "id": "urn:ngsi-ld:A:1",
+                "type": "T",
+                "attr": {"type": ty, wrong_member: "x"}
+            });
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "{ty} without its required member must be rejected (4.2.2)"
+            );
+        }
+    }
+
+    /// 4.2.2: "An NGSI-LD Value shall be either a rdfs:Literal or a node
+    /// object" — every JSON literal, array and object is a legal value;
+    /// a bare JSON null is NOT (the null sentinel is the string form,
+    /// 4.5.2 / 057_03_02).
+    #[test]
+    fn meta_model_value_space() {
+        for v in [
+            serde_json::json!(17),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+            serde_json::json!("text"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"nested": {"deep": [1]}}),
+        ] {
+            let doc = serde_json::json!({
+                "id": "urn:ngsi-ld:A:1", "type": "T",
+                "attr": {"type": "Property", "value": v}
+            });
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_ok(),
+                "literal/node-object value must be accepted (4.2.2): {v}"
+            );
+        }
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:A:1", "type": "T",
+            "attr": {"type": "Property", "value": null}
+        });
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "bare JSON null is not an NGSI-LD Value (4.2.2/4.5.2)"
+        );
     }
 
     #[test]
