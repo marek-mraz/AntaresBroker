@@ -28,11 +28,11 @@ Work **file by file, in clause order** (`4.*` → `5.*` → `6.*` → `7.*` → 
 
 | Dimension | Target | Notes |
 |---|---|---|
-| Entities | 10,000,000 | current-state, one Postgres cluster |
-| Tenants | 1,000 | **one shared schema**, `tenant_id` column on every row — no schema-per-tenant, no database-per-tenant |
-| Subscriptions | 10,000 active | HTTP callback + MQTT delivery (WebSocket deferred, see below) |
-| WebSocket connections | 10,000 concurrent | **DEFERRED — not in v1.** Design stays WS-ready (per the `ngsi-ld-ws` binding draft) so it can land later without redesign |
-| CSource registrations | 1,000+ **per tenant** | broad federation: one tenant may register hundreds–thousands of context sources; matching stays index-shaped and fan-out bounded (§16.7) |
+| Entities | 100,000,000 | current-state, one Postgres cluster |
+| Tenants | 10,000 | **one shared schema**, `tenant_id` column on every row — no schema-per-tenant, no database-per-tenant |
+| Subscriptions | 100,000 per context broker | HTTP callback + MQTT delivery (WebSocket deferred, see below) |
+| WebSocket connections | 100,000 per context broker | **DEFERRED — not in v1.** Design stays WS-ready (per the `ngsi-ld-ws` binding draft) so it can land later without redesign |
+| CSource registrations | 100,000+ per context broker | broad federation: one tenant may register hundreds–thousands of context sources; matching stays index-shaped and fan-out bounded (§16.7) |
 | Broker memory | < 500 MB RSS | per broker process, at full load |
 | Postgres memory | < 16 GB | one instance; PostGIS required. **TimescaleDB optional** — the broker runs with or without it (two temporal-store modes, §8.2); the 16 GB target assumes Timescale compression, plain-Postgres mode needs more disk/RAM headroom at the same retention |
 | Compliance | full NGSI-LD (ETSI CIM 009) | validated against the ETSI conformance suite Scorpio uses |
