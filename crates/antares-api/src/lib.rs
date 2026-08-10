@@ -492,6 +492,51 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "UP");
     }
 
+    /// 4.6.4 Supported Content: "implementations shall preserve the
+    /// representation of the content of the values provided by the context
+    /// information providers and return the original content" — the
+    /// script-injection characters < > " ' = ; ( ) are stored and served
+    /// verbatim, never HTML/unicode-escaped and never rejected.
+    #[tokio::test]
+    async fn dangerous_content_preserved_verbatim() {
+        let app = app();
+        let payload = "<script>alert('x')</script> \"quoted\" = ; ( )";
+        let entity = serde_json::json!({
+            "id": "urn:ngsi-ld:Building:content",
+            "type": "Building",
+            "note": {"type": "Property", "value": payload}
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", entity.to_string().len())
+                    .body(Body::from(entity.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED, "content never rejected");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:content")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let raw = resp.into_body().collect().await.expect("body").to_bytes();
+        let text = std::str::from_utf8(&raw).expect("utf-8");
+        // original content, not an escaped rendering of it
+        assert!(!text.contains("&lt;"), "no HTML escaping");
+        assert!(!text.contains("\\u003c"), "no unicode escaping");
+        let doc: serde_json::Value = serde_json::from_str(text).expect("json");
+        assert_eq!(doc["note"]["value"], payload, "value returned verbatim");
+    }
+
     /// 4.6.1 Supported text encodings: UTF-8 JSON accepted and exposed;
     /// a non-UTF-8 body is not valid JSON → InvalidRequest 400.
     #[tokio::test]
