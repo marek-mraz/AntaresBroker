@@ -795,6 +795,25 @@ mod tests {
     use crate::loader::Loader;
     use serde_json::json;
 
+    /// 4.5.3.3: "type: If missing, Relationship can be inferred by the
+    /// presence of the object attribute" — and the shared prohibitions apply
+    /// to the inferred instance too.
+    #[test]
+    fn concise_relationship_inference() {
+        let doc = json!({"id": "urn:x", "type": "T",
+            "isParked": {"object": "urn:ngsi-ld:P:1",
+                         "observedAt": "2026-01-01T00:00:00Z"}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("concise relationship");
+        let rel = &out["https://uri.etsi.org/ngsi-ld/default-context/isParked"][0];
+        assert_eq!(rel["type"], "Relationship");
+        assert_eq!(rel["object"], "urn:ngsi-ld:P:1");
+        // inferred Relationship still rejects a Property value member
+        let doc = json!({"id": "urn:x", "type": "T",
+            "isParked": {"object": "urn:ngsi-ld:P:1", "value": 1}});
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
+
     /// 4.5.3.2: a normalized Relationship "shall never include" unitCode
     /// ("Relationships are unitless") or the value-defining members of the
     /// Property family — while objectType stays a legal optional member.
