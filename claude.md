@@ -63,7 +63,7 @@ Ledger tooling: `python3 dev/spec.py split|robot|status|gaps` (see `docs/spec/RE
 status` shows ZERO not-implemented. Repeat: take the first
 not-implemented clause in order, do steps 1–9 exactly as written
 (rules 8 and 9 are hard), commit as `<clause>:`, move on without
-stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. First write the tests, try that if that implementaion is even needed. Use ponytail skill.
+stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. TEST-FIRST: write the clause's tests BEFORE the implementation and run them — the red run on the missing behaviour IS the fallibility proof (and shows whether the implementation is even needed: already-green = already implemented, just annotate + ledger). Only tests that never saw red need one invert→FAILED→restore cycle, ONE per clause, not per test (each cycle costs ~3 full crate recompiles at -j 2). Use ponytail skill.
 ```
 
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
@@ -189,9 +189,12 @@ retrieval: ListRelationship joins under entityList inline + flat).
 python string replace, never sed. Broker kill-loops exit 144 — harmless;
 verify with `curl :9377/q/health` → 000.
 
-**Session test protocol (user directive, keep):** every new test proven
-fallible (invert → FAILED → restore → green) AND carries at least one
-negative assertion (what must NOT be in the response).
+**Session test protocol (user directive, updated 2026-08-10):** TEST-FIRST —
+write the clause's tests before the implementation; the red run on missing
+behaviour IS the fallibility proof. Tests that never saw red get ONE
+invert→FAILED→restore cycle per clause (not per test — each cycle is ~3 full
+crate recompiles at -j 2, the dominant time cost). Every test carries at
+least one negative assertion (what must NOT be in the response).
 
 **Pending Mac-side (no ssh in the sandbox):**
 - `git -C /workspace/ngsi-ld-test-suite push origin main` — origin/master
