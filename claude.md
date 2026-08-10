@@ -148,11 +148,13 @@ stopping. Ask only when rule 9 leaves you genuinely unsure.
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position (2026-08-10, AntaresBroker):** 4.1–4.3.6.3 audited (4.1,
-4.2.4, 4.2.5, 4.3.1–4.3.4 informative; 4.3.5 partial — 5.14.x EntityMap
-routes absent; 4.3.6.1/4.3.6.2/4.3.6.3 implemented with extension TPs
-436_01/02/03). **Next clause: 4.3.6.4.** Local dist-ops Robot recipe:
-`ANTARES_EGRESS_ALLOW_PRIVATE=true` on the broker +
+**Loop position (2026-08-10, AntaresBroker):** 4.1–4.5.0 audited. Status:
+14 implemented · 130 informative · 3 partial (4.3.5 + 4.3.6.7 — both named
+gap = EntityMap subsystem 5.14.x; 6.3.17) · 800 not-implemented. Extension
+TPs this pass: 436_01–436_06, 436_08, 404_01. localOnly forwarding
+implemented (4.3.6.4); 4.3.6.3 strict validation + 9 official _exc TPs
+fork-fixed (error.md). **Next clause: 4.5.1.** Local dist-ops Robot
+recipe: `ANTARES_EGRESS_ALLOW_PRIVATE=true` on the broker +
 `--variable context_source_host:127.0.0.1` (drawer in the palace).
 
 **Pending Mac-side (no ssh in the sandbox):**
