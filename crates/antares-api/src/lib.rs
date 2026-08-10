@@ -277,7 +277,13 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     bounds::bounds_layer,
-                )),
+                ))
+                // axum's built-in extractor limit defaults to 2 MiB and fires
+                // BEFORE the bounds wall's documented cap — a 3 MiB body was
+                // 413'd although /q/health advertises maxBodyBytes = 4 MiB
+                // (found by mutation-testing the 413 wall, 2026-08-09). One
+                // number governs both walls.
+                .layer(axum::extract::DefaultBodyLimit::max(bounds::MAX_BODY_BYTES)),
         )
         .fallback(not_found)
         // outermost on purpose: axum attaches the 405 Allow header in the
