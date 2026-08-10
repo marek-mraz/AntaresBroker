@@ -333,9 +333,10 @@ async fn batch_write(
             Err(e) => out.errors.push(err_entry(id_hint.as_deref(), &e)),
         }
     }
-    // C5+ phase 2: duplicates of one id keep their sequential semantics by
-    // splitting into rounds — the Nth occurrence of an id lands in round N,
-    // rounds execute in order, and within a round every id is unique.
+    // 4.6.6: duplicate instances of one Entity in a batch array "shall come
+    // in chronological order" — first oldest. Sequential semantics are kept
+    // by splitting into rounds: the Nth occurrence of an id lands in round
+    // N, rounds execute in order, and within a round every id is unique.
     let mut rounds: Vec<Vec<(String, Value)>> = Vec::new();
     {
         let mut occurrence: HashMap<String, usize> = HashMap::new();

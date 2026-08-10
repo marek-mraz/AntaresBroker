@@ -492,6 +492,56 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "UP");
     }
 
+    /// 4.6.6: duplicate instances of one Entity in a batch array "shall come
+    /// in chronological order" — the broker applies them sequentially, so
+    /// the LAST occurrence's state wins, never the first.
+    #[tokio::test]
+    async fn batch_duplicate_instances_apply_in_array_order() {
+        let app = app();
+        let batch = serde_json::json!([
+            {"id": "urn:ngsi-ld:Building:dup", "type": "Building",
+             "speed": {"type": "Property", "value": 1},
+             "old": {"type": "Property", "value": true}},
+            {"id": "urn:ngsi-ld:Building:dup", "type": "Building",
+             "speed": {"type": "Property", "value": 2}}
+        ]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/upsert")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", batch.to_string().len())
+                    .body(Body::from(batch.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert!(
+            resp.status() == StatusCode::CREATED || resp.status() == StatusCode::NO_CONTENT,
+            "upsert with duplicates succeeds: {}",
+            resp.status()
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:dup")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = body_json(resp).await;
+        assert_eq!(doc["speed"]["value"], 2, "later instance wins");
+        assert_ne!(doc["speed"]["value"], 1, "first instance must not survive");
+        // default upsert is REPLACE: the second instance replaced the first
+        // wholesale, so the first-only attribute is gone too
+        assert!(
+            doc.get("old").is_none(),
+            "replace semantics: first instance's attrs must not linger"
+        );
+    }
+
     /// 4.6.4 Supported Content: "implementations shall preserve the
     /// representation of the content of the values provided by the context
     /// information providers and return the original content" — the
