@@ -371,7 +371,21 @@ fn expand_instance(
             } else if obj.contains_key("objectList") {
                 "ListRelationship"
             } else if obj.contains_key("value") {
-                "Property"
+                // 4.5.2.3: type may be omitted — "Property can be inferred by
+                // the presence of the value attribute. An exception to this
+                // inference rule occurs for geospatial Property Values, where
+                // the GeoProperty sub-type shall be inferred instead, if the
+                // Property Value resolves to a supported GeoJSON geometry."
+                let v = &obj["value"];
+                if v.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| GEO_TYPES.contains(&t))
+                    && v.get("coordinates").is_some()
+                {
+                    "GeoProperty"
+                } else {
+                    "Property"
+                }
             } else {
                 // whole object is a Property value (4.5.2.3)
                 return Ok(json!({"type": "Property", "value": v.clone()}));
@@ -772,6 +786,40 @@ mod tests {
     use super::*;
     use crate::loader::Loader;
     use serde_json::json;
+
+    /// 4.5.2.3: concise Property forms — a geometry-shaped value infers
+    /// GeoProperty (both as the whole object and as the value member); an
+    /// object carrying a "type" member is treated as normalized; a concise
+    /// object mixing value with another type's defining member rejects.
+    #[test]
+    fn concise_property_inference_rules() {
+        let geo = json!({"type": "Point", "coordinates": [1.0, 2.0]});
+        // whole object IS the geometry
+        let doc = json!({"id": "urn:x", "type": "T", "area": geo});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("bare geometry");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/area"][0]["type"],
+            "GeoProperty"
+        );
+        // geometry as the value member of a type-less object
+        let doc = json!({"id": "urn:x", "type": "T",
+            "area": {"value": {"type": "Point", "coordinates": [1.0, 2.0]},
+                     "observedAt": "2026-01-01T00:00:00Z"}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("geometry value");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/area"][0]["type"],
+            "GeoProperty"
+        );
+        // an object with a "type" member is normalized — unknown type rejects
+        let doc = json!({"id": "urn:x", "type": "T", "a": {"type": "Custom", "x": 1}});
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // concise mix of value and a foreign defining member rejects
+        let doc = json!({"id": "urn:x", "type": "T",
+            "a": {"value": 1, "languageMap": {"en": "x"}}});
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
 
     /// 4.5.2.2: a normalized Property "shall never include" the value-defining
     /// members of other attribute types, output-only members, or the sealed
