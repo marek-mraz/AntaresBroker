@@ -96,6 +96,10 @@ pub struct FedReg {
     /// 4.3.6.5 `contextSourceInfo` key/value pairs, conveyed as headers on
     /// every forward to this source (string values only — headers).
     pub csi: Vec<(String, String)>,
+    /// 5.2.9 `localOnly` (4.3.6.4): distributed operations for this
+    /// registration "will act only on data held directly by the registered
+    /// Context Source itself" — every forward carries `local=true`.
+    pub local_only: bool,
 }
 
 impl FedReg {
@@ -425,6 +429,10 @@ pub fn matching_regs(
                 tenant,
                 alias,
                 csi,
+                local_only: doc
+                    .get("localOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -499,6 +507,12 @@ pub async fn forward(
     // context rather than sending terms compacted against the wrong one.
     let mut link_ctx: String = ctx_url.to_owned();
     let mut query: Vec<(String, String)> = query.to_vec();
+    // 4.3.6.4: "a binding-specific mechanism to request operations only on
+    // the registered endpoint itself" — a localOnly registration (5.2.9)
+    // must not cascade, so the forward carries the 6.3.18 local parameter.
+    if reg.local_only && !query.iter().any(|(k, _)| k == "local") {
+        query.push(("local".into(), "true".into()));
+    }
     if let Some(reg_ctx_url) = csi_get("jsonldContext") {
         let orig = st
             .loader
@@ -1325,6 +1339,7 @@ mod tests {
             tenant: None,
             alias: None,
             csi: vec![],
+            local_only: false,
         }
     }
 
@@ -1432,6 +1447,49 @@ mod tests {
         let mut regs = vec![reg("exclusive")];
         assert!(handle_via_loop(&hdrs(None), "me", &t, &mut regs).is_none());
         assert_eq!(regs.len(), 1);
+    }
+
+    /// 4.3.6.4 / 5.2.9 localOnly: "distributed operations associated to this
+    /// Context Source Registration will act only on data held directly by
+    /// the registered Context Source itself" — the flag must survive
+    /// registration compilation so every forward can carry local=true.
+    #[test]
+    fn local_only_survives_registration_compilation() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        for (id, local_only) in [
+            ("urn:ngsi-ld:ContextSourceRegistration:lo", true),
+            ("urn:ngsi-ld:ContextSourceRegistration:casc", false),
+        ] {
+            let mut doc = json!({
+                "id": id,
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+            });
+            if local_only {
+                doc["localOnly"] = json!(true);
+            }
+            st.store
+                .create(&tenant, Kind::Registration, id, doc)
+                .expect("seed registration");
+        }
+        let spec = crate::csource::CsrSpec {
+            types: Some(vec![
+                "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
+            ]),
+            ..Default::default()
+        };
+        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new());
+        let lo = |id: &str| {
+            regs.iter()
+                .find(|r| r.reg_id == id)
+                .expect("compiled")
+                .local_only
+        };
+        assert!(lo("urn:ngsi-ld:ContextSourceRegistration:lo"));
+        assert!(!lo("urn:ngsi-ld:ContextSourceRegistration:casc"));
     }
 
     /// 4.3.6.2: "An auxiliary Context Source Registration never overrides
