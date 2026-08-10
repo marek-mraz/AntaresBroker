@@ -247,10 +247,14 @@ async fn batch_write(
     if !spec_attrs.is_empty() {
         spec.attrs = Some(spec_attrs);
     }
-    let mut fed_regs = crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params);
-    if let Some(r) =
-        crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut fed_regs)
-    {
+    let mut fed_regs =
+        crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut fed_regs,
+    ) {
         return Ok(r);
     }
     let mut out = BatchOutcome {
@@ -592,11 +596,20 @@ pub async fn batch_delete(
             ),
             ..Default::default()
         };
-        let mut regs =
-            crate::federation::write_regs(&st, &tenant, &spec, &st.loader.core(), &params);
-        if let Some(r) =
-            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
-        {
+        let mut regs = crate::federation::write_regs(
+            &st,
+            &tenant,
+            &spec,
+            &st.loader.core(),
+            &params,
+            &headers,
+        );
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
             return Ok(r);
         }
         let proxied = regs.iter().any(|r| r.is_proxy());
@@ -761,8 +774,10 @@ async fn batch_query_inner(
         vp.insert("local".into(), l.clone());
     }
     let fed = if crate::federation::active(&vp)
-        && !crate::federation::via_loop(headers, &st.host_alias)
-    {
+        && !crate::federation::via_loop(
+            headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+        ) {
         // 6.3.17 scopes NGSILD-Warning to GET /entities(/{id}) — collected
         // here for the log only, never emitted on entityOperations/query
         let mut warnings = Vec::new();

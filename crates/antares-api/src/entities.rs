@@ -252,9 +252,13 @@ async fn create_entity_inner(
         attrs: (!attr_iris.is_empty()).then_some(attr_iris),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     if !regs.is_empty() {
@@ -372,7 +376,10 @@ async fn retrieve_entity_inner(
     let join = parse_join(params)?;
     antares_model::EntityId::new(id)?;
     let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
-    let looped = crate::federation::via_loop(headers, &st.host_alias);
+    let looped = crate::federation::via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+    );
     let fed_on = crate::federation::active(params) && !looped;
     // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
     let mut warnings: Vec<String> = Vec::new();
@@ -382,10 +389,10 @@ async fn retrieve_entity_inner(
             ..Default::default()
         };
         // only a loop that suppressed a real forward is abnormal behaviour
-        if !crate::federation::matching_regs(st, &tenant, &spec, &ctx).is_empty() {
+        if !crate::federation::matching_regs(st, &tenant, &spec, &ctx, headers).is_empty() {
             warnings.push(crate::federation::warning(
                 199,
-                &st.host_alias,
+                &crate::federation::alias_for(&st.host_alias, &tenant),
                 "a registration loop has been detected",
             ));
         }
@@ -774,7 +781,7 @@ async fn query_entities_inner(
     // regardless of `local=true`, which is why this asks would_federate rather
     // than active (ETSI 019_19 orders without local — see error.md).
     if params.contains_key("orderBy")
-        && crate::federation::would_federate(st, &tenant, &ctx, params)
+        && crate::federation::would_federate(st, &tenant, &ctx, params, headers)
     {
         return Err(NgsiError::BadRequestData(
             "orderBy requires local scope — ordering is never applied to \
@@ -794,17 +801,20 @@ async fn query_entities_inner(
     let join = parse_join(params)?;
     // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
     let mut warnings: Vec<String> = Vec::new();
-    let looped = crate::federation::via_loop(headers, &st.host_alias);
+    let looped = crate::federation::via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+    );
     let fed = if crate::federation::active(params) && !looped {
         crate::federation::fed_query(st, &tenant, headers, &ctx, params, &mut warnings).await
     } else {
         if crate::federation::active(params)
             && looped
-            && crate::federation::would_federate(st, &tenant, &ctx, params)
+            && crate::federation::would_federate(st, &tenant, &ctx, params, headers)
         {
             warnings.push(crate::federation::warning(
                 199,
-                &st.host_alias,
+                &crate::federation::alias_for(&st.host_alias, &tenant),
                 "a registration loop has been detected",
             ));
         }
@@ -1263,10 +1273,13 @@ pub async fn delete_entity(
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
-        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params);
-        if let Some(r) =
-            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
-        {
+        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params, &headers);
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
             return Ok(r);
         }
         if !regs.is_empty() {
@@ -1451,9 +1464,13 @@ async fn purge_inner(
             .map(|s| s.split(',').map(str::to_owned).collect()),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     if !regs.is_empty() {
@@ -1549,9 +1566,13 @@ async fn merge_entity_inner(
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     if !regs.is_empty() {
@@ -1743,10 +1764,13 @@ pub async fn replace_entity(
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
-        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params);
-        if let Some(r) =
-            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
-        {
+        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params, &headers);
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
             return Ok(r);
         }
         if regs.is_empty() {

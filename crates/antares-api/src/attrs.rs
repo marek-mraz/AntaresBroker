@@ -100,9 +100,14 @@ async fn append_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let (mut regs, local_covered) =
+        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     let all_attr_iris = attr_iris_of(&fragment);
@@ -232,6 +237,7 @@ fn attr_fed_plan(
     fragment: &Value,
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
+    headers: &axum::http::HeaderMap,
 ) -> (Vec<crate::federation::FedReg>, bool) {
     let attr_iris: Vec<String> = fragment
         .as_object()
@@ -247,7 +253,7 @@ fn attr_fed_plan(
                 .collect()
         })
         .unwrap_or_default();
-    attr_fed_plan_iris(st, tenant, id, attr_iris, ctx, params)
+    attr_fed_plan_iris(st, tenant, id, attr_iris, ctx, params, headers)
 }
 
 fn attr_fed_plan_iris(
@@ -257,13 +263,14 @@ fn attr_fed_plan_iris(
     attr_iris: Vec<String>,
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
+    headers: &axum::http::HeaderMap,
 ) -> (Vec<crate::federation::FedReg>, bool) {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         attrs: (!attr_iris.is_empty()).then(|| attr_iris.clone()),
         ..Default::default()
     };
-    let regs = crate::federation::write_regs(st, tenant, &spec, ctx, params);
+    let regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers);
     let covered = !regs.is_empty()
         && !attr_iris.is_empty()
         && attr_iris
@@ -478,9 +485,14 @@ async fn update_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (mut regs, local_covered) = attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let (mut regs, local_covered) =
+        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     let all_attr_iris = attr_iris_of(&fragment);
@@ -633,10 +645,21 @@ async fn partial_update_inner(
         .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     let attr_iri = parsed.ctx.expand_key(attr);
-    let (mut regs, local_covered) =
-        attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &parsed.ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let (mut regs, local_covered) = attr_fed_plan_iris(
+        st,
+        &tenant,
+        id,
+        vec![attr_iri.clone()],
+        &parsed.ctx,
+        params,
+        headers,
+    );
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     let want_ds = frag_inst
@@ -801,10 +824,14 @@ pub async fn replace_attr(
             vec![attr_iri.clone()],
             &parsed.ctx,
             &params,
+            &headers,
         );
-        if let Some(r) =
-            crate::federation::handle_via_loop(&headers, &st.host_alias, &tenant, &mut regs)
-        {
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
             return Ok(r);
         }
         let ts = now_iso();
@@ -923,10 +950,21 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let (mut regs, local_covered) =
-        attr_fed_plan_iris(st, &tenant, id, vec![attr_iri.clone()], &ctx, params);
-    if let Some(r) = crate::federation::handle_via_loop(headers, &st.host_alias, &tenant, &mut regs)
-    {
+    let (mut regs, local_covered) = attr_fed_plan_iris(
+        st,
+        &tenant,
+        id,
+        vec![attr_iri.clone()],
+        &ctx,
+        params,
+        headers,
+    );
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+        &tenant,
+        &mut regs,
+    ) {
         return Ok(r);
     }
     let ts = now_iso();

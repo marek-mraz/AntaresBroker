@@ -86,6 +86,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "9090".into())
         .parse()?;
     let host_alias = std::env::var("ANTARES_HOST_ALIAS").unwrap_or_else(|_| "antares".into());
+    // 6.3.18 sends this as the Via pseudonym — an RFC 7230 token. `~` is
+    // reserved as the tenant separator (federation::alias_for), so allowing
+    // it in the configured alias would let `a~b` in the default tenant
+    // collide with `a` in tenant `b` and cross-detect as a loop. Fatal at
+    // startup, like every other bad config value (§14.3).
+    if host_alias.is_empty()
+        || !host_alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|".contains(&b))
+    {
+        return Err(format!(
+            "ANTARES_HOST_ALIAS {host_alias:?} is not a valid RFC 7230 token \
+             (and may not contain '~', the tenant separator)"
+        )
+        .into());
+    }
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
     // A2: unknown store mode is fatal BEFORE the runtime spins up. The mode
     // is decided ONCE here as a typed value and threaded everywhere — no

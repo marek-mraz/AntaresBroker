@@ -541,8 +541,8 @@ clause5_13_16_contexts_maps:
   - clause: "5.15.1"
     name: "Context Source Identity Information (/info/sourceIdentity)"
     status: implemented
-    evidence: "crates/antares-api/src/lib.rs::source_identity; unit test source_identity_carries_the_mandated_members; TP 061_01"
-    notes: "Payload corrected 2026-08-09 to Table 5.2.40-1: contextSourceAlias, contextSourceUptime (ISO 8601 duration) and contextSourceTimeAt (4.6.3 DateTime), all cardinality 1. Previously emitted hostAlias/uptime, which are not core-context terms and so did not expand to NGSI-LD IRIs. contextSourceExtras (0..1) not emitted. Clause 5.15 has no official ETSI TPs — 061_01 is an Antares extension."
+    evidence: "crates/antares-api/src/lib.rs::source_identity; unit test source_identity_carries_the_mandated_members; TP 061_01 (incl. 061_01_05)"
+    notes: "Payload corrected 2026-08-09 to Table 5.2.40-1: contextSourceAlias, contextSourceUptime (ISO 8601 duration) and contextSourceTimeAt (4.6.3 DateTime), all cardinality 1. Previously emitted hostAlias/uptime, which are not core-context terms and so did not expand to NGSI-LD IRIs. contextSourceExtras (0..1) not emitted. 2026-08-10: the alias is now TENANT-SPECIFIC as Table 5.2.40-1 requires (\"shall be identifying a specific Tenant within a registered Context Source\") — federation::alias_for, `{alias}~{tenant}` with the bare alias for the default tenant per 6.3.14; ADR-0011. Clause 5.15 has no official ETSI TPs — 061_01 is an Antares extension."
   - clause: "5.16.1–5.16.7"
     name: "Snapshots"
     status: staged-v1x
@@ -613,8 +613,8 @@ clause6_http:
   - clause: "6.3.17–6.3.19"
     name: "Distributed-ops caching/timeout; limiting; extra info (Via, NGSILD-EntityMap, contextSourceInfo)"
     status: partial
-    evidence: "crates/antares-api/src/federation.rs (Via chains, hop limit, 508)"
-    notes: "2026-08-09 (audit V-14/V-29/V-30): NGSILD-Warning 199/299/111 emitted on distributed GET /entities(/{id}) per Table 6.3.17-1 (404 = normal); Via received-by compared as an RFC 7230 token; 508 scoped to a single exclusive/redirect source looping back — other loops clear the forward set per Table 6.3.18-2 and warn 199; contextSourceInfo incl. the four 4.3.6.6 processed keys implemented (see 4.3.6). Still open: NGSILD-EntityMap, cacheDuration caching (110)"
+    evidence: "crates/antares-api/src/federation.rs (Via chains, hop limit, 508, alias_for, matching_regs alias filter); crates/antares-api/tests/federation_loop.rs"
+    notes: "2026-08-09 (audit V-14/V-29/V-30): NGSILD-Warning 199/299/111 emitted on distributed GET /entities(/{id}) per Table 6.3.17-1 (404 = normal); Via received-by compared as an RFC 7230 token; 508 scoped to a single exclusive/redirect source looping back — other loops clear the forward set per Table 6.3.18-2 and warn 199; contextSourceInfo incl. the four 4.3.6.6 processed keys implemented (see 4.3.6). 2026-08-10 (ADR-0011): the Via pseudonym is tenant-specific per Table 5.2.40-1, so cross-tenant federation within one broker is no longer a phantom loop; and Table 6.3.18-2 is applied in full — a registration whose Table 5.2.9-1 `contextSourceAlias` is already in the inbound chain is dropped in matching_regs (previously the member was persisted under the non-spec name hostAlias and never read). ETSI D018_01 asserts 508 for mode=inclusive against 6.3.17 — suite defect, error.md 2026-08-10. Still open: NGSILD-EntityMap, cacheDuration caching (110)"
   - clause: "6.3.20"
     name: "Invalid parameters"
     status: implemented

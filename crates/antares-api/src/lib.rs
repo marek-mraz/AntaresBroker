@@ -405,10 +405,15 @@ async fn source_identity(
         // contextSourceTimeAt are all cardinality 1. `hostAlias`/`uptime` were
         // not spec members at all — neither expands to an NGSI-LD IRI, so the
         // payload was not valid JSON-LD against the core context either.
+        // Table 5.2.40-1: in the multi-tenancy case the alias "shall be
+        // identifying a specific Tenant within a registered Context Source",
+        // so what this resource serves depends on NGSILD-Tenant — a peer
+        // retrieves it per tenant and registers it as `contextSourceAlias`.
+        let alias = crate::federation::alias_for(&state.host_alias, &tenant);
         let body = serde_json::json!({
-            "id": format!("urn:ngsi-ld:ContextSourceIdentity:{}", state.host_alias),
+            "id": format!("urn:ngsi-ld:ContextSourceIdentity:{alias}"),
             "type": "ContextSourceIdentity",
-            "contextSourceAlias": state.host_alias,
+            "contextSourceAlias": alias,
             "contextSourceUptime": format!("PT{uptime}S"),
             "contextSourceTimeAt": crate::state::now_iso(),
         });

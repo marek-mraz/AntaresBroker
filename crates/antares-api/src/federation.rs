@@ -87,6 +87,12 @@ pub struct FedReg {
     /// 5.2.9 `tenant`: the Tenant to specify in all requests to this Context
     /// Source. None ⇒ the requesting tenant is carried through unchanged.
     pub tenant: Option<String>,
+    /// 5.2.9 `contextSourceAlias`: "a previously retrieved unique id for a
+    /// registered Context Source which is used to identify loops", tenant-
+    /// specific per Table 5.2.9-1. A registration whose alias is already in
+    /// the inbound Via chain names a source this request has visited, so it
+    /// is not a matching registration (Table 6.3.18-2).
+    pub alias: Option<String>,
     /// 4.3.6.5 `contextSourceInfo` key/value pairs, conveyed as headers on
     /// every forward to this source (string values only — headers).
     pub csi: Vec<(String, String)>,
@@ -137,21 +143,64 @@ pub fn inbound_via(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Does the inbound Via chain already name this broker? (loop, 6.3.18)
+/// This broker's Via pseudonym **for one Tenant**.
+///
+/// Table 5.2.40-1: the alias is "a unique id for a Context Source which can
+/// be used to identify loops. In the multi-tenancy use case (see clause
+/// 4.14), this id **shall** be identifying a specific Tenant within a
+/// registered Context Source." One static per-process alias therefore makes
+/// every tenant of this broker look like the same Context Source: a request
+/// in tenant B whose registration points back here for tenant A is a
+/// different (source, tenant) pair, but a tenant-blind chain reads it as a
+/// loop and drops the registration.
+///
+/// Format `{alias}~{tenant}`, and the bare alias for the default tenant —
+/// mirroring 6.3.14, where the tenant header is omitted rather than sent as
+/// `default`. `~` is an RFC 7230 token character that cannot occur in a
+/// `TenantId` (`[A-Za-z0-9_-]{1,64}`), so the two halves never blur; the
+/// broker rejects a configured `ANTARES_HOST_ALIAS` containing `~` at
+/// startup, so `a~b` in the default tenant cannot collide with `a` in
+/// tenant `b`.
+///
+/// The value is stable for the life of a deployment because peers **register**
+/// it: a Context Source Registration's `contextSourceAlias` (Table 5.2.9-1) is
+/// "a previously retrieved unique id" — retrieved from this broker's
+/// `/info/sourceIdentity` for that tenant. Changing an alias silently breaks
+/// every peer's loop detection, so treat it as a published identifier.
+pub fn alias_for(host_alias: &str, tenant: &TenantId) -> String {
+    if tenant.as_str() == TenantId::DEFAULT {
+        host_alias.to_owned()
+    } else {
+        format!("{host_alias}~{}", tenant.as_str())
+    }
+}
+
+/// The `received-by` pseudonyms of the inbound Via chain — the Context
+/// Sources this request has already passed through (Table 6.3.18-2).
 ///
 /// RFC 7230: `Via = 1#( received-protocol RWS received-by [ RWS comment ] )`
 /// — received-by is the SECOND whitespace token of each element and is a
 /// token compared for equality, never by suffix (audit V-30: `ends_with`
 /// made alias `b1` match peer `sub-b1`). A malformed element with no
 /// protocol falls back to its first token.
-pub fn via_loop(headers: &HeaderMap, alias: &str) -> bool {
-    inbound_via(headers).is_some_and(|v| {
-        v.split(',').any(|t| {
-            let mut toks = t.split_whitespace();
-            let first = toks.next();
-            toks.next().or(first) == Some(alias)
+pub fn via_tokens(headers: &HeaderMap) -> Vec<String> {
+    inbound_via(headers)
+        .map(|v| {
+            v.split(',')
+                .filter_map(|t| {
+                    let mut toks = t.split_whitespace();
+                    let first = toks.next();
+                    toks.next().or(first).map(str::to_owned)
+                })
+                .collect()
         })
-    })
+        .unwrap_or_default()
+}
+
+/// Does the inbound Via chain already name this broker, in this tenant?
+/// (loop, 6.3.18) — `alias` is always [`alias_for`]'s tenant-qualified value.
+pub fn via_loop(headers: &HeaderMap, alias: &str) -> bool {
+    via_tokens(headers).iter().any(|t| t == alias)
 }
 
 /// 6.3.17/6.3.18 loop handling for operations with matching registrations.
@@ -230,13 +279,23 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 }
 
 /// Registrations matching an entity spec (5.12), compiled for forwarding.
+///
+/// Table 6.3.18-2 makes the inbound `Via` listing part of matching itself —
+/// "the listing of previously encountered Context Sources supplied is used
+/// when determining matching registrations" — so a registration whose
+/// `contextSourceAlias` is already in the chain is filtered out HERE, at the
+/// one place every read and write path resolves its candidates. Keeping it
+/// out of the call sites is the §4.1 rule: a loop check the callers own is a
+/// loop check some caller forgets.
 pub fn matching_regs(
     st: &AppState,
     tenant: &TenantId,
     spec: &crate::csource::CsrSpec,
     ctx: &Context,
+    headers: &HeaderMap,
 ) -> Vec<FedReg> {
     let now = crate::state::now_iso();
+    let seen = via_tokens(headers);
     // F5: the ONE compiled mirror when wired (bus=nats), the store otherwise.
     // Expiry is filtered HERE and only here — the single yield point (§4.1).
     let regs = match &st.reg_mirror {
@@ -253,6 +312,14 @@ pub fn matching_regs(
                 .and_then(Value::as_str)
                 .is_some_and(|e| e < now.as_str())
             {
+                return None;
+            }
+            let alias = doc
+                .get("contextSourceAlias")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            // Table 6.3.18-2 / 5.2.9: this source already handled the request.
+            if alias.as_ref().is_some_and(|a| seen.iter().any(|t| t == a)) {
                 return None;
             }
             let infos = crate::csource::matching_infos(spec, &doc, ctx);
@@ -336,6 +403,7 @@ pub fn matching_regs(
                 ent_ids,
                 ent_types,
                 tenant,
+                alias,
                 csi,
             })
         })
@@ -466,7 +534,7 @@ pub async fn forward(
             "Link",
             format!("<{link_ctx}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""),
         )
-        .header("Via", outbound_via(headers, &st.host_alias));
+        .header("Via", outbound_via(headers, &alias_for(&st.host_alias, tenant)));
     if !query.is_empty() {
         req = req.query(&query);
     }
@@ -653,7 +721,7 @@ pub async fn fed_retrieve(
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx) {
+    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
         let Some(op) = reg.read_op() else { continue };
         // sysAttrs on every forwarded read: conflicting instances resolve by
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
@@ -723,7 +791,7 @@ pub async fn fed_retrieve(
         // V-14: abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
         // as a failed overall response; 404-with-no-data is normal.
         if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &st.host_alias, text));
+            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
         if !(200..300).contains(&status) {
             continue;
@@ -742,7 +810,7 @@ pub async fn fed_retrieve(
                 // received in time, but not a parseable NGSI-LD entity (111)
                 None => warnings.push(warning(
                     111,
-                    &st.host_alias,
+                    &alias_for(&st.host_alias, tenant),
                     "the payload of the response was invalid",
                 )),
             }
@@ -780,8 +848,9 @@ pub fn would_federate(
     tenant: &TenantId,
     ctx: &Context,
     params: &HashMap<String, String>,
+    headers: &HeaderMap,
 ) -> bool {
-    active(params) && !matching_regs(st, tenant, &query_spec(ctx, params), ctx).is_empty()
+    active(params) && !matching_regs(st, tenant, &query_spec(ctx, params), ctx, headers).is_empty()
 }
 
 pub async fn fed_query(
@@ -795,7 +864,7 @@ pub async fn fed_query(
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx) {
+    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
         let Some(op) = reg.read_op() else { continue };
         let (status, body) = if op == "queryBatch" && !reg.supports("queryEntity") {
             let mut sel = Map::new();
@@ -848,7 +917,7 @@ pub async fn fed_query(
         };
         // V-14: same NGSILD-Warning classification as fed_retrieve (6.3.17)
         if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &st.host_alias, text));
+            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
         if !(200..300).contains(&status) {
             continue;
@@ -859,7 +928,7 @@ pub async fn fed_query(
                     Some(doc) => out.push((reg.mode == "auxiliary", doc)),
                     None => warnings.push(warning(
                         111,
-                        &st.host_alias,
+                        &alias_for(&st.host_alias, tenant),
                         "the payload of the response was invalid",
                     )),
                 }
@@ -1024,11 +1093,12 @@ pub fn write_regs(
     spec: &crate::csource::CsrSpec,
     ctx: &Context,
     params: &HashMap<String, String>,
+    headers: &HeaderMap,
 ) -> Vec<FedReg> {
     if !active(params) {
         return Vec::new();
     }
-    matching_regs(st, tenant, spec, ctx)
+    matching_regs(st, tenant, spec, ctx, headers)
         .into_iter()
         .filter(|r| r.mode != "auxiliary")
         .collect()
@@ -1202,8 +1272,88 @@ mod tests {
             ent_ids: vec![],
             ent_types: vec![],
             tenant: None,
+            alias: None,
             csi: vec![],
         }
+    }
+
+    /// Table 5.2.40-1: "In the multi-tenancy use case (see clause 4.14), this
+    /// id shall be identifying a specific Tenant within a registered Context
+    /// Source." One alias for every tenant of a broker makes cross-tenant
+    /// federation inside that broker look like a loop.
+    #[test]
+    fn alias_identifies_the_tenant_not_just_the_broker() {
+        let tenant = |s: &str| antares_model::TenantId::new(s).expect("tenant");
+        // the default tenant keeps the bare alias — 6.3.14's own convention
+        // (the header is omitted, not sent as "default"), and the wire format
+        // every single-tenant peer already registered
+        assert_eq!(alias_for("antares1", &tenant("default")), "antares1");
+        assert_eq!(alias_for("antares1", &tenant("zvolen")), "antares1~zvolen");
+        // a chain naming this broker in ANOTHER tenant is not a loop: the
+        // registration points at a different (source, tenant) pair
+        let h = hdrs(Some("1.1 antares1~zvolen"));
+        assert!(via_loop(&h, &alias_for("antares1", &tenant("zvolen"))));
+        assert!(!via_loop(
+            &h,
+            &alias_for("antares1", &tenant("banskabystrica"))
+        ));
+        assert!(
+            !via_loop(&h, &alias_for("antares1", &tenant("default"))),
+            "the default tenant of this broker is its own Context Source"
+        );
+        // `~` cannot occur in a TenantId and is rejected in a configured
+        // alias, so the two halves can never blur into each other
+        assert!(antares_model::TenantId::new("a~b").is_err());
+    }
+
+    /// Table 6.3.18-2: "the listing of previously encountered Context Sources
+    /// supplied is used when determining matching registrations", and 5.2.9
+    /// gives a registration the peer's `contextSourceAlias` "which is used to
+    /// identify loops". A source already in the chain is therefore not a
+    /// match — and the tenant-specific alias keeps that per (source, tenant).
+    #[test]
+    fn registered_alias_in_the_via_chain_is_not_a_matching_registration() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        for (id, alias) in [
+            ("urn:ngsi-ld:ContextSourceRegistration:visited", "peer1"),
+            ("urn:ngsi-ld:ContextSourceRegistration:fresh", "peer2"),
+            ("urn:ngsi-ld:ContextSourceRegistration:anon", ""),
+        ] {
+            let mut doc = json!({
+                "id": id,
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+            });
+            if !alias.is_empty() {
+                doc["contextSourceAlias"] = json!(alias);
+            }
+            st.store
+                .create(&tenant, Kind::Registration, id, doc)
+                .expect("seed registration");
+        }
+        let spec = crate::csource::CsrSpec {
+            types: Some(vec![
+                "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
+            ]),
+            ..Default::default()
+        };
+        let all = matching_regs(&st, &tenant, &spec, &ctx, &hdrs(None));
+        assert_eq!(all.len(), 3, "no Via ⇒ every registration matches");
+        let via = hdrs(Some("1.1 peer1"));
+        let left = matching_regs(&st, &tenant, &spec, &ctx, &via);
+        let ids: Vec<&str> = left.iter().map(|r| r.reg_id.as_str()).collect();
+        assert!(
+            !ids.contains(&"urn:ngsi-ld:ContextSourceRegistration:visited"),
+            "a source already in the Via chain must not match"
+        );
+        assert_eq!(
+            ids.len(),
+            2,
+            "an unvisited peer and a registration with no alias still match"
+        );
     }
 
     /// 6.3.17 p.278 scopes 508 to "an exclusive or redirect registration,

@@ -268,7 +268,11 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
             "ops": ops_mask(reg),
             "tenant_at_peer": reg.get("tenant").and_then(Value::as_str),
             "headers": reg.get("contextSourceInfo"),
-            "host_alias": reg.get("hostAlias").and_then(Value::as_str),
+            // Table 5.2.9-1 names this member `contextSourceAlias` — the
+            // peer's tenant-specific loop pseudonym. (`hostAlias` is the
+            // prose spelling 6.3.18 uses and the csource_index column name;
+            // it is not a payload member and was never sent by any client.)
+            "host_alias": reg.get("contextSourceAlias").and_then(Value::as_str),
         })
     };
     let mut rows = Vec::new();
