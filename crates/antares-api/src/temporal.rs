@@ -265,7 +265,9 @@ fn window(
     };
     let Some(obj) = doc.as_object() else { return w };
     for (k, v) in obj {
-        // temporal scope: instance-shaped scope arrays window like attributes
+        // 4.5.6: the Scope of a Temporal Evolution is represented as the
+        // temporal representation of a Property — instance-shaped scope
+        // arrays window like attributes (plain-string scope stays meta).
         let scope_instances = k == "scope"
             && v.as_array()
                 .is_some_and(|a| a.first().is_some_and(Value::is_object));

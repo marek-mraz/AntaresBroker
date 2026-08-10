@@ -435,6 +435,41 @@ pub fn record_temporal_change(
     let Some(id) = after.get("id").and_then(Value::as_str) else {
         return;
     };
+    // 4.5.6: the Scope of a Temporal Evolution is represented as a temporal
+    // Property whose only sub-properties are the non-reified createdAt,
+    // modifiedAt, deletedAt and observedAt; when it "is updated as the result
+    // of a change from the Core API, the observedAt sub-Property should be
+    // set as a copy of the modifiedAt sub-Property".
+    if before.is_some_and(|b| b.get("scope") != after.get("scope")) {
+        if let Some(scope) = after.get("scope") {
+            let ts = after
+                .get("modifiedAt")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or_else(now_iso);
+            let inst = json!({
+                "type": "Property",
+                "value": scope.clone(),
+                "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
+                "createdAt": ts, "modifiedAt": ts, "observedAt": ts,
+            });
+            let r = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+                let target = doc.as_object_mut().ok_or(())?;
+                match target.get_mut("scope").and_then(Value::as_array_mut) {
+                    Some(arr) if arr.first().is_some_and(Value::is_object) => {
+                        arr.push(inst.clone());
+                    }
+                    _ => {
+                        target.insert("scope".into(), Value::Array(vec![inst.clone()]));
+                    }
+                }
+                Ok::<(), ()>(())
+            });
+            if let Err(e) = r {
+                tracing::warn!("temporal scope mirror failed: {e}");
+            }
+        }
+    }
     let mut additions = Map::new();
     for (k, class) in diff(before, Some(after)) {
         if !matches!(class, ChangeClass::Created | ChangeClass::Updated) {

@@ -89,3 +89,62 @@ async fn partial_update_appends_temporal_instances() {
         "expected values 1..3, got {values:?}"
     );
 }
+
+/// 4.5.6: a scope change from the Core API is recorded in the temporal
+/// evolution as a temporal Property instance whose observedAt "should be set
+/// as a copy of the modifiedAt sub-Property".
+#[tokio::test(flavor = "multi_thread")]
+async fn scope_update_appends_temporal_property_instance() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:2","type":"Rec","scope":"/A",
+        "v":{"type":"Property","value":1}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let patch = r#"{"type":"Rec","scope":"/B"}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("PATCH")
+            .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:Rec:2")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", patch.len())
+            .body(Body::from(patch))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:2?options=sysAttrs")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let scope = doc["scope"].as_array().expect("scope instance array");
+    let inst = scope
+        .iter()
+        .find(|i| i["value"] == serde_json::json!(["/B"]))
+        .unwrap_or_else(|| panic!("no /B scope instance in {body}"));
+    assert_eq!(inst["type"], "Property");
+    assert_eq!(
+        inst["observedAt"], inst["modifiedAt"],
+        "observedAt must copy modifiedAt"
+    );
+}
