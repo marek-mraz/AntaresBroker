@@ -828,6 +828,31 @@ fn merge_context_value(ctx: &mut Context, v: &Value) {
 mod tests {
     use super::*;
 
+    /// 4.4: "the Core @context is protected and shall remain immutable and
+    /// invariant during expansion or compaction of terms. […] implementations
+    /// shall consider the Core @context as if it were in the last position of
+    /// the @context array." A user context redefining a core term must not
+    /// win, while its own new terms still apply.
+    #[tokio::test]
+    async fn core_terms_are_protected_from_user_redefinition() {
+        let loader = Loader::new();
+        let user = serde_json::json!({
+            "Property": "https://evil.example/Property",
+            "observedAt": "https://evil.example/observedAt",
+            "speed": "https://example.org/speed"
+        });
+        let ctx = loader.resolve(&user).await.expect("resolve");
+        assert_eq!(
+            ctx.expand_key("Property"),
+            "https://uri.etsi.org/ngsi-ld/Property"
+        );
+        assert_eq!(
+            ctx.expand_key("observedAt"),
+            "https://uri.etsi.org/ngsi-ld/observedAt"
+        );
+        assert_eq!(ctx.expand_key("speed"), "https://example.org/speed");
+    }
+
     /// I4/§16.4: the resolver is the enforcement point, so a name that
     /// resolves into a private range must fail at DNS time — that is what
     /// makes a rebinding answer between check and connect harmless.
