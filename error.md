@@ -171,3 +171,46 @@ local or distributed". The Data Type column and 5.2.18 govern; the Remarks cell
 is a copy-paste error in the spec. Antares returns an UpdateResult on all five
 /attrs methods (audit V-15). Not a test-suite issue (no TP asserts either
 shape), recorded here because ics.yaml cites it.
+
+## 2026-08-10 — ETSI suite defect: `D018_01` asserts 508 for an **inclusive** registration
+
+**Hit:** the only failing TP of CI run 31326666159 — identical in all four
+store modes: `DistributedOperations → D018_01 Loop Detection With Via Header`,
+`508 != 204`.
+
+**What the test does.** Test Setup registers the CSR through
+`Prepare Context Source Registration From File … mode=inclusive` (fixture
+`csourceRegistrations/context-source-registration-vehicle-redirection-ops.jsonld`,
+whose `operations: ["redirectionOps"]` names an operation GROUP, not a mode).
+It then creates the entity, reads the `Via` pseudonym off the forwarded create
+(`1.1 antares1`), replays it on `DELETE /entities/{id}` and asserts **508**.
+
+**Spec.** 6.3.17 (p.278) scopes that status precisely:
+
+> In the case of an **exclusive** or **redirect** registration, where all of
+> the data is held outside of the `Context Broker` and held in a single
+> registered source, the following errors shall be returned: 508 Loop
+> Detected — if the single registered source and tenant is registered to
+> redirect back on to the `Context Broker`.
+
+For an **inclusive** registration the same clause prescribes 207 when sources
+return errors, and Table 6.3.18-2 (p.279) makes the Via listing "used when
+determining matching registrations" — so the looping registration drops out of
+matching and the DELETE executes locally. 204 is the correct answer; 508 would
+fail an operation the broker can serve from its own store.
+
+Corroborating: siblings `D018_02` and `D018_03` carry the `additive-inclusive`
+tag and `D018_01` does not, yet only `D018_01` hardcodes `mode=inclusive` —
+the mode looks like a slip in a test whose assertion belongs to the
+exclusive/redirect path.
+
+**Broker:** correct. `federation::handle_via_loop` raises 508 only for a
+single proxied registration; unit test
+`loop_508_only_for_a_single_proxy_registration`, end-to-end test
+`crates/antares-api/tests/federation_loop.rs`.
+
+**Action taken:** `D018_01`'s setup switched to `mode=redirect` in this fork,
+which puts the scenario in the clause its assertion cites and leaves the
+subject of the test (Via replay ⇒ loop detected) intact. Verified first as a
+Rust test (`single_redirect_source_looping_back_is_508`) before touching the
+fixture. Status: to be raised upstream.
