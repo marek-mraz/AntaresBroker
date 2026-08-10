@@ -145,3 +145,43 @@ stopping. Ask only when rule 9 leaves you genuinely unsure.
 | ETSI suite fork (submodule) | `ngsi-ld-test-suite/` |
 | Task list & progress | `tasks.md` |
 | Spec PDFs (authoritative) | `etsi-cim-specs/`, via `mempalace_get_pdf_pages` |
+
+## 6. State handoff — 2026-08-10 (prune as items resolve)
+
+**Loop position:** `python3 dev/spec.py status` → 6 implemented (4.2.2,
+4.2.3, 4.8, 5.2.40, 5.15.1, 6.3.18) · 1 partial (6.3.17 — gaps:
+cacheDuration caching/warn 110, cooldown) · 121 informative · 819
+not-implemented. **Next clause: 4.2.4**, then 4.2.5, 4.3.x (architecture
+umbrellas — expect rule-9 delegation verdicts, no code).
+
+**Pending Mac-side (no ssh in the sandbox):**
+- `git -C /workspace/ngsi-ld-test-suite push origin main` — origin/master
+  references suite commits that are NOT on the suite remote; every fresh
+  clone has a broken submodule until this push happens.
+- `git -C /workspace push origin --delete fed-alias-tenant` — stale branch
+  with a pre-amend submodule pointer.
+- Local `master` may be ahead of origin — an external auto-pusher exists
+  but is not this sandbox; verify.
+
+**Open engineering tasks (in rough priority):**
+1. §2 capacity budgets re-derivation for the 10× targets — MEASURED
+   (100k compiled subs ≈ 300 MB in the current mirror; likely per-tenant
+   lazy load + LRU). See the §1 warning.
+2. 4.3.6.3 validation gap: exclusive CSR shall name BOTH entity id and
+   attributes; overlapping exclusive/redirect for the same combination
+   shall be rejected — `csource.rs` checks neither. Known conformance
+   hole on a WRITE path; the loop reaches it late, consider pulling it
+   forward.
+3. CI enforcement of §0.3 (`dev/spec.py check`): clause-prefix commit
+   must touch `docs/spec/`; robot-list drift; forbidden internal-doc
+   citations in `crates/`; frontmatter enum validation; split idempotence.
+4. `dev/spec.py next` + per-chapter burndown in the CI summary.
+5. ETSI D018_01 (`mode=inclusive` asserting 508) — raise upstream; fork
+   already fixed, error.md 2026-08-10 has the full argument.
+6. MemPalace re-mine after the doc split — FIRST add `docs/spec/` to
+   `mempalace.yaml` excludes (it duplicates the already-indexed PDF).
+
+**Loose ends:** `ETSI-matrix-results (5).zip` untracked in `/workspace`
+(analysis input, delete freely); `results/`, `results-proc/`, `www/`
+untracked as before. The federation Via/502/207 fixes, tenant-alias
+work (ADR-0011) and the ledger reset are all committed and documented.
