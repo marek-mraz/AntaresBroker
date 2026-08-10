@@ -270,3 +270,97 @@ async fn relationship_deletion_records_null_instance() {
         "instanceId must be maintained"
     );
 }
+
+/// 4.5.9: simplified temporal representation — per-type member names
+/// (values/objects/languageMaps/valueLists/objectLists), [value, time] pairs,
+/// bare ordered arrays for the List types (Examples 3 and 7), wrapped
+/// {"languageMap": …} for LanguageProperty (Example 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn simplified_temporal_pairs_per_attribute_type() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:5","type":"Rec",
+        "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},
+                 {"type":"Property","value":2,"observedAt":"2026-08-10T00:00:02Z"}],
+        "location":{"type":"GeoProperty","observedAt":"2026-08-10T00:00:01Z",
+                    "value":{"type":"Point","coordinates":[1.0,2.0]}},
+        "says":{"type":"LanguageProperty","observedAt":"2026-08-10T00:00:01Z",
+                "languageMap":{"en":"yes"}},
+        "steps":{"type":"ListProperty","observedAt":"2026-08-10T00:00:01Z",
+                 "valueList":["a","b"]},
+        "spouse":{"type":"Relationship","observedAt":"2026-08-10T00:00:01Z",
+                  "object":"urn:ngsi-ld:P:1"},
+        "route":{"type":"ListRelationship","observedAt":"2026-08-10T00:00:01Z",
+                 "objectList":["urn:ngsi-ld:R:1","urn:ngsi-ld:R:2"]}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:5?options=temporalValues")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+
+    let speed = &doc["speed"];
+    assert_eq!(speed["type"], "Property");
+    let pairs = speed["values"].as_array().expect("values pairs");
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(pairs[0].as_array().expect("pair").len(), 2);
+    assert_eq!(pairs[0][0].as_f64(), Some(1.0));
+    assert_eq!(pairs[0][1], "2026-08-10T00:00:01Z");
+
+    assert_eq!(doc["location"]["type"], "GeoProperty");
+    assert_eq!(doc["location"]["values"][0][0]["type"], "Point");
+
+    assert_eq!(
+        doc["says"]["languageMaps"][0][0],
+        serde_json::json!({"languageMap": {"en": "yes"}})
+    );
+
+    // Lists carry the BARE ordered array as the pair's first element
+    assert_eq!(doc["steps"]["type"], "ListProperty");
+    assert_eq!(
+        doc["steps"]["valueLists"][0][0],
+        serde_json::json!(["a", "b"])
+    );
+    assert_eq!(doc["spouse"]["objects"][0][0], "urn:ngsi-ld:P:1");
+    assert_eq!(doc["route"]["type"], "ListRelationship");
+    assert_eq!(
+        doc["route"]["objectLists"][0][0],
+        serde_json::json!(["urn:ngsi-ld:R:1", "urn:ngsi-ld:R:2"])
+    );
+
+    // the simplified object shall ONLY contain type + the per-type member
+    // (datasetId when grouped): no reified value/object/instanceId leakage
+    for (attr, member) in [
+        ("speed", "values"),
+        ("says", "languageMaps"),
+        ("steps", "valueLists"),
+        ("spouse", "objects"),
+        ("route", "objectLists"),
+    ] {
+        let extra: Vec<&String> = doc[attr]
+            .as_object()
+            .expect("object")
+            .keys()
+            .filter(|k| !["type", "datasetId", member].contains(&k.as_str()))
+            .collect();
+        assert!(extra.is_empty(), "{attr} leaks members: {extra:?}");
+    }
+}
