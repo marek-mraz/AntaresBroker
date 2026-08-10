@@ -215,6 +215,12 @@ pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
     // is a JSON-LD-keyword alias in the @context (e.g. "type" → "@type") is
     // invalid (001_02_04).
     let one = |t: &str| -> Result<Value, NgsiError> {
+        // 4.6.2: Entity Type names obey the name grammar (BadRequestData).
+        if !valid_name(t) {
+            return Err(bad(&format!(
+                "entity type {t:?} violates the 4.6.2 name grammar"
+            )));
+        }
         let iri = ctx.expand_key(t);
         if crate::context::is_absolute_iri(&iri) {
             Ok(Value::String(iri))
@@ -274,6 +280,20 @@ pub fn is_deletion_instance(inst: &Value) -> bool {
 }
 
 /// Expand one attribute's value into a normalized instance list.
+/// 4.6.2 Supported names: `name = unicodeLetter *(unicodeLetter /
+/// unicodeNumber / "_")`. A key containing ':' is a compact or absolute IRI
+/// (the spec's prefix:name production) and is outside the term grammar.
+// ponytail: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
+// through as an IRI; tighten to per-part validation if it ever matters.
+pub(crate) fn valid_name(s: &str) -> bool {
+    if s.contains(':') {
+        return true;
+    }
+    let mut ch = s.chars();
+    ch.next().is_some_and(char::is_alphabetic)
+        && ch.all(|c| c.is_alphabetic() || c.is_numeric() || c == '_')
+}
+
 fn expand_attribute(
     name: &str,
     v: &Value,
@@ -284,6 +304,13 @@ fn expand_attribute(
     let bad = |m: String| NgsiError::BadRequestData(m);
     if depth > 8 {
         return Err(bad(format!("attribute {name}: nesting too deep")));
+    }
+    // 4.6.2: Property/Relationship names with characters outside the name
+    // grammar raise BadRequestData.
+    if !valid_name(name) {
+        return Err(bad(format!(
+            "attribute name {name:?} violates the 4.6.2 name grammar"
+        )));
     }
     match v {
         Value::Array(items) if items.iter().all(looks_like_instance) && !items.is_empty() => {
@@ -1285,6 +1312,55 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.6.2 Supported names: name = unicodeLetter *(letter|number|_) —
+    /// Entity Type / Property / Relationship names with other characters are
+    /// BadRequestData; keys containing ':' (compact or absolute IRIs) are
+    /// out of the term grammar's scope.
+    #[test]
+    fn name_grammar_rules() {
+        let attr = |name: &str| {
+            let doc = json!({"id": "urn:x", "type": "T",
+                name: {"type": "Property", "value": 1}});
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+        };
+        for bad_name in ["my attr", "1temp", "temp-erature", "temp!", "_hidden"] {
+            let err = attr(bad_name).expect_err(bad_name);
+            // 4.6.2 names the error type: BadRequestData, nothing else
+            assert!(
+                matches!(err, NgsiError::BadRequestData(_)),
+                "{bad_name}: {err:?}"
+            );
+        }
+        for good in [
+            "teplota_1",
+            "Ωmega",
+            "výška",
+            "ns:temp",
+            "https://example.com/a b",
+        ] {
+            attr(good).expect(good);
+        }
+        // sub-attribute names obey the same grammar
+        let doc = json!({"id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                "bad sub": {"type": "Property", "value": 2}}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "sub-attribute with space must be rejected"
+        );
+        // entity type names too; multi-type checks each entry
+        let ty = |t: Value| {
+            let doc = json!({"id": "urn:x", "type": t, "speed": {"type": "Property", "value": 1}});
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+        };
+        assert!(ty(json!("My Type")).is_err(), "type with space");
+        assert!(
+            ty(json!(["T", "9T"])).is_err(),
+            "type starting with a digit"
+        );
+        ty(json!("Škola")).expect("unicode-letter type");
     }
 
     /// 4.5.24.2/4.5.24.3: JsonProperty — json is a raw object or array of
