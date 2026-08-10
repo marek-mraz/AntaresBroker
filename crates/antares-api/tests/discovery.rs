@@ -114,3 +114,71 @@ async fn detailed_entity_type_list_shape() {
         .collect();
     assert!(extra.is_empty(), "unexpected members: {extra:?}");
 }
+
+/// 4.5.12: entity type information — id is the type URI, fixed type
+/// "EntityTypeInfo", typeName the short name; entityCount/attributeDetails
+/// are the 5.2.26 detail members, nothing else appears.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_type_info_shape() {
+    let st = AppState::new("test".into());
+    let create = r#"{"id":"urn:ngsi-ld:Disc:3","type":"Building",
+        "v":{"type":"Property","value":1}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/types/Building")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(doc["type"], "EntityTypeInfo");
+    assert_eq!(
+        doc["id"],
+        "https://uri.etsi.org/ngsi-ld/default-context/Building"
+    );
+    assert_eq!(doc["typeName"], "Building");
+    assert_eq!(doc["entityCount"], 1);
+    let extra: Vec<&String> = doc
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| {
+            ![
+                "id",
+                "type",
+                "typeName",
+                "entityCount",
+                "attributeDetails",
+                "@context",
+            ]
+            .contains(&k.as_str())
+        })
+        .collect();
+    assert!(extra.is_empty(), "unexpected members: {extra:?}");
+
+    // unknown type → 404 ResourceNotFound
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/types/Nonexistent")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}

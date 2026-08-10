@@ -139,6 +139,9 @@ pub async fn entity_types(
 
 // ---------- GET /types/{type} (5.7.7) ----------
 
+/// 4.5.12 Entity Type Information Representation: id = the entity type URI,
+/// fixed type "EntityTypeInfo", typeName (short name under the @context);
+/// entityCount and attributeDetails are the 5.2.26 detail members (5.7.7).
 pub async fn entity_type_info(
     State(st): State<AppState>,
     Path(type_name): Path<String>,
