@@ -742,14 +742,29 @@ mod tests {
         assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
+    /// 4.8: "Temporal Properties in NGSI-LD shall be represented based on
+    /// the DateTime data type as mandated by clause 4.6.3" and "a
+    /// TemporalProperty does not allow reification" — only a valid UTC
+    /// DateTime STRING is a legal observedAt.
     #[test]
     fn rejects_bad_observed_at() {
-        let doc = serde_json::json!({
-            "id": "urn:ngsi-ld:Building:1",
-            "type": "Building",
-            "a": {"type": "Property", "value": 1, "observedAt": "not-a-date"}
-        });
-        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        for bad in [
+            serde_json::json!("not-a-date"),
+            // 4.6.3: trailing component shall be Z — offsets are invalid
+            serde_json::json!("2026-08-10T12:00:00+02:00"),
+            // non-reified: a Property-shaped observedAt is not a DateTime
+            serde_json::json!({"type": "Property", "value": "2026-08-10T12:00:00Z"}),
+        ] {
+            let doc = serde_json::json!({
+                "id": "urn:ngsi-ld:Building:1",
+                "type": "Building",
+                "a": {"type": "Property", "value": 1, "observedAt": bad}
+            });
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "observedAt {bad} must be rejected (4.8/4.6.3)"
+            );
+        }
     }
 
     #[test]
