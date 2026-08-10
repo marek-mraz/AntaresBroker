@@ -565,11 +565,14 @@ fn expand_instance(
         let s = d
             .as_str()
             .ok_or_else(|| bad(format!("attribute {name}: datasetId must be a URI")))?;
+        // 4.5.5.1: "datasetId": "@none" designates the default Attribute
+        // instance, which never carries a datasetId — normalize by dropping it
+        // so storage, matching and responses treat it as absent.
         if s != "@none" {
             antares_model::EntityId::new(s)
                 .map_err(|_| bad(format!("attribute {name}: datasetId must be a URI")))?;
+            out.insert("datasetId".into(), d.clone());
         }
-        out.insert("datasetId".into(), d.clone());
     }
     if let Some(o) = obj.get("observedAt") {
         let s = o
@@ -698,6 +701,10 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
     Ok(Value::Object(out))
 }
 
+/// 4.5.5.1: "There can only be one default Attribute instance for an
+/// Attribute with a given Attribute name in any request or response";
+/// datasetIds must be distinct per attribute (explicit "@none" is normalized
+/// to absent before this check, so absent + "@none" counts as two defaults).
 fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError> {
     let mut seen: Vec<&str> = Vec::new();
     let mut default_count = 0usize;
@@ -794,6 +801,24 @@ mod tests {
     use super::*;
     use crate::loader::Loader;
     use serde_json::json;
+
+    /// 4.5.5.1: explicit "datasetId": "@none" designates the default
+    /// instance — normalized to absent, so it never appears in responses and
+    /// absent + "@none" in one request is two default instances (rejected).
+    #[test]
+    fn dataset_id_none_is_the_default_instance() {
+        let doc = json!({"id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1, "datasetId": "@none"}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("@none accepted");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/speed"][0];
+        assert!(inst.get("datasetId").is_none(), "@none must be dropped");
+        // absent + "@none" = two defaults → BadRequestData
+        let doc = json!({"id": "urn:x", "type": "T",
+            "speed": [{"type": "Property", "value": 1},
+                      {"type": "Property", "value": 2, "datasetId": "@none"}]});
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
 
     /// 4.5.3.3: "type: If missing, Relationship can be inferred by the
     /// presence of the object attribute" — and the shared prohibitions apply

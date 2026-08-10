@@ -687,6 +687,37 @@ fn recency(inst: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// 4.5.5.2 Processing of Conflicting Transient Entities: for each received
+/// Entity version with an entity-level expiresAt, add it as a non-reified
+/// expiresAt on every Attribute instance that lacks one, and cap any
+/// Attribute-level expiresAt further in the future to the entity's (earlier)
+/// DateTime.
+fn push_down_expires(doc: &mut Value) {
+    let Some(o) = doc.as_object_mut() else { return };
+    let Some(exp) = o.get("expiresAt").and_then(Value::as_str).map(String::from) else {
+        return;
+    };
+    for (k, v) in o.iter_mut() {
+        if matches!(
+            k.as_str(),
+            "id" | "type" | "scope" | "expiresAt" | "createdAt" | "modifiedAt" | "deletedAt"
+        ) {
+            continue;
+        }
+        let Some(instances) = v.as_array_mut() else {
+            continue;
+        };
+        for inst in instances.iter_mut().filter_map(Value::as_object_mut) {
+            match inst.get("expiresAt").and_then(Value::as_str) {
+                Some(ae) if ae <= exp.as_str() => {}
+                _ => {
+                    inst.insert("expiresAt".into(), Value::String(exp.clone()));
+                }
+            }
+        }
+    }
+}
+
 /// 4.5.5.3 first step (audit V-19): "if an expiresAt DateTime is present on
 /// the Attribute and the date lies in the past, it shall be discarded" —
 /// BEFORE any recency comparison.
@@ -704,11 +735,32 @@ fn expired(inst: &Value, now: &str) -> bool {
 /// past-expiresAt instances first, then most recent observedAt/modifiedAt).
 pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
     let now = crate::state::now_iso();
+    let mut add = add.clone();
+    push_down_expires(&mut add);
     let Some(bo) = base.as_object_mut() else {
         return;
     };
     let Some(ao) = add.as_object() else { return };
+    // 4.5.5.3: entity-level expiresAt — "missing from at least one version of
+    // the Entity received" → removed; present in all versions → the DateTime
+    // furthest in the future.
+    match (
+        bo.get("expiresAt").and_then(Value::as_str),
+        ao.get("expiresAt").and_then(Value::as_str),
+    ) {
+        (Some(b), Some(a)) => {
+            if a > b {
+                bo.insert("expiresAt".into(), Value::String(a.to_owned()));
+            }
+        }
+        _ => {
+            bo.remove("expiresAt");
+        }
+    }
     for (k, v) in ao {
+        if k == "expiresAt" {
+            continue; // resolved above
+        }
         match bo.get_mut(k) {
             None => {
                 bo.insert(k.clone(), v.clone());
@@ -1657,5 +1709,48 @@ mod tests {
         });
         merge_docs(&mut base2, &add2, false);
         assert_eq!(base2[attr][0]["value"], 2, "live instance replaces expired");
+    }
+
+    /// 4.5.5.3: entity-level expiresAt — missing from at least one received
+    /// version → removed; present in all versions → furthest in the future.
+    #[test]
+    fn merge_entity_expires_at_intersection_and_max() {
+        let mut base = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2030-01-01T00:00:00Z"});
+        let add = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2031-01-01T00:00:00Z"});
+        merge_docs(&mut base, &add, false);
+        assert_eq!(base["expiresAt"], "2031-01-01T00:00:00Z");
+        // one version without expiresAt → removed
+        let add2 = json!({"id": "urn:x", "type": ["T"]});
+        merge_docs(&mut base, &add2, false);
+        assert!(base.get("expiresAt").is_none(), "expiresAt must be removed");
+        // and never re-introduced by a later version that has one
+        let add3 = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2032-01-01T00:00:00Z"});
+        merge_docs(&mut base, &add3, false);
+        assert!(base.get("expiresAt").is_none());
+    }
+
+    /// 4.5.5.2: a received version's entity-level expiresAt is pushed onto
+    /// each Attribute instance — added where absent, capped where the
+    /// Attribute's own expiresAt lies further in the future.
+    #[test]
+    fn merge_pushes_entity_expires_at_onto_attributes() {
+        let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let mut base = json!({"id": "urn:x", "type": ["T"]});
+        let add = json!({
+            "id": "urn:x", "type": ["T"],
+            "expiresAt": "2030-01-01T00:00:00Z",
+            attr: [
+                {"type": "Property", "value": 1},
+                {"type": "Property", "value": 2, "datasetId": "urn:ngsi-ld:Dataset:1",
+                 "expiresAt": "2035-01-01T00:00:00Z"},
+                {"type": "Property", "value": 3, "datasetId": "urn:ngsi-ld:Dataset:2",
+                 "expiresAt": "2029-01-01T00:00:00Z"}
+            ]
+        });
+        merge_docs(&mut base, &add, false);
+        let inst = base[attr].as_array().expect("attr array");
+        assert_eq!(inst[0]["expiresAt"], "2030-01-01T00:00:00Z", "added");
+        assert_eq!(inst[1]["expiresAt"], "2030-01-01T00:00:00Z", "capped");
+        assert_eq!(inst[2]["expiresAt"], "2029-01-01T00:00:00Z", "earlier kept");
     }
 }
