@@ -443,12 +443,13 @@ fn expand_instance(
             )));
         }
         // 4.5.3.2: "unitCode shall never be present, as Relationships are
-        // unitless." 4.5.18.2/3 extend the prohibition to LanguageProperty
-        // ("language maps are always strings and hence unitless").
+        // unitless." 4.5.18.2/3 and 4.5.20.2/3 extend the prohibition to
+        // LanguageProperty and VocabProperty ("always strings and hence
+        // unitless").
         if obj.contains_key("unitCode")
             && matches!(
                 attr_type,
-                "Relationship" | "ListRelationship" | "LanguageProperty"
+                "Relationship" | "ListRelationship" | "LanguageProperty" | "VocabProperty"
             )
         {
             return Err(bad(format!(
@@ -1226,6 +1227,40 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.5.20.2/4.5.20.3: VocabProperty — vocab is a string or array of
+    /// strings coerced to IRIs; unitCode and value prohibited; concise
+    /// inference from vocab.
+    #[test]
+    fn vocab_property_rules() {
+        let mk = |attr: Value| json!({"id": "urn:x", "type": "T", "category": attr});
+        // normalized: term expands to an IRI under the context
+        let doc = mk(json!({"type": "VocabProperty", "vocab": "non-commercial"}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("valid vocab");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/category"][0];
+        assert_eq!(
+            inst["vocab"],
+            "https://uri.etsi.org/ngsi-ld/default-context/non-commercial"
+        );
+        // concise inference from vocab
+        let doc = mk(json!({"vocab": ["a", "b"]}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("concise");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/category"][0]["type"],
+            "VocabProperty"
+        );
+        // non-string vocab rejected
+        let doc = mk(json!({"type": "VocabProperty", "vocab": 5}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // unitCode prohibited
+        let doc = mk(json!({"type": "VocabProperty", "vocab": "x", "unitCode": "MTR"}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // value prohibited
+        let doc = mk(json!({"type": "VocabProperty", "vocab": "x", "value": 1}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     /// 4.5.18.2/4.5.18.3: LanguageProperty — non-empty language tags, unitCode
