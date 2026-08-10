@@ -514,10 +514,24 @@ fn expand_instance(
             let val = obj
                 .get("value")
                 .ok_or_else(|| bad(format!("attribute {name}: GeoProperty needs value")))?;
-            if !(opts.allow_null && is_ngsi_null(val)) {
-                validate_geojson(name, val)?;
+            // 4.7.2: a whole geometry may arrive as an encoded JSON string,
+            // accepted "if and only if" it parses into a valid geometry —
+            // normalized here to the object form so storage, geo-queries and
+            // responses all see one representation.
+            let val = match val {
+                Value::String(s) if !(opts.allow_null && is_ngsi_null(val)) => {
+                    serde_json::from_str::<Value>(s).map_err(|_| {
+                        bad(format!(
+                            "attribute {name}: string-encoded geometry is not valid JSON"
+                        ))
+                    })?
+                }
+                _ => val.clone(),
+            };
+            if !(opts.allow_null && is_ngsi_null(&val)) {
+                validate_geojson(name, &val)?;
             }
-            out.insert("value".into(), val.clone());
+            out.insert("value".into(), val);
         }
         "Relationship" => {
             let objv = obj
@@ -1320,6 +1334,65 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.7.1/4.7.2/4.7.3 Geospatial Properties: location & co. must be
+    /// GeoProperties (4.7.1); a whole geometry MAY arrive as an encoded JSON
+    /// string, accepted "if and only if" it parses into a valid geometry of
+    /// the stated type (4.7.2, normalized to the object form); the concise
+    /// forms infer GeoProperty from a resolving geometry value (4.7.3).
+    #[test]
+    fn geo_property_rules() {
+        let ent = |attr: Value| {
+            let doc = json!({"id": "urn:x", "type": "T", "g": attr});
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+        };
+        // 4.7.2: string-encoded geometry accepted and normalized to the object
+        let out = ent(json!({"type": "GeoProperty",
+            "value": "{\"type\": \"Point\", \"coordinates\": [17.1, 48.7]}"}))
+        .expect("string-encoded geometry");
+        let val = &out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["value"];
+        assert!(
+            !val.is_string(),
+            "value must be normalized, not stay a string"
+        );
+        assert_eq!(val["type"], "Point");
+        assert_eq!(val["coordinates"][0], 17.1);
+        // iff: unparseable, non-geometry and GeometryCollection strings → 400
+        for bad_s in [
+            "not json",
+            "{\"a\": 1}",
+            "{\"type\": \"GeometryCollection\", \"geometries\": []}",
+        ] {
+            let err = ent(json!({"type": "GeoProperty", "value": bad_s})).expect_err(bad_s);
+            assert!(matches!(err, NgsiError::BadRequestData(_)), "{bad_s}");
+        }
+        // 4.7.1: location shall be a GeoProperty
+        let doc = json!({"id": "urn:x", "type": "T",
+            "location": {"type": "Property", "value": 1}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "location as plain Property"
+        );
+        // 4.7.3: concise inference — bare geometry and resolving value
+        let out = ent(json!({"type": "Point", "coordinates": [1.0, 2.0]}))
+            .expect("bare geometry concise form");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["type"],
+            "GeoProperty"
+        );
+        let out = ent(json!({"value": {"type": "Point", "coordinates": [1.0, 2.0]}}))
+            .expect("resolving value");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["type"],
+            "GeoProperty"
+        );
+        // an ordinary string value must NOT be inferred as GeoProperty
+        let out = ent(json!({"value": "Point"})).expect("plain string value");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["type"],
+            "Property"
+        );
     }
 
     /// 4.6.5 Supported data types for LanguageMaps: keys are RFC 5646 tags
