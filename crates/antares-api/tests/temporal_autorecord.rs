@@ -148,3 +148,125 @@ async fn scope_update_appends_temporal_property_instance() {
         "observedAt must copy modifiedAt"
     );
 }
+
+/// 4.5.7: the temporal representation of a Property is an array of 4.5.2
+/// instances; deletion records an instance with value "urn:ngsi-ld:null" and
+/// deletedAt set; every instance carries an instanceId.
+#[tokio::test(flavor = "multi_thread")]
+async fn property_deletion_records_null_instance() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:3","type":"Rec",
+        "v":{"type":"Property","value":7,"observedAt":"2026-08-10T00:00:00Z"}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("DELETE")
+            .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:Rec:3/attrs/v")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:3?timeproperty=deletedAt")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let instances = doc["v"].as_array().expect("v instance array");
+    let deleted = instances
+        .iter()
+        .find(|i| i["value"] == "urn:ngsi-ld:null")
+        .unwrap_or_else(|| panic!("no null deletion instance in {body}"));
+    assert!(deleted["deletedAt"].is_string(), "deletedAt must be set");
+    assert!(
+        deleted["instanceId"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("urn:")),
+        "instanceId must be maintained"
+    );
+}
+
+/// 4.5.8: the temporal representation of a Relationship is an array of 4.5.3
+/// instances; deletion records an instance with object "urn:ngsi-ld:null" and
+/// deletedAt set; every instance carries an instanceId.
+#[tokio::test(flavor = "multi_thread")]
+async fn relationship_deletion_records_null_instance() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:4","type":"Rec",
+        "r":{"type":"Relationship","object":"urn:ngsi-ld:X:1",
+             "observedAt":"2026-08-10T00:00:00Z"}}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("DELETE")
+            .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:Rec:4/attrs/r")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:4?timeproperty=deletedAt")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let instances = doc["r"].as_array().expect("r instance array");
+    let deleted = instances
+        .iter()
+        .find(|i| i["object"] == "urn:ngsi-ld:null")
+        .unwrap_or_else(|| panic!("no null deletion instance in {body}"));
+    assert_eq!(deleted["type"], "Relationship");
+    assert!(
+        deleted.get("value").is_none(),
+        "a Relationship deletion instance must not carry a Property value"
+    );
+    assert!(deleted["deletedAt"].is_string(), "deletedAt must be set");
+    assert!(
+        deleted["instanceId"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("urn:")),
+        "instanceId must be maintained"
+    );
+}

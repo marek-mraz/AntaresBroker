@@ -116,8 +116,12 @@ pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
     }
 }
 
-/// Attribute deletion appends ONE deletion instance to the temporal
-/// representation (4.8): typed NGSI-LD-null value + deletedAt.
+/// 4.5.7/4.5.8: "In case the Property is deleted, an instance of the
+/// Property is recorded with its value set to the URI "urn:ngsi-ld:null"
+/// and the deletedAt Temporal Property set" (object for a Relationship;
+/// typed null shapes for the LanguageProperty/JsonProperty/Vocab/List
+/// subtypes). Each recorded instance carries an instanceId — the clause
+/// SHOULD that makes 5.6.14/5.6.15 selective modification possible.
 pub fn mirror_delete_attr(
     st: &AppState,
     tenant: &TenantId,
