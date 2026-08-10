@@ -1964,6 +1964,9 @@ pub fn order_entities(
 
 // ---------- GeoJSON output (6.3.15) ----------
 
+/// 4.5.16.2 GeoJSON Feature: id = entity id, fixed type "Feature", geometry
+/// = the selected GeoProperty's value (4.5.16.1: geometryProperty parameter,
+/// default "location"), properties = the entity's type and attributes.
 pub fn to_geojson_feature(
     entity: Value,
     geometry_property: Option<&String>,
@@ -1988,14 +1991,28 @@ pub fn to_geojson_feature(
     Value::Object(feature)
 }
 
+/// 4.5.16.1: with multiple instances the default one (no datasetId) is
+/// selected unless a datasetId filter already narrowed the set to one; a
+/// missing GeoProperty or a value that "does not hold a valid GeoJSON
+/// geometry object" yields null — "which is syntactically valid GeoJSON".
 fn geo_value_of(attr: &Value) -> Value {
     let inst = match attr {
-        Value::Array(a) => a.first().cloned().unwrap_or(Value::Null),
+        Value::Array(a) => match a.iter().find(|i| i.get("datasetId").is_none()) {
+            Some(default) => default.clone(),
+            None if a.len() == 1 => a[0].clone(),
+            None => return Value::Null,
+        },
         other => other.clone(),
     };
-    inst.get("value").cloned().unwrap_or(inst)
+    let v = inst.get("value").cloned().unwrap_or(inst);
+    match antares_jsonld::expand::validate_geojson("geometry", &v) {
+        Ok(()) => v,
+        Err(_) => Value::Null,
+    }
 }
 
+/// 4.5.16.3 GeoJSON FeatureCollection: fixed type "FeatureCollection" +
+/// features array of 4.5.16.2 Feature objects (no per-Feature @context).
 pub fn to_geojson_collection(
     entities: Vec<Value>,
     geometry_property: Option<&String>,
@@ -2120,5 +2137,53 @@ mod tests {
             "2026-08-08T00:00:01Z",
         );
         assert!(doc.get("expiresAt").is_none(), "NGSI-LD Null removes it");
+    }
+
+    /// 4.5.16.1/4.5.16.2/4.5.16.3: geometry selection (default instance,
+    /// datasetId-narrowed single, invalid value -> null) and the
+    /// Feature/FeatureCollection shapes.
+    #[test]
+    fn geojson_feature_selection_and_shape() {
+        use super::{to_geojson_collection, to_geojson_feature};
+        use serde_json::Value;
+        let ctx = antares_jsonld::Loader::new().core();
+        let entity = json!({
+            "id": "urn:ngsi-ld:V:1", "type": "Vehicle",
+            "location": [
+                {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [9.0, 9.0]},
+                 "datasetId": "urn:ngsi-ld:Dataset:gps"},
+                {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [1.0, 2.0]}}
+            ],
+            "speed": {"type": "Property", "value": 5}
+        });
+        let f = to_geojson_feature(entity.clone(), None, &ctx);
+        assert_eq!(f["type"], "Feature");
+        assert_eq!(f["id"], "urn:ngsi-ld:V:1");
+        // default instance (no datasetId) wins over the first array element
+        assert_eq!(
+            f["geometry"],
+            json!({"type": "Point", "coordinates": [1.0, 2.0]})
+        );
+        assert_eq!(f["properties"]["type"], "Vehicle");
+        assert!(
+            f["properties"].get("id").is_none(),
+            "id only at Feature level"
+        );
+        assert!(f["properties"].get("speed").is_some());
+
+        // geometryProperty naming a non-geometry Property -> null geometry
+        let f2 = to_geojson_feature(entity.clone(), Some(&"speed".to_string()), &ctx);
+        assert_eq!(f2["geometry"], Value::Null);
+        // absent GeoProperty -> null geometry
+        let f3 = to_geojson_feature(entity.clone(), Some(&"missing".to_string()), &ctx);
+        assert_eq!(f3["geometry"], Value::Null);
+
+        let fc = to_geojson_collection(vec![entity], None, &ctx);
+        assert_eq!(fc["type"], "FeatureCollection");
+        assert_eq!(fc["features"].as_array().map(Vec::len), Some(1));
+        assert!(
+            fc["features"][0].get("@context").is_none(),
+            "no per-Feature @context"
+        );
     }
 }
