@@ -21,6 +21,7 @@ Work **file by file, in clause order** (`4.*` → `5.*` → `6.*` → `7.*` → 
 5. **Robot Framework TPs — check for existing ones FIRST.** The file's `robot:` list + `grep -r "5_6_6" ngsi-ld-test-suite/TP/` (clause tag form). Only write a NEW TP for normative surface no existing TP covers — duplicating an ETSI TP is noise. New TPs go in the suite fork following its conventions: `[Documentation]` quotes the clause requirement briefly, `[Tags]` carries the clause number (`5_6_6` form) — that tag is what feeds `robot:` back into the ledger. **Edge-case TPs are mandatory**, not optional: error paths, boundary inputs, the cases the official 686 TPs skip (that long tail is exactly where §4.1's Scorpio violations lived).
 6. **Update the ledger file**: `status:` + `evidence:` (code/test anchors) + `notes:` (dates, named gaps, spec doubts); `python3 dev/spec.py robot` refreshes the TP list. Suspected suite/spec defect → prove it from the clause text first, log in `error.md` + `testsuite-doubts.md`, never hack the broker to a broken test (§ETSI guide).
 7. **One clause = one commit**: code, unit tests, Robot TPs, ledger file — message cites the clause number (`5.6.6:` prefix). Validation per run policy: one store mode locally, the CI 4×8 matrix is the authority.
+8. **The audit loop starts no brokers and no stacks** (user rule, 2026-08-10): the clause's evidence is its unit tests; Robot TPs are validated by the standard pipeline (CI matrix / an explicitly requested `dev/etsi-pipeline.sh` run), never by ad-hoc local broker instances.
 
 ---
 
@@ -42,9 +43,11 @@ Non-goals for v1: **the WebSocket binding** (decision 2026-08-03 — deferred; t
 
 ### 1.1 Why these numbers are consistent
 
-- 10M entities / 1,000 tenants = 10k entities per tenant average — a mid-size city deployment per tenant. Skew is expected (one tenant with 1M entities must not starve the rest); the design handles skew via indexes and fair queueing, not quotas (quotas are a v2 policy knob).
-- 10,000 subscriptions over 10M entities means subscription matching must be index-shaped (per changed entity, find candidate subs via type/attr/tenant lookup structures in O(log n)), never scan-all-subs per change. At 10k subs a naive scan-per-change is already ~10⁴ × change-rate evaluations/s — off the table.
-- 10,000 WS connections ≈ 10,000 subscriptions *(deferred with WS — kept as the sizing assumption the reserved budget is based on)*: some WS clients are query/command clients, some carry several subscriptions; the WS layer must cost ~15–30 KB per idle connection, and subscription state must live in the shared matcher, not per-connection.
+- 100M entities / 10,000 tenants = 10k entities per tenant average — a mid-size city deployment per tenant, now at national-platform count. Skew is expected (one tenant with 10M entities must not starve the rest); the design handles skew via indexes and fair queueing, not quotas (quotas are a v2 policy knob).
+- 100,000 subscriptions over 100M entities makes index-shaped matching (per changed entity, candidate subs via type/attr/tenant lookups in O(log n)) non-negotiable — a naive scan-per-change is ~10⁵ × change-rate evaluations/s.
+- 100,000 WS connections ≈ 100,000 subscriptions *(deferred with WS — kept as the sizing assumption the reserved budget is based on)*: some WS clients are query/command clients, some carry several subscriptions; per-connection cost must stay ~15–30 KB idle, and subscription state must live in the shared matcher, not per-connection.
+
+> **Targets raised 10× on 2026-08-10** (user decision, commit `b2700ee`). The §2 budgets below were derived for the ORIGINAL numbers and are now stale in at least two places: the in-memory subscription mirror (100k × ~3 KB ≈ 300 MB — most of the 500 MB RSS by itself; the mirror likely needs per-tenant lazy loading + LRU like the registration mirror) and the registration mirror line. Re-deriving §2 against the new targets is an open task — measured, not guessed; until then §2 documents the old contract.
 
 ---
 
@@ -580,7 +583,7 @@ CREATE TABLE csource_index (
   expires_at timestamptz,
   endpoint text NOT NULL, mode smallint NOT NULL,      -- 0 auxiliary | 1 inclusive | 2 redirect | 3 exclusive (4.20)
   ops bigint NOT NULL,                                 -- bitmask over the Operation enum (Scorpio: 46 bool columns)
-  tenant_at_peer text, headers jsonb, host_alias text, -- hostAlias (5.2.40)
+  tenant_at_peer text, headers jsonb, host_alias text, -- the peer's contextSourceAlias (Table 5.2.9-1); consumed in matching per Table 6.3.18-2 (ADR-0011)
   FOREIGN KEY (tenant_id, registration_id) REFERENCES csource_registrations ON DELETE CASCADE
 );
 CREATE INDEX ON csource_index (tenant_id, entity_type);
@@ -1059,7 +1062,7 @@ A single tenant may legitimately hold **1,000+ Context Source Registrations** (a
 
 - **Matching is SQL, not iteration**: candidate CSRs for an operation come from indexed `csource_index` lookups (`(tenant_id, entity_type)` / `(tenant_id, entity_id)` + GIST on location + op-bitmask filter) — never a scan over all of a tenant's registrations. The in-memory mirror exists for the *matcher's* hot path and per-request narrow sets, sized ~1–2 KB/entry (§2.1 line: ~10k entries ≈ 20 MB); it is loaded lazily per tenant and evicted LRU — a 1,000-CSR tenant costs ~2 MB only while active.
 - **Fan-out is bounded even when the match set is huge**: a distributed query matching hundreds of sources runs under a per-request forward semaphore (default ~16 concurrent), a per-source timeout (default 2 s, Scorpio's `federation.timeout` heritage), and an **aggregate request deadline** — sources that miss it are reported in the 207 as failures rather than stalling the response. Per-endpoint circuit breakers stop a dead peer from consuming its timeout on every request (the U1 lesson at federation scale).
-- **Loop and depth control**: `Via`/`hostAlias` chains with hop limit (default 5), pre-adopted `508 Loop Detected` (2.0 #25), and registration-scope narrowing (4.3.6.1) keeping forwarded queries minimal.
+- **Loop and depth control**: `Via` chains with **tenant-qualified pseudonyms** (`{alias}~{tenant}`, Table 5.2.40-1 — ADR-0011: one alias per process turned cross-tenant federation inside one broker into phantom loops), loop handling per 6.3.17/6.3.18 (508 only for a single exclusive/redirect source looping back; other loops drop out of registration matching, incl. peers' registered `contextSourceAlias` values already in the chain), and registration-scope narrowing (4.3.6.1) keeping forwarded queries minimal. A hop limit is NOT implemented — the 2026-08-09 audit established 4.3.6.4 prescribes the `local` param, not a hop count; self/peer-alias detection terminates every cycle through this broker.
 - **EntityMaps make broad federation pageable**: distributed pagination over hundreds of sources materializes the id→source map once (§8.3) instead of re-fanning per page; the B1-class correctness tests guard it.
 - **Churn at scale**: registration create/update/delete flows through `ANTARES_REGISTRY` as deltas; mirrors apply increments (never full reloads), and expiry filtering stays at the single yield point (§4.1) — 1,000 expiring registrations must not produce 1,000 forgotten-expiry code paths.
 - **Discovery stays push-based**: csourceSubscriptions notify peers of registration changes — at 1,000+ CSRs, polling `/csourceRegistrations` is the anti-pattern the WS binding's WS-41 was written to kill.
