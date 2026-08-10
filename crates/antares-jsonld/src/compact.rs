@@ -132,11 +132,47 @@ pub fn compact_entity_shallow(internal: &Value, ctx: &Context) -> Value {
                 out.insert("type".into(), compact_types(v, ctx));
             }
             _ => {
-                out.insert(ctx.compact_iri(k), v.clone());
+                out.insert(ctx.compact_iri(k), compact_simplified_value(v, ctx));
             }
         }
     }
     Value::Object(out)
+}
+
+/// 4.5.4 Simplified Representation: the VocabProperty form is the single-key
+/// object {"vocab": …} (Example 6) whose IRI(s) compact back to terms, exactly
+/// as on the normalized path; multi-instance attributes are the {"dataset":
+/// {<datasetId>|"@none": <simplified>}} map (Example 2), compacted per
+/// instance. All other simplified values are plain JSON and stay verbatim.
+fn compact_simplified_value(v: &Value, ctx: &Context) -> Value {
+    let Some(o) = v.as_object() else {
+        return v.clone();
+    };
+    if o.len() == 1 {
+        if let Some(vocab) = o.get("vocab") {
+            let compacted = match vocab {
+                Value::String(iri) => Value::String(ctx.compact_iri(iri)),
+                Value::Array(a) => Value::Array(
+                    a.iter()
+                        .map(|s| match s {
+                            Value::String(iri) => Value::String(ctx.compact_iri(iri)),
+                            other => other.clone(),
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            };
+            return serde_json::json!({ "vocab": compacted });
+        }
+        if let Some(Value::Object(m)) = o.get("dataset") {
+            let per_instance: Map<String, Value> = m
+                .iter()
+                .map(|(k, iv)| (k.clone(), compact_simplified_value(iv, ctx)))
+                .collect();
+            return serde_json::json!({ "dataset": per_instance });
+        }
+    }
+    v.clone()
 }
 
 fn unwrap_single(v: Value) -> Value {
@@ -168,5 +204,26 @@ mod tests {
         assert_eq!(compacted, input);
         // input untouched by construction (&input); expanded untouched too
         assert_eq!(expanded["id"], "urn:ngsi-ld:Building:1");
+    }
+
+    /// 4.5.4 Example 6: simplified VocabProperty vocab IRIs compact to terms;
+    /// dataset-map instances compact per instance (Example 9).
+    #[test]
+    fn simplified_vocab_compacts_to_term() {
+        let ctx = Loader::new().core();
+        let doc = json!({
+            "id": "urn:ngsi-ld:V:1",
+            "type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle",
+            "https://uri.etsi.org/ngsi-ld/default-context/category":
+                {"vocab": "https://uri.etsi.org/ngsi-ld/default-context/non-commercial"},
+            "https://uri.etsi.org/ngsi-ld/default-context/mixed":
+                {"dataset": {"@none": {"vocab": "https://uri.etsi.org/ngsi-ld/default-context/rental"}, "urn:ngsi-ld:Dataset:1": 7}}
+        });
+        let out = compact_entity_shallow(&doc, &ctx);
+        assert_eq!(out["category"], json!({"vocab": "non-commercial"}));
+        assert_eq!(
+            out["mixed"],
+            json!({"dataset": {"@none": {"vocab": "rental"}, "urn:ngsi-ld:Dataset:1": 7}})
+        );
     }
 }

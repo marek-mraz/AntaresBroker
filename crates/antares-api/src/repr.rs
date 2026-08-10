@@ -384,24 +384,60 @@ fn is_reserved_member(k: &str) -> bool {
     )
 }
 
+/// 4.5.4: the simplified (keyValues) value of one instance — bare value for
+/// Property/GeoProperty, bare URI(s) for a Relationship, bare ordered arrays
+/// for ListProperty/ListRelationship, but the single-key wrapper objects
+/// {"languageMap": …} / {"json": …} / {"vocab": …} for the Language, Json
+/// and Vocab subtypes (Examples 4–6).
 fn simplified_value(obj: &Map<String, Value>) -> Value {
-    for k in [
-        "value",
-        "object",
-        "languageMap",
-        "vocab",
-        "valueList",
-        "objectList",
-    ] {
+    for k in ["value", "object", "valueList", "objectList"] {
         if let Some(v) = obj.get(k) {
-            if k == "json" {
-                return v.clone();
-            }
             return v.clone();
         }
     }
-    if let Some(v) = obj.get("json") {
-        return v.clone();
+    for k in ["languageMap", "json", "vocab"] {
+        if let Some(v) = obj.get(k) {
+            return serde_json::json!({ k: v.clone() });
+        }
     }
     Value::Object(obj.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 4.5.4 Examples 1–16: the simplified value of one instance per
+    /// attribute type — bare for Property/GeoProperty/Relationship/List*,
+    /// wrapped single-key objects for Language/Json/Vocab subtypes.
+    #[test]
+    fn simplified_values_per_attribute_type() {
+        let v = |j: Value| simplified_value(j.as_object().unwrap());
+        assert_eq!(v(json!({"type": "Property", "value": 5})), json!(5));
+        assert_eq!(
+            v(json!({"type": "Relationship", "object": "urn:a"})),
+            json!("urn:a")
+        );
+        assert_eq!(
+            v(json!({"type": "ListProperty", "valueList": [1, 2]})),
+            json!([1, 2])
+        );
+        assert_eq!(
+            v(json!({"type": "ListRelationship", "objectList": ["urn:a"]})),
+            json!(["urn:a"])
+        );
+        assert_eq!(
+            v(json!({"type": "LanguageProperty", "languageMap": {"en": "hi"}})),
+            json!({"languageMap": {"en": "hi"}})
+        );
+        assert_eq!(
+            v(json!({"type": "JsonProperty", "json": {"k": 1}})),
+            json!({"json": {"k": 1}})
+        );
+        assert_eq!(
+            v(json!({"type": "VocabProperty", "vocab": "V"})),
+            json!({"vocab": "V"})
+        );
+    }
 }
