@@ -443,11 +443,16 @@ fn expand_instance(
             )));
         }
         // 4.5.3.2: "unitCode shall never be present, as Relationships are
-        // unitless."
-        if obj.contains_key("unitCode") && matches!(attr_type, "Relationship" | "ListRelationship")
+        // unitless." 4.5.18.2/3 extend the prohibition to LanguageProperty
+        // ("language maps are always strings and hence unitless").
+        if obj.contains_key("unitCode")
+            && matches!(
+                attr_type,
+                "Relationship" | "ListRelationship" | "LanguageProperty"
+            )
         {
             return Err(bad(format!(
-                "attribute {name}: unitCode is not allowed on a {attr_type} (4.5.3.2)"
+                "attribute {name}: unitCode is not allowed on a {attr_type}"
             )));
         }
     }
@@ -499,13 +504,18 @@ fn expand_instance(
             out.insert("object".into(), objv.clone());
         }
         "LanguageProperty" => {
+            // 4.5.18.2: "a JSON object consisting of a set of non-empty
+            // language tags (RFC 5646) or the language tag "@none"", each
+            // mapping to a single string or array of strings.
             let lm = obj
                 .get("languageMap")
                 .ok_or_else(|| bad(format!("attribute {name}: needs languageMap")))?;
             let ok = lm.as_object().is_some_and(|m| {
-                m.values().all(|v| {
-                    v.is_string() || v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
-                })
+                m.keys().all(|k| !k.is_empty())
+                    && m.values().all(|v| {
+                        v.is_string()
+                            || v.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+                    })
             }) || (opts.allow_null && is_ngsi_null_langmap(lm))
                 || is_ngsi_null_langmap(lm);
             if !ok {
@@ -1216,6 +1226,39 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.5.18.2/4.5.18.3: LanguageProperty — non-empty language tags, unitCode
+    /// prohibited, value prohibited; concise inference from languageMap.
+    #[test]
+    fn language_property_rules() {
+        let mk = |attr: Value| json!({"id": "urn:x", "type": "T", "says": attr});
+        // valid normalized + "@none" tag
+        let doc = mk(json!({"type": "LanguageProperty",
+                            "languageMap": {"en": "hi", "@none": "hey"}}));
+        expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).expect("valid");
+        // concise inference from languageMap
+        let doc = mk(json!({"languageMap": {"en": "hi"}}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("concise");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/says"][0]["type"],
+            "LanguageProperty"
+        );
+        // empty language tag rejected
+        let doc = mk(json!({"type": "LanguageProperty", "languageMap": {"": "hi"}}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // unitCode prohibited
+        let doc = mk(json!({"type": "LanguageProperty",
+                            "languageMap": {"en": "hi"}, "unitCode": "MTR"}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // value prohibited
+        let doc = mk(json!({"type": "LanguageProperty",
+                            "languageMap": {"en": "hi"}, "value": 1}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // non-string languageMap values rejected
+        let doc = mk(json!({"type": "LanguageProperty", "languageMap": {"en": 5}}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 }
 
