@@ -305,3 +305,73 @@ async fn attribute_representations_shapes() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+/// 4.5.23.2/4.5.22.2: inline linked retrieval joins ListRelationship targets
+/// under the output-only "entityList" (always an array); Relationship targets
+/// under "entity". 4.5.23.3: the flattened form appends both kinds of Linked
+/// Entities to the response array.
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_retrieval_joins_list_relationships() {
+    let st = AppState::new("test".into());
+    for (id, body) in [
+        (
+            "urn:ngsi-ld:Road:1",
+            r#"{"id":"urn:ngsi-ld:Road:1","type":"Road","n":{"type":"Property","value":1}}"#,
+        ),
+        (
+            "urn:ngsi-ld:Road:2",
+            r#"{"id":"urn:ngsi-ld:Road:2","type":"Road","n":{"type":"Property","value":2}}"#,
+        ),
+        (
+            "urn:ngsi-ld:V:1",
+            r#"{"id":"urn:ngsi-ld:V:1","type":"Vehicle",
+            "route":{"type":"ListRelationship","objectList":["urn:ngsi-ld:Road:1","urn:ngsi-ld:Road:2"]}}"#,
+        ),
+    ] {
+        let (status, b) = send(
+            &st,
+            Request::builder()
+                .method("POST")
+                .uri("/ngsi-ld/v1/entities")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{id}: {b}");
+    }
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:V:1?join=inline&joinLevel=1")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let el = doc["route"]["entityList"]
+        .as_array()
+        .expect("entityList array");
+    assert_eq!(el.len(), 2, "{body}");
+    assert!(el.iter().any(|e| e["id"] == "urn:ngsi-ld:Road:1"));
+    assert!(
+        doc["route"].get("entity").is_none(),
+        "entity is the Relationship member, never on a ListRelationship"
+    );
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri("/ngsi-ld/v1/entities/urn:ngsi-ld:V:1?join=flat&joinLevel=1")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let arr = doc.as_array().expect("flattened array");
+    assert_eq!(arr.len(), 3, "linking + 2 linked: {body}");
+}

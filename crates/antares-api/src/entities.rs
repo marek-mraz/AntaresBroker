@@ -610,6 +610,29 @@ fn inline_join_value(
             if repr.key_values {
                 return;
             }
+            // 4.5.22.2: a ListRelationship's targets join under the
+            // output-only "entityList" member (always an array). The
+            // compacted objectList carries {"object": URI} entries.
+            if let Some(Value::Array(ol)) = inst.get("objectList") {
+                let targets: Vec<String> = ol
+                    .iter()
+                    .filter_map(|e| match e {
+                        Value::String(id) => Some(id.clone()),
+                        Value::Object(o) => {
+                            o.get("object").and_then(Value::as_str).map(str::to_owned)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let joined: Vec<Value> = targets
+                    .iter()
+                    .filter_map(|id| lookup_joined(st, tenant, ctx, child, id, level))
+                    .collect();
+                if !joined.is_empty() {
+                    inst.insert("entityList".into(), Value::Array(joined));
+                }
+                return;
+            }
             let targets: Vec<String> = match inst.get("object") {
                 Some(Value::String(id)) => vec![id.clone()],
                 Some(Value::Array(a)) => a
@@ -679,9 +702,13 @@ pub fn collect_flat(
         };
         let child = joined_repr(repr, k, k);
         for inst in instances {
-            let targets: Vec<&str> = match inst.get("object") {
-                Some(Value::String(id)) => vec![id.as_str()],
-                Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+            // Relationship objects plus ListRelationship objectList targets
+            // (internal form stores bare URIs) — 4.5.23.3 appends both kinds
+            // of Linked Entities to the flattened array.
+            let targets: Vec<&str> = match (inst.get("object"), inst.get("objectList")) {
+                (Some(Value::String(id)), _) => vec![id.as_str()],
+                (Some(Value::Array(a)), _) => a.iter().filter_map(Value::as_str).collect(),
+                (None, Some(Value::Array(a))) => a.iter().filter_map(Value::as_str).collect(),
                 _ => continue,
             };
             for id in targets {
