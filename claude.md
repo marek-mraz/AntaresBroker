@@ -148,11 +148,12 @@ stopping. Ask only when rule 9 leaves you genuinely unsure.
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position:** `python3 dev/spec.py status` → 6 implemented (4.2.2,
-4.2.3, 4.8, 5.2.40, 5.15.1, 6.3.18) · 1 partial (6.3.17 — gaps:
-cacheDuration caching/warn 110, cooldown) · 121 informative · 819
-not-implemented. **Next clause: 4.2.4**, then 4.2.5, 4.3.x (architecture
-umbrellas — expect rule-9 delegation verdicts, no code).
+**Loop position (2026-08-10, AntaresBroker):** 4.1–4.3.6.3 audited (4.1,
+4.2.4, 4.2.5, 4.3.1–4.3.4 informative; 4.3.5 partial — 5.14.x EntityMap
+routes absent; 4.3.6.1/4.3.6.2/4.3.6.3 implemented with extension TPs
+436_01/02/03). **Next clause: 4.3.6.4.** Local dist-ops Robot recipe:
+`ANTARES_EGRESS_ALLOW_PRIVATE=true` on the broker +
+`--variable context_source_host:127.0.0.1` (drawer in the palace).
 
 **Pending Mac-side (no ssh in the sandbox):**
 - `git -C /workspace/ngsi-ld-test-suite push origin main` — origin/master
@@ -167,11 +168,9 @@ umbrellas — expect rule-9 delegation verdicts, no code).
 1. §2 capacity budgets re-derivation for the 10× targets — MEASURED
    (100k compiled subs ≈ 300 MB in the current mirror; likely per-tenant
    lazy load + LRU). See the §1 warning.
-2. 4.3.6.3 validation gap: exclusive CSR shall name BOTH entity id and
-   attributes; overlapping exclusive/redirect for the same combination
-   shall be rejected — `csource.rs` checks neither. Known conformance
-   hole on a WRITE path; the loop reaches it late, consider pulling it
-   forward.
+2. RESOLVED 2026-08-10 (commit 0990944): 4.3.6.3 validation implemented —
+   `csource::validate_exclusive` + `check_proxied_overlap`; 9 official
+   `_exc` TPs fork-fixed (error.md), raise upstream with D018_01.
 3. CI enforcement of §0.3 (`dev/spec.py check`): clause-prefix commit
    must touch `docs/spec/`; robot-list drift; forbidden internal-doc
    citations in `crates/`; frontmatter enum validation; split idempotence.
