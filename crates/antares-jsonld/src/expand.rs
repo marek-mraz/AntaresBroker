@@ -454,10 +454,15 @@ fn expand_instance(
         // unitless." 4.5.18.2/3 and 4.5.20.2/3 extend the prohibition to
         // LanguageProperty and VocabProperty ("always strings and hence
         // unitless").
+        // (4.5.24.2/3 add JsonProperty — "raw JSON objects are unitless".)
         if obj.contains_key("unitCode")
             && matches!(
                 attr_type,
-                "Relationship" | "ListRelationship" | "LanguageProperty" | "VocabProperty"
+                "Relationship"
+                    | "ListRelationship"
+                    | "LanguageProperty"
+                    | "VocabProperty"
+                    | "JsonProperty"
             )
         {
             return Err(bad(format!(
@@ -533,9 +538,20 @@ fn expand_instance(
             out.insert("languageMap".into(), lm.clone());
         }
         "JsonProperty" => {
+            // 4.5.24.2: json is "a raw JSON object (or array of objects)" —
+            // never expanded or compacted; kept verbatim. The bare NGSI-LD
+            // Null deletion form passes through under allow_null.
             let j = obj
                 .get("json")
                 .ok_or_else(|| bad(format!("attribute {name}: needs json")))?;
+            let ok = j.is_object()
+                || j.as_array().is_some_and(|a| a.iter().all(Value::is_object))
+                || (opts.allow_null && is_ngsi_null(j));
+            if !ok {
+                return Err(bad(format!(
+                    "attribute {name}: json must be an object or array of objects"
+                )));
+            }
             out.insert("json".into(), j.clone());
         }
         "VocabProperty" => {
@@ -1269,6 +1285,44 @@ mod tests {
             "2021 is not a leap year"
         );
         assert!(!parse_datetime("2020-09-09T25:00:00Z"), "hour 25");
+    }
+
+    /// 4.5.24.2/4.5.24.3: JsonProperty — json is a raw object or array of
+    /// objects (kept verbatim), unitCode and value prohibited, concise
+    /// inference from json.
+    #[test]
+    fn json_property_rules() {
+        let mk = |attr: Value| json!({"id": "urn:x", "type": "T", "tickets": attr});
+        // valid: object and array-of-objects, kept verbatim (no expansion)
+        let doc = mk(json!({"type": "JsonProperty", "json": {"id": "x", "value": 1}}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("valid json object");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/tickets"][0];
+        assert_eq!(
+            inst["json"],
+            json!({"id": "x", "value": 1}),
+            "raw JSON kept verbatim"
+        );
+        let doc = mk(json!({"type": "JsonProperty", "json": [{"a": 1}, {"b": 2}]}));
+        expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("array of objects");
+        // concise inference
+        let doc = mk(json!({"json": {"a": 1}}));
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("concise");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/tickets"][0]["type"],
+            "JsonProperty"
+        );
+        // scalar json rejected
+        let doc = mk(json!({"type": "JsonProperty", "json": 5}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // unitCode prohibited
+        let doc = mk(json!({"type": "JsonProperty", "json": {"a": 1}, "unitCode": "MTR"}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+        // value prohibited
+        let doc = mk(json!({"type": "JsonProperty", "json": {"a": 1}, "value": 1}));
+        assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
     }
 
     /// 4.5.21/4.5.22: ListProperty and ListRelationship — objectList accepts
