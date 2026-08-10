@@ -136,11 +136,25 @@ pub fn active(params: &HashMap<String, String>) -> bool {
     params.get("local").map(String::as_str) != Some("true")
 }
 
+/// The full inbound Via chain, joined across header FIELDS.
+///
+/// RFC 7230 §3.2.2/§5.7.1: Via is a list header — senders may split the
+/// chain over any number of `Via:` field lines, and the two forms are
+/// equivalent. Reading only the first field (`headers.get`) made a loop
+/// pseudonym in a later field invisible (undetected cycle) AND rebuilt the
+/// outbound chain from the truncated view, deleting upstream hop history
+/// that downstream brokers need for THEIR loop detection.
 pub fn inbound_via(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("via")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
+    let fields: Vec<&str> = headers
+        .get_all("via")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields.join(", "))
+    }
 }
 
 /// This broker's Via pseudonym **for one Tenant**.
@@ -1030,7 +1044,15 @@ pub fn combine(parts: Vec<Part>, ok: Response, tenant: &TenantId) -> Response {
             })
         })
         .collect();
-    let body = json!({"success": [], "errors": errors});
+    // 6.3.17: "the error response should be as informative as possible" — a
+    // 207 that hides the succeeded halves (did my local delete happen?)
+    // isn't. Parts carry no entity id, so success entries are the details.
+    let success: Vec<&str> = parts
+        .iter()
+        .filter(|p| p.ok())
+        .map(|p| p.detail.as_str())
+        .collect();
+    let body = json!({"success": success, "errors": errors});
     let mut resp = (
         StatusCode::MULTI_STATUS,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -1129,10 +1151,25 @@ pub async fn forward_part(
         body,
     )
     .await;
-    Part {
-        status,
-        detail: format!("distributed operation to {url} returned {status}"),
-    }
+    let detail = format!("distributed operation to {url} returned {status}");
+    // 6.3.17 p.278: for a proxied (exclusive/redirect) source the error
+    // vocabulary is fixed — 508 loop, 504 timeout, 404 not found, and
+    // "502 Bad Gateway — if the single forwarded request fails for any other
+    // reason such as the Context Broker itself having insufficient access
+    // rights". 404/504/508 pass through, 409 keeps AlreadyExists semantics
+    // (the peer speaks NGSI-LD) and a 207 stays the partial verdict it is;
+    // every other failure — auth-class 401/403, a peer's 500/503, a 400 on
+    // the inter-broker request — surfaces as 502. The original status stays
+    // in `detail` for diagnosis.
+    let status = if reg.is_proxy()
+        && !(200..300).contains(&status)
+        && !matches!(status, 207 | 404 | 409 | 504 | 508)
+    {
+        502
+    } else {
+        status
+    };
+    Part { status, detail }
 }
 
 /// Forward one attribute-level write to every matching registration.

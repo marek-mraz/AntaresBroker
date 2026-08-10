@@ -25,22 +25,63 @@ use tower::ServiceExt;
 const ALIAS: &str = "antares1";
 const ENTITY: &str = "urn:ngsi-ld:Vehicle:d018";
 
-/// A Context Source that answers every request `204` and counts the hits.
-fn mock_source() -> (u16, Arc<AtomicUsize>) {
+/// A canned Context Source: replies `reply` to every request, counts hits,
+/// and keeps the head of the last request it saw (for header assertions).
+struct Mock {
+    port: u16,
+    hits: Arc<AtomicUsize>,
+    last_head: Arc<std::sync::Mutex<String>>,
+}
+
+fn mock_replying(reply: &'static str) -> Mock {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let hits: Arc<AtomicUsize> = Arc::default();
-    let seen = hits.clone();
+    let last_head: Arc<std::sync::Mutex<String>> = Arc::default();
+    let (seen, head) = (hits.clone(), last_head.clone());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
             seen.fetch_add(1, Ordering::SeqCst);
             let mut buf = [0u8; 8192];
-            let _ = s.read(&mut buf);
-            let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+            let n = s.read(&mut buf).unwrap_or(0);
+            *head.lock().expect("lock") = String::from_utf8_lossy(&buf[..n])
+                .split("\r\n\r\n")
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            let _ = s.write_all(reply.as_bytes());
         }
     });
-    (port, hits)
+    Mock {
+        port,
+        hits,
+        last_head,
+    }
+}
+
+/// A Context Source that answers every request `204` and counts the hits.
+fn mock_source() -> (u16, Arc<AtomicUsize>) {
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    (m.port, m.hits)
+}
+
+/// A Context Source that accepts, reads, and never answers — the 6.3.17
+/// "fails to respond in time" source. The socket is held open so the
+/// client's total timeout (8 s), not a connection reset, ends the wait.
+fn mock_stalling() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 8192];
+            let _ = s.read(&mut buf);
+            held.push(s); // keep the connection open, never reply
+        }
+    });
+    port
 }
 
 async fn send(st: &AppState, req: Request<Body>) -> axum::http::Response<Body> {
@@ -172,4 +213,332 @@ async fn a_registered_source_already_in_the_chain_is_skipped() {
         0,
         "a source already in the Via chain must not be contacted again"
     );
+}
+
+/// RFC 7230 §3.2.2: Via is a list header — the chain may be split across any
+/// number of `Via:` field lines and the forms are equivalent. A pseudonym in
+/// the SECOND field is still a loop; reading only the first field would run
+/// the cycle undetected.
+#[tokio::test(flavor = "multi_thread")]
+async fn via_split_across_header_fields_still_detects_the_loop() {
+    let st = state();
+    let (port, _) = mock_source();
+    register(&st, None, "redirect", port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .header("Via", "1.1 upstream")
+        .header("Via", "1.1 antares1") // second FIELD, same header
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::LOOP_DETECTED);
+}
+
+/// The outbound chain preserves EVERY inbound Via field before appending our
+/// own pseudonym — truncating it would delete the hop history downstream
+/// brokers use for their own loop detection (6.3.18 Table 6.3.18-2).
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarding_preserves_all_inbound_via_fields() {
+    let st = state();
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    register(&st, None, "inclusive", m.port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .header("Via", "1.1 up1")
+        .header("Via", "1.1 up2")
+        .body(Body::empty())
+        .expect("request");
+    send(&st, req).await;
+
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "forward must happen");
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.contains("Via: 1.1 up1, 1.1 up2, 1.1 antares1"),
+        "both inbound fields + our pseudonym, in order — got:\n{head}"
+    );
+}
+
+/// Malformed Via elements must neither panic nor false-positive, and an
+/// element carrying an RFC 7230 comment — `1.1 antares1 (proxy)` — is still
+/// our pseudonym (received-by is the token before the comment).
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_via_elements_are_tolerated() {
+    let st = state();
+    let (port, hits) = mock_source();
+    register(&st, None, "redirect", port, None).await;
+
+    // junk chain, nothing matches → not a loop, forward proceeds
+    let res = send(&st, delete_with_via(None, ", ,   1.1, ;;; (x)")).await;
+    assert_ne!(res.status(), StatusCode::LOOP_DETECTED);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // comment after the pseudonym is not part of the token
+    let res = send(&st, delete_with_via(None, "1.1 antares1 (proxy)")).await;
+    assert_eq!(res.status(), StatusCode::LOOP_DETECTED);
+}
+
+/// 6.3.17 p.278, single proxied source: "404 Not Found — if resources not
+/// found within the single registered source." The source's 404 IS the
+/// operation's 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_proxy_source_404_passes_through() {
+    let st = state();
+    let m = mock_replying(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+    );
+    register(&st, None, "redirect", m.port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// 6.3.17 p.278, single proxied source: "502 Bad Gateway — if the single
+/// forwarded request fails for any other reason such as the Context Broker
+/// itself having insufficient access rights." A peer's 500 (or 401/403) is
+/// not this operation's status — it surfaces as 502.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_proxy_source_failure_surfaces_as_502() {
+    let st = state();
+    let m = mock_replying("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+    register(&st, None, "redirect", m.port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+}
+
+/// 6.3.17 p.278, single proxied source: "504 Gateway Timeout — if the single
+/// registered source fails to respond in time." The source accepts and goes
+/// silent; the broker's own forward deadline (8 s at construction, U1) must
+/// end the wait. Slowest test in the file — it IS the timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_proxy_source_timeout_is_504() {
+    let st = state();
+    let port = mock_stalling();
+    register(&st, None, "redirect", port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+}
+
+/// 6.3.17 p.278, inclusive registration: "when updating the state of the
+/// distributed entity, an error response is returned from one or more
+/// registered sources: 207 Multi Status." Local success + remote failure is
+/// a partial result, never a rollback and never a plain error.
+#[tokio::test(flavor = "multi_thread")]
+async fn inclusive_partial_failure_is_207() {
+    let st = state();
+    // entity exists locally BEFORE any registration → created purely locally
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle"}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let m = mock_replying("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+    register(&st, None, "inclusive", m.port, None).await;
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::MULTI_STATUS);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(
+        !doc["success"].as_array().expect("success").is_empty(),
+        "the local delete succeeded and must be reported: {doc}"
+    );
+    assert_eq!(
+        doc["errors"][0]["error"]["status"], 500,
+        "an inclusive source's error keeps its own status in the 207: {doc}"
+    );
+}
+
+/// 4.3.6.2 p.41 + 6.3.17 p.278: "In the case of an auxiliary registration
+/// HTTP unsafe methods are not supported" — auxiliary distributed operations
+/// are limited to consumption (5.7). Writes never reach an auxiliary source.
+#[tokio::test(flavor = "multi_thread")]
+async fn auxiliary_source_never_receives_unsafe_methods() {
+    let st = state();
+    let (port, hits) = mock_source();
+    register(&st, None, "auxiliary", port, None).await;
+
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle"}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "create and delete are unsafe methods — the auxiliary source must see neither"
+    );
+}
+
+/// 4.3.6.2 p.41: an auxiliary source "never overrides data held directly
+/// within a Context Broker … only included if it is supplementary". Same
+/// attribute → local wins; new attribute → supplemented.
+#[tokio::test(flavor = "multi_thread")]
+async fn auxiliary_data_never_overrides_local() {
+    let st = state();
+    let body = serde_json::json!({
+        "id": ENTITY, "type": "Vehicle",
+        "brandName": {"type": "Property", "value": "local-value"},
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let remote = serde_json::json!({
+        "id": ENTITY, "type": "Vehicle",
+        "brandName": {"type": "Property", "value": "aux-value"},
+        "color": {"type": "Property", "value": "blue"},
+    })
+    .to_string();
+    let reply: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
+            remote.len()
+        )
+        .into_boxed_str(),
+    );
+    let m = mock_replying(reply);
+    register(&st, None, "auxiliary", m.port, None).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .header("Accept", "application/json")
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        doc["brandName"]["value"], "local-value",
+        "auxiliary data must not override the broker's own: {doc}"
+    );
+    assert_eq!(
+        doc["color"]["value"], "blue",
+        "supplementary auxiliary data must be included: {doc}"
+    );
+}
+
+/// Table 6.3.18-1: "If local=true then no Context Source Registrations shall
+/// be considered as matching" — and Table 6.4.3.2-1 makes `type=*` imply
+/// local=true. Either way the registered source is never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_true_and_type_wildcard_suppress_forwarding() {
+    let st = state();
+    let (port, hits) = mock_source();
+    register(&st, None, "inclusive", port, None).await;
+
+    for uri in [
+        "/ngsi-ld/v1/entities?type=Vehicle&local=true".to_owned(),
+        "/ngsi-ld/v1/entities?type=*".to_owned(),
+        format!("/ngsi-ld/v1/entities/{ENTITY}?local=true"),
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(&uri)
+            .header("Accept", "application/json")
+            .body(Body::empty())
+            .expect("request");
+        let res = send(&st, req).await;
+        assert_ne!(res.status(), StatusCode::BAD_GATEWAY, "{uri}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "{uri}: local scope must not contact the registered source"
+        );
+    }
+}
+
+/// Table 6.3.17-1: a registration loop on a distributed GET is abnormal
+/// behaviour — "199 Miscellaneous Warning: … a registration loop has been
+/// detected" — surfaced as NGSILD-Warning, with the response still served
+/// from local data.
+#[tokio::test(flavor = "multi_thread")]
+async fn suppressed_loop_forward_warns_199_on_get() {
+    let st = state();
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle"}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let (port, hits) = mock_source();
+    register(&st, None, "inclusive", port, None).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .header("Accept", "application/json")
+        .header("Via", "1.1 antares1")
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::OK, "local data still serves");
+    let warning = res
+        .headers()
+        .get("NGSILD-Warning")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        warning.starts_with("199 antares1 "),
+        "Table 6.3.17-1 warn form `199 <alias> \"…\"`, got {warning:?}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the forward was suppressed");
 }
