@@ -682,6 +682,9 @@ fn expired(inst: &Value, now: &str) -> bool {
         .is_some_and(|e| e < now)
 }
 
+/// 4.3.6.2: "An auxiliary Context Source Registration never overrides data
+/// held directly within a Context Broker. […] Context data from auxiliary
+/// context sources is only included if it is supplementary."
 /// Merge attributes of `add` into `base` (auxiliary sources never override —
 /// base wins; otherwise conflicting instances resolve per 4.5.5.3: discard
 /// past-expiresAt instances first, then most recent observedAt/modifiedAt).
@@ -1117,7 +1120,9 @@ pub fn loop_508(tenant: &TenantId) -> Response {
     resp
 }
 
-/// Matching non-auxiliary registrations for a write op.
+/// 4.3.6.2: "Auxiliary distributed operations are limited to context
+/// information consumption operations (see clause 5.7)" — so a write op
+/// only ever considers non-auxiliary matching registrations.
 pub fn write_regs(
     st: &AppState,
     tenant: &TenantId,
@@ -1427,6 +1432,78 @@ mod tests {
         let mut regs = vec![reg("exclusive")];
         assert!(handle_via_loop(&hdrs(None), "me", &t, &mut regs).is_none());
         assert_eq!(regs.len(), 1);
+    }
+
+    /// 4.3.6.2: "An auxiliary Context Source Registration never overrides
+    /// data held directly within a Context Broker" — supplementary attributes
+    /// are included, conflicting ones lose to the base regardless of recency.
+    #[test]
+    fn auxiliary_merge_supplements_but_never_overrides() {
+        let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let extra = "https://uri.etsi.org/ngsi-ld/default-context/color";
+        let mut base = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 1, "modifiedAt": "2020-01-01T00:00:00Z"}]
+        });
+        // aux instance is FRESHER and would win a 4.5.5.3 recency merge —
+        // auxiliary mode must still lose the conflict, yet supplement `color`
+        let add = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 2, "modifiedAt": "2026-01-01T00:00:00Z"}],
+            extra: [{"type": "Property", "value": "red"}]
+        });
+        merge_docs(&mut base, &add, true);
+        assert_eq!(base[attr][0]["value"], 1, "aux must not override local");
+        assert_eq!(base[extra][0]["value"], "red", "aux supplement is included");
+        // the same add as a non-aux inclusive source DOES win on recency
+        let mut base2 = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 1, "modifiedAt": "2020-01-01T00:00:00Z"}]
+        });
+        merge_docs(&mut base2, &add, false);
+        assert_eq!(base2[attr][0]["value"], 2);
+    }
+
+    /// 4.3.6.2: "Auxiliary distributed operations are limited to context
+    /// information consumption operations" — write_regs must drop a matching
+    /// auxiliary registration while keeping an inclusive one.
+    #[test]
+    fn write_regs_exclude_auxiliary_registrations() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        for (id, mode) in [
+            ("urn:ngsi-ld:ContextSourceRegistration:aux", "auxiliary"),
+            ("urn:ngsi-ld:ContextSourceRegistration:inc", "inclusive"),
+        ] {
+            let doc = json!({
+                "id": id,
+                "type": "ContextSourceRegistration",
+                "mode": mode,
+                "operations": ["redirectionOps"],
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+            });
+            st.store
+                .create(&tenant, Kind::Registration, id, doc)
+                .expect("seed registration");
+        }
+        let spec = crate::csource::CsrSpec {
+            types: Some(vec![
+                "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
+            ]),
+            ..Default::default()
+        };
+        let regs = write_regs(
+            &st,
+            &tenant,
+            &spec,
+            &ctx,
+            &HashMap::new(),
+            &HeaderMap::new(),
+        );
+        let ids: Vec<&str> = regs.iter().map(|r| r.reg_id.as_str()).collect();
+        assert_eq!(ids, vec!["urn:ngsi-ld:ContextSourceRegistration:inc"]);
     }
 
     /// 4.3.6.1: "Context Brokers shall respect" a Context Source's declared
