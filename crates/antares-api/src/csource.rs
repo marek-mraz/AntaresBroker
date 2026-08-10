@@ -174,6 +174,18 @@ pub fn normalize_registration(
                 }
                 out.insert("information".into(), Value::Array(infos));
             }
+            "mode" => {
+                let m = v
+                    .as_str()
+                    .filter(|m| ["inclusive", "auxiliary", "exclusive", "redirect"].contains(m))
+                    .ok_or_else(|| {
+                        bad(
+                            "mode must be inclusive, auxiliary, exclusive or redirect (5.2.9)"
+                                .into(),
+                        )
+                    })?;
+                out.insert("mode".into(), Value::String(m.to_owned()));
+            }
             "endpoint" => {
                 let uri = v
                     .as_str()
@@ -289,8 +301,152 @@ pub fn normalize_registration(
         if !out.contains_key("information") {
             return Err(bad("information is required (5.2.9)".into()));
         }
+        validate_exclusive(&out)?;
     }
     Ok(out)
+}
+
+/// 4.3.6.3 Proxied Registrations: "An exclusive registration shall always
+/// relate to specific Attributes found on a single Entity. Thus, the
+/// registration shall define both: an entity id (i.e. an id pattern or Entity
+/// type defining a group of entities is not supported for exclusive
+/// registrations) [and] Attributes."
+pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
+    if doc.get("mode").and_then(Value::as_str) != Some("exclusive") {
+        return Ok(());
+    }
+    let bad = |m: &str| NgsiError::BadRequestData(format!("{m} (4.3.6.3)"));
+    let infos = doc
+        .get("information")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for info in infos {
+        let has_attrs = ["propertyNames", "relationshipNames"].iter().any(|k| {
+            info.get(*k)
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty())
+        });
+        if !has_attrs {
+            return Err(bad("an exclusive registration shall define Attributes"));
+        }
+        let ids_only = info
+            .get("entities")
+            .and_then(Value::as_array)
+            .is_some_and(|es| {
+                es.iter().all(|e| {
+                    e.get("id").and_then(Value::as_str).is_some() && e.get("idPattern").is_none()
+                })
+            });
+        if !ids_only {
+            return Err(bad(
+                "an exclusive registration shall name an entity id — an id pattern or \
+                 Entity type defining a group of entities is not supported",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 4.3.6.3: "Once an exclusive Context Source Registration has been created,
+/// no further exclusive or redirect Context Source Registrations can be
+/// created for that same combination of Entity ID and Attributes" — and per
+/// 5.9.2, registering an exclusive Context Source when "an exclusive or
+/// redirect Context Source Registration already matches against the Entity ID
+/// (URI) and any of the Attributes defined in the registration" raises a
+/// Conflict (409; Table 6.3.2-1 defines no Conflict type, so it travels as
+/// AlreadyExists — the project's standing 409 mapping). Redirect overlapping
+/// redirect stays legal: "operations are distributed to all registered
+/// Context Sources".
+pub fn check_proxied_overlap(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    doc: &Map<String, Value>,
+    self_id: Option<&str>,
+    ctx: &Context,
+) -> Result<(), NgsiError> {
+    let mode = doc
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("inclusive");
+    if mode != "exclusive" && mode != "redirect" {
+        return Ok(());
+    }
+    let infos = doc
+        .get("information")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let now = now_iso();
+    let existing = st
+        .store
+        .list(tenant, Kind::Registration)
+        .unwrap_or_default();
+    for other in &existing {
+        if other.get("id").and_then(Value::as_str) == self_id {
+            continue;
+        }
+        if other
+            .get("expiresAt")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e < now.as_str())
+        {
+            continue;
+        }
+        let omode = other
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("inclusive");
+        // new exclusive × existing proxied; new redirect × existing exclusive
+        let guarded = match mode {
+            "exclusive" => omode == "exclusive" || omode == "redirect",
+            _ => omode == "exclusive",
+        };
+        if !guarded {
+            continue;
+        }
+        for info in infos {
+            let attrs: Vec<String> = ["propertyNames", "relationshipNames"]
+                .iter()
+                .filter_map(|k| info.get(*k).and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            let empty = Vec::new();
+            let entities = info
+                .get("entities")
+                .and_then(Value::as_array)
+                .unwrap_or(&empty);
+            let ids: Vec<String> = entities
+                .iter()
+                .filter_map(|e| e.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            let types: Vec<String> = entities
+                .iter()
+                .filter_map(|e| e.get("type").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            let spec = CsrSpec {
+                types: (!types.is_empty()).then_some(types),
+                ids: (!ids.is_empty()).then_some(ids),
+                id_pattern: entities
+                    .iter()
+                    .find_map(|e| e.get("idPattern").and_then(Value::as_str))
+                    .map(str::to_owned),
+                attrs: (!attrs.is_empty()).then_some(attrs),
+            };
+            if csr_matches(&spec, other, ctx) {
+                let oid = other.get("id").and_then(Value::as_str).unwrap_or("?");
+                return Err(NgsiError::AlreadyExists(format!(
+                    "proxied registration overlaps {oid} for the same combination of \
+                     Entity ID and Attributes (4.3.6.3)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Output shaping: compact IRIs.
@@ -373,6 +529,7 @@ pub async fn create_registration(
                 id
             }
         };
+        check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
         let ts = now_iso();
         norm.insert("createdAt".into(), Value::String(ts.clone()));
         norm.insert("modifiedAt".into(), Value::String(ts));
@@ -846,6 +1003,23 @@ pub async fn update_registration(
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
         let before = st.store.get(&tenant, Kind::Registration, &id)?;
+        if let Some(prev) = before.as_ref().and_then(Value::as_object) {
+            // validate the post-merge document (4.3.6.3) BEFORE mutating:
+            // a patch may flip the mode or rewrite information
+            let mut merged = prev.clone();
+            for (k, v) in &norm {
+                if k == "id" {
+                    continue;
+                }
+                if v.is_null() {
+                    merged.remove(k);
+                } else {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            validate_exclusive(&merged)?;
+            check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx)?;
+        }
         let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
             let target = doc.as_object_mut().expect("registration object");
             for (k, v) in &norm {
@@ -913,6 +1087,162 @@ mod csi_tests {
     use super::*;
     use antares_jsonld::Loader;
     use serde_json::json;
+
+    /// 4.3.6.3: "the registration shall define both: an entity id (i.e. an id
+    /// pattern or Entity type defining a group of entities is not supported
+    /// for exclusive registrations) [and] Attributes."
+    #[test]
+    fn exclusive_registration_requires_entity_id_and_attributes() {
+        let ctx = Loader::new().core();
+        let mk = |mode: &str, info: Value| {
+            json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:x1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "mode": mode,
+                "information": [info]
+            })
+        };
+        let norm = |mode: &str, info: Value| {
+            normalize_registration(mk(mode, info).as_object().unwrap(), &ctx, false)
+        };
+        let full = json!({
+            "entities": [{"id": "urn:ngsi-ld:Vehicle:v1", "type": "Vehicle"}],
+            "propertyNames": ["speed"]
+        });
+        assert!(norm("exclusive", full.clone()).is_ok());
+        assert!(
+            norm(
+                "exclusive",
+                json!({"entities": [{"id": "urn:ngsi-ld:Vehicle:v1", "type": "Vehicle"}]})
+            )
+            .is_err(),
+            "exclusive without Attributes"
+        );
+        assert!(
+            norm(
+                "exclusive",
+                json!({"entities": [{"type": "Vehicle"}], "propertyNames": ["speed"]})
+            )
+            .is_err(),
+            "exclusive with a type-only entity group"
+        );
+        assert!(
+            norm(
+                "exclusive",
+                json!({"entities": [{"idPattern": ".*", "type": "Vehicle"}],
+                       "propertyNames": ["speed"]})
+            )
+            .is_err(),
+            "exclusive with an id pattern"
+        );
+        assert!(
+            norm("redirect", json!({"entities": [{"type": "Vehicle"}]})).is_ok(),
+            "redirect may register a whole type without attributes (4.3.6.3)"
+        );
+        assert!(
+            norm("sideways", full).is_err(),
+            "mode outside the 5.2.9 enum"
+        );
+    }
+
+    /// 4.3.6.3: "Once an exclusive Context Source Registration has been
+    /// created, no further exclusive or redirect Context Source Registrations
+    /// can be created for that same combination of Entity ID and Attributes"
+    /// — while redirect × redirect overlap stays legal.
+    #[test]
+    fn proxied_overlap_with_an_exclusive_registration_conflicts() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let mk = |id: &str, mode: &str, attr: &str| {
+            let doc = json!({
+                "id": id,
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "mode": mode,
+                "information": [{
+                    "entities": [{"id": "urn:ngsi-ld:Vehicle:v1", "type": "Vehicle"}],
+                    "propertyNames": [attr]
+                }]
+            });
+            normalize_registration(doc.as_object().unwrap(), &ctx, false).expect("valid reg")
+        };
+        let seeded = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:e1",
+            "exclusive",
+            "speed",
+        );
+        st.store
+            .create(
+                &tenant,
+                Kind::Registration,
+                "urn:ngsi-ld:ContextSourceRegistration:e1",
+                Value::Object(seeded),
+            )
+            .expect("seed");
+        let overlap_exc = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:e2",
+            "exclusive",
+            "speed",
+        );
+        assert!(
+            check_proxied_overlap(&st, &tenant, &overlap_exc, None, &ctx).is_err(),
+            "second exclusive for the same (id, attr)"
+        );
+        let overlap_red = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:r1",
+            "redirect",
+            "speed",
+        );
+        assert!(
+            check_proxied_overlap(&st, &tenant, &overlap_red, None, &ctx).is_err(),
+            "redirect after an exclusive for the same combination"
+        );
+        let other_attr = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:e3",
+            "exclusive",
+            "color",
+        );
+        assert!(
+            check_proxied_overlap(&st, &tenant, &other_attr, None, &ctx).is_ok(),
+            "disjoint attribute is a different combination"
+        );
+        // the registration itself is not its own conflict (update path)
+        let self_doc = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:e1",
+            "exclusive",
+            "speed",
+        );
+        assert!(check_proxied_overlap(
+            &st,
+            &tenant,
+            &self_doc,
+            Some("urn:ngsi-ld:ContextSourceRegistration:e1"),
+            &ctx
+        )
+        .is_ok());
+        // redirect × redirect overlap is explicitly legal
+        let r2 = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:r2",
+            "redirect",
+            "color",
+        );
+        st.store
+            .create(
+                &tenant,
+                Kind::Registration,
+                "urn:ngsi-ld:ContextSourceRegistration:r2",
+                Value::Object(r2),
+            )
+            .expect("seed redirect");
+        let r3 = mk(
+            "urn:ngsi-ld:ContextSourceRegistration:r3",
+            "redirect",
+            "color",
+        );
+        assert!(check_proxied_overlap(&st, &tenant, &r3, None, &ctx).is_ok());
+    }
 
     /// 4.3.6.6 (audit V-29): the four processed contextSourceInfo keys have
     /// constrained value spaces, checked at registration time.

@@ -214,3 +214,34 @@ which puts the scenario in the clause its assertion cites and leaves the
 subject of the test (Via replay ⇒ loop detected) intact. Verified first as a
 Rust test (`single_redirect_source_looping_back_is_508`) before touching the
 fixture. Status: to be raised upstream.
+
+## 2026-08-10 — Official `_exc` TPs create exclusive registrations 4.3.6.3 forbids
+
+**Suite defect (9 files).** Clause 4.3.6.3 p.41: "An exclusive registration
+shall always relate to specific Attributes found on a single Entity. Thus,
+the registration shall define both: • An entity id (i.e. an id pattern or
+Entity type defining a group of entities is not supported for exclusive
+registrations). • Attributes." Yet:
+
+- `D001_02_exc`, `D002_02_exc` register `mode=exclusive` from the
+  attribute-less `context-source-registration-vehicle-redirection-ops.jsonld`
+  (entity id, **no propertyNames/relationshipNames**) and assert 201.
+- `D012_01_exc`, `D013_01_exc`, `D013_02_exc`, `D014_01_exc`, `D014_02_exc`,
+  `D015_01_exc`, `D016_01_exc` register `mode=exclusive` with
+  `idPattern=urn:ngsi-ld:Vehicle:*` (the batch-ops fixture) and assert 201 —
+  an id pattern is exactly what the clause rules out.
+
+**Broker:** correct as of 2026-08-10. `csource::validate_exclusive` raises
+BadRequestData 400 for exclusive registrations missing an entity id or
+Attributes (or using idPattern), and `csource::check_proxied_overlap` raises
+409 (AlreadyExists mapping — Table 6.3.2-1 has no Conflict type) when a new
+exclusive/redirect covers the same (Entity ID, Attributes) combination as an
+existing exclusive (4.3.6.3 + 5.9.2 p.227).
+
+**Action taken:** fork fixed. D001_02_exc/D002_02_exc switched to the
+attribute-carrying `vehicle-speed-with-redirection-ops` fixture; the 7 batch
+`_exc` setups replace the idPattern with the two concrete generated entity
+ids (`Update Value To JSON $.information[0].entities`). Semantics of every
+test preserved; all 9 + the whole BatchEntities tree green locally against
+the strict broker. Extension TP `436_03` pins the negative cases upstream
+skips. Status: to be raised upstream.
