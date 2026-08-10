@@ -139,6 +139,10 @@ fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
     i == sseg.len()
 }
 
+/// 4.3.5 NGSI-LD API structure: Core API mandatory; Distributed API mandatory for
+/// distributed/federated deployments; Temporal API and Registry API integrated
+/// locally here (Table 4.3.5-2 row "integrated temporal + integrated Context
+/// Registry"); JSONLDContext API implemented, optional Snapshot API not offered.
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         // entities (6.4/6.5)
