@@ -18,7 +18,8 @@ Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in
    locally — cells run serially here, so it is 4× the wall-clock for a
    signal CI already gives: **CI fans all four modes out in parallel on
    every push and is the authority** (32 cells, `fail-fast: false`).
-5. In ONE commit: the code, its tests, the `docs/ics.yaml` row, the ticked
+5. In ONE commit: the code, its tests, the `docs/spec/<clause>.md` status
+   (the per-clause full-text ledger that replaced `docs/ics.yaml`, 2026-08-10), the ticked
    box, and a message citing the clause number.
 6. File the decision or the gotcha in MemPalace (other agents read it).
 
@@ -44,7 +45,8 @@ Everything from v0 skeleton to the v1 contract, derived from `claude.md` /
 `docs/deep-analysis.md` (§ references) and `README.md`. Working order per
 feature is spec-first (§0.2): read the CIM 009 V1.9.1 clause → implement the
 full normative behaviour → unit-test the clause's rules → only then run the
-ETSI Robot suite as confirmation → update `docs/ics.yaml` (§14.6).
+ETSI Robot suite as confirmation → update `docs/spec/<clause>.md` (§14.6;
+replaced `docs/ics.yaml` 2026-08-10 — see docs/spec/README.md).
 
 **Where we are (v0):** one binary, in-memory store, `LocalBus`, HTTP binding —
 and the full ETSI suite green (1025/1025: CommonBehaviours 33, Consumption
@@ -87,7 +89,7 @@ docker, no host paths, no Mac-side installs, ever.
 lands it — GitHub renders these as checkboxes and shows section progress.
 A task may only be checked when its OWN done-criterion holds: code + unit
 tests merged, the relevant suite green via `dev/etsi-pipeline.sh`, and (for
-spec-clause tasks) the `docs/ics.yaml` row updated. Checking a box without
+spec-clause tasks) the `docs/spec/<clause>.md` status updated. Checking a box without
 its tests is the one way to make this file lie.
 
 ---
