@@ -234,9 +234,10 @@ pub async fn attributes(
 
 // ---------- GET /attributes/{attrId} (5.7.10) ----------
 
-/// 4.5.15 Attribute Information Representation: id = the attribute URI,
-/// fixed type "Attribute", attributeName (short name under @context), plus
-/// the optional attributeCount/attributeTypes/typeNames detail members.
+/// 4.5.15 Attribute Information Representation, members per Table 5.2.28-1
+/// (5.2.28 Attribute): id = the attribute URI, fixed type "Attribute",
+/// attributeName (short name under @context), plus the optional
+/// attributeCount (unsigned integer) / attributeTypes / typeNames members.
 pub async fn attribute_info(
     State(st): State<AppState>,
     Path(attr): Path<String>,
