@@ -2261,3 +2261,69 @@ mod clause_5_2_14 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_14_2 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Table 5.2.14.2-1: lastFailure/lastNotification/lastSuccess/timesSent
+    /// are output-only — provided ones "shall ignore them" on create, and
+    /// retrieval never echoes fabricated values.
+    #[tokio::test]
+    async fn output_only_members_are_ignored_on_input() {
+        let st = AppState::new("t52142".into());
+        let app = router(st);
+        let body = serde_json::json!({
+            "id": "urn:ngsi-ld:Subscription:52142",
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {
+                "endpoint": {"uri": "http://client.example.org/cb"},
+                "timesSent": 999,
+                "lastNotification": "1999-01-01T00:00:00Z",
+                "lastSuccess": "1999-01-01T00:00:00Z",
+                "lastFailure": "1999-01-01T00:00:00Z"
+            }
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/subscriptions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        let resp = app.clone().oneshot(req).await.expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "providing them is not an error"
+        );
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:52142")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let n = &doc["notification"];
+        for k in [
+            "timesSent",
+            "lastNotification",
+            "lastSuccess",
+            "lastFailure",
+        ] {
+            assert!(
+                n.get(k).is_none(),
+                "client-fabricated {k} must be ignored, got {}",
+                n[k]
+            );
+        }
+    }
+}

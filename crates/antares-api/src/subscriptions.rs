@@ -160,6 +160,16 @@ pub fn normalize_subscription(
                     .as_object()
                     .ok_or_else(|| bad("notification must be an object (5.2.14)".into()))?;
                 let mut nn = n.clone();
+                // 5.2.14.2: output-only members are read-only — provided
+                // ones are ignored, never stored.
+                for k in [
+                    "timesSent",
+                    "lastNotification",
+                    "lastSuccess",
+                    "lastFailure",
+                ] {
+                    nn.remove(k);
+                }
                 if let Some(f) = n.get("format").and_then(Value::as_str) {
                     if !["normalized", "keyValues", "simplified", "concise"].contains(&f) {
                         return Err(bad(format!("invalid notification format {f:?}")));
