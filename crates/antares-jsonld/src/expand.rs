@@ -2019,3 +2019,60 @@ mod clause_5_2_5 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_6 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_r(r: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "r": r})
+    }
+
+    /// Table 5.2.6-1: object mandatory — a URI or an array of URIs; datasetId
+    /// a URI; objectType coerced; concise inference from `object`; unitCode
+    /// prohibited (4.5.3.2).
+    #[test]
+    fn relationship_member_table_restrictions() {
+        assert!(
+            expand(with_r(json!({"type": "Relationship"}))).is_err(),
+            "object mandatory"
+        );
+        assert!(expand(with_r(
+            json!({"type": "Relationship", "object": "not a uri"})
+        ))
+        .is_err());
+        assert!(
+            expand(with_r(json!({"type": "Relationship",
+            "object": ["urn:a", "urn:b"], "datasetId": "urn:ds:1",
+            "objectType": "Device"})))
+            .is_ok(),
+            "array of URIs is legal"
+        );
+        assert!(
+            expand(with_r(json!({"type": "Relationship",
+            "object": ["urn:a", "not a uri"]})))
+            .is_err(),
+            "every array entry must be a URI"
+        );
+        assert!(
+            expand(with_r(json!({"type": "Relationship", "object": "urn:a",
+            "unitCode": "C62"})))
+            .is_err(),
+            "Relationships are unitless"
+        );
+        // concise inference from the object member
+        let out = expand(with_r(json!({"object": "urn:o:1"}))).expect("concise");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/r"][0];
+        assert_eq!(inst["type"], "Relationship");
+    }
+}
