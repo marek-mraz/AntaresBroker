@@ -1055,6 +1055,12 @@ async fn delete_attr_inner(
         None
     } else {
         let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+            // 5.6.5.4: the ?type selector narrows the target entity
+            if !matches_type_param(doc, params, &ctx) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "entity {id} does not match the type selector"
+                )));
+            }
             if attr_iri == "scope" {
                 let target = doc.as_object_mut().expect("entity object");
                 found = target.remove("scope").is_some();
