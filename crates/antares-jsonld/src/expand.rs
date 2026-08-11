@@ -2224,6 +2224,181 @@ mod clause_5_2_35 {
 }
 
 #[cfg(test)]
+mod clause_5_2_36 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_list(lp: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "readings": lp})
+    }
+
+    /// Table 5.2.36-1: valueList is a mandatory ordered array of JSON
+    /// values; concise form infers ListProperty from the valueList member.
+    #[test]
+    fn list_property_member_table_restrictions() {
+        let ok = expand(with_list(json!({"type": "ListProperty",
+            "valueList": [1, "a", {"o": 2}]})))
+        .expect("conformant ListProperty");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/readings"][0];
+        assert_eq!(attr["valueList"], json!([1, "a", {"o": 2}]), "order kept");
+        assert!(attr.get("value").is_none(), "valueList, not value");
+        assert!(
+            expand(with_list(json!({"type": "ListProperty", "valueList": 5}))).is_err(),
+            "valueList must be an array"
+        );
+        assert!(
+            expand(with_list(json!({"type": "ListProperty"}))).is_err(),
+            "valueList is mandatory"
+        );
+        let ok = expand(with_list(json!({"valueList": [1, 2]}))).expect("concise inference");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/readings"][0];
+        assert_eq!(attr["type"], "ListProperty");
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_37 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_lr(lr: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "route" : lr})
+    }
+
+    /// Table 5.2.37-1: objectList is a mandatory array of URIs — accepted
+    /// both as bare URI strings and as {"object": URI} entries (4.5.22.2);
+    /// invalid URIs rejected; unitCode prohibited; concise form infers
+    /// ListRelationship from the objectList member.
+    #[test]
+    fn list_relationship_member_table_restrictions() {
+        for form in [
+            json!(["urn:a", "urn:b"]),
+            json!([{"object": "urn:a"}, {"object": "urn:b"}]),
+        ] {
+            let ok = expand(with_lr(
+                json!({"type": "ListRelationship", "objectList": form}),
+            ))
+            .expect("conformant ListRelationship");
+            let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/route"][0];
+            let list = attr["objectList"].as_array().expect("objectList");
+            assert_eq!(list.len(), 2);
+            assert!(attr.get("object").is_none(), "objectList, not object");
+        }
+        assert!(
+            expand(with_lr(
+                json!({"type": "ListRelationship", "objectList": ["not a uri"]})
+            ))
+            .is_err(),
+            "objectList entries must be URIs"
+        );
+        assert!(
+            expand(with_lr(
+                json!({"type": "ListRelationship", "objectList": "urn:a"})
+            ))
+            .is_err(),
+            "objectList must be an array"
+        );
+        assert!(
+            expand(with_lr(json!({"type": "ListRelationship"}))).is_err(),
+            "objectList is mandatory"
+        );
+        assert!(
+            expand(with_lr(
+                json!({"type": "ListRelationship", "objectList": ["urn:a"],
+                "unitCode": "C"})
+            ))
+            .is_err(),
+            "unitCode prohibited on a ListRelationship"
+        );
+        let ok = expand(with_lr(json!({"objectList": ["urn:a"]}))).expect("concise inference");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/route"][0];
+        assert_eq!(attr["type"], "ListRelationship");
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_38 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_jp(jp: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "payload": jp})
+    }
+
+    /// Table 5.2.38-1: json is a mandatory raw JSON object or array of
+    /// objects, never expanded; unitCode prohibited (4.5.24.2); concise form
+    /// infers JsonProperty from the json member.
+    #[test]
+    fn json_property_member_table_restrictions() {
+        let ok = expand(with_jp(json!({"type": "JsonProperty",
+            "json": {"type": "kept-verbatim", "en": 1}})))
+        .expect("conformant JsonProperty");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/payload"][0];
+        assert_eq!(
+            attr["json"],
+            json!({"type": "kept-verbatim", "en": 1}),
+            "raw JSON kept verbatim, no expansion"
+        );
+        assert!(attr.get("value").is_none(), "json, not value");
+        let ok = expand(with_jp(
+            json!({"type": "JsonProperty", "json": [{"a": 1}, {"b": 2}]}),
+        ))
+        .expect("array-of-objects form");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/payload"][0];
+        assert_eq!(attr["json"].as_array().map(Vec::len), Some(2));
+        assert!(
+            expand(with_jp(json!({"type": "JsonProperty", "json": 5}))).is_err(),
+            "json must be an object or array of objects"
+        );
+        assert!(
+            expand(with_jp(json!({"type": "JsonProperty", "json": [1, 2]}))).is_err(),
+            "array entries must be objects"
+        );
+        assert!(
+            expand(with_jp(json!({"type": "JsonProperty"}))).is_err(),
+            "json is mandatory"
+        );
+        assert!(
+            expand(with_jp(
+                json!({"type": "JsonProperty", "json": {"a": 1}, "unitCode": "C"})
+            ))
+            .is_err(),
+            "unitCode prohibited on a JsonProperty"
+        );
+        let ok = expand(with_jp(json!({"json": {"a": 1}}))).expect("concise inference");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/payload"][0];
+        assert_eq!(attr["type"], "JsonProperty");
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_7 {
     use super::*;
     use crate::loader::Loader;
