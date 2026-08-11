@@ -1347,3 +1347,64 @@ async fn clause_5_6_16_temporal_delete_forwarding() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
 }
+
+/// 5.6.17.4: a redirect registration without Merge Entity support is
+/// Conflict (never contacted); inclusive-unsupported is skipped while the
+/// local merge proceeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_17_merge_unsupported_by_registration() {
+    let merge = || {
+        let body = serde_json::json!({"speed": {"type": "Property", "value": 7}}).to_string();
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, mode: &'static str, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:mrg-{mode}"),
+            "type": "ContextSourceRegistration",
+            "mode": mode,
+            "operations": ["retrieveOps"],
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    let (port, hits) = mock_source();
+    let st = register_with(state(), "redirect", port).await;
+    let res = send(&st, merge()).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT, "complete merge failed");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+
+    // inclusive without support: local merge proceeds, no forward
+    let (port, hits) = mock_source();
+    let st = register_with(state(), "inclusive", port).await;
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+        "speed": {"type": "Property", "value": 1}})
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities?local=true")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+    let res = send(&st, merge()).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT, "local merge proceeds");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "no forward without support");
+}

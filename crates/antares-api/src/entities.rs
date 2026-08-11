@@ -1611,7 +1611,7 @@ async fn merge_entity_inner(
     antares_model::EntityId::new(id)?;
     check_params(
         params,
-        &["options", "format", "observedAt", "lang", "local"],
+        &["options", "format", "observedAt", "lang", "local", "type"],
     )?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed
@@ -1684,8 +1684,12 @@ async fn merge_entity_inner(
         }
         let ctx_url = crate::federation::ctx_link_url(headers, &parsed.ctx.source);
         for reg in &regs {
-            if reg.mode == "exclusive" && !reg.supports("mergeEntity") {
-                parts.push(crate::federation::conflict_part("mergeEntity"));
+            // 5.6.17.4: proxy modes without Merge Entity support are an
+            // error of type Conflict; inclusive ones are not forwarded.
+            if !reg.supports("mergeEntity") {
+                if reg.is_proxy() {
+                    parts.push(crate::federation::conflict_part("mergeEntity"));
+                }
                 continue;
             }
             let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) else {
@@ -1714,6 +1718,12 @@ async fn merge_entity_inner(
     }
 
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+        // 5.6.17.4: the ?type selector narrows the merge target
+        if !crate::attrs::matches_type_param(doc, params, &parsed.ctx) {
+            return Err(NgsiError::ResourceNotFound(format!(
+                "entity {id} does not match the type selector"
+            )));
+        }
         merge_into(doc, &fragment, &ts);
         Ok::<(), NgsiError>(())
     })?;
