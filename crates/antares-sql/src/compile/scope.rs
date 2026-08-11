@@ -30,7 +30,13 @@ pub struct CompiledScope {
 pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<CompiledScope> {
     let mut binds = Vec::new();
     let mut or_parts = Vec::new();
-    for and_group in scope_q.split(',') {
+    // 4.19: orOp = `|` / `,`; a conjunction is parenthesized — the parens
+    // only group and must not reach the per-segment regexes.
+    for and_group in scope_q.split([',', '|']) {
+        let and_group = and_group
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')');
         let mut and_parts = Vec::new();
         for pat in and_group.split(';') {
             let re = pattern_regex(pat.trim())?;
@@ -171,5 +177,26 @@ mod tests {
         assert!(re.contains("/+"), "separator must be repeatable: {re}");
         assert!(re.starts_with("^/*"), "leading slash optional: {re}");
         assert!(re.ends_with("/*$"), "trailing slash optional: {re}");
+    }
+}
+
+#[cfg(test)]
+mod clause_4_19 {
+    use super::*;
+
+    /// 4.19 EXAMPLE 5: `(a;b)|c` — the pipe is an orOp and the parentheses
+    /// only group; neither may leak into the compiled per-scope regexes
+    /// (a stricter predicate than the in-memory matcher is a compliance bug).
+    #[test]
+    fn pipe_or_and_parenthesized_conjunction_compile() {
+        let c = compile_scope_q("(/Madrid/Districts;/CompanyA)|/CompanyB", "scopes", 1)
+            .expect("compiles");
+        assert_eq!(c.binds.len(), 3, "two ANDed + one ORed pattern");
+        assert!(c.sql.contains(" OR "), "the pipe is a disjunction");
+        assert!(
+            c.binds.iter().all(|b| !b.contains('(') && !b.contains('|')),
+            "grouping characters must not leak into the regexes: {:?}",
+            c.binds
+        );
     }
 }

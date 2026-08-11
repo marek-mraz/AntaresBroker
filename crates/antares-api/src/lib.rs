@@ -104,15 +104,20 @@ pub(crate) fn repr_reserved(k: &str) -> bool {
     )
 }
 
-/// Scope Query evaluation (4.19) — `,`=OR `;`=AND, `+` one level, `#` subtree.
+/// Scope Query evaluation (4.19) — `|`/`,` = OR, `(a;b)` = AND (parenthesis
+/// grouping), `+` one level, trailing `#` the subtree incl. the node, `/#`
+/// any non-empty scope.
 pub fn scope_matches(scope_q: &str, doc: &Value) -> bool {
     let scopes: Vec<&str> = doc
         .get("scope")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    scope_q.split(',').any(|and_group| {
+    scope_q.split([',', '|']).any(|and_group| {
         and_group
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
             .split(';')
             .all(|pat| scopes.iter().any(|s| scope_pattern_matches(pat.trim(), s)))
     })
@@ -1749,5 +1754,69 @@ mod tests {
             body["type"], "https://uri.etsi.org/ngsi-ld/errors/InvalidRequest",
             "{body}"
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_19 {
+    use super::scope_matches;
+    use serde_json::json;
+
+    fn doc(scopes: &[&str]) -> serde_json::Value {
+        json!({"id": "urn:x", "type": ["T"], "scope": scopes})
+    }
+
+    /// 4.19 EXAMPLES 1-3: direct scope, `#` subtree (including the node
+    /// itself), `+` single-level wildcard, `/#` any non-empty scope.
+    #[test]
+    fn wildcards_and_direct_scopes() {
+        assert!(scope_matches("/Madrid", &doc(&["/Madrid"])));
+        assert!(!scope_matches("/Madrid", &doc(&["/Madrid/Gardens"])));
+        for s in [
+            "/Madrid/Gardens",
+            "/Madrid/Gardens/ParqueNorte",
+            "/Madrid/Gardens/ParqueNorte/Parterre1",
+        ] {
+            assert!(scope_matches("/Madrid/Gardens/#", &doc(&[s])), "{s}");
+        }
+        assert!(!scope_matches(
+            "/Madrid/Gardens/#",
+            &doc(&["/Madrid/Sights"])
+        ));
+        assert!(scope_matches(
+            "/Madrid/+/ParqueNorte",
+            &doc(&["/Madrid/Sights/ParqueNorte"])
+        ));
+        assert!(!scope_matches(
+            "/Madrid/+/ParqueNorte",
+            &doc(&["/Madrid/ParqueNorte"])
+        ));
+        assert!(scope_matches("/#", &doc(&["/Anything"])));
+        assert!(
+            !scope_matches("/#", &doc(&[])),
+            "no scope = no match for /#"
+        );
+    }
+
+    /// 4.19 EXAMPLES 4/5: conjunction needs parentheses; disjunction is `|`
+    /// OR the compatibility comma.
+    #[test]
+    fn conjunction_and_both_or_spellings() {
+        let both = doc(&["/Madrid/Districts", "/CompanyA"]);
+        let only_b = doc(&["/CompanyB"]);
+        let only_madrid = doc(&["/Madrid/Districts"]);
+        assert!(scope_matches("(/Madrid/Districts;/CompanyA)", &both));
+        assert!(
+            !scope_matches("(/Madrid/Districts;/CompanyA)", &only_madrid),
+            "conjunction requires ALL scopes"
+        );
+        for sel in [
+            "(/Madrid/Districts;/CompanyA)|/CompanyB",
+            "(/Madrid/Districts;/CompanyA),/CompanyB",
+        ] {
+            assert!(scope_matches(sel, &both), "{sel}");
+            assert!(scope_matches(sel, &only_b), "{sel}");
+            assert!(!scope_matches(sel, &only_madrid), "{sel}");
+        }
     }
 }
