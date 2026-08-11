@@ -1,5 +1,8 @@
-//! NGSI-LD error model: CIM 009 Table 6.3.2-1, variant names verbatim.
-//! Error type URI base is https (V1.9.1).
+//! NGSI-LD error model: the Table 5.5.2-1 error-type vocabulary (variant
+//! names verbatim) with the Table 6.3.2-1 HTTP status mapping. Error type
+//! URI base is https (V1.9.1). Table 5.5.2-1 also defines errors/Conflict,
+//! which no V1.9.1 operation clause mandates — the variant is added when an
+//! operation first requires it.
 
 use serde::Serialize;
 use thiserror::Error;
