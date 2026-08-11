@@ -62,6 +62,25 @@ const REDIRECTION_OPS: &[&str] = &[
     "createEntityMapQueryEntity",
     "retrieveContextSourceIdentity",
 ];
+/// Table 4.20-2 associationOps: federationOps WITHOUT the EntityMap support
+/// operations.
+const ASSOCIATION_OPS: &[&str] = &[
+    "retrieveEntity",
+    "queryEntity",
+    "queryBatch",
+    "retrieveEntityTypes",
+    "retrieveEntityTypeDetails",
+    "retrieveEntityTypeInfo",
+    "retrieveAttrTypes",
+    "retrieveAttrTypeDetails",
+    "retrieveAttrTypeInfo",
+    "createSubscription",
+    "updateSubscription",
+    "retrieveSubscription",
+    "querySubscription",
+    "deleteSubscription",
+    "retrieveContextSourceIdentity",
+];
 const UPDATE_OPS: &[&str] = &[
     "updateEntity",
     "updateAttrs",
@@ -116,7 +135,7 @@ impl FedReg {
                 || (o == "redirectionOps" && REDIRECTION_OPS.contains(&op))
                 || (o == "updateOps" && UPDATE_OPS.contains(&op))
                 || (o == "retrieveOps" && RETRIEVE_OPS.contains(&op))
-                || (o == "associationOps" && FEDERATION_OPS.contains(&op))
+                || (o == "associationOps" && ASSOCIATION_OPS.contains(&op))
         })
     }
     pub fn is_proxy(&self) -> bool {
@@ -1753,5 +1772,64 @@ mod tests {
         assert_eq!(inst[0]["expiresAt"], "2030-01-01T00:00:00Z", "added");
         assert_eq!(inst[1]["expiresAt"], "2030-01-01T00:00:00Z", "capped");
         assert_eq!(inst[2]["expiresAt"], "2029-01-01T00:00:00Z", "earlier kept");
+    }
+}
+
+#[cfg(test)]
+mod clause_4_20 {
+    use super::*;
+
+    fn reg(ops: &[&str]) -> FedReg {
+        FedReg {
+            ops: ops.iter().map(|s| (*s).to_owned()).collect(),
+            ..FedReg::default()
+        }
+    }
+
+    /// Table 4.20-2: associationOps is federationOps WITHOUT the EntityMap
+    /// support operations (and without createEntityMapQueryTemporal, which is
+    /// in neither group).
+    #[test]
+    fn association_ops_exclude_the_entity_map_operations() {
+        let r = reg(&["associationOps"]);
+        for op in [
+            "retrieveEntity",
+            "queryEntity",
+            "deleteSubscription",
+            "retrieveContextSourceIdentity",
+        ] {
+            assert!(r.supports(op), "{op} is in associationOps");
+        }
+        for op in [
+            "retrieveEntityMap",
+            "updateEntityMap",
+            "deleteEntityMap",
+            "createEntityMapQueryEntity",
+        ] {
+            assert!(
+                !r.supports(op),
+                "{op} is NOT in associationOps (Table 4.20-2)"
+            );
+        }
+    }
+
+    /// Table 4.20-1/2: individual names match themselves; groups match their
+    /// members; nothing matches createEntityMapQueryTemporal except itself.
+    #[test]
+    fn groups_and_individual_names() {
+        assert!(reg(&["federationOps"]).supports("retrieveEntityMap"));
+        assert!(reg(&["redirectionOps"]).supports("purgeEntity"));
+        assert!(!reg(&["redirectionOps"]).supports("createSubscription"));
+        assert!(reg(&["updateOps"]).supports("replaceAttrs"));
+        assert!(!reg(&["updateOps"]).supports("deleteEntity"));
+        assert!(reg(&["retrieveOps"]).supports("queryEntity"));
+        assert!(!reg(&["retrieveOps"]).supports("retrieveTemporal"));
+        assert!(reg(&["createEntityMapQueryTemporal"]).supports("createEntityMapQueryTemporal"));
+        for group in ["federationOps", "associationOps", "redirectionOps"] {
+            assert!(
+                !reg(&[group]).supports("createEntityMapQueryTemporal"),
+                "{group} does not include createEntityMapQueryTemporal"
+            );
+        }
     }
 }
