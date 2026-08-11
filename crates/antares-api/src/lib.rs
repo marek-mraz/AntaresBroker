@@ -2327,3 +2327,70 @@ mod clause_5_2_14_2 {
         }
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_15 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_ep(ep: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5215".into()));
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:Subscription:5215-{}", ep.to_string().len()),
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": ep}
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/subscriptions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.15-1: uri mandatory, accept value space, cooldown/timeout
+    /// > 0, receiverInfo/notifierInfo as KeyValuePair[] (5.2.22).
+    #[tokio::test]
+    async fn endpoint_member_rules() {
+        use serde_json::json;
+        let uri = "http://client.example.org/cb";
+        assert_eq!(
+            post_ep(json!({"accept": "application/json"})).await,
+            StatusCode::BAD_REQUEST,
+            "uri mandatory"
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri, "accept": "text/plain"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri, "cooldown": 0})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri, "timeout": -1})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri,
+                "receiverInfo": [{"key": "Authorization", "value": "Bearer x"}],
+                "cooldown": 500, "timeout": 3000}))
+            .await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri, "receiverInfo": ["junk"]})).await,
+            StatusCode::BAD_REQUEST,
+            "receiverInfo entries must be {{key, value}} pairs"
+        );
+        assert_eq!(
+            post_ep(json!({"uri": uri, "notifierInfo": [{"novalue": true}]})).await,
+            StatusCode::BAD_REQUEST,
+            "notifierInfo entries must be {{key, value}} pairs"
+        );
+    }
+}
