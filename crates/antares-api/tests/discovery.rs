@@ -63,9 +63,10 @@ async fn entity_type_list_shape() {
     assert!(extra.is_empty(), "unexpected members: {extra:?}");
 }
 
-/// 4.5.11: details=true returns an array of EntityType objects — id is the
-/// type URI, fixed type "EntityType", typeName the short name, plus
-/// attributeNames — and nothing else beyond an optional @context.
+/// 4.5.11 + Table 5.2.25-1 (EntityType): details=true returns an array of
+/// EntityType objects — id is the type URI (FQN), fixed type "EntityType",
+/// typeName the short name, plus attributeNames — and nothing else beyond
+/// an optional @context.
 #[tokio::test(flavor = "multi_thread")]
 async fn detailed_entity_type_list_shape() {
     let st = AppState::new("test".into());
@@ -115,9 +116,10 @@ async fn detailed_entity_type_list_shape() {
     assert!(extra.is_empty(), "unexpected members: {extra:?}");
 }
 
-/// 4.5.12: entity type information — id is the type URI, fixed type
-/// "EntityTypeInfo", typeName the short name; entityCount/attributeDetails
-/// are the 5.2.26 detail members, nothing else appears.
+/// 4.5.12 + Table 5.2.26-1 (EntityTypeInfo): id is the type URI (FQN),
+/// fixed type "EntityTypeInfo", typeName the short name, entityCount an
+/// unsigned integer, attributeDetails Attribute[] "with only the elements
+/// id, type, attributeName and attributeTypes" — nothing else appears.
 #[tokio::test(flavor = "multi_thread")]
 async fn entity_type_info_shape() {
     let st = AppState::new("test".into());
@@ -153,6 +155,33 @@ async fn entity_type_info_shape() {
     );
     assert_eq!(doc["typeName"], "Building");
     assert_eq!(doc["entityCount"], 1);
+    // Table 5.2.26-1: attributeDetails elements carry ONLY id, type,
+    // attributeName and attributeTypes (no attributeCount, no typeNames)
+    let details = doc["attributeDetails"]
+        .as_array()
+        .expect("attributeDetails");
+    let v_attr = details
+        .iter()
+        .find(|a| a["attributeName"] == "v")
+        .unwrap_or_else(|| panic!("no v attribute in {body}"));
+    assert_eq!(v_attr["type"], "Attribute");
+    assert_eq!(
+        v_attr["id"],
+        "https://uri.etsi.org/ngsi-ld/default-context/v"
+    );
+    assert!(v_attr["attributeTypes"]
+        .as_array()
+        .is_some_and(|t| t.iter().any(|n| n == "Property")));
+    let detail_extra: Vec<&String> = v_attr
+        .as_object()
+        .expect("object")
+        .keys()
+        .filter(|k| !["id", "type", "attributeName", "attributeTypes"].contains(&k.as_str()))
+        .collect();
+    assert!(
+        detail_extra.is_empty(),
+        "5.2.26 extra members: {detail_extra:?}"
+    );
     let extra: Vec<&String> = doc
         .as_object()
         .expect("object")
@@ -183,9 +212,10 @@ async fn entity_type_info_shape() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
-/// 4.5.13/4.5.14/4.5.15: attribute list, detailed attribute list and
-/// attribute information representations — fixed types, URI ids, short
-/// names, and no members beyond the clause lists.
+/// 4.5.13/4.5.14/4.5.15 + Tables 5.2.27-1 (AttributeList) and 5.2.28-1
+/// (Attribute): attribute list, detailed attribute list and attribute
+/// information representations — fixed types, URI ids, short names, and no
+/// members beyond the clause lists.
 #[tokio::test(flavor = "multi_thread")]
 async fn attribute_representations_shapes() {
     let st = AppState::new("test".into());
