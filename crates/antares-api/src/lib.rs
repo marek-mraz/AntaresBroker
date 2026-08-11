@@ -2046,7 +2046,8 @@ mod clause_5_2_11 {
         );
         assert_eq!(
             post_interval(json!({"startAt": "2020-01-01T00:00:00Z",
-                "endAt": "not a date"})).await,
+                "endAt": "not a date"}))
+            .await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -2056,8 +2057,67 @@ mod clause_5_2_11 {
         );
         assert_eq!(
             post_interval(json!({"startAt": "2020-01-01T00:00:00Z",
-                "endAt": "2030-01-01T00:00:00Z"})).await,
+                "endAt": "2030-01-01T00:00:00Z"}))
+            .await,
             StatusCode::CREATED
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_12 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_sub(doc: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5212".into()));
+        let body = doc.to_string();
+        let req = Request::post("/ngsi-ld/v1/subscriptions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// 5.2.12: "At least one of (a) entities or (b) watchedAttributes shall
+    /// be present, unless the member localOnly is set to true".
+    #[tokio::test]
+    async fn local_only_waives_the_selector_requirement() {
+        use serde_json::json;
+        let base = |extra: serde_json::Value| {
+            let mut d = json!({
+                "id": format!("urn:ngsi-ld:Subscription:5212-{}", extra.to_string().len()),
+                "type": "Subscription",
+                "notification": {"endpoint": {"uri": "http://client.example.org/cb"}}
+            });
+            for (k, v) in extra.as_object().expect("obj") {
+                d[k] = v.clone();
+            }
+            d
+        };
+        assert_eq!(
+            post_sub(base(json!({}))).await,
+            StatusCode::BAD_REQUEST,
+            "no selector and no localOnly"
+        );
+        assert_eq!(
+            post_sub(base(json!({"localOnly": true}))).await,
+            StatusCode::CREATED,
+            "localOnly=true waives entities/watchedAttributes"
+        );
+        assert_eq!(
+            post_sub(base(json!({"localOnly": false}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        // the exclusions stay intact
+        assert_eq!(
+            post_sub(base(json!({"watchedAttributes": ["speed"],
+                "timeInterval": 5})))
+            .await,
+            StatusCode::BAD_REQUEST
         );
     }
 }

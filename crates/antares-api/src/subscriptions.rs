@@ -344,7 +344,11 @@ pub fn normalize_subscription(
         if !out.contains_key("type") {
             return Err(bad("type must be \"Subscription\" (5.2.12)".into()));
         }
-        if !out.contains_key("entities") && !out.contains_key("watchedAttributes") {
+        // 5.2.12: "At least one of (a) entities or (b) watchedAttributes
+        // shall be present, unless the member localOnly is set to true"
+        // (local scope, 5.5.13).
+        let local_only = out.get("localOnly").and_then(Value::as_bool) == Some(true);
+        if !local_only && !out.contains_key("entities") && !out.contains_key("watchedAttributes") {
             return Err(bad(
                 "one of entities or watchedAttributes is required (5.2.12)".into(),
             ));
