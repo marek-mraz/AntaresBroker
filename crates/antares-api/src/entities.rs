@@ -2421,3 +2421,39 @@ mod clause_4_16 {
         assert_eq!(doc["type"], json!(["A", "B"]));
     }
 }
+
+#[cfg(test)]
+mod clause_4_17 {
+    use super::*;
+    use antares_jsonld::Loader;
+
+    /// 4.17: disjunction via `|` or `,`, conjunction via `(a;b)`; short
+    /// names expand against the @context.
+    #[test]
+    fn selection_language_semantics() {
+        let ctx = Loader::new().core();
+        const D: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+        let home = format!("{D}Home");
+        let vehicle = format!("{D}Vehicle");
+        let motorhome = format!("{D}Motorhome");
+        let both: Vec<&str> = vec![&home, &vehicle];
+        let only_home: Vec<&str> = vec![&home];
+        let only_motor: Vec<&str> = vec![&motorhome];
+        // EXAMPLE 1: OR, both spellings
+        assert!(type_selection_matches("Building|Home", &only_home, &ctx));
+        assert!(type_selection_matches("Building,Home", &only_home, &ctx));
+        assert!(!type_selection_matches("Building|House", &only_home, &ctx));
+        // EXAMPLE 2: conjunction — ALL listed types required
+        assert!(type_selection_matches("(Home;Vehicle)", &both, &ctx));
+        assert!(
+            !type_selection_matches("(Home;Vehicle)", &only_home, &ctx),
+            "an entity with only Home must NOT match the conjunction"
+        );
+        // EXAMPLE 3: (Home;Vehicle)|Motorhome in both alternative spellings
+        for sel in ["(Home;Vehicle)|Motorhome", "(Home;Vehicle),Motorhome"] {
+            assert!(type_selection_matches(sel, &both, &ctx), "{sel}");
+            assert!(type_selection_matches(sel, &only_motor, &ctx), "{sel}");
+            assert!(!type_selection_matches(sel, &only_home, &ctx), "{sel}");
+        }
+    }
+}
