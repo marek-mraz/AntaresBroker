@@ -84,6 +84,16 @@ impl Context {
                     );
                 }
                 Value::Object(o) => {
+                    // 5.5.7: user @contexts shall not contain JSON-LD Scoped
+                    // Contexts — a per-term @context could override core
+                    // terms or reshape elements during expansion →
+                    // BadRequestData.
+                    if o.contains_key("@context") {
+                        return Err(NgsiError::BadRequestData(format!(
+                            "term {term:?}: JSON-LD Scoped Contexts are not \
+                             allowed in a user @context (5.5.7)"
+                        )));
+                    }
                     let id = match o.get("@id").and_then(Value::as_str) {
                         Some(id) => self.expand_iri_for_def(id),
                         // No @id: term maps into the vocab (or is a keyword alias we skip).
@@ -254,6 +264,38 @@ mod tests {
         c.merge_object(v.as_object().unwrap()).unwrap();
         c.freeze();
         c
+    }
+
+    /// 5.5.7: the user @context "shall not contain JSON-LD Scoped Contexts"
+    /// — a term definition carrying its own @context "should result in an
+    /// error of type BadRequestData" (it could reshape core terms during
+    /// expansion). Compaction with no matching term renders the FQN.
+    #[test]
+    fn clause_5_5_7_scoped_contexts_rejected_and_fqn_fallback() {
+        let mut c = Context::default();
+        let err = c
+            .merge_object(
+                json!({"Vehicle": {"@id": "https://example.org/Vehicle",
+                    "@context": {"speed": "https://example.org/hidden-speed"}}})
+                .as_object()
+                .unwrap(),
+            )
+            .expect_err("scoped context must be rejected");
+        assert!(
+            matches!(err, NgsiError::BadRequestData(_)),
+            "BadRequestData, got {err:?}"
+        );
+        // and the smuggled scoped term must NOT have landed in the context
+        assert_ne!(
+            ctx(json!({"x": "https://example.org/x"})).expand_key("speed"),
+            "https://example.org/hidden-speed"
+        );
+        // compaction without a matching term renders the FQN verbatim
+        let c = ctx(json!({"name": "https://example.org/name"}));
+        assert_eq!(
+            c.compact_iri("https://elsewhere.org/unmapped"),
+            "https://elsewhere.org/unmapped"
+        );
     }
 
     #[test]
