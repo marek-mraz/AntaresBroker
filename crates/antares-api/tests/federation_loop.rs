@@ -542,3 +542,78 @@ async fn suppressed_loop_forward_warns_199_on_get() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "the forward was suppressed");
 }
+
+/// 5.6.1.4: a redirect (or exclusive) registration matching the input but
+/// NOT supporting Create Entity yields an error of type Conflict and is
+/// never contacted; an inclusive registration without Create Entity support
+/// is simply not forwarded — the local create proceeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_1_create_unsupported_by_registration() {
+    let post_entity = || {
+        let body = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+                "speed": {"type": "Property", "value": 1}})
+        .to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_ops = |st: AppState, mode: &'static str, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:ops-{mode}"),
+            "type": "ContextSourceRegistration",
+            "mode": mode,
+            "operations": ["retrieveEntity"],
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // redirect without createEntity: the complete create fails → Conflict,
+    // and the registered source is never contacted
+    let st = register_ops(state(), "redirect", {
+        let (port, hits) = mock_source();
+        REDIRECT_HITS.set(hits).ok();
+        port
+    })
+    .await;
+    let res = send(&st, post_entity()).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("errors/Conflict"),
+        "error type must be Conflict: {body}"
+    );
+    assert_eq!(
+        REDIRECT_HITS.get().expect("hits").load(Ordering::SeqCst),
+        0,
+        "unsupported operation must not be forwarded"
+    );
+
+    // inclusive without createEntity: not forwarded, local create succeeds
+    let (port, hits) = mock_source();
+    let st = register_ops(state(), "inclusive", port).await;
+    let res = send(&st, post_entity()).await;
+    assert_eq!(res.status(), StatusCode::CREATED, "local create proceeds");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "no forward without support");
+}
+
+static REDIRECT_HITS: std::sync::OnceLock<Arc<AtomicUsize>> = std::sync::OnceLock::new();

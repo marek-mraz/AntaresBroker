@@ -269,8 +269,13 @@ async fn create_entity_inner(
         let mut conflicts = Vec::new();
         let mut fwd = Vec::new();
         for reg in &regs {
-            if reg.mode == "exclusive" && !reg.supports("createEntity") {
-                conflicts.push(crate::federation::conflict_part("createEntity"));
+            // 5.6.1.4: exclusive/redirect registrations not supporting the
+            // Create Entity operation yield an error of type Conflict (and
+            // are never contacted); an inclusive one is simply not forwarded.
+            if !reg.supports("createEntity") {
+                if reg.is_proxy() {
+                    conflicts.push(crate::federation::conflict_part("createEntity"));
+                }
                 continue;
             }
             if let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) {

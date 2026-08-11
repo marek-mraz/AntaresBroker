@@ -81,6 +81,9 @@ async fn register(
                       tenant.unwrap_or("default"), peer_tenant.unwrap_or("default")),
         "type": "ContextSourceRegistration",
         "mode": mode,
+        // 5.6.1.4/4.20: the default operations set (federationOps) does NOT
+        // include createEntity — writes are only forwarded when declared.
+        "operations": ["federationOps", "redirectionOps"],
         "information": [{"entities": [{"type": "Vehicle"}]}],
         "endpoint": endpoint,
     });

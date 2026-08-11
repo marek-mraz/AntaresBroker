@@ -1175,6 +1175,9 @@ pub fn combine(parts: Vec<Part>, ok: Response, tenant: &TenantId) -> Response {
         let p = &parts[0];
         let status = StatusCode::from_u16(p.status).unwrap_or(StatusCode::BAD_GATEWAY);
         let (etype, title) = match p.status {
+            // 5.6.1.4/5.6.2…: an unsupported-operation part is the Conflict
+            // error type; an entity-exists part stays AlreadyExists.
+            409 if p.detail.contains("does not accept") => ("Conflict", "Conflict"),
             409 => ("AlreadyExists", "Conflict"),
             404 => ("ResourceNotFound", "Not Found"),
             _ => ("InternalError", "Error"),
