@@ -780,3 +780,82 @@ async fn clause_5_6_7_batch_create_forwarding_fallbacks() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
 }
+
+/// 5.6.8.4 support ladder: no upsertBatch → per-entity Create Entity, and on
+/// AlreadyExists fall back to Replace Entity (mode replace/unset) or Update
+/// Attributes (mode update); a source offering only updateEntity gets the
+/// per-entity PATCH directly under options=update.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_8_upsert_forwarding_fallbacks() {
+    let upsert = |q: &str| {
+        let body = serde_json::json!([
+            {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 1}}
+        ])
+        .to_string();
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ngsi-ld/v1/entityOperations/upsert{q}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:ups-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // createEntity+replaceEntity source, remote already has the entity
+    // (mock answers 409): create → 409 → Replace Entity forward
+    let m = mock_replying("HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(
+        state(),
+        serde_json::json!(["createEntity", "replaceEntity"]),
+        m.port,
+    )
+    .await;
+    let _ = send(&st, upsert("")).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        2,
+        "create then replace fallback"
+    );
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("PUT /ngsi-ld/v1/entities/{ENTITY}")),
+        "AlreadyExists falls back to Replace Entity: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // updateEntity-only source with options=update: direct per-entity PATCH
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["updateEntity"]), m.port).await;
+    let _ = send(&st, upsert("?options=update")).await;
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one update forward");
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("PATCH /ngsi-ld/v1/entities/{ENTITY}/attrs")),
+        "update mode uses Update Attributes: {}",
+        m.last_head.lock().expect("lock")
+    );
+}

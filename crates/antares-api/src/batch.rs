@@ -544,10 +544,13 @@ async fn batch_write(
         // forward; else (create only) the single Create Entity op supported
         // → one forward PER ENTITY; else proxy modes get a Conflict error
         // per entity and inclusive ones are not forwarded at all.
-        let single_op_fallback = match mode {
-            BatchMode::Create => Some("createEntity"),
-            _ => None,
-        };
+        // 5.6.7.4/5.6.8.4 support ladder per CSR: batch op supported -> one
+        // batch forward; else per-entity single-op forwards (upsert: Create
+        // Entity with AlreadyExists falling back to Replace Entity in
+        // replace mode or Update Attributes in update mode, or those two
+        // directly); else proxy modes get a Conflict error per entity and
+        // inclusive ones are not forwarded at all.
+        let replace_mode = update_mode != Some("update");
         for reg in &fed_regs {
             let arr: Vec<Value> = fwd_items
                 .iter()
@@ -571,25 +574,108 @@ async fn batch_write(
                     )
                     .await,
                 );
-            } else if let Some(single) = single_op_fallback.filter(|single| reg.supports(single)) {
-                let _ = single;
-                for ent in arr {
-                    parts.push(
-                        crate::federation::forward_part(
-                            st,
+                continue;
+            }
+            let fwd_one = |method: reqwest::Method, path: String, body: Value| {
+                crate::federation::forward_part(
+                    st,
+                    method,
+                    path,
+                    &query,
+                    headers,
+                    &tenant,
+                    reg,
+                    &ctx_url,
+                    Some(body),
+                )
+            };
+            let ent_id = |ent: &Value| {
+                ent.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let mut handled = true;
+            match mode {
+                BatchMode::Create if reg.supports("createEntity") => {
+                    for ent in arr.clone() {
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::POST,
+                                format!("{}/ngsi-ld/v1/entities", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                BatchMode::Upsert if reg.supports("createEntity") => {
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        let p = fwd_one(
                             reqwest::Method::POST,
                             format!("{}/ngsi-ld/v1/entities", reg.endpoint),
-                            &query,
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
+                            ent.clone(),
                         )
-                        .await,
-                    );
+                        .await;
+                        if p.status != 409 {
+                            parts.push(p);
+                        } else if replace_mode && reg.supports("replaceEntity") {
+                            parts.push(
+                                fwd_one(
+                                    reqwest::Method::PUT,
+                                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                                    ent,
+                                )
+                                .await,
+                            );
+                        } else if !replace_mode && reg.supports("updateEntity") {
+                            parts.push(
+                                fwd_one(
+                                    reqwest::Method::PATCH,
+                                    format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                    ent,
+                                )
+                                .await,
+                            );
+                        } else {
+                            // 5.6.8.4: neither replace nor update available
+                            parts.push(crate::federation::Part {
+                                status: 422,
+                                detail: format!("OperationNotSupported: no upsert path for {id}"),
+                            });
+                        }
+                    }
                 }
-            } else if reg.is_proxy() {
+                BatchMode::Upsert if replace_mode && reg.supports("replaceEntity") => {
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::PUT,
+                                format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                BatchMode::Upsert if !replace_mode && reg.supports("updateEntity") => {
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::PATCH,
+                                format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                _ => handled = false,
+            }
+            if !handled && reg.is_proxy() {
                 for _ in &arr {
                     parts.push(crate::federation::conflict_part(op));
                 }
