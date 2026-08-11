@@ -2430,11 +2430,75 @@ mod clause_5_2_16 {
         assert!(e.get("entityId").is_some());
         let pd = &e["error"];
         for k in ["type", "title", "status"] {
-            assert!(pd.get(k).is_some(), "ProblemDetails member {k} missing: {pd}");
+            assert!(
+                pd.get(k).is_some(),
+                "ProblemDetails member {k} missing: {pd}"
+            );
         }
         assert!(
             pd["type"].as_str().unwrap_or("").contains("errors/"),
             "error.type is the NGSI-LD error URI"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_18 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Tables 5.2.18-1/5.2.19-1: partial attribute update answers 207 with
+    /// updated = names and notUpdated = {attributeName, reason}[].
+    #[tokio::test]
+    async fn update_result_and_not_updated_details_shape() {
+        let app = router(AppState::new("t5218".into()));
+        let body = serde_json::json!({"id": "urn:ngsi-ld:V:5218", "type": "Vehicle",
+            "speed": {"type": "Property", "value": 1}})
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        assert_eq!(
+            app.clone().oneshot(req).await.expect("r").status(),
+            StatusCode::CREATED
+        );
+        // noOverwrite append: speed exists (skipped), brand is new (applied)
+        let frag = serde_json::json!({
+            "speed": {"type": "Property", "value": 2},
+            "brand": {"type": "Property", "value": "x"}})
+        .to_string();
+        let req =
+            Request::post("/ngsi-ld/v1/entities/urn:ngsi-ld:V:5218/attrs?options=noOverwrite")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", frag.len())
+                .body(Body::from(frag))
+                .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let updated = doc["updated"].as_array().expect("updated");
+        assert!(
+            updated
+                .iter()
+                .any(|u| u.as_str().unwrap_or("").contains("brand")),
+            "brand applied: {doc}"
+        );
+        let nu = doc["notUpdated"].as_array().expect("notUpdated");
+        assert_eq!(nu.len(), 1, "{doc}");
+        assert!(nu[0]["attributeName"]
+            .as_str()
+            .unwrap_or("")
+            .contains("speed"));
+        assert!(!nu[0]["reason"].as_str().unwrap_or("").is_empty());
+        assert!(
+            nu[0].get("registrationId").is_none(),
+            "local failure carries no registrationId"
         );
     }
 }
