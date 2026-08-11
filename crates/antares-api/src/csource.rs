@@ -274,6 +274,104 @@ pub fn normalize_registration(
                 }
                 out.insert("contextSourceInfo".into(), v.clone());
             }
+            // Table 5.2.9-1: operations entries "are limited to the named
+            // API operations and named operation groups (see clause 4.20)".
+            "operations" => {
+                let arr = v
+                    .as_array()
+                    .filter(|a| !a.is_empty())
+                    .ok_or_else(|| bad("operations must be a non-empty array (5.2.9)".into()))?;
+                for op in arr {
+                    let name = op.as_str().unwrap_or_default();
+                    if !crate::federation::ALL_OPERATION_NAMES.contains(&name)
+                        && !crate::federation::OPERATION_GROUPS.contains(&name)
+                    {
+                        return Err(bad(format!(
+                            "unknown operation {name:?} — entries are limited to the 4.20                              names and groups (5.2.9)"
+                        )));
+                    }
+                }
+                out.insert("operations".into(), v.clone());
+            }
+            // 4.3.6.4 / 5.2.9: localOnly is a Boolean.
+            "localOnly" => {
+                if !v.is_boolean() {
+                    return Err(bad("localOnly must be a boolean (5.2.9)".into()));
+                }
+                out.insert("localOnly".into(), v.clone());
+            }
+            // Table 5.2.9-1: a non-empty RFC 7230 pseudonym token.
+            "contextSourceAlias" => {
+                let a = v
+                    .as_str()
+                    .filter(|a| {
+                        !a.is_empty()
+                            && a.bytes().all(|b| {
+                                b.is_ascii_alphanumeric()
+                                    || b"!#$%&'*+-.^_`|~".contains(&b)
+                            })
+                    })
+                    .ok_or_else(|| {
+                        bad("contextSourceAlias must be a non-empty RFC 7230 pseudonym                              token (5.2.9)"
+                            .into())
+                    })?;
+                out.insert("contextSourceAlias".into(), Value::String(a.to_owned()));
+            }
+            // Table 5.2.9-1: non-empty strings.
+            "description" | "registrationName" => {
+                if v.as_str().is_none_or(str::is_empty) {
+                    return Err(bad(format!("{k} must be a non-empty string (5.2.9)")));
+                }
+                out.insert(k.clone(), v.clone());
+            }
+            // Table 5.2.9-1: valid URIs, "@none" for the default instances.
+            "datasetId" => {
+                let arr = v
+                    .as_array()
+                    .ok_or_else(|| bad("datasetId must be an array of URIs (5.2.9)".into()))?;
+                for d in arr {
+                    let d = d.as_str().unwrap_or_default();
+                    if d != "@none" && antares_model::EntityId::new(d).is_err() {
+                        return Err(bad(format!("datasetId entry {d:?} is not a URI (5.2.9)")));
+                    }
+                }
+                out.insert("datasetId".into(), v.clone());
+            }
+            // Table 5.2.9-1: scope(s) per the 4.18 grammar.
+            "scope" => {
+                let all_valid = match v {
+                    Value::String(s) => antares_jsonld::valid_scope_value(s),
+                    Value::Array(a) => a
+                        .iter()
+                        .all(|s| s.as_str().is_some_and(antares_jsonld::valid_scope_value)),
+                    _ => false,
+                };
+                if !all_valid {
+                    return Err(bad("scope violates the 4.18 grammar (5.2.9)".into()));
+                }
+                out.insert("scope".into(), v.clone());
+            }
+            // Table 5.2.9-1: GeoJSON geometries per 4.7.
+            "location" | "observationSpace" | "operationSpace" => {
+                let ok = v
+                    .as_object()
+                    .and_then(|o| Some((o.get("type")?.as_str()?, o.get("coordinates")?)))
+                    .is_some_and(|(t, c)| crate::geo::parse_ref_geometry(t, c).is_ok());
+                if !ok {
+                    return Err(bad(format!("{k} must be a 4.7 GeoJSON geometry (5.2.9)")));
+                }
+                out.insert(k.clone(), v.clone());
+            }
+            // Table 5.2.9-1: an ISO 8601 duration.
+            "refreshRate" => {
+                let ok = v.as_str().is_some_and(valid_iso8601_duration);
+                if !ok {
+                    return Err(bad(
+                        "refreshRate must be an ISO 8601 duration (5.2.9)".into()
+                    ));
+                }
+                out.insert("refreshRate".into(), v.clone());
+            }
             "observationInterval" | "managementInterval" => {
                 let o = v
                     .as_object()
@@ -320,6 +418,45 @@ pub fn normalize_registration(
 /// registration shall define both: an entity id (i.e. an id pattern or Entity
 /// type defining a group of entities is not supported for exclusive
 /// registrations) [and] Attributes."
+/// ISO 8601 duration (5.2.9 refreshRate): P[nY][nM][nW][nD][T[nH][nM][nS]],
+/// at least one component, digits (fraction allowed in seconds).
+fn valid_iso8601_duration(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('P') else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    let (date, time) = match rest.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (rest, None),
+    };
+    let take = |part: &str, units: &[char]| -> bool {
+        let mut p = part;
+        let mut any = false;
+        for u in units {
+            if let Some(i) = p.find(*u) {
+                let num = &p[..i];
+                if num.is_empty()
+                    || !num
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b == b'.' || b == b',')
+                {
+                    return false;
+                }
+                any = true;
+                p = &p[i + 1..];
+            }
+        }
+        p.is_empty() && (any || part.is_empty())
+    };
+    let date_ok = take(date, &['Y', 'M', 'W', 'D']);
+    match time {
+        None => date_ok && !date.is_empty(),
+        Some(t) => date_ok && !t.is_empty() && take(t, &['H', 'M', 'S']),
+    }
+}
+
 pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
     if doc.get("mode").and_then(Value::as_str) != Some("exclusive") {
         return Ok(());

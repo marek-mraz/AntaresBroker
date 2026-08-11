@@ -138,21 +138,13 @@ pub fn expand_entity(
 
     // scope
     if let Some(v) = doc.get("scope") {
-        // 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
-        // unicodeLetter *(letter/digit/_). "urn:ngsi-ld:null" shall ONLY
-        // appear for deleted scopes — creatable solely on null-allowing
-        // (merge/patch) inputs.
+        // 4.18: "urn:ngsi-ld:null" shall ONLY appear for deleted scopes —
+        // creatable solely on null-allowing (merge/patch) inputs.
         let valid_scope = |s: &str| -> bool {
             if s == "urn:ngsi-ld:null" {
                 return opts.allow_null;
             }
-            let body = s.strip_prefix('/').unwrap_or(s);
-            !body.is_empty()
-                && body.split('/').all(|level| {
-                    let mut ch = level.chars();
-                    ch.next().is_some_and(char::is_alphabetic)
-                        && ch.all(|c| c.is_alphabetic() || c.is_numeric() || c == '_')
-                })
+            valid_scope_value(s)
         };
         let scopes: Vec<Value> = match v {
             Value::String(s) => vec![Value::String(s.clone())],
@@ -306,6 +298,19 @@ pub fn is_deletion_instance(inst: &Value) -> bool {
 /// (the spec's prefix:name production) and is outside the term grammar.
 // ponytail: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
 // through as an IRI; tighten to per-part validation if it ever matters.
+/// 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
+/// unicodeLetter *(letter/digit/_) — shared by entity scopes and the 5.2.9
+/// registration scope member.
+pub fn valid_scope_value(s: &str) -> bool {
+    let body = s.strip_prefix('/').unwrap_or(s);
+    !body.is_empty()
+        && body.split('/').all(|level| {
+            let mut ch = level.chars();
+            ch.next().is_some_and(char::is_alphabetic)
+                && ch.all(|c| c.is_alphabetic() || c.is_numeric() || c == '_')
+        })
+}
+
 pub(crate) fn valid_name(s: &str) -> bool {
     if s.contains(':') {
         return true;

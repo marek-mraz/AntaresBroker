@@ -15,7 +15,7 @@ pub use compact::{compact_entity, compact_entity_shallow, compact_types};
 pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};
 pub use expand::{
     expand_attr_fragment, expand_entity, expand_types, is_deletion_instance, is_ngsi_null,
-    is_ngsi_null_langmap, parse_datetime, ExpandOpts,
+    is_ngsi_null_langmap, parse_datetime, valid_scope_value, ExpandOpts,
 };
 pub use loader::{
     client_builder, http_interaction, io_deadline, with_timeouts, wrap_client, CtxUsage,

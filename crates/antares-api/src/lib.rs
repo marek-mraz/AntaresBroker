@@ -1874,3 +1874,77 @@ mod clause_5_2_8 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_9 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_reg(extra: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t529".into()));
+        let mut doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:529-{}",
+                          extra.to_string().len()),
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://cs.example.org:1026"
+        });
+        for (k, v) in extra.as_object().expect("obj") {
+            doc[k] = v.clone();
+        }
+        let body = doc.to_string();
+        let req = Request::post("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.9-1 value spaces: operations limited to the 4.20 names and
+    /// groups; localOnly boolean; contextSourceAlias a non-empty RFC 7230
+    /// pseudonym token; refreshRate an ISO 8601 duration; datasetId URIs or
+    /// @none; scope per the 4.18 grammar; geometries per 4.7; description
+    /// and registrationName non-empty strings.
+    #[tokio::test]
+    async fn registration_member_value_spaces() {
+        use serde_json::json;
+        let cases: &[(serde_json::Value, StatusCode)] = &[
+            (json!({"operations": ["bogusOp"]}), StatusCode::BAD_REQUEST),
+            (
+                json!({"operations": ["updateOps", "retrieveEntity"]}),
+                StatusCode::CREATED,
+            ),
+            (json!({"localOnly": "yes"}), StatusCode::BAD_REQUEST),
+            (json!({"localOnly": true}), StatusCode::CREATED),
+            (json!({"contextSourceAlias": ""}), StatusCode::BAD_REQUEST),
+            (
+                json!({"contextSourceAlias": "has space"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (json!({"contextSourceAlias": "cs1"}), StatusCode::CREATED),
+            (json!({"refreshRate": "5 minutes"}), StatusCode::BAD_REQUEST),
+            (json!({"refreshRate": "PT5M"}), StatusCode::CREATED),
+            (
+                json!({"datasetId": ["urn:ds:1", "@none"]}),
+                StatusCode::CREATED,
+            ),
+            (json!({"datasetId": ["not a uri"]}), StatusCode::BAD_REQUEST),
+            (json!({"scope": "9bad"}), StatusCode::BAD_REQUEST),
+            (json!({"scope": ["/Madrid", "/A/B_2"]}), StatusCode::CREATED),
+            (json!({"description": ""}), StatusCode::BAD_REQUEST),
+            (json!({"registrationName": ""}), StatusCode::BAD_REQUEST),
+            (json!({"location": 5}), StatusCode::BAD_REQUEST),
+            (
+                json!({"location": {"type": "Point", "coordinates": [8, 40]}}),
+                StatusCode::CREATED,
+            ),
+        ];
+        for (extra, want) in cases {
+            let got = post_reg(extra.clone()).await;
+            assert_eq!(got, *want, "extra={extra}");
+        }
+    }
+}
