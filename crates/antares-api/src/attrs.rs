@@ -1069,6 +1069,86 @@ async fn delete_attr_inner(
 }
 
 #[cfg(test)]
+mod clause_5_5_8 {
+    use super::merge_instance_sets;
+    use serde_json::{json, Value};
+
+    /// 5.5.8 update algorithm: a Fragment member replaces the WHOLE matching
+    /// instance (unmapped sub-members are dropped — EXAMPLE 2), a different
+    /// datasetId is added as a new instance, an NGSI-LD Null deletes the
+    /// matching instance (EXAMPLE 3), and createdAt survives the replace.
+    #[test]
+    fn update_replaces_whole_instances_dataset_id_wise() {
+        let mut existing = json!([
+            {"type": "Property", "value": 25, "unitCode": "CEL",
+             "observedAt": "2022-03-14T01:59:26.535Z",
+             "createdAt": "2022-01-01T00:00:00Z"},
+            {"type": "Property", "value": 7, "datasetId": "urn:ngsi-ld:Dataset:a",
+             "createdAt": "2022-01-01T00:00:00Z"}
+        ]);
+        // default instance replaced wholesale; new datasetId appended
+        let incoming = json!([
+            {"type": "Property", "value": 100,
+             "observedAt": "2022-03-14T13:00:00.000Z"},
+            {"type": "Property", "value": 8, "datasetId": "urn:ngsi-ld:Dataset:b"}
+        ]);
+        assert!(merge_instance_sets(&mut existing, &incoming, false));
+        let arr = existing.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "default replaced + a kept + b added");
+        let default = arr
+            .iter()
+            .find(|i| i.get("datasetId").is_none())
+            .expect("default instance");
+        assert_eq!(default["value"], 100);
+        assert!(
+            default.get("unitCode").is_none(),
+            "EXAMPLE 2: whole-attribute replace drops unitCode"
+        );
+        assert_eq!(
+            default["createdAt"], "2022-01-01T00:00:00Z",
+            "createdAt survives the replace"
+        );
+        // NGSI-LD Null deletes exactly the matching datasetId instance
+        let deletion = json!([
+            {"type": "Property", "value": "urn:ngsi-ld:null",
+             "datasetId": "urn:ngsi-ld:Dataset:a"}
+        ]);
+        assert!(merge_instance_sets(&mut existing, &deletion, false));
+        let arr = existing.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(
+            !arr.iter().any(|i| {
+                i.get("datasetId").and_then(Value::as_str) == Some("urn:ngsi-ld:Dataset:a")
+            }),
+            "EXAMPLE 3: null deletes the instance"
+        );
+        assert!(
+            !existing.to_string().contains("urn:ngsi-ld:null"),
+            "the sentinel never persists"
+        );
+    }
+
+    /// 5.5.8 (noOverwrite append, 5.6.3): an existing instance is NOT
+    /// replaced, an absent one is still added.
+    #[test]
+    fn no_overwrite_keeps_existing_instances() {
+        let mut existing = json!([{"type": "Property", "value": 1}]);
+        let incoming = json!([
+            {"type": "Property", "value": 2},
+            {"type": "Property", "value": 3, "datasetId": "urn:ngsi-ld:Dataset:n"}
+        ]);
+        assert!(merge_instance_sets(&mut existing, &incoming, true));
+        let arr = existing.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(
+            arr[0]["value"], 1,
+            "noOverwrite leaves the existing default instance"
+        );
+        assert_eq!(arr[1]["value"], 3);
+    }
+}
+
+#[cfg(test)]
 mod update_result_tests {
     use super::*;
     use crate::federation::{FedReg, Part};

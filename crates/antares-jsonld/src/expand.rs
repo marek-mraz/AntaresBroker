@@ -744,6 +744,14 @@ fn expand_instance(
         let s = d
             .as_str()
             .ok_or_else(|| bad(format!("attribute {name}: datasetId must be a URI")))?;
+        // 5.5.8/5.5.12: "A datasetId cannot be deleted by setting it to the
+        // value urn:ngsi-ld:null" — reject the attempt on every input.
+        if s == "urn:ngsi-ld:null" {
+            return Err(bad(format!(
+                "attribute {name}: a datasetId cannot be set or deleted via \
+                 \"urn:ngsi-ld:null\" (5.5.8)"
+            )));
+        }
         // 4.5.5.1: "datasetId": "@none" designates the default Attribute
         // instance, which never carries a datasetId — normalize by dropping it
         // so storage, matching and responses treat it as absent.
@@ -914,6 +922,12 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
                         .into()));
                 }
                 out.insert("value".into(), v.clone());
+            }
+            // 5.5.8: a datasetId cannot be deleted via the NGSI-LD Null
+            "datasetId" if v.as_str() == Some("urn:ngsi-ld:null") => {
+                return Err(bad("a datasetId cannot be set or deleted via \
+                     \"urn:ngsi-ld:null\" (5.5.8)"
+                    .into()));
             }
             _ if RESERVED_MEMBERS.contains(&k.as_str()) => {
                 out.insert(k.clone(), v.clone());
@@ -1615,6 +1629,54 @@ mod tests {
             },
         )
         .expect("first-level null is the deletion form in fragments");
+    }
+
+    /// 5.5.8: "A datasetId cannot be deleted by setting it to the value
+    /// urn:ngsi-ld:null" — such a fragment is rejected on every input,
+    /// including null-allowing (update/merge) ones.
+    #[test]
+    fn clause_5_5_8_dataset_id_null_rejected() {
+        let doc = json!({"id": "urn:x", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                      "datasetId": "urn:ngsi-ld:null"}});
+        for opts in [
+            ExpandOpts::default(),
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                ..Default::default()
+            },
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                merge: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), opts).is_err(),
+                "datasetId null must be rejected (opts {opts:?})"
+            );
+        }
+        // the attribute-level fragment path (5.6.4) rejects it too
+        let frag = json!({"type": "Property", "value": 1,
+                          "datasetId": "urn:ngsi-ld:null"});
+        assert!(expand_attr_fragment(frag.as_object().unwrap(), &core()).is_err());
+        // a REAL datasetId still passes and is preserved
+        let ok = expand_entity(
+            json!({"id": "urn:x", "type": "T",
+                "speed": {"type": "Property", "value": 1,
+                          "datasetId": "urn:ngsi-ld:Dataset:a"}})
+            .as_object()
+            .unwrap(),
+            &core(),
+            ExpandOpts::default(),
+        )
+        .expect("real datasetId");
+        assert_eq!(
+            ok["https://uri.etsi.org/ngsi-ld/default-context/speed"][0]["datasetId"],
+            "urn:ngsi-ld:Dataset:a"
+        );
     }
 
     /// 4.6.5 Supported data types for LanguageMaps: keys are RFC 5646 tags
