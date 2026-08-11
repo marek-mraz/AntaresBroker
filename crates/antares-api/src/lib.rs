@@ -2155,30 +2155,109 @@ mod clause_5_2_13 {
         use serde_json::json;
         assert_eq!(
             post_geoq(json!({"georel": "near;maxDistance==2000",
-                "geometry": "Point", "coordinates": [8, 40]})).await,
+                "geometry": "Point", "coordinates": [8, 40]}))
+            .await,
             StatusCode::CREATED
         );
         assert_eq!(
             post_geoq(json!({"georel": "within", "geometry": "Polygon",
                 "coordinates": "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]",
-                "geoproperty": "observationSpace"})).await,
+                "geoproperty": "observationSpace"}))
+            .await,
             StatusCode::CREATED,
             "string-encoded coordinates (4.7.1) are legal"
         );
         assert_eq!(
             post_geoq(json!({"georel": "within",
-                "geometry": "GeometryCollection", "coordinates": []})).await,
+                "geometry": "GeometryCollection", "coordinates": []}))
+            .await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
             post_geoq(json!({"georel": "touches", "geometry": "Point",
-                "coordinates": [8, 40]})).await,
+                "coordinates": [8, 40]}))
+            .await,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
             post_geoq(json!({"geometry": "Point", "coordinates": [8, 40]})).await,
             StatusCode::BAD_REQUEST,
             "georel is mandatory"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_14 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_notif(n: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5214".into()));
+        let mut notif = serde_json::json!({"endpoint": {"uri": "http://client.example.org/cb"}});
+        for (k, v) in n.as_object().expect("obj") {
+            notif[k] = v.clone();
+        }
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:Subscription:5214-{}", n.to_string().len()),
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": notif
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/subscriptions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.14.1-1: join limited to flat/inline/@none, joinLevel a
+    /// positive integer, sysAttrs/showChanges booleans, attributes may not
+    /// name id/type/scope (it is "a synonym for pick, except that id, type,
+    /// scope are not allowed").
+    #[tokio::test]
+    async fn notification_params_value_spaces() {
+        use serde_json::json;
+        assert_eq!(
+            post_notif(json!({"join": "sideways"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_notif(json!({"join": "inline"})).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_notif(json!({"joinLevel": 0})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_notif(json!({"joinLevel": 1.5})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_notif(json!({"join": "flat", "joinLevel": 2})).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_notif(json!({"sysAttrs": "yes"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_notif(json!({"showChanges": "yes"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_notif(json!({"attributes": ["id"]})).await,
+            StatusCode::BAD_REQUEST,
+            "attributes may not name id/type/scope"
+        );
+        assert_eq!(
+            post_notif(json!({"attributes": ["speed"]})).await,
+            StatusCode::CREATED
         );
     }
 }

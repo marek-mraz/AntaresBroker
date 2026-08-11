@@ -177,6 +177,31 @@ pub fn normalize_subscription(
                         "showChanges cannot be true when format is keyValues (5.2.14)".into(),
                     ));
                 }
+                // Table 5.2.14.1-1: join / joinLevel / sysAttrs /
+                // showChanges value spaces.
+                if let Some(j) = n.get("join") {
+                    if !j
+                        .as_str()
+                        .is_some_and(|j| ["flat", "inline", "@none"].contains(&j))
+                    {
+                        return Err(bad(format!("invalid notification join {j:?} (5.2.14)")));
+                    }
+                }
+                if let Some(jl) = n.get("joinLevel") {
+                    let ok = jl.as_u64().map(|v| v >= 1).unwrap_or(false);
+                    if !ok {
+                        return Err(bad(
+                            "notification.joinLevel must be a positive integer (5.2.14)".into(),
+                        ));
+                    }
+                }
+                for key in ["sysAttrs", "showChanges"] {
+                    if n.get(key).is_some_and(|v| !v.is_boolean()) {
+                        return Err(bad(format!(
+                            "notification.{key} must be a boolean (5.2.14)"
+                        )));
+                    }
+                }
                 if let Some(attrs) = n.get("attributes").and_then(Value::as_array) {
                     // Table 5.2.14.1-1 p.119: "Empty array (0 length) is not
                     // allowed" — same restriction on pick and omit below
@@ -190,6 +215,13 @@ pub fn normalize_subscription(
                         let s = a
                             .as_str()
                             .ok_or_else(|| bad("notification.attributes must be strings".into()))?;
+                        // "A synonym for pick, except that id, type, scope
+                        // are not allowed."
+                        if ["id", "type", "scope"].contains(&s) {
+                            return Err(bad(format!(
+                                "notification.attributes may not name {s:?} (5.2.14)"
+                            )));
+                        }
                         na.push(Value::String(ctx.expand_key(s)));
                     }
                     nn.insert("attributes".into(), Value::Array(na));
