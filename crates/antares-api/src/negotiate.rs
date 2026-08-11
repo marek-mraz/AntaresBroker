@@ -279,6 +279,9 @@ pub async fn parse_body(
         }
         match link {
             Some(url) => loader.resolve(&Value::String(url)).await?,
+            // 5.5.5 Default @context assignment: input with no @context gets
+            // at minimum the Core @context (no default user @context is
+            // configured; core terms always take precedence).
             None => loader.core(),
         }
     };
@@ -298,7 +301,8 @@ fn body_context_member(v: &Value) -> Option<Value> {
     v.as_object().and_then(|o| o.get("@context")).cloned()
 }
 
-/// Context for GET/DELETE requests: Link header or core (6.3.5).
+/// Context for GET/DELETE requests: Link header or core (6.3.5; the
+/// no-@context fallback to the Core @context is 5.5.5).
 pub async fn request_context(loader: &Loader, headers: &HeaderMap) -> ApiResult<Arc<Context>> {
     match link_context(headers) {
         Some(url) => Ok(loader.resolve(&Value::String(url)).await?),
@@ -539,6 +543,52 @@ pub fn without_context(v: &Value) -> Map<String, Value> {
 #[cfg(test)]
 mod clause_5_5_3 {
     use super::*;
+
+    /// 5.5.5 Default @context assignment: "If the input provided by an API
+    /// client does not include any @context, then the implementation shall
+    /// at minimum assign the Core @context" — core terms map, non-core
+    /// terms fall to the default vocab, and no user context is invented.
+    #[tokio::test]
+    async fn clause_5_5_5_no_context_input_gets_the_core_context() {
+        let loader = antares_jsonld::Loader::new();
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let parsed = parse_body(
+            &loader,
+            &h,
+            br#"{"id":"urn:x","type":"T"}"#,
+            BodyKind::Standard,
+        )
+        .await
+        .expect("no-context body parses under the core context");
+        assert_eq!(
+            parsed.ctx.expand_key("location"),
+            "https://uri.etsi.org/ngsi-ld/location",
+            "core term mapped by the assigned Core @context"
+        );
+        assert_eq!(
+            parsed.ctx.expand_key("speed"),
+            "https://uri.etsi.org/ngsi-ld/default-context/speed",
+            "non-core term falls to the default vocabulary"
+        );
+        assert_eq!(
+            parsed.ctx.source,
+            Value::String(antares_jsonld::CORE_CONTEXT.to_owned()),
+            "the assigned context is exactly the Core @context — no user \
+             context is invented"
+        );
+        // GET/DELETE requests take the same fallback
+        let ctx = request_context(&loader, &HeaderMap::new())
+            .await
+            .expect("no Link header");
+        assert_eq!(
+            ctx.expand_key("observedAt"),
+            "https://uri.etsi.org/ngsi-ld/observedAt"
+        );
+    }
 
     /// 5.5.3: error bodies are RFC 7807 objects with at least type (5.5.2
     /// URI), title (short summary) and detail — served as application/json,
