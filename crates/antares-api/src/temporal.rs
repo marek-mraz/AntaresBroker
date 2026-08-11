@@ -1712,33 +1712,108 @@ pub async fn add_temporal_attrs(
             .value
             .as_object()
             .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        // 5.6.12 input is pushed history — the 4.5.7 deleted-instance
+        // representation is legal (5.5.4 temporal exception), hence
+        // allow_null (mirrors 5.6.11).
         let mut expanded = expand_entity(
             obj,
             &parsed.ctx,
             ExpandOpts {
                 fragment: true,
-                allow_null: false,
+                allow_null: true,
                 temporal: true,
                 ..Default::default()
             },
         )?;
+        // 5.6.12.4: forwarding — proxy modes without appendAttrsTemporal
+        // are Conflict; supporting registrations receive the fragment and
+        // the matching attributes are stripped from the local half.
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.clone()]),
+            ..Default::default()
+        };
+        let mut regs =
+            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers);
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
+            return Ok(r);
+        }
+        if !regs.is_empty() {
+            let mut parts = Vec::new();
+            let mut fwd = Vec::new();
+            for reg in &regs {
+                if !reg.supports("appendAttrsTemporal") {
+                    if reg.is_proxy() {
+                        parts.push(crate::federation::conflict_part("appendAttrsTemporal"));
+                    }
+                    continue;
+                }
+                if let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) {
+                    fwd.push((reg.clone(), frag));
+                }
+            }
+            let proxies: Vec<&crate::federation::FedReg> =
+                regs.iter().filter(|r| r.is_proxy()).collect();
+            let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+            if has_attrs || proxies.is_empty() {
+                let mut local = expand_entity(
+                    &rest,
+                    &parsed.ctx,
+                    ExpandOpts {
+                        fragment: true,
+                        allow_null: true,
+                        temporal: true,
+                        ..Default::default()
+                    },
+                )?;
+                let ts = now_iso();
+                stamp_instances(&mut local, &ts);
+                let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+                    add_temporal_instances(doc, &local, &ts);
+                    Ok::<(), NgsiError>(())
+                })?;
+                parts.push(match res {
+                    Some(Ok(())) => crate::federation::Part {
+                        status: 204,
+                        detail: "added locally".into(),
+                    },
+                    _ => crate::federation::Part {
+                        status: 404,
+                        detail: format!("temporal entity {id} not found locally"),
+                    },
+                });
+            }
+            let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);
+            for (reg, frag) in fwd {
+                parts.push(
+                    crate::federation::forward_part(
+                        &st,
+                        reqwest::Method::POST,
+                        format!("{}/ngsi-ld/v1/temporal/entities/{id}/attrs", reg.endpoint),
+                        &[],
+                        &headers,
+                        &tenant,
+                        &reg,
+                        &ctx_url,
+                        Some(frag),
+                    )
+                    .await,
+                );
+            }
+            return Ok(crate::federation::combine(
+                parts,
+                no_content(&tenant),
+                &tenant,
+            ));
+        }
         let ts = now_iso();
         stamp_instances(&mut expanded, &ts);
         let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
-            let target = doc.as_object_mut().expect("temporal object");
-            for (k, v) in expanded.as_object().expect("expanded") {
-                if is_meta(k) {
-                    continue;
-                }
-                let incoming = v.as_array().cloned().unwrap_or_default();
-                match target.get_mut(k).and_then(Value::as_array_mut) {
-                    Some(cur) => cur.extend(incoming),
-                    None => {
-                        target.insert(k.clone(), Value::Array(incoming));
-                    }
-                }
-            }
-            target.insert("modifiedAt".into(), Value::String(ts.clone()));
+            add_temporal_instances(doc, &expanded, &ts);
             Ok::<(), NgsiError>(())
         })?;
         match res {
@@ -1750,6 +1825,27 @@ pub async fn add_temporal_attrs(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.6.12.4: append the fragment's Attribute instances to the Temporal
+/// Evolution (instances accumulate — history is never overwritten here).
+fn add_temporal_instances(doc: &mut Value, expanded: &Value, ts: &str) {
+    let Some(target) = doc.as_object_mut() else {
+        return;
+    };
+    for (k, v) in expanded.as_object().into_iter().flatten() {
+        if is_meta(k) {
+            continue;
+        }
+        let incoming = v.as_array().cloned().unwrap_or_default();
+        match target.get_mut(k).and_then(Value::as_array_mut) {
+            Some(cur) => cur.extend(incoming),
+            None => {
+                target.insert(k.clone(), Value::Array(incoming));
+            }
+        }
+    }
+    target.insert("modifiedAt".into(), Value::String(ts.to_owned()));
 }
 
 // ---------- DELETE /temporal/entities/{id}/attrs/{attrId} (5.6.13) ----------
