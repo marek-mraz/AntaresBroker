@@ -770,6 +770,7 @@ pub const QUERY_PARAMS: &[&str] = &[
     "containedBy",
     "orderBy",
     "orderFrom",
+    "orderGeometry",
 ];
 
 async fn query_entities_inner(

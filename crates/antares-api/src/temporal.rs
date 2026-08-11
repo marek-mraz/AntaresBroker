@@ -1237,6 +1237,7 @@ async fn query_temporal_inner(
             "datasetId",
             "orderBy",
             "orderFrom",
+            "orderGeometry",
         ],
     )?;
     let accept = parse_accept(headers)?;

@@ -928,9 +928,13 @@ pub(crate) fn query_doc_params(
     match q.get("ordering") {
         None => {}
         Some(Value::Object(o)) => {
-            // 5.2.43 OrderingParams: orderBy maps onto the 4.23 param;
-            // collation/coordinates/geometry mappings audit at 5.2.43.
-            if let Some(Value::Array(a)) = o.get("orderBy") {
+            // Table 5.2.43-1 (OrderingParams): orderBy String[] -> the 4.23
+            // keys; coordinates (JSON array) + geometry (default "Point")
+            // -> the dist-ordering reference (orderFrom/orderGeometry).
+            if let Some(ob) = o.get("orderBy") {
+                let a = ob.as_array().ok_or_else(|| {
+                    bad("ordering orderBy must be an array of strings (5.2.43)".into())
+                })?;
                 let mut parts = Vec::with_capacity(a.len());
                 for m in a {
                     parts.push(m.as_str().ok_or_else(|| {
@@ -938,6 +942,32 @@ pub(crate) fn query_doc_params(
                     })?);
                 }
                 vp.insert("orderBy".into(), parts.join(","));
+            }
+            match o.get("coordinates") {
+                None => {}
+                Some(Value::Array(c)) => {
+                    vp.insert("orderFrom".into(), Value::Array(c.clone()).to_string());
+                }
+                Some(_) => {
+                    return Err(bad(
+                        "ordering coordinates must be a JSON array (5.2.43)".into()
+                    ))
+                }
+            }
+            match o.get("geometry") {
+                None => {}
+                Some(Value::String(g)) => {
+                    vp.insert("orderGeometry".into(), g.clone());
+                }
+                Some(_) => return Err(bad("ordering geometry must be a string (5.2.43)".into())),
+            }
+            if o.get("collation").is_some() {
+                // 4.23.1: only codepoint order is offered - an explicit ICU
+                // collation cannot be honoured, so it is refused loudly
+                // rather than mis-ordering silently.
+                return Err(bad(
+                    "ordering collation is not supported (codepoint order only, 4.23.1)".into(),
+                ));
             }
         }
         Some(_) => {
@@ -1006,9 +1036,13 @@ async fn batch_query_inner(
     } else {
         Vec::new()
     };
-    let matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
+    let mut matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
     let mut page_params = params.clone();
     page_params.extend(vp.clone());
+    // 5.2.43 ordering: same 4.23 keys as the GET twin, applied pre-pagination
+    if let Some(spec) = page_params.get("orderBy") {
+        crate::entities::order_entities(&mut matches, spec, &page_params, &parsed.ctx)?;
+    }
     let (page, count_hdr, _links) = paginate(
         st,
         &page_params,

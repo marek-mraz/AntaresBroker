@@ -2828,6 +2828,139 @@ mod clause_5_2_22 {
 }
 
 #[cfg(test)]
+mod clause_5_2_43 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        doc: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(format!("/ngsi-ld/v1/{path}"));
+        let body = match doc {
+            Some(d) => {
+                let s = d.to_string();
+                b = b
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", s.len());
+                Body::from(s)
+            }
+            None => Body::empty(),
+        };
+        let resp = app
+            .clone()
+            .oneshot(b.body(body).expect("req"))
+            .await
+            .expect("resp");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Table 5.2.43-1: orderBy maps to the 4.23 keys, coordinates (JSON
+    /// array, mandatory for dist ordering) + geometry (default Point) form
+    /// the reference geometry; collation is rejected loudly while only
+    /// codepoint order is offered (4.23.1 named gap).
+    #[tokio::test]
+    async fn ordering_params_members() {
+        let app = router(AppState::new("t5243".into()));
+        for (id, lon, lat) in [
+            ("urn:ngsi-ld:Vehicle:near", 8.01, 40.01),
+            ("urn:ngsi-ld:Vehicle:far", 10.0, 45.0),
+        ] {
+            let (st, body) = send(
+                &app,
+                "POST",
+                "entities",
+                Some(json!({"id": id, "type": "Vehicle",
+                    "location": {"type": "GeoProperty",
+                        "value": {"type": "Point", "coordinates": [lon, lat]}}})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+        }
+        let q = "entityOperations/query";
+        let with_ordering = |o: serde_json::Value| json!({"type": "Query", "entities": [{"type": "Vehicle"}], "ordering": o});
+        let (st, body) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(json!({"orderBy": ["location;dist-asc"],
+                "coordinates": [8, 40], "geometry": "Point"}))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let near = body.find("urn:ngsi-ld:Vehicle:near").expect("near in body");
+        let far = body.find("urn:ngsi-ld:Vehicle:far").expect("far in body");
+        assert!(near < far, "dist-asc must order near before far: {body}");
+        let (st, _) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(json!({"orderBy": ["location;dist-asc"]}))),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "dist ordering without coordinates"
+        );
+        let (st, _) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(json!({"orderBy": ["location;dist-asc"],
+                "coordinates": "8,40"}))),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "coordinates must be a JSON array"
+        );
+        let (st, _) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(json!({"orderBy": ["id;asc"], "geometry": 5}))),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "geometry must be a string");
+        let (st, body) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(json!({"orderBy": ["id;asc"],
+                "collation": "de-u-co-phonebk"}))),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "unsupported collation is loud: {body}"
+        );
+        assert!(body.contains("collation"), "{body}");
+        // GET twin: orderGeometry is a legal query parameter
+        let (st, body) = send(
+            &app,
+            "GET",
+            "entities?type=Vehicle&orderBy=location;dist-asc&orderFrom=[8,40]&orderGeometry=Point",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_34 {
     use super::*;
     use axum::body::Body;
