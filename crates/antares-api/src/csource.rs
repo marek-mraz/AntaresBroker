@@ -235,9 +235,11 @@ pub fn normalize_registration(
                             "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
                         ));
                     };
-                    let Some(value) = kv.get("value") else {
+                    // Table 5.2.22-1: value is a String, cardinality 1.
+                    let Some(value) = kv.get("value").filter(|v| v.is_string()) else {
                         return Err(bad(
-                            "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
+                            "contextSourceInfo entries must be {key, value} pairs of Strings (5.2.22)"
+                                .into(),
                         ));
                     };
                     // 4.3.6.6 (V-29): the four processed keys have constrained

@@ -2703,3 +2703,126 @@ mod clause_5_2_21 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_22 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn post(path: &str, doc: serde_json::Value, tenant: &str) -> StatusCode {
+        let app = router(AppState::new(tenant.into()));
+        let body = doc.to_string();
+        let req = Request::post(format!("/ngsi-ld/v1/{path}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.22-1: key AND value are Strings, both cardinality 1 —
+    /// enforced on the notification endpoint's receiverInfo/notifierInfo.
+    #[tokio::test]
+    async fn endpoint_info_values_must_be_strings() {
+        let sub = |info_key: &str, entries: serde_json::Value| {
+            let mut d = json!({
+                "type": "Subscription",
+                "entities": [{"type": "Building"}],
+                "notification": {"endpoint": {"uri": "http://client.example.org/cb"}}
+            });
+            d["notification"]["endpoint"][info_key] = entries;
+            d
+        };
+        assert_eq!(
+            post(
+                "subscriptions",
+                sub(
+                    "receiverInfo",
+                    json!([{"key": "Authorization", "value": "Bearer x"}])
+                ),
+                "t5222a"
+            )
+            .await,
+            StatusCode::CREATED,
+            "string values stay creatable"
+        );
+        for bad in [
+            json!(42),
+            json!({"a": 1}),
+            json!(["x"]),
+            json!(null),
+            json!(true),
+        ] {
+            assert_eq!(
+                post(
+                    "subscriptions",
+                    sub("receiverInfo", json!([{"key": "K", "value": bad}])),
+                    "t5222a"
+                )
+                .await,
+                StatusCode::BAD_REQUEST,
+                "receiverInfo value {bad} is not a String"
+            );
+        }
+        assert_eq!(
+            post(
+                "subscriptions",
+                sub("notifierInfo", json!([{"key": "K", "value": 7}])),
+                "t5222a"
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "notifierInfo value must be a String"
+        );
+    }
+
+    /// Table 5.2.22-1 via 5.2.9 contextSourceInfo: every pair's value is a
+    /// String — a non-string value on a custom key is rejected at
+    /// registration, not at first forward.
+    #[tokio::test]
+    async fn context_source_info_values_must_be_strings() {
+        let csr = |info: serde_json::Value| {
+            json!({
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer.example/ngsi-ld/v1",
+                "information": [{"entities": [{"type": "Building"}]}],
+                "contextSourceInfo": info
+            })
+        };
+        assert_eq!(
+            post(
+                "csourceRegistrations",
+                csr(json!([{"key": "X-Auth-Token", "value": "abc"}])),
+                "t5222b"
+            )
+            .await,
+            StatusCode::CREATED,
+            "string values stay registrable"
+        );
+        for bad in [json!(123), json!(["a"]), json!({"v": 1}), json!(null)] {
+            assert_eq!(
+                post(
+                    "csourceRegistrations",
+                    csr(json!([{"key": "X-Custom", "value": bad}])),
+                    "t5222b"
+                )
+                .await,
+                StatusCode::BAD_REQUEST,
+                "contextSourceInfo value {bad} is not a String"
+            );
+        }
+        assert_eq!(
+            post(
+                "csourceRegistrations",
+                csr(json!([{"key": 5, "value": "v"}])),
+                "t5222b"
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "key must be a String"
+        );
+    }
+}

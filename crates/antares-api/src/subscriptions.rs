@@ -310,13 +310,14 @@ pub fn normalize_subscription(
                     ));
                 }
                 // Table 5.2.15-1: receiverInfo/notifierInfo are
-                // KeyValuePair[] (5.2.22) — every entry {key, value}.
+                // KeyValuePair[] — per Table 5.2.22-1 both key and value
+                // are Strings, cardinality 1.
                 for key in ["receiverInfo", "notifierInfo"] {
                     if let Some(arr) = ep.get(key) {
                         let ok = arr.as_array().is_some_and(|a| {
                             a.iter().all(|kv| {
                                 kv.get("key").is_some_and(Value::is_string)
-                                    && kv.get("value").is_some()
+                                    && kv.get("value").is_some_and(Value::is_string)
                             })
                         });
                         if !ok {
