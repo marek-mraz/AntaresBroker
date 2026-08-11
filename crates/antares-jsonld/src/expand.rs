@@ -2161,6 +2161,69 @@ mod clause_5_2_32 {
 }
 
 #[cfg(test)]
+mod clause_5_2_35 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_vp(vp: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "category": vp})
+    }
+
+    /// Table 5.2.35-1: vocab is a String or String[] type-coerced to URIs
+    /// under the @context; unitCode is prohibited (4.5.20.2); concise form
+    /// infers VocabProperty from the vocab member.
+    #[test]
+    fn vocab_property_member_table_restrictions() {
+        let ok = expand(with_vp(json!({"type": "VocabProperty", "vocab": "term"})))
+            .expect("conformant VocabProperty");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/category"][0];
+        assert_eq!(
+            attr["vocab"], "https://uri.etsi.org/ngsi-ld/default-context/term",
+            "vocab is term-expanded"
+        );
+        assert!(attr.get("value").is_none(), "vocab, not value");
+        let ok = expand(with_vp(
+            json!({"type": "VocabProperty", "vocab": ["a", "b"]}),
+        ))
+        .expect("string[] form");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/category"][0];
+        assert_eq!(attr["vocab"].as_array().map(Vec::len), Some(2));
+        assert!(
+            expand(with_vp(json!({"type": "VocabProperty", "vocab": ["a", 5]}))).is_err(),
+            "vocab array entries must be strings"
+        );
+        assert!(
+            expand(with_vp(json!({"type": "VocabProperty", "vocab": 5}))).is_err(),
+            "vocab must be a string or string array"
+        );
+        assert!(
+            expand(with_vp(json!({"type": "VocabProperty"}))).is_err(),
+            "vocab is mandatory"
+        );
+        assert!(
+            expand(with_vp(
+                json!({"type": "VocabProperty", "vocab": "t", "unitCode": "C"})
+            ))
+            .is_err(),
+            "unitCode prohibited (4.5.20.2)"
+        );
+        // concise: the vocab member alone infers VocabProperty
+        let ok = expand(with_vp(json!({"vocab": "term"}))).expect("concise inference");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/category"][0];
+        assert_eq!(attr["type"], "VocabProperty");
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_7 {
     use super::*;
     use crate::loader::Loader;
