@@ -210,7 +210,9 @@ impl FedReg {
     }
 }
 
-/// Is federation active for this request? (6.3.18 local param)
+/// Is federation active for this request? (6.3.18 local param; 5.5.13:
+/// a local-scope request executes only on information available locally —
+/// no Context Source Registrations are considered)
 ///
 /// Table 6.4.3.2-1: for `type=*`, "local is implicitly set to true and shall
 /// not be explicitly set to false" — so the wildcard alone disables forwarding.
