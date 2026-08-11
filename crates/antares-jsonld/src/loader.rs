@@ -739,12 +739,14 @@ impl Loader {
         if bytes.len() > MAX_CONTEXT_BYTES {
             return Err(err(format!("{url}: @context document too large")));
         }
+        // 5.5.6: unavailability is LdContextNotAvailable, but a RETRIEVED
+        // remote @context whose content is invalid is BadRequestData.
         let doc: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| err(format!("{url} is not a JSON document: {e}")))?;
+            .map_err(|e| NgsiError::BadRequestData(format!("{url} is not a JSON document: {e}")))?;
         let ctx_val = doc
             .get("@context")
             .cloned()
-            .ok_or_else(|| err(format!("{url} has no @context member")))?;
+            .ok_or_else(|| NgsiError::BadRequestData(format!("{url} has no @context member")))?;
         let arc = Arc::new(ctx_val);
         if stale_value.is_some_and(|old| *old != *arc) {
             // Refreshed content differs: merged contexts built on the old
@@ -872,6 +874,65 @@ mod tests {
         let name = reqwest::dns::Name::from_str("localhost").expect("name");
         let addrs = allow.resolve(name).await.expect("allowed");
         assert!(addrs.count() > 0);
+    }
+
+    /// 5.5.6: "When a remote JSON-LD @context referenced by an incoming
+    /// request is not available … LdContextNotAvailable. If the remote
+    /// JSON-LD @context is invalid … BadRequestData." Unreachable → 503/504
+    /// class; fetched-but-invalid content (not JSON, or no @context member)
+    /// → BadRequestData.
+    #[tokio::test]
+    async fn clause_5_5_6_unavailable_vs_invalid_remote_context() {
+        let serve = |body: &'static str| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    use tokio::io::AsyncWriteExt;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                }
+            });
+            addr
+        };
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        // unreachable → LdContextNotAvailable
+        let err = loader
+            .resolve(&Value::String("http://127.0.0.1:9/ctx.jsonld".into()))
+            .await
+            .expect_err("unreachable context");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "unavailable → LdContextNotAvailable, got {err:?}"
+        );
+        // served but not a JSON document → BadRequestData
+        let addr = serve("this is { not json").await;
+        let err = loader
+            .resolve(&Value::String(format!("http://{addr}/ctx.jsonld")))
+            .await
+            .expect_err("non-JSON context document");
+        assert!(
+            matches!(err, NgsiError::BadRequestData(_)),
+            "invalid (non-JSON) → BadRequestData, got {err:?}"
+        );
+        // served JSON without an @context member → BadRequestData
+        let addr = serve(r#"{"note": "no context here"}"#).await;
+        let err = loader
+            .resolve(&Value::String(format!("http://{addr}/ctx.jsonld")))
+            .await
+            .expect_err("JSON without @context member");
+        assert!(
+            matches!(err, NgsiError::BadRequestData(_)),
+            "invalid (no @context member) → BadRequestData, got {err:?}"
+        );
     }
 
     /// The redirect cap is only real if it is installed on the client an open

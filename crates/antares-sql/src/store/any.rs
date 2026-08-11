@@ -19,6 +19,8 @@ use super::pg_entity::PgEntityStore;
 use super::pg_temporal::PgTemporalStore;
 use super::{ChangeHook, Kind, Store};
 
+/// 5.5.6: unexpected failures (database errors, timeouts) surface as
+/// InternalError.
 #[cfg(feature = "postgres")]
 fn db(e: sqlx::Error) -> NgsiError {
     NgsiError::InternalError(format!("database error: {e}"))

@@ -146,7 +146,9 @@ const MAX_Q_DEPTH: usize = 64;
 /// length are bounded first.
 const MAX_Q_NODES: usize = 512;
 
-/// Parse an NGSI-LD `q=` expression.
+/// Parse an NGSI-LD `q=` expression. Complexity ceilings raise
+/// TooComplexQuery per 5.5.6 ("a query operation … so complex that cannot
+/// be resolved").
 pub fn parse_q(input: &str) -> Result<QNode, NgsiError> {
     if input.len() > MAX_Q_BYTES {
         return Err(NgsiError::TooComplexQuery(format!(

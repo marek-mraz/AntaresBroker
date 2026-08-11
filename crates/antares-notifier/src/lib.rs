@@ -35,7 +35,8 @@ impl SinkRegistry {
             .map(AsRef::as_ref)
     }
 
-    /// Reject-at-creation check (§9.2).
+    /// Reject-at-creation check: an endpoint scheme this deployment cannot
+    /// deliver to is OperationNotSupported (5.5.6).
     pub fn require(&self, scheme: &str) -> Result<(), NgsiError> {
         self.sink_for(scheme).map(|_| ()).ok_or_else(|| {
             NgsiError::OperationNotSupported(format!(

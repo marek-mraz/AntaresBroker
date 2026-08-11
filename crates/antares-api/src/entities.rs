@@ -1207,7 +1207,9 @@ pub fn page_params(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid limit {l:?}")))?,
         None => st.default_limit,
     };
-    // I2: result ceiling (§16.3) — 403 TooManyResults, not silent clamping.
+    // 5.5.6: "so many results that can potentially exhaust client or server
+    // resources" — the implementation threshold is max_limit; 403
+    // TooManyResults, not silent clamping (ceiling choice: §16.3).
     if limit > st.max_limit {
         return Err(NgsiError::TooManyResults(format!(
             "limit {limit} exceeds the server maximum {}",
