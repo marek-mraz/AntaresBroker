@@ -1161,6 +1161,9 @@ pub fn filter_entities_paged(
 }
 
 /// limit/offset/count handling (6.3.10). Returns (page, count, link headers).
+/// 4.12 Pagination: iterate a result set in pages, flag remaining elements
+/// (next link) and support backwards iteration (prev link). Shared by every
+/// paginated list operation (5.7.2, 5.7.4, 5.8.4, 5.10.2, 5.11.5).
 pub fn paginate(
     st: &AppState,
     params: &HashMap<String, String>,
@@ -1182,9 +1185,11 @@ pub fn paginate_pre(
     paginate_impl(st, params, page, path, Accept::Json, Some(total))
 }
 
-/// The limit/offset/count triple of 6.3.10, validated (I2 ceilings included).
-/// Shared by `paginate_impl` and the C11 pushdown gate so the two paths can
-/// never disagree on what a page is.
+/// 4.12 Pagination: clients specify a limit (page size), the server defines
+/// a default page size, and a hard ceiling is rejected with TooManyResults
+/// rather than silently clamped. The limit/offset/count triple of 6.3.10,
+/// validated (I2 ceilings included). Shared by `paginate_impl` and the C11
+/// pushdown gate so the two paths can never disagree on what a page is.
 pub fn page_params(
     st: &AppState,
     params: &HashMap<String, String>,
@@ -2248,6 +2253,132 @@ mod tests {
         assert!(
             fc["features"][0].get("@context").is_none(),
             "no per-Feature @context"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_12 {
+    use super::*;
+    use serde_json::json;
+
+    fn state() -> AppState {
+        AppState::new("http://localhost:9090".into())
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    fn items(n: usize) -> Vec<Value> {
+        (0..n).map(|i| json!({"id": format!("urn:{i}")})).collect()
+    }
+
+    /// 4.12: clients specify a limit (page size); a next link flags remaining
+    /// elements; prev enables backwards iteration; absent on the edges.
+    #[test]
+    fn next_and_prev_flag_remaining_elements() {
+        let st = state();
+        let (page, _, links) = paginate(&st, &params(&[("limit", "1")]), items(3), "/e").unwrap();
+        assert_eq!(page.len(), 1);
+        assert!(links.iter().any(|l| l.contains("rel=\"next\"")));
+        assert!(
+            !links.iter().any(|l| l.contains("rel=\"prev\"")),
+            "no prev on the first page"
+        );
+        let (_, _, links) = paginate(
+            &st,
+            &params(&[("limit", "1"), ("offset", "1")]),
+            items(3),
+            "/e",
+        )
+        .unwrap();
+        assert!(links.iter().any(|l| l.contains("rel=\"next\"")));
+        assert!(links.iter().any(|l| l.contains("rel=\"prev\"")));
+        let (_, _, links) = paginate(
+            &st,
+            &params(&[("limit", "1"), ("offset", "2")]),
+            items(3),
+            "/e",
+        )
+        .unwrap();
+        assert!(
+            !links.iter().any(|l| l.contains("rel=\"next\"")),
+            "no next on the last page"
+        );
+        assert!(links.iter().any(|l| l.contains("rel=\"prev\"")));
+    }
+
+    /// 4.12: "define a default limit (default page size)" — applied when the
+    /// client sends none.
+    #[test]
+    fn default_page_size_applies() {
+        let st = state();
+        let n = st.default_limit + 5;
+        let (page, _, links) = paginate(&st, &params(&[]), items(n), "/e").unwrap();
+        assert_eq!(page.len(), st.default_limit);
+        assert!(links.iter().any(|l| l.contains("rel=\"next\"")));
+    }
+
+    /// 4.12 should: a hard result-size ceiling, rejected with TooManyResults
+    /// (not silently clamped).
+    #[test]
+    fn limit_above_the_ceiling_is_too_many_results() {
+        let st = state();
+        let over = (st.max_limit + 1).to_string();
+        let err = paginate(&st, &params(&[("limit", &over)]), items(1), "/e").unwrap_err();
+        assert!(format!("{err:?}").contains("TooManyResults"));
+    }
+}
+
+#[cfg(test)]
+mod clause_4_13 {
+    use super::*;
+    use serde_json::json;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 4.13: the result count is relayed "whenever this is requested by the
+    /// client" — and only then.
+    #[test]
+    fn count_is_returned_only_on_request() {
+        let st = AppState::new("http://localhost:9090".into());
+        let items: Vec<Value> = (0..3).map(|i| json!({"id": format!("urn:{i}")})).collect();
+        let (_, count, _) =
+            paginate(&st, &params(&[("count", "true")]), items.clone(), "/e").unwrap();
+        assert_eq!(count, Some(3));
+        let (_, count, _) = paginate(&st, &params(&[]), items, "/e").unwrap();
+        assert_eq!(count, None, "no count member unless requested");
+    }
+
+    /// 4.13: "a client can issue a query that limits to zero the number of
+    /// desired results but asks for the count to be present" — limit=0 is
+    /// only valid together with count.
+    #[test]
+    fn limit_zero_with_count_yields_an_empty_page_and_the_total() {
+        let st = AppState::new("http://localhost:9090".into());
+        let items: Vec<Value> = (0..7).map(|i| json!({"id": format!("urn:{i}")})).collect();
+        let (page, count, links) = paginate(
+            &st,
+            &params(&[("limit", "0"), ("count", "true")]),
+            items.clone(),
+            "/e",
+        )
+        .unwrap();
+        assert!(page.is_empty());
+        assert_eq!(count, Some(7));
+        assert!(links.is_empty(), "limit=0 pages have no next/prev");
+        assert!(
+            paginate(&st, &params(&[("limit", "0")]), items, "/e").is_err(),
+            "limit=0 without count is rejected"
         );
     }
 }
