@@ -373,14 +373,7 @@ pub fn respond(
             // 6.3.15: GeoJSON bodies carry the @context at top level
             let with_ctx = match payload {
                 Value::Object(mut o) => {
-                    o.insert(
-                        "@context".into(),
-                        if ctx.source.is_null() {
-                            Value::String(CORE_CONTEXT.to_owned())
-                        } else {
-                            ctx.source.clone()
-                        },
-                    );
+                    o.insert("@context".into(), served_context(ctx));
                     Value::Object(o)
                 }
                 other => other,
@@ -414,13 +407,7 @@ pub fn respond_list(
     if accept == Accept::GeoJson {
         return respond(status, Value::Array(docs), ctx, accept, tenant);
     }
-    let ld_ctx = (accept == Accept::LdJson).then(|| {
-        if ctx.source.is_null() {
-            Value::String(CORE_CONTEXT.to_owned())
-        } else {
-            ctx.source.clone()
-        }
-    });
+    let ld_ctx = (accept == Accept::LdJson).then(|| served_context(ctx));
     let content_type = match accept {
         Accept::LdJson => "application/ld+json",
         _ => "application/json",
@@ -459,12 +446,23 @@ pub fn respond_list(
     resp
 }
 
-pub(crate) fn inject_context(payload: Value, ctx: &Context) -> Value {
-    let ctx_val = if ctx.source.is_null() {
+/// 5.2.3: the @context member served on pure JSON-LD bodies. The sentence
+/// "containing a user @context where present, and the core @context shall be
+/// included" reads as [user, core] — but the ENTIRE ETSI validation
+/// ecosystem (68 official expectation files, strict-compared; the suite is
+/// validated against Scorpio/Stellio) pins the user context ALONE, treating
+/// the core as implicit per 4.4. Antares follows the ecosystem reading; the
+/// wording doubt is logged in testsuite-doubts.md (2026-08-11).
+pub(crate) fn served_context(ctx: &Context) -> Value {
+    if ctx.source.is_null() {
         Value::String(CORE_CONTEXT.to_owned())
     } else {
         ctx.source.clone()
-    };
+    }
+}
+
+pub(crate) fn inject_context(payload: Value, ctx: &Context) -> Value {
+    let ctx_val = served_context(ctx);
     match payload {
         Value::Object(mut o) => {
             o.insert("@context".into(), ctx_val);
@@ -536,4 +534,41 @@ pub fn without_context(v: &Value) -> Map<String, Value> {
     let mut o = v.as_object().cloned().unwrap_or_default();
     o.remove("@context");
     o
+}
+
+#[cfg(test)]
+mod clause_5_2_3 {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx_with(source: Value) -> Context {
+        let mut c = Context::default();
+        c.source = source;
+        c
+    }
+
+    /// 5.2.3 as read by the ETSI validation ecosystem: the served @context
+    /// echoes the user context where present (core implicit per 4.4) and
+    /// falls back to the core context alone otherwise. The literal-wording
+    /// alternative ([user, core]) fails 68 strict-compared official
+    /// expectations — see testsuite-doubts.md 2026-08-11.
+    #[test]
+    fn served_context_echoes_user_or_core() {
+        let out = inject_context(json!({"id": "urn:x"}), &ctx_with(Value::Null));
+        assert_eq!(out["@context"], json!(CORE_CONTEXT));
+        let out = inject_context(
+            json!({"id": "urn:x"}),
+            &ctx_with(json!("https://example.org/user.jsonld")),
+        );
+        assert_eq!(out["@context"], json!("https://example.org/user.jsonld"));
+        let out = inject_context(
+            json!({"id": "urn:x"}),
+            &ctx_with(json!(["https://example.org/a.jsonld", CORE_CONTEXT])),
+        );
+        assert_eq!(
+            out["@context"],
+            json!(["https://example.org/a.jsonld", CORE_CONTEXT]),
+            "a user context already listing the core is echoed verbatim"
+        );
+    }
 }
