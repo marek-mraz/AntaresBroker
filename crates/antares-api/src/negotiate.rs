@@ -537,6 +537,39 @@ pub fn without_context(v: &Value) -> Map<String, Value> {
 }
 
 #[cfg(test)]
+mod clause_5_5_3 {
+    use super::*;
+
+    /// 5.5.3: error bodies are RFC 7807 objects with at least type (5.5.2
+    /// URI), title (short summary) and detail — served as application/json,
+    /// NOT application/problem+json.
+    #[tokio::test]
+    async fn error_body_shape_and_mime() {
+        let resp =
+            ApiError::from(NgsiError::ResourceNotFound("urn:x not found".into())).into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "5.5.3: standard JSON MIME, not problem+json"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            doc["type"],
+            "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound"
+        );
+        assert_eq!(doc["title"], "ResourceNotFound");
+        assert!(doc["detail"].as_str().is_some_and(|d| d.contains("urn:x")));
+        assert_eq!(doc["status"], 404);
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_3 {
     use super::*;
     use serde_json::json;
