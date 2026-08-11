@@ -2382,3 +2382,42 @@ mod clause_4_13 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_4_16 {
+    use super::*;
+    use serde_json::json;
+
+    /// 4.16: "Entity Types can be implicitly added by all operations that
+    /// update or append attributes. There is no operation to remove Entity
+    /// Types from an Entity."
+    #[test]
+    fn merge_unions_types_and_never_removes() {
+        let mut doc = json!({"id": "urn:x", "type": ["A"],
+            "https://ex/p": [{"type": "Property", "value": 1}]});
+        merge_into(
+            &mut doc,
+            &json!({"type": ["B"]}),
+            "2026-08-11T00:00:00.000Z",
+        );
+        assert_eq!(doc["type"], json!(["A", "B"]), "types union");
+        // a fragment naming FEWER types must not shrink the set
+        merge_into(
+            &mut doc,
+            &json!({"type": ["A"]}),
+            "2026-08-11T00:00:00.000Z",
+        );
+        assert_eq!(
+            doc["type"],
+            json!(["A", "B"]),
+            "no operation removes Entity Types"
+        );
+        // duplicates are not accumulated
+        merge_into(
+            &mut doc,
+            &json!({"type": ["B"]}),
+            "2026-08-11T00:00:00.000Z",
+        );
+        assert_eq!(doc["type"], json!(["A", "B"]));
+    }
+}
