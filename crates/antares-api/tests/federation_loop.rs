@@ -1205,6 +1205,67 @@ async fn clause_5_6_13_to_15_temporal_attr_ops_forwarding() {
         m.last_head.lock().expect("lock")
     );
 
+    // 5.6.14: instance modify forwards as PATCH on the instance resource
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(
+        state(),
+        serde_json::json!(["updateAttrInstanceTemporal"]),
+        m.port,
+    )
+    .await;
+    let body = serde_json::json!({"value": 5}).to_string();
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!(
+            "/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/urn:ngsi-ld:Instance:1"
+        ))
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let _ = send(&st, req).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "instance modify forwarded"
+    );
+    assert!(
+        m.last_head.lock().expect("lock").starts_with(&format!(
+            "PATCH /ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/urn:ngsi-ld:Instance:1"
+        )),
+        "5.6.14 instance path: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // 5.6.15: instance delete forwards as DELETE on the instance resource
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(
+        state(),
+        serde_json::json!(["deleteAttrInstanceTemporal"]),
+        m.port,
+    )
+    .await;
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/urn:ngsi-ld:Instance:1"
+        ))
+        .body(Body::empty())
+        .expect("request");
+    let _ = send(&st, req).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "instance delete forwarded"
+    );
+    assert!(
+        m.last_head.lock().expect("lock").starts_with(&format!(
+            "DELETE /ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/urn:ngsi-ld:Instance:1"
+        )),
+        "5.6.15 instance path: {}",
+        m.last_head.lock().expect("lock")
+    );
+
     // retrieve-only proxy: Conflict, never contacted
     let (port, hits) = mock_source();
     let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;

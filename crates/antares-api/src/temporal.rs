@@ -2083,6 +2083,37 @@ pub async fn modify_temporal_instance(
             }
             Ok::<(), NgsiError>(())
         })?;
+        let local_part = match &res {
+            None => crate::federation::Part {
+                status: 404,
+                detail: format!("temporal entity {id} not found locally"),
+            },
+            Some(_) if found => crate::federation::Part {
+                status: 204,
+                detail: "applied locally".into(),
+            },
+            Some(_) => crate::federation::Part {
+                status: 404,
+                detail: format!("instance {instance_id} not found locally"),
+            },
+        };
+        if let Some(r) = temporal_attr_fed(
+            &st,
+            &tenant,
+            &headers,
+            &parsed.ctx,
+            &params,
+            &id,
+            "updateAttrInstanceTemporal",
+            reqwest::Method::PATCH,
+            &format!("/attrs/{attr}/{instance_id}"),
+            Some(parsed.value.clone()),
+            local_part,
+        )
+        .await?
+        {
+            return Ok(r);
+        }
         match res {
             None => {
                 Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
@@ -2131,6 +2162,37 @@ pub async fn delete_temporal_instance(
             }
             Ok::<(), NgsiError>(())
         })?;
+        let local_part = match &res {
+            None => crate::federation::Part {
+                status: 404,
+                detail: format!("temporal entity {id} not found locally"),
+            },
+            Some(_) if found => crate::federation::Part {
+                status: 204,
+                detail: "applied locally".into(),
+            },
+            Some(_) => crate::federation::Part {
+                status: 404,
+                detail: format!("instance {instance_id} not found locally"),
+            },
+        };
+        if let Some(r) = temporal_attr_fed(
+            &st,
+            &tenant,
+            &headers,
+            &ctx,
+            &params,
+            &id,
+            "deleteAttrInstanceTemporal",
+            reqwest::Method::DELETE,
+            &format!("/attrs/{attr}/{instance_id}"),
+            None,
+            local_part,
+        )
+        .await?
+        {
+            return Ok(r);
+        }
         match res {
             None => {
                 Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
