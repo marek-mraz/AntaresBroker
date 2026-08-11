@@ -558,6 +558,92 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "UP");
     }
 
+    /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
+    /// any subsequent instance of the same id is reported as an error
+    /// (already exists). 5.5.11.4: in Batch Delete the first occurrence
+    /// deletes, subsequent ones report an error (does not exist).
+    #[tokio::test]
+    async fn clause_5_5_11_duplicate_ids_in_create_and_delete() {
+        let app = app();
+        let batch = serde_json::json!([
+            {"id": "urn:ngsi-ld:Building:c-dup", "type": "Building",
+             "speed": {"type": "Property", "value": 1}},
+            {"id": "urn:ngsi-ld:Building:c-dup", "type": "Building",
+             "speed": {"type": "Property", "value": 2}}
+        ]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/create")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", batch.to_string().len())
+                    .body(Body::from(batch.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::MULTI_STATUS,
+            "one ok + one error"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["success"],
+            serde_json::json!(["urn:ngsi-ld:Building:c-dup"])
+        );
+        assert_eq!(body["errors"].as_array().map(Vec::len), Some(1));
+        assert!(
+            body["errors"][0].to_string().contains("AlreadyExists"),
+            "second occurrence is an already-exists error: {body}"
+        );
+        // the FIRST occurrence created the entity
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:c-dup")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        let doc = body_json(resp).await;
+        assert_eq!(doc["speed"]["value"], 1, "first occurrence wins the create");
+        // batch delete with the id twice: first deletes, second errors
+        let del = serde_json::json!(["urn:ngsi-ld:Building:c-dup", "urn:ngsi-ld:Building:c-dup"]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/delete")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", del.to_string().len())
+                    .body(Body::from(del.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["success"],
+            serde_json::json!(["urn:ngsi-ld:Building:c-dup"])
+        );
+        assert!(
+            body["errors"][0].to_string().contains("ResourceNotFound"),
+            "second delete occurrence is a not-found error: {body}"
+        );
+        // and the entity is really gone
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:c-dup")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// 4.6.6: duplicate instances of one Entity in a batch array "shall come
     /// in chronological order" — the broker applies them sequentially, so
     /// the LAST occurrence's state wins, never the first.
