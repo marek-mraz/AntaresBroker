@@ -754,16 +754,19 @@ fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::TemporalQ) -> bo
     let Some(iv) = doc.get(key).and_then(Value::as_object) else {
         return false; // relevant interval not present ⇒ no match
     };
-    let start = iv.get("startAt").and_then(Value::as_str).unwrap_or("");
-    let end = iv.get("endAt").and_then(Value::as_str); // open-ended when absent
+    // 4.11 comparison on the canonical key — equal instants in different
+    // 4.6.3 fraction spellings must hit the bounds exactly.
+    let dt = crate::temporal::dt_key;
+    let start = dt(iv.get("startAt").and_then(Value::as_str).unwrap_or(""));
+    let end = iv.get("endAt").and_then(Value::as_str).map(dt); // open-ended when absent
     match tq.timerel.as_str() {
         // interval contains times before/after timeAt (037_09, 047_10/11)
-        "before" => start < tq.time_at.as_str(),
-        "after" => end.is_none_or(|e| e > tq.time_at.as_str()),
+        "before" => start < dt(&tq.time_at),
+        "after" => end.is_none_or(|e| e > dt(&tq.time_at)),
         "between" => {
             // overlap between [timeAt, endTimeAt] and the interval
-            let qe = tq.end_time_at.as_deref().unwrap_or(&tq.time_at);
-            tq.time_at.as_str() <= end.unwrap_or("9999") && qe >= start
+            let qe = dt(tq.end_time_at.as_deref().unwrap_or(&tq.time_at));
+            dt(&tq.time_at) <= end.unwrap_or_else(|| "9999".into()) && qe >= start
         }
         _ => true,
     }

@@ -223,16 +223,42 @@ impl TemporalQ {
         let Some(t) = inst.get(&self.timeproperty).and_then(Value::as_str) else {
             return false;
         };
+        // 4.11: before = exclusive bound, after = inclusive bound, between =
+        // inclusive lower / exclusive upper. Compared on the canonical key so
+        // equal instants written with different 4.6.3 fraction forms
+        // ("…00Z" / "…00.000Z" / "…00,5Z") hit the bounds exactly.
+        let t = dt_key(t);
         match self.timerel.as_str() {
             "any" => true, // bare timeproperty: presence is the filter
-            "before" => t < self.time_at.as_str(),
-            "after" => t >= self.time_at.as_str(),
+            "before" => t < dt_key(&self.time_at),
+            "after" => t >= dt_key(&self.time_at),
             "between" => {
-                t >= self.time_at.as_str() && self.end_time_at.as_deref().is_some_and(|e| t < e)
+                t >= dt_key(&self.time_at)
+                    && self.end_time_at.as_deref().is_some_and(|e| t < dt_key(e))
             }
             _ => false,
         }
     }
+}
+
+/// Canonical lexicographic comparison key for a 4.6.3 DateTime: the trailing
+/// `Z` dropped and the optional seconds fraction (`.` or the request-side `,`
+/// separator) zero-padded to six digits, so string order equals temporal
+/// order across spellings of the same instant. Non-DateTime input is
+/// returned as-is (callers validated at write/parse time).
+pub(crate) fn dt_key(s: &str) -> String {
+    let Some(body) = s.strip_suffix('Z') else {
+        return s.to_owned();
+    };
+    if body.len() < 19 {
+        return s.to_owned();
+    }
+    let (base, frac) = body.split_at(19);
+    let digits = frac
+        .strip_prefix('.')
+        .or_else(|| frac.strip_prefix(','))
+        .unwrap_or("");
+    format!("{base}.{digits:0<6}")
 }
 
 /// Windowed per-entity temporal data: filtered+ordered instances per attr.
@@ -1824,4 +1850,118 @@ async fn query_temporal_inner_with(
     _tenant: &TenantId,
 ) -> ApiResult<Response> {
     query_temporal_inner(st, params, headers).await
+}
+
+#[cfg(test)]
+mod clause_4_11 {
+    use super::*;
+    use serde_json::json;
+
+    fn tq(timerel: &str, time_at: &str, end: Option<&str>) -> TemporalQ {
+        let mut p = HashMap::new();
+        p.insert("timerel".to_owned(), timerel.to_owned());
+        p.insert("timeAt".to_owned(), time_at.to_owned());
+        if let Some(e) = end {
+            p.insert("endTimeAt".to_owned(), e.to_owned());
+        }
+        TemporalQ::from_params(&p, true).unwrap().unwrap()
+    }
+
+    fn inst(observed_at: &str) -> Value {
+        json!({"observedAt": observed_at, "value": 1})
+    }
+
+    /// 4.11 after: "The specified value is used as an INCLUSIVE bound" — an
+    /// instance at exactly timeAt matches, regardless of the equal instant
+    /// being written with or without a seconds fraction (4.6.3 allows both).
+    #[test]
+    fn after_is_inclusive_across_fraction_forms() {
+        let q = tq("after", "2017-12-13T14:20:00Z", None);
+        assert!(q.instance_matches(&inst("2017-12-13T14:20:00Z")));
+        assert!(
+            q.instance_matches(&inst("2017-12-13T14:20:00.000Z")),
+            "same instant with a fraction must be included"
+        );
+        assert!(!q.instance_matches(&inst("2017-12-13T14:19:59.999999Z")));
+    }
+
+    /// 4.11 before: "The specified value is used as an EXCLUSIVE bound" — an
+    /// instance at exactly timeAt does not match, in any equal spelling.
+    #[test]
+    fn before_is_exclusive_across_fraction_forms() {
+        let q = tq("before", "2017-12-13T14:20:00Z", None);
+        assert!(!q.instance_matches(&inst("2017-12-13T14:20:00Z")));
+        assert!(
+            !q.instance_matches(&inst("2017-12-13T14:20:00.000Z")),
+            "same instant with a fraction must stay excluded"
+        );
+        assert!(q.instance_matches(&inst("2017-12-13T14:19:59.999999Z")));
+    }
+
+    /// 4.11 between: "the lower bound of the range is inclusive and ... the
+    /// upper bound of the range is exclusive."
+    #[test]
+    fn between_bounds_inclusive_lower_exclusive_upper() {
+        let q = tq(
+            "between",
+            "2017-12-13T14:20:00Z",
+            Some("2017-12-13T14:40:00Z"),
+        );
+        assert!(
+            q.instance_matches(&inst("2017-12-13T14:20:00.000Z")),
+            "lower incl"
+        );
+        assert!(q.instance_matches(&inst("2017-12-13T14:30:00Z")));
+        assert!(
+            !q.instance_matches(&inst("2017-12-13T14:40:00.000Z")),
+            "upper excl in any spelling"
+        );
+        assert!(!q.instance_matches(&inst("2017-12-13T14:19:59Z")));
+    }
+
+    /// 4.6.3: "a comma instead of a decimal point may be used" in requests —
+    /// the comma form must compare as the same instant.
+    #[test]
+    fn comma_fraction_compares_as_the_same_instant() {
+        let q = tq("after", "2017-12-13T14:20:00,500000Z", None);
+        assert!(q.instance_matches(&inst("2017-12-13T14:20:00.5Z")));
+        assert!(!q.instance_matches(&inst("2017-12-13T14:20:00.499999Z")));
+    }
+
+    /// 4.11: "Entities which do not convey the target Temporal Property of
+    /// the query shall be considered as non-matching" + timeproperty
+    /// defaults to observedAt.
+    #[test]
+    fn missing_timeproperty_is_a_nonmatch_and_default_is_observed_at() {
+        let q = tq("after", "1970-01-01T00:00:00Z", None);
+        assert_eq!(q.timeproperty, "observedAt");
+        assert!(!q.instance_matches(&json!({"modifiedAt": "2020-01-01T00:00:00Z"})));
+    }
+
+    /// 4.11 grammar: only before/after/between; timeAt mandatory and a
+    /// DateTime; between requires endTimeAt.
+    #[test]
+    fn grammar_rejections() {
+        let mk = |pairs: &[(&str, &str)]| {
+            let mut p = HashMap::new();
+            for (k, v) in pairs {
+                p.insert((*k).to_owned(), (*v).to_owned());
+            }
+            TemporalQ::from_params(&p, false)
+        };
+        assert!(mk(&[("timerel", "during"), ("timeAt", "2020-01-01T00:00:00Z")]).is_err());
+        assert!(mk(&[("timerel", "before")]).is_err(), "timeAt mandatory");
+        assert!(
+            mk(&[("timerel", "before"), ("timeAt", "2020-01-01")]).is_err(),
+            "Date is not a DateTime"
+        );
+        assert!(
+            mk(&[("timerel", "between"), ("timeAt", "2020-01-01T00:00:00Z")]).is_err(),
+            "between requires endTimeAt"
+        );
+        assert!(
+            mk(&[("timeAt", "2020-01-01T00:00:00Z")]).is_err(),
+            "timeAt without timerel"
+        );
+    }
 }
