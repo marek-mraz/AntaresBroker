@@ -2734,3 +2734,68 @@ mod clause_4_23 {
         assert_eq!(ids(&docs), vec!["urn:a", "urn:x9", "urn:x1"]);
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_2 {
+    use super::*;
+    use antares_jsonld::{ExpandOpts, Loader};
+    use serde_json::json;
+
+    /// 5.2.2: createdAt/modifiedAt/deletedAt "shall not be provided by
+    /// Context Producers. In the event that they are provided ... NGSI-LD
+    /// implementations shall ignore them" — server stamps win, no error.
+    #[test]
+    fn client_provided_system_timestamps_are_ignored() {
+        let ctx = Loader::new().core();
+        let doc = json!({"id": "urn:x", "type": "T",
+            "createdAt": "1999-01-01T00:00:00Z",
+            "modifiedAt": "1999-01-01T00:00:00Z",
+            "deletedAt": "1999-01-01T00:00:00Z",
+            "p": {"type": "Property", "value": 1,
+                  "createdAt": "1999-01-01T00:00:00Z"}});
+        let mut out = antares_jsonld::expand_entity(
+            doc.as_object().expect("obj"),
+            &ctx,
+            ExpandOpts::default(),
+        )
+        .expect("providing common members is not an error");
+        stamp_new(&mut out, "2026-08-11T00:00:00.000Z");
+        assert_eq!(out["createdAt"], "2026-08-11T00:00:00.000Z");
+        assert_eq!(out["modifiedAt"], "2026-08-11T00:00:00.000Z");
+        assert!(out.get("deletedAt").is_none(), "deletedAt never creatable");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/p"][0];
+        assert_eq!(
+            inst["createdAt"], "2026-08-11T00:00:00.000Z",
+            "instance-level client timestamp ignored too"
+        );
+    }
+
+    /// 5.2.2: common members are only generated "when the Context Consumer
+    /// explicitly asks for their inclusion" (sysAttrs, 6.3.11).
+    #[test]
+    fn common_members_appear_only_on_request() {
+        let doc = json!({"id": "urn:x", "type": ["T"],
+            "createdAt": "2026-08-11T00:00:00.000Z",
+            "modifiedAt": "2026-08-11T00:00:00.000Z",
+            "https://uri.etsi.org/ngsi-ld/default-context/p": [
+                {"type": "Property", "value": 1,
+                 "createdAt": "2026-08-11T00:00:00.000Z",
+                 "modifiedAt": "2026-08-11T00:00:00.000Z"}]});
+        let plain = crate::repr::apply(&doc, &crate::repr::Repr::default());
+        assert!(plain.get("createdAt").is_none());
+        assert!(plain["https://uri.etsi.org/ngsi-ld/default-context/p"][0]
+            .get("modifiedAt")
+            .is_none());
+        let sys = crate::repr::apply(
+            &doc,
+            &crate::repr::Repr {
+                sys_attrs: true,
+                ..Default::default()
+            },
+        );
+        assert!(sys.get("createdAt").is_some());
+        assert!(sys["https://uri.etsi.org/ngsi-ld/default-context/p"][0]
+            .get("modifiedAt")
+            .is_some());
+    }
+}
