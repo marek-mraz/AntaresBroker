@@ -508,9 +508,16 @@ pub fn matching_regs(
                 tenant,
                 alias,
                 csi,
+                // 5.2.34: management.localOnly; the top-level spelling is
+                // kept for compatibility (4.3.6.4 wording / older payloads)
                 local_only: doc
                     .get("localOnly")
                     .and_then(Value::as_bool)
+                    .or_else(|| {
+                        doc.get("management")
+                            .and_then(|m| m.get("localOnly"))
+                            .and_then(Value::as_bool)
+                    })
                     .unwrap_or(false),
             })
         })
@@ -1622,6 +1629,41 @@ mod tests {
         };
         assert!(lo("urn:ngsi-ld:ContextSourceRegistration:lo"));
         assert!(!lo("urn:ngsi-ld:ContextSourceRegistration:casc"));
+    }
+
+    /// Table 5.2.34-1: management.localOnly — "distributed operations
+    /// associated to this Context Source Registration will act only on data
+    /// held directly by the registered Context Source itself".
+    #[test]
+    fn management_local_only_survives_registration_compilation() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let id = "urn:ngsi-ld:ContextSourceRegistration:mgmt-lo";
+        let doc = json!({
+            "id": id,
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer:9090",
+            "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+            "management": {"localOnly": true}
+        });
+        st.store
+            .create(&tenant, Kind::Registration, id, doc)
+            .expect("seed registration");
+        let spec = crate::csource::CsrSpec {
+            types: Some(vec![
+                "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
+            ]),
+            ..Default::default()
+        };
+        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new());
+        assert!(
+            regs.iter()
+                .find(|r| r.reg_id == id)
+                .expect("compiled")
+                .local_only,
+            "management.localOnly must compile into the forward flag"
+        );
     }
 
     /// 4.3.6.2: "An auxiliary Context Source Registration never overrides

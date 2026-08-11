@@ -366,6 +366,36 @@ pub fn normalize_registration(
                 }
                 out.insert(k.clone(), v.clone());
             }
+            // Table 5.2.34-1 (RegistrationManagementInfo): cacheDuration an
+            // ISO 8601 duration, cooldown/timeout numbers greater than 0,
+            // localOnly a boolean.
+            "management" => {
+                let m = v.as_object().ok_or_else(|| {
+                    bad("management must be a RegistrationManagementInfo object (5.2.34)".into())
+                })?;
+                if let Some(d) = m.get("cacheDuration") {
+                    if !d.as_str().is_some_and(valid_iso8601_duration) {
+                        return Err(bad(
+                            "management cacheDuration must be an ISO 8601 duration (5.2.34)".into(),
+                        ));
+                    }
+                }
+                for key in ["cooldown", "timeout"] {
+                    if let Some(n) = m.get(key) {
+                        if !n.as_f64().is_some_and(|n| n > 0.0) {
+                            return Err(bad(format!(
+                                "management {key} must be a number greater than 0 (5.2.34)"
+                            )));
+                        }
+                    }
+                }
+                if let Some(l) = m.get("localOnly") {
+                    if !l.is_boolean() {
+                        return Err(bad("management localOnly must be a boolean (5.2.34)".into()));
+                    }
+                }
+                out.insert("management".into(), v.clone());
+            }
             // Table 5.2.9-1: an ISO 8601 duration.
             "refreshRate" => {
                 let ok = v.as_str().is_some_and(valid_iso8601_duration);

@@ -2828,6 +2828,61 @@ mod clause_5_2_22 {
 }
 
 #[cfg(test)]
+mod clause_5_2_34 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn post_csr(management: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5234".into()));
+        let body = json!({
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer.example/ngsi-ld/v1",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "management": management
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.34-1: cacheDuration is an ISO 8601 duration, cooldown and
+    /// timeout are numbers greater than 0, localOnly is a boolean, and the
+    /// member itself is an object.
+    #[tokio::test]
+    async fn registration_management_info_value_spaces() {
+        assert_eq!(
+            post_csr(json!({"cacheDuration": "PT5M", "cooldown": 500,
+                "timeout": 3000, "localOnly": true}))
+            .await,
+            StatusCode::CREATED,
+            "conformant management info stays registrable"
+        );
+        for (label, m) in [
+            ("non-object", json!("yes")),
+            ("bad cacheDuration", json!({"cacheDuration": "bogus"})),
+            ("cacheDuration wrong type", json!({"cacheDuration": 300})),
+            ("cooldown zero", json!({"cooldown": 0})),
+            ("timeout negative", json!({"timeout": -5})),
+            ("timeout wrong type", json!({"timeout": "3000"})),
+            ("localOnly wrong type", json!({"localOnly": "yes"})),
+        ] {
+            assert_eq!(
+                post_csr(m).await,
+                StatusCode::BAD_REQUEST,
+                "management {label}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_33 {
     use super::*;
     use axum::body::Body;
