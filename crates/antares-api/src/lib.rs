@@ -608,6 +608,52 @@ mod tests {
         assert_eq!(doc["name"]["value"], "y");
     }
 
+    /// 5.6.3.4: append honours the ?type selector the same way — a
+    /// mismatching selector means the entity is not known (404); overwrite
+    /// vs noOverwrite semantics are 5.5.8's merge_instance_sets.
+    #[tokio::test]
+    async fn clause_5_6_3_type_selector_gates_the_append() {
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:app", "type": "Building"});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let append = |ty: &str| {
+            let frag = serde_json::json!({"name": {"type": "Property", "value": "z"}}).to_string();
+            Request::post(format!(
+                "/ngsi-ld/v1/entities/urn:ngsi-ld:B:app/attrs?type={ty}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", frag.len())
+            .body(Body::from(frag))
+            .expect("req")
+        };
+        let resp = app.clone().oneshot(append("Vehicle")).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "wrong type selector");
+        let resp = app.clone().oneshot(append("Building")).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:B:app")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        let doc = body_json(resp).await;
+        assert_eq!(doc["name"]["value"], "z");
+    }
+
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
     /// any subsequent instance of the same id is reported as an error
     /// (already exists). 5.5.11.4: in Batch Delete the first occurrence

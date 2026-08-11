@@ -120,6 +120,12 @@ async fn append_attrs_inner(
         None
     } else {
         let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+            // 5.6.3.4: the ?type selector narrows the target entity
+            if !matches_type_param(doc, params, &parsed.ctx) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "entity {id} does not match the type selector"
+                )));
+            }
             let target = doc.as_object_mut().expect("entity object");
             let frag = fragment.as_object().expect("fragment object");
             // 5.6.3: appended types extend the type set
