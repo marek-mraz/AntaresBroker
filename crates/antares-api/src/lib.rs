@@ -877,7 +877,7 @@ mod tests {
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         // the empty array is 400 too
-        let resp = app()
+        let resp = crate::tests::app()
             .oneshot(
                 Request::post("/ngsi-ld/v1/entityOperations/create")
                     .header("Content-Type", "application/json")
@@ -888,6 +888,70 @@ mod tests {
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 5.6.11.4: an upsert onto an existing Temporal Evolution adds the
+    /// instances AND unions new Entity Type names; a deletion-null instance
+    /// (the 4.5.7 representation) is legal temporal input.
+    #[tokio::test]
+    async fn clause_5_6_11_temporal_upsert_type_union_and_null_instances() {
+        let app = app();
+        let post = |body: String| {
+            Request::post("/ngsi-ld/v1/temporal/entities")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("req")
+        };
+        let first = serde_json::json!({
+            "id": "urn:ngsi-ld:V:tu", "type": "Vehicle",
+            "speed": [{"type": "Property", "value": 1,
+                       "observedAt": "2026-01-01T00:00:00Z"}]
+        });
+        let resp = app
+            .clone()
+            .oneshot(post(first.to_string()))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        // second upsert: new type name + a deleted-instance representation
+        let second = serde_json::json!({
+            "id": "urn:ngsi-ld:V:tu", "type": ["Vehicle", "Truck"],
+            "speed": [{"type": "Property", "value": "urn:ngsi-ld:null",
+                       "observedAt": "2026-01-02T00:00:00Z"}]
+        });
+        let resp = app
+            .clone()
+            .oneshot(post(second.to_string()))
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "deletion-null instances are legal temporal input (4.5.7/5.5.4)"
+        );
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:V:tu?timerel=before&timeAt=2030-01-01T00:00:00Z")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = body_json(resp).await;
+        let types: Vec<&str> = doc["type"]
+            .as_array()
+            .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_else(|| vec![doc["type"].as_str().unwrap_or_default()]);
+        assert!(
+            types.contains(&"Vehicle") && types.contains(&"Truck"),
+            "type names are unioned: {:?}",
+            doc["type"]
+        );
+        // both instances present — the deletion representation included
+        let speed = doc["speed"].as_array().expect("speed instances");
+        assert_eq!(speed.len(), 2, "history keeps both instances: {doc}");
     }
 
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,

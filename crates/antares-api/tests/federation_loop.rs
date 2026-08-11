@@ -1003,3 +1003,79 @@ async fn clause_5_6_10_batch_delete_forwarding_fallbacks() {
     let res = send(&st, batch_delete(format!(r#"["{ENTITY}", null]"#))).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+/// 5.6.11.4: exclusive/redirect registrations forward the temporal upsert
+/// when "Create or Update Temporal" is supported; unsupported proxy modes
+/// are Conflict and never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_11_temporal_upsert_forwarding() {
+    let upsert = || {
+        let body = serde_json::json!({
+            "id": ENTITY, "type": "Vehicle",
+            "speed": [{"type": "Property", "value": 1,
+                       "observedAt": "2026-01-01T00:00:00Z"}]
+        })
+        .to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:tu-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // upsertTemporal-supporting source: the upsert is forwarded
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["upsertTemporal"]), m.port).await;
+    let _ = send(&st, upsert()).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "temporal upsert forwarded"
+    );
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with("POST /ngsi-ld/v1/temporal/entities"),
+        "forwarded to the temporal resource: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // retrieve-only proxy source: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, upsert()).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported proxy source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}

@@ -23,9 +23,12 @@ fn is_meta(k: &str) -> bool {
     )
 }
 
+/// 5.6.11 input: the pushed Temporal Evolution may carry the 4.5.7
+/// deleted-instance representation (value = NGSI-LD Null), which 5.5.4
+/// explicitly excepts for "the temporal evolution" — hence allow_null.
 const TEMPORAL_OPTS: ExpandOpts = ExpandOpts {
     fragment: false,
-    allow_null: false,
+    allow_null: true,
     merge: false,
     temporal: true,
     sys: false,
@@ -67,88 +70,183 @@ pub async fn upsert_temporal(
         let obj = parsed.value.as_object().ok_or_else(|| {
             NgsiError::BadRequestData("temporal entity must be a JSON object".into())
         })?;
-        let mut expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
+        let expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
         let id = expanded["id"].as_str().expect("validated").to_owned();
-        let ts = now_iso();
-        stamp_instances(&mut expanded, &ts);
-        // get→create/mutate is a TOCTOU pair: two concurrent first-upserts
-        // both see "absent", and the loser's create must NOT be silently
-        // dropped (201 with a discarded payload). Loop: a lost create retries
-        // as a merge, a mutate on a just-deleted doc retries as a create.
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            if attempts > 16 {
-                return Err(NgsiError::InternalError("upsert retry storm".into()).into());
-            }
-            let existed = st.store.get(&tenant, Kind::Temporal, &id)?.is_some();
-            if existed {
-                let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
-                    let target = doc.as_object_mut().expect("temporal object");
-                    for (k, v) in expanded.as_object().expect("expanded") {
-                        if is_meta(k) {
-                            continue;
-                        }
-                        let incoming = v.as_array().cloned().unwrap_or_default();
-                        match target.get_mut(k).and_then(Value::as_array_mut) {
-                            Some(cur) => {
-                                // 5.6.11: instances merge by (datasetId, observedAt)
-                                for ni in incoming {
-                                    let key = (
-                                        ni.get("datasetId")
-                                            .and_then(Value::as_str)
-                                            .map(String::from),
-                                        ni.get("observedAt")
-                                            .and_then(Value::as_str)
-                                            .map(String::from),
-                                    );
-                                    let pos = cur.iter().position(|ci| {
-                                        (
-                                            ci.get("datasetId")
-                                                .and_then(Value::as_str)
-                                                .map(String::from),
-                                            ci.get("observedAt")
-                                                .and_then(Value::as_str)
-                                                .map(String::from),
-                                        ) == key
-                                            && key.1.is_some()
-                                    });
-                                    match pos {
-                                        Some(p) => cur[p] = ni,
-                                        None => cur.push(ni),
-                                    }
-                                }
-                            }
-                            None => {
-                                target.insert(k.clone(), Value::Array(incoming));
-                            }
-                        }
-                    }
-                    target.insert("modifiedAt".into(), Value::String(ts.clone()));
-                    Ok::<(), NgsiError>(())
-                })?;
-                match res {
-                    Some(Err(e)) => return Err(ApiError::from(e)),
-                    Some(Ok(())) => return Ok(no_content(&tenant)),
-                    None => continue, // deleted between get and mutate — retry as create
-                }
-            } else {
-                let mut doc = expanded.clone();
-                if let Some(o) = doc.as_object_mut() {
-                    o.insert("createdAt".into(), Value::String(ts.clone()));
-                    o.insert("modifiedAt".into(), Value::String(ts.clone()));
-                }
-                if st.store.create(&tenant, Kind::Temporal, &id, doc)? {
-                    return Ok::<_, ApiError>(created(
-                        format!("/ngsi-ld/v1/temporal/entities/{id}"),
-                        &tenant,
-                    ));
-                }
-                // lost the create race — the doc exists now; retry as a merge
-            }
+        // 5.6.11.4: exclusive/redirect registrations matching the input are
+        // forwarded when "Create or Update Temporal" is supported; proxy
+        // modes without it are an error of type Conflict; inclusive ones
+        // forward when supported. Matching attributes are removed from the
+        // local fragment.
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.clone()]),
+            ..Default::default()
+        };
+        let mut regs =
+            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers);
+        if let Some(r) = crate::federation::handle_via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+            &tenant,
+            &mut regs,
+        ) {
+            return Ok(r);
         }
+        if !regs.is_empty() {
+            let mut parts = Vec::new();
+            let mut fwd = Vec::new();
+            for reg in &regs {
+                if !reg.supports("upsertTemporal") {
+                    if reg.is_proxy() {
+                        parts.push(crate::federation::conflict_part("upsertTemporal"));
+                    }
+                    continue;
+                }
+                if let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) {
+                    fwd.push((reg.clone(), frag));
+                }
+            }
+            let proxies: Vec<&crate::federation::FedReg> =
+                regs.iter().filter(|r| r.is_proxy()).collect();
+            let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+            if has_attrs || proxies.is_empty() {
+                let local = expand_entity(&rest, &parsed.ctx, TEMPORAL_OPTS)?;
+                let status = upsert_temporal_local(&st, &tenant, &id, local)?;
+                parts.push(crate::federation::Part {
+                    status: status.as_u16(),
+                    detail: "local temporal upsert".into(),
+                });
+            }
+            let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);
+            for (reg, frag) in fwd {
+                parts.push(
+                    crate::federation::forward_part(
+                        &st,
+                        reqwest::Method::POST,
+                        format!("{}/ngsi-ld/v1/temporal/entities", reg.endpoint),
+                        &[],
+                        &headers,
+                        &tenant,
+                        &reg,
+                        &ctx_url,
+                        Some(frag),
+                    )
+                    .await,
+                );
+            }
+            return Ok(crate::federation::combine(
+                parts,
+                created(format!("/ngsi-ld/v1/temporal/entities/{id}"), &tenant),
+                &tenant,
+            ));
+        }
+        let status = upsert_temporal_local(&st, &tenant, &id, expanded)?;
+        Ok::<_, ApiError>(if status == StatusCode::CREATED {
+            created(format!("/ngsi-ld/v1/temporal/entities/{id}"), &tenant)
+        } else {
+            no_content(&tenant)
+        })
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.6.11.4 local half: create the Temporal Evolution, or add the provided
+/// instances to the existing one per 5.6.12 (merge key = datasetId +
+/// observedAt) with Entity Type names unioned. Returns 201 vs 204.
+fn upsert_temporal_local(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    id: &str,
+    mut expanded: Value,
+) -> ApiResult<StatusCode> {
+    let ts = now_iso();
+    stamp_instances(&mut expanded, &ts);
+    // get->create/mutate is a TOCTOU pair: two concurrent first-upserts
+    // both see "absent", and the loser's create must NOT be silently
+    // dropped (201 with a discarded payload). Loop: a lost create retries
+    // as a merge, a mutate on a just-deleted doc retries as a create.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        if attempts > 16 {
+            return Err(NgsiError::InternalError("upsert retry storm".into()).into());
+        }
+        let existed = st.store.get(tenant, Kind::Temporal, id)?.is_some();
+        if existed {
+            let res = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+                let target = doc.as_object_mut().expect("temporal object");
+                // 5.6.11.4: new Entity Type names are added to the target
+                if let Some(new_types) = expanded.get("type").and_then(Value::as_array) {
+                    let mut cur: Vec<Value> = target
+                        .get("type")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    for t in new_types {
+                        if !cur.contains(t) {
+                            cur.push(t.clone());
+                        }
+                    }
+                    target.insert("type".into(), Value::Array(cur));
+                }
+                for (k, v) in expanded.as_object().expect("expanded") {
+                    if is_meta(k) {
+                        continue;
+                    }
+                    let incoming = v.as_array().cloned().unwrap_or_default();
+                    match target.get_mut(k).and_then(Value::as_array_mut) {
+                        Some(cur) => {
+                            // 5.6.11: instances merge by (datasetId, observedAt)
+                            for ni in incoming {
+                                let key = (
+                                    ni.get("datasetId")
+                                        .and_then(Value::as_str)
+                                        .map(String::from),
+                                    ni.get("observedAt")
+                                        .and_then(Value::as_str)
+                                        .map(String::from),
+                                );
+                                let pos = cur.iter().position(|ci| {
+                                    (
+                                        ci.get("datasetId")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        ci.get("observedAt")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                    ) == key
+                                        && key.1.is_some()
+                                });
+                                match pos {
+                                    Some(p) => cur[p] = ni,
+                                    None => cur.push(ni),
+                                }
+                            }
+                        }
+                        None => {
+                            target.insert(k.clone(), Value::Array(incoming));
+                        }
+                    }
+                }
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                Ok::<(), NgsiError>(())
+            })?;
+            match res {
+                Some(Err(e)) => return Err(ApiError::from(e)),
+                Some(Ok(())) => return Ok(StatusCode::NO_CONTENT),
+                None => continue, // deleted between get and mutate - retry as create
+            }
+        } else {
+            let mut doc = expanded.clone();
+            if let Some(o) = doc.as_object_mut() {
+                o.insert("createdAt".into(), Value::String(ts.clone()));
+                o.insert("modifiedAt".into(), Value::String(ts.clone()));
+            }
+            if st.store.create(tenant, Kind::Temporal, id, doc)? {
+                return Ok(StatusCode::CREATED);
+            }
+            // lost the create race - the doc exists now; retry as a merge
+        }
+    }
 }
 
 // ---------- temporal query params (4.11) ----------
