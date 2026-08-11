@@ -1851,6 +1851,59 @@ mod endpoint_tests {
 }
 
 #[cfg(test)]
+mod clause_5_3_3 {
+    use super::*;
+    use serde_json::json;
+
+    /// 5.3.2 triggerReason + 5.3.3 TriggerReasonEnumeration: newlyMatching
+    /// (did not match -> matches), updated (matched -> still matches),
+    /// noLongerMatching (matched -> no longer / deleted); no notification
+    /// when neither side matches.
+    #[test]
+    fn trigger_reason_enumeration() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let sub = json!({"entities": [
+            {"type": "https://uri.etsi.org/ngsi-ld/default-context/Building"}]});
+        let reg = |t: &str| {
+            json!({"id": "urn:csr:1", "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [
+                    {"type": format!("https://uri.etsi.org/ngsi-ld/default-context/{t}")}]}]})
+        };
+        let hit = reg("Building");
+        let miss = reg("Vehicle");
+        assert_eq!(
+            csource_trigger(&sub, None, Some(&hit), &ctx),
+            Some("newlyMatching")
+        );
+        assert_eq!(
+            csource_trigger(&sub, Some(&miss), Some(&hit), &ctx),
+            Some("newlyMatching"),
+            "an update that STARTS matching is newlyMatching"
+        );
+        assert_eq!(
+            csource_trigger(&sub, Some(&hit), Some(&hit), &ctx),
+            Some("updated")
+        );
+        assert_eq!(
+            csource_trigger(&sub, Some(&hit), None, &ctx),
+            Some("noLongerMatching"),
+            "deletion of a matching registration"
+        );
+        assert_eq!(
+            csource_trigger(&sub, Some(&hit), Some(&miss), &ctx),
+            Some("noLongerMatching"),
+            "an update that STOPS matching"
+        );
+        assert_eq!(
+            csource_trigger(&sub, Some(&miss), Some(&miss), &ctx),
+            None,
+            "never-matching changes produce no notification"
+        );
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_33 {
     use super::*;
     use serde_json::json;
