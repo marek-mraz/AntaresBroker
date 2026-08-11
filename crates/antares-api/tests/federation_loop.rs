@@ -1408,3 +1408,71 @@ async fn clause_5_6_17_merge_unsupported_by_registration() {
     assert_eq!(res.status(), StatusCode::NO_CONTENT, "local merge proceeds");
     assert_eq!(hits.load(Ordering::SeqCst), 0, "no forward without support");
 }
+
+/// 5.6.18.4: replace honours the ?type selector (mismatch → 404, entity
+/// intact) and a redirect registration without Replace Entity support is
+/// Conflict, never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_18_replace_type_selector_and_unsupported() {
+    let put = |q: &str| {
+        let body = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+            "speed": {"type": "Property", "value": 9}})
+        .to_string();
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/ngsi-ld/v1/entities/{ENTITY}{q}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    // type selector: create locally, replace with wrong selector → 404
+    let st = state();
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+        "speed": {"type": "Property", "value": 1}})
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+    let res = send(&st, put("?type=Building")).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND, "wrong selector is 404");
+    let res = send(&st, put("?type=Vehicle")).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "matching selector replaces"
+    );
+
+    // redirect without replaceEntity: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = state();
+    let doc = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:rep-fb",
+        "type": "ContextSourceRegistration",
+        "mode": "redirect",
+        "operations": ["retrieveOps"],
+        "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+        "endpoint": format!("http://127.0.0.1:{port}"),
+    });
+    let body = doc.to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/csourceRegistrations")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+    let res = send(&st, put("")).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::CONFLICT,
+        "complete replace failed"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}

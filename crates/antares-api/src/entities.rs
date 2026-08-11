@@ -1867,8 +1867,13 @@ pub async fn replace_entity(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
-        let local_doc = st.store.get(&tenant, Kind::Entity, &id)?;
         let ctx0 = st.loader.core();
+        // 5.6.18.4: the ?type selector narrows the target — a non-matching
+        // entity is "not known" for this replace.
+        let local_doc = st
+            .store
+            .get(&tenant, Kind::Entity, &id)?
+            .filter(|d| crate::attrs::matches_type_param(d, &params, &ctx0));
         let spec = crate::csource::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
@@ -1944,8 +1949,12 @@ pub async fn replace_entity(
         }
         let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);
         for reg in &regs {
-            if reg.mode == "exclusive" && !reg.supports("replaceEntity") {
-                parts.push(crate::federation::conflict_part("replaceEntity"));
+            // 5.6.18.4: proxy modes without Replace Entity support are an
+            // error of type Conflict; inclusive ones are not forwarded.
+            if !reg.supports("replaceEntity") {
+                if reg.is_proxy() {
+                    parts.push(crate::federation::conflict_part("replaceEntity"));
+                }
                 continue;
             }
             let Some(frag) = crate::federation::reduce_to_scope(obj, reg, &parsed.ctx) else {
