@@ -2076,3 +2076,44 @@ mod clause_5_2_6 {
         assert_eq!(inst["type"], "Relationship");
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_7 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_g(g: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "g": g})
+    }
+
+    /// Table 5.2.7-1: value must be a 4.7 GeoJSON geometry object (a plain
+    /// number/string is a violation), GeometryCollection excluded (4.6.3);
+    /// unitCode prohibited — GeoProperties carry coordinates, not units.
+    #[test]
+    fn geoproperty_member_table_restrictions() {
+        assert!(expand(with_g(json!({"type": "GeoProperty", "value": 5}))).is_err());
+        assert!(expand(with_g(json!({"type": "GeoProperty",
+            "value": {"type": "Nonsense", "coordinates": [1, 2]}})))
+        .is_err());
+        assert!(expand(with_g(json!({"type": "GeoProperty",
+            "value": {"type": "GeometryCollection", "geometries": []}})))
+        .is_err());
+        assert!(expand(with_g(json!({"type": "GeoProperty",
+            "value": {"type": "Point", "coordinates": [8, 40]},
+            "datasetId": "urn:ds:1"})))
+        .is_ok());
+        assert!(expand(with_g(json!({"type": "GeoProperty",
+            "value": {"type": "LineString",
+                      "coordinates": [[8, 40], [9, 41]]}})))
+        .is_ok());
+    }
+}
