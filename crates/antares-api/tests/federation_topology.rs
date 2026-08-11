@@ -288,3 +288,37 @@ async fn two_broker_chain_stamps_both_pseudonyms_in_order() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
+
+/// 4.14: "If no Tenant information is present in the Context Source
+/// Registration, no Tenant information is to be used and thus the default
+/// Tenant is targeted on the registered Context Source." Two brokers: the
+/// hub's tenant `town-a` federates a peer whose data lives in the peer's
+/// DEFAULT tenant, through a CSR WITHOUT a `tenant` member. The forward must
+/// carry no NGSILD-Tenant header — flowing `town-a` through would make the
+/// peer answer NonexistentTenant (and leak the local tenant name).
+#[tokio::test(flavor = "multi_thread")]
+async fn tenantless_registration_targets_the_peer_default_tenant() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    let hub = AppState::new("hub3".into());
+    let peer = AppState::new("peer3".into());
+    let peer_port = serve(&peer).await;
+
+    // the peer's data lives in its DEFAULT tenant; tenant `town-a` does not
+    // exist on the peer at all
+    create_entity(&peer, None).await;
+    // hub, tenant town-a: CSR with NO `tenant` member
+    register(
+        &hub,
+        Some("town-a"),
+        "inclusive",
+        format!("http://127.0.0.1:{peer_port}"),
+        None,
+    )
+    .await;
+
+    let ids = query_ids(&hub, Some("town-a")).await;
+    assert!(
+        ids.contains(&ENTITY.to_owned()),
+        "a tenant-less CSR must reach the peer's default tenant, got {ids:?}"
+    );
+}

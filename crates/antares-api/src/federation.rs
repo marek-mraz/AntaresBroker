@@ -572,11 +572,12 @@ pub async fn forward(
     if !query.is_empty() {
         req = req.query(&query);
     }
-    // 5.2.9 `tenant`: requests related to this registration carry the
-    // registration's Tenant; absent ⇒ the requesting tenant flows through
-    // (4.3.6.4: each Tenant in a registered source is considered separately).
-    let peer_tenant = reg.tenant.as_deref().unwrap_or(tenant.as_str());
-    if peer_tenant != "default" {
+    // 4.14: "the Tenant information from the Context Source Registration has
+    // to be used. If no Tenant information is present in the Context Source
+    // Registration, no Tenant information is to be used and thus the default
+    // Tenant is targeted" — the requesting tenant never flows through; 6.3.14
+    // omits the header for the default Tenant.
+    if let Some(peer_tenant) = reg.tenant.as_deref().filter(|t| *t != "default") {
         req = req.header("NGSILD-Tenant", peer_tenant);
     }
     // 4.3.6.5 contextSourceInfo ⇒ extra headers; the special value
