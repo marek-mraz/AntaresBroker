@@ -63,7 +63,7 @@ Ledger tooling: `python3 dev/spec.py split|robot|status|gaps` (see `docs/spec/RE
 status` shows ZERO not-implemented. Repeat: take the first
 not-implemented clause in order, do steps 1–9 exactly as written
 (rules 8 and 9 are hard), commit as `<clause>:`, move on without
-stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. TEST-FIRST: write the clause's tests BEFORE the implementation and run them — the red run on the missing behaviour IS the fallibility proof (and shows whether the implementation is even needed: already-green = already implemented, just annotate + ledger). Only tests that never saw red need one invert→FAILED→restore cycle, ONE per clause, not per test (each cycle costs ~3 full crate recompiles at -j 2). Use ponytail skill.
+stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. TEST-FIRST: write the clause's tests BEFORE the implementation and run them — the red run on the missing behaviour IS the fallibility proof (and shows whether the implementation is even needed: already-green = already implemented, just annotate + ledger). Only tests that never saw red need one invert→FAILED→restore cycle, ONE per clause, not per test (each cycle costs ~3 full crate recompiles at -j 2). Use ponytail skill. Always write more tests in ngsi-ld-test-suite with different inputs so the ngsi-ld compliance ca be tested for 100 percent.
 ```
 
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
@@ -148,7 +148,9 @@ stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponyt
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position (2026-08-11, AntaresBroker):** 4.1–4.13 audited. Partials:
+**Loop position (2026-08-11b, AntaresBroker):** CHAPTER 4 COMPLETE (4.1–4.23.3) + 5–5.2.1. Next clause: 5.2.2 (Entity data type). Partials so far: 4.3.5, 4.3.6.7, 4.5.25 (EntityMap -> 5.14.x), 4.9 (notify null-lookup -> 5.8.x), 4.10 (in-memory near ceiling), 4.23.1/4.23.3 (ICU collation + collation param; codepoint order today). Session-b fixes: 4.14 tenant-less CSR forwarded requesting tenant (now none); 4.15 lang q-ranking/case/prefix-truncation; 4.18 scope grammar unenforced; 4.19 | orOp + parens (matcher AND SQL compiler); 4.20 associationOps=federationOps aliasing; 4.21 pipe orOp; 4.23 dist-asc/desc + datatype ranks + brackets; 5.2.1 NGSI-LD Null creatable. Traps: vendored httpctrl egg-link died in the tree move (repoint easy-install.pth+egg-link in .venv); 422 TPs need ANTARES_SWEEP_SECS=2; tenant charset is token-safe (URN tenants 400 by design).
+
+**Loop position (2026-08-11a, superseded):** 4.1–4.13 audited. Partials:
 4.3.5, 4.3.6.7, 4.5.25 (shared named gap = EntityMap 5.14.x+6.3.18, build at
 5.14 in clause order), 4.9 (notify matcher evaluates linked-entity q terms
 with a null lookup — wire or reject at 5.8.x; temporal expandValues at
