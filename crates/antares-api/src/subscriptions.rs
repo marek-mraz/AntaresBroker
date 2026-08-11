@@ -31,6 +31,10 @@ pub fn normalize_subscription(
     is_patch: bool,
 ) -> Result<Map<String, Value>, NgsiError> {
     let bad = |m: String| NgsiError::BadRequestData(m);
+    // 5.5.4: first-level member nulls are only legal in fragments (patch)
+    if !is_patch {
+        antares_jsonld::reject_first_level_nulls(doc)?;
+    }
     let mut out = Map::new();
     for (k, v) in doc {
         match k.as_str() {
@@ -869,6 +873,26 @@ mod tests {
     use super::*;
     use antares_jsonld::Loader;
     use serde_json::json;
+
+    /// 5.5.4: "urn:ngsi-ld:null" as a first-level member value is
+    /// BadRequestData on create; in a patch fragment it is the removal form.
+    #[test]
+    fn clause_5_5_4_first_level_null_in_subscription() {
+        let ctx = Loader::new().core();
+        let doc = json!({
+            "type": "Subscription",
+            "entities": [{"type": "Building"}],
+            "description": "urn:ngsi-ld:null",
+            "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}}
+        });
+        assert!(
+            normalize_subscription(doc.as_object().unwrap(), &ctx, false).is_err(),
+            "create with a first-level null URN must be rejected"
+        );
+        // patch fragment: not the create-path error (removal semantics)
+        let patch = json!({"description": "urn:ngsi-ld:null"});
+        assert!(normalize_subscription(patch.as_object().unwrap(), &ctx, true).is_ok());
+    }
 
     #[test]
     fn validates_subscription() {

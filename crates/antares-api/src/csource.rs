@@ -29,6 +29,10 @@ pub fn normalize_registration(
     is_patch: bool,
 ) -> Result<Map<String, Value>, NgsiError> {
     let bad = |m: String| NgsiError::BadRequestData(m);
+    // 5.5.4: first-level member nulls are only legal in fragments (patch)
+    if !is_patch {
+        antares_jsonld::reject_first_level_nulls(doc)?;
+    }
     let mut out = Map::new();
     for (k, v) in doc {
         // NGSI-LD Fragment member removal (5.4): null / NGSI-LD Null
@@ -1295,6 +1299,29 @@ mod csi_tests {
     use super::*;
     use antares_jsonld::Loader;
     use serde_json::json;
+
+    /// 5.5.4: "urn:ngsi-ld:null" as a first-level member value is
+    /// BadRequestData on create; on patch it is the Fragment removal form.
+    #[test]
+    fn clause_5_5_4_first_level_null_in_registration() {
+        let ctx = Loader::new().core();
+        let doc = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:n1",
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer:9090",
+            "description": "urn:ngsi-ld:null",
+            "information": [{"entities": [{"type": "Building"}]}]
+        });
+        assert!(
+            normalize_registration(doc.as_object().unwrap(), &ctx, false).is_err(),
+            "create with a first-level null URN must be rejected"
+        );
+        // patch: the same member is a removal fragment (stored as Null)
+        let patch = json!({"description": "urn:ngsi-ld:null"});
+        let out = normalize_registration(patch.as_object().unwrap(), &ctx, true)
+            .expect("patch fragment null is legal");
+        assert!(out["description"].is_null());
+    }
 
     /// 4.3.6.3: "the registration shall define both: an entity id (i.e. an id
     /// pattern or Entity type defining a group of entities is not supported

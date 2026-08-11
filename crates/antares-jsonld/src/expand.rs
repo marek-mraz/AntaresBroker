@@ -98,6 +98,10 @@ pub struct ExpandOpts {
     /// Allow NGSI-LD null (`"urn:ngsi-ld:null"`) as a deletion marker
     /// (merge-patch inputs, 5.5.12).
     pub allow_null: bool,
+    /// Merge fragment (5.5.12): the one input where 5.5.4 permits
+    /// "urn:ngsi-ld:null" as the value of a key inside a JSON object that is
+    /// a Property's value. Implies `allow_null`.
+    pub merge: bool,
     /// Temporal representation: repeated instances of the same datasetId are
     /// legal (4.5.6), so the multi-instance uniqueness check is skipped.
     pub temporal: bool,
@@ -107,6 +111,33 @@ pub struct ExpandOpts {
     pub sys: bool,
 }
 
+/// 5.5.4 General NGSI-LD validation: "urn:ngsi-ld:null" as a first-level
+/// member value is BadRequestData — legal only in NGSI-LD Fragments used in
+/// partial update and merge operations (5.5.8, 5.5.12).
+pub fn reject_first_level_nulls(doc: &Map<String, Value>) -> Result<(), NgsiError> {
+    for (k, v) in doc {
+        if v.as_str() == Some("urn:ngsi-ld:null") {
+            return Err(NgsiError::BadRequestData(format!(
+                "member {k}: \"urn:ngsi-ld:null\" is only allowed in partial \
+                 update or merge fragments (5.5.4)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Does any key-value pair anywhere inside `v` carry the NGSI-LD Null as its
+/// value? (5.5.4: banned inside a JSON object that is a Property's value.)
+fn has_object_member_null(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => m
+            .values()
+            .any(|x| x.as_str() == Some("urn:ngsi-ld:null") || has_object_member_null(x)),
+        Value::Array(a) => a.iter().any(has_object_member_null),
+        _ => false,
+    }
+}
+
 pub fn expand_entity(
     doc: &Map<String, Value>,
     ctx: &Context,
@@ -114,6 +145,12 @@ pub fn expand_entity(
 ) -> Result<Value, NgsiError> {
     let bad = |m: &str| NgsiError::BadRequestData(m.to_owned());
     let mut out = Map::new();
+
+    // 5.5.4: first-level member nulls are only legal in null-allowing
+    // (partial update / merge) fragments.
+    if !opts.allow_null {
+        reject_first_level_nulls(doc)?;
+    }
 
     // id
     match doc.get("id").or_else(|| doc.get("@id")) {
@@ -828,6 +865,16 @@ fn expand_instance(
         }
     }
 
+    // 5.5.4: "urn:ngsi-ld:null" as the value of a key-value pair within a
+    // JSON object that is the Property's value is BadRequestData — excepted
+    // solely for merge fragments (5.5.12). `json` stays exempt (raw JSON).
+    if !opts.merge && out.get("value").is_some_and(has_object_member_null) {
+        return Err(bad(format!(
+            "attribute {name}: \"urn:ngsi-ld:null\" inside a compound value \
+             is only allowed in merge fragments (5.5.4)"
+        )));
+    }
+
     Ok(Value::Object(out))
 }
 
@@ -858,6 +905,13 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
             "value" => {
                 if v.is_null() {
                     return Err(bad("JSON null is not a valid value".into()));
+                }
+                // 5.5.4: a null inside a compound value is legal in merge
+                // fragments only — a partial update (5.5.8) is not one.
+                if has_object_member_null(v) {
+                    return Err(bad("\"urn:ngsi-ld:null\" inside a compound value is only \
+                         allowed in merge fragments (5.5.4)"
+                        .into()));
                 }
                 out.insert("value".into(), v.clone());
             }
@@ -1461,6 +1515,106 @@ mod tests {
             out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["type"],
             "Property"
         );
+    }
+
+    /// 5.5.4 General NGSI-LD validation: "urn:ngsi-ld:null" as a first-level
+    /// member value is BadRequestData outside partial-update/merge fragments;
+    /// as the value of a key inside a JSON object that is a Property's value
+    /// it is BadRequestData everywhere EXCEPT merge fragments (5.5.12).
+    #[test]
+    fn clause_5_5_4_null_placement() {
+        let e =
+            |doc: Value, opts: ExpandOpts| expand_entity(doc.as_object().unwrap(), &core(), opts);
+        // first-level member value — id and type are first-level members too
+        assert!(
+            e(
+                json!({"id": "urn:ngsi-ld:null", "type": "T"}),
+                ExpandOpts::default()
+            )
+            .is_err(),
+            "null URN as id must 400 on create"
+        );
+        assert!(
+            e(
+                json!({"id": "urn:x", "type": "urn:ngsi-ld:null"}),
+                ExpandOpts::default()
+            )
+            .is_err(),
+            "null URN as type must 400 on create"
+        );
+        // null inside a JSON object that is a Property value
+        let nested = json!({"id": "urn:x", "type": "T",
+            "p": {"type": "Property", "value": {"a": "urn:ngsi-ld:null"}}});
+        assert!(
+            e(nested.clone(), ExpandOpts::default()).is_err(),
+            "nested null in value object must 400 on create"
+        );
+        // partial update allows top-level nulls (allow_null) but the
+        // object-nested form is excepted for merge ONLY
+        assert!(
+            e(
+                nested.clone(),
+                ExpandOpts {
+                    fragment: true,
+                    allow_null: true,
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "nested null in value object must 400 on partial update"
+        );
+        // merge fragment: accepted and preserved for merge_into
+        let ok = e(
+            nested,
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                merge: true,
+                ..Default::default()
+            },
+        )
+        .expect("merge fragment keeps the nested null");
+        assert_eq!(
+            ok["https://uri.etsi.org/ngsi-ld/default-context/p"][0]["value"]["a"],
+            "urn:ngsi-ld:null"
+        );
+        // deep nesting (object in object, object in array) is caught too
+        let deep = json!({"id": "urn:x", "type": "T",
+            "p": {"type": "Property", "value": {"a": {"b": "urn:ngsi-ld:null"}}}});
+        assert!(
+            e(deep, ExpandOpts::default()).is_err(),
+            "deep nested null must 400"
+        );
+        let in_array = json!({"id": "urn:x", "type": "T",
+            "p": {"type": "Property", "value": [{"a": "urn:ngsi-ld:null"}]}});
+        assert!(
+            e(in_array, ExpandOpts::default()).is_err(),
+            "null in object in array must 400"
+        );
+        // negative: a benign object value passes and carries no null
+        let fine = e(
+            json!({"id": "urn:x", "type": "T",
+                "p": {"type": "Property", "value": {"a": 1}}}),
+            ExpandOpts::default(),
+        )
+        .expect("plain object value stays legal");
+        assert!(
+            !fine.to_string().contains("urn:ngsi-ld:null"),
+            "no null leakage"
+        );
+        // top-level attribute null stays the fragment deletion form:
+        // rejected on create, accepted under allow_null (5.5.8/5.5.12)
+        let top = json!({"id": "urn:x", "type": "T", "p": "urn:ngsi-ld:null"});
+        assert!(e(top.clone(), ExpandOpts::default()).is_err());
+        e(
+            top,
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                ..Default::default()
+            },
+        )
+        .expect("first-level null is the deletion form in fragments");
     }
 
     /// 4.6.5 Supported data types for LanguageMaps: keys are RFC 5646 tags
@@ -2395,6 +2549,62 @@ mod clause_5_2_38 {
         let ok = expand(with_jp(json!({"json": {"a": 1}}))).expect("concise inference");
         let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/payload"][0];
         assert_eq!(attr["type"], "JsonProperty");
+    }
+}
+
+#[cfg(test)]
+mod clause_5_5_4 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    /// 5.5.4: outside fragments/notifications, "urn:ngsi-ld:null" is
+    /// BadRequestData as a first-level member value, as a Property value /
+    /// Relationship object, as the languageMap {"@none": null} form, AND as
+    /// a key value inside a JSON object that is a Property value.
+    #[test]
+    fn ngsi_null_rejected_everywhere_on_create() {
+        let with = |attr: serde_json::Value| json!({"id": "urn:x", "type": "T", "a": attr});
+        assert!(
+            expand(json!({"id": "urn:x", "type": "T", "scope": "urn:ngsi-ld:null"})).is_err(),
+            "first-level member value"
+        );
+        assert!(
+            expand(with(
+                json!({"type": "Property", "value": "urn:ngsi-ld:null"})
+            ))
+            .is_err(),
+            "Property value"
+        );
+        assert!(
+            expand(with(
+                json!({"type": "Relationship", "object": "urn:ngsi-ld:null"})
+            ))
+            .is_err(),
+            "Relationship object"
+        );
+        assert!(
+            expand(with(json!({"type": "LanguageProperty",
+                "languageMap": {"@none": "urn:ngsi-ld:null"}})))
+            .is_err(),
+            "languageMap null form"
+        );
+        assert!(
+            expand(with(json!({"type": "Property",
+                "value": {"nested": "urn:ngsi-ld:null"}})))
+            .is_err(),
+            "null inside a compound Property value"
+        );
+        // control: an ordinary compound value stays creatable
+        assert!(expand(with(json!({"type": "Property", "value": {"nested": 1}}))).is_ok());
     }
 }
 

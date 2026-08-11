@@ -321,6 +321,7 @@ async fn batch_write(
                 ExpandOpts {
                     fragment: false,
                     allow_null: fragment_ok,
+                    merge: fragment_ok,
                     temporal: false,
                     ..Default::default()
                 },

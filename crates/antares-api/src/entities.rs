@@ -1609,6 +1609,7 @@ async fn merge_entity_inner(
         ExpandOpts {
             fragment: true,
             allow_null: true,
+            merge: true,
             temporal: false,
             ..Default::default()
         },
@@ -1641,6 +1642,7 @@ async fn merge_entity_inner(
                 ExpandOpts {
                     fragment: true,
                     allow_null: true,
+                    merge: true,
                     temporal: false,
                     ..Default::default()
                 },
@@ -1791,11 +1793,35 @@ fn merge_instance(target: &mut Value, frag: &Value, ts: &str) {
         }
         if v.is_null() || is_ngsi_null(v) {
             t.remove(k);
+        } else if let (Some(cur), Some(patch)) =
+            (t.get_mut(k).and_then(Value::as_object_mut), v.as_object())
+        {
+            // 5.5.12: the merge goes "into JSON objects representing a
+            // Property value" — RFC 7396 with the NGSI-LD Null as removal.
+            merge_value_object(cur, patch);
         } else {
             t.insert(k.clone(), v.clone());
         }
     }
     t.insert("modifiedAt".into(), Value::String(ts.to_owned()));
+}
+
+/// RFC 7396 merge patch over a compound (JSON object) member value, with
+/// "urn:ngsi-ld:null" / JSON null as the key-removal marker (5.5.12); the
+/// sentinel itself is never stored (5.5.4).
+fn merge_value_object(target: &mut Map<String, Value>, patch: &Map<String, Value>) {
+    for (k, v) in patch {
+        if v.is_null() || is_ngsi_null(v) {
+            target.remove(k);
+        } else if let (Some(cur), Some(po)) = (
+            target.get_mut(k).and_then(Value::as_object_mut),
+            v.as_object(),
+        ) {
+            merge_value_object(cur, po);
+        } else {
+            target.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 // ---------- PUT /entities/{id} — Replace (5.6.18) ----------
@@ -2343,6 +2369,36 @@ async fn retrieve_attr_inner(
 mod tests {
     use super::merge_into;
     use serde_json::json;
+
+    /// 5.5.12: merge "merges the provided information with the existing
+    /// information up to an arbitrary depth, e.g. including going into JSON
+    /// objects representing a Property value" (RFC 7396 with the NGSI-LD
+    /// Null) — untouched keys survive, null-valued keys are removed, and the
+    /// null sentinel never lands in the stored document (5.5.4).
+    #[test]
+    fn merge_goes_into_compound_property_values() {
+        let mut doc = json!({"id": "urn:x", "type": ["T"],
+            "https://uri.etsi.org/ngsi-ld/default-context/address": [{
+                "type": "Property",
+                "value": {"street": "Straße des 17. Juni", "city": "Berlin",
+                          "country": "Germany"}}]});
+        merge_into(
+            &mut doc,
+            &json!({"https://uri.etsi.org/ngsi-ld/default-context/address": [{
+                "type": "Property",
+                "value": {"street": "Pariser Platz",
+                          "country": "urn:ngsi-ld:null"}}]}),
+            "2026-08-11T00:00:00Z",
+        );
+        let v = &doc["https://uri.etsi.org/ngsi-ld/default-context/address"][0]["value"];
+        assert_eq!(v["street"], "Pariser Platz");
+        assert_eq!(v["city"], "Berlin", "untouched keys survive the merge");
+        assert!(v.get("country").is_none(), "null removes the key");
+        assert!(
+            !doc.to_string().contains("urn:ngsi-ld:null"),
+            "the null sentinel must never be stored"
+        );
+    }
 
     #[test]
     fn merge_sets_and_null_removes_expires_at() {

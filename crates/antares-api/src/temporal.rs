@@ -26,6 +26,7 @@ fn is_meta(k: &str) -> bool {
 const TEMPORAL_OPTS: ExpandOpts = ExpandOpts {
     fragment: false,
     allow_null: false,
+    merge: false,
     temporal: true,
     sys: false,
 };
