@@ -711,19 +711,41 @@ pub(crate) fn query_doc_params(
                         "entities entries must be EntitySelector objects (5.2.33)".into(),
                     ));
                 }
-                for (member, out) in [
-                    ("type", &mut types),
-                    ("id", &mut ids),
-                    ("idPattern", &mut pats),
-                ] {
-                    match e.get(member) {
-                        None => {}
-                        Some(Value::String(s)) => out.push(s.clone()),
-                        Some(_) => {
-                            return Err(bad(format!(
-                                "EntitySelector {member} must be a string (5.2.33)"
-                            )))
+                // Table 5.2.33-1: type is the mandatory selector member (a
+                // 4.17 type selection, "*" allowed)
+                match e.get("type") {
+                    Some(Value::String(s)) if !s.is_empty() => types.push(s.clone()),
+                    _ => return Err(bad("EntitySelector requires type (5.2.33)".into())),
+                }
+                // id: "String or String[]", valid URI(s)
+                match e.get("id") {
+                    None => {}
+                    Some(Value::String(s)) => {
+                        antares_model::EntityId::new(s)?;
+                        ids.push(s.clone());
+                    }
+                    Some(Value::Array(a)) => {
+                        for i in a {
+                            let s = i.as_str().ok_or_else(|| {
+                                bad("EntitySelector id entries must be URIs (5.2.33)".into())
+                            })?;
+                            antares_model::EntityId::new(s)?;
+                            ids.push(s.to_owned());
                         }
+                    }
+                    Some(_) => {
+                        return Err(bad(
+                            "EntitySelector id must be a URI string or array (5.2.33)".into(),
+                        ))
+                    }
+                }
+                match e.get("idPattern") {
+                    None => {}
+                    Some(Value::String(s)) => pats.push(s.clone()),
+                    Some(_) => {
+                        return Err(bad(
+                            "EntitySelector idPattern must be a string (5.2.33)".into()
+                        ))
                     }
                 }
             }

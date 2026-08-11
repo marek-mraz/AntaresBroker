@@ -2828,6 +2828,112 @@ mod clause_5_2_22 {
 }
 
 #[cfg(test)]
+mod clause_5_2_33 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn send(app: &axum::Router, path: &str, doc: &serde_json::Value) -> (StatusCode, String) {
+        let body = doc.to_string();
+        let req = Request::post(format!("/ngsi-ld/v1/{path}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        let resp = app.clone().oneshot(req).await.expect("resp");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Table 5.2.33-1: id is "String or String[]" of valid URIs, type is
+    /// mandatory, and "id takes precedence over idPattern".
+    #[tokio::test]
+    async fn entity_selector_id_forms_and_precedence() {
+        let app = router(AppState::new("t5233a".into()));
+        for id in [
+            "urn:ngsi-ld:Vehicle:A1",
+            "urn:ngsi-ld:Vehicle:A2",
+            "urn:ngsi-ld:Vehicle:B1",
+        ] {
+            let (st, body) = send(
+                &app,
+                "entities",
+                &json!({"id": id, "type": "Vehicle",
+                        "speed": {"type": "Property", "value": 1}}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+        }
+        let q = "entityOperations/query";
+        let sel = |e: serde_json::Value| json!({"type": "Query", "entities": [e]});
+        let (st, body) = send(
+            &app,
+            q,
+            &sel(json!({"type": "Vehicle",
+                "id": ["urn:ngsi-ld:Vehicle:A1", "urn:ngsi-ld:Vehicle:A2"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "id array form: {body}");
+        assert!(body.contains("urn:ngsi-ld:Vehicle:A1"), "{body}");
+        assert!(body.contains("urn:ngsi-ld:Vehicle:A2"), "{body}");
+        assert!(!body.contains("urn:ngsi-ld:Vehicle:B1"), "{body}");
+        let (st, body) = send(
+            &app,
+            q,
+            &sel(json!({"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:A1",
+                "idPattern": "^urn:ngsi-ld:Vehicle:B.*$"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("urn:ngsi-ld:Vehicle:A1"),
+            "id takes precedence over idPattern: {body}"
+        );
+        let (st, _) = send(&app, q, &sel(json!({"id": "urn:ngsi-ld:Vehicle:A1"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "type is mandatory (5.2.33)");
+        let (st, _) = send(
+            &app,
+            q,
+            &sel(json!({"type": "Vehicle", "id": ["urn:ngsi-ld:Vehicle:A1", 5]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "id entries must be strings");
+        let (st, _) = send(&app, q, &sel(json!({"type": "Vehicle", "id": "not a uri"}))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "id must be a valid URI");
+    }
+
+    /// 5.2.33 in Subscription.entities: the String[] id form is accepted at
+    /// creation.
+    #[tokio::test]
+    async fn subscription_selector_id_array() {
+        let app = router(AppState::new("t5233b".into()));
+        let sub = |e: serde_json::Value| {
+            json!({"type": "Subscription", "entities": [e],
+                "notification": {"endpoint": {"uri": "http://client.example.org/cb"}}})
+        };
+        let (st, body) = send(
+            &app,
+            "subscriptions",
+            &sub(json!({"type": "Building",
+                "id": ["urn:ngsi-ld:Building:a", "urn:ngsi-ld:Building:b"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let (st, _) = send(
+            &app,
+            "subscriptions",
+            &sub(json!({"type": "Building", "id": ["urn:ngsi-ld:Building:a", 5]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_23 {
     use super::*;
     use axum::body::Body;

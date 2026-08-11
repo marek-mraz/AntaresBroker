@@ -75,10 +75,26 @@ pub fn normalize_subscription(
                                 }
                             }
                             "id" => {
-                                let id = ev
-                                    .as_str()
-                                    .ok_or_else(|| bad("EntitySelector id must be a URI".into()))?;
-                                antares_model::EntityId::new(id)?;
+                                // Table 5.2.33-1: id is "String or String[]"
+                                // of valid URIs
+                                match ev {
+                                    Value::String(id) => {
+                                        antares_model::EntityId::new(id)?;
+                                    }
+                                    Value::Array(a) => {
+                                        for i in a {
+                                            let id = i.as_str().ok_or_else(|| {
+                                                bad("EntitySelector id entries must be URIs (5.2.33)"
+                                                    .into())
+                                            })?;
+                                            antares_model::EntityId::new(id)?;
+                                        }
+                                    }
+                                    _ => return Err(bad(
+                                        "EntitySelector id must be a URI string or array (5.2.33)"
+                                            .into(),
+                                    )),
+                                }
                                 ne.insert("id".into(), ev.clone());
                             }
                             "idPattern" => {

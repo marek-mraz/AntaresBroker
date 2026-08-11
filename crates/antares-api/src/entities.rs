@@ -1108,10 +1108,15 @@ pub fn filter_entities_paged(
                 continue;
             }
         }
-        if let Some(re) = &id_pattern {
-            // idPattern is invisible to the store — applied even when decided
-            if !re.is_match(id) {
-                continue;
+        // 5.2.33: "id takes precedence over idPattern" — the pattern only
+        // filters when no id selector was given.
+        if ids.is_none() {
+            if let Some(re) = &id_pattern {
+                // idPattern is invisible to the store — applied even when
+                // decided
+                if !re.is_match(id) {
+                    continue;
+                }
             }
         }
         if !decided {

@@ -1325,9 +1325,12 @@ async fn query_temporal_inner(
                 continue;
             }
         }
-        if let Some(re) = &id_pattern {
-            if !re.is_match(id) {
-                continue;
+        // 5.2.33: "id takes precedence over idPattern"
+        if ids.is_none() {
+            if let Some(re) = &id_pattern {
+                if !re.is_match(id) {
+                    continue;
+                }
             }
         }
         if let Some(types) = &types {

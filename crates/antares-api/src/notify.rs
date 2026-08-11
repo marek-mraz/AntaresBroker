@@ -563,11 +563,18 @@ fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
                 types.contains(&t)
             }
         });
-        let id_ok = e.get("id").and_then(Value::as_str).is_none_or(|i| i == id);
-        let pat_ok = e
-            .get("idPattern")
-            .and_then(Value::as_str)
-            .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()));
+        // Table 5.2.33-1: id is String or String[]; "id takes precedence
+        // over idPattern" — a selector carrying id ignores its idPattern.
+        let id_ok = match e.get("id") {
+            None => true,
+            Some(Value::String(i)) => i == id,
+            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).any(|i| i == id),
+            Some(_) => false,
+        };
+        let pat_ok = e.get("id").is_some()
+            || e.get("idPattern")
+                .and_then(Value::as_str)
+                .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()));
         t_ok && id_ok && pat_ok
     })
 }
@@ -1817,6 +1824,43 @@ mod endpoint_tests {
         assert!(
             !in_cooldown(&no_cooldown, now),
             "no cooldown member ⇒ no gate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_33 {
+    use super::*;
+    use serde_json::json;
+
+    /// Table 5.2.33-1: id is String or String[]; "id takes precedence over
+    /// idPattern" when a selector carries both.
+    #[test]
+    fn selector_id_array_and_precedence() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let doc = json!({"id": "urn:x:A", "type": ["T"]});
+        let sub = |e: serde_json::Value| json!({"entities": [e]});
+        assert!(!selector_match(
+            &sub(json!({"type": "T", "idPattern": "^urn:x:B"})),
+            &doc,
+            &ctx
+        ));
+        assert!(
+            selector_match(
+                &sub(json!({"type": "T", "id": "urn:x:A", "idPattern": "^urn:x:B"})),
+                &doc,
+                &ctx
+            ),
+            "id takes precedence over idPattern"
+        );
+        assert!(selector_match(
+            &sub(json!({"type": "T", "id": ["urn:x:A", "urn:x:C"]})),
+            &doc,
+            &ctx
+        ));
+        assert!(
+            !selector_match(&sub(json!({"type": "T", "id": ["urn:x:B"]})), &doc, &ctx),
+            "an id array not containing the entity id must not match"
         );
     }
 }
