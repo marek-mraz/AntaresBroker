@@ -148,10 +148,21 @@ stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponyt
 
 ## 6. State handoff — 2026-08-10 (prune as items resolve)
 
-**Loop position (2026-08-10, AntaresBroker):** 4.1–4.7.3 audited. 4 partial
-(4.3.5, 4.3.6.7, 4.5.25 — shared named gap = EntityMap 5.14.x+6.3.18, build
-at 5.14 in clause order; 6.3.17). Next clause: 4.8. Test protocol is now
-TEST-FIRST (§0.3 goal prompt + §6 protocol note below).
+**Loop position (2026-08-11, AntaresBroker):** 4.1–4.13 audited. Partials:
+4.3.5, 4.3.6.7, 4.5.25 (shared named gap = EntityMap 5.14.x+6.3.18, build at
+5.14 in clause order), 4.9 (notify matcher evaluates linked-entity q terms
+with a null lookup — wire or reject at 5.8.x; temporal expandValues at
+6.18+), 4.10 (in-memory near ceiling: representative-point reference,
+planar closest-point to extended targets; PostGIS path is the metric
+authority). Next clause: 4.14 (multi-tenancy). Test protocol is TEST-FIRST
+(§0.3 goal prompt + §6 protocol note below). 2026-08-11 session: 4.9 (QPath
+grammar+evaluator, TP 019_29), 4.10 (PositiveNumber+single-modifier fixes,
+TP 019_30), 4.11 (dt_key canonical DateTime compare — lexicographic compare
+over fraction spellings broke every bound; TP 021_26), 4.12/4.13
+(pagination+count annotated/tested, TP 019_31). MemPalace re-mined
+(docs/spec/ excluded in mempalace.yaml — §6 task 6 DONE); venv trap: repo
+now at /workspace/AntaresBroker, `ln -sfn /workspace/AntaresBroker/.venv
+/workspace/.venv` before robot runs; cargo needs PATH=$PATH:$HOME/.cargo/bin.
 
 **Audited this session (each one commit, code+tests+TPs+ledger):**
 4.5.4 (simplified: wrapped languageMap/json/vocab + vocab term compaction,

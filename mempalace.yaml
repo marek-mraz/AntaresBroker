@@ -25,6 +25,11 @@ exclude_patterns:
   - "**/log.html"
   - "**/report.html"
   - "**/output.xml"
+  # The conformance ledger bodies are the CIM 009 clause text verbatim — the
+  # PDF is already mined into wing `spec` (2026-08-09, pdf_page metadata);
+  # indexing docs/spec/ would duplicate every clause into the code wing and
+  # outrank the code on clause-shaped queries.
+  - "docs/spec/"
 
 # Deliberately NOT excluded:
 #
