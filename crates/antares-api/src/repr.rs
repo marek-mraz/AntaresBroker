@@ -340,12 +340,58 @@ fn transform_instance(inst: &Value, r: &Repr) -> Value {
     Value::Object(out)
 }
 
+/// 4.15 Language Filter: pick one languageMap entry for a lang priority
+/// list. Ranges are ordered by their q weights (RFC 3282, default 1, list
+/// position breaking ties); tags compare case-insensitively (RFC 5646); a
+/// range matches an exact tag, then a longer tag by prefix (fr → fr-CH),
+/// then a shorter tag by truncation (fr-CH → fr). "*" — or no match at
+/// all — "shall default to any supported language" (@none preferred).
 fn select_lang(lm: &Map<String, Value>, lang: &str) -> Option<(String, Value)> {
-    if lang != "*" {
-        for want in lang.split(',') {
-            let want = want.trim().split(';').next().unwrap_or("").trim();
-            if let Some(v) = lm.get(want) {
-                return Some((want.to_owned(), v.clone()));
+    let mut ranges: Vec<(f64, usize, &str)> = lang
+        .split(',')
+        .enumerate()
+        .filter_map(|(i, part)| {
+            let mut it = part.trim().split(';');
+            let tag = it.next()?.trim();
+            if tag.is_empty() {
+                return None;
+            }
+            let q = it
+                .find_map(|p| {
+                    p.trim()
+                        .strip_prefix("q=")
+                        .and_then(|v| v.parse::<f64>().ok())
+                })
+                .unwrap_or(1.0);
+            Some((q, i, tag))
+        })
+        .collect();
+    ranges.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    let ci = |k: &str, want: &str| k.eq_ignore_ascii_case(want);
+    for (q, _, want) in &ranges {
+        // q=0 = "not acceptable" (RFC 3282); "*" = any → the fallback below
+        if *q <= 0.0 || *want == "*" {
+            continue;
+        }
+        if let Some((k, v)) = lm.iter().find(|(k, _)| ci(k, want)) {
+            return Some((k.clone(), v.clone()));
+        }
+        if let Some((k, v)) = lm.iter().find(|(k, _)| {
+            k.len() > want.len()
+                && k.as_bytes().get(want.len()) == Some(&b'-')
+                && ci(&k[..want.len()], want)
+        }) {
+            return Some((k.clone(), v.clone()));
+        }
+        let mut w = *want;
+        while let Some(cut) = w.rfind('-') {
+            w = &w[..cut];
+            if let Some((k, v)) = lm.iter().find(|(k, _)| ci(k, w)) {
+                return Some((k.clone(), v.clone()));
             }
         }
     }
@@ -438,6 +484,91 @@ mod tests {
         assert_eq!(
             v(json!({"type": "VocabProperty", "vocab": "V"})),
             json!({"vocab": "V"})
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_15 {
+    use super::*;
+    use serde_json::json;
+
+    fn lm(pairs: &[(&str, &str)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), json!(*v)))
+            .collect()
+    }
+
+    /// 4.15 EXAMPLE 4: quality value ranking — entries are ordered by their
+    /// q weight (default 1), not by list position.
+    #[test]
+    fn q_values_rank_the_priority_list() {
+        let m = lm(&[("en", "red"), ("fr", "rouge")]);
+        let (l, v) = select_lang(&m, "en;q=0.2,fr;q=0.9").expect("pick");
+        assert_eq!((l.as_str(), &v), ("fr", &json!("rouge")), "fr outranks en");
+        // default q=1: plain fr-CH beats fr;q=0.9
+        let m = lm(&[("fr-CH", "rouge suisse"), ("fr", "rouge")]);
+        let (l, _) = select_lang(&m, "fr-CH,fr;q=0.9").expect("pick");
+        assert_eq!(l, "fr-CH");
+        // wildcard with low q still yields a fallback when nothing else fits
+        let m = lm(&[("de", "rot")]);
+        let (l, _) = select_lang(&m, "fr;q=0.9,*;q=0.5").expect("pick");
+        assert_eq!(l, "de");
+    }
+
+    /// RFC 5646 (via 4.15): language tags compare case-insensitively.
+    #[test]
+    fn langtags_compare_case_insensitively() {
+        let m = lm(&[("en-US", "color")]);
+        let (l, v) = select_lang(&m, "en-us").expect("pick");
+        assert_eq!((l.as_str(), &v), ("en-US", &json!("color")));
+        let m = lm(&[("fr", "rouge"), ("de", "rot")]);
+        let (l, _) = select_lang(&m, "FR").expect("pick");
+        assert_eq!(l, "fr");
+    }
+
+    /// RFC 5646 lookup (via 4.15): a shorter range matches a longer tag
+    /// (lang=fr picks fr-CH) and a longer range truncates onto a shorter tag
+    /// (lang=fr-CH picks fr) — the `lang` subproperty reports the ACTUAL tag.
+    #[test]
+    fn prefix_and_truncation_fallbacks() {
+        // decoy `de` sorts first — a naive any-fallback would pick it
+        let m = lm(&[("de", "rot"), ("fr-CH", "rouge suisse")]);
+        let (l, _) = select_lang(&m, "fr").expect("pick");
+        assert_eq!(l, "fr-CH", "range fr matches tag fr-CH, not the decoy");
+        let m = lm(&[("de", "rot"), ("fr", "rouge")]);
+        let (l, _) = select_lang(&m, "fr-CH").expect("pick");
+        assert_eq!(l, "fr", "range fr-CH truncates onto tag fr, not the decoy");
+        // an exact match still beats a prefix match at the same rank
+        let m = lm(&[("fr-CH", "suisse"), ("fr", "rouge")]);
+        let (l, _) = select_lang(&m, "fr").expect("pick");
+        assert_eq!(l, "fr");
+    }
+
+    /// 4.15: "If the Context Broker cannot serve any matching language, it
+    /// shall default to any supported language" — and the augmented `lang`
+    /// subproperty carries the actually returned one.
+    #[test]
+    fn no_match_falls_back_to_any_supported_language() {
+        let m = lm(&[("de", "rot")]);
+        let (l, v) = select_lang(&m, "pt").expect("fallback");
+        assert_eq!((l.as_str(), &v), ("de", &json!("rot")));
+        // the transform augments with the actual language and converts the
+        // LanguageProperty to a Property — languageMap must NOT survive
+        let inst = json!({"type": "LanguageProperty",
+            "languageMap": {"en": "red", "fr": "rouge"}});
+        let r = Repr {
+            lang: Some("fr".into()),
+            ..Repr::default()
+        };
+        let out = transform_instance(&inst, &r);
+        assert_eq!(out["type"], "Property");
+        assert_eq!(out["value"], "rouge");
+        assert_eq!(out["lang"], "fr");
+        assert!(
+            out.get("languageMap").is_none(),
+            "languageMap must not remain after conversion"
         );
     }
 }
