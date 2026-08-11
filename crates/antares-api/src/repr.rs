@@ -134,7 +134,7 @@ pub(crate) fn parse_projection(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, 
         || s.matches('{').count() != s.matches('}').count()
         || !s
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_,.:{}#/%-+@".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "_,.:{}#/%-+@|".contains(c))
     {
         return Err(bad());
     }
@@ -146,7 +146,8 @@ pub(crate) fn parse_projection(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, 
             match c {
                 '{' => depth += 1,
                 '}' => depth = depth.checked_sub(1)?,
-                ',' if depth == 0 => {
+                // 4.21 orOp = | / , — both split at the same depth
+                ',' | '|' if depth == 0 => {
                     out.push(&s[start..i]);
                     start = i + 1;
                 }
@@ -570,5 +571,41 @@ mod clause_4_15 {
             out.get("languageMap").is_none(),
             "languageMap must not remain after conversion"
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_21 {
+    use super::*;
+    use antares_jsonld::Loader;
+
+    /// 4.21: "either a comma or a pipe character can be used as alternative
+    /// representations of the or operator" — including inside a nested
+    /// LinkedEntityTerm (EXAMPLE 3).
+    #[test]
+    fn pipe_and_comma_are_both_or_operators() {
+        let ctx = Loader::new().core();
+        let comma = parse_projection("temperature,humidity", &ctx).expect("comma");
+        let pipe = parse_projection("temperature|humidity", &ctx).expect("pipe");
+        assert_eq!(comma.len(), 2);
+        assert_eq!(pipe.len(), 2);
+        assert_eq!(comma[0].raw, pipe[0].raw);
+        assert_eq!(comma[1].raw, pipe[1].raw);
+        let nested = parse_projection("observation{temperature|humidity}", &ctx).expect("nested");
+        assert_eq!(nested.len(), 1);
+        let kids = nested[0].children.as_ref().expect("children");
+        assert_eq!(kids.len(), 2, "pipe splits inside the braces too");
+    }
+
+    /// 4.21 grammar: an empty member or unbalanced braces are violations.
+    #[test]
+    fn grammar_rejections_hold_for_both_spellings() {
+        let ctx = Loader::new().core();
+        for bad in ["a||b", "a|,b", "|a", "a|", "a{b|}"] {
+            assert!(
+                parse_projection(bad, &ctx).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }
