@@ -1902,6 +1902,37 @@ pub async fn delete_temporal_attr(
             }
             Ok::<(), NgsiError>(())
         })?;
+        let local_part = match &res {
+            None => crate::federation::Part {
+                status: 404,
+                detail: format!("temporal entity {id} not found locally"),
+            },
+            Some(_) if found => crate::federation::Part {
+                status: 204,
+                detail: "deleted locally".into(),
+            },
+            Some(_) => crate::federation::Part {
+                status: 404,
+                detail: format!("attribute {attr} not found locally"),
+            },
+        };
+        if let Some(r) = temporal_attr_fed(
+            &st,
+            &tenant,
+            &headers,
+            &ctx,
+            &params,
+            &id,
+            "deleteAttrsTemporal",
+            reqwest::Method::DELETE,
+            &format!("/attrs/{attr}"),
+            None,
+            local_part,
+        )
+        .await?
+        {
+            return Ok(r);
+        }
         match res {
             None => {
                 Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
@@ -1914,6 +1945,74 @@ pub async fn delete_temporal_attr(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.6.13.4-5.6.15.4 shared forwarding: proxy registrations without the
+/// operation's support are an error of type Conflict and are never
+/// contacted; supporting registrations receive the forwarded request. None
+/// = no matching registrations (the operation stays purely local).
+#[allow(clippy::too_many_arguments)]
+async fn temporal_attr_fed(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    headers: &HeaderMap,
+    ctx: &antares_jsonld::Context,
+    params: &HashMap<String, String>,
+    id: &str,
+    op: &str,
+    method: reqwest::Method,
+    path_suffix: &str,
+    body: Option<Value>,
+    local_part: crate::federation::Part,
+) -> ApiResult<Option<Response>> {
+    let spec = crate::csource::CsrSpec {
+        ids: Some(vec![id.to_owned()]),
+        ..Default::default()
+    };
+    let mut regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers);
+    if let Some(r) = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, tenant),
+        tenant,
+        &mut regs,
+    ) {
+        return Ok(Some(r));
+    }
+    if regs.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = vec![local_part];
+    let ctx_url = crate::federation::ctx_link_url(headers, &ctx.source);
+    for reg in &regs {
+        if !reg.supports(op) {
+            if reg.is_proxy() {
+                parts.push(crate::federation::conflict_part(op));
+            }
+            continue;
+        }
+        parts.push(
+            crate::federation::forward_part(
+                st,
+                method.clone(),
+                format!(
+                    "{}/ngsi-ld/v1/temporal/entities/{id}{path_suffix}",
+                    reg.endpoint
+                ),
+                &[],
+                headers,
+                tenant,
+                reg,
+                &ctx_url,
+                body.clone(),
+            )
+            .await,
+        );
+    }
+    Ok(Some(crate::federation::combine(
+        parts,
+        no_content(tenant),
+        tenant,
+    )))
 }
 
 // ---------- PATCH/DELETE .../attrs/{attrId}/{instanceId} (5.6.14/5.6.15) ----------

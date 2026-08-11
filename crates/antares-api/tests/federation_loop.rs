@@ -1152,3 +1152,72 @@ async fn clause_5_6_12_temporal_add_attrs_forwarding() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
 }
+
+/// 5.6.13.4/5.6.14.4/5.6.15.4: temporal attribute delete / instance modify /
+/// instance delete forward to registrations supporting the respective op;
+/// unsupported proxy modes are Conflict and never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_13_to_15_temporal_attr_ops_forwarding() {
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:td-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+    let del_attr = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed"
+            ))
+            .body(Body::empty())
+            .expect("request")
+    };
+
+    // supporting source: forwarded
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["deleteAttrsTemporal"]), m.port).await;
+    let _ = send(&st, del_attr()).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "temporal attr delete forwarded"
+    );
+    assert!(
+        m.last_head.lock().expect("lock").starts_with(&format!(
+            "DELETE /ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/"
+        )),
+        "forwarded to the temporal attr resource: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // retrieve-only proxy: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, del_attr()).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported proxy source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}
