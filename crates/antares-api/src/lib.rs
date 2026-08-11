@@ -2002,3 +2002,62 @@ mod clause_5_2_10 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_11 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_interval(iv: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5211".into()));
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:5211-{}",
+                          iv.to_string().len()),
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://cs.example.org:1026",
+            "observationInterval": iv
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.11-1: startAt is a mandatory DateTime; endAt optional but a
+    /// DateTime when present (absent = open interval).
+    #[tokio::test]
+    async fn time_interval_member_rules() {
+        use serde_json::json;
+        assert_eq!(
+            post_interval(json!({"endAt": "2030-01-01T00:00:00Z"})).await,
+            StatusCode::BAD_REQUEST,
+            "startAt mandatory"
+        );
+        assert_eq!(
+            post_interval(json!({"startAt": "2020-01-01"})).await,
+            StatusCode::BAD_REQUEST,
+            "a Date is not a DateTime"
+        );
+        assert_eq!(
+            post_interval(json!({"startAt": "2020-01-01T00:00:00Z",
+                "endAt": "not a date"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_interval(json!({"startAt": "2020-01-01T00:00:00Z"})).await,
+            StatusCode::CREATED,
+            "open interval"
+        );
+        assert_eq!(
+            post_interval(json!({"startAt": "2020-01-01T00:00:00Z",
+                "endAt": "2030-01-01T00:00:00Z"})).await,
+            StatusCode::CREATED
+        );
+    }
+}
