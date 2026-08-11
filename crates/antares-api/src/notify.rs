@@ -1549,6 +1549,26 @@ async fn deliver_as(
             }
         }
     }
+    if accept == "application/geo+json" {
+        // Table 5.3.1-1: with endpoint.accept application/geo+json, data is
+        // a FeatureCollection (5.2.30); if receiverInfo carries
+        // Prefer=body=json the FeatureCollection carries no @context.
+        let prefer_body_json = ep
+            .get("receiverInfo")
+            .and_then(Value::as_array)
+            .is_some_and(|ri| {
+                ri.iter().any(|kv| {
+                    kv.get("key").and_then(Value::as_str) == Some("Prefer")
+                        && kv.get("value").and_then(Value::as_str) == Some("body=json")
+                })
+            });
+        let entities = body["data"].as_array().cloned().unwrap_or_default();
+        let mut fc = crate::entities::to_geojson_collection(entities, None, ctx);
+        if !prefer_body_json {
+            fc["@context"] = crate::negotiate::served_context(ctx);
+        }
+        body["data"] = fc;
+    }
     let receiver_info: Vec<(String, String)> = ep
         .get("receiverInfo")
         .and_then(Value::as_array)
@@ -1625,8 +1645,10 @@ async fn deliver_as(
         if accept == "application/ld+json" {
             req = req.header("Content-Type", "application/ld+json");
         } else {
+            // application/json and application/geo+json (5.3.1) both carry
+            // the @context via the Link header (6.3.5)
             req = req
-                .header("Content-Type", "application/json")
+                .header("Content-Type", accept)
                 .header("Link", link_header_value(ctx));
         }
         for (k, v) in &receiver_info {
