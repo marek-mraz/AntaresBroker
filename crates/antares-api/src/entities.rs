@@ -1167,8 +1167,10 @@ pub fn filter_entities_paged(
 }
 
 /// limit/offset/count handling (6.3.10). Returns (page, count, link headers).
-/// 4.12 Pagination: iterate a result set in pages, flag remaining elements
-/// (next link) and support backwards iteration (prev link). Shared by every
+/// 4.12/5.5.9.1 Pagination: L = client limit (Mc) or the default (Md); at
+/// most L elements per page; remaining elements are flagged with a next
+/// pointer carrying every parameter needed to fetch the page, prev on every
+/// iteration but the first, and only prev on the last. Shared by every
 /// paginated list operation (5.7.2, 5.7.4, 5.8.4, 5.10.2, 5.11.5).
 pub fn paginate(
     st: &AppState,
