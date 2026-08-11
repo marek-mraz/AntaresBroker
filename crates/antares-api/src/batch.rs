@@ -11,7 +11,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
@@ -688,6 +688,245 @@ pub async fn batch_delete(
 
 // ---------- POST /entityOperations/query (6.23) ----------
 
+/// 5.2.23 Query: flatten the JSON members into query-param form with the
+/// Table 5.2.23-1 value spaces enforced — entities is a non-empty
+/// EntitySelector[], string members must be strings, string-array members
+/// are non-empty arrays of strings, joinLevel is a positive integer,
+/// entityMap/splitEntities are booleans, geoQ/ordering are objects.
+/// `temporal` selects the "Query Temporal Evolution of Entities" reading:
+/// temporalQ/aggrParams are only allowed there, containedBy only outside it.
+pub(crate) fn query_doc_params(
+    q: &Map<String, Value>,
+    temporal: bool,
+    vp: &mut HashMap<String, String>,
+) -> Result<(), NgsiError> {
+    let bad = NgsiError::BadRequestData;
+    match q.get("entities") {
+        None => {}
+        Some(Value::Array(es)) if !es.is_empty() => {
+            let (mut types, mut ids, mut pats) = (Vec::new(), Vec::new(), Vec::new());
+            for e in es {
+                if !e.is_object() {
+                    return Err(bad(
+                        "entities entries must be EntitySelector objects (5.2.33)".into(),
+                    ));
+                }
+                for (member, out) in [
+                    ("type", &mut types),
+                    ("id", &mut ids),
+                    ("idPattern", &mut pats),
+                ] {
+                    match e.get(member) {
+                        None => {}
+                        Some(Value::String(s)) => out.push(s.clone()),
+                        Some(_) => {
+                            return Err(bad(format!(
+                                "EntitySelector {member} must be a string (5.2.33)"
+                            )))
+                        }
+                    }
+                }
+            }
+            if !types.is_empty() {
+                vp.insert("type".into(), types.join(","));
+            }
+            if !ids.is_empty() {
+                vp.insert("id".into(), ids.join(","));
+            }
+            if !pats.is_empty() {
+                vp.insert("idPattern".into(), pats.join("|"));
+            }
+        }
+        Some(_) => {
+            return Err(bad(
+                "entities must be a non-empty EntitySelector array (5.2.23)".into(),
+            ))
+        }
+    }
+    for k in [
+        "q",
+        "scopeQ",
+        "csf",
+        "lang",
+        "join",
+        "expandValues",
+        "jsonKeys",
+    ] {
+        match q.get(k) {
+            None => {}
+            Some(Value::String(s)) => {
+                vp.insert(k.into(), s.clone());
+            }
+            Some(_) => return Err(bad(format!("Query {k} must be a string (5.2.23)"))),
+        }
+    }
+    // string-array members; "Empty array (0 length) is not allowed"
+    for k in ["attrs", "pick", "omit", "containedBy", "datasetId"] {
+        match q.get(k) {
+            None => {}
+            Some(Value::Array(a)) if !a.is_empty() => {
+                if k == "containedBy" && temporal {
+                    return Err(bad(
+                        "containedBy is only applicable to Retrieve Entity and Query Entities (5.2.23)"
+                            .into(),
+                    ));
+                }
+                let mut parts = Vec::with_capacity(a.len());
+                for m in a {
+                    parts.push(m.as_str().ok_or_else(|| {
+                        bad(format!("Query {k} entries must be strings (5.2.23)"))
+                    })?);
+                }
+                vp.insert(k.into(), parts.join(","));
+            }
+            Some(_) => {
+                return Err(bad(format!(
+                    "Query {k} must be a non-empty array of strings (5.2.23)"
+                )))
+            }
+        }
+    }
+    if let Some(n) = q.get("joinLevel") {
+        let v = n
+            .as_u64()
+            .filter(|v| *v >= 1)
+            .ok_or_else(|| bad("Query joinLevel must be a positive integer (5.2.23)".into()))?;
+        vp.insert("joinLevel".into(), v.to_string());
+    }
+    for k in ["entityMap", "splitEntities"] {
+        match q.get(k) {
+            None => {}
+            Some(Value::Bool(b)) => {
+                // splitEntities semantics live with DistributedOperations;
+                // stored entities are complete here (the false reading).
+                if k == "entityMap" {
+                    vp.insert(k.into(), b.to_string());
+                }
+            }
+            Some(_) => return Err(bad(format!("Query {k} must be a boolean (5.2.23)"))),
+        }
+    }
+    if let Some(l) = q.get("entityMapLifetime") {
+        // ISO 8601 duration; EntityMap lifetimes are the broker's call
+        // ("possibly overriding the requested duration") — 5.14.x surface.
+        if !l.is_string() {
+            return Err(bad(
+                "Query entityMapLifetime must be a string (5.2.23)".into()
+            ));
+        }
+    }
+    match q.get("geoQ") {
+        None => {}
+        Some(Value::Object(g)) => {
+            for k in ["georel", "geometry", "geoproperty"] {
+                match g.get(k) {
+                    None => {}
+                    Some(Value::String(s)) => {
+                        vp.insert(k.into(), s.clone());
+                    }
+                    Some(_) => return Err(bad(format!("geoQ {k} must be a string (5.2.13)"))),
+                }
+            }
+            if let Some(c) = g.get("coordinates") {
+                vp.insert(
+                    "coordinates".into(),
+                    match c {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                );
+            }
+        }
+        Some(_) => return Err(bad("geoQ must be a GeoQuery object (5.2.13)".into())),
+    }
+    match q.get("temporalQ") {
+        None => {}
+        Some(Value::Object(tq)) if temporal => crate::temporal::temporal_q_params(tq, vp)?,
+        Some(Value::Object(_)) => {
+            return Err(bad(
+                "temporalQ is only allowed for Query Temporal Evolution of Entities (5.2.23)"
+                    .into(),
+            ))
+        }
+        Some(_) => {
+            return Err(bad(
+                "temporalQ must be a TemporalQuery object (5.2.21)".into()
+            ))
+        }
+    }
+    match q.get("aggrParams") {
+        None => {}
+        Some(Value::Object(ap)) if temporal => {
+            // 5.2.44 AggregationParams: aggrMethods + aggrPeriodDuration
+            match ap.get("aggrMethods") {
+                None => {}
+                Some(Value::String(s)) => {
+                    vp.insert("aggrMethods".into(), s.clone());
+                }
+                Some(Value::Array(a)) => {
+                    let mut parts = Vec::with_capacity(a.len());
+                    for m in a {
+                        parts.push(m.as_str().ok_or_else(|| {
+                            bad("aggrParams aggrMethods entries must be strings (5.2.44)".into())
+                        })?);
+                    }
+                    vp.insert("aggrMethods".into(), parts.join(","));
+                }
+                Some(_) => {
+                    return Err(bad(
+                        "aggrParams aggrMethods must be a comma separated list of strings (5.2.44)"
+                            .into(),
+                    ))
+                }
+            }
+            match ap.get("aggrPeriodDuration") {
+                None => {}
+                Some(Value::String(s)) => {
+                    vp.insert("aggrPeriodDuration".into(), s.clone());
+                }
+                Some(_) => {
+                    return Err(bad(
+                        "aggrParams aggrPeriodDuration must be a string (5.2.44)".into(),
+                    ))
+                }
+            }
+        }
+        Some(Value::Object(_)) => {
+            return Err(bad(
+                "aggrParams is only allowed for Query Temporal Evolution of Entities (5.2.23)"
+                    .into(),
+            ))
+        }
+        Some(_) => {
+            return Err(bad(
+                "aggrParams must be an AggregationParams object (5.2.44)".into(),
+            ))
+        }
+    }
+    match q.get("ordering") {
+        None => {}
+        Some(Value::Object(o)) => {
+            // 5.2.43 OrderingParams: orderBy maps onto the 4.23 param;
+            // collation/coordinates/geometry mappings audit at 5.2.43.
+            if let Some(Value::Array(a)) = o.get("orderBy") {
+                let mut parts = Vec::with_capacity(a.len());
+                for m in a {
+                    parts.push(m.as_str().ok_or_else(|| {
+                        bad("ordering orderBy entries must be strings (5.2.43)".into())
+                    })?);
+                }
+                vp.insert("orderBy".into(), parts.join(","));
+            }
+        }
+        Some(_) => {
+            return Err(bad(
+                "ordering must be an OrderingParams object (5.2.43)".into()
+            ))
+        }
+    }
+    Ok(())
+}
+
 pub async fn batch_query(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -723,54 +962,7 @@ async fn batch_query_inner(
     }
     // Convert Query members into virtual params reusing the GET filter path.
     let mut vp: HashMap<String, String> = HashMap::new();
-    if let Some(es) = q.get("entities").and_then(Value::as_array) {
-        let types: Vec<String> = es
-            .iter()
-            .filter_map(|e| e.get("type").and_then(Value::as_str).map(str::to_owned))
-            .collect();
-        if !types.is_empty() {
-            vp.insert("type".into(), types.join(","));
-        }
-        let ids: Vec<&str> = es
-            .iter()
-            .filter_map(|e| e.get("id").and_then(Value::as_str))
-            .collect();
-        if !ids.is_empty() {
-            vp.insert("id".into(), ids.join(","));
-        }
-        let pats: Vec<&str> = es
-            .iter()
-            .filter_map(|e| e.get("idPattern").and_then(Value::as_str))
-            .collect();
-        if !pats.is_empty() {
-            vp.insert("idPattern".into(), pats.join("|"));
-        }
-    }
-    if let Some(j) = q.get("join").and_then(Value::as_str) {
-        vp.insert("join".into(), j.to_owned());
-    }
-    if let Some(jl) = q.get("joinLevel").and_then(Value::as_f64) {
-        vp.insert("joinLevel".into(), (jl as i64).to_string());
-    }
-    for k in ["q", "scopeQ", "lang"] {
-        if let Some(v) = q.get(k).and_then(Value::as_str) {
-            vp.insert(k.into(), v.to_owned());
-        }
-    }
-    if let Some(attrs) = q.get("attrs").and_then(Value::as_array) {
-        let l: Vec<&str> = attrs.iter().filter_map(Value::as_str).collect();
-        vp.insert("attrs".into(), l.join(","));
-    }
-    if let Some(g) = q.get("geoQ").and_then(Value::as_object) {
-        for k in ["georel", "geometry", "geoproperty"] {
-            if let Some(v) = g.get(k).and_then(Value::as_str) {
-                vp.insert(k.into(), v.to_owned());
-            }
-        }
-        if let Some(c) = g.get("coordinates") {
-            vp.insert("coordinates".into(), c.to_string());
-        }
-    }
+    query_doc_params(q, false, &mut vp)?;
     if let Some(l) = params.get("local") {
         vp.insert("local".into(), l.clone());
     }
@@ -801,7 +993,9 @@ async fn batch_query_inner(
         matches,
         "/ngsi-ld/v1/entityOperations/query",
     )?;
-    let repr = parse_repr(params, &parsed.ctx)?;
+    // body members (pick/omit/attrs/lang/datasetId) shape the representation
+    // exactly like their 6.3.7 query-parameter twins
+    let repr = parse_repr(&page_params, &parsed.ctx)?;
     let join = crate::entities::parse_join(&vp)?;
     let mut payload: Vec<Value> = page
         .iter()

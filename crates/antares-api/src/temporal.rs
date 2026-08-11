@@ -1870,29 +1870,11 @@ pub async fn batch_temporal_query(
         if q.get("type").and_then(Value::as_str) != Some("Query") {
             return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
         }
+        // 5.2.23 Query (temporal reading): members flattened with their
+        // Table 5.2.23-1 value spaces enforced, incl. temporalQ (5.2.21)
+        // and aggrParams (5.2.44).
         let mut vp: HashMap<String, String> = params.clone();
-        if let Some(es) = q.get("entities").and_then(Value::as_array) {
-            let types: Vec<String> = es
-                .iter()
-                .filter_map(|e| e.get("type").and_then(Value::as_str).map(str::to_owned))
-                .collect();
-            if !types.is_empty() {
-                vp.insert("type".into(), types.join(","));
-            }
-        }
-        // 5.2.21 TemporalQuery: the Query's temporalQ members (incl.
-        // aggrMethods/aggrPeriodDuration/lastN) flattened with their value
-        // spaces enforced.
-        if let Some(tq) = q.get("temporalQ").and_then(Value::as_object) {
-            temporal_q_params(tq, &mut vp)?;
-        }
-        if let Some(v) = q.get("q").and_then(Value::as_str) {
-            vp.insert("q".into(), v.to_owned());
-        }
-        if let Some(attrs) = q.get("attrs").and_then(Value::as_array) {
-            let l: Vec<&str> = attrs.iter().filter_map(Value::as_str).collect();
-            vp.insert("attrs".into(), l.join(","));
-        }
+        crate::batch::query_doc_params(q, true, &mut vp)?;
         let _ = accept;
         query_temporal_inner_with(&st, &vp, &headers, &tenant).await
     };

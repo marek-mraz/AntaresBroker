@@ -2826,3 +2826,192 @@ mod clause_5_2_22 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_23 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        doc: &serde_json::Value,
+    ) -> (StatusCode, String) {
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method(method)
+            .uri(format!("/ngsi-ld/v1/{path}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        let resp = app.clone().oneshot(req).await.expect("resp");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn query(extra: serde_json::Value) -> serde_json::Value {
+        let mut d = json!({"type": "Query", "entities": [{"type": "Vehicle"}]});
+        for (k, v) in extra.as_object().expect("obj") {
+            d[k] = v.clone();
+        }
+        d
+    }
+
+    /// Table 5.2.23-1: member value spaces — empty arrays are not allowed
+    /// (entities/attrs/pick/omit), string members must be strings, joinLevel
+    /// is a positive integer, geoQ/ordering are objects, and
+    /// temporalQ/aggrParams are only allowed on the temporal operation.
+    #[tokio::test]
+    async fn query_body_member_value_spaces() {
+        let app = router(AppState::new("t5223a".into()));
+        let q = "entityOperations/query";
+        let (st, body) = send(&app, "POST", q, &query(json!({}))).await;
+        assert_eq!(st, StatusCode::OK, "control: {body}");
+        assert!(!body.contains("BadRequestData"), "{body}");
+        for (label, doc) in [
+            ("type not Query", json!({"type": "NotQuery"})),
+            ("entities empty", json!({"type": "Query", "entities": []})),
+            (
+                "entities not array",
+                query(json!({"entities": "Vehicle"})).clone(),
+            ),
+            ("attrs empty", query(json!({"attrs": []}))),
+            ("attrs non-string entry", query(json!({"attrs": [7]}))),
+            ("pick empty", query(json!({"pick": []}))),
+            ("omit empty", query(json!({"omit": []}))),
+            ("q not a string", query(json!({"q": 42}))),
+            ("csf not a string", query(json!({"csf": 42}))),
+            (
+                "datasetId not an array",
+                query(json!({"datasetId": "urn:x"})),
+            ),
+            (
+                "joinLevel zero",
+                query(json!({"join": "inline", "joinLevel": 0})),
+            ),
+            (
+                "joinLevel fractional",
+                query(json!({"join": "inline", "joinLevel": 2.5})),
+            ),
+            ("geoQ not an object", query(json!({"geoQ": "near"}))),
+            ("ordering not an object", query(json!({"ordering": "asc"}))),
+            (
+                "splitEntities not a boolean",
+                query(json!({"splitEntities": "yes"})),
+            ),
+            (
+                "entityMap not a boolean",
+                query(json!({"entityMap": "yes"})),
+            ),
+            (
+                "temporalQ only for the temporal operation",
+                query(json!({"temporalQ": {"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"}})),
+            ),
+            (
+                "aggrParams only for the temporal operation",
+                query(json!({"aggrParams": {"aggrMethods": "avg"}})),
+            ),
+        ] {
+            let (st, body) = send(&app, "POST", q, &doc).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{label}: {body}");
+        }
+        // entities selector: non-object entries violate 5.2.33 EntitySelector[]
+        let (st, _) = send(
+            &app,
+            "POST",
+            q,
+            &json!({"type": "Query", "entities": ["Vehicle"]}),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "entities entries must be objects"
+        );
+    }
+
+    /// Table 5.2.23-1: q/pick/omit conveyed in the body are honoured exactly
+    /// like their 6.3.7 query-parameter twins.
+    #[tokio::test]
+    async fn query_body_members_are_honoured() {
+        let app = router(AppState::new("t5223b".into()));
+        for (id, speed) in [
+            ("urn:ngsi-ld:Vehicle:A1", 80),
+            ("urn:ngsi-ld:Vehicle:A2", 120),
+        ] {
+            let (st, body) = send(
+                &app,
+                "POST",
+                "entities",
+                &json!({"id": id, "type": "Vehicle",
+                        "speed": {"type": "Property", "value": speed},
+                        "brand": {"type": "Property", "value": "Mercedes"}}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+        }
+        let q = "entityOperations/query";
+        let (st, body) = send(&app, "POST", q, &query(json!({"q": "speed>100"}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("urn:ngsi-ld:Vehicle:A2"), "{body}");
+        assert!(
+            !body.contains("urn:ngsi-ld:Vehicle:A1"),
+            "q must filter: {body}"
+        );
+        let (st, body) = send(&app, "POST", q, &query(json!({"pick": ["speed"]}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("speed"), "{body}");
+        assert!(!body.contains("brand"), "pick must project: {body}");
+        let (st, body) = send(&app, "POST", q, &query(json!({"omit": ["speed"]}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("brand"), "{body}");
+        assert!(!body.contains("speed"), "omit must remove: {body}");
+    }
+
+    /// Table 5.2.23-1 on the temporal operation (5.7.4): the entities
+    /// selector's id member selects, temporalQ is accepted, and containedBy
+    /// is "Only applicable for the Retrieve Entity and Query Entities
+    /// operations".
+    #[tokio::test]
+    async fn temporal_query_body_entity_selector() {
+        let app = router(AppState::new("t5223c".into()));
+        for id in ["urn:ngsi-ld:Vehicle:T1", "urn:ngsi-ld:Vehicle:T2"] {
+            let (st, body) = send(
+                &app,
+                "POST",
+                "temporal/entities",
+                &json!({"id": id, "type": "Vehicle",
+                        "speed": [{"type": "Property", "value": 1,
+                                   "observedAt": "2020-08-01T12:00:00Z"}]}),
+            )
+            .await;
+            assert!(st.is_success(), "{st} {body}");
+        }
+        let tq = json!({"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"});
+        let doc = json!({"type": "Query",
+            "entities": [{"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:T1"}],
+            "temporalQ": tq});
+        let (st, body) = send(&app, "POST", "temporal/entityOperations/query", &doc).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("urn:ngsi-ld:Vehicle:T1"), "{body}");
+        assert!(
+            !body.contains("urn:ngsi-ld:Vehicle:T2"),
+            "entities id selector must narrow the temporal query: {body}"
+        );
+        let doc = json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+            "temporalQ": tq, "containedBy": ["urn:ngsi-ld:Vehicle:T2"]});
+        let (st, _) = send(&app, "POST", "temporal/entityOperations/query", &doc).await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "containedBy is not applicable to 5.7.4"
+        );
+    }
+}
