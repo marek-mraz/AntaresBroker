@@ -2167,9 +2167,11 @@ pub fn order_entities(
 
 // ---------- GeoJSON output (6.3.15) ----------
 
-/// 4.5.16.2 GeoJSON Feature: id = entity id, fixed type "Feature", geometry
-/// = the selected GeoProperty's value (4.5.16.1: geometryProperty parameter,
-/// default "location"), properties = the entity's type and attributes.
+/// 4.5.16.2 GeoJSON Feature, members per Table 5.2.29-1 (5.2.29 Feature):
+/// id = entity id (URI), fixed type "Feature", geometry = the selected
+/// GeoProperty's value or null (4.5.16.1: geometryProperty parameter,
+/// default "location"), properties = the 5.2.31 FeatureProperties (entity
+/// type + attributes). The @context member is added by respond() (6.3.6).
 pub fn to_geojson_feature(
     entity: Value,
     geometry_property: Option<&String>,
