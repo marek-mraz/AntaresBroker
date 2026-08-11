@@ -1681,17 +1681,46 @@ pub async fn delete_temporal(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = || -> ApiResult<Response> {
+    let go = async {
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
-        if st.store.delete(&tenant, Kind::Temporal, &id)? {
-            Ok(no_content(&tenant))
+        let deleted = st.store.delete(&tenant, Kind::Temporal, &id)?;
+        // 5.6.16.4: forward to registrations supporting the operation;
+        // unsupported proxy modes are Conflict.
+        let ctx = st.loader.core();
+        let local_part = crate::federation::Part {
+            status: if deleted { 204 } else { 404 },
+            detail: if deleted {
+                "deleted locally".into()
+            } else {
+                format!("temporal entity {id} not found locally")
+            },
+        };
+        if let Some(r) = temporal_attr_fed(
+            &st,
+            &tenant,
+            &headers,
+            &ctx,
+            &params,
+            &id,
+            "deleteTemporal",
+            reqwest::Method::DELETE,
+            "",
+            None,
+            local_part,
+        )
+        .await?
+        {
+            return Ok(r);
+        }
+        if deleted {
+            Ok::<_, ApiError>(no_content(&tenant))
         } else {
             Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
         }
     };
-    go().unwrap_or_else(|e| e.into_response())
+    go.await.unwrap_or_else(|e| e.into_response())
 }
 
 // ---------- POST /temporal/entities/{id}/attrs/ (5.6.12) ----------

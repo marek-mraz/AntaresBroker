@@ -1282,3 +1282,68 @@ async fn clause_5_6_13_to_15_temporal_attr_ops_forwarding() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
 }
+
+/// 5.6.16.4: Delete Temporal Evolution forwards to registrations supporting
+/// deleteTemporal; unsupported proxy modes are Conflict, never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_16_temporal_delete_forwarding() {
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:tdel-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+    let del = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/ngsi-ld/v1/temporal/entities/{ENTITY}"))
+            .body(Body::empty())
+            .expect("request")
+    };
+
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["deleteTemporal"]), m.port).await;
+    let _ = send(&st, del()).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "temporal delete forwarded"
+    );
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("DELETE /ngsi-ld/v1/temporal/entities/{ENTITY} ")),
+        "forwarded to the temporal entity resource: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, del()).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported proxy source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}
