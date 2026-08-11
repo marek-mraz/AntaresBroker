@@ -96,9 +96,10 @@ fn attr_stats(
 
 // ---------- GET /types (5.7.5/5.7.6) ----------
 
-/// 4.5.10 Entity Type List Representation: id (URI), fixed type
-/// "EntityTypeList", typeList of entity type names — 4.5.11 EntityType
-/// detail objects when details=true (5.7.5/5.7.6).
+/// 4.5.10 Entity Type List Representation, members per Table 5.2.24-1
+/// (5.2.24 EntityTypeList): id a valid URI, type equal to "EntityTypeList",
+/// typeList the entity type names — 4.5.11 EntityType detail objects when
+/// details=true (5.7.5/5.7.6).
 pub async fn entity_types(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,

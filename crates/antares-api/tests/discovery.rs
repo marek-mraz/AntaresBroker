@@ -16,9 +16,9 @@ async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// 4.5.10: the entity type list is a JSON-LD object with id (a URI), the
-/// fixed type "EntityTypeList" and typeList — and nothing else beyond an
-/// optional @context.
+/// 4.5.10 + Table 5.2.24-1 (EntityTypeList): a JSON-LD object with id (a
+/// valid URI), the fixed type "EntityTypeList" and typeList — and nothing
+/// else beyond an optional @context.
 #[tokio::test(flavor = "multi_thread")]
 async fn entity_type_list_shape() {
     let st = AppState::new("test".into());
