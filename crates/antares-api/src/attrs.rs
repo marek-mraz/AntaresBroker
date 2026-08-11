@@ -867,6 +867,14 @@ pub async fn replace_attr(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_attr_name(&attr)?;
+        // 5.6.19.4: "If the target Attribute is scope, then an error of type
+        // BadRequestData shall be raised."
+        if attr == "scope" {
+            return Err(NgsiError::BadRequestData(
+                "scope cannot be the target of a replace attribute (5.6.19)".into(),
+            )
+            .into());
+        }
         check_params(&params, &["local", "type"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
@@ -922,6 +930,12 @@ pub async fn replace_attr(
             None
         } else {
             let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
+                // 5.6.19.4: the ?type selector narrows the target entity
+                if !matches_type_param(doc, &params, &parsed.ctx) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    )));
+                }
                 let target = doc.as_object_mut().expect("entity object");
                 if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                     // 5.6.19: only the instance with the matching datasetId is
