@@ -279,6 +279,32 @@ fn attr_fed_plan_iris(
     (regs, covered)
 }
 
+/// 5.6.2.4 (and sibling attribute operations): with a `?type` selector the
+/// target Entity must ALSO match the 4.17 Entity Type Selection — otherwise
+/// the entity is "not known" for this operation (ResourceNotFound).
+pub(crate) fn matches_type_param(
+    doc: &Value,
+    params: &HashMap<String, String>,
+    ctx: &antares_jsonld::Context,
+) -> bool {
+    let Some(sel) = params.get("type").filter(|s| *s != "*") else {
+        return true;
+    };
+    let types: Vec<&str> = doc
+        .get("type")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    // 4.17: `,`/`|` = OR over alternatives, `(a;b)` = AND within one
+    sel.split([',', '|']).any(|alt| {
+        alt.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(';')
+            .all(|t| types.contains(&ctx.expand_key(t.trim()).as_str()))
+    })
+}
+
 /// Attribute IRIs of an expanded fragment (entity meta members excluded).
 fn attr_iris_of(fragment: &Value) -> Vec<String> {
     fragment
@@ -352,6 +378,11 @@ fn combine_attr_parts(
     }
     let mut any_fed_ok = false;
     for (reg, part) in regs.iter().zip(fed_parts) {
+        // status 0: inclusive registration skipped for lack of operation
+        // support (5.6.2.4) — neither a success nor a failure branch.
+        if part.status == 0 {
+            continue;
+        }
         let covered: Vec<&String> = attr_iris.iter().filter(|a| reg.covers_attr(a)).collect();
         if part.ok() {
             any_fed_ok = true;
@@ -371,6 +402,30 @@ fn combine_attr_parts(
         if let LocalOutcome::NotFound(d) = local {
             return ApiError::from(NgsiError::ResourceNotFound(d)).into_response();
         }
+    }
+    // 5.6.2.4: unsupported operation on a proxy registration is "an error of
+    // type Conflict if the complete update failed" — nothing updated
+    // anywhere and at least one registration refused the operation.
+    if updated.is_empty()
+        && !matches!(local, LocalOutcome::Ok)
+        && !any_fed_ok
+        && fed_parts
+            .iter()
+            .any(|p| p.detail.contains("does not accept"))
+    {
+        let mut resp = (
+            axum::http::StatusCode::CONFLICT,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            axum::Json(serde_json::json!({
+                "type": "https://uri.etsi.org/ngsi-ld/errors/Conflict",
+                "title": "Conflict",
+                "detail": "registration does not accept the operation",
+                "status": 409,
+            })),
+        )
+            .into_response();
+        crate::negotiate::echo_tenant(tenant, &mut resp);
+        return resp;
     }
     if not_updated.is_empty() {
         return no_content(tenant);
@@ -505,6 +560,13 @@ async fn update_attrs_inner(
         None
     } else {
         let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+            // 5.6.2.4: the ?type selector narrows the target — a mismatch
+            // means the entity is not known for this operation.
+            if !matches_type_param(doc, params, &parsed.ctx) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "entity {id} does not match the type selector"
+                )));
+            }
             let target = doc.as_object_mut().expect("entity object");
             let frag = fragment.as_object().expect("fragment object");
             // 5.6.2: appended/updated types extend the type set

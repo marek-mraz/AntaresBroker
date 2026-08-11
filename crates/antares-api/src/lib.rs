@@ -558,6 +558,56 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "UP");
     }
 
+    /// 5.6.2.4: "no existing Entity whose id (URI), and where specified
+    /// type, is equivalent … an error of type ResourceNotFound shall be
+    /// raised" — the optional ?type selector (4.17) narrows the target.
+    #[tokio::test]
+    async fn clause_5_6_2_type_selector_gates_the_update() {
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:sel", "type": "Building",
+            "name": {"type": "Property", "value": "x"}});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let patch = |ty: &str| {
+            let frag = serde_json::json!({"name": {"type": "Property", "value": "y"}}).to_string();
+            Request::patch(format!(
+                "/ngsi-ld/v1/entities/urn:ngsi-ld:B:sel/attrs?type={ty}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", frag.len())
+            .body(Body::from(frag))
+            .expect("req")
+        };
+        // wrong type: the target is "not known" under this selector → 404
+        let resp = app.clone().oneshot(patch("Vehicle")).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // matching type: update proceeds
+        let resp = app.clone().oneshot(patch("Building")).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // and the wrong-type attempt must NOT have written anything
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:B:sel")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        let doc = body_json(resp).await;
+        assert_eq!(doc["name"]["value"], "y");
+    }
+
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
     /// any subsequent instance of the same id is reported as an error
     /// (already exists). 5.5.11.4: in Batch Delete the first occurrence

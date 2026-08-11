@@ -617,3 +617,84 @@ async fn clause_5_6_1_create_unsupported_by_registration() {
 }
 
 static REDIRECT_HITS: std::sync::OnceLock<Arc<AtomicUsize>> = std::sync::OnceLock::new();
+
+/// 5.6.2.4: an exclusive/redirect registration matching the update but NOT
+/// supporting it yields Conflict (never contacted); an inclusive one without
+/// support is not forwarded and the local update proceeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_2_update_unsupported_by_registration() {
+    let patch_attrs = || {
+        let body = serde_json::json!({"speed": {"type": "Property", "value": 9}}).to_string();
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/ngsi-ld/v1/entities/{ENTITY}/attrs"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_retrieve_only = |st: AppState, mode: &'static str, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:upd-{mode}"),
+            "type": "ContextSourceRegistration",
+            "mode": mode,
+            "operations": ["retrieveOps"],
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // redirect without update support → Conflict, source untouched
+    let (port, hits) = mock_source();
+    let st = register_retrieve_only(state(), "redirect", port).await;
+    let res = send(&st, patch_attrs()).await;
+    let status = res.status();
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "complete update failed: {body}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "unsupported op never forwarded"
+    );
+
+    // inclusive without update support → local update proceeds, no forward
+    let (port, hits) = mock_source();
+    let st = register_retrieve_only(state(), "inclusive", port).await;
+    let body = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+        "speed": {"type": "Property", "value": 1}})
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities?local=true")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+    let res = send(&st, patch_attrs()).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "local update proceeds"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "no forward without support");
+}

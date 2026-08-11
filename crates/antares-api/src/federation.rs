@@ -1361,8 +1361,22 @@ pub async fn fed_attr_parts(
     let ctx_url = ctx_link_url(headers, ctx_source);
     let mut parts = Vec::new();
     for reg in regs {
-        if reg.mode == "exclusive" && !reg.supports(op) {
-            parts.push(conflict_part(op));
+        // 5.6.2.4 (and the sibling attribute operations): a proxy-mode
+        // registration not supporting the operation is an error of type
+        // Conflict and is never contacted; an inclusive one is simply not
+        // forwarded.
+        if !reg.supports(op) {
+            if reg.is_proxy() {
+                parts.push(conflict_part(op));
+            } else {
+                // status 0 = "not forwarded" sentinel: keeps the parts list
+                // 1:1 with regs (combine_attr_parts zips them) without
+                // counting as success or failure.
+                parts.push(Part {
+                    status: 0,
+                    detail: format!("not forwarded: {op} not supported"),
+                });
+            }
             continue;
         }
         parts.push(
