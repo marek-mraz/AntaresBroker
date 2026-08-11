@@ -540,11 +540,7 @@ async fn batch_write(
             },
             detail: "local batch".into(),
         }];
-        // 5.6.7.4 (and siblings): per CSR — batch op supported → one batch
-        // forward; else (create only) the single Create Entity op supported
-        // → one forward PER ENTITY; else proxy modes get a Conflict error
-        // per entity and inclusive ones are not forwarded at all.
-        // 5.6.7.4/5.6.8.4 support ladder per CSR: batch op supported -> one
+        // 5.6.7.4/5.6.8.4/5.6.9.4 support ladder per CSR: batch op supported -> one
         // batch forward; else per-entity single-op forwards (upsert: Create
         // Entity with AlreadyExists falling back to Replace Entity in
         // replace mode or Update Attributes in update mode, or those two
@@ -666,6 +662,34 @@ async fn batch_write(
                         parts.push(
                             fwd_one(
                                 reqwest::Method::PATCH,
+                                format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                BatchMode::Update if !no_overwrite && reg.supports("updateEntity") => {
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::PATCH,
+                                format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                BatchMode::Update if no_overwrite && reg.supports("appendAttrs") => {
+                    // 5.6.9.4: append with Attribute overwrite disabled —
+                    // options=noOverwrite already rides in `query`.
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::POST,
                                 format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
                                 ent,
                             )

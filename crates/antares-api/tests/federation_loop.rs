@@ -859,3 +859,72 @@ async fn clause_5_6_8_upsert_forwarding_fallbacks() {
         m.last_head.lock().expect("lock")
     );
 }
+
+/// 5.6.9.4 support ladder: no updateBatch → per-entity Update Attributes
+/// (overwrite permitted) or per-entity Append Attributes with overwrite
+/// disabled (options=noOverwrite).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_9_batch_update_forwarding_fallbacks() {
+    let batch_update = |q: &str| {
+        let body = serde_json::json!([
+            {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 5}}
+        ])
+        .to_string();
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ngsi-ld/v1/entityOperations/update{q}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:bu-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // updateEntity-only source: per-entity Update Attributes forward
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["updateEntity"]), m.port).await;
+    let _ = send(&st, batch_update("")).await;
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1);
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("PATCH /ngsi-ld/v1/entities/{ENTITY}/attrs")),
+        "overwrite-permitted uses Update Attributes: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // appendAttrs-only source with noOverwrite: per-entity append forward
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["appendAttrs"]), m.port).await;
+    let _ = send(&st, batch_update("?options=noOverwrite")).await;
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1);
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.starts_with(&format!("POST /ngsi-ld/v1/entities/{ENTITY}/attrs")),
+        "noOverwrite uses Append Attributes: {head}"
+    );
+    assert!(
+        head.contains("options=noOverwrite"),
+        "append forwarded with overwrite disabled: {head}"
+    );
+}
