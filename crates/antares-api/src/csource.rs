@@ -162,9 +162,11 @@ pub fn normalize_registration(
                                 ni.insert("entities".into(), Value::Array(nes));
                             }
                             "propertyNames" | "relationshipNames" => {
-                                let names = iv
-                                    .as_array()
-                                    .ok_or_else(|| bad(format!("{ik} must be an array")))?;
+                                // 5.2.10: "Empty array is not allowed"
+                                let names =
+                                    iv.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+                                        bad(format!("{ik} must be a non-empty array (5.2.10)"))
+                                    })?;
                                 let mut nn = Vec::new();
                                 for n in names {
                                     let s = n.as_str().ok_or_else(|| {

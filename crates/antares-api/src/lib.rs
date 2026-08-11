@@ -1948,3 +1948,57 @@ mod clause_5_2_9 {
         }
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_10 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_info(info: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5210".into()));
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:5210-{}",
+                          info.to_string().len()),
+            "type": "ContextSourceRegistration",
+            "information": [info],
+            "endpoint": "http://cs.example.org:1026"
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.10-1: empty arrays are not allowed for entities,
+    /// propertyNames or relationshipNames; non-empty name lists are fine.
+    #[tokio::test]
+    async fn registration_info_empty_arrays_are_rejected() {
+        use serde_json::json;
+        assert_eq!(
+            post_info(json!({"entities": []})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_info(json!({"propertyNames": []})).await,
+            StatusCode::BAD_REQUEST,
+            "empty propertyNames"
+        );
+        assert_eq!(
+            post_info(json!({"relationshipNames": []})).await,
+            StatusCode::BAD_REQUEST,
+            "empty relationshipNames"
+        );
+        assert_eq!(
+            post_info(json!({"entities": [{"type": "Building"}],
+                "propertyNames": ["speed"],
+                "relationshipNames": ["isParked"]}))
+            .await,
+            StatusCode::CREATED
+        );
+    }
+}
