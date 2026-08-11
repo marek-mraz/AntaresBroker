@@ -116,18 +116,28 @@ impl GeoQuery {
         let base = parts.next().unwrap_or("").trim();
         let mut max = None;
         let mut min = None;
+        // 4.10 PositiveNumber: RFC 8259 Number "excluding the 'minus' symbol
+        // and excluding the number 0".
+        let positive = |v: &str, name: &str| -> Result<f64, NgsiError> {
+            let n = v
+                .parse::<f64>()
+                .map_err(|_| bad(format!("invalid {name} {v:?}")))?;
+            if !(n > 0.0) {
+                return Err(bad(format!("{name} must be a positive non-zero number")));
+            }
+            Ok(n)
+        };
         for p in parts {
             let p = p.trim();
+            // 4.10 nearRel = nearOp andOp distance equal PositiveNumber —
+            // exactly one distance modifier is in the grammar.
+            if max.is_some() || min.is_some() {
+                return Err(bad("near takes a single distance modifier".into()));
+            }
             if let Some(v) = p.strip_prefix("maxDistance==") {
-                max = Some(
-                    v.parse::<f64>()
-                        .map_err(|_| bad(format!("invalid maxDistance {v:?}")))?,
-                );
+                max = Some(positive(v, "maxDistance")?);
             } else if let Some(v) = p.strip_prefix("minDistance==") {
-                min = Some(
-                    v.parse::<f64>()
-                        .map_err(|_| bad(format!("invalid minDistance {v:?}")))?,
-                );
+                min = Some(positive(v, "minDistance")?);
             } else {
                 return Err(bad(format!("invalid georel modifier {p:?}")));
             }
@@ -257,7 +267,10 @@ impl GeoQuery {
                     },
                 };
                 let d = haversine_m(qp, cp);
-                max.is_none_or(|m| d <= m) && min.is_none_or(|m| d >= m)
+                // 4.10: maxDistance = within the (closed) buffer => d <= max;
+                // minDistance = DISJOINT with the buffer — boundary contact
+                // is not disjoint => strictly d > min.
+                max.is_none_or(|m| d <= m) && min.is_none_or(|m| d > m)
             }
             Georel::Equals => {
                 // literal-identical geometry is equal even when the ring is
@@ -387,5 +400,64 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("georel".to_owned(), "nearish".to_owned());
         assert!(GeoQuery::from_params(&params).is_err());
+    }
+}
+
+#[cfg(test)]
+mod clause_4_10_grammar {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    fn params(rel: &str) -> HashMap<String, String> {
+        let mut p = HashMap::new();
+        p.insert("georel".to_owned(), rel.to_owned());
+        p.insert("geometry".to_owned(), "Point".to_owned());
+        p.insert("coordinates".to_owned(), "[8,40]".to_owned());
+        p
+    }
+
+    /// 4.10 PositiveNumber: "excluding the 'minus' symbol and excluding the
+    /// number 0" — a zero or negative distance is a grammar violation, 400.
+    #[test]
+    fn distance_must_be_a_positive_nonzero_number() {
+        for rel in [
+            "near;maxDistance==0",
+            "near;maxDistance==-100",
+            "near;minDistance==0",
+            "near;minDistance==-0.5",
+        ] {
+            assert!(
+                GeoQuery::from_params(&params(rel)).is_err(),
+                "{rel} must be rejected"
+            );
+        }
+        // a positive number stays valid
+        assert!(GeoQuery::from_params(&params("near;maxDistance==0.5")).is_ok());
+    }
+
+    /// 4.10 nearRel = nearOp andOp distance equal PositiveNumber — exactly
+    /// ONE distance modifier; a second (or duplicate) one is not in the
+    /// grammar.
+    #[test]
+    fn near_takes_exactly_one_distance_modifier() {
+        assert!(GeoQuery::from_params(&params("near;maxDistance==5;minDistance==1")).is_err());
+        assert!(GeoQuery::from_params(&params("near;maxDistance==5;maxDistance==7")).is_err());
+    }
+
+    /// 4.10: "Entities which do not convey the target GeoProperty of the
+    /// query shall be considered as non-matching."
+    #[test]
+    fn missing_target_geoproperty_is_a_nonmatch() {
+        let ctx = Loader::new().core();
+        let g = GeoQuery::from_params(&params("near;maxDistance==2000"))
+            .unwrap()
+            .unwrap();
+        let doc = json!({
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature": [
+                {"type": "Property", "value": 20}
+            ]
+        });
+        assert!(!g.matches(&doc, &ctx), "no location => non-matching");
     }
 }
