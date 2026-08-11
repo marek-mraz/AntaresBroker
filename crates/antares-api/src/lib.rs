@@ -2394,3 +2394,47 @@ mod clause_5_2_15 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_16 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Tables 5.2.16-1/5.2.17-1: a partial batch failure answers 207 with
+    /// success = URI array and errors = BatchEntityError[] (entityId +
+    /// RFC 7807 ProblemDetails).
+    #[tokio::test]
+    async fn batch_result_and_entity_error_shapes() {
+        let app = router(AppState::new("t5216".into()));
+        let body = serde_json::json!([
+            {"id": "urn:ngsi-ld:V:ok", "type": "Vehicle"},
+            {"id": "not a uri", "type": "Vehicle"}
+        ])
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/entityOperations/create")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(doc["success"], serde_json::json!(["urn:ngsi-ld:V:ok"]));
+        let errs = doc["errors"].as_array().expect("errors array");
+        assert_eq!(errs.len(), 1);
+        let e = &errs[0];
+        assert!(e.get("entityId").is_some());
+        let pd = &e["error"];
+        for k in ["type", "title", "status"] {
+            assert!(pd.get(k).is_some(), "ProblemDetails member {k} missing: {pd}");
+        }
+        assert!(
+            pd["type"].as_str().unwrap_or("").contains("errors/"),
+            "error.type is the NGSI-LD error URI"
+        );
+    }
+}
