@@ -713,6 +713,14 @@ async fn partial_update_inner(
         .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     let attr_iri = parsed.ctx.expand_key(attr);
+    // 5.6.4.4: "If the target Attribute is scope, then an error of type
+    // BadRequestData shall be raised."
+    if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
+        return Err(NgsiError::BadRequestData(
+            "scope cannot be the target of a partial attribute update (5.6.4)".into(),
+        )
+        .into());
+    }
     let (mut regs, local_covered) = attr_fed_plan_iris(
         st,
         &tenant,
@@ -741,6 +749,12 @@ async fn partial_update_inner(
         None
     } else {
         let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
+            // 5.6.4.4: the ?type selector narrows the target entity
+            if !matches_type_param(doc, params, &parsed.ctx) {
+                return Err(NgsiError::ResourceNotFound(format!(
+                    "entity {id} does not match the type selector"
+                )));
+            }
             let target = doc.as_object_mut().expect("entity object");
             if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 let pos = existing.iter().position(|ci| {

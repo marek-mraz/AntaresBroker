@@ -654,6 +654,70 @@ mod tests {
         assert_eq!(doc["name"]["value"], "z");
     }
 
+    /// 5.6.4.4: "If the target Attribute is scope, then an error of type
+    /// BadRequestData shall be raised"; the ?type selector narrows the
+    /// target entity (404 on mismatch).
+    #[tokio::test]
+    async fn clause_5_6_4_scope_target_and_type_selector() {
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:pu", "type": "Building",
+            "scope": "/Madrid", "name": {"type": "Property", "value": "x"}});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let patch = |attr: &str, q: &str| {
+            let frag = serde_json::json!({"value": "y"}).to_string();
+            Request::patch(format!(
+                "/ngsi-ld/v1/entities/urn:ngsi-ld:B:pu/attrs/{attr}{q}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", frag.len())
+            .body(Body::from(frag))
+            .expect("req")
+        };
+        // the scope pseudo-attribute is not partially updatable
+        let resp = app.clone().oneshot(patch("scope", "")).await.expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "scope target is 400"
+        );
+        // type selector gates the partial update
+        let resp = app
+            .clone()
+            .oneshot(patch("name", "?type=Vehicle"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(patch("name", "?type=Building"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:B:pu")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        let doc = body_json(resp).await;
+        assert_eq!(doc["name"]["value"], "y");
+        assert_eq!(doc["scope"], "/Madrid", "scope untouched");
+    }
+
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
     /// any subsequent instance of the same id is reported as an error
     /// (already exists). 5.5.11.4: in Batch Delete the first occurrence
