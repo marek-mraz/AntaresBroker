@@ -2121,3 +2121,64 @@ mod clause_5_2_12 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_13 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_geoq(geoq: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t5213".into()));
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:Subscription:5213-{}", geoq.to_string().len()),
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "geoQ": geoq,
+            "notification": {"endpoint": {"uri": "http://client.example.org/cb"}}
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/subscriptions")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.13-1: coordinates as JSON Array OR string form, geometry
+    /// from the legal set (no GeometryCollection), georel per 4.10,
+    /// geoproperty optional.
+    #[tokio::test]
+    async fn subscription_geoquery_member_rules() {
+        use serde_json::json;
+        assert_eq!(
+            post_geoq(json!({"georel": "near;maxDistance==2000",
+                "geometry": "Point", "coordinates": [8, 40]})).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_geoq(json!({"georel": "within", "geometry": "Polygon",
+                "coordinates": "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]",
+                "geoproperty": "observationSpace"})).await,
+            StatusCode::CREATED,
+            "string-encoded coordinates (4.7.1) are legal"
+        );
+        assert_eq!(
+            post_geoq(json!({"georel": "within",
+                "geometry": "GeometryCollection", "coordinates": []})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_geoq(json!({"georel": "touches", "geometry": "Point",
+                "coordinates": [8, 40]})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_geoq(json!({"geometry": "Point", "coordinates": [8, 40]})).await,
+            StatusCode::BAD_REQUEST,
+            "georel is mandatory"
+        );
+    }
+}
