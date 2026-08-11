@@ -380,13 +380,24 @@ pub fn normalize_subscription(
                 }
                 out.insert("isActive".into(), v.clone());
             }
+            "temporalQ" => {
+                // 5.2.21 TemporalQuery: timerel and timeAt are cardinality 1
+                // and every member must sit in its Table 5.2.21-1 value
+                // space (used by CSR subscriptions, 5.11.7).
+                let tq = v.as_object().ok_or_else(|| {
+                    bad("temporalQ must be a TemporalQuery object (5.2.21)".into())
+                })?;
+                let mut p = std::collections::HashMap::new();
+                crate::temporal::temporal_q_params(tq, &mut p)?;
+                crate::temporal::TemporalQ::from_params(&p, true)?;
+                out.insert(k.clone(), v.clone());
+            }
             "scopeQ"
             | "lang"
             | "subscriptionName"
             | "name"
             | "description"
             | "notificationTrigger"
-            | "temporalQ"
             | "csf"
             | "jsonldContext"
             | "ngsildConformance"

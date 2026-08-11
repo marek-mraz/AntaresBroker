@@ -2502,3 +2502,204 @@ mod clause_5_2_18 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_21 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn temporal_query(qs: &str) -> StatusCode {
+        let app = router(AppState::new("t5221".into()));
+        let req = Request::get(format!(
+            "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2020-01-01T00:00:00Z{qs}"
+        ))
+        .body(Body::empty())
+        .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.21-1: lastN is a POSITIVE integer; aggrMethods entries are
+    /// limited to the 4.5.19 methods; endTimeAt is mandatory for between.
+    #[tokio::test]
+    async fn temporal_query_member_value_spaces() {
+        assert_eq!(
+            temporal_query("&lastN=0").await,
+            StatusCode::BAD_REQUEST,
+            "lastN=0"
+        );
+        assert_eq!(temporal_query("&lastN=-3").await, StatusCode::BAD_REQUEST);
+        assert_eq!(temporal_query("&lastN=5").await, StatusCode::OK);
+        assert_eq!(
+            temporal_query("&aggrMethods=bogus").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            temporal_query("&options=aggregatedValues").await,
+            StatusCode::BAD_REQUEST,
+            "aggregatedValues without aggrMethods"
+        );
+        assert_eq!(
+            temporal_query("&options=aggregatedValues&aggrMethods=avg,max").await,
+            StatusCode::OK
+        );
+        let app = router(AppState::new("t5221b".into()));
+        let req = Request::get(
+            "/ngsi-ld/v1/temporal/entities?type=V&timerel=between&timeAt=2020-01-01T00:00:00Z",
+        )
+        .body(Body::empty())
+        .expect("req");
+        assert_eq!(
+            app.oneshot(req).await.expect("resp").status(),
+            StatusCode::BAD_REQUEST,
+            "between without endTimeAt"
+        );
+    }
+
+    /// POST Query (5.2.23) carrying a temporalQ object (5.2.21 JSON form).
+    async fn post_tq(tq: serde_json::Value, qs: &str) -> (StatusCode, String) {
+        let app = router(AppState::new("t5221j".into()));
+        let body = json!({
+            "type": "Query",
+            "entities": [{"type": "Vehicle"}],
+            "temporalQ": tq
+        })
+        .to_string();
+        let req = Request::post(format!("/ngsi-ld/v1/temporal/entityOperations/query{qs}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Table 5.2.21-1 (JSON form): lastN is a positive INTEGER — zero,
+    /// negative, fractional and string values are all outside the value
+    /// space; timerel is limited to before/after/between; endTimeAt is
+    /// mandatory for between; timeproperty is limited to the four 4.8 names.
+    #[tokio::test]
+    async fn temporal_query_json_member_value_spaces() {
+        let ok = json!({"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"});
+        let with = |k: &str, v: serde_json::Value| {
+            let mut t = ok.clone();
+            t[k] = v;
+            t
+        };
+        let (st, body) = post_tq(with("lastN", json!(5)), "").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(!body.contains("BadRequestData"), "{body}");
+        for bad in [json!(0), json!(-3), json!(2.5), json!("5")] {
+            let (st, body) = post_tq(with("lastN", bad.clone()), "").await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "lastN={bad}");
+            assert!(body.contains("lastN"), "{body}");
+        }
+        let (st, _) = post_tq(with("timerel", json!("bogus")), "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = post_tq(with("timerel", json!("between")), "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "between without endTimeAt");
+        let (st, _) = post_tq(with("timeproperty", json!("expiresAt")), "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "timeproperty outside 4.8 set");
+        let (st, _) = post_tq(with("timeAt", json!(20200101)), "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "timeAt must be a string");
+    }
+
+    /// Table 5.2.21-1: aggrMethods (comma separated list of string — both
+    /// the string and string-array spellings) and aggrPeriodDuration are
+    /// carried by the JSON TemporalQuery and honoured when
+    /// aggregatedValues is requested via format/options.
+    #[tokio::test]
+    async fn temporal_query_json_aggregation_members() {
+        let base = json!({"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"});
+        let with = |k: &str, v: serde_json::Value| {
+            let mut t = base.clone();
+            t[k] = v;
+            t
+        };
+        let (st, body) = post_tq(
+            with("aggrMethods", json!(["avg", "max"])),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "array aggrMethods honoured: {body}");
+        let (st, body) = post_tq(
+            with("aggrMethods", json!("avg,max")),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "string aggrMethods honoured: {body}");
+        let (st, body) = post_tq(
+            with("aggrMethods", json!(["bogus"])),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body.contains("aggrMethods"), "{body}");
+        let (st, _) = post_tq(with("aggrMethods", json!(42)), "?format=aggregatedValues").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "aggrMethods wrong JSON type");
+        let mut t = base.clone();
+        t["aggrMethods"] = json!(["avg"]);
+        t["aggrPeriodDuration"] = json!("bogus");
+        let (st, body) = post_tq(t, "?format=aggregatedValues").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body.contains("aggrPeriodDuration"), "{body}");
+    }
+
+    /// 5.2.21 used from Subscription.temporalQ (5.2.12, CSR subscriptions):
+    /// timerel and timeAt are cardinality 1 — a temporalQ violating the
+    /// data type is rejected at subscription creation.
+    #[tokio::test]
+    async fn subscription_temporal_q_validated() {
+        async fn post_sub(tq: serde_json::Value) -> StatusCode {
+            let app = router(AppState::new("t5221s".into()));
+            let body = json!({
+                "id": format!("urn:ngsi-ld:Subscription:5221-{}", tq.to_string().len()),
+                "type": "Subscription",
+                "entities": [{"type": "Building"}],
+                "notification": {"endpoint": {"uri": "http://client.example.org/cb"}},
+                "temporalQ": tq
+            })
+            .to_string();
+            let req = Request::post("/ngsi-ld/v1/subscriptions")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("req");
+            app.oneshot(req).await.expect("resp").status()
+        }
+        assert_eq!(
+            post_sub(json!({
+                "timerel": "after",
+                "timeAt": "2020-06-01T22:07:00Z",
+                "timeproperty": "createdAt"
+            }))
+            .await,
+            StatusCode::CREATED,
+            "official fixture shape stays creatable"
+        );
+        assert_eq!(
+            post_sub(json!({"timerel": "after"})).await,
+            StatusCode::BAD_REQUEST,
+            "timeAt is cardinality 1"
+        );
+        assert_eq!(
+            post_sub(json!({"timeAt": "2020-06-01T22:07:00Z"})).await,
+            StatusCode::BAD_REQUEST,
+            "timerel is cardinality 1"
+        );
+        assert_eq!(
+            post_sub(json!({"timerel": "bogus", "timeAt": "2020-06-01T22:07:00Z"})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_sub(json!("after")).await,
+            StatusCode::BAD_REQUEST,
+            "temporalQ must be an object"
+        );
+    }
+}

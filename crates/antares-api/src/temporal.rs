@@ -241,6 +241,62 @@ impl TemporalQ {
     }
 }
 
+/// 5.2.21 TemporalQuery (JSON form): flatten the object's members into
+/// query-param form, enforcing the Table 5.2.21-1 value spaces — the string
+/// members must be JSON strings, aggrMethods a comma separated list of
+/// string (string or string-array spelling), lastN a positive integer.
+/// Vocabulary/range rules are then enforced by the shared param validators
+/// (TemporalQ::from_params, parse_trepr).
+pub(crate) fn temporal_q_params(
+    tq: &Map<String, Value>,
+    out: &mut HashMap<String, String>,
+) -> Result<(), NgsiError> {
+    let bad = NgsiError::BadRequestData;
+    for k in [
+        "timerel",
+        "timeAt",
+        "endTimeAt",
+        "timeproperty",
+        "aggrPeriodDuration",
+    ] {
+        match tq.get(k) {
+            None => {}
+            Some(Value::String(s)) => {
+                out.insert(k.into(), s.clone());
+            }
+            Some(_) => return Err(bad(format!("temporalQ {k} must be a string (5.2.21)"))),
+        }
+    }
+    if let Some(n) = tq.get("lastN") {
+        let v = n
+            .as_u64()
+            .filter(|v| *v >= 1)
+            .ok_or_else(|| bad("temporalQ lastN must be a positive integer (5.2.21)".into()))?;
+        out.insert("lastN".into(), v.to_string());
+    }
+    match tq.get("aggrMethods") {
+        None => {}
+        Some(Value::String(s)) => {
+            out.insert("aggrMethods".into(), s.clone());
+        }
+        Some(Value::Array(a)) => {
+            let mut parts = Vec::with_capacity(a.len());
+            for m in a {
+                parts.push(m.as_str().ok_or_else(|| {
+                    bad("temporalQ aggrMethods entries must be strings (5.2.21)".into())
+                })?);
+            }
+            out.insert("aggrMethods".into(), parts.join(","));
+        }
+        Some(_) => {
+            return Err(bad(
+                "temporalQ aggrMethods must be a comma separated list of string (5.2.21)".into(),
+            ))
+        }
+    }
+    Ok(())
+}
+
 /// Canonical lexicographic comparison key for a 4.6.3 DateTime: the trailing
 /// `Z` dropped and the optional seconds fraction (`.` or the request-side `,`
 /// separator) zero-padded to six digits, so string order equals temporal
@@ -767,9 +823,13 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
         .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect());
     r.last_n = match params.get("lastN") {
         Some(n) => {
+            // 5.2.21: lastN is a POSITIVE integer — 0 is outside the value
+            // space.
             let v = n
                 .parse::<usize>()
-                .map_err(|_| NgsiError::BadRequestData(format!("invalid lastN {n:?}")))?;
+                .ok()
+                .filter(|v| *v >= 1)
+                .ok_or_else(|| NgsiError::BadRequestData(format!("invalid lastN {n:?}")))?;
             // Above i64::MAX it wraps negative when bound as the RANK cap
             // (`rk <= $n::bigint`), silently returning an empty set.
             if v > i64::MAX as usize {
@@ -1820,15 +1880,11 @@ pub async fn batch_temporal_query(
                 vp.insert("type".into(), types.join(","));
             }
         }
+        // 5.2.21 TemporalQuery: the Query's temporalQ members (incl.
+        // aggrMethods/aggrPeriodDuration/lastN) flattened with their value
+        // spaces enforced.
         if let Some(tq) = q.get("temporalQ").and_then(Value::as_object) {
-            for k in ["timerel", "timeAt", "endTimeAt", "timeproperty"] {
-                if let Some(v) = tq.get(k).and_then(Value::as_str) {
-                    vp.insert(k.into(), v.to_owned());
-                }
-            }
-            if let Some(n) = tq.get("lastN").and_then(Value::as_f64) {
-                vp.insert("lastN".into(), (n as i64).to_string());
-            }
+            temporal_q_params(tq, &mut vp)?;
         }
         if let Some(v) = q.get("q").and_then(Value::as_str) {
             vp.insert("q".into(), v.to_owned());
