@@ -2225,8 +2225,10 @@ fn geo_value_of(attr: &Value) -> Value {
     }
 }
 
-/// 4.5.16.3 GeoJSON FeatureCollection: fixed type "FeatureCollection" +
-/// features array of 4.5.16.2 Feature objects (no per-Feature @context).
+/// 4.5.16.3 GeoJSON FeatureCollection, members per Table 5.2.30-1 (5.2.30
+/// FeatureCollection): fixed type "FeatureCollection" + features array of
+/// 4.5.16.2 Feature objects — empty array when no matches, no per-Feature
+/// @context; the top-level @context is added by respond() (6.3.6).
 pub fn to_geojson_collection(
     entities: Vec<Value>,
     geometry_property: Option<&String>,
@@ -2416,6 +2418,11 @@ mod tests {
             fc["features"][0].get("@context").is_none(),
             "no per-Feature @context"
         );
+        // Table 5.2.30-1: "In the case that no matches are found, features
+        // will be an empty array"
+        let empty = to_geojson_collection(vec![], None, &ctx);
+        assert_eq!(empty["type"], "FeatureCollection");
+        assert_eq!(empty["features"], json!([]));
     }
 }
 
