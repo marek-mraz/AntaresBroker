@@ -2374,6 +2374,55 @@ mod tests {
     use super::merge_into;
     use serde_json::json;
 
+    /// 5.5.12 EXAMPLE 1 + the datasetId/type bullets: a merge updates the
+    /// named sub-attributes and leaves the others untouched; a fragment
+    /// instance with an unknown datasetId is ADDED (not replacing the
+    /// default); entity types are unioned.
+    #[test]
+    fn clause_5_5_12_merge_algorithm() {
+        let mut doc = json!({"id": "urn:x", "type": ["https://uri.etsi.org/ngsi-ld/default-context/T"],
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature": [{
+                "type": "Property", "value": 25, "unitCode": "CEL",
+                "observedAt": "2022-03-14T01:59:26.535Z"}]});
+        merge_into(
+            &mut doc,
+            &json!({
+            "type": ["https://uri.etsi.org/ngsi-ld/default-context/T",
+                     "https://uri.etsi.org/ngsi-ld/default-context/U"],
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature": [
+                {"type": "Property", "value": 100,
+                 "observedAt": "2022-03-14T13:00:00.000Z"},
+                {"type": "Property", "value": 7,
+                 "datasetId": "urn:ngsi-ld:Dataset:extra"}
+            ]}),
+            "2026-08-11T00:00:00Z",
+        );
+        // EXAMPLE 1: value/observedAt updated, unitCode untouched
+        let t = &doc["https://uri.etsi.org/ngsi-ld/default-context/temperature"];
+        let default = t
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i.get("datasetId").is_none())
+            .expect("default instance");
+        assert_eq!(default["value"], 100);
+        assert_eq!(default["observedAt"], "2022-03-14T13:00:00.000Z");
+        assert_eq!(
+            default["unitCode"], "CEL",
+            "unmentioned sub-attribute survives"
+        );
+        // unknown datasetId is added as a NEW instance
+        assert_eq!(t.as_array().unwrap().len(), 2);
+        // entity types are unioned, no duplicates
+        assert_eq!(
+            doc["type"],
+            json!([
+                "https://uri.etsi.org/ngsi-ld/default-context/T",
+                "https://uri.etsi.org/ngsi-ld/default-context/U"
+            ])
+        );
+    }
+
     /// 5.5.12: merge "merges the provided information with the existing
     /// information up to an arbitrary depth, e.g. including going into JSON
     /// objects representing a Property value" (RFC 7396 with the NGSI-LD
