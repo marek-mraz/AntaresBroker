@@ -737,8 +737,8 @@ fn q_attr_roots(node: &antares_ql::QNode, out: &mut Vec<String>) {
     match node {
         And(v) | Or(v) => v.iter().for_each(|n| q_attr_roots(n, out)),
         Cmp { path, .. } | Exists { path, .. } => {
-            if let Some(r) = path.first() {
-                out.push(r.clone());
+            if let Some(r) = path.top() {
+                out.push(r.to_owned());
             }
         }
     }

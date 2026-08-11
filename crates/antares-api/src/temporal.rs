@@ -1259,7 +1259,7 @@ async fn query_temporal_inner(
             }
         }
         if let Some(ast) = &q_ast {
-            if !crate::qeval::eval_q(ast, &doc, &ctx) {
+            if !crate::qeval::eval_q(ast, &doc, &ctx, &|_| None) {
                 continue;
             }
         }

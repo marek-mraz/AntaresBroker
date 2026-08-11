@@ -74,7 +74,12 @@ fn emit(
         QNode::And(items) => join(items, " AND ", col, first, expand, binds),
         QNode::Or(items) => join(items, " OR ", col, first, expand, binds),
         QNode::Exists { path, negated } => {
-            let p = path_expr(path, expand)?;
+            // 4.9 linked-entity hops and trailing brackets are outside the
+            // exact SQL subset — fall back to in-memory eval_q.
+            if !path.links.is_empty() || path.bracket.is_some() {
+                return None;
+            }
+            let p = path_expr(&path.path, expand)?;
             let sql = value_or(&p, None, col, first, binds)?;
             Some(if *negated {
                 format!("NOT ({sql})")
@@ -83,7 +88,10 @@ fn emit(
             })
         }
         QNode::Cmp { path, op, value } => {
-            let p = path_expr(path, expand)?;
+            if !path.links.is_empty() || path.bracket.is_some() {
+                return None;
+            }
+            let p = path_expr(&path.path, expand)?;
             value_or(&p, Some((*op, value)), col, first, binds)
         }
     }

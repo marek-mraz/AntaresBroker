@@ -2,26 +2,148 @@
 //! evaluator the subscription matcher uses — §evaluate.rs in the design).
 
 use antares_jsonld::Context;
-use antares_ql::{CmpOp, QNode, QValue};
+use antares_ql::{CmpOp, QNode, QPath, QValue};
 use serde_json::Value;
 
-pub fn eval_q(node: &QNode, entity: &Value, ctx: &Context) -> bool {
+/// Entity resolver for 4.9 linked-entity subqueries (`attr{path}`,
+/// EXAMPLE 13/14). Returns the expanded entity for a URI, or None when the
+/// entity is unknown or the evaluation context has no store access — a
+/// linked term then simply does not match.
+pub type EntityLookup<'a> = &'a dyn Fn(&str) -> Option<Value>;
+
+pub fn eval_q(node: &QNode, entity: &Value, ctx: &Context, lookup: EntityLookup) -> bool {
     match node {
-        QNode::And(items) => items.iter().all(|n| eval_q(n, entity, ctx)),
-        QNode::Or(items) => items.iter().any(|n| eval_q(n, entity, ctx)),
+        QNode::And(items) => items.iter().all(|n| eval_q(n, entity, ctx, lookup)),
+        QNode::Or(items) => items.iter().any(|n| eval_q(n, entity, ctx, lookup)),
         QNode::Exists { path, negated } => {
-            let found = !resolve_targets(entity, path, ctx).is_empty();
+            let found = !resolve_qpath(entity, path, ctx, lookup, 0).is_empty();
             found != *negated
         }
-        QNode::Cmp { path, op, value } => resolve_targets(entity, path, ctx)
+        // 4.9: "If the target element corresponds to a Relationship or
+        // ListRelationship, the combination of such target element with any
+        // operator different than equal or unequal shall result in not
+        // matching."
+        QNode::Cmp { path, op, value } => resolve_qpath(entity, path, ctx, lookup, 0)
             .iter()
-            .any(|v| compare(v, *op, value)),
+            .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value)),
     }
 }
 
-/// Resolve a dotted q path to candidate JSON values (across instances).
-fn resolve_targets(entity: &Value, path: &[String], ctx: &Context) -> Vec<Value> {
-    let Some(first) = path.first() else {
+/// 4.9 expandValues: rewrite the string values of query terms whose
+/// top-level attribute is named in the comma-separated `expandValues` list —
+/// each is expanded against the @context (JSON-LD type coercion), so e.g.
+/// `gender==Male&expandValues=gender` compares against the Male URI
+/// (EXAMPLE 12).
+pub fn apply_expand_values(node: QNode, expand_values: Option<&str>, ctx: &Context) -> QNode {
+    let Some(list) = expand_values else {
+        return node;
+    };
+    let names: Vec<&str> = list.split(',').map(str::trim).collect();
+    fn expand_val(v: QValue, ctx: &Context) -> QValue {
+        match v {
+            QValue::Str(s) => QValue::Str(ctx.expand_key(&s)),
+            QValue::List(items) => {
+                QValue::List(items.into_iter().map(|i| expand_val(i, ctx)).collect())
+            }
+            other => other,
+        }
+    }
+    fn walk(node: QNode, names: &[&str], ctx: &Context) -> QNode {
+        match node {
+            QNode::And(items) => {
+                QNode::And(items.into_iter().map(|n| walk(n, names, ctx)).collect())
+            }
+            QNode::Or(items) => QNode::Or(items.into_iter().map(|n| walk(n, names, ctx)).collect()),
+            QNode::Cmp { path, op, value } if path.top().is_some_and(|t| names.contains(&t)) => {
+                QNode::Cmp {
+                    path,
+                    op,
+                    value: expand_val(value, ctx),
+                }
+            }
+            other => other,
+        }
+    }
+    walk(node, &names, ctx)
+}
+
+/// Which value-defining member the target element carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    Value,
+    Object,
+    LanguageMap,
+    Vocab,
+    Json,
+    ValueList,
+    ObjectList,
+}
+
+fn kind_allows(kind: TargetKind, op: CmpOp) -> bool {
+    match kind {
+        TargetKind::Object | TargetKind::ObjectList => matches!(op, CmpOp::Eq | CmpOp::Ne),
+        _ => true,
+    }
+}
+
+/// Resolve a 4.9 attribute path — linked-entity hops first (EXAMPLE 13/14),
+/// then the dotted path with its optional trailing bracket.
+fn resolve_qpath(
+    entity: &Value,
+    qp: &QPath,
+    ctx: &Context,
+    lookup: EntityLookup,
+    depth: usize,
+) -> Vec<(TargetKind, Value)> {
+    let Some(link) = qp.links.first() else {
+        return resolve_targets(entity, qp, ctx);
+    };
+    if depth > 8 {
+        return vec![];
+    }
+    let iri = ctx.expand_key(&link.attr);
+    let Some(instances) = entity.get(&iri).and_then(Value::as_array) else {
+        return vec![];
+    };
+    let mut uris: Vec<&str> = Vec::new();
+    for inst in instances {
+        match inst.get("object") {
+            Some(Value::String(s)) => uris.push(s),
+            Some(Value::Array(a)) => uris.extend(a.iter().filter_map(Value::as_str)),
+            _ => {}
+        }
+        if let Some(Value::Array(a)) = inst.get("objectList") {
+            uris.extend(a.iter().filter_map(Value::as_str));
+        }
+    }
+    let rest = QPath {
+        links: qp.links[1..].to_vec(),
+        path: qp.path.clone(),
+        bracket: qp.bracket.clone(),
+    };
+    let mut out = Vec::new();
+    for uri in uris {
+        let Some(linked) = lookup(uri) else { continue };
+        // EXAMPLE 14 type hint: only consider target entities of these types
+        if !link.types.is_empty() {
+            let matched = linked["type"].as_array().is_some_and(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .any(|t| link.types.iter().any(|hint| ctx.expand_key(hint) == t))
+            });
+            if !matched {
+                continue;
+            }
+        }
+        out.extend(resolve_qpath(&linked, &rest, ctx, lookup, depth + 1));
+    }
+    out
+}
+
+/// Resolve a dotted q path to candidate (kind, value) targets across
+/// instances.
+fn resolve_targets(entity: &Value, qp: &QPath, ctx: &Context) -> Vec<(TargetKind, Value)> {
+    let Some(first) = qp.path.first() else {
         return vec![];
     };
     let iri = ctx.expand_key(first);
@@ -30,17 +152,20 @@ fn resolve_targets(entity: &Value, path: &[String], ctx: &Context) -> Vec<Value>
     };
     let mut out = Vec::new();
     for inst in instances {
-        collect(inst, &path[1..], ctx, &mut out);
+        collect(inst, &qp.path[1..], qp.bracket.as_deref(), ctx, &mut out);
     }
     out
 }
 
-fn collect(inst: &Value, rest: &[String], ctx: &Context, out: &mut Vec<Value>) {
+fn collect(
+    inst: &Value,
+    rest: &[String],
+    bracket: Option<&[String]>,
+    ctx: &Context,
+    out: &mut Vec<(TargetKind, Value)>,
+) {
     if rest.is_empty() {
-        // terminal: the comparable value of this instance
-        if let Some(v) = comparable_value(inst) {
-            out.push(v.clone());
-        }
+        terminal(inst, bracket, ctx, out);
         return;
     }
     let seg = &rest[0];
@@ -48,15 +173,83 @@ fn collect(inst: &Value, rest: &[String], ctx: &Context, out: &mut Vec<Value>) {
     let iri = ctx.expand_key(seg);
     if let Some(subs) = inst.get(&iri).and_then(Value::as_array) {
         for s in subs {
-            collect(s, &rest[1..], ctx, out);
+            collect(s, &rest[1..], bracket, ctx, out);
         }
         return;
     }
-    // 2. value-path step: navigate into the value object
-    if let Some(v) = comparable_value(inst) {
+    // 2. legacy value-path step: navigate into the value object (pre-bracket
+    // dotted access, kept as a superset of the 4.9 bracket form)
+    if let Some((kind, v)) = comparable_value(inst) {
         if let Some(nested) = navigate(v, rest) {
-            out.push(nested.clone());
+            let nested = nested.clone();
+            match bracket {
+                None => out.push((kind, nested)),
+                Some(b) => {
+                    if let Some(deeper) = navigate(&nested, b) {
+                        out.push((kind, deeper.clone()));
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Terminal instance: extract the target value, applying the trailing
+/// bracket — a language filter on a LanguageProperty (4.9 Equal/Unequal
+/// languageMap semantics), a MemberExpression into a compound value
+/// (EXAMPLE 9/10/11) otherwise.
+fn terminal(
+    inst: &Value,
+    bracket: Option<&[String]>,
+    ctx: &Context,
+    out: &mut Vec<(TargetKind, Value)>,
+) {
+    let Some((kind, v)) = comparable_value(inst) else {
+        return;
+    };
+    match (bracket, kind) {
+        (None, TargetKind::Vocab) => {
+            // 4.9: "If the target element is a VocabProperty, the target
+            // value shall be expanded according to the @context."
+            out.push((kind, expand_vocab(v, ctx)));
+        }
+        (None, _) => out.push((kind, v.clone())),
+        (Some(b), TargetKind::LanguageMap) => {
+            let Some(map) = v.as_object() else { return };
+            if b.len() != 1 {
+                return;
+            }
+            if b[0] == "*" {
+                // any language: ONE array target so that != requires no
+                // matching value in ANY language (4.9 Unequal, color[*])
+                let mut all = Vec::new();
+                for val in map.values() {
+                    match val {
+                        Value::Array(a) => all.extend(a.iter().cloned()),
+                        other => all.push(other.clone()),
+                    }
+                }
+                out.push((kind, Value::Array(all)));
+            } else if let Some(val) = map.get(&b[0]) {
+                out.push((kind, val.clone()));
+            }
+        }
+        (Some(b), _) => {
+            // MemberExpression into the compound value; undefined result =
+            // "the target element shall be considered as non-existent"
+            if let Some(nested) = navigate(v, b) {
+                out.push((kind, nested.clone()));
+            }
+        }
+    }
+}
+
+/// Expand a vocab value (string or array of strings) against the @context.
+fn expand_vocab(v: &Value, ctx: &Context) -> Value {
+    match v {
+        Value::String(s) => Value::String(ctx.expand_key(s)),
+        Value::Array(a) => Value::Array(a.iter().map(|x| expand_vocab(x, ctx)).collect()),
+        other => other.clone(),
     }
 }
 
@@ -68,19 +261,19 @@ fn navigate<'a>(v: &'a Value, path: &[String]) -> Option<&'a Value> {
     Some(cur)
 }
 
-fn comparable_value(inst: &Value) -> Option<&Value> {
+fn comparable_value(inst: &Value) -> Option<(TargetKind, &Value)> {
     let obj = inst.as_object()?;
-    for k in [
-        "value",
-        "object",
-        "languageMap",
-        "vocab",
-        "json",
-        "valueList",
-        "objectList",
+    for (k, kind) in [
+        ("value", TargetKind::Value),
+        ("object", TargetKind::Object),
+        ("languageMap", TargetKind::LanguageMap),
+        ("vocab", TargetKind::Vocab),
+        ("json", TargetKind::Json),
+        ("valueList", TargetKind::ValueList),
+        ("objectList", TargetKind::ObjectList),
     ] {
         if let Some(v) = obj.get(k) {
-            return Some(v);
+            return Some((kind, v));
         }
     }
     None
@@ -205,6 +398,176 @@ fn num_cmp(t: f64, op: CmpOp, n: f64) -> bool {
 }
 
 #[cfg(test)]
+mod clause_4_9_extensions {
+    use super::*;
+    use antares_jsonld::{Context, Loader};
+    use antares_ql::parse_q;
+    use serde_json::json;
+
+    fn ctx() -> std::sync::Arc<Context> {
+        Loader::new().core()
+    }
+
+    fn expand(doc: serde_json::Value) -> Value {
+        antares_jsonld::expand_entity(
+            doc.as_object().expect("obj"),
+            &ctx(),
+            antares_jsonld::ExpandOpts::default(),
+        )
+        .expect("expand")
+    }
+
+    fn q(doc: &Value, q: &str) -> bool {
+        let ast = parse_q(q).expect(q);
+        eval_q(&ast, doc, &ctx(), &|_| None)
+    }
+
+    /// 4.9 EXAMPLE 9/10/11: trailing [path] navigates the compound value
+    /// (MemberExpression); undefined member = target non-existent.
+    #[test]
+    fn compound_value_trailing_path() {
+        let e = expand(json!({"id": "urn:x", "type": "T",
+            "address": {"type": "Property",
+                "value": {"city": "Berlin", "street": "Ulrich Strasse"}},
+            "sensor": {"type": "Property", "value": 40,
+                "rawdata": {"type": "Property",
+                    "value": {"airquality": {"particulate": 40, "PM20": 85}}}},
+            "parkingTickets": {"type": "JsonProperty",
+                "json": {"id": "85a6cc52", "value": "Overstay 60 minutes"}}}));
+        assert!(q(&e, r#"address[city]=="Berlin""#), "EXAMPLE 9");
+        assert!(!q(&e, r#"address[city]=="Paris""#));
+        assert!(!q(&e, r#"address[postcode]=="Berlin""#), "undefined member");
+        assert!(
+            q(&e, "sensor.rawdata[airquality.particulate]==40"),
+            "EXAMPLE 10"
+        );
+        assert!(!q(&e, "sensor.rawdata[airquality.missing]==40"));
+        assert!(
+            q(&e, r#"parkingTickets[value]=="Overstay 60 minutes""#),
+            "EXAMPLE 11 (JsonProperty raw json navigation)"
+        );
+        // existence through the bracket: defined member exists, missing not
+        assert!(q(&e, "address[city]"));
+        assert!(!q(&e, "address[postcode]"));
+    }
+
+    /// 4.9 Equal/Unequal languageMap semantics: [lang] targets one language,
+    /// [*] any; != over [*] requires NO value to match.
+    #[test]
+    fn language_property_filters() {
+        let e = expand(json!({"id": "urn:x", "type": "T",
+            "color": {"type": "LanguageProperty",
+                "languageMap": {"fr": "rouge", "en": "red", "de": "rot"}},
+            "names": {"type": "LanguageProperty",
+                "languageMap": {"fr": ["chat", "rouge"], "en": ["red", "cat"]}}}));
+        assert!(q(&e, r#"color[en]=="red""#));
+        assert!(
+            !q(&e, r#"color[en]=="rouge""#),
+            "wrong language must not match"
+        );
+        assert!(q(&e, r#"color[*]=="rouge""#), "any-language match");
+        assert!(!q(&e, r#"color[*]=="blau""#));
+        assert!(
+            q(&e, r#"names[en]=="cat""#),
+            "array element in one language"
+        );
+        // Unequal: no matching value in ANY of the values
+        assert!(q(&e, r#"color[en]!="rouge""#));
+        assert!(!q(&e, r#"color[en]!="red""#));
+        assert!(!q(&e, r#"color[*]!="red""#), "some language holds red");
+        assert!(q(&e, r#"color[*]!="blau""#));
+    }
+
+    /// 4.9: "If the target element is a VocabProperty, the target value shall
+    /// be expanded according to the @context" — the default-context expansion
+    /// makes a URI out of the vocab term, so only URI comparisons match.
+    #[test]
+    fn vocab_property_target_expansion() {
+        let e = expand(json!({"id": "urn:x", "type": "T",
+            "category": {"type": "VocabProperty", "vocab": "commercial"}}));
+        assert!(
+            q(
+                &e,
+                r#"category=="https://uri.etsi.org/ngsi-ld/default-context/commercial""#
+            ),
+            "expanded URI equality"
+        );
+        assert!(
+            !q(&e, r#"category=="somethingelse""#),
+            "non-matching literal"
+        );
+    }
+
+    /// 4.9: "If the target element corresponds to a Relationship or
+    /// ListRelationship, the combination of such target element with any
+    /// operator different than equal or unequal shall result in not matching."
+    #[test]
+    fn relationship_ordering_operators_never_match() {
+        let e = expand(json!({"id": "urn:x", "type": "T",
+            "isParked": {"type": "Relationship", "object": "urn:ngsi-ld:P:5"}}));
+        assert!(q(&e, r#"isParked=="urn:ngsi-ld:P:5""#));
+        assert!(
+            !q(&e, r#"isParked>"urn:ngsi-ld:P:4""#),
+            "ordering op on Relationship"
+        );
+        assert!(!q(&e, r#"isParked<"urn:ngsi-ld:P:6""#));
+        assert!(!q(&e, r#"isParked~="urn.*""#), "pattern op on Relationship");
+    }
+
+    /// 4.9 EXAMPLE 12: expandValues coerces the query term value through the
+    /// @context, so a VocabProperty short term matches its expanded URI.
+    #[test]
+    fn expand_values_coercion() {
+        let e = expand(json!({"id": "urn:x", "type": "T",
+            "category": {"type": "VocabProperty", "vocab": "commercial"}}));
+        let ast = parse_q("category==commercial").expect("parse");
+        assert!(
+            !eval_q(&ast, &e, &ctx(), &|_| None),
+            "without expandValues the literal does not match the expanded vocab"
+        );
+        let ast = apply_expand_values(ast, Some("category"), &ctx());
+        assert!(eval_q(&ast, &e, &ctx(), &|_| None), "EXAMPLE 12");
+        // other attributes' values stay untouched
+        let ast = apply_expand_values(
+            parse_q(r#"other=="commercial""#).expect("parse"),
+            Some("category"),
+            &ctx(),
+        );
+        match ast {
+            QNode::Cmp { value, .. } => assert_eq!(value, QValue::Str("commercial".into())),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// 4.9 EXAMPLE 13/14: linked entity subquery attr{[Type:]path} follows
+    /// the Relationship object through the resolver; a missing resolver or
+    /// non-matching type hint yields no match.
+    #[test]
+    fn linked_entity_subquery() {
+        let station = expand(json!({"id": "urn:ngsi-ld:WS:123", "type": "WeatherStation",
+            "sensor": {"type": "Relationship", "object": "urn:ngsi-ld:Device:345"}}));
+        let device = expand(json!({"id": "urn:ngsi-ld:Device:345", "type": "Device",
+            "humidity": {"type": "Property", "value": 40}}));
+        let lookup = |id: &str| (id == "urn:ngsi-ld:Device:345").then(|| device.clone());
+        let ast = parse_q("sensor{humidity}==40").expect("parse");
+        assert!(eval_q(&ast, &station, &ctx(), &lookup), "EXAMPLE 13");
+        let ast = parse_q("sensor{humidity}==50").expect("parse");
+        assert!(!eval_q(&ast, &station, &ctx(), &lookup));
+        // EXAMPLE 14: type hint — matching and non-matching
+        let ast = parse_q("sensor{Device:humidity}==40").expect("parse");
+        assert!(eval_q(&ast, &station, &ctx(), &lookup), "EXAMPLE 14");
+        let ast = parse_q("sensor{Vehicle:humidity}==40").expect("parse");
+        assert!(
+            !eval_q(&ast, &station, &ctx(), &lookup),
+            "type hint must filter"
+        );
+        // no resolver → no match, never an error
+        let ast = parse_q("sensor{humidity}==40").expect("parse");
+        assert!(!eval_q(&ast, &station, &ctx(), &|_| None));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use antares_jsonld::Loader;
@@ -241,7 +604,7 @@ mod tests {
             ("color", false),
         ] {
             let ast = parse_q(q).expect(q);
-            assert_eq!(eval_q(&ast, &e, &ctx), want, "q={q}");
+            assert_eq!(eval_q(&ast, &e, &ctx, &|_| None), want, "q={q}");
         }
     }
 
@@ -271,7 +634,7 @@ mod tests {
             ("speed>10", false), // ordering on a mismatch does NOT match
         ] {
             let ast = parse_q(q).expect(q);
-            assert_eq!(eval_q(&ast, &e, &ctx), want, "q={q}");
+            assert_eq!(eval_q(&ast, &e, &ctx, &|_| None), want, "q={q}");
         }
     }
 
@@ -292,11 +655,13 @@ mod tests {
         };
         let ast = parse_q(r#"color!="red""#).expect("q");
         assert!(
-            eval_q(&ast, &mk(json!(["blue", "black", "green"])), &ctx),
+            eval_q(&ast, &mk(json!(["blue", "black", "green"])), &ctx, &|_| {
+                None
+            }),
             "no element equals red ⇒ matches"
         );
         assert!(
-            !eval_q(&ast, &mk(json!(["blue", "red", "green"])), &ctx),
+            !eval_q(&ast, &mk(json!(["blue", "red", "green"])), &ctx, &|_| None),
             "red is included ⇒ must NOT match (was matching on the 'blue' element)"
         );
     }
@@ -340,7 +705,7 @@ mod tests {
         ] {
             let ast = parse_q(q).expect(q);
             assert_eq!(
-                eval_q(&ast, &mk(target.clone()), &ctx),
+                eval_q(&ast, &mk(target.clone()), &ctx, &|_| None),
                 want,
                 "q={q} target={target}"
             );
@@ -373,7 +738,7 @@ mod tests {
         ] {
             let ast = parse_q(q).expect(q);
             assert_eq!(
-                eval_q(&ast, &mk(target.clone()), &ctx),
+                eval_q(&ast, &mk(target.clone()), &ctx, &|_| None),
                 want,
                 "q={q} target={target}"
             );
@@ -389,7 +754,7 @@ mod tests {
                 {"type": "Property", "value": "2021-03-15T12:00:00Z"}
             ]
         });
-        assert!(eval_q(&ast, &e, &ctx));
+        assert!(eval_q(&ast, &e, &ctx, &|_| None));
     }
 
     /// 4.9 notPatternOp p.92: NOT in L(R); non-string targets are "not
@@ -421,7 +786,7 @@ mod tests {
         ] {
             let ast = parse_q(q).expect(q);
             assert_eq!(
-                eval_q(&ast, &mk(target.clone()), &ctx),
+                eval_q(&ast, &mk(target.clone()), &ctx, &|_| None),
                 want,
                 "q={q} target={target}"
             );

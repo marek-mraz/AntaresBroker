@@ -579,7 +579,9 @@ fn conditions_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
         let q = crate::negotiate::percent_decode(q.as_bytes());
         match antares_ql::parse_q(&q) {
             Ok(node) => {
-                if !crate::qeval::eval_q(&node, doc, ctx) {
+                // linked-entity q terms have no store access here — they
+                // evaluate as non-matching (ledger 4.9 note)
+                if !crate::qeval::eval_q(&node, doc, ctx, &|_| None) {
                     return false;
                 }
             }

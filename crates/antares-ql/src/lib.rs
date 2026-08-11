@@ -11,37 +11,76 @@ pub enum QNode {
     And(Vec<QNode>),
     Or(Vec<QNode>),
     Cmp {
-        path: Vec<String>,
+        path: QPath,
         op: CmpOp,
         value: QValue,
     },
     /// Bare attribute path = existence check (`q=temperature`).
     Exists {
-        path: Vec<String>,
+        path: QPath,
         negated: bool,
     },
 }
 
+/// 4.9 `Attribute = LinkedEntityRelation` — zero or more `attr{[T[,T]:]…}`
+/// hops (EXAMPLE 13/14), then `ValuePath = DottedPath *1([DottedPath])`:
+/// a dotted path plus an optional single trailing bracket that is either a
+/// compound-value member path (EXAMPLE 9/10/11) or a language filter
+/// (`[en]` / `[*]`, Equal/Unequal languageMap semantics).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QPath {
+    pub links: Vec<Link>,
+    pub path: Vec<String>,
+    pub bracket: Option<Vec<String>>,
+}
+
+/// One `attr{…}` linked-entity hop with its optional EntityType hints.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub attr: String,
+    pub types: Vec<String>,
+}
+
+impl QPath {
+    /// Plain dotted path (the pre-4.9-extension shape).
+    pub fn dotted(path: Vec<String>) -> Self {
+        Self {
+            links: Vec::new(),
+            path,
+            bracket: None,
+        }
+    }
+
+    /// The top-level Attribute name this path filters on.
+    pub fn top(&self) -> Option<&str> {
+        self.links
+            .first()
+            .map(|l| l.attr.as_str())
+            .or_else(|| self.path.first().map(String::as_str))
+    }
+}
+
 impl QNode {
-    /// Every attribute path this expression references, in source order.
+    /// Every top-level attribute name this expression references, in source
+    /// order.
     ///
     /// Purge (5.6.21.4 b/c) qualifies an `attrs` list or a `q` only when it
     /// includes "at least one non-system Attribute", so the caller needs the
-    /// paths rather than just "is there a q".
-    pub fn attribute_paths(&self) -> Vec<&[String]> {
+    /// referenced names rather than just "is there a q".
+    pub fn attribute_paths(&self) -> Vec<&str> {
         let mut out = Vec::new();
         self.collect_paths(&mut out);
         out
     }
 
-    fn collect_paths<'a>(&'a self, out: &mut Vec<&'a [String]>) {
+    fn collect_paths<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             QNode::And(ns) | QNode::Or(ns) => {
                 for n in ns {
                     n.collect_paths(out);
                 }
             }
-            QNode::Cmp { path, .. } | QNode::Exists { path, .. } => out.push(path.as_slice()),
+            QNode::Cmp { path, .. } | QNode::Exists { path, .. } => out.extend(path.top()),
         }
     }
 }
@@ -189,7 +228,7 @@ impl<'a> Parser<'a> {
             return Ok(node);
         }
         let negated = self.eat('!');
-        let path = self.path()?;
+        let path = self.qpath()?;
         if let Some(op) = self.cmp_op() {
             if negated {
                 return Err(bad(self.rest, "'!' only prefixes an existence check"));
@@ -201,18 +240,82 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn path(&mut self) -> Result<Vec<String>, NgsiError> {
+    /// 4.9 Attribute: `attr{[T[,T]:]…}` linked-entity hops, then a dotted
+    /// path, then at most one trailing `[member.path]` / `[lang]` / `[*]`.
+    fn qpath(&mut self) -> Result<QPath, NgsiError> {
+        let mut links = Vec::new();
+        let mut braces = 0usize;
+        let mut name = self.name_token()?;
+        // LinkedEntityRelation: AttrName{ [EntityType(,EntityType)*:] … }
+        while self.eat('{') {
+            braces += 1;
+            if braces > 8 {
+                return Err(NgsiError::TooComplexQuery(
+                    "q linked-entity path nests deeper than 8".into(),
+                ));
+            }
+            let mut types = Vec::new();
+            let mut inner = self.name_token()?;
+            if self.rest.starts_with(',') || self.rest.starts_with(':') {
+                types.push(inner);
+                while self.eat(',') {
+                    types.push(self.name_token()?);
+                }
+                if !self.eat(':') {
+                    return Err(bad(self.rest, "expected ':' after EntityType hints"));
+                }
+                inner = self.name_token()?;
+            }
+            links.push(Link { attr: name, types });
+            name = inner;
+        }
+        let mut path = vec![name];
+        while self.eat('.') {
+            path.push(self.name_token()?);
+        }
+        let bracket = if self.eat('[') {
+            let b = if self.eat('*') {
+                vec!["*".to_owned()]
+            } else {
+                let mut b = vec![self.name_token()?];
+                while self.eat('.') {
+                    b.push(self.name_token()?);
+                }
+                b
+            };
+            if !self.eat(']') {
+                return Err(bad(self.rest, "expected ']'"));
+            }
+            Some(b)
+        } else {
+            None
+        };
+        for _ in 0..braces {
+            if !self.eat('}') {
+                return Err(bad(self.rest, "expected '}'"));
+            }
+        }
+        Ok(QPath {
+            links,
+            path,
+            bracket,
+        })
+    }
+
+    /// One path segment: everything up to a structural delimiter.
+    fn name_token(&mut self) -> Result<String, NgsiError> {
+        self.rest = self.rest.trim_start();
         let end = self
             .rest
-            .find(|c: char| "=!<>~;|()".contains(c))
+            .find(|c: char| "=!<>~;|(),.{}[]: ".contains(c))
             .unwrap_or(self.rest.len());
         let (raw, rest) = self.rest.split_at(end);
-        let raw = raw.trim();
         if raw.is_empty() {
-            return Err(bad(rest, "expected attribute path"));
+            return Err(bad(rest, "expected attribute name"));
         }
-        self.rest = rest;
-        Ok(raw.split('.').map(str::to_owned).collect())
+        // spacing around the segment is insignificant (`a ==1`, `a ; b`)
+        self.rest = rest.trim_start();
+        Ok(raw.to_owned())
     }
 
     fn cmp_op(&mut self) -> Option<CmpOp> {
@@ -351,7 +454,7 @@ mod tests {
         assert_eq!(
             q,
             QNode::Cmp {
-                path: vec!["brandName".into()],
+                path: QPath::dotted(vec!["brandName".into()]),
                 op: CmpOp::Eq,
                 value: QValue::Str("Mercedes".into())
             }
@@ -377,7 +480,7 @@ mod tests {
         assert_eq!(
             q,
             QNode::Cmp {
-                path: vec!["speed".into(), "value".into()],
+                path: QPath::dotted(vec!["speed".into(), "value".into()]),
                 op: CmpOp::Ge,
                 value: QValue::Num(80.5)
             }
@@ -389,7 +492,7 @@ mod tests {
         assert_eq!(
             parse_q("!temperature").expect("parse"),
             QNode::Exists {
-                path: vec!["temperature".into()],
+                path: QPath::dotted(vec!["temperature".into()]),
                 negated: true
             }
         );
@@ -415,7 +518,7 @@ mod tests {
         assert_eq!(
             q,
             QNode::Cmp {
-                path: vec!["color".into()],
+                path: QPath::dotted(vec!["color".into()]),
                 op: CmpOp::Eq,
                 value: QValue::List(vec![QValue::Str("black".into()), QValue::Str("red".into())])
             }
@@ -444,7 +547,7 @@ mod tests {
         assert_eq!(
             q,
             QNode::Cmp {
-                path: vec!["temperature".into()],
+                path: QPath::dotted(vec!["temperature".into()]),
                 op: CmpOp::Eq,
                 value: QValue::Range(Box::new(QValue::Num(10.0)), Box::new(QValue::Num(20.0)))
             }
@@ -481,7 +584,7 @@ mod tests {
         assert_eq!(
             q,
             QNode::Cmp {
-                path: vec!["name".into()],
+                path: QPath::dotted(vec!["name".into()]),
                 op: CmpOp::NotPattern,
                 value: QValue::Str("^Merc".into())
             }

@@ -1021,7 +1021,15 @@ pub fn filter_entities_paged(
         .get("attrs")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
     let q_ast = match params.get("q") {
-        Some(q) => Some(parse_q(q)?),
+        // 4.9 expandValues: "attributes whose values should be expanded
+        // against the supplied @context using JSON-LD type coercion prior to
+        // executing the query" (EXAMPLE 12). jsonKeys needs no action — raw
+        // JSON targets are navigated without term expansion by default.
+        Some(q) => Some(crate::qeval::apply_expand_values(
+            parse_q(q)?,
+            params.get("expandValues").map(String::as_str),
+            &ctx,
+        )),
         None => None,
     };
     let scope_q = params.get("scopeQ");
@@ -1125,7 +1133,10 @@ pub fn filter_entities_paged(
                 }
             }
             if let Some(ast) = &q_ast {
-                if !eval_q(ast, &doc, ctx) {
+                // 4.9 linked-entity subqueries (attr{path}) resolve through
+                // the local store, same tenant.
+                let lookup = |uri: &str| st.store.get(&tenant, Kind::Entity, uri).ok().flatten();
+                if !eval_q(ast, &doc, ctx, &lookup) {
                     continue;
                 }
             }
@@ -1429,7 +1440,7 @@ async fn purge_inner(
         Some(q) => parse_q(q)?
             .attribute_paths()
             .iter()
-            .any(|p| p.first().is_some_and(|h| antares_ql::is_non_system_attr(h))),
+            .any(|h| antares_ql::is_non_system_attr(h)),
         None => false,
     };
     let has_filter = params.contains_key("type")
