@@ -412,8 +412,12 @@ pub fn matching_regs(
                         if let Some(i) = e.get("id").and_then(Value::as_str) {
                             ent_ids.push(i.to_owned());
                         }
-                        if let Some(t) = e.get("type").and_then(Value::as_str) {
-                            ent_types.push(t.to_owned());
+                        // 5.2.8: type may be a String or String[]
+                        match e.get("type") {
+                            Some(Value::String(t)) => ent_types.push(t.clone()),
+                            Some(Value::Array(ts)) => ent_types
+                                .extend(ts.iter().filter_map(Value::as_str).map(str::to_owned)),
+                            _ => {}
                         }
                     }
                 }

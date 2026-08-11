@@ -103,18 +103,27 @@ pub fn normalize_registration(
                                     let mut ne = Map::new();
                                     for (ek, ev) in eo {
                                         match ek.as_str() {
+                                            // 5.2.8: type is "String or String[]" — both forms legal.
                                             "type" => {
-                                                let t = ev
-                                                    .as_str()
-                                                    .filter(|t| !t.is_empty())
-                                                    .ok_or_else(|| {
-                                                        bad("EntityInfo type is required (5.2.8)"
-                                                            .into())
+                                                let expand_one =
+                                                    |t: &Value| -> Result<Value, NgsiError> {
+                                                        let t = t.as_str().filter(|t| !t.is_empty()).ok_or_else(|| {
+                                                        bad("EntityInfo type must be a non-empty string (5.2.8)".into())
                                                     })?;
-                                                ne.insert(
-                                                    "type".into(),
-                                                    Value::String(ctx.expand_key(t)),
-                                                );
+                                                        Ok(Value::String(ctx.expand_key(t)))
+                                                    };
+                                                let expanded = match ev {
+                                                    Value::Array(ts) if !ts.is_empty() => Value::Array(
+                                                        ts.iter().map(expand_one).collect::<Result<_, _>>()?,
+                                                    ),
+                                                    Value::Array(_) => {
+                                                        return Err(bad(
+                                                            "EntityInfo type array must not be empty (5.2.8)".into(),
+                                                        ))
+                                                    }
+                                                    other => expand_one(other)?,
+                                                };
+                                                ne.insert("type".into(), expanded);
                                             }
                                             "id" => {
                                                 let id = ev.as_str().ok_or_else(|| {
@@ -425,7 +434,7 @@ pub fn check_proxied_overlap(
                 .collect();
             let types: Vec<String> = entities
                 .iter()
-                .filter_map(|e| e.get("type").and_then(Value::as_str))
+                .flat_map(ei_types)
                 .map(str::to_owned)
                 .collect();
             let spec = CsrSpec {
@@ -471,8 +480,20 @@ pub fn present_registration(doc: &Value, ctx: &Context, sys_attrs: bool) -> Valu
                                 .iter()
                                 .map(|e| {
                                     let mut ne = e.as_object().cloned().unwrap_or_default();
-                                    if let Some(t) = ne.get("type").and_then(Value::as_str) {
-                                        ne.insert("type".into(), Value::String(ctx.compact_iri(t)));
+                                    match ne.get("type") {
+                                        Some(Value::String(t)) => {
+                                            let c = ctx.compact_iri(t);
+                                            ne.insert("type".into(), Value::String(c));
+                                        }
+                                        Some(Value::Array(ts)) => {
+                                            let cs: Vec<Value> = ts
+                                                .iter()
+                                                .filter_map(Value::as_str)
+                                                .map(|t| Value::String(ctx.compact_iri(t)))
+                                                .collect();
+                                            ne.insert("type".into(), Value::Array(cs));
+                                        }
+                                        _ => {}
                                     }
                                     Value::Object(ne)
                                 })
@@ -783,6 +804,15 @@ pub struct CsrSpec {
     pub attrs: Option<Vec<String>>,
 }
 
+/// 5.2.8: EntityInfo type is a String or String[] — yield every named type.
+fn ei_types(ei: &Value) -> Vec<&str> {
+    match ei.get("type") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn type_matches(sel: &str, info_type: &str, ctx: &Context) -> bool {
     if sel.contains(['|', ',', ';', '(']) {
         crate::entities::type_selection_matches(sel, &[info_type], ctx)
@@ -794,11 +824,15 @@ fn type_matches(sel: &str, info_type: &str, ctx: &Context) -> bool {
 /// 5.12: does an EntityInfo element match the entity specification?
 fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
     if let Some(types) = &spec.types {
-        if let Some(it) = ei.get("type").and_then(Value::as_str) {
-            if !types.iter().any(|t| type_matches(t, it, ctx)) {
-                return false;
-            }
-        } // EntityInfo without a type restricts only by id/idPattern
+        let its = ei_types(ei);
+        // EntityInfo without a type restricts only by id/idPattern
+        if !its.is_empty()
+            && !types
+                .iter()
+                .any(|t| its.iter().any(|it| type_matches(t, it, ctx)))
+        {
+            return false;
+        }
     }
     let ei_id = ei.get("id").and_then(Value::as_str);
     let ei_pat = ei.get("idPattern").and_then(Value::as_str);

@@ -1820,3 +1820,57 @@ mod clause_4_19 {
         }
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_8 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn post_reg(entities: serde_json::Value) -> StatusCode {
+        let app = router(AppState::new("t528".into()));
+        let body = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:528-{}",
+                          entities.to_string().len()),
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": entities}],
+            "endpoint": "http://cs.example.org:1026"
+        })
+        .to_string();
+        let req = Request::post("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("req");
+        app.oneshot(req).await.expect("resp").status()
+    }
+
+    /// Table 5.2.8-1: type is "String or String[]" — the array form must be
+    /// accepted; id must be a URI; idPattern must be a valid regex.
+    #[tokio::test]
+    async fn entity_info_type_accepts_the_array_form() {
+        assert_eq!(
+            post_reg(serde_json::json!([{"type": ["Building", "Vehicle"]}])).await,
+            StatusCode::CREATED,
+            "String[] type is legal"
+        );
+        assert_eq!(
+            post_reg(serde_json::json!([{"type": "Building"}])).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post_reg(serde_json::json!([{"type": [] }])).await,
+            StatusCode::BAD_REQUEST,
+            "an empty type array names no Entity Type"
+        );
+        assert_eq!(
+            post_reg(serde_json::json!([{"type": "Building", "id": "not a uri"}])).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_reg(serde_json::json!([{"type": "Building", "idPattern": "urn:[" }])).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
