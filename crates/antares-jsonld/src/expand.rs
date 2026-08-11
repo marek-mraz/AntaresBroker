@@ -1906,3 +1906,52 @@ mod clause_5_2_1 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_4 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    /// Table 5.2.4-1: id must be a valid URI; type accepts a short name, a
+    /// URI, or an array of either; expiresAt must be a 4.6.3 DateTime.
+    #[test]
+    fn entity_member_table_restrictions() {
+        assert!(expand(json!({"id": "not a uri", "type": "T"})).is_err());
+        assert!(expand(json!({"id": "urn:x", "type": "T"})).is_ok());
+        assert!(expand(json!({"id": "urn:x", "type": ["T", "https://ex.org/U"]})).is_ok());
+        assert!(expand(json!({"id": "urn:x", "type": 5})).is_err());
+        assert!(
+            expand(json!({"id": "urn:x", "type": "T", "expiresAt": "2020-01-01"})).is_err(),
+            "expiresAt must be a DateTime, not a Date"
+        );
+        assert!(
+            expand(json!({"id": "urn:x", "type": "T", "expiresAt": "2030-01-01T00:00:00Z"}))
+                .is_ok()
+        );
+    }
+
+    /// Table 5.2.4-1: location/observationSpace/operationSpace are
+    /// GeoProperties (5.2.7) — a plain Property under those names is a
+    /// violation (4.7.1).
+    #[test]
+    fn default_geo_names_must_be_geoproperties() {
+        for name in ["location", "observationSpace", "operationSpace"] {
+            let doc = json!({"id": "urn:x", "type": "T",
+                name: {"type": "Property", "value": 3}});
+            assert!(expand(doc).is_err(), "{name} as a plain Property must 400");
+            let ok = json!({"id": "urn:x", "type": "T",
+                name: {"type": "GeoProperty",
+                       "value": {"type": "Point", "coordinates": [8, 40]}}});
+            assert!(expand(ok).is_ok(), "{name} as a GeoProperty is fine");
+        }
+    }
+}
