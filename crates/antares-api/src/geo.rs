@@ -74,6 +74,32 @@ fn validate_rings(gtype: &str, coords: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// 4.23: reference geometry for distance ordering (orderFrom/orderGeometry).
+pub(crate) fn parse_ref_geometry(
+    gtype: &str,
+    coords: &Value,
+) -> Result<geo_types::Geometry<f64>, String> {
+    parse_geometry(gtype, coords)
+}
+
+/// 4.23: haversine metres from the reference geometry to a target GeoJSON
+/// value — closest point in planar lon/lat, haversine metric (the same
+/// documented ceiling as `near`, 4.10). None when the target is not a valid
+/// geometry.
+pub(crate) fn order_distance_m(refg: &geo_types::Geometry<f64>, target: &Value) -> Option<f64> {
+    let (t, c) = (
+        target.get("type").and_then(Value::as_str)?,
+        target.get("coordinates")?,
+    );
+    let target = parse_geometry(t, c).ok()?;
+    let qp = first_point(refg)?;
+    let cp = match target.closest_point(&qp) {
+        geo::Closest::Intersection(p) | geo::Closest::SinglePoint(p) => p,
+        geo::Closest::Indeterminate => first_point(&target)?,
+    };
+    Some(haversine_m(qp, cp))
+}
+
 /// GeoJSON `{type, coordinates}` → geo_types, with ring validation.
 fn parse_geometry(gtype: &str, coords: &Value) -> Result<geo_types::Geometry<f64>, String> {
     validate_rings(gtype, coords)?;

@@ -873,7 +873,7 @@ async fn query_entities_inner(
     )?;
     let mut matches = filtered.docs;
     if let Some(spec) = params.get("orderBy") {
-        order_entities(&mut matches, spec, &ctx)?;
+        order_entities(&mut matches, spec, &params, &ctx)?;
     }
     let (page, count_hdr, links) = if filtered.paged {
         let total = filtered.total.unwrap_or(matches.len());
@@ -1917,15 +1917,34 @@ pub async fn replace_entity(
 // ---------- Entity Ordering (4.23) ----------
 
 /// Sort by an orderBy spec: comma-separated `member[;asc|desc]`.
+/// 4.23 Entity Ordering: orderBy = AttrName[;direction] *(, …) with asc
+/// (default) / desc / dist-asc / dist-desc (4.23.3); distance keys need the
+/// orderFrom reference coordinates (orderGeometry, default Point) and apply
+/// to GeoProperties — non-GeoProperties fall back to value order after them
+/// (4.23.2). Mixed datatypes rank Numbers < Strings < Object < Array <
+/// Boolean < Time < Date < DateTime < Null < absent (4.23.2). Paths may be
+/// dotted (EXAMPLE 5) or carry one trailing [member.path] bracket
+/// (EXAMPLE 4). String collation is codepoint order — the ICU root default
+/// and the `collation` parameter are a named ledger gap.
 pub fn order_entities(
     docs: &mut [Value],
     spec: &str,
+    params: &HashMap<String, String>,
     ctx: &antares_jsonld::Context,
 ) -> Result<(), NgsiError> {
+    #[derive(PartialEq)]
+    enum Dir {
+        Asc,
+        Desc,
+        DistAsc,
+        DistDesc,
+    }
     struct Key {
         path: Vec<String>,
-        desc: bool,
+        bracket: Option<Vec<String>>,
+        dir: Dir,
     }
+    let bad = |m: String| NgsiError::BadRequestData(m);
     let mut keys = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();
@@ -1933,19 +1952,58 @@ pub fn order_entities(
             Some((m, d)) => (m.trim(), d.trim()),
             None => (part, "asc"),
         };
-        if member.is_empty() || !["asc", "desc"].contains(&dir) {
-            return Err(NgsiError::BadRequestData(format!(
-                "invalid orderBy {spec:?} (4.23)"
-            )));
+        let dir = match dir {
+            "asc" => Dir::Asc,
+            "desc" => Dir::Desc,
+            "dist-asc" => Dir::DistAsc,
+            "dist-desc" => Dir::DistDesc,
+            _ => {
+                return Err(bad(format!(
+                    "invalid orderBy direction in {spec:?} (4.23.3)"
+                )))
+            }
+        };
+        // one trailing [member.path] bracket (EXAMPLE 4)
+        let (head, bracket) = match member.split_once('[') {
+            Some((h, rest)) => {
+                let inner = rest
+                    .strip_suffix(']')
+                    .ok_or_else(|| bad(format!("unclosed bracket in orderBy {spec:?}")))?;
+                (h, Some(inner.split('.').map(str::to_owned).collect()))
+            }
+            None => (member, None),
+        };
+        if head.is_empty() {
+            return Err(bad(format!("invalid orderBy {spec:?} (4.23)")));
         }
         keys.push(Key {
-            path: member.split('.').map(str::to_owned).collect(),
-            desc: dir == "desc",
+            path: head.split('.').map(str::to_owned).collect(),
+            bracket,
+            dir,
         });
     }
-    fn order_value(doc: &Value, path: &[String], ctx: &antares_jsonld::Context) -> Option<Value> {
+    // dist-* keys need the orderFrom reference geometry (4.23.3 EXAMPLE 8-10)
+    let refg = if keys
+        .iter()
+        .any(|k| matches!(k.dir, Dir::DistAsc | Dir::DistDesc))
+    {
+        let coords_raw = params
+            .get("orderFrom")
+            .ok_or_else(|| bad("dist ordering requires orderFrom (4.23.3)".into()))?;
+        let coords: Value = serde_json::from_str(coords_raw)
+            .map_err(|_| bad(format!("invalid orderFrom {coords_raw:?}")))?;
+        let gtype = params
+            .get("orderGeometry")
+            .cloned()
+            .unwrap_or_else(|| "Point".into());
+        Some(crate::geo::parse_ref_geometry(&gtype, &coords).map_err(bad)?)
+    } else {
+        None
+    };
+    fn order_value(doc: &Value, k: &Key, ctx: &antares_jsonld::Context) -> Option<Value> {
+        let path = &k.path;
         let head = path.first()?;
-        match head.as_str() {
+        let base = match head.as_str() {
             "id" | "createdAt" | "modifiedAt" => doc.get(head.as_str()).cloned(),
             "type" => doc["type"].as_array().and_then(|a| a.first()).cloned(),
             _ => {
@@ -1971,36 +2029,138 @@ pub fn order_entities(
                     None => Some(cur.clone()),
                 }
             }
+        }?;
+        match &k.bracket {
+            None => Some(base),
+            Some(b) => {
+                let mut cur = &base;
+                for seg in b {
+                    cur = cur.get(seg)?;
+                }
+                Some(cur.clone())
+            }
         }
+    }
+    /// 4.23.2 datatype rank: Numbers < Strings < Object < Array < Boolean <
+    /// Time < Date < DateTime < Null (absent is handled as Option::None).
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Number(_) => 0,
+            Value::String(s) => {
+                if antares_jsonld::parse_datetime(s) {
+                    7
+                } else if is_date(s) {
+                    6
+                } else if is_time(s) {
+                    5
+                } else {
+                    1
+                }
+            }
+            Value::Object(_) => 2,
+            Value::Array(_) => 3,
+            Value::Bool(_) => 4,
+            Value::Null => 8,
+        }
+    }
+    /// 4.6.3 Date: YYYY-MM-DD, all components present.
+    fn is_date(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+    }
+    /// 4.6.3 Time: hh:mm:ss[.f*]Z.
+    fn is_time(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() >= 9
+            && b[b.len() - 1] == b'Z'
+            && b[2] == b':'
+            && b[5] == b':'
+            && b[..2].iter().all(u8::is_ascii_digit)
+            && b[3..5].iter().all(u8::is_ascii_digit)
+            && b[6..8].iter().all(u8::is_ascii_digit)
     }
     fn cmp_vals(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
             (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Greater, // absent sorts last
+            (None, Some(_)) => Ordering::Greater, // absent sorts last (4.23.2)
             (Some(_), None) => Ordering::Less,
-            (Some(x), Some(y)) => match (x.as_f64(), y.as_f64()) {
-                (Some(nx), Some(ny)) => nx.total_cmp(&ny),
-                _ => x
-                    .as_str()
-                    .unwrap_or(&x.to_string())
-                    .cmp(y.as_str().unwrap_or(&y.to_string())),
-            },
+            (Some(x), Some(y)) => {
+                let (rx, ry) = (rank(x), rank(y));
+                if rx != ry {
+                    return rx.cmp(&ry);
+                }
+                match (x, y) {
+                    (Value::Number(_), Value::Number(_)) => x
+                        .as_f64()
+                        .unwrap_or(f64::NAN)
+                        .total_cmp(&y.as_f64().unwrap_or(f64::NAN)),
+                    (Value::Bool(bx), Value::Bool(by)) => bx.cmp(by),
+                    (Value::String(sx), Value::String(sy)) => {
+                        if rx == 7 {
+                            // DateTime: canonical key so equal instants in
+                            // different 4.6.3 fraction spellings tie (4.11)
+                            crate::temporal::dt_key(sx).cmp(&crate::temporal::dt_key(sy))
+                        } else {
+                            // ponytail: codepoint order — ICU root collation
+                            // is the ledger-named upgrade
+                            sx.cmp(sy)
+                        }
+                    }
+                    _ => x.to_string().cmp(&y.to_string()),
+                }
+            }
         }
     }
     docs.sort_by(|a, b| {
+        use std::cmp::Ordering;
         for k in &keys {
-            let va = order_value(a, &k.path, ctx);
-            let vb = order_value(b, &k.path, ctx);
-            let mut o = cmp_vals(&va, &vb);
-            if k.desc {
-                o = o.reverse();
-            }
-            if o != std::cmp::Ordering::Equal {
+            let o = match k.dir {
+                Dir::Asc | Dir::Desc => {
+                    let va = order_value(a, k, ctx);
+                    let vb = order_value(b, k, ctx);
+                    let mut o = cmp_vals(&va, &vb);
+                    if k.dir == Dir::Desc {
+                        o = o.reverse();
+                    }
+                    o
+                }
+                Dir::DistAsc | Dir::DistDesc => {
+                    let refg = refg.as_ref().expect("checked above");
+                    let da =
+                        order_value(a, k, ctx).and_then(|v| crate::geo::order_distance_m(refg, &v));
+                    let db =
+                        order_value(b, k, ctx).and_then(|v| crate::geo::order_distance_m(refg, &v));
+                    match (da, db) {
+                        (Some(x), Some(y)) => {
+                            let mut o = x.total_cmp(&y);
+                            if k.dir == Dir::DistDesc {
+                                o = o.reverse();
+                            }
+                            o
+                        }
+                        // 4.23.2 distance order: GeoProperties (by distance)
+                        // rank before non-GeoProperties (by value)
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => {
+                            let va = order_value(a, k, ctx);
+                            let vb = order_value(b, k, ctx);
+                            cmp_vals(&va, &vb)
+                        }
+                    }
+                }
+            };
+            if o != Ordering::Equal {
                 return o;
             }
         }
-        std::cmp::Ordering::Equal
+        Ordering::Equal
     });
     Ok(())
 }
@@ -2455,5 +2615,122 @@ mod clause_4_17 {
             assert!(type_selection_matches(sel, &only_motor, &ctx), "{sel}");
             assert!(!type_selection_matches(sel, &only_home, &ctx), "{sel}");
         }
+    }
+}
+
+#[cfg(test)]
+mod clause_4_23 {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    const D: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+
+    fn ent(id: &str, attr: &str, v: Value) -> Value {
+        json!({"id": id, "type": ["T"],
+            format!("{D}{attr}"): [{"type": "Property", "value": v}]})
+    }
+
+    fn ids(docs: &[Value]) -> Vec<&str> {
+        docs.iter().map(|d| d["id"].as_str().unwrap()).collect()
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 4.23.2: mixed datatypes order as Numbers < Strings < Object < Array <
+    /// Boolean < Time < Date < DateTime < Null < absent.
+    #[test]
+    fn datatype_comparison_order() {
+        let ctx = Loader::new().core();
+        let mut docs = vec![
+            ent("urn:null", "x", Value::Null),
+            ent("urn:datetime", "x", json!("2020-01-01T00:00:00Z")),
+            ent("urn:bool", "x", json!(true)),
+            json!({"id": "urn:absent", "type": ["T"]}),
+            ent("urn:array", "x", json!([1, 2])),
+            ent("urn:string", "x", json!("abc")),
+            ent("urn:date", "x", json!("2020-01-01")),
+            ent("urn:object", "x", json!({"k": 1})),
+            ent("urn:number", "x", json!(5)),
+            ent("urn:time", "x", json!("12:00:00Z")),
+        ];
+        order_entities(&mut docs, "x", &params(&[]), &ctx).expect("order");
+        assert_eq!(
+            ids(&docs),
+            vec![
+                "urn:number",
+                "urn:string",
+                "urn:object",
+                "urn:array",
+                "urn:bool",
+                "urn:time",
+                "urn:date",
+                "urn:datetime",
+                "urn:null",
+                "urn:absent"
+            ]
+        );
+    }
+
+    /// 4.23.3 EXAMPLES 8/9: dist-asc / dist-desc rank by haversine distance
+    /// from the orderFrom reference; a non-GeoProperty under a dist ordering
+    /// falls back to value ordering after the geo-ranked ones (4.23.2).
+    #[test]
+    fn distance_ordering() {
+        let ctx = Loader::new().core();
+        let geo = |id: &str, lon: f64, lat: f64| {
+            json!({"id": id, "type": ["T"],
+                "https://uri.etsi.org/ngsi-ld/location": [
+                    {"type": "GeoProperty",
+                     "value": {"type": "Point", "coordinates": [lon, lat]}}]})
+        };
+        let mut docs = vec![
+            geo("urn:far", 10.0, 45.0),
+            geo("urn:near", 8.01, 40.01),
+            geo("urn:mid", 9.0, 41.0),
+        ];
+        let p = params(&[("orderFrom", "[8,40]")]);
+        order_entities(&mut docs, "location;dist-asc", &p, &ctx).expect("order");
+        assert_eq!(ids(&docs), vec!["urn:near", "urn:mid", "urn:far"]);
+        order_entities(&mut docs, "location;dist-desc", &p, &ctx).expect("order");
+        assert_eq!(ids(&docs), vec!["urn:far", "urn:mid", "urn:near"]);
+        // dist without orderFrom is a violation
+        assert!(order_entities(&mut docs, "location;dist-asc", &params(&[]), &ctx).is_err());
+        // non-GeoProperty entities sort after the geo-ranked ones
+        let mut mixed = vec![
+            ent("urn:plain", "location", json!("not-geo")),
+            geo("urn:g", 8.0, 40.0),
+        ];
+        order_entities(&mut mixed, "location;dist-asc", &p, &ctx).expect("order");
+        assert_eq!(ids(&mixed), vec!["urn:g", "urn:plain"]);
+    }
+
+    /// 4.23.3 EXAMPLE 4: a trailing [path] addresses a compound-value
+    /// subitem; EXAMPLE 3: per-key directions apply sequentially.
+    #[test]
+    fn bracket_paths_and_sequential_keys() {
+        let ctx = Loader::new().core();
+        let addr = |id: &str, city: &str| ent(id, "address", json!({"city": city}));
+        let mut docs = vec![addr("urn:b", "Berlin"), addr("urn:a", "Amsterdam")];
+        order_entities(&mut docs, "address[city]", &params(&[]), &ctx).expect("order");
+        assert_eq!(ids(&docs), vec!["urn:a", "urn:b"]);
+        // name asc, then age desc among equals (EXAMPLE 3)
+        let two = |id: &str, name: &str, age: i64| {
+            json!({"id": id, "type": ["T"],
+                format!("{D}name"): [{"type": "Property", "value": name}],
+                format!("{D}age"): [{"type": "Property", "value": age}]})
+        };
+        let mut docs = vec![
+            two("urn:x1", "same", 1),
+            two("urn:x9", "same", 9),
+            two("urn:a", "aaa", 5),
+        ];
+        order_entities(&mut docs, "name,age;desc", &params(&[]), &ctx).expect("order");
+        assert_eq!(ids(&docs), vec!["urn:a", "urn:x9", "urn:x1"]);
     }
 }
