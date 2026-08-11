@@ -138,6 +138,22 @@ pub fn expand_entity(
 
     // scope
     if let Some(v) = doc.get("scope") {
+        // 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
+        // unicodeLetter *(letter/digit/_). "urn:ngsi-ld:null" shall ONLY
+        // appear for deleted scopes — creatable solely on null-allowing
+        // (merge/patch) inputs.
+        let valid_scope = |s: &str| -> bool {
+            if s == "urn:ngsi-ld:null" {
+                return opts.allow_null;
+            }
+            let body = s.strip_prefix('/').unwrap_or(s);
+            !body.is_empty()
+                && body.split('/').all(|level| {
+                    let mut ch = level.chars();
+                    ch.next().is_some_and(char::is_alphabetic)
+                        && ch.all(|c| c.is_alphabetic() || c.is_numeric() || c == '_')
+                })
+        };
         let scopes: Vec<Value> = match v {
             Value::String(s) => vec![Value::String(s.clone())],
             Value::Array(a) => {
@@ -152,6 +168,12 @@ pub fn expand_entity(
             }
             _ => return Err(bad("scope must be a string or array of strings")),
         };
+        for s in &scopes {
+            let s = s.as_str().expect("string scope");
+            if !valid_scope(s) {
+                return Err(bad(&format!("invalid scope {s:?} (4.18 grammar)")));
+            }
+        }
         out.insert("scope".into(), Value::Array(scopes));
     }
 
@@ -1728,6 +1750,70 @@ mod bench {
         assert!(
             rate >= 5_000.0,
             "expansion rate {rate:.0}/s is below the 5k/s/core phase-0 gate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_18 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_scope(s: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "scope": s})
+    }
+
+    /// 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
+    /// unicodeLetter *(letter/number/_). EXAMPLES 1-4 must pass.
+    #[test]
+    fn scope_grammar_accepts_the_examples() {
+        for s in [
+            "/Madrid",
+            "Madrid",
+            "/Madrid/Gardens/ParqueNorte",
+            "/CompanyA/OrganizationB/UnitC",
+        ] {
+            assert!(expand(with_scope(json!(s))).is_ok(), "{s} must be valid");
+        }
+        let out = expand(with_scope(json!(["/A", "B/C_2"]))).expect("multi scope");
+        assert_eq!(out["scope"], json!(["/A", "B/C_2"]));
+    }
+
+    /// 4.18: levels start with a letter, carry only letters/digits/_, no
+    /// empty levels; "urn:ngsi-ld:null" "shall be only used and only appear
+    /// in case of deleted scopes" — never creatable.
+    #[test]
+    fn scope_grammar_rejects_malformed_values() {
+        for s in [
+            "9bad",  // level starts with a digit
+            "/a//b", // empty level
+            "a-b",   // '-' not a ScopeLevelChar
+            "/",     // no level at all
+            "",      // empty
+            "/a/b/", // trailing empty level
+            "a b",   // space
+        ] {
+            assert!(
+                expand(with_scope(json!(s))).is_err(),
+                "{s:?} must be rejected"
+            );
+        }
+        assert!(
+            expand(with_scope(json!("urn:ngsi-ld:null"))).is_err(),
+            "the NGSI-LD Null scope is only for deletions, not creation"
+        );
+        assert!(
+            expand(with_scope(json!(["/ok", "9bad"]))).is_err(),
+            "one bad entry poisons the array"
         );
     }
 }
