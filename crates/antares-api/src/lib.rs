@@ -782,6 +782,71 @@ mod tests {
         );
     }
 
+    /// 5.6.6.4: the ?type selector narrows the delete-entity target — a
+    /// mismatch means the entity is not known (404) and nothing is deleted.
+    #[tokio::test]
+    async fn clause_5_6_6_type_selector_gates_entity_delete() {
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:edel", "type": "Building"});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let del = |q: &str| {
+            Request::delete(format!("/ngsi-ld/v1/entities/urn:ngsi-ld:B:edel{q}"))
+                .body(Body::empty())
+                .expect("req")
+        };
+        let resp = app
+            .clone()
+            .oneshot(del("?type=Vehicle"))
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "wrong selector is 404"
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:B:edel")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "entity survives the gated delete"
+        );
+        let resp = app
+            .clone()
+            .oneshot(del("?type=Building"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:B:edel")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
     /// any subsequent instance of the same id is reported as an error
     /// (already exists). 5.5.11.4: in Batch Delete the first occurrence

@@ -1344,12 +1344,17 @@ pub async fn delete_entity(
         ) {
             return Ok(r);
         }
+        // 5.6.6.4: the ?type selector narrows the target — an entity of a
+        // non-matching type is "not known" for this delete.
+        let type_gate = |doc: Option<Value>| -> Option<Value> {
+            doc.filter(|d| crate::attrs::matches_type_param(d, &params, &ctx))
+        };
         if !regs.is_empty() {
-            let local_exists = st.store.get(&tenant, Kind::Entity, &id)?.is_some();
+            let local_exists = type_gate(st.store.get(&tenant, Kind::Entity, &id)?).is_some();
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
             if local_exists || !proxy_match {
-                if st.store.delete(&tenant, Kind::Entity, &id)? {
+                if local_exists && st.store.delete(&tenant, Kind::Entity, &id)? {
                     mirror_delete_entity(&st, &tenant, &id);
                     parts.push(crate::federation::Part {
                         status: 204,
@@ -1364,8 +1369,12 @@ pub async fn delete_entity(
             }
             let ctx_url = crate::federation::ctx_link_url(&headers, &ctx.source);
             for reg in &regs {
-                if reg.mode == "exclusive" && !reg.supports("deleteEntity") {
-                    parts.push(crate::federation::conflict_part("deleteEntity"));
+                // 5.6.6.4: proxy modes not supporting Delete Entity are an
+                // error of type Conflict; inclusive ones are not forwarded.
+                if !reg.supports("deleteEntity") {
+                    if reg.is_proxy() {
+                        parts.push(crate::federation::conflict_part("deleteEntity"));
+                    }
                     continue;
                 }
                 parts.push(
@@ -1389,7 +1398,9 @@ pub async fn delete_entity(
                 &tenant,
             ));
         }
-        if st.store.delete(&tenant, Kind::Entity, &id)? {
+        if type_gate(st.store.get(&tenant, Kind::Entity, &id)?).is_some()
+            && st.store.delete(&tenant, Kind::Entity, &id)?
+        {
             mirror_delete_entity(&st, &tenant, &id);
             Ok::<_, ApiError>(no_content(&tenant))
         } else {
