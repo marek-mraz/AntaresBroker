@@ -782,6 +782,36 @@ fn expand_instance(
         out.insert(iri, Value::Array(instances));
     }
 
+    // 5.2.1: "In all other cases, implementations shall raise an error of
+    // type BadRequestData if an NGSI-LD Null value is encountered" — the
+    // deletion marker is only meaningful on partial-update/merge inputs
+    // (allow_null). `json` is exempt: raw JSON is never interpreted.
+    if !opts.allow_null {
+        let nullish = |v: &Value| match v {
+            Value::String(s) => s == "urn:ngsi-ld:null",
+            Value::Array(a) => a.iter().any(|x| x.as_str() == Some("urn:ngsi-ld:null")),
+            _ => false,
+        };
+        for k in ["value", "object", "vocab", "valueList", "objectList"] {
+            if out.get(k).is_some_and(&nullish) {
+                return Err(bad(format!(
+                    "attribute {name}: the NGSI-LD Null is only allowed in \
+                     partial update or merge inputs (5.2.1)"
+                )));
+            }
+        }
+        if out
+            .get("languageMap")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.values().any(nullish))
+        {
+            return Err(bad(format!(
+                "attribute {name}: the NGSI-LD Null is only allowed in \
+                 partial update or merge inputs (5.2.1)"
+            )));
+        }
+    }
+
     Ok(Value::Object(out))
 }
 
@@ -1814,6 +1844,65 @@ mod clause_4_18 {
         assert!(
             expand(with_scope(json!(["/ok", "9bad"]))).is_err(),
             "one bad entry poisons the array"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_1 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand_create(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(), // create: allow_null = false
+        )
+    }
+
+    /// 5.2.1: outside partial-update/merge inputs, "implementations shall
+    /// raise an error of type BadRequestData if an NGSI-LD Null value is
+    /// encountered" — Property value, Relationship object, sub-attribute.
+    #[test]
+    fn ngsi_ld_null_is_rejected_outside_merge_inputs() {
+        for doc in [
+            json!({"id": "urn:x", "type": "T",
+                "p": {"type": "Property", "value": "urn:ngsi-ld:null"}}),
+            json!({"id": "urn:x", "type": "T",
+                "r": {"type": "Relationship", "object": "urn:ngsi-ld:null"}}),
+            json!({"id": "urn:x", "type": "T",
+                "p": {"type": "Property", "value": 1,
+                    "sub": {"type": "Property", "value": "urn:ngsi-ld:null"}}}),
+        ] {
+            let e = expand_create(doc).expect_err("NGSI-LD Null on create must be rejected");
+            assert!(
+                matches!(e, NgsiError::BadRequestData(_)),
+                "must be BadRequestData, got {e:?}"
+            );
+        }
+    }
+
+    /// 5.2.1: the deletion marker stays legal on null-allowing inputs
+    /// (merge/partial-update, 5.5.8/5.5.12).
+    #[test]
+    fn ngsi_ld_null_survives_on_merge_inputs() {
+        let doc = json!({"p": {"type": "Property", "value": "urn:ngsi-ld:null"}});
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                ..ExpandOpts::default()
+            },
+        )
+        .expect("merge fragment expands");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/p"][0];
+        assert!(
+            is_deletion_instance(inst),
+            "the marker must remain recognizable: {inst}"
         );
     }
 }
