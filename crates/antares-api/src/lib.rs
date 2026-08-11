@@ -2828,6 +2828,79 @@ mod clause_5_2_22 {
 }
 
 #[cfg(test)]
+mod clause_5_2_44 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    /// Table 5.2.44-1: aggrParams carries aggrMethods (comma separated list
+    /// of strings — string and string-array spellings) + aggrPeriodDuration,
+    /// honoured on the temporal operation when aggregatedValues is requested.
+    #[tokio::test]
+    async fn aggregation_params_members() {
+        let app = router(AppState::new("t5244".into()));
+        let send = |doc: serde_json::Value, qs: &'static str| {
+            let app = app.clone();
+            async move {
+                let body = doc.to_string();
+                let req = Request::post(format!("/ngsi-ld/v1/temporal/entityOperations/query{qs}"))
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req");
+                let resp = app.oneshot(req).await.expect("resp");
+                let status = resp.status();
+                let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        let with_ap = |ap: serde_json::Value| {
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                "temporalQ": {"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"},
+                "aggrParams": ap})
+        };
+        let (st, body) = send(
+            with_ap(json!({"aggrMethods": ["avg"], "aggrPeriodDuration": "PT1H"})),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "array spelling honoured: {body}");
+        assert!(!body.contains("BadRequestData"), "{body}");
+        let (st, _) = send(
+            with_ap(json!({"aggrMethods": "avg,max"})),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "string spelling honoured");
+        let (st, body) = send(
+            with_ap(json!({"aggrMethods": ["bogus"]})),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body.contains("aggrMethods"), "{body}");
+        let (st, body) = send(
+            with_ap(json!({"aggrMethods": ["avg"], "aggrPeriodDuration": "bogus"})),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(body.contains("aggrPeriodDuration"), "{body}");
+        let (st, _) = send(
+            with_ap(json!({"aggrMethods": 42})),
+            "?format=aggregatedValues",
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "aggrMethods wrong JSON type");
+        let (st, _) = send(with_ap(json!("avg")), "?format=aggregatedValues").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "aggrParams must be an object");
+    }
+}
+
+#[cfg(test)]
 mod clause_5_2_43 {
     use super::*;
     use axum::body::Body;
