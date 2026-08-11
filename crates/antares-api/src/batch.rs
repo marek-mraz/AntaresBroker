@@ -734,6 +734,13 @@ pub async fn batch_delete(
         let ids = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
             NgsiError::BadRequestData("batch delete body must be a non-empty array".into())
         })?;
+        // 5.6.10.4: a null item fails the whole request
+        if ids.iter().any(Value::is_null) {
+            return Err(NgsiError::BadRequestData(
+                "batch array must not contain null items".into(),
+            )
+            .into());
+        }
         let spec = crate::csource::CsrSpec {
             ids: Some(
                 ids.iter()
@@ -801,25 +808,47 @@ pub async fn batch_delete(
                 status: if out.errors.is_empty() { 204 } else { 207 },
                 detail: "local batch delete".into(),
             }];
+            // 5.6.10.4 support ladder: deleteBatch -> one batch forward;
+            // else per-entity Delete Entity forwards; else proxy modes get
+            // Conflict per entity and inclusive ones are not forwarded.
             for reg in &regs {
-                if reg.mode == "exclusive" && !reg.supports("deleteBatch") {
-                    parts.push(crate::federation::conflict_part("deleteBatch"));
-                    continue;
+                if reg.supports("deleteBatch") {
+                    parts.push(
+                        crate::federation::forward_part(
+                            &st,
+                            reqwest::Method::POST,
+                            format!("{}/ngsi-ld/v1/entityOperations/delete", reg.endpoint),
+                            &[],
+                            &headers,
+                            &tenant,
+                            reg,
+                            &ctx_url,
+                            Some(Value::Array(ids.clone())),
+                        )
+                        .await,
+                    );
+                } else if reg.supports("deleteEntity") {
+                    for id in ids.iter().filter_map(Value::as_str) {
+                        parts.push(
+                            crate::federation::forward_part(
+                                &st,
+                                reqwest::Method::DELETE,
+                                format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                                &[],
+                                &headers,
+                                &tenant,
+                                reg,
+                                &ctx_url,
+                                None,
+                            )
+                            .await,
+                        );
+                    }
+                } else if reg.is_proxy() {
+                    for _ in ids {
+                        parts.push(crate::federation::conflict_part("deleteBatch"));
+                    }
                 }
-                parts.push(
-                    crate::federation::forward_part(
-                        &st,
-                        reqwest::Method::POST,
-                        format!("{}/ngsi-ld/v1/entityOperations/delete", reg.endpoint),
-                        &[],
-                        &headers,
-                        &tenant,
-                        reg,
-                        &ctx_url,
-                        Some(Value::Array(ids.clone())),
-                    )
-                    .await,
-                );
             }
             return Ok(crate::federation::combine(
                 parts,

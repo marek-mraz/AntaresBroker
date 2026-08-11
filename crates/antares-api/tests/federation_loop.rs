@@ -928,3 +928,78 @@ async fn clause_5_6_9_batch_update_forwarding_fallbacks() {
         "append forwarded with overwrite disabled: {head}"
     );
 }
+
+/// 5.6.10.4 support ladder: no deleteBatch → per-entity Delete Entity
+/// forwards; a proxy source supporting neither is Conflict and never
+/// contacted. A null item in the id array fails the whole request (400).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_10_batch_delete_forwarding_fallbacks() {
+    let batch_delete = |body: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entityOperations/delete")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:bd-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // deleteEntity-only source: per-entity DELETE forward
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["deleteEntity"]), m.port).await;
+    let _ = send(&st, batch_delete(serde_json::json!([ENTITY]).to_string())).await;
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "one Delete Entity forward"
+    );
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("DELETE /ngsi-ld/v1/entities/{ENTITY}")),
+        "fallback uses the single-entity resource: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // retrieve-only proxy source: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, batch_delete(serde_json::json!([ENTITY]).to_string())).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported proxy source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+
+    // null item → whole-request 400
+    let st = state();
+    let res = send(&st, batch_delete(format!(r#"["{ENTITY}", null]"#))).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
