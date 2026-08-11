@@ -1955,3 +1955,67 @@ mod clause_5_2_4 {
         }
     }
 }
+
+#[cfg(test)]
+mod clause_5_2_5 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_p(p: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "p": p})
+    }
+
+    /// Table 5.2.5-1: value mandatory (any JSON value), datasetId a URI,
+    /// observedAt/expiresAt DateTimes, unitCode a string, sub-attributes
+    /// nest per their own tables.
+    #[test]
+    fn property_member_table_restrictions() {
+        assert!(
+            expand(with_p(json!({"type": "Property"}))).is_err(),
+            "value mandatory"
+        );
+        assert!(
+            expand(with_p(json!({"type": "Property", "value": {"k": [1, "x"]},
+            "datasetId": "urn:ds:1", "observedAt": "2020-09-09T16:40:00Z",
+            "unitCode": "CEL",
+            "sub": {"type": "Relationship", "object": "urn:o:1"}})))
+            .is_ok()
+        );
+        assert!(expand(with_p(json!({"type": "Property", "value": 1,
+            "datasetId": "not a uri"})))
+        .is_err());
+        assert!(expand(with_p(json!({"type": "Property", "value": 1,
+            "observedAt": "2020-09-09"})))
+        .is_err());
+        assert!(expand(with_p(json!({"type": "Property", "value": 1,
+            "unitCode": 7})))
+        .is_err());
+    }
+
+    /// 5.2.5: in the concise representation type="Property" is inferred from
+    /// `value` — but a GeoJSON-object value "would be interpreted as a
+    /// GeoProperty" and so infers GeoProperty, not Property.
+    #[test]
+    fn concise_inference_and_the_geojson_value_carveout() {
+        let out = expand(with_p(json!({"value": 42}))).expect("concise Property");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/p"][0];
+        assert_eq!(inst["type"], "Property");
+        let out = expand(with_p(json!({"value":
+            {"type": "Point", "coordinates": [8, 40]}})))
+        .expect("concise geo value");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/p"][0];
+        assert_eq!(
+            inst["type"], "GeoProperty",
+            "a GeoJSON object value infers GeoProperty (5.2.5/5.2.7)"
+        );
+    }
+}
