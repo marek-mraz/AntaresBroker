@@ -698,3 +698,85 @@ async fn clause_5_6_2_update_unsupported_by_registration() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "no forward without support");
 }
+
+/// 5.6.7.4: per matching CSR — batch op supported → forward the batch;
+/// only the single Create Entity op supported → forward PER-ENTITY create
+/// requests; neither supported on a proxy mode → Conflict; the source is
+/// never contacted with an operation it does not support.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_7_batch_create_forwarding_fallbacks() {
+    let batch_create = || {
+        let body = serde_json::json!([
+            {"id": "urn:ngsi-ld:Vehicle:b1", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 1}},
+            {"id": "urn:ngsi-ld:Vehicle:b2", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 2}}
+        ])
+        .to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entityOperations/create")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:batch-fb",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle"}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // createEntity-only source: the batch falls back to per-entity creates
+    let m = mock_replying("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["createEntity"]), m.port).await;
+    let res = send(&st, batch_create()).await;
+    assert!(
+        res.status().is_success() || res.status() == StatusCode::MULTI_STATUS,
+        "fallback forwarding must not fail the batch: {}",
+        res.status()
+    );
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        2,
+        "one Create Entity forward per entity"
+    );
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with("POST /ngsi-ld/v1/entities"),
+        "fallback uses the single-entity resource"
+    );
+
+    // retrieve-only proxy source: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, batch_create()).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported proxy source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}

@@ -847,6 +847,49 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// 5.6.7.4: "If the input Array is empty or contains a null value in
+    /// any of its items an error of type BadRequestData shall be raised" —
+    /// the WHOLE request fails, nothing is created.
+    #[tokio::test]
+    async fn clause_5_6_7_null_item_fails_the_whole_batch() {
+        let app = app();
+        let body = r#"[{"id":"urn:ngsi-ld:V:nb1","type":"Vehicle"}, null]"#;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/create")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // and the non-null sibling must NOT have been created
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:V:nb1")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // the empty array is 400 too
+        let resp = app()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/create")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", 2)
+                    .body(Body::from("[]"))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     /// 5.5.11.1: in Batch Create the FIRST occurrence creates the entity,
     /// any subsequent instance of the same id is reported as an error
     /// (already exists). 5.5.11.4: in Batch Delete the first occurrence

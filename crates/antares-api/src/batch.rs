@@ -45,6 +45,13 @@ async fn parse_batch(
     let items = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
         NgsiError::BadRequestData("batch body must be a non-empty JSON array".into())
     })?;
+    // 5.6.7.4 (and siblings): a null value in ANY item fails the whole
+    // request with BadRequestData — not a per-item 207 error.
+    if items.iter().any(Value::is_null) {
+        return Err(
+            NgsiError::BadRequestData("batch array must not contain null items".into()).into(),
+        );
+    }
     // I2: batch entity count cap (§16.3)
     if items.len() > crate::bounds::MAX_BATCH_ITEMS {
         return Err(NgsiError::BadRequestData(format!(
@@ -533,11 +540,15 @@ async fn batch_write(
             },
             detail: "local batch".into(),
         }];
+        // 5.6.7.4 (and siblings): per CSR — batch op supported → one batch
+        // forward; else (create only) the single Create Entity op supported
+        // → one forward PER ENTITY; else proxy modes get a Conflict error
+        // per entity and inclusive ones are not forwarded at all.
+        let single_op_fallback = match mode {
+            BatchMode::Create => Some("createEntity"),
+            _ => None,
+        };
         for reg in &fed_regs {
-            if reg.mode == "exclusive" && !reg.supports(op) {
-                parts.push(crate::federation::conflict_part(op));
-                continue;
-            }
             let arr: Vec<Value> = fwd_items
                 .iter()
                 .filter_map(|(o, c)| crate::federation::reduce_to_scope(o, reg, c))
@@ -545,20 +556,44 @@ async fn batch_write(
             if arr.is_empty() {
                 continue;
             }
-            parts.push(
-                crate::federation::forward_part(
-                    st,
-                    reqwest::Method::POST,
-                    format!("{}/ngsi-ld/v1/entityOperations/{res_path}", reg.endpoint),
-                    &query,
-                    headers,
-                    &tenant,
-                    reg,
-                    &ctx_url,
-                    Some(Value::Array(arr)),
-                )
-                .await,
-            );
+            if reg.supports(op) {
+                parts.push(
+                    crate::federation::forward_part(
+                        st,
+                        reqwest::Method::POST,
+                        format!("{}/ngsi-ld/v1/entityOperations/{res_path}", reg.endpoint),
+                        &query,
+                        headers,
+                        &tenant,
+                        reg,
+                        &ctx_url,
+                        Some(Value::Array(arr)),
+                    )
+                    .await,
+                );
+            } else if let Some(single) = single_op_fallback.filter(|single| reg.supports(single)) {
+                let _ = single;
+                for ent in arr {
+                    parts.push(
+                        crate::federation::forward_part(
+                            st,
+                            reqwest::Method::POST,
+                            format!("{}/ngsi-ld/v1/entities", reg.endpoint),
+                            &query,
+                            headers,
+                            &tenant,
+                            reg,
+                            &ctx_url,
+                            Some(ent),
+                        )
+                        .await,
+                    );
+                }
+            } else if reg.is_proxy() {
+                for _ in &arr {
+                    parts.push(crate::federation::conflict_part(op));
+                }
+            }
         }
         return Ok(crate::federation::combine(
             parts,
