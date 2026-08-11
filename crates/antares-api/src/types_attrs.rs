@@ -98,8 +98,9 @@ fn attr_stats(
 
 /// 4.5.10 Entity Type List Representation, members per Table 5.2.24-1
 /// (5.2.24 EntityTypeList): id a valid URI, type equal to "EntityTypeList",
-/// typeList the entity type names — 4.5.11 EntityType detail objects when
-/// details=true (5.7.5/5.7.6).
+/// typeList the entity type names — with details=true the 4.5.11 detailed
+/// list of Table 5.2.25-1 EntityType objects (id = type FQN, type
+/// "EntityType", attributeNames, typeName) (5.7.5/5.7.6).
 pub async fn entity_types(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -140,9 +141,11 @@ pub async fn entity_types(
 
 // ---------- GET /types/{type} (5.7.7) ----------
 
-/// 4.5.12 Entity Type Information Representation: id = the entity type URI,
-/// fixed type "EntityTypeInfo", typeName (short name under the @context);
-/// entityCount and attributeDetails are the 5.2.26 detail members (5.7.7).
+/// 4.5.12 Entity Type Information Representation, members per Table
+/// 5.2.26-1 (5.2.26 EntityTypeInfo): id = the entity type FQN, fixed type
+/// "EntityTypeInfo", typeName (short name under the @context), entityCount
+/// an unsigned integer, attributeDetails Attribute[] restricted to the
+/// elements id/type/attributeName/attributeTypes (5.7.7).
 pub async fn entity_type_info(
     State(st): State<AppState>,
     Path(type_name): Path<String>,
@@ -186,10 +189,11 @@ pub async fn entity_type_info(
 
 // ---------- GET /attributes (5.7.8/5.7.9) ----------
 
-/// 4.5.13 Attribute List Representation: id (URI), fixed type
-/// "AttributeList", attributeList of attribute names — 4.5.14 detailed
-/// Attribute objects (id = attribute URI, fixed type "Attribute",
-/// attributeName, typeNames) when details=true.
+/// 4.5.13 Attribute List Representation, members per Table 5.2.27-1
+/// (5.2.27 AttributeList): id a valid URI, type "AttributeList",
+/// attributeList of attribute names — with details=true the 4.5.14 detailed
+/// list of Table 5.2.28-1 Attribute objects (id = attribute URI, type
+/// "Attribute", attributeName, typeNames).
 pub async fn attributes(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
