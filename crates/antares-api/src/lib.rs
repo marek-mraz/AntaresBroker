@@ -287,6 +287,13 @@ pub fn router(state: AppState) -> Router {
                     state.clone(),
                     bounds::bounds_layer,
                 ))
+                // 5.5.10: non-create operations targeting a non-existing
+                // Tenant answer NonexistentTenant 404; create operations
+                // implicitly create the Tenant.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    tenant_exists_layer,
+                ))
                 // axum's built-in extractor limit defaults to 2 MiB and fires
                 // BEFORE the bounds wall's documented cap — a 3 MiB body was
                 // 413'd although /q/health advertises maxBodyBytes = 4 MiB
@@ -302,6 +309,60 @@ pub fn router(state: AppState) -> Router {
         // K12: outermost so the duration covers the full stack.
         .layer(axum::middleware::from_fn(http_metrics_layer))
         .with_state(state)
+}
+
+/// 5.5.10 Multi-Tenant Behaviour: Tenants are created implicitly by create
+/// operations (Create Entity 5.6.1, Batch Create/Upsert 5.6.7/5.6.8, Create
+/// Temporal 5.6.11, Create Subscription 5.8.1, Register Context Source
+/// 5.9.2, Create CSource Subscription 5.11.2); "all other NGSI-LD
+/// operations … that target a non-existing Tenant should raise an error of
+/// type NonexistentTenant". Malformed tenant headers pass through — the
+/// handler's own parse answers 400.
+async fn tenant_exists_layer(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().trim_start_matches(API_ROOT);
+    let implicit_create = req.method() == axum::http::Method::POST
+        && matches!(
+            path,
+            "/entities"
+                | "/entityOperations/create"
+                | "/entityOperations/upsert"
+                | "/temporal/entities"
+                | "/subscriptions"
+                | "/csourceRegistrations"
+                | "/csourceSubscriptions"
+        );
+    // tenant-independent resources: broker identity (6.33) answers for any
+    // tenant (the per-tenant alias exists before any data does), and hosted
+    // @contexts are stored tenant-less (5.13).
+    let tenant_free = path.starts_with("/info/") || path.starts_with("/jsonldContexts");
+    if !implicit_create && !tenant_free {
+        if let Some(t) = req
+            .headers()
+            .get("NGSILD-Tenant")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| antares_model::TenantId::new(s).ok())
+        {
+            match st.store.tenant_exists(&t) {
+                Ok(false) => {
+                    let mut resp = crate::negotiate::ApiError::from(NgsiError::NonexistentTenant(
+                        format!("tenant {} does not exist", t.as_str()),
+                    ))
+                    .into_response();
+                    // 6.3.14: a request-supplied NGSILD-Tenant SHALL be
+                    // present in the response — error responses included.
+                    crate::negotiate::echo_tenant(&t, &mut resp);
+                    return resp;
+                }
+                Err(e) => return crate::negotiate::ApiError::from(e).into_response(),
+                Ok(true) => {}
+            }
+        }
+    }
+    next.run(req).await
 }
 
 /// K12: /q/metrics — Prometheus exposition, rendered by the closure the
@@ -1189,6 +1250,8 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_header_is_echoed_and_validated() {
+        // 5.5.10: an unknown tenant on a non-create op is NonexistentTenant
+        // 404 — and 6.3.14 still requires the tenant header on the response.
         let resp = app()
             .oneshot(
                 Request::get("/ngsi-ld/v1/entities?type=Building")
@@ -1198,6 +1261,40 @@ mod tests {
             )
             .await
             .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()
+                .get("NGSILD-Tenant")
+                .map(|v| v.to_str().expect("ascii")),
+            Some("city-01")
+        );
+        // once the tenant exists (implicit creation), the query echoes on 200
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:t1", "type": "Building"});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .header("NGSILD-Tenant", "city-01")
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building")
+                    .header("NGSILD-Tenant", "city-01")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers()
                 .get("NGSILD-Tenant")

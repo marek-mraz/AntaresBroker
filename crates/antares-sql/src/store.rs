@@ -446,6 +446,24 @@ impl Store {
     }
 
     /// Tenants that hold any subscriptions (interval-firing scan).
+    /// 5.5.10: a Tenant exists once any create operation implicitly created
+    /// it (any resource kind was ever written under it).
+    pub fn tenant_exists(&self, tenant: &TenantId) -> bool {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        [
+            Kind::Entity,
+            Kind::Subscription,
+            Kind::Registration,
+            Kind::CSourceSubscription,
+            Kind::Temporal,
+        ]
+        .iter()
+        .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
+    }
+
     pub fn subscription_tenants(&self) -> Vec<String> {
         let inner = self
             .inner

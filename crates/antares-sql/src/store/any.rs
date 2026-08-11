@@ -630,6 +630,26 @@ impl AnyStore {
         }
     }
 
+    /// 5.5.10: does the Tenant exist? The default Tenant "implicitly exists";
+    /// others exist once implicitly created by a create operation.
+    pub fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        if tenant.as_str() == TenantId::DEFAULT {
+            return Ok(true);
+        }
+        match self {
+            AnyStore::Mem(s) => Ok(s.tenant_exists(tenant)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                let row =
+                    sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1")
+                        .fetch_optional(p.docs.pool())
+                        .await
+                        .map_err(db)?;
+                Ok(row.is_some())
+            }),
+        }
+    }
+
     pub fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.subscription_tenants()),

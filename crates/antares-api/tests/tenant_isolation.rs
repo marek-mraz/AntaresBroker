@@ -229,3 +229,49 @@ async fn store_state_is_tenant_keyed() {
         "unknown tenant must not see another tenant's types: {status} {body}"
     );
 }
+
+/// 5.5.10: creates implicitly create the Tenant; "All other NGSI-LD
+/// operations … that target a non-existing Tenant should raise an error of
+/// type NonexistentTenant" (404).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_10_nonexistent_tenant_on_non_create_ops() {
+    let st = AppState::new("test".into());
+    // query / retrieve / discovery / subscription list on an unknown tenant
+    for (method, path) in [
+        ("GET", "/ngsi-ld/v1/entities?type=T"),
+        ("GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:X:1"),
+        ("GET", "/ngsi-ld/v1/types"),
+        ("GET", "/ngsi-ld/v1/subscriptions"),
+        ("DELETE", "/ngsi-ld/v1/entities/urn:ngsi-ld:X:1"),
+    ] {
+        let (status, body) = send(&st, method, path, Some("tp5510-ghost"), None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{method} {path} on unknown tenant: {body}"
+        );
+        assert!(
+            body.contains("NonexistentTenant"),
+            "{method} {path}: expected NonexistentTenant, got {body}"
+        );
+    }
+    // a create implicitly creates the tenant …
+    create_entity(&st, "tp5510-ghost", "urn:ngsi-ld:X:seed").await;
+    // … and the same read now succeeds (no NonexistentTenant anymore)
+    let (status, body) = send(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Isolation",
+        Some("tp5510-ghost"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.contains("NonexistentTenant"),
+        "tenant exists after implicit creation: {body}"
+    );
+    // the default tenant always exists — a tenant-less query is never 404
+    let (status, _) = send(&st, "GET", "/ngsi-ld/v1/entities?type=T", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+}
