@@ -753,7 +753,18 @@ fn expand_instance(
         let s = vt
             .as_str()
             .ok_or_else(|| bad(format!("attribute {name}: valueType must be a string")))?;
-        out.insert("valueType".into(), Value::String(ctx.expand_key(s)));
+        // Table 5.2.32-1: on a LanguageProperty valueType "shall be equal
+        // to langString" (the rdf:langString datatype) — kept literal.
+        if attr_type == "LanguageProperty" {
+            if s != "langString" {
+                return Err(bad(format!(
+                    "attribute {name}: valueType shall be \"langString\" on a LanguageProperty"
+                )));
+            }
+            out.insert("valueType".into(), vt.clone());
+        } else {
+            out.insert("valueType".into(), Value::String(ctx.expand_key(s)));
+        }
     }
     if let Some(l) = obj.get("lang") {
         out.insert("lang".into(), l.clone());
@@ -2079,6 +2090,73 @@ mod clause_5_2_6 {
         let out = expand(with_r(json!({"object": "urn:o:1"}))).expect("concise");
         let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/r"][0];
         assert_eq!(inst["type"], "Relationship");
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_32 {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    fn expand(doc: serde_json::Value) -> Result<Value, NgsiError> {
+        expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts::default(),
+        )
+    }
+
+    fn with_lp(lp: serde_json::Value) -> serde_json::Value {
+        json!({"id": "urn:x", "type": "T", "greeting": lp})
+    }
+
+    /// Table 5.2.32-1: languageMap keys are non-empty language tags mapping
+    /// to strings or string arrays; valueType, when present, shall be equal
+    /// to "langString"; datasetId is a URI; observedAt a DateTime.
+    #[test]
+    fn language_property_member_table_restrictions() {
+        let ok = expand(with_lp(json!({"type": "LanguageProperty",
+            "languageMap": {"en": "hello", "sk": ["ahoj", "servus"]},
+            "valueType": "langString"})))
+        .expect("conformant LanguageProperty");
+        let attr = &ok["https://uri.etsi.org/ngsi-ld/default-context/greeting"][0];
+        assert_eq!(attr["valueType"], "langString");
+        assert!(attr.get("value").is_none(), "languageMap, not value");
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty",
+                "languageMap": {"en": "x"}, "valueType": "xsd:string"})))
+            .is_err(),
+            "valueType shall be equal to langString"
+        );
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty",
+                "languageMap": {"en": 5}})))
+            .is_err(),
+            "languageMap values are strings or string arrays"
+        );
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty",
+                "languageMap": {"": "x"}})))
+            .is_err(),
+            "empty language tag"
+        );
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty",
+                "languageMap": {"en": ["a", 5]}})))
+            .is_err(),
+            "array entries must all be strings"
+        );
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty"}))).is_err(),
+            "languageMap is mandatory"
+        );
+        assert!(
+            expand(with_lp(json!({"type": "LanguageProperty",
+                "languageMap": {"en": "x"}, "observedAt": "not-a-date"})))
+            .is_err(),
+            "observedAt must be a DateTime"
+        );
     }
 }
 
