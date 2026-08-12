@@ -10,6 +10,7 @@ pub mod contexts;
 pub mod csource;
 pub mod egress;
 pub mod entities;
+pub mod entity_maps;
 pub mod federation;
 pub mod geo;
 pub mod negotiate;
@@ -193,6 +194,22 @@ pub fn router(state: AppState) -> Router {
         .route("/entityOperations/delete", post(batch::batch_delete))
         .route("/entityOperations/merge", post(batch::batch_merge))
         .route("/entityOperations/query", post(batch::batch_query))
+        // EntityMaps (5.14; 6.32/6.34/6.35)
+        .route(
+            "/entityMaps",
+            get(entity_maps::create_entity_map).post(entity_maps::create_entity_map_post),
+        )
+        .route(
+            "/entityMaps/{id}",
+            get(entity_maps::retrieve_entity_map)
+                .patch(entity_maps::update_entity_map)
+                .delete(entity_maps::delete_entity_map),
+        )
+        .route(
+            "/temporal/entityMaps",
+            get(entity_maps::create_temporal_entity_map)
+                .post(entity_maps::create_temporal_entity_map_post),
+        )
         // subscriptions (6.10/6.11)
         .route(
             "/subscriptions",

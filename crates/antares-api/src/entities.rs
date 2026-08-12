@@ -794,10 +794,87 @@ pub async fn query_entities(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    match query_entities_inner(&st, &params, &headers).await {
+    match query_entities_outer(&st, params, &headers).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
+}
+
+/// 5.5.14 / 5.5.9.3: a query referencing an EntityMap (NGSILD-EntityMap
+/// request header, 6.4.3.2-2) is fixed to the map's Entities; the filters
+/// are re-checked at processing time and local entries that no longer match
+/// are removed from the map by its creator. An expired or unknown map means
+/// "no inference can be made … a new one shall be created".
+async fn query_entities_outer(
+    st: &AppState,
+    mut params: HashMap<String, String>,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let Some(map_ref) = headers
+        .get("NGSILD-EntityMap")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    else {
+        return query_entities_inner(st, &params, headers).await;
+    };
+    let tenant = tenant_from(headers)?;
+    let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
+    let Some(mut map) = crate::entity_maps::map_get(st, &tenant, &map_id) else {
+        // 5.5.14: expired or inaccessible → a new EntityMap is created
+        params.insert("entityMap".into(), "true".into());
+        return query_entities_inner(st, &params, headers).await;
+    };
+    let ctx = request_context(&st.loader, headers).await?;
+    // a request that references a live map does not create a new one
+    params.remove("entityMap");
+    // 5.5.14: "The creating Context Source shall remove Entities from the
+    // EntityMap that do not match the filters of the query at the time of
+    // processing" — judgeable locally only for "@none" (local) entries.
+    let matching: std::collections::HashSet<String> = {
+        let mut p = params.clone();
+        p.remove("limit");
+        p.remove("offset");
+        filter_entities(st, &tenant, &p, &ctx)?
+            .iter()
+            .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    };
+    if let Some(emap) = map.get_mut("entityMap").and_then(Value::as_object_mut) {
+        let stale: Vec<String> = emap
+            .iter()
+            .filter(|(eid, srcs)| {
+                srcs.as_array()
+                    .is_some_and(|a| a.len() == 1 && a[0] == "@none")
+                    && !matching.contains(*eid)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            emap.remove(&k);
+        }
+    }
+    crate::entity_maps::map_put(st, &tenant, map.clone());
+    // fix the query to the Entities listed in the map (5.5.14)
+    let ids: Vec<&str> = map["entityMap"]
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    params.insert(
+        "id".into(),
+        if ids.is_empty() {
+            // an empty map fixes the result set to nothing
+            "urn:ngsi-ld:entitymap:empty".to_owned()
+        } else {
+            ids.join(",")
+        },
+    );
+    let mut resp = query_entities_inner(st, &params, headers).await?;
+    // "The location of the EntityMap used in the query operation is
+    // returned in the response" (6.4.3.2-2)
+    if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{map_id}").parse() {
+        resp.headers_mut().insert("NGSILD-EntityMap", v);
+    }
+    Ok(resp)
 }
 
 pub const QUERY_PARAMS: &[&str] = &[
@@ -832,6 +909,8 @@ pub const QUERY_PARAMS: &[&str] = &[
     "orderBy",
     "orderFrom",
     "orderGeometry",
+    "entityMapLifetime",
+    "splitEntities",
 ];
 
 async fn query_entities_inner(
@@ -847,20 +926,7 @@ async fn query_entities_inner(
     // 5.7.2.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
     // list / q must include "at least one non-system Attribute" to qualify.
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
-    let attrs_qualify = params.get("attrs").is_some_and(|a| {
-        a.split(',')
-            .any(|n| antares_ql::is_non_system_attr(n.trim()))
-    });
-    let q_qualifies = q_ast.as_ref().is_some_and(|ast| {
-        ast.attribute_paths()
-            .iter()
-            .any(|h| antares_ql::is_non_system_attr(h))
-    });
-    let has_filter = params.contains_key("type")
-        || attrs_qualify
-        || q_qualifies
-        || params.contains_key("georel")
-        || params.get("local").map(String::as_str) == Some("true");
+    let has_filter = qualifies_non_wide(params, q_ast.as_ref());
     // 5.7.2.4 validation bullets (p.201), in the spec's own order.
     if params.get("type").map(String::as_str) == Some("*")
         && params.get("local").map(String::as_str) == Some("false")
@@ -1038,7 +1104,41 @@ async fn query_entities_inner(
         }
     }
     attach_warnings(&mut resp, &warnings);
+    // 6.4.3.2: entityMap=true — the EntityMap for this query is (re)created;
+    // the response carries NGSILD-EntityMap and 201 Created.
+    if params.get("entityMap").map(String::as_str) == Some("true") {
+        let map = crate::entity_maps::build_query_map(st, &tenant, headers, &ctx, params).await?;
+        *resp.status_mut() = StatusCode::CREATED;
+        if let Some(id) = map.get("id").and_then(Value::as_str) {
+            if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
+                resp.headers_mut().insert("NGSILD-EntityMap", v);
+            }
+        }
+    }
     Ok(resp)
+}
+
+/// 5.7.2.4 / 5.7.4.4 / 5.14.4.4 a-e: a query qualifies (is not "too wide")
+/// only with a type selector, an attrs list or q naming at least one
+/// non-system Attribute, a geoquery, or local scope.
+pub(crate) fn qualifies_non_wide(
+    params: &HashMap<String, String>,
+    q_ast: Option<&antares_ql::QNode>,
+) -> bool {
+    let attrs_qualify = params.get("attrs").is_some_and(|a| {
+        a.split(',')
+            .any(|n| antares_ql::is_non_system_attr(n.trim()))
+    });
+    let q_qualifies = q_ast.is_some_and(|ast| {
+        ast.attribute_paths()
+            .iter()
+            .any(|h| antares_ql::is_non_system_attr(h))
+    });
+    params.contains_key("type")
+        || attrs_qualify
+        || q_qualifies
+        || params.contains_key("georel")
+        || params.get("local").map(String::as_str) == Some("true")
 }
 
 /// Shared entity filtering for query + purge.

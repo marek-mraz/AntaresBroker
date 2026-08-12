@@ -1209,6 +1209,79 @@ pub async fn fed_query(
     out
 }
 
+/// 5.14.4.4 / 5.14.5.4: forward EntityMap creation to matching registrations
+/// that support `op` (createEntityMapQueryEntity / …QueryTemporal, 4.20);
+/// with split entities in play the value/geo/scope filters are removed
+/// before forwarding. Returns (registration id, returned EntityMap) pairs —
+/// the caller merges them into the local map's entityMap/linkedMaps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fed_entity_maps(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &Context,
+    params: &HashMap<String, String>,
+    split: bool,
+    op: &str,
+    path: &str,
+) -> Vec<(String, Value)> {
+    let spec = query_spec(ctx, params);
+    let ctx_url = ctx_link_url(headers, &ctx.source);
+    let mut out = Vec::new();
+    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        if !reg.supports(op) {
+            continue;
+        }
+        let mut query: Vec<(String, String)> = Vec::new();
+        for k in [
+            "id",
+            "idPattern",
+            "type",
+            "timerel",
+            "timeAt",
+            "endTimeAt",
+            "timeproperty",
+            "lastN",
+        ] {
+            if let Some(v) = params.get(k) {
+                query.push((k.to_owned(), v.clone()));
+            }
+        }
+        if !split {
+            for k in [
+                "attrs",
+                "q",
+                "georel",
+                "geometry",
+                "coordinates",
+                "geoproperty",
+                "scopeQ",
+                "lang",
+            ] {
+                if let Some(v) = params.get(k) {
+                    query.push((k.to_owned(), v.clone()));
+                }
+            }
+        }
+        let (status, body) = forward(
+            st,
+            reqwest::Method::GET,
+            format!("{}/ngsi-ld/v1/{path}", reg.endpoint),
+            &query,
+            headers,
+            tenant,
+            &reg,
+            &ctx_url,
+            None,
+        )
+        .await;
+        if (200..300).contains(&status) && body.get("entityMap").is_some() {
+            out.push((reg.reg_id.clone(), body));
+        }
+    }
+    out
+}
+
 /// 5.7.4.4: forward the temporal query to matching registrations that
 /// support the queryTemporal operation; registrations without it are not
 /// contacted. Returns (auxiliary, expanded doc) pairs.

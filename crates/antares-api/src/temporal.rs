@@ -1296,7 +1296,7 @@ pub async fn query_temporal(
     }
 }
 
-async fn query_temporal_inner(
+pub(crate) async fn query_temporal_inner(
     st: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
@@ -1337,6 +1337,8 @@ async fn query_temporal_inner(
             "orderBy",
             "orderFrom",
             "orderGeometry",
+            "entityMapLifetime",
+            "splitEntities",
         ],
     )?;
     let accept = parse_accept(headers)?;
@@ -1685,6 +1687,18 @@ async fn query_temporal_inner(
     for l in links {
         if let Ok(v) = l.parse() {
             resp.headers_mut().append(axum::http::header::LINK, v);
+        }
+    }
+    // 6.18.3.2: entityMap=true — the temporal EntityMap for this query is
+    // (re)created; the response carries NGSILD-EntityMap and 201 Created.
+    if params.get("entityMap").map(String::as_str) == Some("true") {
+        let map =
+            crate::entity_maps::build_temporal_map(st, &tenant, headers, &ctx, params).await?;
+        *resp.status_mut() = StatusCode::CREATED;
+        if let Some(id) = map.get("id").and_then(Value::as_str) {
+            if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
+                resp.headers_mut().insert("NGSILD-EntityMap", v);
+            }
         }
     }
     Ok(resp)

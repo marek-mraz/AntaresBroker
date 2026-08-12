@@ -75,6 +75,20 @@ pub struct AppState {
     /// the broker (the only crate that knows an exporter exists, §9.2);
     /// `None` = 404, the facade calls elsewhere stay no-ops.
     pub metrics_render: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    /// 5.14 EntityMaps: tenant → map id → 5.2.39 document. 5.14.1.1 allows
+    /// storage "in the broker's internal storage, or memory" — kept in
+    /// memory, lazily expiry-pruned, per-tenant bounded.
+    /// ponytail: per-process (HA pods do not share maps); promote to the pg
+    /// entity_maps row store if cross-instance reuse becomes a requirement.
+    #[allow(clippy::type_complexity)]
+    pub entity_maps: Arc<
+        std::sync::RwLock<
+            std::collections::HashMap<
+                String,
+                std::collections::BTreeMap<String, serde_json::Value>,
+            >,
+        >,
+    >,
     /// True only under bus=nats (set by the broker's wiring): multiple
     /// processes share the store, so interval-subscription firings must be
     /// claimed single-winner (§3.1.6). bus=local keeps the direct path — a
@@ -150,6 +164,7 @@ impl AppState {
             reg_mirror: None,
             record_locally: true,
             metrics_render: None,
+            entity_maps: Arc::default(),
             nats: false,
         }
     }
