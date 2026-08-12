@@ -353,13 +353,18 @@ fn ttl_from_headers(
         if cc.contains("no-store") || cc.contains("no-cache") {
             return Some(std::time::Duration::ZERO);
         }
-        if let Some(v) = cc
-            .split(',')
-            .filter_map(|d| d.trim().strip_prefix("max-age="))
-            .next()
-        {
-            if let Ok(secs) = v.trim().parse::<u64>() {
-                return Some(std::time::Duration::from_secs(secs));
+        // 6.3.16: "a max-age or s-maxage response directive"; the broker is a
+        // shared cache, so s-maxage takes precedence when both are present
+        // (RFC 7234 5.2.2.9).
+        for prefix in ["s-maxage=", "max-age="] {
+            if let Some(v) = cc
+                .split(',')
+                .filter_map(|d| d.trim().strip_prefix(prefix))
+                .next()
+            {
+                if let Ok(secs) = v.trim().parse::<u64>() {
+                    return Some(std::time::Duration::from_secs(secs));
+                }
             }
         }
     }
@@ -1080,6 +1085,16 @@ mod tests {
         assert_eq!(
             ttl_from_headers(Some("no-store"), None),
             Some(std::time::Duration::ZERO)
+        );
+        // 6.3.16 names "a max-age or s-maxage response directive"; the broker
+        // is a shared cache, so s-maxage wins over max-age when both appear.
+        assert_eq!(
+            ttl_from_headers(Some("s-maxage=120"), None),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(
+            ttl_from_headers(Some("max-age=60, s-maxage=120"), None),
+            Some(std::time::Duration::from_secs(120))
         );
         assert_eq!(ttl_from_headers(None, None), None);
         let past = ttl_from_headers(None, Some("Tue, 01 Jan 2019 00:00:00 GMT"));
