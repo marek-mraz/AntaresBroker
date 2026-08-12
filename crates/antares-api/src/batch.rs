@@ -146,6 +146,7 @@ fn ngsi_of(e: ApiError) -> NgsiError {
     match e {
         ApiError::Ngsi(n) => n,
         ApiError::Bare(code) => NgsiError::BadRequestData(format!("HTTP {code}")),
+        ApiError::NotAcceptable(_) => NgsiError::BadRequestData("HTTP 406".into()),
     }
 }
 

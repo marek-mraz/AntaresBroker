@@ -62,6 +62,8 @@ pub(crate) fn percent_decode(input: &[u8]) -> String {
 pub enum ApiError {
     Ngsi(NgsiError),
     Bare(StatusCode),
+    /// 6.3.4: 406 whose body lists the available representations.
+    NotAcceptable(&'static [&'static str]),
 }
 
 impl From<NgsiError> for ApiError {
@@ -90,6 +92,16 @@ impl IntoResponse for ApiError {
                     .into_response()
             }
             Self::Bare(code) => code.into_response(),
+            // 6.3.4: "the body of the message shall contain the list of the
+            // available representations of the resources"
+            Self::NotAcceptable(available) => (
+                StatusCode::NOT_ACCEPTABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                axum::Json(serde_json::json!({
+                    "availableRepresentations": available,
+                })),
+            )
+                .into_response(),
         }
     }
 }
@@ -163,7 +175,11 @@ pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
     }
     match best {
         Some((q, _, _, kind)) if q > 0.0 => Ok(kind),
-        _ => Err(ApiError::Bare(StatusCode::NOT_ACCEPTABLE)),
+        _ => Err(ApiError::NotAcceptable(&[
+            "application/json",
+            "application/ld+json",
+            "application/geo+json",
+        ])),
     }
 }
 
@@ -171,7 +187,10 @@ pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
 /// Entities: application/geo+json ⇒ 406 (6.3.15).
 pub fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
     match parse_accept_geo(headers)? {
-        Accept::GeoJson => Err(ApiError::Bare(StatusCode::NOT_ACCEPTABLE)),
+        Accept::GeoJson => Err(ApiError::NotAcceptable(&[
+            "application/json",
+            "application/ld+json",
+        ])),
         other => Ok(other),
     }
 }
@@ -590,6 +609,44 @@ mod clause_5_5_3 {
             ctx.expand_key("observedAt"),
             "https://uri.etsi.org/ngsi-ld/observedAt"
         );
+    }
+
+    /// 6.3.4: "Not Acceptable Media Type … shall result in a 406 HTTP status
+    /// code and the body of the message shall contain the list of the
+    /// available representations of the resources."
+    #[tokio::test]
+    async fn clause_6_3_4_not_acceptable_body_lists_representations() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            axum::http::HeaderValue::from_static("text/html"),
+        );
+        let err = parse_accept(&h).expect_err("text/html is not acceptable");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("application/json"), "{body}");
+        assert!(body.contains("application/ld+json"), "{body}");
+
+        // geo+json on a non-consumption operation: 406 with the two
+        // non-geo representations listed
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            axum::http::HeaderValue::from_static("application/geo+json"),
+        );
+        let err = parse_accept(&h).expect_err("geo is not acceptable here");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("application/ld+json"), "{body}");
+        assert!(!body.contains("application/geo+json"), "{body}");
     }
 
     /// 5.5.3: error bodies are RFC 7807 objects with at least type (5.5.2
