@@ -108,6 +108,19 @@ pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Rep
     Ok(r)
 }
 
+/// Maximum `{…}` selection depth of a projection tree — the number of
+/// Linked Entity hops it implies (5.7.1.4: must not exceed joinLevel).
+pub fn proj_depth(nodes: &[ProjNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match &n.children {
+            Some(c) => 1 + proj_depth(c),
+            None => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 const ENTITY_META: &[&str] = &[
     "id",
     "type",

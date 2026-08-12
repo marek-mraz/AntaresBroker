@@ -1980,6 +1980,105 @@ mod tests {
         );
     }
 
+    // ---- 5.7.1.4 Retrieve Entity ------------------------------------------
+
+    async fn get_status(app: &Router, uri: &str, accept: Option<&str>) -> StatusCode {
+        let mut req = Request::get(uri);
+        if let Some(a) = accept {
+            req = req.header("Accept", a);
+        }
+        app.clone()
+            .oneshot(req.body(Body::empty()).expect("req"))
+            .await
+            .expect("resp")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn retrieve_honors_the_type_selector() {
+        // 5.7.1.4: ResourceNotFound when no entity "whose id (URI), and
+        // where specified type, is equivalent" exists — ?type narrows the
+        // retrieve target (4.17); a matching or wildcard selector passes.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:rt1", "Building").await;
+        let uri = "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:rt1";
+        assert_eq!(
+            get_status(&app, &format!("{uri}?type=Vehicle"), None).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_status(&app, &format!("{uri}?type=Building"), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_status(&app, &format!("{uri}?type=%2A"), None).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_geometry_property_needs_geojson_accept() {
+        // 5.7.1.4: "If geometryProperty parameter is present and the Accept
+        // Header is not set to application/geo+json ... BadRequestData".
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:rg1", "Building").await;
+        let uri = "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:rg1?geometryProperty=location";
+        assert_eq!(get_status(&app, uri, None).await, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            get_status(&app, uri, Some("application/json")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get_status(&app, uri, Some("application/geo+json")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_linked_projection_requires_join_and_depth() {
+        // 5.7.1.4: projection attributes that "indicate the use of Linked
+        // Entity retrieval" without join, or that project deeper than
+        // joinLevel, are BadRequestData.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:rl1", "Building").await;
+        let uri = "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:rl1";
+        // {…} selection without join
+        assert_eq!(
+            get_status(&app, &format!("{uri}?pick=owner%7Bname%7D"), None).await,
+            StatusCode::BAD_REQUEST
+        );
+        // join=@none is "Linked Entity retrieval not specified"
+        assert_eq!(
+            get_status(
+                &app,
+                &format!("{uri}?pick=owner%7Bname%7D&join=%40none"),
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // depth 2 projection over joinLevel=1
+        assert_eq!(
+            get_status(
+                &app,
+                &format!("{uri}?pick=owner%7Bworks%7Bname%7D%7D&join=inline&joinLevel=1"),
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // well-formed: depth 1 within joinLevel=1, plain member kept
+        assert_eq!(
+            get_status(
+                &app,
+                &format!("{uri}?pick=id,type,name,owner%7Bname%7D&join=inline&joinLevel=1"),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

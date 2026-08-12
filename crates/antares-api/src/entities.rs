@@ -370,6 +370,7 @@ async fn retrieve_entity_inner(
             "options",
             "format",
             "lang",
+            "type",
             "geometryProperty",
             "datasetId",
             "containedBy",
@@ -380,9 +381,49 @@ async fn retrieve_entity_inner(
         ],
     )?;
     let accept = parse_accept_geo(headers)?;
+    // 5.7.1.4: geometryProperty is only meaningful for the GeoJSON
+    // representation — any other Accept is BadRequestData
+    if params.contains_key("geometryProperty") && accept != Accept::GeoJson {
+        return Err(NgsiError::BadRequestData(
+            "geometryProperty requires Accept: application/geo+json (5.7.1.4)".into(),
+        )
+        .into());
+    }
     let ctx = request_context(&st.loader, headers).await?;
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
+    // 5.7.1.4: a `{…}` projection selects into Linked Entities — it must be
+    // requested via join, and may not select deeper than joinLevel
+    let proj_depth = repr
+        .pick
+        .as_deref()
+        .map(crate::repr::proj_depth)
+        .unwrap_or(0)
+        .max(
+            repr.omit
+                .as_deref()
+                .map(crate::repr::proj_depth)
+                .unwrap_or(0),
+        );
+    if proj_depth > 0 {
+        match &join {
+            Some((mode, level)) if mode != "@none" => {
+                if proj_depth > *level {
+                    return Err(NgsiError::BadRequestData(format!(
+                        "projected attribute depth {proj_depth} exceeds joinLevel {level} (5.7.1.4)"
+                    ))
+                    .into());
+                }
+            }
+            _ => {
+                return Err(NgsiError::BadRequestData(
+                    "projection uses Linked Entity selection but join is not specified (5.7.1.4)"
+                        .into(),
+                )
+                .into());
+            }
+        }
+    }
     antares_model::EntityId::new(id)?;
     let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
     let looped = crate::federation::via_loop(
@@ -440,6 +481,14 @@ async fn retrieve_entity_inner(
     } else {
         local_doc.ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?
     };
+    // 5.7.1.4: no entity "whose id (URI), and where specified type, is
+    // equivalent" — the optional ?type selector (4.17) narrows the target
+    if !crate::attrs::matches_type_param(&doc, params, &ctx) {
+        return Err(NgsiError::ResourceNotFound(format!(
+            "entity {id} does not match the type selector"
+        ))
+        .into());
+    }
     // 5.7.1: attrs projection with no matching attribute ⇒ 404
     if let Some(want) = &repr.attrs {
         if !want.iter().any(|a| doc.get(a).is_some()) {
