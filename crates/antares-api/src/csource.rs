@@ -734,6 +734,7 @@ pub fn check_proxied_overlap(
                     .find_map(|e| e.get("idPattern").and_then(Value::as_str))
                     .map(str::to_owned),
                 attrs: (!attrs.is_empty()).then_some(attrs),
+                csf: None,
             };
             if csr_matches(&spec, other, ctx) {
                 let oid = other.get("id").and_then(Value::as_str).unwrap_or("?");
@@ -1121,6 +1122,10 @@ pub struct CsrSpec {
     pub id_pattern: Option<String>,
     /// Expanded attribute IRIs.
     pub attrs: Option<Vec<String>>,
+    /// 4.9 Context Source Filter: with a csf present, only registrations
+    /// whose Context Source Properties match it are considered (query,
+    /// temporal query, purge, entityMaps — 5.7.2.4/5.7.4.4/5.6.21.4).
+    pub csf: Option<antares_ql::QNode>,
 }
 
 /// 5.2.8: EntityInfo type is a String or String[] — yield every named type.
@@ -1227,7 +1232,7 @@ pub fn matching_infos<'a>(spec: &CsrSpec, doc: &'a Value, ctx: &Context) -> Vec<
 /// 5.10.2.4: the context source filter (csf, 4.9) evaluates over the
 /// registration document's own Context Source Properties — its members are
 /// wrapped as Property instances so the shared 4.9 evaluator applies.
-fn csf_matches(csf: &antares_ql::QNode, reg: &Value, ctx: &Context) -> bool {
+pub(crate) fn csf_matches(csf: &antares_ql::QNode, reg: &Value, ctx: &Context) -> bool {
     let Some(obj) = reg.as_object() else {
         return false;
     };
@@ -1241,10 +1246,16 @@ fn csf_matches(csf: &antares_ql::QNode, reg: &Value, ctx: &Context) -> bool {
         if ["id", "type", "information", "createdAt", "modifiedAt"].contains(&k.as_str()) {
             continue;
         }
-        pseudo.insert(
-            ctx.expand_key(k),
-            serde_json::json!([{"type": "Property", "value": v}]),
-        );
+        // a Context Source Property stored in attribute form (5.2.9) is an
+        // instance already — only bare scalars need the Property wrap
+        let inst = match v {
+            Value::Array(_) => v.clone(),
+            Value::Object(o) if o.contains_key("value") || o.contains_key("object") => {
+                serde_json::json!([v])
+            }
+            _ => serde_json::json!([{"type": "Property", "value": v}]),
+        };
+        pseudo.insert(ctx.expand_key(k), inst);
     }
     crate::qeval::eval_q(csf, &Value::Object(pseudo), ctx, &|_| None)
 }

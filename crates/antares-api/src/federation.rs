@@ -410,6 +410,14 @@ pub fn matching_regs(
             if crate::csource::reg_expired(&doc) {
                 return None;
             }
+            // 5.7.2.4/5.7.4.4/5.6.21.4: a csf gates which Context Sources
+            // are considered (evaluated over the registration's own
+            // Context Source Properties, 5.10.2.4 semantics).
+            if let Some(csf) = &spec.csf {
+                if !crate::csource::csf_matches(csf, &doc, ctx) {
+                    return None;
+                }
+            }
             let alias = doc
                 .get("contextSourceAlias")
                 .and_then(Value::as_str)
@@ -1139,6 +1147,7 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource
     crate::csource::CsrSpec {
         types,
         ids,
+        csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         ..Default::default()
     }
 }

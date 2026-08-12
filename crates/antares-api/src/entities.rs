@@ -1817,6 +1817,7 @@ async fn purge_inner(
         ids: params
             .get("id")
             .map(|s| s.split(',').map(str::to_owned).collect()),
+        csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         ..Default::default()
     };
     let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params, headers);
