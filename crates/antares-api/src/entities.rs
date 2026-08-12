@@ -431,12 +431,22 @@ async fn retrieve_entity_inner(
                 base
             }
             None => {
-                let mut iter = fed.iter();
-                let mut base = iter
+                let first = fed
+                    .iter()
                     .find(|(aux, _)| !aux)
                     .map(|(_, d)| d.clone())
-                    .or_else(|| fed.first().map(|(_, d)| d.clone()))
-                    .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+                    .or_else(|| fed.first().map(|(_, d)| d.clone()));
+                let Some(mut base) = first else {
+                    // 6.3.17: abnormal distributed outcomes surface as
+                    // NGSILD-Warning even when the retrieve ends 404
+                    let mut resp = ApiError::from(NgsiError::ResourceNotFound(format!(
+                        "entity {id} not found"
+                    )))
+                    .into_response();
+                    attach_warnings(&mut resp, &warnings);
+                    echo_tenant(&tenant, &mut resp);
+                    return Ok(resp);
+                };
                 for aux_pass in [false, true] {
                     for (aux, d) in &fed {
                         if *aux == aux_pass {
