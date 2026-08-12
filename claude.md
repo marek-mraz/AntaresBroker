@@ -93,16 +93,10 @@ recorded next to it in tasks.md:
       dist_subs from per-process maps to the store trait (memory backend keeps
       today's behaviour; pg/timescale survive restart). ADR if the shape is
       irreversible. Restart-survival asserted in tests.
-[ ] 5. §2 capacity re-derivation, MEASURED: benchmark RSS at 100k compiled subs +
-      100k CSRs + snapshot/entity-map load; implement per-tenant lazy-load + LRU if
-      the 500 MB budget breaks; rewrite deep-analysis §2 with measured numbers and
-      drop the stale flag; update the §1 warning.
-[ ] 6. CI enforcement: dev/spec.py check as a CI gate + dev/spec.py next +
-      per-chapter burndown in the CI summary (.github/workflows/ci.yml).
-[ ] 7. Upstream raises drafted: write docs/upstream/etsi-raises.md with ready-to-file
+[ ] 5. Upstream raises drafted: write docs/upstream/etsi-raises.md with ready-to-file
       issue texts for D018_01, the 504 fixture fix, the 4.3.6.3 _exc TPs, and the
       5.3.4 naming/snapshotReady doubt (filing itself is user-side).
-[ ] 8. MemPalace re-mine: add docs/spec/ to mempalace.yaml excludes, back up
+[ ] 6. MemPalace re-mine: add docs/spec/ to mempalace.yaml excludes, back up
       hand-filed drawers, run mempalace mine /workspace.
 Rules 8 and 9 stay hard; Mac-side pushes stay out of scope (list them for the user
 at the end instead). Ask only when rule 9 leaves you genuinely unsure.
@@ -110,10 +104,11 @@ at the end instead). Ask only when rule 9 leaves you genuinely unsure.
 
 Scope notes (decided with the user 2026-08-12): items 1-2 deliberately
 OVERTURN the two standing "deliberate posture" partials — that is what
-full completion means here; item 5 may legitimately end in a revised
-budget instead of code; item 4 is the biggest diff (store-trait surgery
-across three subsystems) and exists because per-process maps contradict
-the §1 stateless-pods HA row.
+full completion means here; item 4 is the biggest diff (store-trait
+surgery across three subsystems) and exists because per-process maps
+contradict the §1 stateless-pods HA row. Dropped from the backlog by the
+user 2026-08-12: the §2 capacity re-derivation and the dev/spec.py-check
+CI enforcement (+ spec.py next/burndown).
 
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
 
@@ -257,12 +252,13 @@ least one negative assertion (what must NOT be in the response).
   but is not this sandbox; verify.
 
 **Open engineering tasks:** SUPERSEDED 2026-08-12 by the full-completion
-backlog in §0.3 ("The follow-up /goal prompt") — capacity re-derivation,
-CI enforcement of `dev/spec.py check`, `spec.py next` + burndown, the
-upstream ETSI raises (D018_01 + 504 fixtures + `_exc` TPs + 5.3.4 doubt,
-all argued in error.md), and the MemPalace re-mine all live there as
-items 5-8. 4.3.6.3 validation itself was RESOLVED 2026-08-10 (commit
-0990944); only its upstream raise remains (backlog item 7).
+backlog in §0.3 ("The follow-up /goal prompt") — the upstream ETSI raises
+(D018_01 + 504 fixtures + `_exc` TPs + 5.3.4 doubt, all argued in
+error.md) and the MemPalace re-mine live there as items 5-6. Dropped by
+the user 2026-08-12: the §2 capacity re-derivation and the CI enforcement
+of `dev/spec.py check` (+ `spec.py next`/burndown). 4.3.6.3 validation
+itself was RESOLVED 2026-08-10 (commit 0990944); only its upstream raise
+remains (backlog item 5).
 
 **Loose ends:** `ETSI-matrix-results (5).zip` untracked in `/workspace`
 (analysis input, delete freely); `results/`, `results-proc/`, `www/`
