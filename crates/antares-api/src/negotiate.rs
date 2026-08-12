@@ -70,6 +70,8 @@ impl From<NgsiError> for ApiError {
     }
 }
 
+/// 6.3.3 Reporting errors: Content-Type application/json, HTTP status per
+/// Table 6.3.2-1, payload = the RFC 7807 object with the 5.5.3 terms.
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
