@@ -642,6 +642,7 @@ impl AnyStore {
             AnyStore::Pg(p) => super::pg_entity::wait(async {
                 let row =
                     sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1")
+                        .bind(tenant.as_str())
                         .fetch_optional(p.docs.pool())
                         .await
                         .map_err(db)?;
