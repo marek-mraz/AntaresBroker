@@ -647,6 +647,8 @@ pub async fn create(
     ))
 }
 
+/// 5.8.3 Retrieve Subscription: invalid URI 400, unknown id 404, else the
+/// 5.2.12 subscription document (status/timesSent are output members).
 pub async fn retrieve(
     st: &AppState,
     kind: Kind,
@@ -671,6 +673,8 @@ pub async fn retrieve(
     Ok(respond(StatusCode::OK, payload, &ctx, accept, &tenant))
 }
 
+/// 5.8.4 Query Subscriptions: list with 5.5.9 pagination; each element a
+/// 5.2.12 subscription document.
 pub async fn list(
     st: &AppState,
     kind: Kind,
@@ -713,6 +717,11 @@ pub async fn list(
     Ok(resp)
 }
 
+/// 5.8.2 Update Subscription: invalid URI 400, unknown id 404, fragment
+/// validated per 5.5.4 + 5.2.12 (past expiresAt 400), jsonldContext
+/// unavailable -> LdContextNotAvailable / invalid -> 400, modify per 5.5.8;
+/// the 5.8.2.4 status table falls out of the computed status
+/// (isActive/expiresAt) on read.
 pub async fn update(
     st: &AppState,
     kind: Kind,
@@ -773,6 +782,8 @@ pub async fn update(
     }
 }
 
+/// 5.8.5 Delete Subscription: invalid URI 400, unknown id 404, 204 on
+/// success and no further notifications (sub_changed drops the mirror).
 pub async fn delete(
     st: &AppState,
     kind: Kind,
