@@ -245,3 +245,18 @@ ids (`Update Value To JSON $.information[0].entities`). Semantics of every
 test preserved; all 9 + the whole BatchEntities tree green locally against
 the strict broker. Extension TP `436_03` pins the negative cases upstream
 skips. Status: to be raised upstream.
+
+## 2026-08-12 — 021_23 temporal orderBy (fork TP corrected)
+
+**TPs:** 021_23_01/03..09 (fork extension TP, QueryTemporalEvolutionOfEntities)
+
+**Claim:** temporal query with `orderBy=<attribute>` returns 200 ordered.
+
+**Spec:** 5.7.4.4 (p.208): "If the ordering parameter is present and refers
+an entity name other than \"id\", then an error of type BadRequestData shall
+be raised." Ordering by arbitrary members exists only on the entity query
+(5.7.2.4/4.23); the temporal query restricts it to `id`.
+
+**Action taken:** fork TP rewritten — id-based cases keep their ordering
+assertions, non-id members assert 400. Broker enforces the 400 as of the
+5.7.4 audit commit.

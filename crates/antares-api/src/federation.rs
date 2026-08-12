@@ -1214,6 +1214,85 @@ pub async fn fed_query(
     out
 }
 
+/// 5.7.4.4: forward the temporal query to matching registrations that
+/// support the queryTemporal operation; registrations without it are not
+/// contacted. Returns (auxiliary, expanded doc) pairs.
+pub async fn fed_query_temporal(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &Context,
+    params: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Vec<(bool, Value)> {
+    let spec = query_spec(ctx, params);
+    let ctx_url = ctx_link_url(headers, &ctx.source);
+    let mut out = Vec::new();
+    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        if !reg.supports("queryTemporal") {
+            continue;
+        }
+        let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
+        for k in [
+            "type",
+            "id",
+            "idPattern",
+            "q",
+            "georel",
+            "geometry",
+            "coordinates",
+            "geoproperty",
+            "scopeQ",
+            "timerel",
+            "timeAt",
+            "endTimeAt",
+            "timeproperty",
+            "lastN",
+        ] {
+            if let Some(v) = params.get(k) {
+                query.push((k.into(), v.clone()));
+            }
+        }
+        if let Some(scope) = &reg.attrs {
+            let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
+            query.push(("attrs".into(), names.join(",")));
+        } else if let Some(a) = params.get("attrs") {
+            query.push(("attrs".into(), a.clone()));
+        }
+        let (status, body) = forward(
+            st,
+            reqwest::Method::GET,
+            format!("{}/ngsi-ld/v1/temporal/entities", reg.endpoint),
+            &query,
+            headers,
+            tenant,
+            &reg,
+            &ctx_url,
+            None,
+        )
+        .await;
+        if let Some((code, text)) = read_warning(status, &body) {
+            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
+        }
+        if !(200..300).contains(&status) {
+            continue;
+        }
+        if let Value::Array(a) = &body {
+            for c in a {
+                match import_temporal(c, &reg, ctx) {
+                    Some(doc) => out.push((reg.mode == "auxiliary", doc)),
+                    None => warnings.push(warning(
+                        111,
+                        &alias_for(&st.host_alias, tenant),
+                        "the payload of the response was invalid",
+                    )),
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Merge federated docs into a local candidate set (keyed by id). Local docs
 /// win; non-aux remote attrs merge before aux ones.
 pub fn merge_candidates(local: Vec<Value>, fed: Vec<(bool, Value)>) -> Vec<Value> {

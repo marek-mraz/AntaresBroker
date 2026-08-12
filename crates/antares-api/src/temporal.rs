@@ -1341,9 +1341,22 @@ async fn query_temporal_inner(
     )?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
-    let has_filter = ["type", "attrs", "q", "georel"]
-        .iter()
-        .any(|k| params.contains_key(*k))
+    // 5.7.4.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
+    // list / q must include at least one non-system Attribute to qualify.
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    let attrs_qualify = params.get("attrs").is_some_and(|a| {
+        a.split(',')
+            .any(|n| antares_ql::is_non_system_attr(n.trim()))
+    });
+    let q_qualifies = q_ast.as_ref().is_some_and(|ast| {
+        ast.attribute_paths()
+            .iter()
+            .any(|h| antares_ql::is_non_system_attr(h))
+    });
+    let has_filter = params.contains_key("type")
+        || attrs_qualify
+        || q_qualifies
+        || params.contains_key("georel")
         || params.get("local").map(String::as_str) == Some("true");
     if !has_filter {
         return Err(NgsiError::BadRequestData(
@@ -1351,11 +1364,67 @@ async fn query_temporal_inner(
         )
         .into());
     }
+    // 5.7.4.4: Linked Entity retrieval is not defined for temporal queries —
+    // linked filter conditions are an unconditional BadRequestData
+    if q_ast
+        .as_ref()
+        .map(antares_ql::QNode::max_link_depth)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err(NgsiError::BadRequestData(
+            "temporal q must not reference Linked Entity attributes (5.7.4.4)".into(),
+        )
+        .into());
+    }
+    // 5.7.4.4: a syntactically invalid context source filter is 400. Named
+    // gap: csf is validated but not applied to Context Source matching.
+    if let Some(csf) = params.get("csf") {
+        parse_q(csf)?;
+    }
+    // 5.7.4.4: temporal ordering may only refer to the "id" entity member
+    if let Some(spec) = params.get("orderBy") {
+        let non_id = spec.split(',').any(|part| {
+            let m = part.trim().split(';').next().unwrap_or("").trim();
+            m.split('[').next().unwrap_or(m) != "id"
+        });
+        if non_id {
+            return Err(NgsiError::BadRequestData(
+                "temporal orderBy may only name \"id\" (5.7.4.4)".into(),
+            )
+            .into());
+        }
+    }
     let tq = TemporalQ::from_params(params, true)?;
     let trepr = parse_trepr(params, &ctx)?;
+    // 5.7.4.4: {…} projection is Linked Entity retrieval — unconditional 400
+    if trepr
+        .pick
+        .as_deref()
+        .map(crate::repr::proj_depth)
+        .unwrap_or(0)
+        > 0
+        || trepr
+            .omit
+            .as_deref()
+            .map(crate::repr::proj_depth)
+            .unwrap_or(0)
+            > 0
+    {
+        return Err(NgsiError::BadRequestData(
+            "temporal projection must not use Linked Entity selection (5.7.4.4)".into(),
+        )
+        .into());
+    }
     let last_n = trepr.last_n;
 
     let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
+    // 5.7.4.4: an invalid URI in the id list is BadRequestData
+    if let Some(ids) = &ids {
+        for id in ids {
+            antares_model::EntityId::new(id)?;
+        }
+    }
     let id_pattern = match params.get("idPattern") {
         Some(p) => Some(
             regex::Regex::new(p)
@@ -1371,10 +1440,6 @@ async fn query_temporal_inner(
     let attrs_filter = selection(&trepr);
     // only the attrs= param excludes entities; pick is projection-only
     let entity_attr_filter = trepr.attrs.clone();
-    let q_ast = match params.get("q") {
-        Some(q) => Some(parse_q(q)?),
-        None => None,
-    };
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
     // C11: push entity narrowing (ids/types/attrs) and instance-window
@@ -1417,6 +1482,61 @@ async fn query_temporal_inner(
     };
     let outcome = st.store.query_temporal(&tenant, &tf)?;
     let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
+    // 5.7.4.4: fan the query out to matching queryTemporal registrations
+    // and merge the remote Temporal Evolutions with the local set (4.5.5;
+    // auxiliary data never introduces new entities)
+    let mut warnings: Vec<String> = Vec::new();
+    let looped = crate::federation::via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+    );
+    let timeprop = tq
+        .as_ref()
+        .map_or("observedAt", |t| t.timeproperty.as_str())
+        .to_owned();
+    let all = if crate::federation::active(params) && !looped {
+        let fed = crate::federation::fed_query_temporal(
+            st,
+            &tenant,
+            headers,
+            &ctx,
+            params,
+            &mut warnings,
+        )
+        .await;
+        let mut order: Vec<String> = Vec::new();
+        let mut by_id: std::collections::HashMap<String, Value> = Default::default();
+        for doc in all {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                order.push(id.to_owned());
+                by_id.insert(id.to_owned(), doc);
+            }
+        }
+        for aux_pass in [false, true] {
+            for (aux, d) in &fed {
+                if *aux != aux_pass {
+                    continue;
+                }
+                let Some(id) = d.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                match by_id.get_mut(id) {
+                    Some(base) => merge_temporal_docs(base, d, *aux, &timeprop),
+                    None if !aux => {
+                        order.push(id.to_owned());
+                        by_id.insert(id.to_owned(), d.clone());
+                    }
+                    None => {}
+                }
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|id| by_id.remove(&id))
+            .collect()
+    } else {
+        all
+    };
     let mut matches = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
@@ -1447,14 +1567,30 @@ async fn query_temporal_inner(
                 continue;
             }
         }
-        if let Some(ast) = &q_ast {
-            if !crate::qeval::eval_q(ast, &doc, &ctx, &|_| None) {
-                continue;
+        // 5.7.4.4 S2/S3: the values filter and geoquery are checked against
+        // the Attribute instances WITHIN the temporal-query interval — an
+        // out-of-window instance must not satisfy them
+        if q_ast.is_some() || geo.is_some() {
+            let mut eval_doc = doc.clone();
+            if let (Some(tqv), Some(o)) = (tq.as_ref(), eval_doc.as_object_mut()) {
+                for (k, v) in o.iter_mut() {
+                    if is_meta(k) {
+                        continue;
+                    }
+                    if let Some(arr) = v.as_array_mut() {
+                        arr.retain(|inst| tqv.instance_matches(inst));
+                    }
+                }
             }
-        }
-        if let Some(g) = &geo {
-            if !g.matches(&doc, &ctx) {
-                continue;
+            if let Some(ast) = &q_ast {
+                if !crate::qeval::eval_q(ast, &eval_doc, &ctx, &|_| None) {
+                    continue;
+                }
+            }
+            if let Some(g) = &geo {
+                if !g.matches(&eval_doc, &ctx) {
+                    continue;
+                }
             }
         }
         // entity qualifies only if some instance falls in the window
@@ -1481,10 +1617,6 @@ async fn query_temporal_inner(
     } else {
         crate::entities::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?
     };
-    let timeprop = tq
-        .as_ref()
-        .map_or("observedAt", |t| t.timeproperty.as_str())
-        .to_owned();
     let core_only_pick = attrs_filter.as_ref().is_some_and(Vec::is_empty);
     let mut payload: Vec<Value> = Vec::new();
     let (mut g_max, mut g_min, mut g_maxts) = (0usize, None::<String>, None::<String>);
@@ -1539,6 +1671,7 @@ async fn query_temporal_inner(
         StatusCode::OK
     };
     let mut resp = crate::negotiate::respond_list(status, payload, &ctx, accept, &tenant);
+    crate::entities::attach_warnings(&mut resp, &warnings);
     if let Some(cr) = cr {
         if let Ok(v) = cr.parse() {
             resp.headers_mut().insert("Content-Range", v);

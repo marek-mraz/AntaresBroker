@@ -2175,6 +2175,102 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn temporal_query_validation_edges() {
+        // 5.7.4.4: non-system rule for attrs/q; Linked Entity projection or
+        // filter is an unconditional 400; invalid id URI 400; csf syntax
+        // 400; orderBy may only name "id" on the temporal query.
+        let app = app();
+        let w = "timerel=after&timeAt=2020-01-01T00:00:00Z";
+        let cases: &[(&str, StatusCode, &str)] = &[
+            (
+                "attrs=createdAt",
+                StatusCode::BAD_REQUEST,
+                "system attrs alone are too wide",
+            ),
+            (
+                "type=Building&pick=owner%7Bname%7D",
+                StatusCode::BAD_REQUEST,
+                "linked projection",
+            ),
+            (
+                "type=Building&q=owner%7Bname%7D%3D%3D%22x%22",
+                StatusCode::BAD_REQUEST,
+                "linked filter",
+            ),
+            (
+                "type=Building&id=not%20a%20uri",
+                StatusCode::BAD_REQUEST,
+                "invalid id URI",
+            ),
+            (
+                "type=Building&csf=%29%29bad%28%28",
+                StatusCode::BAD_REQUEST,
+                "invalid csf",
+            ),
+            (
+                "type=Building&orderBy=name",
+                StatusCode::BAD_REQUEST,
+                "orderBy other than id",
+            ),
+            (
+                "type=Building&orderBy=id",
+                StatusCode::OK,
+                "orderBy id is legal",
+            ),
+        ];
+        for (qs, want, why) in cases {
+            let uri = format!("/ngsi-ld/v1/temporal/entities?{w}&{qs}");
+            assert_eq!(get_status(&app, &uri, None).await, *want, "{why}");
+        }
+    }
+
+    #[tokio::test]
+    async fn temporal_query_values_filter_respects_the_window() {
+        // 5.7.4.4 S2: "the values filter query shall be checked against all
+        // the Attribute instances resulting from the initial filtering
+        // performed by the temporal query" — an instance OUTSIDE the
+        // interval must not satisfy q.
+        let app = app();
+        let body = serde_json::json!({
+            "id": "urn:ngsi-ld:Vehicle:tw1", "type": "Vehicle",
+            "speed": [
+                {"type": "Property", "value": 5,
+                 "observedAt": "2026-01-01T00:00:00Z"},
+                {"type": "Property", "value": 99,
+                 "observedAt": "2026-03-01T00:00:00Z"}
+            ]
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/temporal/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert!(resp.status().is_success(), "seed: {}", resp.status());
+        // window covers ONLY the value-5 instance; q asks for 99
+        let uri = "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=between&timeAt=2025-12-01T00:00:00Z&endTimeAt=2026-02-01T00:00:00Z&q=speed%3D%3D99";
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let status = resp.status();
+        let docs = body_json(resp).await;
+        assert!(status.is_success(), "query: {status}");
+        assert_eq!(
+            docs.as_array().map(Vec::len),
+            Some(0),
+            "out-of-window instance must not satisfy q: {docs}"
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]
