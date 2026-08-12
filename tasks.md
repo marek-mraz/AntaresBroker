@@ -1198,10 +1198,12 @@ Definition of done, all six measured rather than asserted:
       (priority-ordered, 5.3.4 deletion notification). Unit 16/16 (3 new,
       red seen); TP 5161_01_05 (CS-mock fed fill) 5/5 local; pagination +
       eviction unit-only (need non-default broker config — noted in ledger).
-      Commit: `5.16.1.4:` (hash backfilled next commit).
+      Commit: 8e9491b (+ fork).
 - [ ] 4. Durable state for HA: snapshots, entity_maps, dist_subs promoted to
       the store trait (pg/timescale survive restart); restart-survival tests.
-- [ ] 5. docs/upstream/etsi-raises.md — ready-to-file issue texts (D018_01,
-      504 fixtures, 4.3.6.3 _exc TPs, 5.3.4 naming/snapshotReady).
+- [x] 5. docs/upstream/etsi-raises.md — DONE 2026-08-12: five ready-to-file
+      texts (3 suite: D018_01, _exc TPs, 504 fixtures; 2 spec: 5.3.4
+      naming+snapshotReady, 6.6.3.2-2 UpdateResult). Filing is user-side.
+      Commit: `docs:` (hash backfilled next commit).
 - [ ] 6. MemPalace re-mine with docs/spec/ excluded; hand-filed drawers
       backed up first.
