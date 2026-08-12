@@ -1005,6 +1005,83 @@ async fn clause_5_6_10_batch_delete_forwarding_fallbacks() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
+/// 5.6.10.5 Output data: none (empty 204) if all Entities were deleted;
+/// otherwise 207 with the S array (deleted ids) and the E array
+/// (BatchEntityError per 5.2.17) as {"success": [...], "errors": [...]}.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_10_5_output_shape() {
+    let st = state();
+    let create = |body: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let batch_delete = |body: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entityOperations/delete")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let entity = serde_json::json!({"id": ENTITY, "type": "Vehicle"}).to_string();
+
+    // all deleted → 204 and NO body at all
+    assert_eq!(
+        send(&st, create(entity.clone())).await.status(),
+        StatusCode::CREATED
+    );
+    let res = send(&st, batch_delete(serde_json::json!([ENTITY]).to_string())).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    assert!(bytes.is_empty(), "204 carries no body: {bytes:?}");
+
+    // partial → 207 with both arrays, correctly partitioned
+    assert_eq!(
+        send(&st, create(entity)).await.status(),
+        StatusCode::CREATED
+    );
+    let missing = "urn:ngsi-ld:Vehicle:absent-56105";
+    let res = send(
+        &st,
+        batch_delete(serde_json::json!([ENTITY, missing]).to_string()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::MULTI_STATUS);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        doc["success"],
+        serde_json::json!([ENTITY]),
+        "S array holds exactly the deleted ids: {doc}"
+    );
+    let errors = doc["errors"].as_array().expect("E array");
+    assert_eq!(errors.len(), 1, "one BatchEntityError: {doc}");
+    assert_eq!(errors[0]["entityId"], missing);
+    assert_eq!(
+        errors[0]["error"]["type"],
+        "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound"
+    );
+    // the failed id must NOT leak into S
+    assert!(
+        !doc["success"]
+            .as_array()
+            .expect("S array")
+            .iter()
+            .any(|v| v == missing),
+        "missing id must not appear as a success: {doc}"
+    );
+}
+
 /// 5.6.11.4: exclusive/redirect registrations forward the temporal upsert
 /// when "Create or Update Temporal" is supported; unsupported proxy modes
 /// are Conflict and never contacted.

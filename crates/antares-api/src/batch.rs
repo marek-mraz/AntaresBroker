@@ -101,6 +101,10 @@ struct BatchOutcome {
 }
 
 impl BatchOutcome {
+    /// Batch output data (5.6.7.5 / 5.6.8.5 / 5.6.9.5 / 5.6.10.5): if every
+    /// entity succeeded, the operation's all-ok status (201 + id array for
+    /// create, else 204 with no body); otherwise 207 with the S array
+    /// ("success") and the E array of BatchEntityError 5.2.17 ("errors").
     fn respond(
         self,
         tenant: &antares_model::TenantId,
