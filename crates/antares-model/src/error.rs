@@ -43,9 +43,10 @@ impl NgsiError {
             Self::AlreadyExists(_) | Self::Conflict(_) => 409,
             Self::BadRequestData(_) | Self::InvalidRequest(_) => 400,
             Self::InternalError(_) => 500,
-            // 503 per the conformance suite's V1.8-era expectation (043_01);
-            // V1.9.1 moved this to 504 — flip when the suite catches up.
-            Self::LdContextNotAvailable(_) => 503,
+            // 6.3.2 Table 6.3.2-1 (V1.9.1): LdContextNotAvailable → 504.
+            // The suite's V1.8-era 503 expectations are fork-fixed
+            // (testsuite-doubts #18).
+            Self::LdContextNotAvailable(_) => 504,
             Self::NoMultiTenantSupport(_) => 501,
             Self::NonexistentTenant(_) | Self::ResourceNotFound(_) => 404,
             Self::OperationNotSupported(_) => 422,
@@ -101,7 +102,7 @@ mod tests {
         assert_eq!(NgsiError::Conflict(String::new()).status(), 409);
         assert_eq!(
             NgsiError::LdContextNotAvailable(String::new()).status(),
-            503
+            504
         );
         assert_eq!(NgsiError::NoMultiTenantSupport(String::new()).status(), 501);
         assert_eq!(NgsiError::NonexistentTenant(String::new()).status(), 404);

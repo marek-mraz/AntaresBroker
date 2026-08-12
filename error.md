@@ -260,3 +260,18 @@ be raised." Ordering by arbitrary members exists only on the entity query
 **Action taken:** fork TP rewritten — id-based cases keep their ordering
 assertions, non-id members assert 400. Broker enforces the 400 as of the
 5.7.4 audit commit.
+
+## 2026-08-12 — LdContextNotAvailable is 504, not 503 (fork fixtures fixed)
+
+**TPs:** 043_01 (5 cases), 028_07, 051_05_01, 053_05_01
+
+**Claim:** the official fixtures assert 503 "Service Unavailable" for
+`LdContextNotAvailable` — a V1.8-era expectation.
+
+**Spec:** V1.9.1 Table 6.3.2-1 (p.269, verified in the PDF) maps
+`https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable` to **504**.
+
+**Action taken:** broker mapping restored to 504 (it had been flipped to
+503 to match the suite — the exact anti-pattern §2 forbids); the four
+fork fixtures now assert 504 / "Gateway Timeout". testsuite-doubts #18
+marked RESOLVED. Status: to be raised upstream.

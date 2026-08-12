@@ -552,7 +552,7 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
 // ---------- handlers (parameterized by Kind) ----------
 
 /// Validate a subscription's jsonldContext member (5.2.12): must be a
-/// dereferenceable @context — invalid value ⇒ 400, unresolvable ⇒ 503.
+/// dereferenceable @context — invalid value ⇒ 400, unresolvable ⇒ 504.
 async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Result<(), ApiError> {
     let Some(v) = norm.get("jsonldContext") else {
         return Ok(());
