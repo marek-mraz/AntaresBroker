@@ -1182,3 +1182,21 @@ Definition of done, all six measured rather than asserted:
 5. `docs/ics.yaml` covers §5.4 clause by clause, `error.md` logs every ETSI
    *tool* bug found, every irreversible decision has an ADR.
 6. The §L targets measured on hardware you provide (🖥), not estimated.
+
+## Backlog 2026-08-12 (this goal)
+
+- [x] 1. Close partial 4.10 — DONE 2026-08-12: geo.rs min_distance_m
+      (local equirectangular metric min distance, extended ref+target);
+      unit 11/11 (2 new, red seen), TP 019_30_09-_12, 4.10-set 31/31 local;
+      ledger 4.10 implemented. Commit: `4.10:` (hash backfilled next commit).
+- [ ] 2. Close partial 5.8.6 — splitEntities=true inbound-notification merge
+      block; ledger 5.8.6 → implemented (deployment default stays off).
+- [ ] 3. Snapshot ceilings: federated snapshot fills (5.16.1.4 via 5.7.2.4)
+      + temporal fill paginates past max_limit + priority-ordered
+      resource-pressure eviction (5.5.15). TPs for each.
+- [ ] 4. Durable state for HA: snapshots, entity_maps, dist_subs promoted to
+      the store trait (pg/timescale survive restart); restart-survival tests.
+- [ ] 5. docs/upstream/etsi-raises.md — ready-to-file issue texts (D018_01,
+      504 fixtures, 4.3.6.3 _exc TPs, 5.3.4 naming/snapshotReady).
+- [ ] 6. MemPalace re-mine with docs/spec/ excluded; hand-filed drawers
+      backed up first.

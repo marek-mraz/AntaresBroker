@@ -4,18 +4,18 @@
 //! approximations this file used to carry are retired).
 //!
 //! The query geometry is parsed ONCE at construction; targets are parsed per
-//! evaluation. `near` is haversine from the query's representative point to
-//! the closest point of the target — exact for point targets; for extended
-//! targets the closest point is computed in planar lon/lat space, so a
-//! residual delta vs PostGIS `ST_DWithin` on geography remains (documented
-//! ceiling; the SQL path C11b is the metric authority).
+//! evaluation. `near` is the metric minimum distance between the two
+//! geometries (`min_distance_m`: local equirectangular projection, so
+//! closest-point selection is metric and extended reference/target
+//! geometries measure from their true closest points); the small
+//! equirectangular residual vs PostGIS `ST_DWithin` on geography is the
+//! remaining documented ceiling (the SQL path C11b is the metric authority).
 //! ponytail: per-call relate without a prepared edge index — a
 //! PreparedGeometry cache is the §6.5 matcher lever when 10k subscriptions
 //! demand it.
 
 use antares_jsonld::Context;
 use antares_model::NgsiError;
-use geo::algorithm::closest_point::ClosestPoint;
 use geo::Relate;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -82,22 +82,42 @@ pub(crate) fn parse_ref_geometry(
     parse_geometry(gtype, coords)
 }
 
-/// 4.23: haversine metres from the reference geometry to a target GeoJSON
-/// value — closest point in planar lon/lat, haversine metric (the same
-/// documented ceiling as `near`, 4.10). None when the target is not a valid
-/// geometry.
+/// 4.23: metres from the reference geometry to a target GeoJSON value —
+/// the same metric minimum distance as `near` (4.10). None when the target
+/// is not a valid geometry.
 pub(crate) fn order_distance_m(refg: &geo_types::Geometry<f64>, target: &Value) -> Option<f64> {
     let (t, c) = (
         target.get("type").and_then(Value::as_str)?,
         target.get("coordinates")?,
     );
     let target = parse_geometry(t, c).ok()?;
-    let qp = first_point(refg)?;
-    let cp = match target.closest_point(&qp) {
-        geo::Closest::Intersection(p) | geo::Closest::SinglePoint(p) => p,
-        geo::Closest::Indeterminate => first_point(&target)?,
+    Some(min_distance_m(refg, &target))
+}
+
+/// metres per degree of latitude (WGS-84 mean)
+const DEG_M: f64 = 111_319.490_793;
+
+/// 4.10 near / 4.23 ordering: minimum distance in metres between two
+/// geometries. Both are projected into a local equirectangular plane
+/// (x = lon·cos(lat₀)), so closest-point selection is metric and EXTENDED
+/// reference and target geometries both measure from their true closest
+/// points; intersecting/containing pairs are distance 0.
+/// ponytail: equirectangular residual (<~0.5 % over sub-1000 km spans, no
+/// antimeridian wrap) — the PostGIS geography path stays the metric
+/// authority; geodesic segment distance if a geo TP ever demands exactness.
+fn min_distance_m(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) -> f64 {
+    use geo::algorithm::line_measures::{Distance, Euclidean};
+    use geo::algorithm::{BoundingRect, MapCoords};
+    let mid_lat =
+        |g: &geo_types::Geometry<f64>| g.bounding_rect().map(|r| (r.min().y + r.max().y) / 2.0);
+    let lat0 = match (mid_lat(a), mid_lat(b)) {
+        (Some(x), Some(y)) => (x + y) / 2.0,
+        _ => 0.0,
     };
-    Some(haversine_m(qp, cp))
+    let k = lat0.to_radians().cos().max(1e-9);
+    let proj =
+        |g: &geo_types::Geometry<f64>| g.map_coords(|c| geo_types::Coord { x: c.x * k, y: c.y });
+    Euclidean.distance(&proj(a), &proj(b)) * DEG_M
 }
 
 /// GeoJSON `{type, coordinates}` → geo_types, with ring validation.
@@ -107,22 +127,6 @@ fn parse_geometry(gtype: &str, coords: &Value) -> Result<geo_types::Geometry<f64
     let geom: geojson::Geometry =
         serde_json::from_value(gj).map_err(|e| format!("invalid GeoJSON geometry: {e}"))?;
     geo_types::Geometry::<f64>::try_from(geom).map_err(|e| format!("invalid geometry: {e}"))
-}
-
-/// Representative point of a geometry (first coordinate).
-fn first_point(g: &geo_types::Geometry<f64>) -> Option<geo_types::Point<f64>> {
-    use geo::CoordsIter;
-    g.coords_iter().next().map(geo_types::Point::from)
-}
-
-fn haversine_m(a: geo_types::Point<f64>, b: geo_types::Point<f64>) -> f64 {
-    let r = 6_371_000.0f64;
-    let (lon1, lat1, lon2, lat2) = (a.x(), a.y(), b.x(), b.y());
-    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
-    let dp = (lat2 - lat1).to_radians();
-    let dl = (lon2 - lon1).to_radians();
-    let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
-    2.0 * r * h.sqrt().asin()
 }
 
 impl GeoQuery {
@@ -281,22 +285,11 @@ impl GeoQuery {
         let q = &self.query_geom;
         match &self.rel {
             Georel::Near { max, min } => {
-                let Some(qp) = first_point(q) else {
-                    return false;
-                };
-                // closest point of the target to the query point (planar
-                // selection, haversine metric — see module docs)
-                let cp = match target.closest_point(&qp) {
-                    geo::Closest::Intersection(p) | geo::Closest::SinglePoint(p) => p,
-                    geo::Closest::Indeterminate => match first_point(&target) {
-                        Some(p) => p,
-                        None => return false,
-                    },
-                };
-                let d = haversine_m(qp, cp);
-                // 4.10: maxDistance = within the (closed) buffer => d <= max;
+                // 4.10: metric minimum distance between the geometries;
+                // maxDistance = within the (closed) buffer => d <= max;
                 // minDistance = DISJOINT with the buffer — boundary contact
                 // is not disjoint => strictly d > min.
+                let d = min_distance_m(q, &target);
                 max.is_none_or(|m| d <= m) && min.is_none_or(|m| d > m)
             }
             Georel::Equals => {
@@ -331,6 +324,38 @@ mod tests {
 
     fn geoval(gtype: &str, coords: Value) -> Value {
         json!({"type": gtype, "coordinates": coords})
+    }
+
+    /// 4.10 near with an EXTENDED reference geometry: "near;maxDistance==x
+    /// (in meters)" is the distance to the reference GEOMETRY — measured
+    /// from its closest point, not from its first coordinate.
+    #[test]
+    fn clause_4_10_near_extended_reference() {
+        // LineString [0,60]→[10,60]; the target sits ~1 km north of the
+        // EAST end (~557 km from the first coordinate)
+        let g = q("near;maxDistance==2000", "LineString", "[[0,60],[10,60]]");
+        assert!(
+            g.matches_geometry(&geoval("Point", json!([10.0, 60.009]))),
+            "distance must be measured from the closest point of the line"
+        );
+        // ~111 km north of the line must NOT match
+        assert!(!g.matches_geometry(&geoval("Point", json!([10.0, 61.0]))));
+    }
+
+    /// 4.10 near: closest-point selection on an extended TARGET is METRIC —
+    /// at lat 85 a 1°-longitude offset (~9.7 km) is closer than a
+    /// 0.6°-latitude offset (~67 km), though planar lon/lat says otherwise.
+    #[test]
+    fn clause_4_10_near_metric_closest_point_high_latitude() {
+        let target = geoval("LineString", json!([[0.0, 85.6], [1.0, 85.0]]));
+        let g = q("near;maxDistance==20000", "Point", "[0,85]");
+        assert!(
+            g.matches_geometry(&target),
+            "metric closest point is the lon-offset end (~9.7 km)"
+        );
+        // ...but it is farther than 5 km — must NOT match
+        let g5 = q("near;maxDistance==5000", "Point", "[0,85]");
+        assert!(!g5.matches_geometry(&target));
     }
 
     #[test]
