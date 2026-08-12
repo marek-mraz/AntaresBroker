@@ -18,6 +18,7 @@ pub mod negotiate;
 pub mod notify;
 pub mod qeval;
 pub mod repr;
+pub mod snapshots;
 pub mod state;
 pub mod subscriptions;
 pub mod temporal;
@@ -151,7 +152,8 @@ fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
 /// 4.3.5 NGSI-LD API structure: Core API mandatory; Distributed API mandatory for
 /// distributed/federated deployments; Temporal API and Registry API integrated
 /// locally here (Table 4.3.5-2 row "integrated temporal + integrated Context
-/// Registry"); JSONLDContext API implemented, optional Snapshot API not offered.
+/// Registry"); JSONLDContext API implemented; optional Snapshot API offered
+/// (5.16, resources 6.36-6.38, NGSILD-Snapshot scoping 6.3.22).
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         // entities (6.4/6.5)
@@ -284,6 +286,18 @@ pub fn router(state: AppState) -> Router {
             "/jsonldContexts/{id}",
             get(contexts::serve_context).delete(contexts::delete_context),
         )
+        // snapshots (5.16; 6.36-6.38, optional API group — offered)
+        .route(
+            "/snapshots",
+            post(snapshots::create_snapshot).delete(snapshots::purge_snapshots),
+        )
+        .route(
+            "/snapshots/{id}",
+            get(snapshots::retrieve_snapshot)
+                .patch(snapshots::update_snapshot)
+                .delete(snapshots::delete_snapshot),
+        )
+        .route("/snapshots/{id}/clone", post(snapshots::clone_snapshot))
         // info (6.33)
         .route("/info/sourceIdentity", get(source_identity));
 
@@ -316,6 +330,10 @@ pub fn router(state: AppState) -> Router {
                 // 5.5.10: non-create operations targeting a non-existing
                 // Tenant answer NonexistentTenant 404; create operations
                 // implicitly create the Tenant.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    snapshots::snapshot_layer,
+                ))
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     tenant_exists_layer,

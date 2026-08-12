@@ -104,6 +104,20 @@ pub struct AppState {
     /// the notification endpoint of forwarded subscription copies
     /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to http://{host_alias}.
     pub public_url: String,
+    /// 5.16 Snapshots: tenant → snapshot id → 5.2.41 document (with the
+    /// internal __tenant member naming the snapshot's synthetic tenant).
+    /// ponytail: per-process like entity_maps — 5.5.15 explicitly allows
+    /// dropping snapshots under resource pressure; promote to the store if
+    /// durable snapshots are required.
+    #[allow(clippy::type_complexity)]
+    pub snapshots: Arc<
+        std::sync::RwLock<
+            std::collections::HashMap<
+                String,
+                std::collections::BTreeMap<String, serde_json::Value>,
+            >,
+        >,
+    >,
 }
 
 impl AppState {
@@ -179,6 +193,7 @@ impl AppState {
             nats: false,
             dist_subs: Arc::default(),
             public_url,
+            snapshots: Arc::default(),
         }
     }
 

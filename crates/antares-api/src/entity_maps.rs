@@ -84,7 +84,7 @@ pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> bool {
 
 /// Parse an ISO 8601 duration (entityMapLifetime, Table 6.4.3.2-1) to whole
 /// seconds; years/months are approximated (365/30 days), fractions rejected.
-fn iso8601_secs(s: &str) -> Option<i64> {
+pub(crate) fn iso8601_secs(s: &str) -> Option<i64> {
     let rest = s.strip_prefix('P')?;
     if rest.is_empty() {
         return None;

@@ -275,3 +275,26 @@ assertions, non-id members assert 400. Broker enforces the 400 as of the
 503 to match the suite — the exact anti-pattern §2 forbids); the four
 fork fixtures now assert 504 / "Gateway Timeout". testsuite-doubts #18
 marked RESOLVED. Status: to be raised upstream.
+
+## 2026-08-12 — 5.3.4 SnapshotNotification internal inconsistencies (spec doubt)
+
+**Where:** CIM 009 V1.9.1 Table 5.3.4-1 vs Table 5.2.41-2.
+
+**Doubt 1 — member naming:** the Snapshot datatype (5.2.41) calls the
+temporal details list `snapshotTemporalQueriesDetails`, but the
+SnapshotNotification table (5.3.4) calls the same list
+`temporalSnapshotQueriesDetails`. Decision: each datatype's own table
+governs its payload — the broker stores/serves the 5.2.41 name on the
+Snapshot resource and emits the 5.3.4 name in notifications (asserted both
+ways in tests/snapshots_5_16.rs clause_5_16_6_snapshot_notification).
+
+**Doubt 2 — phantom member:** the `expiresAt` row's description says "In
+this case, snapshotReady shall be set to false", but no `snapshotReady`
+member is defined anywhere in Table 5.3.4-1 (or 5.2.41). Looks like a
+leftover from an earlier draft. Antares emits no `snapshotReady` (negative
+assertion in the same test). No deletion notifications are sent — the
+expiresAt-before-notifiedAt encoding only matters for implementations that
+evict and notify, which the 5.5.15 MAY does not require.
+
+**Action:** raise upstream with the other V1.9.1 doubts; no fork TP change
+needed (the official suite has no Snapshot coverage — 5161_01 is ours).

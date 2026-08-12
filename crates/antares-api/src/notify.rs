@@ -1610,6 +1610,14 @@ async fn deliver_as(
         })
         .unwrap_or_default();
 
+    // 6.3.22: a subscription living under a snapshot's synthetic tenant
+    // notifies with the NGSILD-Snapshot header and the OWNER tenant — the
+    // internal "snap-…" tenant never leaks.
+    let (hdr_tenant, snapshot_id) = match crate::snapshots::snapshot_of_synth(st, tenant.as_str()) {
+        Some((owner, sid)) => (owner, Some(sid)),
+        None => (tenant.clone(), None),
+    };
+
     // Per-binding send, prepared BEFORE the bookkeeping writeback so the
     // optimistic stamp covers only the in-flight attempt (046_12_01 race).
     enum Outbound {
@@ -1646,8 +1654,11 @@ async fn deliver_as(
                     // 7.2 Table 7.2-2: header-borne info moves into "metadata".
                     let link = link_header_value(ctx);
                     let mut ri = receiver_info.clone();
-                    if tenant.as_str() != "default" {
-                        ri.push(("NGSILD-Tenant".into(), tenant.as_str().to_owned()));
+                    if hdr_tenant.as_str() != "default" {
+                        ri.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().to_owned()));
+                    }
+                    if let Some(sid) = &snapshot_id {
+                        ri.push(("NGSILD-Snapshot".into(), sid.clone()));
                     }
                     let msg = build_message(&body, accept, Some(&link), &ri);
                     Outbound::Mqtt(
@@ -1680,8 +1691,11 @@ async fn deliver_as(
         for (k, v) in &receiver_info {
             req = req.header(k, v);
         }
-        if tenant.as_str() != "default" {
-            req = req.header("NGSILD-Tenant", tenant.as_str());
+        if hdr_tenant.as_str() != "default" {
+            req = req.header("NGSILD-Tenant", hdr_tenant.as_str());
+        }
+        if let Some(sid) = &snapshot_id {
+            req = req.header("NGSILD-Snapshot", sid.as_str());
         }
         Outbound::Http(req, serde_json::to_vec(&body).unwrap_or_default())
     };
