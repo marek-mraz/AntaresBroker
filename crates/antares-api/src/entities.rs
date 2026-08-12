@@ -1412,6 +1412,10 @@ pub async fn delete_entity(
 
 // ---------- DELETE /entities/ — Purge (5.6.21) ----------
 
+/// 5.6.21 Purge Entities: delete (or keep=/drop=-prune) all entities matched
+/// by the query; output data is none — 204 (5.6.21.5). Too-wide queries,
+/// Linked Entity paths and invalid id/q/geo/csf are BadRequestData
+/// (5.6.21.4); matched registrations forward only with purgeEntity support.
 pub async fn purge_entities(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -1467,13 +1471,35 @@ async fn purge_inner(
         a.split(',')
             .any(|n| antares_ql::is_non_system_attr(n.trim()))
     });
-    let q_qualifies = match params.get("q") {
-        Some(q) => parse_q(q)?
-            .attribute_paths()
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    let q_qualifies = q_ast.as_ref().is_some_and(|ast| {
+        ast.attribute_paths()
             .iter()
-            .any(|h| antares_ql::is_non_system_attr(h)),
-        None => false,
-    };
+            .any(|h| antares_ql::is_non_system_attr(h))
+    });
+    // 5.6.21.4: Linked Entity retrieval in the projection attributes, or
+    // Linked Entity attributes in the filter conditions → BadRequestData.
+    if q_ast
+        .as_ref()
+        .is_some_and(antares_ql::QNode::has_linked_paths)
+    {
+        return Err(NgsiError::BadRequestData(
+            "purge q must not reference Linked Entity attributes (5.6.21.4)".into(),
+        )
+        .into());
+    }
+    if params.get("attrs").is_some_and(|a| a.contains('{')) {
+        return Err(NgsiError::BadRequestData(
+            "purge attrs must not use Linked Entity retrieval (5.6.21.4)".into(),
+        )
+        .into());
+    }
+    // 5.6.21.4: a syntactically invalid context source filter is
+    // BadRequestData. Named gap: csf is validated here but not yet applied
+    // to Context Source matching (broker-wide, see the csf param audits).
+    if let Some(csf) = params.get("csf") {
+        parse_q(csf)?;
+    }
     let has_filter = params.contains_key("type")
         || attrs_qualify
         || q_qualifies
@@ -1557,7 +1583,11 @@ async fn purge_inner(
             .filter_map(|k| params.get(*k).map(|v| (k.to_string(), v.clone())))
             .collect();
         for reg in &regs {
-            if reg.mode == "exclusive" && !reg.supports("purgeEntity") {
+            // 5.6.21.4: matching input data is forwarded only when the
+            // registration supports Purge Entity; an unsupported matched
+            // registration — any mode — is an error of type Conflict
+            // (partial success when other parts succeeded).
+            if !reg.supports("purgeEntity") {
                 parts.push(crate::federation::conflict_part("purgeEntity"));
                 continue;
             }

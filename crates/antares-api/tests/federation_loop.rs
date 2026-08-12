@@ -861,6 +861,68 @@ async fn clause_5_6_8_upsert_forwarding_fallbacks() {
     );
 }
 
+/// 5.6.21.4: a matched registration forwards the purge only when it
+/// supports purgeEntity; an unsupported matched registration — any mode,
+/// redirect included — contributes a Conflict and is never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_21_purge_forwarding_gate() {
+    let purge_req = || {
+        Request::builder()
+            .method("DELETE")
+            .uri("/ngsi-ld/v1/entities?type=Vehicle")
+            .body(Body::empty())
+            .expect("request")
+    };
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:purge-gate",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+
+    // redirect source without purgeEntity: Conflict, never contacted
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveOps"]), port).await;
+    let res = send(&st, purge_req()).await;
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    assert!(
+        body.contains("does not accept") || body.contains("Conflict"),
+        "unsupported matched source reports Conflict: {body}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+
+    // purgeEntity-supporting source: one DELETE /entities forward with the
+    // narrowing query on the wire
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = register_with(state(), serde_json::json!(["purgeEntity"]), m.port).await;
+    let _ = send(&st, purge_req()).await;
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one purge forward");
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.starts_with("DELETE /ngsi-ld/v1/entities?") && head.contains("type=Vehicle"),
+        "forward keeps the purge query: {head}"
+    );
+}
+
 /// 5.6.20.4 support ladder: no mergeBatch → per-entity Merge Entity
 /// (PATCH /entities/{id}) forwards.
 #[tokio::test(flavor = "multi_thread")]

@@ -1934,6 +1934,52 @@ mod tests {
         assert_ne!(purge(&app, "local=true").await, StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn purge_rejects_linked_entity_paths() {
+        // 5.6.21.4: "If projection attributes are present and indicate the
+        // use of Linked Entity retrieval" and "If the filter conditions
+        // specified by the query includes Linked Entity attributes" →
+        // BadRequestData. `owner{name}` is the 4.9 LinkedEntityRelation form.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:lep1", "Building").await;
+        assert_eq!(
+            purge(&app, "q=owner%7Bname%7D%3D%3D%22x%22").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            purge(&app, "attrs=owner%7Bname%7D").await,
+            StatusCode::BAD_REQUEST
+        );
+        // the entity must survive the rejected purges
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:lep1")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn purge_validates_csf_syntax() {
+        // 5.6.21.4: "if the query, geoquery or context source filter are not
+        // syntactically valid ... an error of type BadRequestData shall be
+        // raised". csf is a 4.9 query over Context Source properties.
+        let app = app();
+        assert_eq!(
+            purge(&app, "type=Building&csf=%29%29bad%28%28").await,
+            StatusCode::BAD_REQUEST
+        );
+        // a well-formed csf is accepted
+        assert_ne!(
+            purge(&app, "type=Building&csf=endpoint%3D%3D%22x%22").await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

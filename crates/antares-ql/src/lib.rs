@@ -73,6 +73,16 @@ impl QNode {
         out
     }
 
+    /// True when any referenced Attribute path uses a `attr{…}` linked-entity
+    /// hop (4.9 LinkedEntityRelation). Purge (5.6.21.4) must reject filter
+    /// conditions that include Linked Entity attributes.
+    pub fn has_linked_paths(&self) -> bool {
+        match self {
+            QNode::And(ns) | QNode::Or(ns) => ns.iter().any(Self::has_linked_paths),
+            QNode::Cmp { path, .. } | QNode::Exists { path, .. } => !path.links.is_empty(),
+        }
+    }
+
     fn collect_paths<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             QNode::And(ns) | QNode::Or(ns) => {
