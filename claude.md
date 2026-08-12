@@ -66,6 +66,55 @@ not-implemented clause in order, do steps 1–9 exactly as written
 stopping. Ask only when rule 9 leaves you genuinely unsure. And always use ponytail. And Always check that in test response that can be for example something that should not be there. Write more tests, for the each implementaion to test different variations. TEST-FIRST: write the clause's tests BEFORE the implementation and run them — the red run on the missing behaviour IS the fallibility proof (and shows whether the implementation is even needed: already-green = already implemented, just annotate + ledger). Only tests that never saw red need one invert→FAILED→restore cycle, ONE per clause, not per test (each cycle costs ~3 full crate recompiles at -j 2). Use ponytail skill. Always write more tests in ngsi-ld-test-suite with different inputs so the ngsi-ld compliance ca be tested for 100 percent.
 ```
 
+### The follow-up /goal prompt — the full-completion backlog (added 2026-08-12)
+
+The §0.3 audit loop is COMPLETE (zero not-implemented since 2026-08-12).
+This second prompt drives everything the ledger and §6 still leave open:
+
+```
+/goal Finish EVERYTHING the Antares ledger and §6 still leave open, sandbox-side.
+First create "## Backlog 2026-08-12 (this goal)" in tasks.md with the checklist
+below, then work it top-to-bottom — one item = one commit (clause-prefixed where
+clause work), each with the full §0.3 discipline: MemPalace first, TEST-FIRST red
+run as the fallibility proof, negative assertions (assert what must NOT be in the
+response), extra ngsi-ld-test-suite TPs with varied inputs, rule-8 local Robot
+validation, ledger + claude.md §6 updated. Use ponytail throughout. The goal is
+DONE only when every checkbox is [x] with evidence (commit hash + green run)
+recorded next to it in tasks.md:
+
+[ ] 1. Close partial 4.10 — real metric geo distances in the in-memory store
+      (haversine is enough; PostGIS stays the authority), ledger 4.10 → implemented.
+[ ] 2. Close partial 5.8.6 — implement the splitEntities=true inbound-notification
+      merge block, ledger 5.8.6 → implemented (keep the deployment default off).
+[ ] 3. Snapshot ceilings: federated snapshot fills (5.16.1.4 via 5.7.2.4 dist path)
+      + temporal fill paginates past max_limit ("all pages") + priority-ordered
+      resource-pressure eviction (5.5.15). TPs for each.
+[ ] 4. Durable state for HA (§1 contract): promote snapshots, entity_maps and
+      dist_subs from per-process maps to the store trait (memory backend keeps
+      today's behaviour; pg/timescale survive restart). ADR if the shape is
+      irreversible. Restart-survival asserted in tests.
+[ ] 5. §2 capacity re-derivation, MEASURED: benchmark RSS at 100k compiled subs +
+      100k CSRs + snapshot/entity-map load; implement per-tenant lazy-load + LRU if
+      the 500 MB budget breaks; rewrite deep-analysis §2 with measured numbers and
+      drop the stale flag; update the §1 warning.
+[ ] 6. CI enforcement: dev/spec.py check as a CI gate + dev/spec.py next +
+      per-chapter burndown in the CI summary (.github/workflows/ci.yml).
+[ ] 7. Upstream raises drafted: write docs/upstream/etsi-raises.md with ready-to-file
+      issue texts for D018_01, the 504 fixture fix, the 4.3.6.3 _exc TPs, and the
+      5.3.4 naming/snapshotReady doubt (filing itself is user-side).
+[ ] 8. MemPalace re-mine: add docs/spec/ to mempalace.yaml excludes, back up
+      hand-filed drawers, run mempalace mine /workspace.
+Rules 8 and 9 stay hard; Mac-side pushes stay out of scope (list them for the user
+at the end instead). Ask only when rule 9 leaves you genuinely unsure.
+```
+
+Scope notes (decided with the user 2026-08-12): items 1-2 deliberately
+OVERTURN the two standing "deliberate posture" partials — that is what
+full completion means here; item 5 may legitimately end in a revised
+budget instead of code; item 4 is the biggest diff (store-trait surgery
+across three subsystems) and exists because per-process maps contradict
+the §1 stateless-pods HA row.
+
 ## 1. Targets (the contract — raised 10× on 2026-08-10)
 
 | Dimension | Target | Notes |
@@ -207,21 +256,13 @@ least one negative assertion (what must NOT be in the response).
 - Local `master` may be ahead of origin — an external auto-pusher exists
   but is not this sandbox; verify.
 
-**Open engineering tasks (in rough priority):**
-1. §2 capacity budgets re-derivation for the 10× targets — MEASURED
-   (100k compiled subs ≈ 300 MB in the current mirror; likely per-tenant
-   lazy load + LRU). See the §1 warning.
-2. RESOLVED 2026-08-10 (commit 0990944): 4.3.6.3 validation implemented —
-   `csource::validate_exclusive` + `check_proxied_overlap`; 9 official
-   `_exc` TPs fork-fixed (error.md), raise upstream with D018_01.
-3. CI enforcement of §0.3 (`dev/spec.py check`): clause-prefix commit
-   must touch `docs/spec/`; robot-list drift; forbidden internal-doc
-   citations in `crates/`; frontmatter enum validation; split idempotence.
-4. `dev/spec.py next` + per-chapter burndown in the CI summary.
-5. ETSI D018_01 (`mode=inclusive` asserting 508) — raise upstream; fork
-   already fixed, error.md 2026-08-10 has the full argument.
-6. MemPalace re-mine after the doc split — FIRST add `docs/spec/` to
-   `mempalace.yaml` excludes (it duplicates the already-indexed PDF).
+**Open engineering tasks:** SUPERSEDED 2026-08-12 by the full-completion
+backlog in §0.3 ("The follow-up /goal prompt") — capacity re-derivation,
+CI enforcement of `dev/spec.py check`, `spec.py next` + burndown, the
+upstream ETSI raises (D018_01 + 504 fixtures + `_exc` TPs + 5.3.4 doubt,
+all argued in error.md), and the MemPalace re-mine all live there as
+items 5-8. 4.3.6.3 validation itself was RESOLVED 2026-08-10 (commit
+0990944); only its upstream raise remains (backlog item 7).
 
 **Loose ends:** `ETSI-matrix-results (5).zip` untracked in `/workspace`
 (analysis input, delete freely); `results/`, `results-proc/`, `www/`
