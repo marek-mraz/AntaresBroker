@@ -18,6 +18,10 @@ Commands:
     python3 dev/spec.py robot     # refresh the robot: field from suite tags
     python3 dev/spec.py status    # counts + per-chapter rollup
     python3 dev/spec.py gaps      # leaves with status not-implemented and no TPs
+    python3 dev/spec.py check     # ledger integrity gate (exit 1 on violation):
+                                  #   every clause file parses, status is in the
+                                  #   enum, partial/staged carry notes, robot
+                                  #   lists match the suite tags
 """
 
 import re
@@ -39,6 +43,7 @@ FOOTER_RE = re.compile(r"^(ETSI|\d{1,3}|ETSI GS CIM 009 V1\.9\.1 \(2025-07\))\s*
 
 HAND_FIELDS = ("status", "evidence", "notes")
 DEFAULTS = {"status": "not-implemented", "evidence": "", "notes": ""}
+STATUSES = {"not-implemented", "partial", "implemented", "staged-v1x", "informative"}
 
 
 def outline():
@@ -202,8 +207,47 @@ def cmd_gaps():
             print(f"{m['clause']:14} {m['title']}  (p.{m['pages']})")
 
 
+def cmd_check():
+    """Ledger integrity gate. A clause file that stops parsing would silently
+    DROP OUT of every other command's count — this is the command that makes
+    that (and status typos, robot drift) a loud CI failure instead."""
+    errors = []
+    tps = robot_map()
+    n = 0
+    for path in all_sections():
+        if path.name == "README.md":
+            continue
+        n += 1
+        try:
+            meta = read_frontmatter(path)
+        except yaml.YAMLError as e:
+            errors.append(f"{path}: frontmatter does not parse: {e}")
+            continue
+        if not meta:
+            errors.append(f"{path}: no frontmatter — excluded from all counts")
+            continue
+        status = meta.get("status")
+        if status not in STATUSES:
+            errors.append(f"{path}: status {status!r} not in {sorted(STATUSES)}")
+        if status in ("partial", "staged-v1x") and not meta.get("notes"):
+            errors.append(f"{path}: {status} without notes naming the gap/posture")
+        if status == "implemented" and not meta.get("evidence"):
+            errors.append(f"{path}: implemented without evidence")
+        if meta.get("robot") != tps.get(meta.get("clause"), []):
+            errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
+    for e in errors:
+        print(f"CHECK {e}")
+    print(f"check: {n} files, {len(errors)} violations")
+    if errors:
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
-    {"split": cmd_split, "robot": cmd_robot, "status": cmd_status, "gaps": cmd_gaps}.get(
-        cmd, cmd_status
-    )()
+    {
+        "split": cmd_split,
+        "robot": cmd_robot,
+        "status": cmd_status,
+        "gaps": cmd_gaps,
+        "check": cmd_check,
+    }.get(cmd, cmd_status)()
