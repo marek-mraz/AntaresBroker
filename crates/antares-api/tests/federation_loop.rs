@@ -923,6 +923,83 @@ async fn clause_5_6_21_purge_forwarding_gate() {
     );
 }
 
+/// 5.7.3.4: matching registrations that support retrieveTemporal are
+/// forwarded GET /temporal/entities/{id} and the remote instance data
+/// merges into the Temporal Evolution; sources without the operation are
+/// never contacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_3_temporal_retrieve_forwarding() {
+    let register_with = |st: AppState, ops: serde_json::Value, port: u16| async move {
+        let doc = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:trf",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ops,
+            "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        let body = doc.to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+        st
+    };
+    let temporal_get = || {
+        Request::builder()
+            .uri(format!("/ngsi-ld/v1/temporal/entities/{ENTITY}"))
+            .body(Body::empty())
+            .expect("request")
+    };
+
+    // retrieveTemporal-supporting source: forwarded, remote data served
+    let remote = serde_json::json!({
+        "id": ENTITY, "type": "Vehicle",
+        "speed": [{"type": "Property", "value": 5,
+                   "observedAt": "2026-01-01T00:00:00Z"}]
+    })
+    .to_string();
+    let reply: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            remote.len(),
+            remote
+        )
+        .into_boxed_str(),
+    );
+    let m = mock_replying(reply);
+    let st = register_with(state(), serde_json::json!(["retrieveTemporal"]), m.port).await;
+    let res = send(&st, temporal_get()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let speed = doc["speed"].as_array().expect("speed instances");
+    assert_eq!(speed.len(), 1, "remote instance served: {doc}");
+    assert_eq!(speed[0]["value"], 5);
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one temporal forward");
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("GET /ngsi-ld/v1/temporal/entities/{ENTITY}")),
+        "forward targets the temporal resource: {}",
+        m.last_head.lock().expect("lock")
+    );
+
+    // source without retrieveTemporal: never contacted; nothing local → 404
+    let (port, hits) = mock_source();
+    let st = register_with(state(), serde_json::json!(["retrieveEntity"]), port).await;
+    let res = send(&st, temporal_get()).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
+}
+
 /// 5.6.20.4 support ladder: no mergeBatch → per-entity Merge Entity
 /// (PATCH /entities/{id}) forwards.
 #[tokio::test(flavor = "multi_thread")]

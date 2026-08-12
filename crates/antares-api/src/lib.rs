@@ -2158,6 +2158,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn temporal_retrieve_rejects_linked_projection() {
+        // 5.7.3.4: "If projection attributes are present and indicate the
+        // use of Linked Entity retrieval, an error of type BadRequestData
+        // shall be raised" — unconditional, temporal has no join.
+        let app = app();
+        assert_eq!(
+            get_status(
+                &app,
+                "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Building:tl1?pick=owner%7Bname%7D",
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

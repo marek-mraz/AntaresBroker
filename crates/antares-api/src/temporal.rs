@@ -1591,6 +1591,27 @@ pub async fn retrieve_temporal(
         let ctx = request_context(&st.loader, &headers).await?;
         let tq = TemporalQ::from_params(&params, false)?;
         let trepr = parse_trepr(&params, &ctx)?;
+        // 5.7.3.4: "If projection attributes are present and indicate the
+        // use of Linked Entity retrieval, an error of type BadRequestData
+        // shall be raised" — unconditional, temporal defines no join.
+        if trepr
+            .pick
+            .as_deref()
+            .map(crate::repr::proj_depth)
+            .unwrap_or(0)
+            > 0
+            || trepr
+                .omit
+                .as_deref()
+                .map(crate::repr::proj_depth)
+                .unwrap_or(0)
+                > 0
+        {
+            return Err(NgsiError::BadRequestData(
+                "temporal projection must not use Linked Entity selection (5.7.3.4)".into(),
+            )
+            .into());
+        }
         let last_n = trepr.last_n;
         antares_model::EntityId::new(&id)?;
         // C11: instance pruning pushed into the store (no q=/geo on retrieve,
@@ -1610,9 +1631,65 @@ pub async fn retrieve_temporal(
                 .map_or("observedAt", |t| t.timeproperty.as_str()),
             ..Default::default()
         };
-        let doc = st.store.get_temporal(&tenant, &id, &tf)?.ok_or_else(|| {
-            NgsiError::ResourceNotFound(format!("temporal entity {id} not found"))
-        })?;
+        let timeprop = tq
+            .as_ref()
+            .map_or("observedAt", |t| t.timeproperty.as_str())
+            .to_owned();
+        let local = st.store.get_temporal(&tenant, &id, &tf)?;
+        // 5.7.3.4: forward to matching retrieveTemporal registrations and
+        // merge the remote instance data (4.5.5; auxiliary instances only
+        // fill timestamps absent elsewhere)
+        let mut warnings: Vec<String> = Vec::new();
+        let looped = crate::federation::via_loop(
+            &headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+        );
+        let doc = if crate::federation::active(&params) && !looped {
+            let fed = crate::federation::fed_retrieve_temporal(
+                &st,
+                &tenant,
+                &headers,
+                &ctx,
+                &id,
+                &params,
+                &mut warnings,
+            )
+            .await;
+            let (mut base, skip) = match local {
+                Some(b) => (b, None),
+                None => {
+                    let idx = fed.iter().position(|(aux, _)| !aux).or(if fed.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+                    match idx {
+                        Some(i) => (fed[i].1.clone(), Some(i)),
+                        None => {
+                            return Err(NgsiError::ResourceNotFound(format!(
+                                "temporal entity {id} not found"
+                            ))
+                            .into())
+                        }
+                    }
+                }
+            };
+            for aux_pass in [false, true] {
+                for (i, (aux, d)) in fed.iter().enumerate() {
+                    if Some(i) == skip {
+                        continue;
+                    }
+                    if *aux == aux_pass {
+                        merge_temporal_docs(&mut base, d, *aux, &timeprop);
+                    }
+                }
+            }
+            base
+        } else {
+            local.ok_or_else(|| {
+                NgsiError::ResourceNotFound(format!("temporal entity {id} not found"))
+            })?
+        };
         let attrs_filter = selection(&trepr);
         // 5.7.3: attrs matching nothing ⇒ 404
         if let Some(want) = &attrs_filter {
@@ -1623,10 +1700,6 @@ pub async fn retrieve_temporal(
                 .into());
             }
         }
-        let timeprop = tq
-            .as_ref()
-            .map_or("observedAt", |t| t.timeproperty.as_str())
-            .to_owned();
         let mut w = window(
             &doc,
             tq.as_ref(),
@@ -1668,9 +1741,60 @@ pub async fn retrieve_temporal(
                 resp.headers_mut().insert("Content-Range", v);
             }
         }
+        crate::entities::attach_warnings(&mut resp, &warnings);
         Ok::<_, ApiError>(resp)
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.7.3.4 / 4.5.5: merge one remote Temporal Evolution into `base` by
+/// appending instances per Attribute; auxiliary data contributes an
+/// instance only when no instance with the same timeproperty value was
+/// received from elsewhere.
+fn merge_temporal_docs(base: &mut Value, add: &Value, aux: bool, timeprop: &str) {
+    let (Some(target), Some(source)) = (base.as_object_mut(), add.as_object()) else {
+        return;
+    };
+    for (k, v) in source {
+        if [
+            "id",
+            "type",
+            "scope",
+            "createdAt",
+            "modifiedAt",
+            "deletedAt",
+            "expiresAt",
+        ]
+        .contains(&k.as_str())
+        {
+            target.entry(k.clone()).or_insert_with(|| v.clone());
+            continue;
+        }
+        let incoming: Vec<Value> = match v {
+            Value::Array(x) => x.clone(),
+            other => vec![other.clone()],
+        };
+        match target.get_mut(k).and_then(Value::as_array_mut) {
+            None => {
+                target.insert(k.clone(), Value::Array(incoming));
+            }
+            Some(cur) => {
+                for ni in incoming {
+                    if aux {
+                        let ts = ni.get(timeprop).and_then(Value::as_str);
+                        if ts.is_some()
+                            && cur
+                                .iter()
+                                .any(|ci| ci.get(timeprop).and_then(Value::as_str) == ts)
+                        {
+                            continue;
+                        }
+                    }
+                    cur.push(ni);
+                }
+            }
+        }
+    }
 }
 
 // ---------- DELETE /temporal/entities/{id} (5.6.16) ----------

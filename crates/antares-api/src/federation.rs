@@ -769,6 +769,104 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
     Some(Value::Object(out))
 }
 
+/// Expand + registration-scope-filter one remote temporal entity (5.7.3.4).
+/// Instances of one datasetId legally repeat in a Temporal Evolution, so
+/// expansion runs in temporal mode.
+fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value> {
+    let mut obj = remote.as_object()?.clone();
+    obj.remove("@context");
+    let expanded = antares_jsonld::expand_entity(
+        &obj,
+        ctx,
+        antares_jsonld::ExpandOpts {
+            sys: true,
+            temporal: true,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    let Some(scope) = &reg.attrs else {
+        return Some(expanded);
+    };
+    let mut out = Map::new();
+    for (k, v) in expanded.as_object()? {
+        if ["id", "type", "scope", "createdAt", "modifiedAt"].contains(&k.as_str())
+            || scope.iter().any(|s| s == k)
+        {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Some(Value::Object(out))
+}
+
+/// 5.7.3.4: forward Retrieve Temporal Evolution to matching registrations
+/// that support the retrieveTemporal operation; registrations without it
+/// are not contacted. Returns (auxiliary, expanded doc) pairs for the
+/// caller's 4.5.5 merge.
+pub async fn fed_retrieve_temporal(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &Context,
+    id: &str,
+    params: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Vec<(bool, Value)> {
+    let spec = crate::csource::CsrSpec {
+        ids: Some(vec![id.to_owned()]),
+        ..Default::default()
+    };
+    let ctx_url = ctx_link_url(headers, &ctx.source);
+    let mut out = Vec::new();
+    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        if !reg.supports("retrieveTemporal") {
+            continue;
+        }
+        // the temporal window travels with the forward; sysAttrs for the
+        // 4.5.5.3 recency arbitration
+        let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
+        for k in ["timerel", "timeAt", "endTimeAt", "timeproperty", "lastN"] {
+            if let Some(v) = params.get(k) {
+                query.push((k.into(), v.clone()));
+            }
+        }
+        if let Some(scope) = &reg.attrs {
+            let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
+            query.push(("attrs".into(), names.join(",")));
+        }
+        let (status, body) = forward(
+            st,
+            reqwest::Method::GET,
+            format!("{}/ngsi-ld/v1/temporal/entities/{id}", reg.endpoint),
+            &query,
+            headers,
+            tenant,
+            &reg,
+            &ctx_url,
+            None,
+        )
+        .await;
+        if let Some((code, text)) = read_warning(status, &body) {
+            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
+        }
+        if !(200..300).contains(&status) {
+            continue;
+        }
+        if body.get("id").and_then(Value::as_str) != Some(id) {
+            continue;
+        }
+        match import_temporal(&body, &reg, ctx) {
+            Some(doc) => out.push((reg.mode == "auxiliary", doc)),
+            None => warnings.push(warning(
+                111,
+                &alias_for(&st.host_alias, tenant),
+                "the payload of the response was invalid",
+            )),
+        }
+    }
+    out
+}
+
 fn recency(inst: &Value) -> &str {
     inst.get("observedAt")
         .or_else(|| inst.get("modifiedAt"))
