@@ -1,8 +1,7 @@
 //! NGSI-LD error model: the Table 5.5.2-1 error-type vocabulary (variant
 //! names verbatim) with the Table 6.3.2-1 HTTP status mapping. Error type
-//! URI base is https (V1.9.1). Table 5.5.2-1 also defines errors/Conflict,
-//! which no V1.9.1 operation clause mandates — the variant is added when an
-//! operation first requires it.
+//! URI base is https (V1.9.1). errors/Conflict entered with 5.9.2.4
+//! (registration-vs-entity/registration proxied-mode conflicts, 409).
 
 use serde::Serialize;
 use thiserror::Error;
@@ -15,6 +14,8 @@ pub enum NgsiError {
     AlreadyExists(String),
     #[error("{0}")]
     BadRequestData(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("{0}")]
     InvalidRequest(String),
     #[error("{0}")]
@@ -39,7 +40,7 @@ impl NgsiError {
     /// HTTP status per Table 6.3.2-1.
     pub fn status(&self) -> u16 {
         match self {
-            Self::AlreadyExists(_) => 409,
+            Self::AlreadyExists(_) | Self::Conflict(_) => 409,
             Self::BadRequestData(_) | Self::InvalidRequest(_) => 400,
             Self::InternalError(_) => 500,
             // 503 per the conformance suite's V1.8-era expectation (043_01);
@@ -57,6 +58,7 @@ impl NgsiError {
         match self {
             Self::AlreadyExists(_) => "AlreadyExists",
             Self::BadRequestData(_) => "BadRequestData",
+            Self::Conflict(_) => "Conflict",
             Self::InvalidRequest(_) => "InvalidRequest",
             Self::InternalError(_) => "InternalError",
             Self::LdContextNotAvailable(_) => "LdContextNotAvailable",
@@ -96,6 +98,7 @@ mod tests {
     fn status_mapping_matches_table_6_3_2_1() {
         assert_eq!(NgsiError::AlreadyExists(String::new()).status(), 409);
         assert_eq!(NgsiError::BadRequestData(String::new()).status(), 400);
+        assert_eq!(NgsiError::Conflict(String::new()).status(), 409);
         assert_eq!(
             NgsiError::LdContextNotAvailable(String::new()).status(),
             503

@@ -2271,6 +2271,191 @@ mod tests {
         );
     }
 
+    // ---- 5.9.2.4 Create Context Source Registration -----------------------
+
+    async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> StatusCode {
+        let body = body.to_string();
+        app.clone()
+            .oneshot(
+                Request::post(uri)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn csr_create_mode_restrictions() {
+        // 5.9.2.4: auxiliary registrations may only offer retrieveOps /
+        // retrieveEntity / queryEntity (or a combination); an exclusive
+        // registration conflicts with an existing entity carrying any of
+        // its Attributes; a redirect registration conflicts with any
+        // existing matching entity.
+        let app = app();
+        let reg = |id: &str, mode: &str, ops: serde_json::Value, ent: serde_json::Value| {
+            serde_json::json!({
+                "id": format!("urn:ngsi-ld:ContextSourceRegistration:{id}"),
+                "type": "ContextSourceRegistration",
+                "mode": mode,
+                "operations": ops,
+                "information": [ent],
+                "endpoint": "http://source.example.com"
+            })
+        };
+        let uri = "/ngsi-ld/v1/csourceRegistrations";
+
+        // auxiliary with a write op → 400; retrieve/query combination → 201
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "aux-bad",
+                    "auxiliary",
+                    serde_json::json!(["updateEntity"]),
+                    serde_json::json!({"entities": [{"type": "Building"}]})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "aux-ok",
+                    "auxiliary",
+                    serde_json::json!(["retrieveOps", "queryEntity"]),
+                    serde_json::json!({"entities": [{"type": "Building"}]})
+                )
+            )
+            .await,
+            StatusCode::CREATED
+        );
+
+        // exclusive vs existing entity carrying the registered attribute
+        create(&app, "urn:ngsi-ld:Building:csr1", "Building").await; // has "name"
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "exc-conflict",
+                    "exclusive",
+                    serde_json::json!(["retrieveOps"]),
+                    serde_json::json!({
+                        "entities": [{"type": "Building", "id": "urn:ngsi-ld:Building:csr1"}],
+                        "propertyNames": ["name"]
+                    })
+                )
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        // exclusive over an attr the entity does NOT have is fine
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "exc-ok",
+                    "exclusive",
+                    serde_json::json!(["retrieveOps"]),
+                    serde_json::json!({
+                        "entities": [{"type": "Building", "id": "urn:ngsi-ld:Building:csr1"}],
+                        "propertyNames": ["capacity"]
+                    })
+                )
+            )
+            .await,
+            StatusCode::CREATED
+        );
+
+        // redirect vs any existing matching entity
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "red-conflict",
+                    "redirect",
+                    serde_json::json!(["retrieveOps"]),
+                    serde_json::json!({
+                        "entities": [{"type": "Building", "id": "urn:ngsi-ld:Building:csr1"}]
+                    })
+                )
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        // redirect for an untouched id is fine
+        assert_eq!(
+            post_json(
+                &app,
+                uri,
+                reg(
+                    "red-ok",
+                    "redirect",
+                    serde_json::json!(["retrieveOps"]),
+                    serde_json::json!({
+                        "entities": [{"type": "Building", "id": "urn:ngsi-ld:Building:other"}]
+                    })
+                )
+            )
+            .await,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
+    async fn csr_expires_at_deletes_the_registration() {
+        // 5.9.2.4: "If expiresAt is a date and time in the future,
+        // implementations shall delete the Registration when this point in
+        // time is reached" — after expiry the registration is gone from
+        // retrieve and query.
+        let app = app();
+        let soon = (chrono::Utc::now() + chrono::Duration::milliseconds(1100))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reg = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:expiring",
+            "type": "ContextSourceRegistration",
+            "expiresAt": soon,
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://source.example.com"
+        });
+        assert_eq!(
+            post_json(&app, "/ngsi-ld/v1/csourceRegistrations", reg).await,
+            StatusCode::CREATED
+        );
+        let uri = "/ngsi-ld/v1/csourceRegistrations/urn:ngsi-ld:ContextSourceRegistration:expiring";
+        assert_eq!(get_status(&app, uri, None).await, StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+        assert_eq!(
+            get_status(&app, uri, None).await,
+            StatusCode::NOT_FOUND,
+            "expired registration must be gone"
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/csourceRegistrations?type=Building")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        let docs = body_json(resp).await;
+        assert!(
+            !docs.to_string().contains("expiring"),
+            "expired registration must not be listed: {docs}"
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

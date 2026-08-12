@@ -97,7 +97,8 @@ async fn register(st: &AppState, tenant: Option<&str>, mode: &str, port: u16, al
         "id": format!("urn:ngsi-ld:ContextSourceRegistration:{mode}-{}", alias.unwrap_or("none")),
         "type": "ContextSourceRegistration",
         "mode": mode,
-        "operations": ["redirectionOps"],
+        // 5.9.2.4: auxiliary registrations are limited to retrieve/query ops
+        "operations": if mode == "auxiliary" { ["retrieveOps"] } else { ["redirectionOps"] },
         "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
         "endpoint": format!("http://127.0.0.1:{port}"),
     });

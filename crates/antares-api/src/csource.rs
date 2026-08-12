@@ -495,6 +495,120 @@ fn valid_iso8601_duration(s: &str) -> bool {
     }
 }
 
+/// 5.9.2.4: an auxiliary registration may only offer "retrieveOps",
+/// "retrieveEntity" or "queryEntity" (or a combination thereof) — enforced
+/// when the operations member is present (absent = deployment default).
+fn validate_auxiliary_ops(doc: &Map<String, Value>) -> Result<(), NgsiError> {
+    if doc.get("mode").and_then(Value::as_str) != Some("auxiliary") {
+        return Ok(());
+    }
+    let Some(ops) = doc.get("operations").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let allowed = ["retrieveOps", "retrieveEntity", "queryEntity"];
+    if let Some(bad_op) = ops
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|o| !allowed.contains(o))
+    {
+        return Err(NgsiError::BadRequestData(format!(
+            "auxiliary registration operations are limited to \
+             retrieveOps/retrieveEntity/queryEntity — {bad_op:?} is not allowed (5.9.2.4)"
+        )));
+    }
+    Ok(())
+}
+
+/// 5.9.2.4 registration-vs-entity conflicts: an exclusive registration
+/// conflicts with an existing entity that carries any registered Attribute;
+/// a redirect registration conflicts with any existing matching entity.
+fn check_entity_conflict(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    doc: &Map<String, Value>,
+) -> Result<(), NgsiError> {
+    let mode = doc
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("inclusive");
+    if mode != "exclusive" && mode != "redirect" {
+        return Ok(());
+    }
+    let infos = doc
+        .get("information")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let all = st
+        .store
+        .list(tenant, Kind::Entity)
+        .map_err(|e| NgsiError::InternalError(e.to_string()))?;
+    for info in infos {
+        let attrs: Vec<&str> = ["propertyNames", "relationshipNames"]
+            .iter()
+            .flat_map(|k| info.get(*k).and_then(Value::as_array).into_iter().flatten())
+            .filter_map(Value::as_str)
+            .collect();
+        let ents = info
+            .get("entities")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for e in ents {
+            let want_id = e.get("id").and_then(Value::as_str);
+            let want_type = e.get("type").and_then(Value::as_str);
+            let pattern = e
+                .get("idPattern")
+                .and_then(Value::as_str)
+                .and_then(|p| regex::Regex::new(p).ok());
+            for existing in &all {
+                let eid = existing.get("id").and_then(Value::as_str).unwrap_or("");
+                let id_hit = match (want_id, &pattern) {
+                    (Some(w), _) => w == eid,
+                    (None, Some(re)) => re.is_match(eid),
+                    (None, None) => true,
+                };
+                if !id_hit {
+                    continue;
+                }
+                if let Some(t) = want_type {
+                    let matches_type = existing
+                        .get("type")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ts| ts.iter().any(|x| x.as_str() == Some(t)));
+                    if !matches_type {
+                        continue;
+                    }
+                }
+                let conflict = match mode {
+                    // exclusive names concrete Attributes (4.3.6.3) — only
+                    // an entity already carrying one of them conflicts
+                    "exclusive" => attrs.iter().any(|a| existing.get(*a).is_some()),
+                    // redirect: any matching entity conflicts
+                    _ => true,
+                };
+                if conflict {
+                    return Err(NgsiError::Conflict(format!(
+                        "existing entity {eid} conflicts with the {mode} registration (5.9.2.4)"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 5.9.2.4: a registration whose expiresAt has been reached counts as
+/// deleted — lazily filtered on every read/match path (dt_key so fraction
+/// spellings cannot misorder, 4.11).
+pub fn reg_expired(doc: &Value) -> bool {
+    doc.get("expiresAt")
+        .and_then(Value::as_str)
+        .is_some_and(|e| {
+            crate::temporal::dt_key(e) < crate::temporal::dt_key(&crate::state::now_iso())
+        })
+}
+
 pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
     if doc.get("mode").and_then(Value::as_str) != Some("exclusive") {
         return Ok(());
@@ -725,6 +839,8 @@ pub async fn create_registration(
                 id
             }
         };
+        validate_auxiliary_ops(&norm)?;
+        check_entity_conflict(&st, &tenant, &norm)?;
         check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
         let ts = now_iso();
         norm.insert("createdAt".into(), Value::String(ts.clone()));
@@ -772,6 +888,7 @@ pub async fn retrieve_registration(
         let doc = st
             .store
             .get(&tenant, Kind::Registration, &id)?
+            .filter(|d| !reg_expired(d))
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("registration {id} not found")))?;
         let sys = params
             .get("options")
@@ -885,6 +1002,9 @@ pub async fn query_registrations(
         let matches: Vec<Value> = all
             .into_iter()
             .filter(|doc| {
+                if reg_expired(doc) {
+                    return false;
+                }
                 let has_interval = doc.get("observationInterval").is_some()
                     || doc.get("managementInterval").is_some();
                 match &temporal {

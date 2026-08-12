@@ -395,7 +395,6 @@ pub fn matching_regs(
     ctx: &Context,
     headers: &HeaderMap,
 ) -> Vec<FedReg> {
-    let now = crate::state::now_iso();
     let seen = via_tokens(headers);
     // F5: the ONE compiled mirror when wired (bus=nats), the store otherwise.
     // Expiry is filtered HERE and only here — the single yield point (§4.1).
@@ -408,11 +407,7 @@ pub fn matching_regs(
     };
     regs.into_iter()
         .filter_map(|doc| {
-            if doc
-                .get("expiresAt")
-                .and_then(Value::as_str)
-                .is_some_and(|e| e < now.as_str())
-            {
+            if crate::csource::reg_expired(&doc) {
                 return None;
             }
             let alias = doc
