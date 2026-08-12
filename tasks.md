@@ -1204,6 +1204,9 @@ Definition of done, all six measured rather than asserted:
 - [x] 5. docs/upstream/etsi-raises.md — DONE 2026-08-12: five ready-to-file
       texts (3 suite: D018_01, _exc TPs, 504 fixtures; 2 spec: 5.3.4
       naming+snapshotReady, 6.6.3.2-2 UpdateResult). Filing is user-side.
-      Commit: `docs:` (hash backfilled next commit).
-- [ ] 6. MemPalace re-mine with docs/spec/ excluded; hand-filed drawers
-      backed up first.
+      Commit: 7f228b0.
+- [x] 6. MemPalace re-mine — DONE 2026-08-12: docs/spec/ was already in
+      mempalace.yaml excludes; 91 hand-filed chunks backed up to
+      ~/mempalace-backups/ngsi-ld-handfiled-2026-08-12.json; mine re-filed
+      54 changed files (2934 drawers); 4 decision chunks absorbed into the
+      mined wing (content preserved in backup + mined copies).
