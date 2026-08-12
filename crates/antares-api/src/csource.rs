@@ -995,6 +995,12 @@ pub async fn query_registrations(
             )
             .into());
         }
+        // 5.10.2.4: csf is a 4.9 query over Context Source Properties
+        let csf = params
+            .get("csf")
+            .map(|c| antares_ql::parse_q(c))
+            .transpose()?;
+        let scope_q = params.get("scopeQ").cloned();
         // temporal query: validate + interval presence rules (5.10.2.4)
         let temporal =
             crate::temporal::TemporalQ::from_params(&params, false)?.filter(|t| t.timerel != "any");
@@ -1011,6 +1017,24 @@ pub async fn query_registrations(
                     None if has_interval => return false,
                     Some(tq) if !temporal_interval_matches(doc, tq) => return false,
                     _ => {}
+                }
+                // 5.10.2.4: csf vs Context Source Properties, Scope query vs
+                // the registration scope, geoquery vs its location
+                if let Some(csf) = &csf {
+                    if !csf_matches(csf, doc, &ctx) {
+                        return false;
+                    }
+                }
+                if let Some(sq) = &scope_q {
+                    if !crate::scope_matches(sq, doc) {
+                        return false;
+                    }
+                }
+                if let Some(g) = &geo {
+                    match doc.get("location") {
+                        Some(geom) if g.matches_geometry(geom) => {}
+                        _ => return false,
+                    }
                 }
                 csr_matches(&spec, doc, &ctx)
             })
@@ -1198,6 +1222,31 @@ pub fn matching_infos<'a>(spec: &CsrSpec, doc: &'a Value, ctx: &Context) -> Vec<
             entity_ok && attrs_match_info(&spec.attrs, info)
         })
         .collect()
+}
+
+/// 5.10.2.4: the context source filter (csf, 4.9) evaluates over the
+/// registration document's own Context Source Properties — its members are
+/// wrapped as Property instances so the shared 4.9 evaluator applies.
+fn csf_matches(csf: &antares_ql::QNode, reg: &Value, ctx: &Context) -> bool {
+    let Some(obj) = reg.as_object() else {
+        return false;
+    };
+    let mut pseudo = Map::new();
+    pseudo.insert("id".into(), obj.get("id").cloned().unwrap_or(Value::Null));
+    pseudo.insert(
+        "type".into(),
+        serde_json::json!(["ContextSourceRegistration"]),
+    );
+    for (k, v) in obj {
+        if ["id", "type", "information", "createdAt", "modifiedAt"].contains(&k.as_str()) {
+            continue;
+        }
+        pseudo.insert(
+            ctx.expand_key(k),
+            serde_json::json!([{"type": "Property", "value": v}]),
+        );
+    }
+    crate::qeval::eval_q(csf, &Value::Object(pseudo), ctx, &|_| None)
 }
 
 pub fn csr_matches(spec: &CsrSpec, doc: &Value, ctx: &Context) -> bool {

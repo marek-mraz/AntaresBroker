@@ -108,11 +108,13 @@ pub(crate) fn repr_reserved(k: &str) -> bool {
 /// grouping), `+` one level, trailing `#` the subtree incl. the node, `/#`
 /// any non-empty scope.
 pub fn scope_matches(scope_q: &str, doc: &Value) -> bool {
-    let scopes: Vec<&str> = doc
-        .get("scope")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+    // scope is an array in the entity internal form, but a bare string is
+    // legal on documents stored verbatim (e.g. registrations, 5.2.9)
+    let scopes: Vec<&str> = match doc.get("scope") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        _ => Vec::new(),
+    };
     scope_q.split([',', '|']).any(|and_group| {
         and_group
             .trim()
@@ -2506,6 +2508,74 @@ mod tests {
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn csr_query_csf_scope_and_geo_filters() {
+        // 5.10.2.4: the context source filter (csf) matches the
+        // registration's own Context Source Properties; the Scope query
+        // matches its scope; the geoquery matches its location.
+        let app = app();
+        let reg_a = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:disc-a",
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://a.example.com",
+            "scope": "/Madrid/Centro",
+            "location": {"type": "Point", "coordinates": [8.68, 49.41]}
+        });
+        let reg_b = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:disc-b",
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://b.example.com",
+            "scope": "/Berlin"
+        });
+        for r in [reg_a, reg_b] {
+            assert_eq!(
+                post_json(&app, "/ngsi-ld/v1/csourceRegistrations", r).await,
+                StatusCode::CREATED
+            );
+        }
+        let list = |q: String| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(
+                        Request::get(format!(
+                            "/ngsi-ld/v1/csourceRegistrations?type=Building&{q}"
+                        ))
+                        .body(Body::empty())
+                        .expect("req"),
+                    )
+                    .await
+                    .expect("resp");
+                assert_eq!(resp.status(), StatusCode::OK, "query {q}");
+                body_json(resp).await.to_string()
+            }
+        };
+        // csf on a Context Source Property
+        let got = list("csf=endpoint%3D%3D%22http%3A%2F%2Fa.example.com%22".into()).await;
+        assert!(
+            got.contains("disc-a") && !got.contains("disc-b"),
+            "csf: {got}"
+        );
+        // Scope query against the registration scope
+        let got = list("scopeQ=%2FMadrid%2F%23".into()).await;
+        assert!(
+            got.contains("disc-a") && !got.contains("disc-b"),
+            "scopeQ: {got}"
+        );
+        // geoquery against the registration location
+        let got = list(
+            "georel=near%3BmaxDistance%3D%3D2000&geometry=Point&coordinates=%5B8.68%2C49.41%5D"
+                .into(),
+        )
+        .await;
+        assert!(
+            got.contains("disc-a") && !got.contains("disc-b"),
+            "geo: {got}"
+        );
     }
 
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
