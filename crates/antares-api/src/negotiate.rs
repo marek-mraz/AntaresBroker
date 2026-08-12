@@ -195,6 +195,45 @@ pub fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
     }
 }
 
+/// 6.3.6: "Prefer: body=json" on a GeoJSON response — the @context is
+/// conveyed only by the Link header and omitted from the payload body.
+pub fn prefer_body_json(headers: &HeaderMap) -> bool {
+    headers
+        .get("Prefer")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|p| {
+            p.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("body=json"))
+        })
+}
+
+/// 6.3.6: build a payload-carrying response honouring Prefer on GeoJSON —
+/// body=json keeps the @context out of the body (Link header only);
+/// omitted / body=ld+json embeds it (the respond() default).
+pub fn respond_prefer(
+    status: StatusCode,
+    payload: Value,
+    ctx: &Context,
+    accept: Accept,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+) -> Response {
+    if accept == Accept::GeoJson && prefer_body_json(headers) {
+        let mut resp = (
+            status,
+            [
+                (header::CONTENT_TYPE, "application/geo+json".to_owned()),
+                (header::LINK, link_header_value(ctx)),
+            ],
+            axum::Json(payload),
+        )
+            .into_response();
+        echo_tenant(tenant, &mut resp);
+        return resp;
+    }
+    respond(status, payload, ctx, accept, tenant)
+}
+
 /// Content-Type of the request (media type only, parameters dropped).
 pub fn content_type(headers: &HeaderMap) -> String {
     headers
@@ -609,6 +648,49 @@ mod clause_5_5_3 {
             ctx.expand_key("observedAt"),
             "https://uri.etsi.org/ngsi-ld/observedAt"
         );
+    }
+
+    /// 6.3.6: geo+json + "Prefer: body=json" → Link header only, @context
+    /// omitted from the body; without the preference the body embeds it.
+    #[tokio::test]
+    async fn clause_6_3_6_prefer_body_json_omits_geojson_context() {
+        let loader = antares_jsonld::Loader::new();
+        let ctx = loader.core();
+        let tenant = TenantId::default();
+        let payload = serde_json::json!({"type": "FeatureCollection", "features": []});
+
+        let mut h = HeaderMap::new();
+        h.insert("Prefer", axum::http::HeaderValue::from_static("body=json"));
+        let resp = respond_prefer(
+            StatusCode::OK,
+            payload.clone(),
+            &ctx,
+            Accept::GeoJson,
+            &tenant,
+            &h,
+        );
+        assert!(resp.headers().get(header::LINK).is_some());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(doc.get("@context").is_none(), "{doc}");
+        assert_eq!(doc["type"], "FeatureCollection");
+
+        // no preference → the body embeds the @context (6.3.15)
+        let resp = respond_prefer(
+            StatusCode::OK,
+            payload,
+            &ctx,
+            Accept::GeoJson,
+            &tenant,
+            &HeaderMap::new(),
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(doc.get("@context").is_some(), "{doc}");
     }
 
     /// 6.3.5: "No mixes are allowed" — application/json takes its @context

@@ -501,7 +501,7 @@ async fn retrieve_entity_inner(
     } else {
         payload
     };
-    let mut resp = respond(StatusCode::OK, payload, &ctx, accept, &tenant);
+    let mut resp = respond_prefer(StatusCode::OK, payload, &ctx, accept, &tenant, headers);
     attach_warnings(&mut resp, &warnings);
     Ok(resp)
 }
@@ -1089,7 +1089,7 @@ async fn query_entities_inner(
     }
     let mut resp = if accept == Accept::GeoJson {
         let fc = to_geojson_collection(payload, params.get("geometryProperty"), &ctx);
-        respond(StatusCode::OK, fc, &ctx, accept, &tenant)
+        respond_prefer(StatusCode::OK, fc, &ctx, accept, &tenant, headers)
     } else {
         crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant)
     };

@@ -1292,7 +1292,7 @@ async fn batch_query_inner(
     } else {
         Value::Array(payload)
     };
-    let mut resp = respond(StatusCode::OK, out, &parsed.ctx, accept, &tenant);
+    let mut resp = respond_prefer(StatusCode::OK, out, &parsed.ctx, accept, &tenant, headers);
     if let Some(total) = count_hdr {
         if let Ok(v) = total.to_string().parse() {
             resp.headers_mut().insert("NGSILD-Results-Count", v);
