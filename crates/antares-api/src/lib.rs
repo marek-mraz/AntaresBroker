@@ -2079,6 +2079,85 @@ mod tests {
         );
     }
 
+    // ---- 5.7.2.4 Query Entities validation --------------------------------
+
+    #[tokio::test]
+    async fn query_requires_a_non_system_attribute_in_attrs_and_q() {
+        // 5.7.2.4 b/c: the Attribute list / query only qualifies the
+        // too-wide guard when it includes "at least one non-system
+        // Attribute" — system names alone are still a too-wide 400.
+        let app = app();
+        assert_eq!(
+            get_status(&app, "/ngsi-ld/v1/entities?attrs=createdAt", None).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get_status(
+                &app,
+                "/ngsi-ld/v1/entities?q=modifiedAt%3E%222020-01-01T00:00:00Z%22",
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_ne!(
+            get_status(&app, "/ngsi-ld/v1/entities?attrs=name", None).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn query_linked_entity_guards() {
+        // 5.7.2.4: projection or filter conditions that use Linked Entity
+        // paths require join, and their depth may not exceed joinLevel
+        // ("too deep query"); csf must be syntactically valid.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:ql1", "Building").await;
+        let base = "/ngsi-ld/v1/entities?type=Building";
+        // {…} projection without join
+        assert_eq!(
+            get_status(&app, &format!("{base}&pick=owner%7Bname%7D"), None).await,
+            StatusCode::BAD_REQUEST
+        );
+        // linked q term without join
+        assert_eq!(
+            get_status(
+                &app,
+                &format!("{base}&q=owner%7Bname%7D%3D%3D%22x%22"),
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // linked q term two hops deep over joinLevel=1
+        assert_eq!(
+            get_status(
+                &app,
+                &format!(
+                    "{base}&q=owner%7Bworks%7Bname%7D%7D%3D%3D%22x%22&join=inline&joinLevel=1"
+                ),
+                None
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // invalid csf
+        assert_eq!(
+            get_status(&app, &format!("{base}&csf=%29%29bad%28%28"), None).await,
+            StatusCode::BAD_REQUEST
+        );
+        // well-formed linked q within depth is accepted
+        assert_eq!(
+            get_status(
+                &app,
+                &format!("{base}&q=owner%7Bname%7D%3D%3D%22x%22&join=inline&joinLevel=1"),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

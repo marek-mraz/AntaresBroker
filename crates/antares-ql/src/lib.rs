@@ -83,6 +83,18 @@ impl QNode {
         }
     }
 
+    /// Deepest chain of `attr{…}` hops any referenced path uses — the number
+    /// of Linked Entity levels the query needs (5.7.2.4: must not exceed
+    /// joinLevel).
+    pub fn max_link_depth(&self) -> usize {
+        match self {
+            QNode::And(ns) | QNode::Or(ns) => {
+                ns.iter().map(Self::max_link_depth).max().unwrap_or(0)
+            }
+            QNode::Cmp { path, .. } | QNode::Exists { path, .. } => path.links.len(),
+        }
+    }
+
     fn collect_paths<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             QNode::And(ns) | QNode::Or(ns) => {

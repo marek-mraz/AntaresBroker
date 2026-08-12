@@ -392,38 +392,7 @@ async fn retrieve_entity_inner(
     let ctx = request_context(&st.loader, headers).await?;
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
-    // 5.7.1.4: a `{…}` projection selects into Linked Entities — it must be
-    // requested via join, and may not select deeper than joinLevel
-    let proj_depth = repr
-        .pick
-        .as_deref()
-        .map(crate::repr::proj_depth)
-        .unwrap_or(0)
-        .max(
-            repr.omit
-                .as_deref()
-                .map(crate::repr::proj_depth)
-                .unwrap_or(0),
-        );
-    if proj_depth > 0 {
-        match &join {
-            Some((mode, level)) if mode != "@none" => {
-                if proj_depth > *level {
-                    return Err(NgsiError::BadRequestData(format!(
-                        "projected attribute depth {proj_depth} exceeds joinLevel {level} (5.7.1.4)"
-                    ))
-                    .into());
-                }
-            }
-            _ => {
-                return Err(NgsiError::BadRequestData(
-                    "projection uses Linked Entity selection but join is not specified (5.7.1.4)"
-                        .into(),
-                )
-                .into());
-            }
-        }
-    }
+    check_linked_projection(&repr, &join)?;
     antares_model::EntityId::new(id)?;
     let local_doc = st.store.get(&tenant, Kind::Entity, id)?;
     let looped = crate::federation::via_loop(
@@ -544,6 +513,44 @@ pub fn attach_warnings(resp: &mut Response, warnings: &[String]) {
         if let Ok(v) = axum::http::HeaderValue::from_str(w) {
             resp.headers_mut().append("NGSILD-Warning", v);
         }
+    }
+}
+
+/// 5.7.1.4 / 5.7.2.4: a `{…}` projection selects into Linked Entities —
+/// it must be requested via join, and may not select deeper than joinLevel.
+fn check_linked_projection(
+    repr: &crate::repr::Repr,
+    join: &Option<(String, usize)>,
+) -> ApiResult<()> {
+    let depth = repr
+        .pick
+        .as_deref()
+        .map(crate::repr::proj_depth)
+        .unwrap_or(0)
+        .max(
+            repr.omit
+                .as_deref()
+                .map(crate::repr::proj_depth)
+                .unwrap_or(0),
+        );
+    if depth == 0 {
+        return Ok(());
+    }
+    match join {
+        Some((mode, level)) if mode != "@none" => {
+            if depth > *level {
+                return Err(NgsiError::BadRequestData(format!(
+                    "projected attribute depth {depth} exceeds joinLevel {level} (5.7.1.4/5.7.2.4)"
+                ))
+                .into());
+            }
+            Ok(())
+        }
+        _ => Err(NgsiError::BadRequestData(
+            "projection uses Linked Entity selection but join is not specified (5.7.1.4/5.7.2.4)"
+                .into(),
+        )
+        .into()),
     }
 }
 
@@ -837,11 +844,22 @@ async fn query_entities_inner(
     let accept = parse_accept_geo(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
 
-    // 5.7.2: id/idPattern alone are NOT sufficient — one of type, attrs, q,
-    // georel (or local=true) is required.
-    let has_filter = ["type", "attrs", "q", "georel"]
-        .iter()
-        .any(|k| params.contains_key(*k))
+    // 5.7.2.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
+    // list / q must include "at least one non-system Attribute" to qualify.
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    let attrs_qualify = params.get("attrs").is_some_and(|a| {
+        a.split(',')
+            .any(|n| antares_ql::is_non_system_attr(n.trim()))
+    });
+    let q_qualifies = q_ast.as_ref().is_some_and(|ast| {
+        ast.attribute_paths()
+            .iter()
+            .any(|h| antares_ql::is_non_system_attr(h))
+    });
+    let has_filter = params.contains_key("type")
+        || attrs_qualify
+        || q_qualifies
+        || params.contains_key("georel")
         || params.get("local").map(String::as_str) == Some("true");
     // 5.7.2.4 validation bullets (p.201), in the spec's own order.
     if params.get("type").map(String::as_str) == Some("*")
@@ -885,6 +903,39 @@ async fn query_entities_inner(
 
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
+    check_linked_projection(&repr, &join)?;
+    // 5.7.2.4: filter conditions using Linked Entity attributes need join,
+    // and their hop depth may not exceed joinLevel ("too deep query")
+    let link_depth = q_ast
+        .as_ref()
+        .map(antares_ql::QNode::max_link_depth)
+        .unwrap_or(0);
+    if link_depth > 0 {
+        match &join {
+            Some((mode, level)) if mode != "@none" => {
+                if link_depth > *level {
+                    return Err(NgsiError::BadRequestData(format!(
+                        "linked attribute query depth {link_depth} exceeds joinLevel {level} \
+                         (5.7.2.4 — too deep query)"
+                    ))
+                    .into());
+                }
+            }
+            _ => {
+                return Err(NgsiError::BadRequestData(
+                    "q references Linked Entity attributes but join is not specified \
+                     (5.7.2.4 — too deep query)"
+                        .into(),
+                )
+                .into());
+            }
+        }
+    }
+    // 5.7.2.4: a syntactically invalid context source filter is 400. Named
+    // gap: csf is validated but not applied to Context Source matching.
+    if let Some(csf) = params.get("csf") {
+        parse_q(csf)?;
+    }
     // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
     let mut warnings: Vec<String> = Vec::new();
     let looped = crate::federation::via_loop(
