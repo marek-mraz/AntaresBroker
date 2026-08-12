@@ -1199,8 +1199,14 @@ Definition of done, all six measured rather than asserted:
       red seen); TP 5161_01_05 (CS-mock fed fill) 5/5 local; pagination +
       eviction unit-only (need non-default broker config — noted in ledger).
       Commit: 8e9491b (+ fork).
-- [ ] 4. Durable state for HA: snapshots, entity_maps, dist_subs promoted to
-      the store trait (pg/timescale survive restart); restart-survival tests.
+- [x] 4. Durable state for HA — DONE 2026-08-12: Kind::Snapshot/EntityMap/DistSub
+      on the store trait (memory maps + redb tables + pg doc-kind path,
+      migration 0008 with ADR-0001-shaped RLS); inbound dist-sub index under
+      the reserved distsub-index tenant (ADR-0012). tests/durable_state.rs
+      2/2 (red seen on inverted survival assertion); targeted regressions
+      36/36 (snapshots_5_16 16, entity_maps_5_14 10, entity_maps_usage 6,
+      dist_subs_5_8 4 + tenant_isolation 4); EntityMap+5161_01+5814_01 Robot
+      TPs 22/22 local. Commit: 602b236.
 - [x] 5. docs/upstream/etsi-raises.md — DONE 2026-08-12: five ready-to-file
       texts (3 suite: D018_01, _exc TPs, 504 fixtures; 2 spec: 5.3.4
       naming+snapshotReady, 6.6.3.2-2 UpdateResult). Filing is user-side.
