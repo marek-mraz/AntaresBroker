@@ -1310,6 +1310,19 @@ pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool
             }
         }
     }
+    // 5.11.2.4: csf vs the registration's Context Source Properties, scopeQ
+    // vs its scope property
+    if let Some(csf) = sub.get("csf").and_then(Value::as_str) {
+        match antares_ql::parse_q(csf) {
+            Ok(ast) if csf_matches(&ast, reg, ctx) => {}
+            _ => return false,
+        }
+    }
+    if let Some(sq) = sub.get("scopeQ").and_then(Value::as_str) {
+        if !crate::scope_matches(sq, reg) {
+            return false;
+        }
+    }
     true
 }
 
@@ -1470,6 +1483,53 @@ pub async fn delete_registration(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+#[cfg(test)]
+mod clause_5_11_2 {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    /// 5.11.2.4: a csource subscription's csf matches the registration's
+    /// own Context Source Properties, and its scopeQ matches the
+    /// registration scope.
+    #[test]
+    fn csource_subscription_csf_and_scope_matching() {
+        let ctx = Loader::new().core();
+        let reg_a = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:sub-a",
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://a.example.com",
+            "scope": "/Madrid/Centro"
+        });
+        let reg_b = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:sub-b",
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "endpoint": "http://b.example.com",
+            "scope": "/Berlin"
+        });
+        let sub_csf = json!({
+            "entities": [{"type": "Building"}],
+            "csf": "endpoint==\"http://a.example.com\""
+        });
+        assert!(csr_matches_subscription(&sub_csf, &reg_a, &ctx));
+        assert!(
+            !csr_matches_subscription(&sub_csf, &reg_b, &ctx),
+            "csf must exclude the other endpoint"
+        );
+        let sub_scope = json!({
+            "entities": [{"type": "Building"}],
+            "scopeQ": "/Madrid/#"
+        });
+        assert!(csr_matches_subscription(&sub_scope, &reg_a, &ctx));
+        assert!(
+            !csr_matches_subscription(&sub_scope, &reg_b, &ctx),
+            "scopeQ must exclude /Berlin"
+        );
+    }
 }
 
 #[cfg(test)]
