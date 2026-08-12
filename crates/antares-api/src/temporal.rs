@@ -1420,13 +1420,21 @@ pub(crate) async fn query_temporal_inner(
             "orderGeometry",
             "entityMapLifetime",
             "splitEntities",
+            "expandValues",
+            "jsonKeys",
         ],
     )?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
     // 5.7.4.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
     // list / q must include at least one non-system Attribute to qualify.
-    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    // 5.7.4.3 expandValues: the same 4.9 EXAMPLE 12 coercion as the entity
+    // query — term values expanded against the @context before executing;
+    // jsonKeys needs no action (raw JSON targets are navigated without term
+    // expansion by default).
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
+        crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
+    });
     let attrs_qualify = params.get("attrs").is_some_and(|a| {
         a.split(',')
             .any(|n| antares_ql::is_non_system_attr(n.trim()))

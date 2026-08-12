@@ -582,15 +582,22 @@ fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
 }
 
 /// q / scopeQ / geoQ conditions against an internal entity doc.
-fn conditions_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
+fn conditions_match(
+    st: &AppState,
+    tenant: &TenantId,
+    sub: &Value,
+    doc: &Value,
+    ctx: &Context,
+) -> bool {
     if let Some(q) = sub_str(sub, "q") {
         // q values in subscription bodies may be percent-encoded (4.9, 046_05)
         let q = crate::negotiate::percent_decode(q.as_bytes());
         match antares_ql::parse_q(&q) {
             Ok(node) => {
-                // linked-entity q terms have no store access here — they
-                // evaluate as non-matching (ledger 4.9 note)
-                if !crate::qeval::eval_q(&node, doc, ctx, &|_| None) {
+                // 4.9 EXAMPLE 13/14: linked-entity q terms (attr{path})
+                // resolve through the local store, same tenant
+                let lookup = |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten();
+                if !crate::qeval::eval_q(&node, doc, ctx, &lookup) {
                     return false;
                 }
             }
@@ -1037,7 +1044,7 @@ pub async fn process_change(
         if !selector_match(&sub, eval_doc, &ctx) {
             continue;
         }
-        if !conditions_match(&sub, eval_doc, &ctx) {
+        if !conditions_match(st, &tenant, &sub, eval_doc, &ctx) {
             continue;
         }
         if throttled(&sub) {
@@ -1157,7 +1164,9 @@ pub async fn interval_tick(st: &AppState) {
                 .list(&tenant, Kind::Entity)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|d| selector_match(&sub, d, &ctx) && conditions_match(&sub, d, &ctx))
+                .filter(|d| {
+                    selector_match(&sub, d, &ctx) && conditions_match(st, &tenant, &sub, d, &ctx)
+                })
                 .flat_map(|d| build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now))
                 .collect();
             if matching.is_empty() {
