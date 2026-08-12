@@ -831,6 +831,7 @@ fn map_gate(mut reg: FedReg, map: Option<&Value>, id: &str) -> Option<FedReg> {
     Some(reg)
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn fed_retrieve_temporal(
     st: &AppState,
     tenant: &TenantId,

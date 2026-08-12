@@ -17,6 +17,8 @@ geojson = { workspace = true }
 sonic-rs = { workspace = true, optional = true }
 futures-util = { workspace = true }
 chrono = { workspace = true }
+icu_collator = { workspace = true }
+icu_locale_core = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }

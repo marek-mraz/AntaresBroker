@@ -1418,6 +1418,7 @@ pub(crate) async fn query_temporal_inner(
             "orderBy",
             "orderFrom",
             "orderGeometry",
+            "collation",
             "entityMapLifetime",
             "splitEntities",
             "expandValues",

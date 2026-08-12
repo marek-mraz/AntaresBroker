@@ -965,6 +965,7 @@ pub const QUERY_PARAMS: &[&str] = &[
     "orderBy",
     "orderFrom",
     "orderGeometry",
+    "collation",
     "entityMapLifetime",
     "splitEntities",
 ];
@@ -2282,8 +2283,41 @@ pub async fn replace_entity(
 /// (4.23.2). Mixed datatypes rank Numbers < Strings < Object < Array <
 /// Boolean < Time < Date < DateTime < Null < absent (4.23.2). Paths may be
 /// dotted (EXAMPLE 5) or carry one trailing [member.path] bracket
-/// (EXAMPLE 4). String collation is codepoint order — the ICU root default
-/// and the `collation` parameter are a named ledger gap.
+/// (EXAMPLE 4). String comparison is codepoint order by default; the
+/// `collation` parameter selects an ICU collation (4.23.3 EXAMPLES 6/7).
+///
+/// 4.23.3 EXAMPLES 6/7: the ICU collator for an RFC 6067 collation tag
+/// (e.g. und-u-ks-identic, de-u-co-phonebk). The co/kf/kn keywords travel
+/// via CollatorPreferences; the -u-ks strength keyword maps onto
+/// CollatorOptions. Invalid/unsupported tags are BadRequestData.
+fn build_collator(tag: &str) -> Result<icu_collator::CollatorBorrowed<'static>, NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let locale: icu_locale_core::Locale = tag.parse().map_err(|_| {
+        bad(format!(
+            "collation is not an RFC 6067 tag: {tag:?} (4.23.3)"
+        ))
+    })?;
+    let mut opts = icu_collator::options::CollatorOptions::default();
+    use icu_collator::options::Strength;
+    use icu_locale_core::extensions::unicode::key;
+    if let Some(ks) = locale.extensions.unicode.keywords.get(&key!("ks")) {
+        opts.strength = Some(match ks.to_string().as_str() {
+            "level1" => Strength::Primary,
+            "level2" => Strength::Secondary,
+            "level3" => Strength::Tertiary,
+            "level4" => Strength::Quaternary,
+            "identic" => Strength::Identical,
+            other => {
+                return Err(bad(format!(
+                    "unknown collation strength {other:?} (4.23.3)"
+                )))
+            }
+        });
+    }
+    icu_collator::Collator::try_new((&locale).into(), opts)
+        .map_err(|e| bad(format!("unsupported collation {tag:?}: {e} (4.23.3)")))
+}
+
 pub fn order_entities(
     docs: &mut [Value],
     spec: &str,
@@ -2340,6 +2374,11 @@ pub fn order_entities(
             dir,
         });
     }
+    // 4.23.3 EXAMPLES 6/7: collation names an ICU ordering for strings
+    let collator = params
+        .get("collation")
+        .map(|t| build_collator(t))
+        .transpose()?;
     // dist-* keys need the orderFrom reference geometry (4.23.3 EXAMPLE 8-10)
     let refg = if keys
         .iter()
@@ -2442,7 +2481,11 @@ pub fn order_entities(
             && b[3..5].iter().all(u8::is_ascii_digit)
             && b[6..8].iter().all(u8::is_ascii_digit)
     }
-    fn cmp_vals(a: &Option<Value>, b: &Option<Value>) -> std::cmp::Ordering {
+    fn cmp_vals(
+        a: &Option<Value>,
+        b: &Option<Value>,
+        coll: Option<&icu_collator::CollatorBorrowed<'static>>,
+    ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
             (None, None) => Ordering::Equal,
@@ -2464,9 +2507,11 @@ pub fn order_entities(
                             // DateTime: canonical key so equal instants in
                             // different 4.6.3 fraction spellings tie (4.11)
                             crate::temporal::dt_key(sx).cmp(&crate::temporal::dt_key(sy))
+                        } else if let Some(c) = coll {
+                            // 4.23.3 EXAMPLES 6/7: the named ICU collation
+                            c.compare(sx, sy)
                         } else {
-                            // ponytail: codepoint order — ICU root collation
-                            // is the ledger-named upgrade
+                            // 4.23.1 default: codepoint order
                             sx.cmp(sy)
                         }
                     }
@@ -2482,7 +2527,7 @@ pub fn order_entities(
                 Dir::Asc | Dir::Desc => {
                     let va = order_value(a, k, ctx);
                     let vb = order_value(b, k, ctx);
-                    let mut o = cmp_vals(&va, &vb);
+                    let mut o = cmp_vals(&va, &vb, collator.as_ref());
                     if k.dir == Dir::Desc {
                         o = o.reverse();
                     }
@@ -2509,7 +2554,7 @@ pub fn order_entities(
                         (None, None) => {
                             let va = order_value(a, k, ctx);
                             let vb = order_value(b, k, ctx);
-                            cmp_vals(&va, &vb)
+                            cmp_vals(&va, &vb, collator.as_ref())
                         }
                     }
                 }

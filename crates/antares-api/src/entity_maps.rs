@@ -346,6 +346,7 @@ pub(crate) async fn build_query_map(
 /// every matching Context Source Registration supporting the retrieve
 /// operation ("only the retrieved Entity Map shall be used to determine
 /// which Context Source Registrations match the Entity ID").
+#[allow(clippy::too_many_arguments)] // one param per 5.7.1.4 input
 pub(crate) fn build_retrieve_map(
     st: &AppState,
     tenant: &TenantId,

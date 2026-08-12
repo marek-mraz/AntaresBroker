@@ -1159,13 +1159,12 @@ pub(crate) fn query_doc_params(
                 }
                 Some(_) => return Err(bad("ordering geometry must be a string (5.2.43)".into())),
             }
-            if o.get("collation").is_some() {
-                // 4.23.1: only codepoint order is offered - an explicit ICU
-                // collation cannot be honoured, so it is refused loudly
-                // rather than mis-ordering silently.
-                return Err(bad(
-                    "ordering collation is not supported (codepoint order only, 4.23.1)".into(),
-                ));
+            match o.get("collation") {
+                None => {}
+                Some(Value::String(c)) => {
+                    vp.insert("collation".into(), c.clone());
+                }
+                Some(_) => return Err(bad("ordering collation must be a string (5.2.43)".into())),
             }
         }
         Some(_) => {

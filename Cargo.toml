@@ -37,6 +37,9 @@ antares-registry = { path = "crates/antares-registry" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
+# 4.23.3 EXAMPLES 6/7: orderBy collation — ICU4X collator, compiled data
+icu_collator = "2"
+icu_locale_core = "2"
 uuid = { version = "1", features = ["v4", "v5"] }
 regex = "1"
 axum = "0.8"

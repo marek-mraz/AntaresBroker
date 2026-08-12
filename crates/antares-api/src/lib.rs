@@ -4312,6 +4312,8 @@ mod clause_5_2_43 {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "geometry must be a string");
+        // 4.23.3 EXAMPLE 7: a named ICU collation is honoured (200), and a
+        // non-string member stays a loud 400
         let (st, body) = send(
             &app,
             "POST",
@@ -4320,11 +4322,17 @@ mod clause_5_2_43 {
                 "collation": "de-u-co-phonebk"}))),
         )
         .await;
-        assert_eq!(
-            st,
-            StatusCode::BAD_REQUEST,
-            "unsupported collation is loud: {body}"
-        );
+        assert_eq!(st, StatusCode::OK, "named collation is honoured: {body}");
+        let (st, body) = send(
+            &app,
+            "POST",
+            q,
+            Some(with_ordering(
+                json!({"orderBy": ["id;asc"], "collation": 5}),
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("collation"), "{body}");
         // GET twin: orderGeometry is a legal query parameter
         let (st, body) = send(
