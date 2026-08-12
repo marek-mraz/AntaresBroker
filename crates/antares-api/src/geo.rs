@@ -148,7 +148,8 @@ impl GeoQuery {
             let n = v
                 .parse::<f64>()
                 .map_err(|_| bad(format!("invalid {name} {v:?}")))?;
-            if !(n > 0.0) {
+            // NaN parses as a valid f64 — Greater-only comparison rejects it too
+            if n.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                 return Err(bad(format!("{name} must be a positive non-zero number")));
             }
             Ok(n)

@@ -1611,7 +1611,7 @@ pub(crate) async fn query_temporal_inner(
         matches.push(doc);
     }
     if let Some(spec) = params.get("orderBy") {
-        crate::entities::order_entities(&mut matches, spec, &params, &ctx)?;
+        crate::entities::order_entities(&mut matches, spec, params, &ctx)?;
     }
     let (page, count_hdr, links) = if pre_paged {
         let total = pre_total.map(|t| t as usize).unwrap_or(matches.len());

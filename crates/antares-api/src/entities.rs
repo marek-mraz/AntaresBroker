@@ -1055,7 +1055,7 @@ async fn query_entities_inner(
     )?;
     let mut matches = filtered.docs;
     if let Some(spec) = params.get("orderBy") {
-        order_entities(&mut matches, spec, &params, &ctx)?;
+        order_entities(&mut matches, spec, params, &ctx)?;
     }
     let (page, count_hdr, links) = if filtered.paged {
         let total = filtered.total.unwrap_or(matches.len());
@@ -1244,7 +1244,7 @@ pub fn filter_entities_paged(
         Some(q) => Some(crate::qeval::apply_expand_values(
             parse_q(q)?,
             params.get("expandValues").map(String::as_str),
-            &ctx,
+            ctx,
         )),
         None => None,
     };
@@ -1356,7 +1356,7 @@ pub fn filter_entities_paged(
             if let Some(ast) = &q_ast {
                 // 4.9 linked-entity subqueries (attr{path}) resolve through
                 // the local store, same tenant.
-                let lookup = |uri: &str| st.store.get(&tenant, Kind::Entity, uri).ok().flatten();
+                let lookup = |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten();
                 if !eval_q(ast, &doc, ctx, &lookup) {
                     continue;
                 }
