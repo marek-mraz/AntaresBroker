@@ -1192,11 +1192,13 @@ Definition of done, all six measured rather than asserted:
 - [x] 2. Close partial 5.8.6 — DONE 2026-08-12: distsub.rs split_merge
       (expand + local/fed retrieve excluding origin + merge + conditions
       refilter); reduced_copy splitEntities read from sub (bug); unit 4/4
-      (red seen), TP 5814_01_02 2/2 local; ledger implemented. Commit: `5.8.6:`
-      (hash backfilled next commit).
-- [ ] 3. Snapshot ceilings: federated snapshot fills (5.16.1.4 via 5.7.2.4)
-      + temporal fill paginates past max_limit + priority-ordered
-      resource-pressure eviction (5.5.15). TPs for each.
+      (red seen), TP 5814_01_02 2/2 local; ledger implemented. Commits: cb385a8 + 44a3a96 (fork).
+- [x] 3. Snapshot ceilings — DONE 2026-08-12: run_query via fed_query
+      (5.7.2.4), temporal fill pages past max_limit, evict_over_cap
+      (priority-ordered, 5.3.4 deletion notification). Unit 16/16 (3 new,
+      red seen); TP 5161_01_05 (CS-mock fed fill) 5/5 local; pagination +
+      eviction unit-only (need non-default broker config — noted in ledger).
+      Commit: `5.16.1.4:` (hash backfilled next commit).
 - [ ] 4. Durable state for HA: snapshots, entity_maps, dist_subs promoted to
       the store trait (pg/timescale survive restart); restart-survival tests.
 - [ ] 5. docs/upstream/etsi-raises.md — ready-to-file issue texts (D018_01,

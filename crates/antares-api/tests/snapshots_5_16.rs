@@ -486,6 +486,154 @@ async fn clause_5_16_1_temporal_queries_fill_the_temporal_view() {
     assert_eq!(ids, vec!["urn:ngsi-ld:Vehicle:t1"], "{list}");
 }
 
+/// 5.16.1.4: snapshot queries follow 5.7.2.4 — the DISTRIBUTED query
+/// behaviour. Entities served by a registered Context Source are part of
+/// the snapshot alongside local ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_1_federated_fill() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    let st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:fedlocal", 70).await;
+
+    // a context source serving one remote Vehicle on the query path
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = axum::Router::new().route(
+        "/ngsi-ld/v1/entities",
+        axum::routing::get(|| async {
+            axum::Json(
+                json!([{"id": "urn:ngsi-ld:Vehicle:fedremote", "type": "Vehicle",
+                "speed": {"type": "Property", "value": 80}}]),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:snapfed",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["queryEntity"],
+        "endpoint": format!("http://{addr}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let snap = json!({"type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}], "q": "speed>50"}]})
+    .to_string();
+    let (_, h, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), &[]).await;
+    let loc = h.get("Location").unwrap().to_str().unwrap().to_owned();
+    let ready = wait_ready(&st, &loc).await;
+    assert_eq!(ready["snapshotStatus"], "success", "{ready}");
+    let sid = ready["id"].as_str().expect("id");
+
+    let (status, _, list) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Vehicle",
+        None,
+        &[("NGSILD-Snapshot", sid)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let mut ids: Vec<&str> = list
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|d| d["id"].as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![
+            "urn:ngsi-ld:Vehicle:fedlocal",
+            "urn:ngsi-ld:Vehicle:fedremote"
+        ],
+        "5.7.2.4: the remote entity is part of the snapshot: {list}"
+    );
+    // the local q still applies: no third entity, no duplicates
+    assert_eq!(ids.len(), 2, "{list}");
+}
+
+/// 5.16.1.4: "If the size of the respective results require pagination,
+/// all pages are to be retrieved completely" — the temporal fill must page
+/// past the broker's max_limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_1_temporal_fill_pages_past_max_limit() {
+    let mut st = state();
+    st.max_limit = 2;
+    for i in 1..=3 {
+        create_vehicle(&st, &format!("urn:ngsi-ld:Vehicle:page{i}"), 60 + i).await;
+    }
+    let snap = json!({"type": "Snapshot",
+        "snapshotTemporalQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}],
+            "temporalQ": {"timerel": "after", "timeAt": "2000-01-01T00:00:00Z",
+                          "timeproperty": "createdAt"}}]})
+    .to_string();
+    let (_, h, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), &[]).await;
+    let loc = h.get("Location").unwrap().to_str().unwrap().to_owned();
+    let ready = wait_ready(&st, &loc).await;
+    assert_eq!(ready["snapshotStatus"], "success", "{ready}");
+    let sid = ready["id"].as_str().expect("id");
+
+    // the verification itself must page (max_limit is 2)
+    let mut ids = std::collections::BTreeSet::new();
+    for offset in [0, 2] {
+        let (status, _, list) = send_h(
+            &st,
+            "GET",
+            &format!("/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2000-01-01T00:00:00Z&timeproperty=createdAt&limit=2&offset={offset}"),
+            None,
+            &[("NGSILD-Snapshot", sid)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        for d in list.as_array().expect("array") {
+            ids.insert(d["id"].as_str().expect("id").to_owned());
+        }
+    }
+    assert_eq!(
+        ids.len(),
+        3,
+        "all pages retrieved into the snapshot: {ids:?}"
+    );
+}
+
+/// 5.5.15: under resource pressure (the per-tenant cap) snapshots are
+/// evicted lowest-snapshotPriority-first; higher-priority snapshots
+/// survive.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_15_priority_eviction_over_cap() {
+    let mut st = state();
+    st.snapshot_cap = 2;
+    let mk = |prio: i64| {
+        json!({"type": "Snapshot", "snapshotPriority": prio,
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
+        .to_string()
+    };
+    let (_, h_hi, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(mk(8)), &[]).await;
+    let hi = h_hi.get("Location").unwrap().to_str().unwrap().to_owned();
+    let (_, h_lo, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(mk(2)), &[]).await;
+    let lo = h_lo.get("Location").unwrap().to_str().unwrap().to_owned();
+    let (status, _, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(mk(5)), &[]).await;
+    assert_eq!(status, StatusCode::CREATED);
+    // the lowest priority (2) was evicted; 8 and 5 survive
+    let (status, _) = send(&st, "GET", &lo, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "priority 2 evicted");
+    let (status, _) = send(&st, "GET", &hi, None).await;
+    assert_eq!(status, StatusCode::OK, "priority 8 must survive");
+}
+
 /// 5.2.41 Table 5.2.41-2: lastUsedAt is initialized at creation time and
 /// refreshed when the snapshot is used via NGSILD-Snapshot (5.5.15); plain
 /// status retrieval is not "use".

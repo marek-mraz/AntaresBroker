@@ -10,12 +10,12 @@
 //! no registrations exist under the synthetic tenant, all operations are
 //! naturally local.
 //!
-//! ponytail ceilings: snapshot METADATA is per-process memory (5.5.15
+//! ponytail ceiling: snapshot METADATA is per-process memory (5.5.15
 //! explicitly allows implementations to drop snapshots when low on
 //! resources; a restart is the extreme case — promote to the store if
-//! durable snapshots are required, and sweep orphaned snap- tenants then);
-//! snapshot queries execute against LOCAL broker content (a legal 5.7.2.4
-//! outcome; federated snapshot fills are the upgrade path).
+//! durable snapshots are required, and sweep orphaned snap- tenants then).
+//! Fills follow the 5.7.2.4 distributed path and page past max_limit;
+//! resource pressure evicts lowest-priority snapshots (evict_over_cap).
 
 use crate::negotiate::{
     check_params, created, no_content, parse_accept, respond, tenant_from, ApiError, CleanParams,
@@ -306,6 +306,61 @@ fn snap_exists(st: &AppState, id: &str) -> bool {
         .any(|m| m.contains_key(id))
 }
 
+/// 5.5.15: "If an implementation determines that it is low on resources,
+/// it may delete one or more snapshots", considering snapshotPriority
+/// (lowest first; earliest expiresAt breaks ties). The resource signal is
+/// the per-tenant registry cap (AppState.snapshot_cap); the just-created
+/// snapshot is never the victim. Evicted snapshots with an endpoint are
+/// notified with expiresAt set before notifiedAt — the 5.3.4 deletion
+/// encoding.
+fn evict_over_cap(st: &AppState, tenant: &TenantId, keep: &str) {
+    let victims: Vec<Value> = {
+        let reg = st.snapshots.read().expect("snapshots lock");
+        let Some(m) = reg.get(tenant.as_str()) else {
+            return;
+        };
+        if m.len() <= st.snapshot_cap {
+            return;
+        }
+        let mut metas: Vec<&Value> = m.values().collect();
+        metas.sort_by_key(|v| {
+            (
+                v.get("snapshotPriority")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(5),
+                v.get("expiresAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            )
+        });
+        metas
+            .iter()
+            .filter(|v| v.get("id").and_then(Value::as_str) != Some(keep))
+            .take(m.len() - st.snapshot_cap)
+            .map(|v| (*v).clone())
+            .collect()
+    };
+    for mut meta in victims {
+        if let Some(id) = meta.get("id").and_then(Value::as_str).map(str::to_owned) {
+            st.snapshots
+                .write()
+                .expect("snapshots lock")
+                .get_mut(tenant.as_str())
+                .map(|m| m.remove(&id));
+        }
+        purge_data_bg(st, &meta);
+        if let Some(o) = meta.as_object_mut() {
+            // deletion signal: expiresAt strictly before the notification
+            o.insert("expiresAt".into(), Value::String(now_iso()));
+        }
+        let st2 = st.clone();
+        crate::spawn(async move {
+            send_notification(&st2, &meta).await;
+        });
+    }
+}
+
 // ---------- 5.16.1 Create Snapshot (POST /snapshots, 6.36.3.1) ----------
 
 pub async fn create_snapshot(
@@ -322,6 +377,7 @@ pub async fn create_snapshot(
         let o = validate(&v, Mode::Create)?;
         let (id, meta) = new_meta(o, &st)?;
         snap_put(&st, &tenant, meta);
+        evict_over_cap(&st, &tenant, &id);
         let (st2, t2, id2) = (st.clone(), tenant.clone(), id.clone());
         crate::spawn(async move {
             fill_snapshot(&st2, &t2, &id2).await;
@@ -366,7 +422,7 @@ async fn fill_snapshot(st: &AppState, tenant: &TenantId, id: &str) {
         .into_iter()
         .flatten()
     {
-        let r = run_query(st, tenant, &synth, q, &ctx);
+        let r = run_query(st, tenant, &synth, q, &ctx).await;
         if let Ok(n) = &r {
             copied += n;
         }
@@ -401,9 +457,10 @@ async fn fill_snapshot(st: &AppState, tenant: &TenantId, id: &str) {
     finish(st, tenant, id, status, Some((q_details, tq_details))).await;
 }
 
-/// One 5.2.23 Query executed against the live broker content; results are
-/// copied into the snapshot's synthetic tenant.
-fn run_query(
+/// One 5.2.23 Query executed per the DISTRIBUTED query behaviour
+/// (5.16.1.4 -> 5.7.2.4): local content plus every matching Context
+/// Source; results are copied into the snapshot's synthetic tenant.
+async fn run_query(
     st: &AppState,
     tenant: &TenantId,
     synth: &TenantId,
@@ -418,10 +475,18 @@ fn run_query(
     for k in ["limit", "offset", "count"] {
         vp.remove(k);
     }
-    let docs = crate::entities::filter_entities(st, tenant, &vp, ctx).map_err(|e| match e {
-        ApiError::Ngsi(n) => n,
-        other => bad(format!("query execution failed: {other:?}")),
-    })?;
+    let headers = HeaderMap::new();
+    let mut warnings = Vec::new();
+    let fed = if crate::federation::active(&vp) {
+        crate::federation::fed_query(st, tenant, &headers, ctx, &vp, &mut warnings).await
+    } else {
+        Vec::new()
+    };
+    let docs =
+        crate::entities::filter_entities_fed(st, tenant, &vp, ctx, fed).map_err(|e| match e {
+            ApiError::Ngsi(n) => n,
+            other => bad(format!("query execution failed: {other:?}")),
+        })?;
     let n = docs.len();
     for doc in docs {
         if let Some(id) = doc.get("id").and_then(Value::as_str) {
@@ -447,37 +512,48 @@ async fn run_temporal_query(
     for k in ["limit", "offset", "count"] {
         vp.remove(k);
     }
-    vp.insert("limit".into(), st.max_limit.to_string());
     let mut headers = HeaderMap::new();
     if let Ok(v) = tenant.as_str().parse() {
         headers.insert("NGSILD-Tenant", v);
     }
-    let resp = crate::temporal::query_temporal_inner(st, &vp, &headers)
-        .await
-        .map_err(|e| match e {
-            ApiError::Ngsi(n) => n,
-            other => bad(format!("temporal query execution failed: {other:?}")),
-        })?;
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .map_err(|e| NgsiError::InternalError(format!("temporal result read: {e}")))?;
-    let arr: Vec<Value> = serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
+    // 5.16.1.4: "If the size of the respective results require pagination,
+    // all pages are to be retrieved completely."
     let mut n = 0usize;
-    for d in arr {
-        let Some(id) = d.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Ok(Some(doc)) = st.store.get_temporal(
-            tenant,
-            id,
-            &antares_sql::store::filter::TemporalFilter::default(),
-        ) {
-            let _ = st.store.create(synth, Kind::Temporal, id, doc);
-            n += 1;
+    let mut offset = 0usize;
+    loop {
+        vp.insert("limit".into(), st.max_limit.to_string());
+        vp.insert("offset".into(), offset.to_string());
+        let resp = crate::temporal::query_temporal_inner(st, &vp, &headers)
+            .await
+            .map_err(|e| match e {
+                ApiError::Ngsi(n) => n,
+                other => bad(format!("temporal query execution failed: {other:?}")),
+            })?;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .map_err(|e| NgsiError::InternalError(format!("temporal result read: {e}")))?;
+        let arr: Vec<Value> = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let got = arr.len();
+        for d in arr {
+            let Some(id) = d.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Ok(Some(doc)) = st.store.get_temporal(
+                tenant,
+                id,
+                &antares_sql::store::filter::TemporalFilter::default(),
+            ) {
+                let _ = st.store.create(synth, Kind::Temporal, id, doc);
+                n += 1;
+            }
         }
+        if got < st.max_limit {
+            break;
+        }
+        offset += st.max_limit;
     }
     Ok(n)
 }

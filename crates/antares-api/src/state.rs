@@ -118,6 +118,9 @@ pub struct AppState {
             >,
         >,
     >,
+    /// 5.5.15 resource-pressure signal: max snapshots per tenant — above it
+    /// the lowest-snapshotPriority snapshots are evicted.
+    pub snapshot_cap: usize,
 }
 
 impl AppState {
@@ -194,6 +197,7 @@ impl AppState {
             dist_subs: Arc::default(),
             public_url,
             snapshots: Arc::default(),
+            snapshot_cap: 1024,
         }
     }
 
