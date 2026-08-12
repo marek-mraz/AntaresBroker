@@ -534,7 +534,7 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
     let expired = obj
         .get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| e < now_iso().as_str());
+        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(&now_iso()));
     let paused = obj.get("isActive") == Some(&Value::Bool(false));
     let status = if expired {
         "expired"

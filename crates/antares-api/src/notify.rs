@@ -539,9 +539,11 @@ fn is_active(sub: &Value) -> bool {
     if sub.get("isActive") == Some(&Value::Bool(false)) {
         return false;
     }
+    // 5.8.1.4 auto-expiry; dt_key so fraction spellings cannot misorder
+    // around the boundary second (4.11)
     !sub.get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| e < now_iso().as_str())
+        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(&now_iso()))
 }
 
 /// entities selector (5.2.33) against an internal entity doc.
@@ -1847,6 +1849,32 @@ mod endpoint_tests {
             !in_cooldown(&no_cooldown, now),
             "no cooldown member ⇒ no gate"
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_8_1 {
+    use super::*;
+
+    /// 5.8.1.4: "the status of the Subscription changes automatically to
+    /// \"expired\", so that notifications will no longer be sent" — an
+    /// expiresAt spelled without a seconds fraction must count as expired
+    /// the moment now (spelled with milliseconds) passes it. A raw
+    /// lexicographic compare ranks 'Z' above '.' and keeps the
+    /// subscription alive for the whole boundary second.
+    #[test]
+    fn expiry_compare_survives_fraction_spellings() {
+        let now = crate::state::now_iso();
+        let secs = &now[..19];
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let sub = serde_json::json!({ "expiresAt": format!("{secs}Z") });
+        assert!(
+            !is_active(&sub),
+            "expiresAt {secs}Z lies in the past and must expire the subscription"
+        );
+        // a genuinely future expiry stays active
+        let sub = serde_json::json!({ "expiresAt": "2999-01-01T00:00:00Z" });
+        assert!(is_active(&sub));
     }
 }
 
