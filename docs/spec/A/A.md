@@ -2,9 +2,9 @@
 clause: A
 title: 'Annex A (normative): NGSI-LD identifier considerations'
 pages: '364'
-status: not-implemented
+status: informative
 evidence: ''
-notes: ''
+notes: 'audited 2026-08-12: annex heading.'
 robot: []
 ---
 

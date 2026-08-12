@@ -2,9 +2,9 @@
 clause: B
 title: 'Annex B (normative): Core NGSI-LD @context definition'
 pages: 365-371
-status: not-implemented
-evidence: ''
-notes: ''
+status: implemented
+evidence: 'antares-jsonld loader.rs pinned(): the Annex B core @context (v1.9 document) compiled in alongside v1.3-v1.8, resolvable without network (test pinned_versions_resolve_without_network); protected core terms win on merge (4.4)'
+notes: 'audited 2026-08-12: the DEFAULT core (CORE_CONTEXT) is pinned to the v1.8 document by the 5.2.3 ecosystem decision — the official suite''s 68 strict expectations compare against it; the Annex B v1.9 core is pinned and served on request.'
 robot: []
 ---
 

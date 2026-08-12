@@ -2,9 +2,9 @@
 clause: A.1
 title: Introduction
 pages: '364'
-status: not-implemented
+status: informative
 evidence: ''
-notes: ''
+notes: 'audited 2026-08-12: introduction prose.'
 robot: []
 ---
 

@@ -2,9 +2,9 @@
 clause: A.2
 title: Entity identifiers
 pages: '364'
-status: not-implemented
-evidence: ''
-notes: ''
+status: implemented
+evidence: 'antares-model EntityId::new enforces URI-ness of every element id (entities, subscriptions, registrations, entity maps); dereferenceability is a SHOULD for linked-data scenarios (client concern)'
+notes: 'audited 2026-08-12.'
 robot: []
 ---
 
