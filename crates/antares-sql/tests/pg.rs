@@ -32,20 +32,24 @@ macro_rules! require_db {
 async fn tenant_exists_answers_for_the_actual_tenant() {
     let url = require_db!();
     let pool = pg::connect(&url, 5).await.expect("connect+migrate");
-    let store = antares_sql::store::any::AnyStore::Pg(
-        antares_sql::store::any::PgBackend::new(pool.clone()),
-    );
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
     let run = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_millis();
     let t = TenantId::new(&format!("pgte{run}")).expect("tenant");
     assert!(
-        !store.tenant_exists(&t).expect("tenant_exists must not error"),
+        !store
+            .tenant_exists(&t)
+            .expect("tenant_exists must not error"),
         "never-seen tenant reads as existing"
     );
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
-    assert!(store.tenant_exists(&t).expect("tenant_exists must not error"));
+    assert!(store
+        .tenant_exists(&t)
+        .expect("tenant_exists must not error"));
 }
 
 #[tokio::test]
