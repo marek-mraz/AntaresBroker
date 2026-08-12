@@ -861,6 +861,150 @@ async fn clause_5_6_8_upsert_forwarding_fallbacks() {
     );
 }
 
+/// 5.6.20.4 support ladder: no mergeBatch → per-entity Merge Entity
+/// (PATCH /entities/{id}) forwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_20_batch_merge_fallback() {
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let st = state();
+    let doc = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:bm-fb",
+        "type": "ContextSourceRegistration",
+        "mode": "redirect",
+        "operations": ["mergeEntity"],
+        "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+        "endpoint": format!("http://127.0.0.1:{}", m.port),
+    });
+    let body = doc.to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/csourceRegistrations")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+    let body = serde_json::json!([
+        {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 3}}
+    ])
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entityOperations/merge")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let _ = send(&st, req).await;
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one Merge Entity forward");
+    assert!(
+        m.last_head
+            .lock()
+            .expect("lock")
+            .starts_with(&format!("PATCH /ngsi-ld/v1/entities/{ENTITY} ")),
+        "fallback uses the single-entity merge: {}",
+        m.last_head.lock().expect("lock")
+    );
+}
+
+/// 5.6.20.4 local behaviour: each entity merged per 5.6.17 (RFC 7396 —
+/// value overwrite, null deletes the attribute); 204 with no body when all
+/// merge, 207 with the S/E partition when some fail (5.6.20.5).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_20_local_merge_and_partition() {
+    let st = state();
+    let post = |uri: &'static str, body: String| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request")
+    };
+    let entity = serde_json::json!({
+        "id": ENTITY, "type": "Vehicle",
+        "speed": {"type": "Property", "value": 3},
+        "color": {"type": "Property", "value": "red"}
+    })
+    .to_string();
+    assert_eq!(
+        send(&st, post("/ngsi-ld/v1/entities", entity))
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+
+    // all merged → 204, no body; overwrite + null-deletion + append applied
+    let batch = serde_json::json!([{
+        "id": ENTITY, "type": "Vehicle",
+        "speed": {"type": "Property", "value": 9},
+        "color": "urn:ngsi-ld:null",
+        "brand": {"type": "Property", "value": "Ajax"}
+    }])
+    .to_string();
+    let res = send(&st, post("/ngsi-ld/v1/entityOperations/merge", batch)).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    assert!(bytes.is_empty(), "204 carries no body: {bytes:?}");
+    let req = Request::builder()
+        .uri(format!("/ngsi-ld/v1/entities/{ENTITY}"))
+        .body(Body::empty())
+        .expect("request");
+    let res = send(&st, req).await;
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(doc["speed"]["value"], 9, "value overwritten: {doc}");
+    assert_eq!(doc["brand"]["value"], "Ajax", "attribute appended: {doc}");
+    assert!(
+        doc.get("color").is_none(),
+        "null must delete the attribute, not store the sentinel: {doc}"
+    );
+
+    // one existing + one absent → 207 partition per 5.6.20.5
+    let missing = "urn:ngsi-ld:Vehicle:absent-5620";
+    let batch = serde_json::json!([
+        {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 11}},
+        {"id": missing, "type": "Vehicle", "speed": {"type": "Property", "value": 1}}
+    ])
+    .to_string();
+    let res = send(&st, post("/ngsi-ld/v1/entityOperations/merge", batch)).await;
+    assert_eq!(res.status(), StatusCode::MULTI_STATUS);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        doc["success"],
+        serde_json::json!([ENTITY]),
+        "S array: {doc}"
+    );
+    let errors = doc["errors"].as_array().expect("E array");
+    assert_eq!(errors.len(), 1, "one BatchEntityError: {doc}");
+    assert_eq!(errors[0]["entityId"], missing);
+    assert_eq!(
+        errors[0]["error"]["type"],
+        "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound"
+    );
+
+    // 5.5.4 validation: null item and empty array are whole-request 400s
+    let res = send(
+        &st,
+        post(
+            "/ngsi-ld/v1/entityOperations/merge",
+            format!(r#"[{{"id":"{ENTITY}","type":"Vehicle"}}, null]"#),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "null item");
+    let res = send(&st, post("/ngsi-ld/v1/entityOperations/merge", "[]".into())).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "empty array");
+}
+
 /// 5.6.9.4 support ladder: no updateBatch → per-entity Update Attributes
 /// (overwrite permitted) or per-entity Append Attributes with overwrite
 /// disabled (options=noOverwrite).

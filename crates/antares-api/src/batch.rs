@@ -187,6 +187,8 @@ pub async fn batch_update(
     }
 }
 
+/// 5.6.20 Batch Entity Merge: each entity merged per 5.6.17 locally;
+/// 204 when all succeed, 207 with S/E arrays otherwise (5.6.20.5).
 pub async fn batch_merge(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -544,7 +546,8 @@ async fn batch_write(
             },
             detail: "local batch".into(),
         }];
-        // 5.6.7.4/5.6.8.4/5.6.9.4 support ladder per CSR: batch op supported -> one
+        // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 support ladder per CSR: batch op
+        // supported -> one
         // batch forward; else per-entity single-op forwards (upsert: Create
         // Entity with AlreadyExists falling back to Replace Entity in
         // replace mode or Update Attributes in update mode, or those two
@@ -680,6 +683,21 @@ async fn batch_write(
                             fwd_one(
                                 reqwest::Method::PATCH,
                                 format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                ent,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                BatchMode::Merge if reg.supports("mergeEntity") => {
+                    // 5.6.20.4 support ladder: no mergeBatch -> per-entity
+                    // Merge Entity (5.6.17) forwards.
+                    for ent in arr.clone() {
+                        let id = ent_id(&ent);
+                        parts.push(
+                            fwd_one(
+                                reqwest::Method::PATCH,
+                                format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
                                 ent,
                             )
                             .await,
