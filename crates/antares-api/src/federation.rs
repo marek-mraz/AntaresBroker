@@ -798,6 +798,31 @@ fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value>
 /// that support the retrieveTemporal operation; registrations without it
 /// are not contacted. Returns (auxiliary, expanded doc) pairs for the
 /// caller's 4.5.5 merge.
+/// 5.7.1.4 / 5.7.3.4: with an EntityMap in use, "only the retrieved Entity
+/// Map shall be used to determine which Context Source Registrations match
+/// the Entity ID" — a registration not listed in the entry does not match;
+/// "the location of the linked EntityMap shall be passed as part of any
+/// forwarded request" (conveyed as an extra header on the forward).
+fn map_gate(mut reg: FedReg, map: Option<&Value>, id: &str) -> Option<FedReg> {
+    let Some(m) = map else { return Some(reg) };
+    let listed = m
+        .get("entityMap")
+        .and_then(|e| e.get(id))
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(reg.reg_id.as_str())));
+    if !listed {
+        return None;
+    }
+    if let Some(mid) = m
+        .get("linkedMaps")
+        .and_then(|l| l.get(&reg.reg_id))
+        .and_then(Value::as_str)
+    {
+        reg.csi.push(("NGSILD-EntityMap".into(), mid.to_owned()));
+    }
+    Some(reg)
+}
+
 pub async fn fed_retrieve_temporal(
     st: &AppState,
     tenant: &TenantId,
@@ -805,6 +830,7 @@ pub async fn fed_retrieve_temporal(
     ctx: &Context,
     id: &str,
     params: &HashMap<String, String>,
+    map: Option<&Value>,
     warnings: &mut Vec<String>,
 ) -> Vec<(bool, Value)> {
     let spec = crate::csource::CsrSpec {
@@ -814,6 +840,11 @@ pub async fn fed_retrieve_temporal(
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        // 5.7.3.4: a live EntityMap in use is the ONLY source of matching
+        // registrations; its linked map location travels with the forward.
+        let Some(reg) = map_gate(reg, map, id) else {
+            continue;
+        };
         if !reg.supports("retrieveTemporal") {
             continue;
         }
@@ -984,6 +1015,7 @@ pub async fn fed_retrieve(
     headers: &HeaderMap,
     ctx: &Context,
     id: &str,
+    map: Option<&Value>,
     warnings: &mut Vec<String>,
 ) -> Vec<(bool, Value)> {
     let spec = crate::csource::CsrSpec {
@@ -993,6 +1025,11 @@ pub async fn fed_retrieve(
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        // 5.7.1.4: a live EntityMap in use is the ONLY source of matching
+        // registrations; its linked map location travels with the forward.
+        let Some(reg) = map_gate(reg, map, id) else {
+            continue;
+        };
         let Some(op) = reg.read_op() else { continue };
         // sysAttrs on every forwarded read: conflicting instances resolve by
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote

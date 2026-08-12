@@ -1290,10 +1290,91 @@ pub async fn query_temporal(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    match query_temporal_inner(&st, &params, &headers).await {
+    match query_temporal_outer(&st, params, &headers).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
+}
+
+/// 5.7.4.4 EntityMap usage on the temporal query: a live map referenced by
+/// the NGSILD-EntityMap header fixes the result set to the map's Entities
+/// (5.5.14) and its location is echoed; an unknown or expired reference
+/// means "a new EntityMap shall be created" (the entityMap=true branch,
+/// answering 201 + the fresh location).
+async fn query_temporal_outer(
+    st: &AppState,
+    mut params: HashMap<String, String>,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let Some(map_ref) = headers
+        .get("NGSILD-EntityMap")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    else {
+        return query_temporal_inner(st, &params, headers).await;
+    };
+    let tenant = tenant_from(headers)?;
+    let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
+    let Some(mut map) = crate::entity_maps::map_get(st, &tenant, &map_id) else {
+        params.insert("entityMap".into(), "true".into());
+        return query_temporal_inner(st, &params, headers).await;
+    };
+    params.remove("entityMap");
+    // 5.5.14: the creator removes Entities that no longer match the query
+    // filters at processing time — judgeable locally only for "@none"
+    // entries. ponytail: this recheck is a second temporal query per
+    // map-using request, same shape as the entity query's filter re-run.
+    let matching: std::collections::HashSet<String> = {
+        let mut eff = params.clone();
+        for k in ["limit", "offset", "count"] {
+            eff.remove(k);
+        }
+        eff.insert("limit".into(), st.max_limit.to_string());
+        let resp = query_temporal_inner(st, &eff, headers).await?;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .map_err(|e| NgsiError::InternalError(format!("entityMap recheck read: {e}")))?;
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    };
+    if let Some(emap) = map.get_mut("entityMap").and_then(Value::as_object_mut) {
+        let stale: Vec<String> = emap
+            .iter()
+            .filter(|(eid, srcs)| {
+                srcs.as_array()
+                    .is_some_and(|a| a.len() == 1 && a[0] == "@none")
+                    && !matching.contains(*eid)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            emap.remove(&k);
+        }
+    }
+    crate::entity_maps::map_put(st, &tenant, map.clone());
+    // fix the query to the Entities listed in the map (5.5.14)
+    let ids: Vec<&str> = map["entityMap"]
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    params.insert(
+        "id".into(),
+        if ids.is_empty() {
+            "urn:ngsi-ld:entitymap:empty".to_owned()
+        } else {
+            ids.join(",")
+        },
+    );
+    let mut resp = query_temporal_inner(st, &params, headers).await?;
+    if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{map_id}").parse() {
+        resp.headers_mut().insert("NGSILD-EntityMap", v);
+    }
+    Ok(resp)
 }
 
 pub(crate) async fn query_temporal_inner(
@@ -1712,10 +1793,74 @@ pub async fn retrieve_temporal(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = async {
-        let tenant = tenant_from(&headers)?;
+    match retrieve_temporal_outer(&st, &id, params, &headers).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// 5.7.3.4 EntityMap usage on the temporal retrieve: a supplied
+/// NGSILD-EntityMap location is retrieved and, if live, is the only source
+/// used to determine which registrations match; an unknown/expired
+/// reference — or the entityMap=true flag — creates a new map, whose
+/// location is returned in the NGSILD-EntityMap response header.
+async fn retrieve_temporal_outer(
+    st: &AppState,
+    id: &str,
+    params: HashMap<String, String>,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    let map_ref = headers
+        .get("NGSILD-EntityMap")
+        .and_then(|v| v.to_str().ok())
+        .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
+    if let Some(map) = map_ref
+        .as_deref()
+        .and_then(|mid| crate::entity_maps::map_get(st, &tenant, mid))
+    {
+        let mut resp = retrieve_temporal_inner(st, id, &params, headers, Some(&map)).await?;
+        let mid = map_ref.unwrap_or_default();
+        if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
+            resp.headers_mut().insert("NGSILD-EntityMap", v);
+        }
+        return Ok(resp);
+    }
+    let want_map = map_ref.is_some() || params.get("entityMap").map(String::as_str) == Some("true");
+    let mut resp = retrieve_temporal_inner(st, id, &params, headers, None).await?;
+    if want_map && resp.status().is_success() {
+        let ctx = request_context(&st.loader, headers).await?;
+        let local_held = st
+            .store
+            .get_temporal(
+                &tenant,
+                id,
+                &antares_sql::store::filter::TemporalFilter::default(),
+            )?
+            .is_some();
+        let map = crate::entity_maps::build_retrieve_map(
+            st, &tenant, &ctx, headers, id, &params, true, local_held,
+        )?;
+        if let Some(mid) = map.get("id").and_then(Value::as_str) {
+            if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
+                resp.headers_mut().insert("NGSILD-EntityMap", v);
+            }
+        }
+    }
+    Ok(resp)
+}
+
+async fn retrieve_temporal_inner(
+    st: &AppState,
+    id: &str,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    map: Option<&Value>,
+) -> ApiResult<Response> {
+    {
+        let tenant = tenant_from(headers)?;
         check_params(
-            &params,
+            params,
             &[
                 "attrs",
                 "timerel",
@@ -1732,12 +1877,14 @@ pub async fn retrieve_temporal(
                 "pick",
                 "omit",
                 "datasetId",
+                "entityMap",
+                "entityMapLifetime",
             ],
         )?;
-        let accept = parse_accept(&headers)?;
-        let ctx = request_context(&st.loader, &headers).await?;
-        let tq = TemporalQ::from_params(&params, false)?;
-        let trepr = parse_trepr(&params, &ctx)?;
+        let accept = parse_accept(headers)?;
+        let ctx = request_context(&st.loader, headers).await?;
+        let tq = TemporalQ::from_params(params, false)?;
+        let trepr = parse_trepr(params, &ctx)?;
         // 5.7.3.4: "If projection attributes are present and indicate the
         // use of Linked Entity retrieval, an error of type BadRequestData
         // shall be raised" — unconditional, temporal defines no join.
@@ -1760,7 +1907,7 @@ pub async fn retrieve_temporal(
             .into());
         }
         let last_n = trepr.last_n;
-        antares_model::EntityId::new(&id)?;
+        antares_model::EntityId::new(id)?;
         // C11: instance pruning pushed into the store (no q=/geo on retrieve,
         // so it is always safe here); window() below stays the arbiter.
         let tf = antares_sql::store::filter::TemporalFilter {
@@ -1782,23 +1929,24 @@ pub async fn retrieve_temporal(
             .as_ref()
             .map_or("observedAt", |t| t.timeproperty.as_str())
             .to_owned();
-        let local = st.store.get_temporal(&tenant, &id, &tf)?;
+        let local = st.store.get_temporal(&tenant, id, &tf)?;
         // 5.7.3.4: forward to matching retrieveTemporal registrations and
         // merge the remote instance data (4.5.5; auxiliary instances only
         // fill timestamps absent elsewhere)
         let mut warnings: Vec<String> = Vec::new();
         let looped = crate::federation::via_loop(
-            &headers,
+            headers,
             &crate::federation::alias_for(&st.host_alias, &tenant),
         );
-        let doc = if crate::federation::active(&params) && !looped {
+        let doc = if crate::federation::active(params) && !looped {
             let fed = crate::federation::fed_retrieve_temporal(
-                &st,
+                st,
                 &tenant,
-                &headers,
+                headers,
                 &ctx,
-                &id,
-                &params,
+                id,
+                params,
+                map,
                 &mut warnings,
             )
             .await;
@@ -1889,9 +2037,8 @@ pub async fn retrieve_temporal(
             }
         }
         crate::entities::attach_warnings(&mut resp, &warnings);
-        Ok::<_, ApiError>(resp)
-    };
-    go.await.unwrap_or_else(|e| e.into_response())
+        Ok(resp)
+    }
 }
 
 /// 5.7.3.4 / 4.5.5: merge one remote Temporal Evolution into `base` by

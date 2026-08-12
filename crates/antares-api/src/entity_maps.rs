@@ -341,6 +341,56 @@ pub(crate) async fn build_query_map(
     Ok(doc)
 }
 
+/// 5.7.1.4 / 5.7.3.4: the EntityMap created for a single-Entity retrieve —
+/// its one entry lists "@none" when Attribute data is held locally plus
+/// every matching Context Source Registration supporting the retrieve
+/// operation ("only the retrieved Entity Map shall be used to determine
+/// which Context Source Registrations match the Entity ID").
+pub(crate) fn build_retrieve_map(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    headers: &HeaderMap,
+    id: &str,
+    params: &HashMap<String, String>,
+    temporal: bool,
+    local_held: bool,
+) -> Result<Value, NgsiError> {
+    let mut srcs: Vec<Value> = Vec::new();
+    if local_held {
+        srcs.push(json!("@none"));
+    }
+    if crate::federation::active(params) {
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec![id.to_owned()]),
+            ..Default::default()
+        };
+        for reg in crate::federation::matching_regs(st, tenant, &spec, ctx, headers) {
+            let ok = if temporal {
+                reg.supports("retrieveTemporal")
+            } else {
+                reg.read_op().is_some()
+            };
+            if ok {
+                srcs.push(json!(reg.reg_id));
+            }
+        }
+    }
+    let mut emap = Map::new();
+    if !srcs.is_empty() {
+        emap.insert(id.to_owned(), Value::Array(srcs));
+    }
+    let doc = json!({
+        "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
+        "type": "EntityMap",
+        "expiresAt": expires_at(params)?,
+        "entityMap": Value::Object(emap),
+        "linkedMaps": {},
+    });
+    map_put(st, tenant, doc.clone());
+    Ok(doc)
+}
+
 /// 201 + the EntityMap body + the NGSILD-EntityMap header carrying the
 /// resource URI of the created map (6.34.3.1 / 6.35.3.1).
 fn created_response(
