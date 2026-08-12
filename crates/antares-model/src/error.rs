@@ -95,11 +95,14 @@ pub struct ProblemDetails {
 mod tests {
     use super::*;
 
+    /// 6.3.2 Table 6.3.2-1 — every row of the error-type → HTTP status
+    /// mapping (V1.9.1, PDF p.269), plus the project's Conflict extension.
     #[test]
     fn status_mapping_matches_table_6_3_2_1() {
         assert_eq!(NgsiError::AlreadyExists(String::new()).status(), 409);
         assert_eq!(NgsiError::BadRequestData(String::new()).status(), 400);
-        assert_eq!(NgsiError::Conflict(String::new()).status(), 409);
+        assert_eq!(NgsiError::InternalError(String::new()).status(), 500);
+        assert_eq!(NgsiError::InvalidRequest(String::new()).status(), 400);
         assert_eq!(
             NgsiError::LdContextNotAvailable(String::new()).status(),
             504
@@ -110,7 +113,10 @@ mod tests {
             NgsiError::OperationNotSupported(String::new()).status(),
             422
         );
+        assert_eq!(NgsiError::ResourceNotFound(String::new()).status(), 404);
         assert_eq!(NgsiError::TooComplexQuery(String::new()).status(), 403);
+        assert_eq!(NgsiError::TooManyResults(String::new()).status(), 403);
+        assert_eq!(NgsiError::Conflict(String::new()).status(), 409);
     }
 
     #[test]
