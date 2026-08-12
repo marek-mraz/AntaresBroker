@@ -51,6 +51,9 @@ const T_CSOURCE_SUBSCRIPTIONS: TableDefinition<&[u8], &[u8]> =
 const T_TEMPORAL_ENTITIES: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("temporal_entities");
 const T_JSONLD_CONTEXTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("jsonld_contexts");
+const T_SNAPSHOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapshots");
+const T_ENTITY_MAP_DOCS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entity_map_docs");
+const T_DIST_SUBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dist_subs");
 const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 /// On-disk format version (B11): bump on any key/value shape change; an older
 /// or newer file refuses to load rather than being misread as valid data.
@@ -107,15 +110,21 @@ fn table_for(kind: Kind) -> TableDefinition<'static, &'static [u8], &'static [u8
         Kind::Registration => T_CSOURCE_REGISTRATIONS,
         Kind::CSourceSubscription => T_CSOURCE_SUBSCRIPTIONS,
         Kind::Temporal => T_TEMPORAL_ENTITIES,
+        Kind::Snapshot => T_SNAPSHOTS,
+        Kind::EntityMap => T_ENTITY_MAP_DOCS,
+        Kind::DistSub => T_DIST_SUBS,
     }
 }
 
-const ALL_KINDS: [Kind; 5] = [
+const ALL_KINDS: [Kind; 8] = [
     Kind::Entity,
     Kind::Subscription,
     Kind::Registration,
     Kind::CSourceSubscription,
     Kind::Temporal,
+    Kind::Snapshot,
+    Kind::EntityMap,
+    Kind::DistSub,
 ];
 
 /// Key = `tenant \0 id` (B2). Unambiguous: TenantId is `[A-Za-z0-9_-]{1,64}`
@@ -210,6 +219,9 @@ struct Inner {
     subscriptions: HashMap<String, BTreeMap<String, Value>>,
     registrations: HashMap<String, BTreeMap<String, Value>>,
     csource_subscriptions: HashMap<String, BTreeMap<String, Value>>,
+    snapshots: HashMap<String, BTreeMap<String, Value>>,
+    entity_map_docs: HashMap<String, BTreeMap<String, Value>>,
+    dist_subs: HashMap<String, BTreeMap<String, Value>>,
     /// tenant → entity id → temporal doc (attr IRI → instance array).
     temporal: HashMap<String, BTreeMap<String, Value>>,
     /// hosted/cached @context documents, shared across tenants by design (§8.3).
@@ -224,6 +236,12 @@ pub enum Kind {
     Registration,
     CSourceSubscription,
     Temporal,
+    /// 5.16 Snapshot status documents (+ the internal synth-tenant index).
+    Snapshot,
+    /// 5.14 EntityMap API documents.
+    EntityMap,
+    /// 5.8.1.4 distributed-subscription mappings (remote ids per CSR).
+    DistSub,
 }
 
 impl Store {
@@ -303,6 +321,9 @@ impl Store {
                 Kind::Registration => &mut inner.registrations,
                 Kind::CSourceSubscription => &mut inner.csource_subscriptions,
                 Kind::Temporal => &mut inner.temporal,
+                Kind::Snapshot => &mut inner.snapshots,
+                Kind::EntityMap => &mut inner.entity_map_docs,
+                Kind::DistSub => &mut inner.dist_subs,
             };
             for row in redb::ReadableTable::iter(&table).map_err(|e| e.to_string())? {
                 let (k, v) = row.map_err(|e| e.to_string())?;
@@ -453,15 +474,9 @@ impl Store {
             .inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        [
-            Kind::Entity,
-            Kind::Subscription,
-            Kind::Registration,
-            Kind::CSourceSubscription,
-            Kind::Temporal,
-        ]
-        .iter()
-        .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
+        ALL_KINDS
+            .iter()
+            .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
     }
 
     pub fn subscription_tenants(&self) -> Vec<String> {
@@ -488,6 +503,9 @@ impl Store {
             Kind::Registration => &inner.registrations,
             Kind::CSourceSubscription => &inner.csource_subscriptions,
             Kind::Temporal => &inner.temporal,
+            Kind::Snapshot => &inner.snapshots,
+            Kind::EntityMap => &inner.entity_map_docs,
+            Kind::DistSub => &inner.dist_subs,
         }
     }
 
@@ -498,6 +516,9 @@ impl Store {
             Kind::Registration => &mut inner.registrations,
             Kind::CSourceSubscription => &mut inner.csource_subscriptions,
             Kind::Temporal => &mut inner.temporal,
+            Kind::Snapshot => &mut inner.snapshots,
+            Kind::EntityMap => &mut inner.entity_map_docs,
+            Kind::DistSub => &mut inner.dist_subs,
         }
     }
 

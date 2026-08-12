@@ -5,6 +5,7 @@
 use crate::negotiate::*;
 use crate::state::AppState;
 use antares_model::{NgsiError, TenantId};
+use antares_sql::store::Kind;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,54 +33,60 @@ fn dt(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 // ---------- storage (5.14.1.1: "internal storage, or memory") ----------
 
 /// Fetch a live EntityMap; an expired one "cannot be accessed" (5.5.14) and
-/// is pruned on touch.
+/// is pruned on touch. Maps live in the store (Kind::EntityMap) so
+/// persistent modes survive restarts.
 pub(crate) fn map_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
-    let mut maps = st.entity_maps.write().ok()?;
-    let t = maps.get_mut(tenant.as_str())?;
-    let expired = t
-        .get(id)?
+    let doc = st.store.get(tenant, Kind::EntityMap, id).ok().flatten()?;
+    let expired = doc
         .get("expiresAt")
         .and_then(Value::as_str)
         .and_then(dt)
         .is_some_and(|e| e <= chrono::Utc::now());
     if expired {
-        t.remove(id);
+        let _ = st.store.delete(tenant, Kind::EntityMap, id);
         return None;
     }
-    t.get(id).cloned()
+    Some(doc)
 }
 
 pub(crate) fn map_put(st: &AppState, tenant: &TenantId, doc: Value) {
     let Some(id) = doc.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return;
     };
-    if let Ok(mut maps) = st.entity_maps.write() {
-        let t = maps.entry(tenant.as_str().to_owned()).or_default();
-        if t.len() >= MAX_MAPS_PER_TENANT && !t.contains_key(&id) {
-            // eviction order is a heuristic — earliest expiresAt string wins
-            if let Some(victim) = t
-                .iter()
-                .min_by(|a, b| {
-                    a.1["expiresAt"]
-                        .as_str()
-                        .unwrap_or("")
-                        .cmp(b.1["expiresAt"].as_str().unwrap_or(""))
-                })
-                .map(|(k, _)| k.clone())
-            {
-                t.remove(&victim);
-            }
+    let existing = st.store.list(tenant, Kind::EntityMap).unwrap_or_default();
+    if existing.len() >= MAX_MAPS_PER_TENANT && !existing.iter().any(|d| d["id"] == id.as_str()) {
+        // eviction order is a heuristic — earliest expiresAt string wins
+        if let Some(victim) = existing
+            .iter()
+            .min_by(|a, b| {
+                a["expiresAt"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["expiresAt"].as_str().unwrap_or(""))
+            })
+            .and_then(|d| d.get("id").and_then(Value::as_str))
+        {
+            let _ = st.store.delete(tenant, Kind::EntityMap, victim);
         }
-        t.insert(id, doc);
+    }
+    let updated = st
+        .store
+        .mutate(tenant, Kind::EntityMap, &id, |d| {
+            *d = doc.clone();
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .ok()
+        .flatten()
+        .is_some();
+    if !updated {
+        let _ = st.store.create(tenant, Kind::EntityMap, &id, doc);
     }
 }
 
 pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> bool {
-    st.entity_maps
-        .write()
-        .ok()
-        .and_then(|mut maps| maps.get_mut(tenant.as_str())?.remove(id))
-        .is_some()
+    st.store
+        .delete(tenant, Kind::EntityMap, id)
+        .unwrap_or(false)
 }
 
 /// Parse an ISO 8601 duration (entityMapLifetime, Table 6.4.3.2-1) to whole

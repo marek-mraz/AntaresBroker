@@ -39,6 +39,9 @@ fn doc_kind(kind: Kind) -> Option<DocKind> {
         Kind::Subscription => Some(DocKind::Subscription),
         Kind::Registration => Some(DocKind::Registration),
         Kind::CSourceSubscription => Some(DocKind::CSourceSubscription),
+        Kind::Snapshot => Some(DocKind::Snapshot),
+        Kind::EntityMap => Some(DocKind::EntityMap),
+        Kind::DistSub => Some(DocKind::DistSub),
         Kind::Entity | Kind::Temporal => None,
     }
 }

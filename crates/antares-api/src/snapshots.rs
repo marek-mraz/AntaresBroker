@@ -10,10 +10,9 @@
 //! no registrations exist under the synthetic tenant, all operations are
 //! naturally local.
 //!
-//! ponytail ceiling: snapshot METADATA is per-process memory (5.5.15
-//! explicitly allows implementations to drop snapshots when low on
-//! resources; a restart is the extreme case — promote to the store if
-//! durable snapshots are required, and sweep orphaned snap- tenants then).
+//! Snapshot metadata lives in the store (Kind::Snapshot, ADR-0012) —
+//! persistent modes serve snapshots across restarts; 5.5.15 still allows
+//! dropping them under resource pressure (evict_over_cap).
 //! Fills follow the 5.7.2.4 distributed path and page past max_limit;
 //! resource pressure evicts lowest-priority snapshots (evict_over_cap).
 
@@ -61,18 +60,26 @@ fn expired(meta: &Value) -> bool {
         .is_some_and(|e| e < chrono::Utc::now())
 }
 
+/// The internal tenant holding the synth-tenant -> (owner, snapshot id)
+/// index docs (durable reverse lookup for 6.3.22 notification stamping).
+fn snap_index_tenant() -> Option<TenantId> {
+    TenantId::new("snap-index").ok()
+}
+
 /// Registry access with lazy expiry (an expired snapshot is gone; its data
-/// purge runs in the background).
+/// purge runs in the background). Snapshot docs live in the store
+/// (Kind::Snapshot) so restarts keep them on persistent store modes.
 pub(crate) fn snap_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
-    let mut reg = st.snapshots.write().expect("snapshots lock");
-    let maps = reg.get_mut(tenant.as_str())?;
-    if maps.get(id).is_some_and(expired) {
-        if let Some(meta) = maps.remove(id) {
-            purge_data_bg(st, &meta);
-        }
+    let meta = st.store.get(tenant, Kind::Snapshot, id).ok().flatten()?;
+    // the snap-index marker docs are not Snapshots
+    if meta.get("type").and_then(Value::as_str) != Some("Snapshot") {
         return None;
     }
-    maps.get(id).cloned()
+    if expired(&meta) {
+        snap_remove(st, tenant, id, &meta);
+        return None;
+    }
+    Some(meta)
 }
 
 fn snap_put(st: &AppState, tenant: &TenantId, meta: Value) {
@@ -81,12 +88,42 @@ fn snap_put(st: &AppState, tenant: &TenantId, meta: Value) {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    st.snapshots
-        .write()
-        .expect("snapshots lock")
-        .entry(tenant.as_str().to_owned())
-        .or_default()
-        .insert(id, meta);
+    let updated = st
+        .store
+        .mutate(tenant, Kind::Snapshot, &id, |d| {
+            *d = meta.clone();
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .ok()
+        .flatten()
+        .is_some();
+    if !updated {
+        let _ = st.store.create(tenant, Kind::Snapshot, &id, meta.clone());
+        // durable reverse index for snapshot_of_synth
+        if let (Some(synth), Some(idx)) = (
+            meta.get("__tenant").and_then(Value::as_str),
+            snap_index_tenant(),
+        ) {
+            let _ = st.store.create(
+                &idx,
+                Kind::Snapshot,
+                synth,
+                json!({"tenant": tenant.as_str(), "snapshot": id}),
+            );
+        }
+    }
+}
+
+/// Remove a snapshot everywhere: doc, synth-tenant index, data purge.
+fn snap_remove(st: &AppState, tenant: &TenantId, id: &str, meta: &Value) {
+    let _ = st.store.delete(tenant, Kind::Snapshot, id);
+    if let (Some(synth), Some(idx)) = (
+        meta.get("__tenant").and_then(Value::as_str),
+        snap_index_tenant(),
+    ) {
+        let _ = st.store.delete(&idx, Kind::Snapshot, synth);
+    }
+    purge_data_bg(st, meta);
 }
 
 fn synth_tenant(meta: &Value) -> Option<TenantId> {
@@ -231,7 +268,11 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
 
 /// Fresh metadata for a new snapshot (create or clone) — 5.16.1.4/5.16.2.4:
 /// timestamps now, status "preparing", priority default 5, bounded expiresAt.
-fn new_meta(mut o: Map<String, Value>, st: &AppState) -> Result<(String, Value), NgsiError> {
+fn new_meta(
+    mut o: Map<String, Value>,
+    st: &AppState,
+    tenant: &TenantId,
+) -> Result<(String, Value), NgsiError> {
     let id = match o.get("id").and_then(Value::as_str) {
         Some(id) => {
             antares_model::EntityId::new(id)
@@ -244,7 +285,7 @@ fn new_meta(mut o: Map<String, Value>, st: &AppState) -> Result<(String, Value),
             id
         }
     };
-    if snap_exists(st, &id) {
+    if snap_exists(st, tenant, &id) {
         return Err(NgsiError::AlreadyExists(format!(
             "snapshot {id} already exists"
         )));
@@ -269,17 +310,12 @@ fn new_meta(mut o: Map<String, Value>, st: &AppState) -> Result<(String, Value),
 /// 5.2.41: lastUsedAt tracks "the point in time when the snapshot was most
 /// recently used" — refreshed on every snapshot-scoped operation.
 fn snap_touch(st: &AppState, tenant: &TenantId, id: &str) {
-    if let Some(meta) = st
-        .snapshots
-        .write()
-        .expect("snapshots lock")
-        .get_mut(tenant.as_str())
-        .and_then(|m| m.get_mut(id))
-    {
+    let _ = st.store.mutate(tenant, Kind::Snapshot, id, |meta| {
         if let Some(o) = meta.as_object_mut() {
             o.insert("lastUsedAt".into(), Value::String(now_iso()));
         }
-    }
+        Ok::<_, std::convert::Infallible>(())
+    });
 }
 
 /// Reverse lookup: which (owner tenant, snapshot id) does a synthetic
@@ -287,23 +323,18 @@ fn snap_touch(st: &AppState, tenant: &TenantId, id: &str) {
 /// notifications from snapshot-scoped subscriptions (6.3.22) without
 /// leaking the internal tenant.
 pub(crate) fn snapshot_of_synth(st: &AppState, synth: &str) -> Option<(TenantId, String)> {
-    let reg = st.snapshots.read().expect("snapshots lock");
-    for (owner, maps) in reg.iter() {
-        for (id, meta) in maps {
-            if meta.get("__tenant").and_then(Value::as_str) == Some(synth) {
-                return TenantId::new(owner).ok().map(|t| (t, id.clone()));
-            }
-        }
-    }
-    None
+    let idx = snap_index_tenant()?;
+    let doc = st.store.get(&idx, Kind::Snapshot, synth).ok().flatten()?;
+    let owner = TenantId::new(doc.get("tenant")?.as_str()?).ok()?;
+    Some((owner, doc.get("snapshot")?.as_str()?.to_owned()))
 }
 
-fn snap_exists(st: &AppState, id: &str) -> bool {
-    st.snapshots
-        .read()
-        .expect("snapshots lock")
-        .values()
-        .any(|m| m.contains_key(id))
+fn snap_exists(st: &AppState, tenant: &TenantId, id: &str) -> bool {
+    st.store
+        .get(tenant, Kind::Snapshot, id)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// 5.5.15: "If an implementation determines that it is low on resources,
@@ -315,14 +346,11 @@ fn snap_exists(st: &AppState, id: &str) -> bool {
 /// encoding.
 fn evict_over_cap(st: &AppState, tenant: &TenantId, keep: &str) {
     let victims: Vec<Value> = {
-        let reg = st.snapshots.read().expect("snapshots lock");
-        let Some(m) = reg.get(tenant.as_str()) else {
-            return;
-        };
-        if m.len() <= st.snapshot_cap {
+        let mut metas = st.store.list(tenant, Kind::Snapshot).unwrap_or_default();
+        if metas.len() <= st.snapshot_cap {
             return;
         }
-        let mut metas: Vec<&Value> = m.values().collect();
+        let over = metas.len() - st.snapshot_cap;
         metas.sort_by_key(|v| {
             (
                 v.get("snapshotPriority")
@@ -335,21 +363,15 @@ fn evict_over_cap(st: &AppState, tenant: &TenantId, keep: &str) {
             )
         });
         metas
-            .iter()
+            .into_iter()
             .filter(|v| v.get("id").and_then(Value::as_str) != Some(keep))
-            .take(m.len() - st.snapshot_cap)
-            .map(|v| (*v).clone())
+            .take(over)
             .collect()
     };
     for mut meta in victims {
         if let Some(id) = meta.get("id").and_then(Value::as_str).map(str::to_owned) {
-            st.snapshots
-                .write()
-                .expect("snapshots lock")
-                .get_mut(tenant.as_str())
-                .map(|m| m.remove(&id));
+            snap_remove(st, tenant, &id, &meta);
         }
-        purge_data_bg(st, &meta);
         if let Some(o) = meta.as_object_mut() {
             // deletion signal: expiresAt strictly before the notification
             o.insert("expiresAt".into(), Value::String(now_iso()));
@@ -375,7 +397,7 @@ pub async fn create_snapshot(
         let v: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let o = validate(&v, Mode::Create)?;
-        let (id, meta) = new_meta(o, &st)?;
+        let (id, meta) = new_meta(o, &st, &tenant)?;
         snap_put(&st, &tenant, meta);
         evict_over_cap(&st, &tenant, &id);
         let (st2, t2, id2) = (st.clone(), tenant.clone(), id.clone());
@@ -689,26 +711,17 @@ pub async fn purge_snapshots(
             .into());
         }
         let ctx = st.loader.core();
-        let victims: Vec<Value> = {
-            let reg = st.snapshots.read().expect("snapshots lock");
-            reg.get(tenant.as_str())
-                .map(|m| {
-                    m.values()
-                        .filter(|meta| crate::csource::csf_matches(&ast, meta, &ctx))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        let victims: Vec<Value> = st
+            .store
+            .list(&tenant, Kind::Snapshot)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|meta| crate::csource::csf_matches(&ast, meta, &ctx))
+            .collect();
         for meta in victims {
             if let Some(id) = meta.get("id").and_then(Value::as_str) {
-                st.snapshots
-                    .write()
-                    .expect("snapshots lock")
-                    .get_mut(tenant.as_str())
-                    .map(|m| m.remove(id));
+                snap_remove(&st, &tenant, id, &meta);
             }
-            purge_data_bg(&st, &meta);
         }
         Ok::<_, ApiError>(no_content(&tenant))
     };
@@ -814,12 +827,9 @@ pub async fn delete_snapshot(
         check_params(&params, &["local"])?;
         antares_model::EntityId::new(&id)
             .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
-        let meta = {
-            let mut reg = st.snapshots.write().expect("snapshots lock");
-            reg.get_mut(tenant.as_str()).and_then(|m| m.remove(&id))
-        }
-        .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
-        purge_data_bg(&st, &meta);
+        let meta = snap_get(&st, &tenant, &id)
+            .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
+        snap_remove(&st, &tenant, &id, &meta);
         Ok::<_, ApiError>(no_content(&tenant))
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -854,7 +864,7 @@ pub async fn clone_snapshot(
                 o.insert(k.into(), qv.clone());
             }
         }
-        let (new_id, meta) = new_meta(o, &st)?;
+        let (new_id, meta) = new_meta(o, &st, &tenant)?;
         snap_put(&st, &tenant, meta);
         let (st2, t2, sid, nid) = (st.clone(), tenant.clone(), id.clone(), new_id.clone());
         crate::spawn(async move {

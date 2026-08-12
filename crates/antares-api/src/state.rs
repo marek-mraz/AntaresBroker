@@ -75,51 +75,20 @@ pub struct AppState {
     /// the broker (the only crate that knows an exporter exists, §9.2);
     /// `None` = 404, the facade calls elsewhere stay no-ops.
     pub metrics_render: Option<Arc<dyn Fn() -> String + Send + Sync>>,
-    /// 5.14 EntityMaps: tenant → map id → 5.2.39 document. 5.14.1.1 allows
-    /// storage "in the broker's internal storage, or memory" — kept in
-    /// memory, lazily expiry-pruned, per-tenant bounded.
-    /// ponytail: per-process (HA pods do not share maps); promote to the pg
-    /// entity_maps row store if cross-instance reuse becomes a requirement.
-    #[allow(clippy::type_complexity)]
-    pub entity_maps: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<
-                String,
-                std::collections::BTreeMap<String, serde_json::Value>,
-            >,
-        >,
-    >,
     /// True only under bus=nats (set by the broker's wiring): multiple
     /// processes share the store, so interval-subscription firings must be
     /// claimed single-winner (§3.1.6). bus=local keeps the direct path — a
     /// claim there would disturb the 046_12 bookkeeping ordering for
     /// nothing.
     pub nats: bool,
-    /// 5.8.1.4 distributed-subscription mappings (own Subscription ↔ internal
-    /// CSR subscription ↔ per-registration remote subscriptions).
-    /// ponytail: per-process like entity_maps; promote to the store if HA
-    /// pods must share the consumer half.
-    pub dist_subs: Arc<std::sync::RwLock<crate::distsub::DistSubs>>,
     /// The base URL remote Context Sources reach THIS broker at — used as
     /// the notification endpoint of forwarded subscription copies
     /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to http://{host_alias}.
     pub public_url: String,
-    /// 5.16 Snapshots: tenant → snapshot id → 5.2.41 document (with the
-    /// internal __tenant member naming the snapshot's synthetic tenant).
-    /// ponytail: per-process like entity_maps — 5.5.15 explicitly allows
-    /// dropping snapshots under resource pressure; promote to the store if
-    /// durable snapshots are required.
-    #[allow(clippy::type_complexity)]
-    pub snapshots: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<
-                String,
-                std::collections::BTreeMap<String, serde_json::Value>,
-            >,
-        >,
-    >,
     /// 5.5.15 resource-pressure signal: max snapshots per tenant — above it
-    /// the lowest-snapshotPriority snapshots are evicted.
+    /// the lowest-snapshotPriority snapshots are evicted. Snapshot documents
+    /// themselves live in the store (Kind::Snapshot) so persistent modes
+    /// survive restarts.
     pub snapshot_cap: usize,
 }
 
@@ -192,11 +161,8 @@ impl AppState {
             reg_mirror: None,
             record_locally: true,
             metrics_render: None,
-            entity_maps: Arc::default(),
             nats: false,
-            dist_subs: Arc::default(),
             public_url,
-            snapshots: Arc::default(),
             snapshot_cap: 1024,
         }
     }

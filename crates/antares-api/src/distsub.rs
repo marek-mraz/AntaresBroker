@@ -15,25 +15,92 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
 /// 5.8.1.4: "The mapping of the received subscriptionId with the own
 /// Subscription identifier is stored" (inbound), "a mapping of the id of
 /// the Context Source Registration to the received subscriptionId is
 /// stored" (remotes), and "the mapping of the id of the Subscription to the
 /// … Context Source Registration Subscription shall be stored" (csr_sub).
-#[derive(Default)]
-pub struct DistSubs {
-    /// remote subscriptionId → (tenant, own Subscription id)
-    pub inbound: HashMap<String, (String, String)>,
-    /// "{tenant}\n{own sub id}" → reg id → (endpoint, remote sub id)
-    pub remotes: HashMap<String, HashMap<String, (String, String)>>,
-    /// "{tenant}\n{own sub id}" → internal CSR subscription id
-    pub csr_sub: HashMap<String, String>,
+/// All three live in the store (Kind::DistSub) so persistent modes keep the
+/// consumer half across restarts: one doc per (tenant, own Subscription id)
+/// = {"csr_sub": id, "remotes": {reg_id: [endpoint, remote sub id]}}, plus
+/// inbound index docs under the internal "distsub-index" tenant
+/// (id = remote subscriptionId, doc = {"tenant", "own"}).
+fn ds_index_tenant() -> Option<TenantId> {
+    TenantId::new("distsub-index").ok()
 }
 
-fn key(tenant: &TenantId, sub_id: &str) -> String {
-    format!("{}\n{sub_id}", tenant.as_str())
+fn ds_get(st: &AppState, tenant: &TenantId, own_id: &str) -> Value {
+    st.store
+        .get(tenant, Kind::DistSub, own_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn ds_put(st: &AppState, tenant: &TenantId, own_id: &str, doc: Value) {
+    let updated = st
+        .store
+        .mutate(tenant, Kind::DistSub, own_id, |d| {
+            *d = doc.clone();
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .ok()
+        .flatten()
+        .is_some();
+    if !updated {
+        let _ = st.store.create(tenant, Kind::DistSub, own_id, doc);
+    }
+}
+
+/// remotes of one own Subscription: reg id → (endpoint, remote sub id)
+fn ds_remotes(doc: &Value) -> Vec<(String, (String, String))> {
+    doc.get("remotes")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(reg, v)| {
+                    Some((
+                        reg.clone(),
+                        (
+                            v.get(0)?.as_str()?.to_owned(),
+                            v.get(1)?.as_str()?.to_owned(),
+                        ),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn inbound_put(st: &AppState, remote_id: &str, tenant: &TenantId, own_id: &str) {
+    if let Some(idx) = ds_index_tenant() {
+        let _ = st.store.create(
+            &idx,
+            Kind::DistSub,
+            remote_id,
+            json!({"tenant": tenant.as_str(), "own": own_id}),
+        );
+    }
+}
+
+fn inbound_get(st: &AppState, remote_id: &str) -> Option<(String, String)> {
+    let idx = ds_index_tenant()?;
+    let doc = st
+        .store
+        .get(&idx, Kind::DistSub, remote_id)
+        .ok()
+        .flatten()?;
+    Some((
+        doc.get("tenant")?.as_str()?.to_owned(),
+        doc.get("own")?.as_str()?.to_owned(),
+    ))
+}
+
+fn inbound_delete(st: &AppState, remote_id: &str) {
+    if let Some(idx) = ds_index_tenant() {
+        let _ = st.store.delete(&idx, Kind::DistSub, remote_id);
+    }
 }
 
 fn distributed(sub: &Value) -> bool {
@@ -75,11 +142,9 @@ pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Va
         .create(tenant, Kind::CSourceSubscription, &csr_id, doc)
         .unwrap_or(false)
     {
-        st.dist_subs
-            .write()
-            .expect("dist_subs lock")
-            .csr_sub
-            .insert(key(tenant, own_id), csr_id.clone());
+        let mut doc = ds_get(st, tenant, own_id);
+        doc["csr_sub"] = Value::String(csr_id.clone());
+        ds_put(st, tenant, own_id, doc);
         // 5.11.2.4 initial notification with all matching registrations —
         // this is what turns already-known registrations into newlyMatching
         let (st2, t2) = (st.clone(), tenant.clone());
@@ -100,13 +165,10 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
     else {
         return;
     };
-    let csr_id = st
-        .dist_subs
-        .read()
-        .expect("dist_subs lock")
-        .csr_sub
-        .get(&key(tenant, own_id))
-        .cloned();
+    let csr_id = ds_get(st, tenant, own_id)
+        .get("csr_sub")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     match csr_id {
         None => {
             // became distributed only now (e.g. localOnly flipped off)
@@ -129,14 +191,7 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
                 });
         }
     }
-    let remotes: Vec<(String, (String, String))> = st
-        .dist_subs
-        .read()
-        .expect("dist_subs lock")
-        .remotes
-        .get(&key(tenant, own_id))
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
+    let remotes: Vec<(String, (String, String))> = ds_remotes(&ds_get(st, tenant, own_id));
     for (reg_id, (endpoint, remote_id)) in remotes {
         let Some(reg) = st
             .store
@@ -170,15 +225,16 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
 /// 5.8.5.4: delete the internal CSR subscription (5.11.6) and forward the
 /// delete to every mapped remote supporting deleteSubscription.
 pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: &str) {
-    let k = key(tenant, own_id);
-    let (csr_id, remotes) = {
-        let mut ds = st.dist_subs.write().expect("dist_subs lock");
-        let csr_id = ds.csr_sub.remove(&k);
-        let remotes = ds.remotes.remove(&k).unwrap_or_default();
-        ds.inbound
-            .retain(|_, (t, s)| !(t == tenant.as_str() && s == own_id));
-        (csr_id, remotes)
-    };
+    let doc = ds_get(st, tenant, own_id);
+    let csr_id = doc
+        .get("csr_sub")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let remotes = ds_remotes(&doc);
+    for (_, (_, remote_id)) in &remotes {
+        inbound_delete(st, remote_id);
+    }
+    let _ = st.store.delete(tenant, Kind::DistSub, own_id);
     if let Some(csr_id) = csr_id {
         let _ = st.store.delete(tenant, Kind::CSourceSubscription, &csr_id);
     }
@@ -243,14 +299,10 @@ pub(crate) async fn on_csource_notification(
         }) else {
             continue;
         };
-        let mapped = st
-            .dist_subs
-            .read()
-            .expect("dist_subs lock")
-            .remotes
-            .get(&key(tenant, own_id))
-            .and_then(|m| m.get(reg_id))
-            .cloned();
+        let mapped = ds_remotes(&ds_get(st, tenant, own_id))
+            .into_iter()
+            .find(|(r, _)| r == reg_id)
+            .map(|(_, v)| v);
         match (reason, mapped) {
             // an unmapped registration that starts (or keeps) matching gets
             // the reduced copy — newlyMatching, or "updated" reported by an
@@ -272,15 +324,10 @@ pub(crate) async fn on_csource_notification(
                 )
                 .await;
                 if (200..300).contains(&status) {
-                    let mut ds = st.dist_subs.write().expect("dist_subs lock");
-                    ds.inbound.insert(
-                        remote_id.clone(),
-                        (tenant.as_str().to_owned(), own_id.to_owned()),
-                    );
-                    ds.remotes
-                        .entry(key(tenant, own_id))
-                        .or_default()
-                        .insert(reg_id.to_owned(), (endpoint.clone(), remote_id));
+                    inbound_put(st, &remote_id, tenant, own_id);
+                    let mut doc = ds_get(st, tenant, own_id);
+                    doc["remotes"][reg_id] = json!([endpoint.clone(), remote_id]);
+                    ds_put(st, tenant, own_id, doc);
                 }
             }
             ("updated", Some((_, remote_id)))
@@ -312,11 +359,12 @@ pub(crate) async fn on_csource_notification(
                     None,
                 )
                 .await;
-                let mut ds = st.dist_subs.write().expect("dist_subs lock");
-                if let Some(m) = ds.remotes.get_mut(&key(tenant, own_id)) {
+                let mut doc = ds_get(st, tenant, own_id);
+                if let Some(m) = doc.get_mut("remotes").and_then(Value::as_object_mut) {
                     m.remove(reg_id);
                 }
-                ds.inbound.remove(&remote_id);
+                ds_put(st, tenant, own_id, doc);
+                inbound_delete(st, &remote_id);
             }
             _ => {}
         }
@@ -516,14 +564,7 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
         .get("subscriptionId")
         .and_then(Value::as_str)
         .ok_or_else(|| NgsiError::BadRequestData("notification without subscriptionId".into()))?;
-    let mapped = st
-        .dist_subs
-        .read()
-        .expect("dist_subs lock")
-        .inbound
-        .get(sid)
-        .cloned();
-    let Some((tenant, own_id)) = mapped else {
+    let Some((tenant, own_id)) = inbound_get(st, sid) else {
         return Err(ApiError::from(NgsiError::ResourceNotFound(format!(
             "no distributed subscription maps {sid}"
         ))));
@@ -542,17 +583,10 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
     };
     // the origin of this notification is the registration its remote
     // subscription was created at
-    let origin_reg_id = st
-        .dist_subs
-        .read()
-        .expect("dist_subs lock")
-        .remotes
-        .get(&key(&tenant, &own_id))
-        .and_then(|m| {
-            m.iter()
-                .find(|(_, (_, rid))| rid.as_str() == sid)
-                .map(|(reg_id, _)| reg_id.clone())
-        });
+    let origin_reg_id = ds_remotes(&ds_get(st, &tenant, &own_id))
+        .into_iter()
+        .find(|(_, (_, rid))| rid.as_str() == sid)
+        .map(|(reg_id, _)| reg_id);
     // 5.8.6: "if a Context Source filter is defined, then only the
     // subscribed Entities whose origin Context Source matches the referred
     // filter shall be included".
