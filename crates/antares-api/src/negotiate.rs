@@ -611,6 +611,77 @@ mod clause_5_5_3 {
         );
     }
 
+    /// 6.3.5: "No mixes are allowed" — application/json takes its @context
+    /// from the Link header only (a body @context is 400), application/ld+json
+    /// from the body only (a missing body @context is 400, a Link header is
+    /// 400).
+    #[tokio::test]
+    async fn clause_6_3_5_context_source_mixing_rules() {
+        let loader = antares_jsonld::Loader::new();
+        let core_link = format!(
+            "<{}>; rel=\"{JSONLD_CONTEXT_REL}\"; type=\"application/ld+json\"",
+            antares_jsonld::CORE_CONTEXT
+        );
+        let ct = |v: &'static str| axum::http::HeaderValue::from_static(v);
+
+        // json + body @context → BadRequestData
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct("application/json"));
+        let err = parse_body(
+            &loader,
+            &h,
+            br#"{"id":"urn:x","type":"T","@context":{}}"#,
+            BodyKind::Standard,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("json body with @context");
+        assert!(matches!(err, ApiError::Ngsi(NgsiError::BadRequestData(_))));
+
+        // ld+json without a body @context → BadRequestData
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct("application/ld+json"));
+        let err = parse_body(
+            &loader,
+            &h,
+            br#"{"id":"urn:x","type":"T"}"#,
+            BodyKind::Standard,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("ld+json without @context");
+        assert!(matches!(err, ApiError::Ngsi(NgsiError::BadRequestData(_))));
+
+        // ld+json + Link header → BadRequestData
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct("application/ld+json"));
+        h.insert(header::LINK, core_link.parse().expect("link"));
+        let err = parse_body(
+            &loader,
+            &h,
+            br#"{"id":"urn:x","type":"T","@context":{}}"#,
+            BodyKind::Standard,
+        )
+        .await
+        .map(|_| ())
+        .expect_err("ld+json with Link header");
+        assert!(matches!(err, ApiError::Ngsi(NgsiError::BadRequestData(_))));
+
+        // the legal combinations still parse: json + Link, ld+json + body
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, ct("application/json"));
+        h.insert(header::LINK, core_link.parse().expect("link"));
+        let ok = parse_body(
+            &loader,
+            &h,
+            br#"{"id":"urn:x","type":"T"}"#,
+            BodyKind::Standard,
+        )
+        .await
+        .expect("json + Link is the sanctioned pair");
+        assert!(ok.value.get("@context").is_none());
+    }
+
     /// 6.3.4: "Not Acceptable Media Type … shall result in a 406 HTTP status
     /// code and the body of the message shall contain the list of the
     /// available representations of the resources."
