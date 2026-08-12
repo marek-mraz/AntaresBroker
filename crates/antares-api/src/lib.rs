@@ -481,6 +481,10 @@ async fn health(
 }
 
 /// CIM 009 5.15.1 / 6.33 — Context Source identity.
+/// 5.15.1 Retrieve Context Source Identity Information: the 5.2.40
+/// ContextSourceIdentity object for this source (per tenant in the
+/// multi-tenancy case). The NotImplemented arm of 5.15.1.4 is vacuous here —
+/// this broker can always supply its identity.
 async fn source_identity(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
