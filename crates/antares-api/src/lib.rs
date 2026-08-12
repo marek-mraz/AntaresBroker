@@ -8,6 +8,7 @@ pub mod bounds;
 pub mod conformance;
 pub mod contexts;
 pub mod csource;
+pub mod distsub;
 pub mod egress;
 pub mod entities;
 pub mod entity_maps;
@@ -288,6 +289,12 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/q/health", get(health))
+        // 5.8.1.4 consumer half: where forwarded subscription copies point
+        // their notifications; remapped to the original subscriber.
+        .route(
+            "/ngsi-ld/ex/remote-notify",
+            post(distsub::remote_notify).with_state(state.clone()),
+        )
         // K12: Prometheus text format. 404 until the broker installs the
         // renderer — the api crate never depends on an exporter (§9.2).
         .route("/q/metrics", get(metrics_endpoint))

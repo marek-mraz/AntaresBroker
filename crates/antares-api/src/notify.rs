@@ -656,7 +656,7 @@ fn throttled(sub: &Value) -> bool {
 
 /// The @context governing a subscription's notifications (5.8.6): the
 /// jsonldContext member if set, else the @context of the creating request.
-async fn sub_context(st: &AppState, sub: &Value) -> Arc<Context> {
+pub(crate) async fn sub_context(st: &AppState, sub: &Value) -> Arc<Context> {
     let source = sub
         .get("jsonldContext")
         .cloned()
@@ -1239,7 +1239,13 @@ pub async fn interval_tick(st: &AppState) {
 }
 
 /// POST the Notification (5.3.1) and write the 5.2.14.2 bookkeeping back.
-async fn deliver(st: &AppState, tenant: &TenantId, sub: &Value, data: Vec<Value>, ctx: &Context) {
+pub(crate) async fn deliver(
+    st: &AppState,
+    tenant: &TenantId,
+    sub: &Value,
+    data: Vec<Value>,
+    ctx: &Context,
+) {
     deliver_as(
         st,
         tenant,
@@ -1516,6 +1522,15 @@ async fn deliver_as(
     let Some(uri) = ep.get("uri").and_then(Value::as_str) else {
         return;
     };
+    // 5.8.1.4 consumer half: the internal CSR subscription's notifications
+    // are handled in-process (urn:antares:distsub:{tenant}\n{own sub id})
+    if let Some(own) = uri.strip_prefix("urn:antares:distsub:") {
+        if let Some((_, own_id)) = own.split_once('\n') {
+            crate::distsub::on_csource_notification(st, tenant, own_id, trigger_reason, &data)
+                .await;
+        }
+        return;
+    }
     let is_mqtt = uri.starts_with("mqtt://") || uri.starts_with("mqtts://");
     if !uri.starts_with("http") && !is_mqtt {
         return; // creation rejects unknown schemes with 422 (§9.2); belt only

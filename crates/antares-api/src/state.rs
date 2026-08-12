@@ -95,6 +95,15 @@ pub struct AppState {
     /// claim there would disturb the 046_12 bookkeeping ordering for
     /// nothing.
     pub nats: bool,
+    /// 5.8.1.4 distributed-subscription mappings (own Subscription ↔ internal
+    /// CSR subscription ↔ per-registration remote subscriptions).
+    /// ponytail: per-process like entity_maps; promote to the store if HA
+    /// pods must share the consumer half.
+    pub dist_subs: Arc<std::sync::RwLock<crate::distsub::DistSubs>>,
+    /// The base URL remote Context Sources reach THIS broker at — used as
+    /// the notification endpoint of forwarded subscription copies
+    /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to http://{host_alias}.
+    pub public_url: String,
 }
 
 impl AppState {
@@ -141,6 +150,8 @@ impl AppState {
                 }
             }));
         }
+        let public_url =
+            std::env::var("ANTARES_PUBLIC_URL").unwrap_or_else(|_| format!("http://{host_alias}"));
         Self {
             store,
             store_mode,
@@ -166,6 +177,8 @@ impl AppState {
             metrics_render: None,
             entity_maps: Arc::default(),
             nats: false,
+            dist_subs: Arc::default(),
+            public_url,
         }
     }
 

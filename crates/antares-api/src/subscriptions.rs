@@ -633,6 +633,9 @@ pub async fn create(
     }
     if kind == Kind::Subscription {
         st.sub_changed(&tenant, &id, Some(&doc));
+        // 5.8.1.4: a distributed Subscription creates its internal Context
+        // Source Registration Subscription (consumer half)
+        crate::distsub::on_subscription_created(st, &tenant, &doc);
     }
     if kind == Kind::CSourceSubscription {
         // initial CSourceNotification with all matching registrations (5.11.2.4)
@@ -777,6 +780,11 @@ pub async fn update(
                 let doc = st.store.get(&tenant, kind, id)?;
                 st.sub_changed(&tenant, id, doc.as_ref());
             }
+            if kind == Kind::Subscription {
+                // 5.8.2.4: the CSR subscription and the mapped remote
+                // subscriptions follow the update (5.11.3)
+                crate::distsub::on_subscription_updated(st, &tenant, id);
+            }
             Ok(no_content(&tenant))
         }
     }
@@ -798,6 +806,9 @@ pub async fn delete(
     if st.store.delete(&tenant, kind, id)? {
         if kind == Kind::Subscription {
             st.sub_changed(&tenant, id, None);
+            // 5.8.5.4: forward the delete to every mapped Context Source
+            // and drop the internal CSR subscription (5.11.6)
+            crate::distsub::on_subscription_deleted(st, &tenant, id);
         }
         Ok(no_content(&tenant))
     } else {

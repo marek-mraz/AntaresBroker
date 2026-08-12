@@ -806,6 +806,55 @@ fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value>
 /// that support the retrieveTemporal operation; registrations without it
 /// are not contacted. Returns (auxiliary, expanded doc) pairs for the
 /// caller's 4.5.5 merge.
+/// 4.20: does a raw registration document support `op`? Same group tables
+/// as FedReg::supports; default when the operations member is absent is
+/// federationOps (5.2.9).
+pub(crate) fn doc_supports(reg: &Value, op: &str) -> bool {
+    fed_reg_of(reg.get("id").and_then(Value::as_str).unwrap_or(""), reg).supports(op)
+}
+
+/// A minimal FedReg view of a raw registration document — enough for
+/// `forward` (endpoint/tenant/csi/alias) and `supports`.
+pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
+    let endpoint = reg
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .map(|e| {
+            let e = e.trim_end_matches('/');
+            e.strip_suffix("/ngsi-ld/v1").unwrap_or(e).to_owned()
+        })
+        .unwrap_or_default();
+    FedReg {
+        reg_id: reg_id.to_owned(),
+        endpoint,
+        mode: reg
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("inclusive")
+            .to_owned(),
+        ops: reg
+            .get("operations")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["federationOps".into()]),
+        attrs: None,
+        ent_ids: Vec::new(),
+        ent_types: Vec::new(),
+        tenant: reg.get("tenant").and_then(Value::as_str).map(str::to_owned),
+        alias: reg
+            .get("contextSourceAlias")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        csi: Vec::new(),
+        local_only: false,
+    }
+}
+
 /// 5.7.1.4 / 5.7.3.4: with an EntityMap in use, "only the retrieved Entity
 /// Map shall be used to determine which Context Source Registrations match
 /// the Entity ID" — a registration not listed in the entry does not match;
