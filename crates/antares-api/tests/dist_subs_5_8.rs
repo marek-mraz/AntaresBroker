@@ -361,6 +361,161 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     );
 }
 
+/// 5.8.6 splitEntities=true: the Entities of an inbound Notification shall
+/// be retrieved from all OTHER Context Sources (never the origin), merged
+/// with the notified fragments, and re-filtered by the local Subscription's
+/// conditions; the reduced remote copy carries no q (5.8.1.4).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_8_6_split_entities_inbound_merge() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-split".into());
+    antares_api::notify::wire(&mut st);
+
+    // origin: receives the reduced subscription copy, notifies fragments
+    let (remote_port, remote_seen) = recording_mock();
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:split-origin",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // a SECOND context source serving the brandName part of the entities
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let brand_addr = listener.local_addr().expect("addr");
+    let app = axum::Router::new().route(
+        "/ngsi-ld/v1/entities/{id}",
+        axum::routing::get(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                axum::Json(json!({"id": id, "type": "Vehicle",
+                "brandName": {"type": "Property", "value": "Tesla"}}))
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let reg2 = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:split-brand",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["retrieveEntity"],
+        "endpoint": format!("http://{brand_addr}"),
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg2.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (orig_port, orig_seen) = recording_mock();
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:ds-split",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "q": "speed>50;brandName==\"Tesla\"",
+        "splitEntities": true,
+        "notification": {"endpoint": {"uri": format!("http://127.0.0.1:{orig_port}/notify")}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let remote_sub: Value = {
+        let seen = remote_seen.lock().expect("seen");
+        let r = seen
+            .iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .clone();
+        serde_json::from_str(r.split("\n\n").nth(1).expect("body")).expect("json")
+    };
+    // 5.8.1.4: with splitEntities the conditions stay LOCAL — no q pushed down
+    assert!(
+        remote_sub.get("q").is_none(),
+        "the reduced copy must not carry q: {remote_sub}"
+    );
+    let remote_id = remote_sub["id"].as_str().expect("remote id").to_owned();
+
+    // inbound fragments: split1 matches q only after the brandName merge;
+    // split2 fails q (speed 10) even merged and must be dropped
+    let inbound = json!({
+        "type": "Notification",
+        "subscriptionId": remote_id,
+        "data": [
+            {"id": "urn:ngsi-ld:Vehicle:split1", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 99}},
+            {"id": "urn:ngsi-ld:Vehicle:split2", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 10}},
+        ],
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(inbound.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    wait_for("the merged notification at the original subscriber", || {
+        orig_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:split1") && r.contains("Tesla"))
+    })
+    .await;
+    let delivered = orig_seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .find(|r| r.contains("urn:ngsi-ld:Vehicle:split1"))
+        .expect("notification")
+        .clone();
+    // negative controls: the non-matching entity is dropped; the origin is
+    // never re-queried for entity data
+    assert!(
+        !delivered.contains("urn:ngsi-ld:Vehicle:split2"),
+        "split2 fails q after merge and must be removed: {delivered}"
+    );
+    assert!(
+        !remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("GET /ngsi-ld/v1/entities/")),
+        "the origin Context Source must be excluded from the merge retrieval"
+    );
+}
+
 /// localOnly=true opts OUT of the distributed-subscription machinery: no
 /// CSR subscription, nothing forwarded.
 #[tokio::test(flavor = "multi_thread")]

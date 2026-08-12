@@ -1074,6 +1074,7 @@ pub async fn fed_retrieve(
     ctx: &Context,
     id: &str,
     map: Option<&Value>,
+    except_reg: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Vec<(bool, Value)> {
     let spec = crate::csource::CsrSpec {
@@ -1083,6 +1084,11 @@ pub async fn fed_retrieve(
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let mut out = Vec::new();
     for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+        // 5.8.6 splitEntities merge: "except for the one from which the
+        // Notification has been received"
+        if except_reg.is_some_and(|x| x == reg.reg_id) {
+            continue;
+        }
         // 5.7.1.4: a live EntityMap in use is the ONLY source of matching
         // registrations; its linked map location travels with the forward.
         let Some(reg) = map_gate(reg, map, id) else {

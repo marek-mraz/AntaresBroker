@@ -462,9 +462,17 @@ async fn retrieve_entity_inner(
         }
     }
     let doc = if fed_on {
-        let fed =
-            crate::federation::fed_retrieve(st, &tenant, headers, &ctx, id, map, &mut warnings)
-                .await;
+        let fed = crate::federation::fed_retrieve(
+            st,
+            &tenant,
+            headers,
+            &ctx,
+            id,
+            map,
+            None,
+            &mut warnings,
+        )
+        .await;
         match local_doc {
             Some(mut base) => {
                 for aux_pass in [false, true] {

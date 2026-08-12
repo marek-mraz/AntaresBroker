@@ -582,7 +582,7 @@ fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
 }
 
 /// q / scopeQ / geoQ conditions against an internal entity doc.
-fn conditions_match(
+pub(crate) fn conditions_match(
     st: &AppState,
     tenant: &TenantId,
     sub: &Value,

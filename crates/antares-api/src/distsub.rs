@@ -395,7 +395,10 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
             o.insert("watchedAttributes".into(), Value::Array(kept));
         }
     }
-    if reg.get("splitEntities").and_then(Value::as_bool) == Some(true) {
+    // 5.8.1.4: with splitEntities the remote sees only fragments — the
+    // q/geoQ/scopeQ conditions are evaluated LOCALLY after the 5.8.6 merge
+    // (splitEntities is a Subscription member, 5.2.12)
+    if sub.get("splitEntities").and_then(Value::as_bool) == Some(true) {
         for k in ["q", "geoQ", "scopeQ"] {
             o.remove(k);
         }
@@ -437,6 +440,62 @@ async fn forward_sub(
         body,
     )
     .await
+}
+
+/// 5.8.6 splitEntities=true inbound merge: each notified Entity "shall be
+/// retrieved locally and from all Context Sources that have information
+/// about these Entities, except for the one from which the Notification has
+/// been received", merged with the notified fragment, and "all Entities
+/// that do not match the query, geoquery and Scope query conditions of the
+/// local Subscription shall be removed".
+async fn split_merge(
+    st: &AppState,
+    tenant: &TenantId,
+    sub: &Value,
+    origin_reg: Option<&str>,
+    data: Vec<Value>,
+) -> Vec<Value> {
+    let ctx = crate::notify::sub_context(st, sub).await;
+    let headers = HeaderMap::new();
+    let mut out = Vec::new();
+    for ent in data {
+        let Some(obj) = ent.as_object() else { continue };
+        // inbound notification presentation → the expanded storage form
+        let Ok(mut merged) =
+            antares_jsonld::expand_entity(obj, &ctx, antares_jsonld::ExpandOpts::default())
+        else {
+            continue;
+        };
+        let Some(id) = merged.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        if let Ok(Some(local)) = st.store.get(tenant, Kind::Entity, &id) {
+            crate::federation::merge_docs(&mut merged, &local, false);
+        }
+        let mut warnings = Vec::new();
+        let fed = crate::federation::fed_retrieve(
+            st,
+            tenant,
+            &headers,
+            &ctx,
+            &id,
+            None,
+            origin_reg,
+            &mut warnings,
+        )
+        .await;
+        for aux_pass in [false, true] {
+            for (aux, doc) in &fed {
+                if *aux == aux_pass {
+                    crate::federation::merge_docs(&mut merged, doc, *aux);
+                }
+            }
+        }
+        if crate::notify::conditions_match(st, tenant, sub, &merged, &ctx) {
+            out.push(merged);
+        }
+    }
+    out
 }
 
 /// POST /ngsi-ld/ex/remote-notify — the local broker's endpoint for
@@ -481,29 +540,30 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
             "subscription {own_id} is gone"
         ))));
     };
+    // the origin of this notification is the registration its remote
+    // subscription was created at
+    let origin_reg_id = st
+        .dist_subs
+        .read()
+        .expect("dist_subs lock")
+        .remotes
+        .get(&key(&tenant, &own_id))
+        .and_then(|m| {
+            m.iter()
+                .find(|(_, (_, rid))| rid.as_str() == sid)
+                .map(|(reg_id, _)| reg_id.clone())
+        });
     // 5.8.6: "if a Context Source filter is defined, then only the
     // subscribed Entities whose origin Context Source matches the referred
-    // filter shall be included" — the origin of this notification is the
-    // registration its remote subscription was created at.
+    // filter shall be included".
     if let Some(csf) = sub.get("csf").and_then(Value::as_str) {
         if let Ok(ast) = antares_ql::parse_q(csf) {
-            let origin_reg = st
-                .dist_subs
-                .read()
-                .expect("dist_subs lock")
-                .remotes
-                .get(&key(&tenant, &own_id))
-                .and_then(|m| {
-                    m.iter()
-                        .find(|(_, (_, rid))| rid.as_str() == sid)
-                        .map(|(reg_id, _)| reg_id.clone())
-                })
-                .and_then(|reg_id| {
-                    st.store
-                        .get(&tenant, Kind::Registration, &reg_id)
-                        .ok()
-                        .flatten()
-                });
+            let origin_reg = origin_reg_id.as_ref().and_then(|reg_id| {
+                st.store
+                    .get(&tenant, Kind::Registration, reg_id)
+                    .ok()
+                    .flatten()
+            });
             let ctx = st.loader.core();
             let matches =
                 origin_reg.is_some_and(|reg| crate::csource::csf_matches(&ast, &reg, &ctx));
@@ -513,11 +573,22 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
             }
         }
     }
-    let data: Vec<Value> = v
+    let mut data: Vec<Value> = v
         .get("data")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // 5.8.6 splitEntities=true: the notified Entities are fragments —
+    // retrieve them locally and from all other Context Sources (except the
+    // origin), merge, and re-filter by the local Subscription's conditions.
+    if sub.get("splitEntities").and_then(Value::as_bool) == Some(true) {
+        data = split_merge(st, &tenant, &sub, origin_reg_id.as_deref(), data).await;
+        if data.is_empty() {
+            // "If there are Entities in the data member of the Notification
+            // copy, the Notification copy shall be forwarded" — none left
+            return Ok(StatusCode::OK.into_response());
+        }
+    }
     // 5.8.6: forward to the original subscriber under the OWN subscriptionId
     let (st2, sub2, t2) = (st.clone(), sub.clone(), tenant.clone());
     crate::spawn(async move {

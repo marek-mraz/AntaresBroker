@@ -15,6 +15,10 @@ use antares_bus::LocalBus;
 const KNOWN_KEYS: &[&str] = &[
     "ANTARES_HTTP_PORT",
     "ANTARES_HOST_ALIAS",
+    // 5.8.1.4 distributed subscriptions: the public base URL other brokers
+    // reach this one at (the reduced-copy notification endpoint); defaults
+    // to http://{host_alias}.
+    "ANTARES_PUBLIC_URL",
     "ANTARES_ROLES",
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
