@@ -2456,6 +2456,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn csr_update_reapplies_mode_restrictions() {
+        // 5.9.3.4: the exclusive/redirect entity-conflict rules and the
+        // auxiliary ops restriction apply to the post-merge document.
+        let app = app();
+        create(&app, "urn:ngsi-ld:Building:csru1", "Building").await;
+        let reg = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:upd1",
+            "type": "ContextSourceRegistration",
+            "mode": "inclusive",
+            "information": [{"entities": [{"type": "Building", "id": "urn:ngsi-ld:Building:csru1"}]}],
+            "endpoint": "http://source.example.com"
+        });
+        assert_eq!(
+            post_json(&app, "/ngsi-ld/v1/csourceRegistrations", reg).await,
+            StatusCode::CREATED
+        );
+        // flipping the mode to redirect now collides with the entity
+        let patch = serde_json::json!({"mode": "redirect"}).to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::patch(
+                    "/ngsi-ld/v1/csourceRegistrations/urn:ngsi-ld:ContextSourceRegistration:upd1",
+                )
+                .header("Content-Type", "application/json")
+                .header("Content-Length", patch.len())
+                .body(Body::from(patch))
+                .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // flipping to auxiliary while operations carry writes is 400
+        let patch =
+            serde_json::json!({"mode": "auxiliary", "operations": ["updateEntity"]}).to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::patch(
+                    "/ngsi-ld/v1/csourceRegistrations/urn:ngsi-ld:ContextSourceRegistration:upd1",
+                )
+                .header("Content-Type", "application/json")
+                .header("Content-Length", patch.len())
+                .body(Body::from(patch))
+                .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     // ---- Table 6.4.3.2-1: type=* ------------------------------------------
 
     #[tokio::test]

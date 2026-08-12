@@ -1315,6 +1315,10 @@ pub fn spec_for_subscription(sub: &Value) -> CsrSpec {
     spec
 }
 
+/// 5.9.3 Update Context Source Registration: invalid URI 400, unknown 404,
+/// 5.2.9 fragment merge per 5.5.8 with every mode rule re-checked on the
+/// post-merge document (4.3.6.3 exclusive shape, auxiliary ops limit,
+/// entity/registration conflicts).
 pub async fn update_registration(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -1350,6 +1354,9 @@ pub async fn update_registration(
                 }
             }
             validate_exclusive(&merged)?;
+            // 5.9.3.4: the mode-specific rules apply to the merged document
+            validate_auxiliary_ops(&merged)?;
+            check_entity_conflict(&st, &tenant, &merged)?;
             check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx)?;
         }
         let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
@@ -1385,6 +1392,8 @@ pub async fn update_registration(
     go.await.unwrap_or_else(|e| e.into_response())
 }
 
+/// 5.9.4 Delete Context Source Registration: invalid URI 400, unknown id
+/// 404, 204 on removal (registry mirror + csource subscriptions refresh).
 pub async fn delete_registration(
     State(st): State<AppState>,
     Path(id): Path<String>,
