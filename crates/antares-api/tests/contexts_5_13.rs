@@ -1,0 +1,293 @@
+//! 5.13 Storing, Managing and Serving @contexts — wire-level tests through
+//! the router: Add (5.13.2), List (5.13.3), Serve (5.13.4) and
+//! Delete/Reload (5.13.5) against the memory store.
+
+use antares_api::AppState;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+fn state() -> AppState {
+    AppState::new("antares-ctx".into())
+}
+
+async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let res = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("response");
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, headers, body)
+}
+
+async fn post_ctx(st: &AppState, body: Value) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let body = body.to_string();
+    send(
+        st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/jsonldContexts")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await
+}
+
+async fn get(st: &AppState, uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
+    send(
+        st,
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await
+}
+
+async fn delete(st: &AppState, uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
+    send(
+        st,
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await
+}
+
+/// Add a valid hosted @context, returning its Location path.
+async fn add_hosted(st: &AppState) -> String {
+    let (status, headers, _) =
+        post_ctx(st, json!({"@context": {"A1": "urn:ngsi-ld:attributes:A1"}})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .expect("Location header")
+        .to_owned()
+}
+
+/// 5.13.2.4: "The behaviour described in clause 5.5.4 about JSON and JSON-LD
+/// validation shall be applied in case of invalid @context." A top-level
+/// @context that is not a string/object/array-of-those is not valid JSON-LD.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_2_4_invalid_context_value_is_400() {
+    let st = state();
+    for bad in [
+        json!({"@context": 42}),
+        json!({"@context": true}),
+        json!({"@context": ["https://example.org/ctx.jsonld", 7]}),
+    ] {
+        let (status, headers, body) = post_ctx(&st, bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "payload {bad}");
+        assert_eq!(
+            body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "payload {bad}: {body}"
+        );
+        // an invalid @context must NOT have been stored
+        assert!(headers.get("Location").is_none(), "payload {bad}");
+    }
+    // negative control: nothing invalid leaked into the store
+    let (_, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts?kind=Hosted").await;
+    assert_eq!(list, json!([]));
+}
+
+/// 5.13.2.3/.4/.5: extra members outside @context are discarded, the entry
+/// is flagged Hosted, and a locally unique URI comes back (Location).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_2_hosted_add_serve_roundtrip() {
+    let st = state();
+    let (status, headers, _) = post_ctx(
+        &st,
+        json!({"@context": {"A1": "urn:ngsi-ld:attributes:A1"}, "junk": "outside the @context subtree"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let loc = headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .expect("Location header")
+        .to_owned();
+    assert!(loc.starts_with("/ngsi-ld/v1/jsonldContexts/"), "{loc}");
+
+    // 5.13.4.4: full content served for Hosted
+    let (status, _, body) = get(&st, &loc).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["@context"]["A1"], "urn:ngsi-ld:attributes:A1",
+        "{body}"
+    );
+    // 5.13.2.3: "all extra information located outside of the @context
+    // subtree ... shall be discarded"
+    assert!(body.get("junk").is_none(), "{body}");
+
+    // 5.13.4.4 details=true: metadata per 5.13.3.5
+    let (status, _, meta) = get(&st, &format!("{loc}?details=true")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["kind"], "Hosted", "{meta}");
+    assert!(meta["localId"].is_string(), "{meta}");
+    assert!(meta["URL"].is_string(), "{meta}");
+    assert!(meta["createdAt"].is_string(), "{meta}");
+    // metadata is not the content
+    assert!(meta.get("@context").is_none(), "{meta}");
+}
+
+/// 5.13.3.3/.4: kind filter applied; unknown kind / bad details flag → 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_3_list_and_kind_filter() {
+    let st = state();
+    let loc = add_hosted(&st).await;
+    let local_id = loc.rsplit('/').next().expect("id");
+
+    // simple list: URLs (strings), containing the hosted entry
+    let (status, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts").await;
+    assert_eq!(status, StatusCode::OK);
+    let urls: Vec<&str> = list
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        urls.iter().any(|u| u.ends_with(local_id)),
+        "hosted URL missing from {urls:?}"
+    );
+
+    // details list restricted to Hosted
+    let (status, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts?kind=Hosted&details=true").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = &list.as_array().expect("array")[0];
+    assert_eq!(entry["kind"], "Hosted");
+    assert_eq!(entry["localId"], *local_id);
+
+    // 5.13.3.4: the Hosted entry must NOT match a Cached filter
+    let (status, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts?kind=Cached").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !list
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|u| u.ends_with(local_id)),
+        "{list}"
+    );
+
+    // invalid kind / invalid details flag → 400
+    for uri in [
+        "/ngsi-ld/v1/jsonldContexts?kind=Bogus",
+        "/ngsi-ld/v1/jsonldContexts?details=banana",
+    ] {
+        let (status, _, body) = get(&st, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "{uri}: {body}"
+        );
+    }
+}
+
+/// 5.13.4.4: unknown id → 404 ResourceNotFound; Cached (here: the pinned
+/// core context) is never served on demand → 422 OperationNotSupported,
+/// while its metadata stays retrievable.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_4_serve_errors() {
+    let st = state();
+
+    let (status, _, body) = get(&st, "/ngsi-ld/v1/jsonldContexts/urn:ngsi-ld:none").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+        "{body}"
+    );
+
+    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.8.jsonld";
+    let (status, _, body) = get(&st, &format!("/ngsi-ld/v1/jsonldContexts/{core}")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported",
+        "{body}"
+    );
+
+    let (status, _, meta) = get(
+        &st,
+        &format!("/ngsi-ld/v1/jsonldContexts/{core}?details=true"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["kind"], "Cached", "{meta}");
+    // metadata, never the content
+    assert!(meta.get("@context").is_none(), "{meta}");
+}
+
+/// 5.13.5.4: delete → 204 (no body) and the entry is gone; second delete →
+/// 404; reload on a non-Cached kind → 400; malformed reload flag → 400;
+/// unknown id without reload → 404.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_5_delete_and_reload_errors() {
+    let st = state();
+    let loc = add_hosted(&st).await;
+
+    // reload=true on a Hosted @context → 400 (kind is not "Cached")
+    let (status, _, body) = delete(&st, &format!("{loc}?reload=true")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+        "{body}"
+    );
+    // ... and the failed reload must NOT have deleted it
+    let (status, _, _) = get(&st, &loc).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // malformed reload value → 400
+    let (status, _, _) = delete(&st, &format!("{loc}?reload=xxx")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // plain delete → 204 with an empty body
+    let (status, _, body) = delete(&st, &loc).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+
+    // gone from serve and from the list
+    let (status, _, _) = get(&st, &loc).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts?kind=Hosted").await;
+    assert_eq!(list, json!([]));
+
+    // second delete → 404 ResourceNotFound
+    let (status, _, body) = delete(&st, &loc).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+        "{body}"
+    );
+
+    // unknown id, no reload → 404 (5.13.5.4)
+    let (status, _, _) = delete(&st, "/ngsi-ld/v1/jsonldContexts/urn:ngsi-ld:none").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // unknown id with reload=true → 400: the reload bullets only distinguish
+    // Cached vs not-Cached (5.13.5.4), and the 404 rule is restated inside
+    // the reload=false bullet — the official suite pins this reading
+    // (051_04_01).
+    let (status, _, _) = delete(
+        &st,
+        "/ngsi-ld/v1/jsonldContexts/urn:ngsi-ld:none?reload=true",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

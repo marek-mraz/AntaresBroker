@@ -142,6 +142,21 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
 
 // ---------- POST /jsonldContexts (5.13.2) ----------
 
+/// 5.13.2.4 + 5.5.4: a JSON-LD local context is a string (IRI), an object of
+/// term definitions, null, or an array of those — anything else is invalid
+/// JSON-LD and rejected as BadRequestData.
+fn valid_context_shape(v: &Value) -> bool {
+    match v {
+        Value::String(_) | Value::Object(_) | Value::Null => true,
+        Value::Array(a) => a
+            .iter()
+            .all(|e| matches!(e, Value::String(_) | Value::Object(_) | Value::Null)),
+        _ => false,
+    }
+}
+
+/// 5.13.2.4 Add @context: store the client-supplied @context under a new
+/// locally unique URI, flagged "Hosted"; the URI is returned (Location).
 pub async fn add_context(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -161,6 +176,9 @@ pub async fn add_context(
             // 050_02: a JSON object without @context is InvalidRequest
             NgsiError::InvalidRequest("body must carry an @context member".into())
         })?;
+        if !valid_context_shape(&ctx_val) {
+            return Err(NgsiError::BadRequestData("invalid JSON-LD @context value".into()).into());
+        }
         let local_id = uuid::Uuid::new_v4().to_string();
         let url = format!("{}/{local_id}", base_url(&headers));
         let doc = json!({
@@ -188,6 +206,8 @@ pub async fn add_context(
 
 // ---------- GET /jsonldContexts (5.13.3) ----------
 
+/// 5.13.3.4 List @contexts: one URL (or metadata object, 5.13.3.5) per
+/// stored @context matching the kind filter; no filter → all kinds.
 pub async fn list_contexts(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -275,6 +295,9 @@ pub async fn list_contexts(
 
 // ---------- GET /jsonldContexts/{ctxId} (5.13.4) ----------
 
+/// 5.13.4.4 Serve @context: full content for Hosted/ImplicitlyCreated,
+/// OperationNotSupported for Cached, ResourceNotFound for unknown ids;
+/// details=true serves metadata for all kinds.
 pub async fn serve_context(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -352,6 +375,10 @@ pub async fn serve_context(
 
 // ---------- DELETE /jsonldContexts/{ctxId} (5.13.5) ----------
 
+/// 5.13.5.4 Delete and Reload @context: unknown id → ResourceNotFound;
+/// reload=true re-downloads a Cached @context in place (failure →
+/// LdContextNotAvailable, entry kept) and is BadRequestData for other
+/// kinds; without reload the entry is removed.
 pub async fn delete_context(
     State(st): State<AppState>,
     Path(id): Path<String>,
