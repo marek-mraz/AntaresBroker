@@ -521,13 +521,31 @@ impl Loader {
         self.evict(url).await;
     }
 
-    /// Re-download a cached @context from its original URL, replacing the
-    /// stored copy (5.13.5.4 reload).
+    /// 5.13.5.4 Delete and Reload: re-download a Cached @context from its
+    /// original URL, replacing the stored copy only on success. Any error —
+    /// download failure or invalid content per 5.5.4 — is
+    /// LdContextNotAvailable and "the operation ends without removing the
+    /// existing @context".
     pub async fn refetch(&self, url: &str) -> Result<(), NgsiError> {
-        self.fetched.invalidate(url);
-        self.merged.invalidate_all();
-        self.merged_urls.invalidate_all();
-        self.fetch(url).await.map(|_| ())
+        let old = self.fetched.get(url);
+        self.fetched.invalidate(url); // force a network fetch
+        match self.fetch(url).await {
+            Ok(_) => {
+                // merged contexts built on the old copy are stale
+                self.merged.invalidate_all();
+                self.merged_urls.invalidate_all();
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(old) = old {
+                    self.fetched.insert(url.to_owned(), old);
+                }
+                Err(match e {
+                    NgsiError::BadRequestData(m) => NgsiError::LdContextNotAvailable(m),
+                    other => other,
+                })
+            }
+        }
     }
 
     /// Core-only context (no user @context supplied).
@@ -670,8 +688,10 @@ impl Loader {
     }
 
     /// Fetch a remote context document, returning its `@context` member.
-    /// Cache hits honour the 6.3.16 lifetime; stale entries are re-fetched,
-    /// and a changed body invalidates the merged-context cache.
+    /// 5.13.1: Cached @contexts are invalidated per the protocol's explicit
+    /// expiration indications — cache hits honour the 6.3.16 lifetime, stale
+    /// entries are re-fetched, and a changed body invalidates the
+    /// merged-context cache.
     async fn fetch(&self, url: &str) -> Result<Arc<Value>, NgsiError> {
         if let Some(v) = pinned(url) {
             return Ok(Arc::new(v));
@@ -1100,6 +1120,86 @@ mod tests {
             allow_private: true,
         };
         assert!(allow.check_host("127.0.0.1", 80).await.is_ok());
+    }
+
+    /// 5.13.5.4 Delete and Reload: on reload the broker re-downloads BEFORE
+    /// removing — a failed or invalid download raises LdContextNotAvailable
+    /// and "the operation ends without removing the existing @context"; a
+    /// successful download replaces it.
+    #[tokio::test]
+    async fn clause_5_13_5_4_reload_keeps_existing_on_failure_replaces_on_success() {
+        // switchable mock: Some(body) → 200 with that body, None → 500
+        let body = Arc::new(std::sync::Mutex::new(Some(
+            r#"{"@context":{"speed":"https://a.example/speed"}}"#.to_string(),
+        )));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = body.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let b = served.lock().expect("lock").clone();
+                let resp = match b {
+                    Some(b) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{b}",
+                        b.len()
+                    ),
+                    None => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let url = format!("http://{addr}/ctx.jsonld");
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let ctx = loader
+            .resolve(&Value::String(url.clone()))
+            .await
+            .expect("initial fetch");
+        assert_eq!(ctx.expand_key("speed"), "https://a.example/speed");
+
+        // download fails → LdContextNotAvailable, the existing copy stays
+        // usable even through a fresh (uncached) resolution shape
+        *body.lock().expect("lock") = None;
+        let err = loader.refetch(&url).await.expect_err("failed reload");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "download failure → LdContextNotAvailable, got {err:?}"
+        );
+        let ctx = loader
+            .resolve(&serde_json::json!([url.clone()]))
+            .await
+            .expect("existing copy kept after failed reload");
+        assert_eq!(ctx.expand_key("speed"), "https://a.example/speed");
+
+        // invalid content → LdContextNotAvailable (5.13.5.4 — not the 5.5.6
+        // BadRequestData used outside reload), existing copy kept
+        *body.lock().expect("lock") = Some(r#"{"note":"no @context member"}"#.to_string());
+        let err = loader.refetch(&url).await.expect_err("invalid reload");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "invalid content → LdContextNotAvailable, got {err:?}"
+        );
+        let ctx = loader
+            .resolve(&Value::String(url.clone()))
+            .await
+            .expect("existing copy kept after invalid reload");
+        assert_eq!(ctx.expand_key("speed"), "https://a.example/speed");
+
+        // success → "the existing @context is replaced with the newly
+        // downloaded one"
+        *body.lock().expect("lock") =
+            Some(r#"{"@context":{"speed":"https://b.example/speed"}}"#.to_string());
+        loader.refetch(&url).await.expect("successful reload");
+        let ctx = loader
+            .resolve(&Value::String(url))
+            .await
+            .expect("resolve after reload");
+        assert_eq!(ctx.expand_key("speed"), "https://b.example/speed");
     }
 
     #[tokio::test]
