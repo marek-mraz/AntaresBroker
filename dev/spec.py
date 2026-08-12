@@ -28,7 +28,6 @@ import re
 import sys
 from pathlib import Path
 
-import fitz  # pymupdf
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +50,8 @@ def outline():
     order. Unnumbered outline entries (Foreword, History, ...) get no file but
     STAY in the list as cut points — without them the History table on the
     last page would leak into annex I's body."""
+    import fitz  # pymupdf — only split touches the PDF
+
     doc = fitz.open(PDF)
     rows = []
     for _level, title, page in doc.get_toc():
@@ -136,6 +137,8 @@ def robot_map():
 
 
 def cmd_split():
+    import fitz  # pymupdf — only split touches the PDF
+
     doc = fitz.open(PDF)
     sections = outline()
     tps = robot_map()

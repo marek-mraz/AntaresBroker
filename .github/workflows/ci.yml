@@ -115,6 +115,11 @@ jobs:
       # broken (an empty column reads as "nothing happened") — check them here.
       - name: ETSI sampling self-check
         run: python3 dev/etsi-selftest.py
+      # §0.3 ledger integrity: a clause file that stops parsing silently
+      # drops out of every count — make that (and status typos, robot drift)
+      # a red build instead.
+      - name: conformance ledger check
+        run: pip install --quiet pyyaml && python3 dev/spec.py check
       # SQL-injection guard (§16.2): no string-built queries outside antares-sql
       - name: no format! into SQL outside the compiler
         run: |
