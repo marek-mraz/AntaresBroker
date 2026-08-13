@@ -483,6 +483,233 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
     assert!(!outcome.decided && !outcome.paged && outcome.total.is_none());
 }
 
+/// 5.7.4.4 S2 — the temporal q= prefilter obeys the same contract as every
+/// pushdown in this file: **SQL may only narrow.** ONE fixture set with
+/// deliberately awkward shapes (relationships, languageMaps, array values,
+/// datasetId multi-instance, out-of-window decoys), a battery of q filters
+/// spanning the 4.9 grammar, and for each:
+///
+/// * every entity whose WINDOWED doc `qeval::eval_q` accepts MUST come back
+///   from SQL (superset — a drop here is two store modes disagreeing);
+/// * for filters whose every leaf compiles, known non-matches must be
+///   EXCLUDED SQL-side (tightness — proves the prefilter reached the DB).
+#[tokio::test(flavor = "multi_thread")]
+async fn temporal_q_prefilter_narrows_but_never_drops() {
+    let url = require_db!();
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("tqprefilter").expect("tenant");
+    antares_sql::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool));
+    let ctx = Loader::new().core();
+
+    // window: [Mar 1, Mar 2). Decoy instances sit in January — far outside
+    // the 48 h widened column bound, so tightness assertions stay valid.
+    const T0: &str = "2026-03-01T00:00:00Z";
+    const T1: &str = "2026-03-02T00:00:00Z";
+    const OUT: &str = "2026-01-05T00:00:00Z";
+    const IN: &str = "2026-03-01T12:00:00Z";
+
+    let a = |name: &str| format!("{NS}{name}");
+    let inst = |body: Value, at: &str, iid: &str| {
+        let mut o = body;
+        o["observedAt"] = json!(at);
+        o["instanceId"] = json!(format!("urn:ngsi-ld:Instance:{iid}"));
+        o["createdAt"] = json!(at);
+        o["modifiedAt"] = json!(at);
+        o
+    };
+    let prop = |v: Value| json!({"type": "Property", "value": v});
+    let docs: Vec<(&str, Value)> = vec![
+        // in-window speed 30, heading 45, route "550"; out-window speed 90
+        (
+            "urn:tq:fast",
+            json!({
+                "id": "urn:tq:fast", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                a("speed"): [inst(prop(json!(30)), IN, "f1"), inst(prop(json!(90)), OUT, "f2")],
+                a("heading"): [inst(prop(json!(45)), IN, "f3")],
+                a("route"): [inst(prop(json!("550")), IN, "f4")],
+            }),
+        ),
+        // in-window speed 10 (fails >25), heading 170; out-window speed 80
+        // (would pass >25 — the window inside the EXISTS must ignore it)
+        (
+            "urn:tq:slow",
+            json!({
+                "id": "urn:tq:slow", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                a("speed"): [inst(prop(json!(10)), IN, "s1"), inst(prop(json!(80)), OUT, "s2")],
+                a("heading"): [inst(prop(json!(170)), IN, "s3")],
+            }),
+        ),
+        // string value, relationship object, array value, languageMap
+        (
+            "urn:tq:shapes",
+            json!({
+                "id": "urn:tq:shapes", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                a("name"): [inst(prop(json!("m")), IN, "h1")],
+                a("ref"): [inst(json!({"type": "Relationship", "object": "urn:dest:1"}), IN, "h2")],
+                a("tags"): [inst(prop(json!(["a", "b"])), IN, "h3")],
+                a("label"): [inst(json!({"type": "LanguageProperty",
+                                         "languageMap": {"en": "hi"}}), IN, "h4")],
+            }),
+        ),
+        // multi-instance datasetId: only the datasetId'd instance matches
+        ("urn:tq:multi", {
+            let mut m2 = inst(prop(json!(60)), IN, "m2");
+            m2["datasetId"] = json!("urn:d:1");
+            json!({
+                "id": "urn:tq:multi", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                a("speed"): [inst(prop(json!(5)), IN, "m1"), m2],
+            })
+        }),
+        // everything out-of-window: never part of any windowed result
+        (
+            "urn:tq:nowin",
+            json!({
+                "id": "urn:tq:nowin", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": OUT,
+                a("speed"): [inst(prop(json!(99)), OUT, "n1")],
+            }),
+        ),
+    ];
+    for (id, doc) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        assert!(store
+            .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .expect("seed temporal"));
+    }
+
+    // the arbiter's view: instances retained by the [T0, T1) byte-compare
+    // window (instance_matches semantics for `between`), then eval_q
+    let windowed = |doc: &Value| -> Value {
+        let mut d = doc.clone();
+        if let Some(o) = d.as_object_mut() {
+            for (k, v) in o.iter_mut() {
+                if !k.starts_with("http") {
+                    continue;
+                }
+                if let Some(arr) = v.as_array_mut() {
+                    arr.retain(|i| {
+                        i.get("observedAt")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| s >= T0 && s < T1)
+                    });
+                }
+            }
+        }
+        d
+    };
+    let expand = |t: &str| format!("{NS}{t}");
+
+    // (q, entities that must be EXCLUDED SQL-side; empty = superset-only —
+    // the filter contains a leaf the compiler rightly refuses)
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        (
+            "speed>25",
+            vec!["urn:tq:slow", "urn:tq:nowin", "urn:tq:shapes"],
+        ),
+        ("speed>=5;heading<90", vec!["urn:tq:nowin", "urn:tq:shapes"]),
+        (
+            "speed>25|heading>100",
+            vec!["urn:tq:nowin", "urn:tq:shapes"],
+        ),
+        (r#"speed>25|name~="^x""#, vec![]), // Or with a refused branch: trivial
+        (r#"name=="m""#, vec!["urn:tq:fast", "urn:tq:slow"]),
+        (r#"ref=="urn:dest:1""#, vec!["urn:tq:fast", "urn:tq:nowin"]),
+        (r#"tags=="a""#, vec!["urn:tq:fast", "urn:tq:nowin"]),
+        ("speed", vec!["urn:tq:shapes", "urn:tq:nowin"]),
+        ("!speed", vec![]),         // negated existence: trivial
+        ("speed!=10", vec![]),      // != caveats: trivial
+        (r#"label=="hi""#, vec![]), // languageMap semantics stay in memory? superset holds either way
+        ("speed==10..40", vec!["urn:tq:nowin", "urn:tq:shapes"]),
+        (
+            r#"route=="550","551""#,
+            vec!["urn:tq:slow", "urn:tq:nowin", "urn:tq:shapes"],
+        ),
+    ];
+
+    for (q, excluded) in &cases {
+        let ast = antares_ql::parse_q(q).expect("parse");
+        let expected: Vec<&str> = docs
+            .iter()
+            .filter(|(_, d)| antares_api::qeval::eval_q(&ast, &windowed(d), &ctx, &|_| None))
+            .map(|(id, _)| *id)
+            .collect();
+        let tf = antares_sql::store::filter::TemporalFilter {
+            range: Some(antares_sql::compile::temporal::InstanceRange {
+                timerel: "between",
+                time_at: T0,
+                end_time_at: Some(T1),
+                timeproperty: "observedAt",
+            }),
+            q: Some(&ast),
+            expand: &expand,
+            ..Default::default()
+        };
+        let got = ids(&store.query_temporal(&t, &tf).expect("query").rows);
+        for want in &expected {
+            assert!(
+                got.contains(&(*want).to_string()),
+                "SQL dropped {want}, which the windowed evaluator matches, for q={q}\n  sql set: {got:?}"
+            );
+        }
+        for out in excluded {
+            assert!(
+                !got.contains(&(*out).to_string()),
+                "prefilter failed to exclude {out} for q={q} — it never reached the DB?\n  sql set: {got:?}"
+            );
+            // an excluded id must really be a non-match, or the case is wrong
+            let d = &docs.iter().find(|(id, _)| id == out).expect("fixture").1;
+            assert!(
+                !antares_api::qeval::eval_q(&ast, &windowed(d), &ctx, &|_| None),
+                "case bug: {out} actually matches q={q}"
+            );
+        }
+    }
+
+    // the 48 h widening: an instance whose stamp is textually inside the
+    // window but whose parsed instant sits BEFORE the window start (+03:00
+    // offset) — the byte-exact text predicate keeps it, so an unwidened
+    // column bound would drop it and flip both the verdict and the payload
+    let off = "2026-03-01T02:00:00+03:00"; // instant 2026-02-28T23:00:00Z
+    let doc = json!({
+        "id": "urn:tq:offset", "type": [format!("{NS}Vehicle")],
+        "createdAt": OUT, "modifiedAt": IN,
+        a("speed"): [inst(prop(json!(50)), off, "o1")],
+    });
+    let _ = store.delete(&t, antares_sql::store::Kind::Temporal, "urn:tq:offset");
+    assert!(store
+        .create(&t, antares_sql::store::Kind::Temporal, "urn:tq:offset", doc)
+        .expect("seed"));
+    let ast = antares_ql::parse_q("speed>25").expect("parse");
+    let tf = antares_sql::store::filter::TemporalFilter {
+        range: Some(antares_sql::compile::temporal::InstanceRange {
+            timerel: "between",
+            time_at: T0,
+            end_time_at: Some(T1),
+            timeproperty: "observedAt",
+        }),
+        q: Some(&ast),
+        expand: &expand,
+        ..Default::default()
+    };
+    let rows = store.query_temporal(&t, &tf).expect("query").rows;
+    let offset_doc = rows
+        .iter()
+        .find(|r| r["id"] == "urn:tq:offset")
+        .expect("widened column bound must admit the textually-in-window instance");
+    let arr = offset_doc[&a("speed")].as_array().expect("speed array");
+    assert!(
+        arr.iter().any(|i| i["value"] == 50),
+        "range pruning dropped the offset-stamp instance: {arr:?}"
+    );
+}
+
 /// C11: temporal instance pruning is byte-exact against instance_matches, and
 /// the lastN RANK() cap keeps timestamp ties.
 #[tokio::test(flavor = "multi_thread")]

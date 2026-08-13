@@ -93,6 +93,15 @@ pub struct TemporalFilter<'a> {
     /// (≥1 instance, in-window when a range is given), so the paged set is
     /// exactly the set the evaluator would keep.
     pub page: Option<Page>,
+    /// 5.7.4.4 S2 prefilter: the `q=` AST. The Pg arm compiles the leaves it
+    /// can reproduce into windowed EXISTS predicates and treats everything
+    /// else as TRUE — always a SUPERSET of the eval_q verdict, so the API
+    /// arbiter (which always re-runs when q is present) never changes an
+    /// answer, only sees fewer rows. Requires the matching `expand`.
+    pub q: Option<&'a antares_ql::QNode>,
+    /// term → IRI, the request context's expander (the AST holds terms).
+    /// `Sync` so a filter alive across an await keeps the handler future Send.
+    pub expand: &'a (dyn Fn(&str) -> String + Sync),
 }
 
 impl Default for TemporalFilter<'_> {
@@ -105,6 +114,8 @@ impl Default for TemporalFilter<'_> {
             last_n: None,
             timeproperty: "observedAt",
             page: None,
+            q: None,
+            expand: &|t: &str| t.to_owned(),
         }
     }
 }

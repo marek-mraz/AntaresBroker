@@ -161,6 +161,12 @@ fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String
         range_and = format!(" AND {}", c.sql);
         debug_assert_eq!(c.binds[0], f.timeproperty);
         binds.extend(c.binds.into_iter().skip(1));
+        // widened COLUMN bound on the SAME binds ($first_bind+1 = timeAt):
+        // lets the (tenant, entity, attr, observed_at) btree serve the range;
+        // the byte-exact text predicate above still decides membership
+        if let Some(cb) = crate::compile::temporal::column_range_bound(r, "ai", first_bind + 1) {
+            range_and.push_str(&format!(" AND {cb}"));
+        }
     }
     let expr = match f.last_n {
         Some(n) => {
@@ -344,17 +350,39 @@ impl PgTemporalStore {
                             ai.tenant_id = m.tenant_id AND ai.entity_id = m.id"
                 .to_owned();
             if let Some(r) = &f.range {
-                let c =
-                    crate::compile::temporal::compile_instance_range(r, "ai.data", binds.len() + 1)
-                        .expect("range_compiled checked above");
+                let n = binds.len() + 1;
+                let c = crate::compile::temporal::compile_instance_range(r, "ai.data", n)
+                    .expect("range_compiled checked above");
                 for b in c.binds {
                     binds.push(B::Text(b));
                 }
                 qual.push_str(&format!(" AND {}", c.sql));
+                // index-serving widened bound on the same binds ($n+1 = timeAt)
+                if let Some(cb) = crate::compile::temporal::column_range_bound(r, "ai", n + 1) {
+                    qual.push_str(&format!(" AND {cb}"));
+                }
             }
             qual.push(')');
             wheres.push(qual);
             paged = true;
+        }
+        // 5.7.4.4 S2 superset prefilter: entities with no windowed instance
+        // satisfying the compilable part of q= are never reconstructed. The
+        // API arbiter re-evaluates q on every row that comes back, so this
+        // can only narrow (compile::qprefilter invariant), never decide.
+        if let Some(qn) = f.q {
+            if let Some(c) = crate::compile::qprefilter::compile_prefilter(
+                qn,
+                f.range.as_ref(),
+                "m",
+                binds.len() + 1,
+                f.expand,
+            ) {
+                for b in c.binds {
+                    binds.push(B::Text(b));
+                }
+                wheres.push(c.sql);
+            }
         }
         let n_where = binds.len();
         let where_sql = wheres.join(" AND ");

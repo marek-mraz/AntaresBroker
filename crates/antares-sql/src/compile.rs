@@ -3,5 +3,6 @@
 
 pub mod geo;
 pub mod q;
+pub mod qprefilter;
 pub mod scope;
 pub mod temporal;

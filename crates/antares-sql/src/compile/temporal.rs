@@ -63,6 +63,40 @@ pub fn compile_instance_range(
     Some(CompiledRange { sql, binds })
 }
 
+/// Widened, index-serving COLUMN bound for the 4.11 window. Returns SQL only
+/// — it references `$time_bind` (and `$time_bind+1` for between), the SAME
+/// binds the byte-exact text predicate uses, cast to timestamptz in place.
+///
+/// A SUPERSET by construction: the parsed column and the raw stamp diverge by
+/// at most the two RFC 3339 offsets (±14 h each), so 48 h of slack admits
+/// every row the text window keeps; the extra rows it admits are dropped by
+/// the text predicate (or the API arbiter) right after. Purpose: the btree on
+/// (tenant_id, entity_id, attr_id, observed_at) can serve this range — the
+/// jsonb text extraction the exact predicate runs on never uses an index.
+/// Only timeproperties with a parsed column compile; others prune by text
+/// alone (`None`).
+pub fn column_range_bound(r: &InstanceRange<'_>, alias: &str, time_bind: usize) -> Option<String> {
+    let col = match r.timeproperty {
+        "observedAt" => "observed_at",
+        "createdAt" => "created_at",
+        "modifiedAt" => "modified_at",
+        _ => return None,
+    };
+    Some(match r.timerel {
+        "before" => format!("{alias}.{col} < ${time_bind}::timestamptz + interval '48 hours'"),
+        "after" => format!("{alias}.{col} >= ${time_bind}::timestamptz - interval '48 hours'"),
+        "between" => {
+            r.end_time_at?;
+            format!(
+                "{alias}.{col} >= ${time_bind}::timestamptz - interval '48 hours' \
+                 AND {alias}.{col} < ${}::timestamptz + interval '48 hours'",
+                time_bind + 1
+            )
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +145,40 @@ mod tests {
     fn unknown_shapes_refuse() {
         assert!(compile_instance_range(&range("since", "t0", None), "el", 1).is_none());
         assert!(compile_instance_range(&range("between", "t0", None), "el", 1).is_none());
+    }
+
+    #[test]
+    fn column_bound_reuses_binds_and_widens_outward() {
+        // after: lower bound moves DOWN, before: upper bound moves UP —
+        // widening must always ADMIT more than the text window, never less
+        let s = column_range_bound(&range("after", "t0", None), "ai", 5).expect("bound");
+        assert_eq!(s, "ai.observed_at >= $5::timestamptz - interval '48 hours'");
+        let s = column_range_bound(&range("before", "t0", None), "ai", 2).expect("bound");
+        assert!(s.contains("< $2::timestamptz + interval '48 hours'"), "{s}");
+        let s = column_range_bound(&range("between", "t0", Some("t1")), "ai", 2).expect("bound");
+        assert!(
+            s.contains(">= $2::timestamptz - interval")
+                && s.contains("< $3::timestamptz + interval"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn column_bound_only_for_parsed_columns_and_known_relations() {
+        let created = InstanceRange {
+            timeproperty: "createdAt",
+            ..range("after", "t0", None)
+        };
+        assert!(column_range_bound(&created, "ai", 1)
+            .expect("bound")
+            .contains("ai.created_at"));
+        let deleted = InstanceRange {
+            timeproperty: "deletedAt",
+            ..range("after", "t0", None)
+        };
+        assert!(column_range_bound(&deleted, "ai", 1).is_none(), "no column");
+        assert!(column_range_bound(&range("any", "", None), "ai", 1).is_none());
+        assert!(column_range_bound(&range("since", "t0", None), "ai", 1).is_none());
+        assert!(column_range_bound(&range("between", "t0", None), "ai", 1).is_none());
     }
 }

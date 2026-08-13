@@ -63,6 +63,21 @@ pub fn compile_q(
     Some(CompiledQ { sql, binds })
 }
 
+/// One 4.9 leaf over a SINGLE stored attribute instance (a temporal
+/// `attr_instances.data` object): identical member/operator semantics to the
+/// entity-doc path, but the jsonpath is rooted at the instance (`$."value"`)
+/// instead of navigating `$."IRI"[*]`. Same exact-or-refuse contract —
+/// `cmp = None` is the existence form.
+pub fn compile_instance_leaf(
+    cmp: Option<(CmpOp, &QValue)>,
+    col: &str,
+    first: usize,
+) -> Option<CompiledQ> {
+    let mut binds = Vec::new();
+    let sql = value_or("$", cmp, col, first, &mut binds)?;
+    Some(CompiledQ { sql, binds })
+}
+
 fn emit(
     node: &QNode,
     col: &str,

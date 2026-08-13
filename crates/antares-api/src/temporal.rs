@@ -1540,41 +1540,50 @@ pub(crate) async fn query_temporal_inner(
     // pruning (range + RANK()-capped lastN) into the store. The loop below
     // and window() stay the arbiters — pruning is byte-exact against
     // instance_matches (compile::temporal), so it cannot change an answer.
-    // With q= or geo present the instance pruning is withheld: both evaluate
-    // over the FULL instance set, and a pruned doc would flip their verdicts
-    // (memory mode would answer differently — the one unforgivable bug).
-    let push_instances = q_ast.is_none() && geo.is_none();
+    // 5.7.4.4 S2/S3: q and geo are judged on the instances WITHIN the
+    // temporal interval (the eval_doc retain below), so RANGE pruning is
+    // verdict-safe to push even with q=/geo present. Only the lastN cap
+    // (its ordering vs the values filter is unspecified) and entity paging
+    // (q/geo still drop entities after SQL) wait for exactness.
+    let exact_push = q_ast.is_none() && geo.is_none();
     // Entity-page pushdown (audit 2026-08-08): a temporal query used to
     // materialize the tenant's ENTIRE history. Pushed only when every filter
     // the store cannot see is absent — same gate family as C11 entities.
     let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
     let push_page =
-        push_instances && id_pattern.is_none() && params.get("orderBy").is_none() && p_limit > 0;
-    let tf = antares_sql::store::filter::TemporalFilter {
-        ids: ids.as_deref(),
-        types: types.as_deref(),
-        attrs: entity_attr_filter.as_deref(),
-        range: tq.as_ref().filter(|_| push_instances).map(|t| {
-            antares_sql::compile::temporal::InstanceRange {
-                timerel: &t.timerel,
-                time_at: &t.time_at,
-                end_time_at: t.end_time_at.as_deref(),
-                timeproperty: &t.timeproperty,
-            }
-        }),
-        last_n: match (last_n, push_instances) {
-            (Some(n), true) => Some(n as i64),
-            _ => None,
-        },
-        timeproperty: tq
-            .as_ref()
-            .map_or("observedAt", |t| t.timeproperty.as_str()),
-        page: push_page.then_some(antares_sql::store::filter::Page {
-            offset: p_offset as i64,
-            limit: p_limit as i64,
-        }),
+        exact_push && id_pattern.is_none() && params.get("orderBy").is_none() && p_limit > 0;
+    // scoped: the &dyn expander must not live across an await (handler
+    // futures are Send; the store call itself is synchronous)
+    let outcome = {
+        let expand = |t: &str| ctx.expand_key(t);
+        let tf = antares_sql::store::filter::TemporalFilter {
+            ids: ids.as_deref(),
+            types: types.as_deref(),
+            attrs: entity_attr_filter.as_deref(),
+            range: tq
+                .as_ref()
+                .map(|t| antares_sql::compile::temporal::InstanceRange {
+                    timerel: &t.timerel,
+                    time_at: &t.time_at,
+                    end_time_at: t.end_time_at.as_deref(),
+                    timeproperty: &t.timeproperty,
+                }),
+            last_n: match (last_n, exact_push) {
+                (Some(n), true) => Some(n as i64),
+                _ => None,
+            },
+            timeproperty: tq
+                .as_ref()
+                .map_or("observedAt", |t| t.timeproperty.as_str()),
+            page: push_page.then_some(antares_sql::store::filter::Page {
+                offset: p_offset as i64,
+                limit: p_limit as i64,
+            }),
+            q: q_ast.as_ref(),
+            expand: &expand,
+        };
+        st.store.query_temporal(&tenant, &tf)?
     };
-    let outcome = st.store.query_temporal(&tenant, &tf)?;
     let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
     // 5.7.4.4: fan the query out to matching queryTemporal registrations
     // and merge the remote Temporal Evolutions with the local set (4.5.5;
