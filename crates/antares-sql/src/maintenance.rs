@@ -109,6 +109,24 @@ pub async fn temporal_maintenance(
     if reaped > 0 {
         done.push(format!("reaped {reaped} expired transient entities (4.22)"));
     }
+    // 4.22 also names Properties/Relationships: an attribute instance whose
+    // expiresAt has passed "should be deleted from an NGSI-LD system". Reads
+    // already refuse expired instances (pg_temporal read filter), so this
+    // reap only bounds storage — same sanctioned lag as the entity reap.
+    // Runs on both backends (row DELETE is chunk/partition-transparent).
+    let reaped_inst = sqlx::query(
+        "DELETE FROM attr_instances
+         WHERE data->>'expiresAt' IS NOT NULL
+           AND (data->>'expiresAt')::timestamptz < now()",
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if reaped_inst > 0 {
+        done.push(format!(
+            "reaped {reaped_inst} expired attribute instances (4.22)"
+        ));
+    }
     if backend == TemporalBackend::Hypertable {
         if let Some(days) = retention_days {
             sqlx::query("SELECT public.drop_chunks('attr_instances', older_than => make_interval(days => $1::int))")

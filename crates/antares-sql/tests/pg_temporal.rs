@@ -164,9 +164,15 @@ async fn attr_instances_decomposition_and_maintenance() {
         .expect("detect");
     let msg = maintenance_winning(&pool, None).await.expect("maintenance");
     if ts {
+        // no partition/chunk work without a retention horizon — but the 4.22
+        // expired-instance reap legitimately runs on every pass
         assert!(
-            msg.contains("nothing to do"),
+            msg.contains("nothing to do") || msg.contains("(4.22)"),
             "timescale, no retention: {msg}"
+        );
+        assert!(
+            !msg.contains("partition") && !msg.contains("drop_chunks"),
+            "timescale must not do partition work without retention: {msg}"
         );
     } else {
         assert!(msg.contains("partition"), "plain-mode partitions: {msg}");
@@ -243,4 +249,64 @@ async fn occupied_range_is_skipped_without_poisoning_the_pass() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+/// 4.22: expiresAt marks the point where an instance "should be deleted from
+/// an NGSI-LD system" — the maintenance pass physically reaps attr_instances
+/// rows whose instance-level expiresAt has passed. Durable siblings stay.
+/// (Reads already refuse expired instances; this bounds the storage.)
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_22_expired_attr_instances_reaped() {
+    let url = require_db!();
+    let _ddl = PARTITION_DDL.lock().await;
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgtempexp").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempexp'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("clean");
+    }
+    let s = PgTemporalStore::new(pool.clone());
+    let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let doc = json!({
+        "id": "urn:t:exp422", "type": ["T"],
+        "createdAt": "2026-08-04T09:00:00Z", "modifiedAt": "2026-08-04T09:00:00Z",
+        attr: [
+            {"type": "Property", "value": 1, "observedAt": "2026-08-04T09:00:00Z",
+             "instanceId": "urn:ngsi-ld:Instance:reapme",
+             "expiresAt": "2020-01-01T00:00:00Z"},
+            {"type": "Property", "value": 2, "observedAt": "2026-08-04T09:01:00Z",
+             "instanceId": "urn:ngsi-ld:Instance:durable"}
+        ]
+    });
+    assert!(s.create(&t, "urn:t:exp422", &doc).expect("create"));
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = 'pgtempexp'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(before, 2, "both instances decomposed");
+
+    maintenance_winning(&pool, None).await.expect("maintenance");
+
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT instance_id FROM attr_instances WHERE tenant_id = 'pgtempexp'")
+            .fetch_all(&pool)
+            .await
+            .expect("rows");
+    assert_eq!(
+        left,
+        vec!["urn:ngsi-ld:Instance:durable".to_string()],
+        "expired instance reaped, durable sibling kept (4.22)"
+    );
+
+    sqlx::query("DELETE FROM attr_instances WHERE tenant_id = 'pgtempexp'")
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+    let _ = s.delete(&t, "urn:t:exp422");
 }
