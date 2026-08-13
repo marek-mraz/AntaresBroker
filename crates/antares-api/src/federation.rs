@@ -1193,7 +1193,7 @@ pub async fn fed_retrieve(
                     headers,
                     tenant,
                     &reg,
-                    &ctx_url,
+                    ctx_url,
                     None,
                 )
                 .await
@@ -1214,7 +1214,7 @@ pub async fn fed_retrieve(
                     headers,
                     tenant,
                     &reg,
-                    &ctx_url,
+                    ctx_url,
                     None,
                 )
                 .await
@@ -1234,7 +1234,7 @@ pub async fn fed_retrieve(
                     headers,
                     tenant,
                     &reg,
-                    &ctx_url,
+                    ctx_url,
                     Some(json!({"type": "Query", "entities": [Value::Object(sel)]})),
                 )
                 .await
