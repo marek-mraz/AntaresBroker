@@ -550,6 +550,44 @@ const CSI_SKIP: &[&str] = &[
     "ngsildconformance",
 ];
 
+/// §16.3 bounds wall on the forwarded-read path: a peer response larger than
+/// ANTARES_MAX_FED_RESPONSE_BYTES is never held in memory — the part fails
+/// exactly like an unparseable payload (Table 6.3.17-1, warning 111 via the
+/// 2xx-with-null-body arm of `read_warning`).
+async fn read_body_capped(resp: reqwest::Response) -> Value {
+    let cap = *crate::bounds::MAX_FED_RESPONSE_BYTES;
+    if resp.content_length().is_some_and(|l| l > cap as u64) {
+        tracing::warn!("federation response over the {cap}-byte cap (declared length), skipped");
+        return Value::Null;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = {
+        let mut resp = resp;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(c)) => {
+                    if buf.len() + c.len() > cap {
+                        tracing::warn!("federation response over the {cap}-byte cap, skipped");
+                        return Value::Null;
+                    }
+                    buf.extend_from_slice(&c);
+                }
+                Ok(None) => break,
+                Err(_) => return Value::Null,
+            }
+        }
+        buf
+    };
+    // the browser fetch API hands the body over whole — cap after the read
+    #[cfg(target_arch = "wasm32")]
+    let bytes = match resp.bytes().await {
+        Ok(b) if b.len() <= cap => b.to_vec(),
+        _ => return Value::Null,
+    };
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
 /// One forwarded request. `body` is compacted JSON (no @context member).
 #[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn forward(
@@ -729,7 +767,7 @@ pub async fn forward(
                 } else {
                     st.egress.record_success(&url);
                 }
-                let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+                let body = read_body_capped(resp).await;
                 (status, body)
             }
             Err(e) if e.is_timeout() => {

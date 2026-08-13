@@ -28,6 +28,18 @@ pub static MAX_BATCH_ITEMS: std::sync::LazyLock<usize> = std::sync::LazyLock::ne
         .filter(|n| *n > 0)
         .unwrap_or(1_000)
 });
+// Deployment knob (ANTARES_MAX_FED_RESPONSE_BYTES): ceiling on one forwarded
+// (4.3.6) response body. The spec sets no ceiling; an over-cap peer part
+// fails like an unparseable payload (Table 6.3.17-1, warning 111) instead of
+// ballooning broker memory — one misbehaving peer must not break the §1
+// 500 MB RSS budget. Read once at first use.
+pub static MAX_FED_RESPONSE_BYTES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_MAX_FED_RESPONSE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(16 * 1024 * 1024)
+});
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
@@ -47,6 +59,7 @@ impl LimitStats {
             "maxUriBytes": MAX_URI_BYTES,
             "maxJsonDepth": MAX_JSON_DEPTH,
             "maxBatchItems": *MAX_BATCH_ITEMS,
+            "maxFedResponseBytes": *MAX_FED_RESPONSE_BYTES,
             "maxJoinLevel": MAX_JOIN_LEVEL,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
