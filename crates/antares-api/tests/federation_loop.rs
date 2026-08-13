@@ -36,6 +36,11 @@ struct Mock {
 fn mock_replying(reply: &'static str) -> Mock {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
+    // The mock serves ONE request per connection, so it must say so: without
+    // Connection: close the broker's pooled client may reuse the (dropped)
+    // keep-alive connection for the next forward — a CI-timing flake where a
+    // per-entity fallback forward dies on the dead socket and `hits` undercounts.
+    let reply = reply.replacen("\r\n", "\r\nConnection: close\r\n", 1);
     let hits: Arc<AtomicUsize> = Arc::default();
     let last_head: Arc<std::sync::Mutex<String>> = Arc::default();
     let (seen, head) = (hits.clone(), last_head.clone());
