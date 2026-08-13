@@ -136,3 +136,36 @@ defines UpdateResult as the result of attribute update operations
 "regardless of whether local or distributed". The Remarks cell looks like
 a copy-paste from the batch chapter; suggest correcting it to
 UpdateResult.
+
+---
+
+## 6. [spec] 5.7.4.4 / Table 5.2.21-1: lastN vs values-filter ordering is unspecified
+
+**Title:** GS CIM 009 V1.9.1 — interaction of `lastN` with the values
+filter (and geoquery) on temporal queries is undefined
+
+**Body:**
+
+Table 5.2.21-1 (p. 123) defines `lastN` as "Only the last n instances,
+per Attribute, per Entity (under the specified time interval) shall be
+retrieved" — window-scoped, but silent on its ordering relative to the
+other filters. Clause 5.7.4.4 S2 (p. 209) says the values filter "shall
+be checked against all the Attribute instances resulting from the
+initial filtering performed by the temporal query"; whether the lastN
+cap is part of that "initial filtering" is unspecified. The two readings
+give different answers whenever a matching instance is in the window but
+not among the last n:
+
+- lastN-first: the entity may FAIL the values filter (the matching
+  instance was capped away);
+- filter-last (lastN as a presentation cap): the entity matches, and
+  lastN trims the returned instances.
+
+The same question arises for the geoquery (S3) and the Scope query (S4,
+with the 4.18 validity semantics additionally trimming instances after
+S-selection). Suggest an explicit sentence in 5.7.4.4, e.g. "the lastN
+restriction is applied to the instances of the final result set, after
+S4" (which matches the S-chain's structure — none of S1-S4 mentions
+lastN). Until then, implementations differ silently; ours applies lastN
+after all S-filters (API-side presentation cap) and withholds any
+store-level lastN optimization when q/geoQ/scopeQ is present.
