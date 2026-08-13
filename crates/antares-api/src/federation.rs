@@ -588,6 +588,22 @@ async fn read_body_capped(resp: reqwest::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// 5.7.2.4: "If split entities flag is explicitly set to true or, if not
+/// explicitly set, the default setting of the deployment allows split
+/// entities" — this deployment's default is OFF, so only the explicit flag
+/// engages the split branch.
+fn split_entities(params: &HashMap<String, String>) -> bool {
+    params.get("splitEntities").map(String::as_str) == Some("true")
+}
+
+/// 4.3.6.6: a registration carrying a jsonldContext contextSourceInfo key —
+/// forwards to it are recompacted term-by-term (attrs/type/geoproperty only).
+fn has_reg_context(reg: &FedReg) -> bool {
+    reg.csi
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("jsonldContext"))
+}
+
 /// 4.3.6.1 fan-out: forwards to matching registrations run concurrently —
 /// the clause fixes the merge order (4.5.5 non-aux before aux), never the
 /// request order, and cross-source result ordering does not exist (the
@@ -1350,6 +1366,28 @@ pub async fn fed_query(
             } else if let Some(a) = params.get("attrs") {
                 query.push(("attrs".into(), a.clone()));
             }
+            // 5.7.2.4: with split entities the filters "shall be removed
+            // before forwarding" and re-applied on the aggregate (which the
+            // local re-check always does); otherwise the request is forwarded
+            // WITH its filters, so the peer returns its filtered subset
+            // instead of everything. A registered jsonldContext (4.3.6.6)
+            // recompacts only attrs/type/geoproperty — q/scopeQ terms cannot
+            // be recompacted, so push-down is skipped there rather than
+            // filtering at the remote against the wrong terms.
+            if !split_entities(params) && !has_reg_context(&reg) {
+                for k in [
+                    "q",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "scopeQ",
+                ] {
+                    if let Some(v) = params.get(k) {
+                        query.push((k.into(), v.clone()));
+                    }
+                }
+            }
             forward(
                 st,
                 reqwest::Method::GET,
@@ -1494,12 +1532,6 @@ pub async fn fed_query_temporal(
             "type",
             "id",
             "idPattern",
-            "q",
-            "georel",
-            "geometry",
-            "coordinates",
-            "geoproperty",
-            "scopeQ",
             "timerel",
             "timeAt",
             "endTimeAt",
@@ -1508,6 +1540,24 @@ pub async fn fed_query_temporal(
         ] {
             if let Some(v) = params.get(k) {
                 query.push((k.into(), v.clone()));
+            }
+        }
+        // 5.7.4.4 mirrors 5.7.2.4: with split entities the value/geo/scope
+        // filters are stripped from the forward and applied on the
+        // aggregate; a registered jsonldContext cannot recompact q/scopeQ
+        // terms, so push-down is skipped there too.
+        if !split_entities(params) && !has_reg_context(&reg) {
+            for k in [
+                "q",
+                "georel",
+                "geometry",
+                "coordinates",
+                "geoproperty",
+                "scopeQ",
+            ] {
+                if let Some(v) = params.get(k) {
+                    query.push((k.into(), v.clone()));
+                }
             }
         }
         if let Some(scope) = &reg.attrs {
