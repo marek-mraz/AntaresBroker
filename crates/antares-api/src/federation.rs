@@ -208,6 +208,35 @@ impl FedReg {
             .into_iter()
             .find(|op| self.supports(op))
     }
+    /// 4.3.6.1: the registration's EntityInfo constraints gate which payload
+    /// ITEMS a distributed write may carry — an item whose present id/type
+    /// the registration does not name is not this source's data. An item
+    /// without a `type` member (attribute fragments) cannot be disproven and
+    /// stays covered.
+    pub fn covers_item(&self, obj: &Map<String, Value>, ctx: &Context) -> bool {
+        if !self.ent_ids.is_empty() {
+            if let Some(id) = obj.get("id").and_then(Value::as_str) {
+                if !self.ent_ids.iter().any(|x| x == id) {
+                    return false;
+                }
+            }
+        }
+        if !self.ent_types.is_empty() {
+            let types: Vec<String> = match obj.get("type") {
+                Some(Value::String(t)) => vec![ctx.expand_key(t)],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|t| ctx.expand_key(t))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !types.is_empty() && !types.iter().any(|t| self.ent_types.contains(t)) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Is federation active for this request? (6.3.18 local param; 5.5.13:
@@ -1725,6 +1754,11 @@ pub fn combine(parts: Vec<Part>, ok: Response, tenant: &TenantId) -> Response {
 /// Reduce a compacted entity/fragment to the members a registration covers
 /// (plus id/type); returns None if no attribute member remains.
 pub fn reduce_to_scope(obj: &Map<String, Value>, reg: &FedReg, ctx: &Context) -> Option<Value> {
+    // an item outside the registration's EntityInfo ids/types is not this
+    // source's data at all — nothing of it may be forwarded there
+    if !reg.covers_item(obj, ctx) {
+        return None;
+    }
     let Some(_) = &reg.attrs else {
         let mut full = obj.clone();
         full.remove("@context");
@@ -1934,7 +1968,13 @@ pub fn strip_proxied(
             continue;
         }
         let iri = ctx.expand_key(k);
-        if proxies.iter().any(|r| r.covers_attr(&iri)) {
+        // a proxy only owns the attribute if this ITEM is within its
+        // EntityInfo constraints (4.3.6.1) — a type-scoped registration
+        // must not strip attributes from an unrelated entity
+        if proxies
+            .iter()
+            .any(|r| r.covers_item(obj, ctx) && r.covers_attr(&iri))
+        {
             continue;
         }
         out.insert(k.clone(), v.clone());

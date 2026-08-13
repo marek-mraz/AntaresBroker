@@ -962,3 +962,84 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
         }
     }
 }
+
+/// C11/5.7.4.4 — entity paging WITH a values filter: safe only when the
+/// prefilter is EXACT, i.e. the windowed EXISTS carries the byte-exact text
+/// predicate, not just the ±48 h widened column bound. An entity whose only
+/// q-matching instance lies in the slack zone (outside the true window,
+/// inside the widened bound) must NOT consume the page slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn temporal_exact_prefilter_pages_correctly() {
+    let url = require_db!();
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("tqpage").expect("tenant");
+    antares_sql::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool));
+
+    const T0: &str = "2026-03-01T00:00:00Z";
+    const T1: &str = "2026-03-02T00:00:00Z";
+    const SLACK: &str = "2026-02-28T23:00:00Z"; // outside window, inside 48 h
+    const IN: &str = "2026-03-01T12:00:00Z";
+    let a = |name: &str| format!("{NS}{name}");
+    let inst = |v: Value, at: &str, iid: &str| {
+        json!({"type": "Property", "value": v, "observedAt": at,
+               "instanceId": format!("urn:ngsi-ld:Instance:{iid}"),
+               "createdAt": at, "modifiedAt": at})
+    };
+    // urn:tp:a sorts FIRST: q-matching speed only in the slack zone, plus an
+    // unrelated in-window instance so the entity-qualification EXISTS passes
+    let docs: Vec<(&str, Value)> = vec![
+        (
+            "urn:tp:a",
+            json!({
+                "id": "urn:tp:a", "type": [format!("{NS}Vehicle")],
+                "createdAt": SLACK, "modifiedAt": IN,
+                a("speed"): [inst(json!(90), SLACK, "p1")],
+                a("heading"): [inst(json!(10), IN, "p2")],
+            }),
+        ),
+        (
+            "urn:tp:b",
+            json!({
+                "id": "urn:tp:b", "type": [format!("{NS}Vehicle")],
+                "createdAt": SLACK, "modifiedAt": IN,
+                a("speed"): [inst(json!(30), IN, "p3")],
+            }),
+        ),
+    ];
+    for (id, doc) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        assert!(store
+            .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .expect("seed temporal"));
+    }
+
+    let ast = antares_ql::parse_q("speed>25").expect("parse");
+    let expand = |s: &str| format!("{NS}{s}");
+    let tf = antares_sql::store::filter::TemporalFilter {
+        range: Some(antares_sql::compile::temporal::InstanceRange {
+            timerel: "between",
+            time_at: T0,
+            end_time_at: Some(T1),
+            timeproperty: "observedAt",
+        }),
+        q: Some(&ast),
+        expand: &expand,
+        page: Some(antares_sql::store::filter::Page {
+            offset: 0,
+            limit: 1,
+        }),
+        ..Default::default()
+    };
+    let out = store.query_temporal(&t, &tf).expect("query");
+    assert!(out.paged, "page must be honoured");
+    let got = ids(&out.rows);
+    assert_eq!(
+        got,
+        vec!["urn:tp:b".to_string()],
+        "the slack-zone-only match must not consume the page slot"
+    );
+    assert_eq!(out.total, Some(1), "total counts only true matches");
+}

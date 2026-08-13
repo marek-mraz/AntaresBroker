@@ -1625,9 +1625,28 @@ pub(crate) async fn query_temporal_inner(
     // Entity-page pushdown (audit 2026-08-08): a temporal query used to
     // materialize the tenant's ENTIRE history. Pushed only when every filter
     // the store cannot see is absent — same gate family as C11 entities.
+    // A values filter no longer blocks paging when its prefilter compiles
+    // EXACTLY (every leaf a Cmp with the byte-exact text window): the SQL
+    // entity verdict then equals the evaluator's. datasetId/pick still
+    // block: their entity drops happen at presentation, after the page.
+    let q_page_exact = q_ast.as_ref().is_none_or(|ast| {
+        let r = tq
+            .as_ref()
+            .map(|t| antares_sql::compile::temporal::InstanceRange {
+                timerel: &t.timerel,
+                time_at: &t.time_at,
+                end_time_at: t.end_time_at.as_deref(),
+                timeproperty: &t.timeproperty,
+            });
+        antares_sql::compile::qprefilter::prefilter_exact(ast, r.as_ref(), &|t| ctx.expand_key(t))
+    });
     let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
-    let push_page =
-        exact_push && id_pattern.is_none() && params.get("orderBy").is_none() && p_limit > 0;
+    let push_page = (exact_push || (geo.is_none() && scope_q.is_none() && q_page_exact))
+        && id_pattern.is_none()
+        && params.get("orderBy").is_none()
+        && params.get("datasetId").is_none()
+        && params.get("pick").is_none()
+        && p_limit > 0;
     // scoped: the &dyn expander must not live across an await (handler
     // futures are Send; the store call itself is synchronous)
     let outcome = {
@@ -2223,6 +2242,26 @@ fn merge_temporal_docs(base: &mut Value, add: &Value, aux: bool, timeprop: &str)
                         {
                             continue;
                         }
+                    }
+                    // 4.5.5.3: an instance with the same datasetId (or both
+                    // default) AND the same timeproperty value is a
+                    // CONFLICTING instance of one slot — resolve to one, the
+                    // most recent modifiedAt winning.
+                    let slot = cur.iter_mut().find(|ci| {
+                        ci.get(timeprop).and_then(Value::as_str)
+                            == ni.get(timeprop).and_then(Value::as_str)
+                            && ci.get("datasetId") == ni.get("datasetId")
+                    });
+                    if let Some(existing) = slot {
+                        let newer = ni.get("modifiedAt").and_then(Value::as_str).unwrap_or("")
+                            > existing
+                                .get("modifiedAt")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                        if newer {
+                            *existing = ni;
+                        }
+                        continue;
                     }
                     cur.push(ni);
                 }
@@ -2841,6 +2880,38 @@ async fn query_temporal_inner_with(
 mod clause_4_11 {
     use super::*;
     use serde_json::json;
+
+    /// 5.7.3.4 / 4.5.5.3: instances with the same datasetId (or both default)
+    /// AND the same timeproperty value are CONFLICTING instances of one slot
+    /// — the merge resolves them to one (most recent modifiedAt wins), never
+    /// serves both. Red 2026-08-13: the same instance held by two federated
+    /// brokers came back twice (IOP_EXT_TMP_02_05).
+    #[test]
+    fn merge_resolves_same_slot_instances_to_one() {
+        let mut base = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-05-01T00:00:00Z"},
+        ]});
+        let add = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 11, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-06-01T00:00:00Z"},
+            {"type": "Property", "value": 20, "observedAt": "2026-05-02T00:00:00Z",
+             "modifiedAt": "2026-05-02T00:00:00Z"},
+            {"type": "Property", "value": 30, "observedAt": "2026-05-01T00:00:00Z",
+             "datasetId": "urn:d:1", "modifiedAt": "2026-05-01T00:00:00Z"},
+        ]});
+        merge_temporal_docs(&mut base, &add, false, "observedAt");
+        let speed = base["speed"].as_array().expect("array");
+        // default-instance duplicate collapsed (newer modifiedAt won),
+        // the other timestamp appended, the datasetId instance is its own slot
+        assert_eq!(speed.len(), 3, "{speed:?}");
+        let default_slot: Vec<&Value> = speed
+            .iter()
+            .filter(|i| i.get("datasetId").is_none() && i["observedAt"] == "2026-05-01T00:00:00Z")
+            .collect();
+        assert_eq!(default_slot.len(), 1);
+        assert_eq!(default_slot[0]["value"], 11, "newer modifiedAt wins");
+    }
 
     fn tq(timerel: &str, time_at: &str, end: Option<&str>) -> TemporalQ {
         let mut p = HashMap::new();

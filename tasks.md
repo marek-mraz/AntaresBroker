@@ -1277,7 +1277,18 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       instances, so a windowed EXISTS with a PostGIS predicate slots into
       the existing qprefilter framework; verdict stays with
       GeoQuery::matches (superset contract as for q).
-- [ ] 4. Exactness flag on compile::qprefilter → SQL entity-paging when
+- [x] 4. **DONE 2026-08-13 (commit below): qprefilter leaves now carry the
+      byte-exact text window predicate (still + widened column bound for the
+      index) and emit() tracks exactness; prefilter_exact() gates the API's
+      push_page — paging with q allowed when every leaf is an exactly-
+      compiled Cmp (existence/dropped-conjunct/refused-branch stay inexact).
+      Red-first pg_query_parity temporal_exact_prefilter_pages_correctly
+      (slack-zone entity stole the page slot → exact predicate fixes it);
+      qprefilter units incl. exactness_flags_the_pageable_subset; TP
+      5744_05 (count + page partition + past-the-end) 3/3, full temporal
+      tree 141/141 local; datasetId/pick added to the paging gate (their
+      entity drops happen at presentation, after the page).** Exactness
+      flag on compile::qprefilter → SQL entity-paging when
       every leaf compiled (today paging is withheld with q/geo because the
       prefilter is superset-only; limit=1 with q still materializes all
       candidates).

@@ -40,8 +40,22 @@ pub fn compile_prefilter(
     first_bind: usize,
     expand: &dyn Fn(&str) -> String,
 ) -> Option<CompiledQ> {
-    let (sql, binds) = emit(node, range, entity, first_bind, expand)?;
+    let (sql, binds, _) = emit(node, range, entity, first_bind, expand)?;
     Some(CompiledQ { sql, binds })
+}
+
+/// Did the whole filter compile EXACTLY — no member dropped, no branch
+/// refused, every leaf a `Cmp` whose window carries the byte-exact text
+/// predicate? An exact prefilter's entity verdict equals the evaluator's,
+/// which is what makes SQL entity-paging with `q=` safe (the caller's gate).
+/// Existence leaves are deliberately NOT exact: the evaluator's treatment of
+/// deletion instances has no SQL twin yet.
+pub fn prefilter_exact(
+    node: &QNode,
+    range: Option<&InstanceRange<'_>>,
+    expand: &dyn Fn(&str) -> String,
+) -> bool {
+    emit(node, range, "m", 1, expand).is_some_and(|(_, _, exact)| exact)
 }
 
 /// `first` is the ABSOLUTE number the member's first bind will get; refused
@@ -53,28 +67,36 @@ fn emit(
     entity: &str,
     first: usize,
     expand: &dyn Fn(&str) -> String,
-) -> Option<(String, Vec<String>)> {
+) -> Option<(String, Vec<String>, bool)> {
     match node {
         QNode::And(items) => {
             let mut sqls = Vec::new();
             let mut binds = Vec::new();
+            let mut exact = true;
             for it in items {
-                if let Some((s, b)) = emit(it, range, entity, first + binds.len(), expand) {
+                if let Some((s, b, e)) = emit(it, range, entity, first + binds.len(), expand) {
                     sqls.push(s);
                     binds.extend(b);
+                    exact &= e;
+                } else {
+                    // a dropped conjunct only widens — but the result is no
+                    // longer the evaluator's verdict
+                    exact = false;
                 }
             }
-            (!sqls.is_empty()).then(|| (format!("({})", sqls.join(" AND ")), binds))
+            (!sqls.is_empty()).then(|| (format!("({})", sqls.join(" AND ")), binds, exact))
         }
         QNode::Or(items) => {
             let mut sqls = Vec::new();
             let mut binds = Vec::new();
+            let mut exact = true;
             for it in items {
-                let (s, b) = emit(it, range, entity, first + binds.len(), expand)?;
+                let (s, b, e) = emit(it, range, entity, first + binds.len(), expand)?;
                 sqls.push(s);
                 binds.extend(b);
+                exact &= e;
             }
-            (!sqls.is_empty()).then(|| (format!("({})", sqls.join(" OR ")), binds))
+            (!sqls.is_empty()).then(|| (format!("({})", sqls.join(" OR ")), binds, exact))
         }
         QNode::Exists { path, negated } => {
             if *negated {
@@ -95,21 +117,39 @@ fn leaf(
     entity: &str,
     first: usize,
     expand: &dyn Fn(&str) -> String,
-) -> Option<(String, Vec<String>)> {
+) -> Option<(String, Vec<String>, bool)> {
     // same exact-subset rule as compile::q — anything fancier stays in memory
     if !path.links.is_empty() || path.bracket.is_some() || path.path.len() != 1 {
         return None;
     }
-    // binds: [attr IRI, window time(s)…, jsonpath(s)…]
+    // binds: [attr IRI, timeproperty + window time(s)…, jsonpath(s)…]
     let mut binds = vec![expand(path.path.first()?)];
     let mut window = String::new();
+    let mut win_exact = range.is_none();
     if let Some(r) = range {
-        if let Some(cb) = column_range_bound(r, "qi", first + binds.len()) {
-            binds.push(r.time_at.to_owned());
-            if r.timerel == "between" {
-                binds.push(r.end_time_at?.to_owned());
+        match crate::compile::temporal::compile_instance_range(r, "qi.data", first + binds.len()) {
+            // byte-exact text predicate (the arbiter's own window semantics),
+            // plus the widened column bound REUSING its time binds so the
+            // (tenant, entity, attr, observed_at) btree still serves the range
+            Some(c) => {
+                let time_bind = first + binds.len() + 1;
+                window = format!(" AND {}", c.sql);
+                binds.extend(c.binds);
+                if let Some(cb) = column_range_bound(r, "qi", time_bind) {
+                    window.push_str(&format!(" AND {cb}"));
+                }
+                win_exact = true;
             }
-            window = format!(" AND {cb}");
+            // refused text shape: superset-only widened column bound
+            None => {
+                if let Some(cb) = column_range_bound(r, "qi", first + binds.len()) {
+                    binds.push(r.time_at.to_owned());
+                    if r.timerel == "between" {
+                        binds.push(r.end_time_at?.to_owned());
+                    }
+                    window = format!(" AND {cb}");
+                }
+            }
         }
     }
     let l = compile_instance_leaf(cmp, "qi.data", first + binds.len())?;
@@ -120,7 +160,8 @@ fn leaf(
         l.sql
     );
     binds.extend(l.binds);
-    Some((sql, binds))
+    // existence leaves stay inexact: deletion-instance semantics differ
+    Some((sql, binds, win_exact && cmp.is_some()))
 }
 
 #[cfg(test)]
@@ -165,24 +206,52 @@ mod tests {
         assert_eq!(c.binds[0], ex("speed"));
         assert!(c.sql.contains("EXISTS (SELECT 1 FROM attr_instances qi"));
         assert!(c.sql.contains("qi.attr_id = $3"), "{}", c.sql);
-        // widened column window INSIDE the existence test (5.7.4.4 S2)
+        // byte-exact text window predicate INSIDE the existence test
+        // (5.7.4.4 S2 — this is what makes a Cmp leaf EXACT), its binds
+        // [timeproperty, timeAt, endTimeAt] at $4..$6…
+        assert_eq!(c.binds[1], "observedAt");
+        assert_eq!(c.binds[2], "2026-03-01T00:00:00Z");
+        assert_eq!(c.binds[3], "2026-03-02T00:00:00Z");
+        // …with the widened column bound REUSING the time binds
         assert!(
             c.sql
-                .contains("qi.observed_at >= $4::timestamptz - interval '48 hours'"),
+                .contains("qi.observed_at >= $5::timestamptz - interval '48 hours'"),
             "{}",
             c.sql
         );
         assert!(
             c.sql
-                .contains("qi.observed_at < $5::timestamptz + interval '48 hours'"),
+                .contains("qi.observed_at < $6::timestamptz + interval '48 hours'"),
             "{}",
             c.sql
         );
-        assert_eq!(c.binds[1], "2026-03-01T00:00:00Z");
-        assert_eq!(c.binds[2], "2026-03-02T00:00:00Z");
         // the jsonpath leaf is rooted at the instance, not the entity doc
-        assert!(c.binds[3].starts_with("$.\"value\""), "{}", c.binds[3]);
+        assert!(c.binds[4].starts_with("$.\"value\""), "{}", c.binds[4]);
         assert_dense(&c, 3);
+    }
+
+    #[test]
+    fn exactness_flags_the_pageable_subset() {
+        let r = between();
+        let e = |q: &str| prefilter_exact(&parse_q(q).expect("parse"), Some(&r), &ex);
+        // every leaf a compiled Cmp with the text window → exact
+        assert!(e("speed>25"));
+        assert!(e("speed>=5;heading<90"));
+        assert!(e("speed>25|heading>100"));
+        assert!(e("speed==10..40"));
+        assert!(e(r#"route=="550","551""#));
+        // dropped conjunct / refused branch / existence / negation → inexact
+        assert!(!e(r#"speed>25;name~="^x""#), "And drop widens");
+        assert!(!e(r#"speed>25|name~="^x""#), "Or refusal is trivial");
+        assert!(!e("speed"), "existence: deletion semantics differ");
+        assert!(!e("!speed"));
+        assert!(!e("speed!=10"));
+        // no range at all still exact (nothing to window)
+        assert!(prefilter_exact(
+            &parse_q("speed>25").expect("parse"),
+            None,
+            &ex
+        ));
     }
 
     #[test]
