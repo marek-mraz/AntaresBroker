@@ -304,3 +304,105 @@ async fn clause_5_14_5_temporal_map_created_based_on_s4() {
         "S4-excluded entities must not enter the map: {body}"
     );
 }
+
+/// The SQL lastN cap and entity paging must be withheld when scopeQ is
+/// present — they run before the scope-validity filter and would
+/// under-return: lastN=1 must yield the last instance WHILE THE SCOPE WAS
+/// VALID, not the last in-window instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_4_4_scopeq_disables_lastn_and_paging_pushdown() {
+    let st = AppState::new("me".into());
+    let (status, b) = post(
+        &st,
+        "/ngsi-ld/v1/temporal/entities",
+        json!({"id": "urn:ngsi-ld:V:sc-ln", "type": "Vehicle",
+            "scope": [
+                {"type": "Property", "value": "/R", "observedAt": "2026-03-01T10:00:00Z"},
+                {"type": "Property", "value": "/S", "observedAt": "2026-03-01T12:30:00Z"}],
+            "speed": [
+                {"type": "Property", "value": "lnold", "observedAt": "2026-03-01T12:15:00Z"},
+                {"type": "Property", "value": "lnnew", "observedAt": "2026-03-01T12:45:00Z"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+
+    let (status, body) = get(
+        &st,
+        &format!("/ngsi-ld/v1/temporal/entities?type=Vehicle&scopeQ=/R&lastN=1&limit=5&{WINDOW}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec!["urn:ngsi-ld:V:sc-ln"], "{body}");
+    let text = body.to_string();
+    assert!(
+        text.contains("lnold"),
+        "lastN must apply AFTER the scope-validity filter: {body}"
+    );
+    assert!(!text.contains("lnnew"), "{body}");
+}
+
+/// Same invariant at the SQL layer: on a Pg-backed AppState the lastN RANK()
+/// cap and entity paging must NOT be pushed down when scopeQ is present —
+/// the store would cap to the last in-window instance BEFORE the 4.18
+/// validity filter runs. Skips loudly without ANTARES_TEST_DATABASE_URL.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_4_4_scopeq_gates_the_sql_pushdown() {
+    let Ok(url) = std::env::var("ANTARES_TEST_DATABASE_URL") else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
+        return;
+    };
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    let st = AppState::with_store(
+        "me".into(),
+        std::sync::Arc::new(store),
+        antares_sql::StoreMode::Postgres,
+    );
+    // isolate this run's rows from earlier local runs
+    let tenant = format!("scln{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+
+    let e = json!({"id": "urn:ngsi-ld:V:sc-pg", "type": "Vehicle",
+        "scope": [
+            {"type": "Property", "value": "/R", "observedAt": "2026-03-01T10:00:00Z"},
+            {"type": "Property", "value": "/S", "observedAt": "2026-03-01T12:30:00Z"}],
+        "speed": [
+            {"type": "Property", "value": "pgold", "observedAt": "2026-03-01T12:15:00Z"},
+            {"type": "Property", "value": "pgnew", "observedAt": "2026-03-01T12:45:00Z"}]})
+    .to_string();
+    let (status, b) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("NGSILD-Tenant", &tenant)
+            .header("Content-Length", e.len())
+            .body(Body::from(e))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/ngsi-ld/v1/temporal/entities?type=Vehicle&scopeQ=/R&lastN=1&limit=5&{WINDOW}"
+            ))
+            .header("NGSILD-Tenant", &tenant)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec!["urn:ngsi-ld:V:sc-pg"], "{body}");
+    let text = body.to_string();
+    assert!(
+        text.contains("pgold"),
+        "lastN must apply AFTER the scope-validity filter on Pg too: {body}"
+    );
+    assert!(!text.contains("pgnew"), "{body}");
+}

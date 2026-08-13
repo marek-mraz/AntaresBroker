@@ -1619,7 +1619,9 @@ pub(crate) async fn query_temporal_inner(
     // verdict-safe to push even with q=/geo present. Only the lastN cap
     // (its ordering vs the values filter is unspecified) and entity paging
     // (q/geo still drop entities after SQL) wait for exactness.
-    let exact_push = q_ast.is_none() && geo.is_none();
+    // scopeQ joins q/geo here: the 4.18 validity filter drops entities and
+    // instances AFTER SQL, so a pushed page/lastN cap would under-return.
+    let exact_push = q_ast.is_none() && geo.is_none() && scope_q.is_none();
     // Entity-page pushdown (audit 2026-08-08): a temporal query used to
     // materialize the tenant's ENTIRE history. Pushed only when every filter
     // the store cannot see is absent — same gate family as C11 entities.
