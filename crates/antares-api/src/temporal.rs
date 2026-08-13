@@ -429,6 +429,56 @@ struct Windowed {
 /// <=5 — any limit in (5,20) is spec-valid; 9 keeps margin (Scorpio parity).
 const TEMPORAL_INSTANCE_LIMIT: usize = 9;
 
+/// 5.7.4.4 S4/S7: does a scope VALUE (string or array of strings) match the
+/// 4.19 Scope query? The 4.5.7 deletion sentinel never matches.
+fn scope_value_matches(sq: &str, v: &Value) -> bool {
+    if v.is_null() || v.as_str() == Some("urn:ngsi-ld:null") {
+        return false;
+    }
+    crate::scope_matches(sq, &serde_json::json!({ "scope": v }))
+}
+
+/// 4.18 over a Temporal Evolution: "a given Scope is considered valid from
+/// the time it has been set until the time it has been explicitly removed by
+/// an update or delete operation" (example: annex C.5.16). Instance-shaped
+/// scope arrays become [set-time, next-set-time) validity intervals
+/// (set-time = observedAt‖modifiedAt‖createdAt — 4.5.6 mirrors them from the
+/// Core API change); a plain string/array scope is valid for all time.
+/// Returns only the intervals whose value matches `sq`; "" start = -inf,
+/// None end = +inf.
+fn scope_match_intervals(doc: &Value, sq: &str) -> Vec<(String, Option<String>)> {
+    match doc.get("scope") {
+        Some(Value::Array(a)) if a.first().is_some_and(Value::is_object) => {
+            let mut states: Vec<(&str, &Value)> = a
+                .iter()
+                .filter_map(|i| {
+                    scope_set_time(i).map(|t| (t, i.get("value").unwrap_or(&Value::Null)))
+                })
+                .collect();
+            states.sort_by_key(|(t, _)| *t);
+            (0..states.len())
+                .filter(|&n| scope_value_matches(sq, states[n].1))
+                .map(|n| {
+                    (
+                        states[n].0.to_owned(),
+                        states.get(n + 1).map(|(t, _)| (*t).to_owned()),
+                    )
+                })
+                .collect()
+        }
+        Some(_) if crate::scope_matches(sq, doc) => vec![(String::new(), None)],
+        _ => Vec::new(),
+    }
+}
+
+/// The time a temporal scope instance was set (4.5.6: observedAt is a copy
+/// of modifiedAt on Core-API changes; direct 5.6.11 input may carry any).
+fn scope_set_time(i: &Value) -> Option<&str> {
+    ["observedAt", "modifiedAt", "createdAt"]
+        .iter()
+        .find_map(|k| i.get(*k).and_then(Value::as_str))
+}
+
 fn window(
     doc: &Value,
     tq: Option<&TemporalQ>,
@@ -478,6 +528,29 @@ fn window(
                 _ => false,
             })
             .collect();
+        // 4.18/C.5.16: the scope valid AT the window start was set at or
+        // before it — carry the latest pre-window instance into the
+        // representation (a temporal scope stays valid until replaced).
+        if scope_instances {
+            let start = tq.and_then(|t| match t.timerel.as_str() {
+                "after" | "between" => Some(t.time_at.as_str()),
+                _ => None,
+            });
+            if let Some(start) = start {
+                let carry = v
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|i| scope_set_time(i).is_some_and(|t| t < start))
+                    .max_by(|a, b| scope_set_time(a).cmp(&scope_set_time(b)))
+                    .cloned();
+                if let Some(c) = carry {
+                    if !instances.contains(&c) {
+                        instances.push(c);
+                    }
+                }
+            }
+        }
         instances.sort_by(|a, b| {
             let ta = a.get(timeprop).and_then(Value::as_str).unwrap_or("");
             let tb = b.get(timeprop).and_then(Value::as_str).unwrap_or("");
@@ -1438,6 +1511,7 @@ pub(crate) async fn query_temporal_inner(
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
         crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
     });
+    let scope_q = params.get("scopeQ").map(String::as_str);
     let attrs_qualify = params.get("attrs").is_some_and(|a| {
         a.split(',')
             .any(|n| antares_ql::is_non_system_attr(n.trim()))
@@ -1641,7 +1715,7 @@ pub(crate) async fn query_temporal_inner(
         all
     };
     let mut matches = Vec::new();
-    for doc in all {
+    for mut doc in all {
         let id = doc["id"].as_str().unwrap_or("");
         if let Some(ids) = &ids {
             if !ids.contains(&id) {
@@ -1693,6 +1767,48 @@ pub(crate) async fn query_temporal_inner(
             if let Some(g) = &geo {
                 if !g.matches(&eval_doc, &ctx) {
                     continue;
+                }
+            }
+        }
+        // 5.7.4.4 S4 — and S7: the federation merge above precedes this
+        // check, so split/aggregated entities are re-filtered here too. The
+        // entity qualifies if one of its scope's 4.18 validity intervals
+        // intersects the query window; attribute instances outside every
+        // matching interval are excluded (annex C.5.16).
+        if let Some(sq) = scope_q {
+            let iv = scope_match_intervals(&doc, sq);
+            let (wstart, wend) = match tq.as_ref() {
+                Some(t) => match t.timerel.as_str() {
+                    "before" => (None, Some(t.time_at.as_str())),
+                    "after" => (Some(t.time_at.as_str()), None),
+                    "between" => (Some(t.time_at.as_str()), t.end_time_at.as_deref()),
+                    _ => (None, None),
+                },
+                None => (None, None),
+            };
+            let intersects = iv.iter().any(|(s, e)| {
+                wend.is_none_or(|w| s.as_str() < w)
+                    && e.as_deref().is_none_or(|e| wstart.is_none_or(|w| e > w))
+            });
+            if !intersects {
+                continue;
+            }
+            if let Some(o) = doc.as_object_mut() {
+                for (k, v) in o.iter_mut() {
+                    if is_meta(k) {
+                        continue;
+                    }
+                    if let Some(arr) = v.as_array_mut() {
+                        arr.retain(|inst| {
+                            inst.get(timeprop.as_str())
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| {
+                                    iv.iter().any(|(s, e)| {
+                                        t >= s.as_str() && e.as_deref().is_none_or(|e| t < e)
+                                    })
+                                })
+                        });
+                    }
                 }
             }
         }

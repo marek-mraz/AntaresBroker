@@ -190,6 +190,26 @@ pub fn expand_entity(
                 for s in a {
                     match s {
                         Value::String(s) => items.push(Value::String(s.clone())),
+                        // 4.5.6: on temporal input the scope is the temporal
+                        // representation of a Property — instance objects
+                        // whose value is a scope string or array thereof.
+                        Value::Object(o) if opts.temporal => {
+                            let vals: Vec<&str> = match o.get("value") {
+                                Some(Value::String(s)) => vec![s.as_str()],
+                                Some(Value::Array(vs)) if vs.iter().all(Value::is_string) => {
+                                    vs.iter().filter_map(Value::as_str).collect()
+                                }
+                                _ => return Err(bad("scope instance needs a string value")),
+                            };
+                            for sv in vals {
+                                if !valid_scope(sv) {
+                                    return Err(bad(&format!(
+                                        "invalid scope {sv:?} (4.18 grammar)"
+                                    )));
+                                }
+                            }
+                            items.push(s.clone());
+                        }
                         _ => return Err(bad("scope entries must be strings")),
                     }
                 }
@@ -197,8 +217,7 @@ pub fn expand_entity(
             }
             _ => return Err(bad("scope must be a string or array of strings")),
         };
-        for s in &scopes {
-            let s = s.as_str().expect("string scope");
+        for s in scopes.iter().filter_map(Value::as_str) {
             if !valid_scope(s) {
                 return Err(bad(&format!("invalid scope {s:?} (4.18 grammar)")));
             }
