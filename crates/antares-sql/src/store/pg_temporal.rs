@@ -121,17 +121,26 @@ async fn insert_rows(
     if rows.is_empty() {
         return Ok(());
     }
+    // geo_value: extracted per instance when the value LOOKS like a GeoJSON
+    // geometry; try_geomfromgeojson (0009) maps anything PostGIS rejects to
+    // NULL, which the S3 prefilter treats as "reaches the evaluator".
     sqlx::query(
         "INSERT INTO attr_instances
            (tenant_id, entity_id, attr_id, instance_id, dataset_id, observed_at,
-            created_at, modified_at, data)
+            created_at, modified_at, data, geo_value)
          SELECT $1, $2, e->>'attr_id', e->>'instance_id', e->>'dataset_id',
                 (e->>'observed_at')::timestamptz, (e->>'created_at')::timestamptz,
-                (e->>'modified_at')::timestamptz, e->'data'
+                (e->>'modified_at')::timestamptz, e->'data',
+                CASE WHEN jsonb_typeof(e->'data'->'value') = 'object'
+                      AND e->'data'->'value'->>'type' IN
+                          ('Point','MultiPoint','LineString','MultiLineString',
+                           'Polygon','MultiPolygon')
+                     THEN try_geomfromgeojson((e->'data'->'value')::text) END
          FROM jsonb_array_elements($3::jsonb) AS e
          ON CONFLICT (tenant_id, entity_id, attr_id, instance_id, observed_at)
            DO UPDATE SET data = EXCLUDED.data, modified_at = EXCLUDED.modified_at,
-                         dataset_id = EXCLUDED.dataset_id",
+                         dataset_id = EXCLUDED.dataset_id,
+                         geo_value = EXCLUDED.geo_value",
     )
     .bind(tenant.as_str())
     .bind(entity_id)
@@ -307,6 +316,7 @@ impl PgTemporalStore {
             Text(String),
             Arr(Vec<String>),
             Num(i64),
+            Float(f64),
         }
         let mut binds: Vec<B> = vec![B::Text(tenant.as_str().to_owned())];
         // 4.22: an expired ENTITY is invalid on temporal reads too — filter it
@@ -384,6 +394,50 @@ impl PgTemporalStore {
                 wheres.push(c.sql);
             }
         }
+        // 5.7.4.4 S3 superset prefilter: entities with no windowed instance
+        // of the geoproperty possibly satisfying the geoquery are never
+        // reconstructed. NULL geo_value (unextracted / pre-0009 rows) always
+        // survives; GeoQuery::matches stays the arbiter.
+        if let Some((spec, iri)) = f.geo {
+            let attr_bind = binds.len() + 1;
+            let mut win_binds: Vec<String> = Vec::new();
+            let mut window = String::new();
+            if let Some(r) = &f.range {
+                if let Some(cb) =
+                    crate::compile::temporal::column_range_bound(r, "gi", attr_bind + 1)
+                {
+                    win_binds.push(r.time_at.to_owned());
+                    if r.timerel == "between" {
+                        if let Some(e) = r.end_time_at {
+                            win_binds.push(e.to_owned());
+                        }
+                    }
+                    window = format!(" AND {cb}");
+                }
+            }
+            if let Some(c) = crate::compile::geo::compile_geo_instance(
+                spec,
+                "gi.geo_value",
+                attr_bind + 1 + win_binds.len(),
+            ) {
+                binds.push(B::Text(iri.to_owned()));
+                for b in win_binds {
+                    binds.push(B::Text(b));
+                }
+                for b in c.geo_binds {
+                    binds.push(B::Text(b));
+                }
+                for n in c.num_binds {
+                    binds.push(B::Float(n));
+                }
+                wheres.push(format!(
+                    "EXISTS (SELECT 1 FROM attr_instances gi \
+                     WHERE gi.tenant_id = m.tenant_id AND gi.entity_id = m.id \
+                     AND gi.attr_id = ${attr_bind}{window} AND {})",
+                    c.sql
+                ));
+            }
+        }
         let n_where = binds.len();
         let where_sql = wheres.join(" AND ");
         let (attr_expr, extra) = match attr_object_expr(f, n_where + 1) {
@@ -417,6 +471,7 @@ impl PgTemporalStore {
                     B::Text(s) => qy.bind(s),
                     B::Arr(v) => qy.bind(v),
                     B::Num(n) => qy.bind(n),
+                    B::Float(x) => qy.bind(x),
                 };
             }
             let rows = qy.fetch_all(&mut *tx).await?;
@@ -436,6 +491,7 @@ impl PgTemporalStore {
                         B::Text(s) => cq.bind(s),
                         B::Arr(v) => cq.bind(v),
                         B::Num(n) => cq.bind(n),
+                        B::Float(x) => cq.bind(x),
                     };
                 }
                 total = Some(cq.fetch_one(&mut *tx).await?);

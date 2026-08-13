@@ -788,3 +788,177 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
     assert_eq!(got["id"], "urn:troom:1");
     assert!(got.get("type").is_some() && got.get("createdAt").is_some());
 }
+
+/// 5.7.4.4 S3 — the geoquery compiled to a SUPERSET SQL prefilter over the
+/// per-instance `attr_instances.geo_value` column:
+///
+/// * every entity the windowed evaluator (`GeoQuery::matches`) accepts MUST
+///   come back from SQL (superset);
+/// * far-away and out-of-window entities must be EXCLUDED SQL-side
+///   (tightness — proves the windowed EXISTS reached the DB);
+/// * a row whose `geo_value` is NULL (unextracted / pre-fill data) always
+///   survives to the evaluator.
+#[tokio::test(flavor = "multi_thread")]
+async fn temporal_geo_prefilter_narrows_but_never_drops() {
+    let url = require_db!();
+    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("tgeopre").expect("tenant");
+    antares_sql::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool.clone()));
+
+    const T0: &str = "2026-03-01T00:00:00Z";
+    const T1: &str = "2026-03-02T00:00:00Z";
+    const OUT: &str = "2026-01-05T00:00:00Z";
+    const IN: &str = "2026-03-01T12:00:00Z";
+    let paris = json!({"type": "Point", "coordinates": [2.29, 48.85]});
+    let far = json!({"type": "Point", "coordinates": [10.0, 50.0]});
+    let ginst = |geom: &Value, at: &str, iid: &str| {
+        json!({"type": "GeoProperty", "value": geom.clone(), "observedAt": at,
+               "instanceId": format!("urn:ngsi-ld:Instance:{iid}"),
+               "createdAt": at, "modifiedAt": at})
+    };
+    let obs = format!("{NS}observationSpace");
+    let docs: Vec<(&str, Value)> = vec![
+        (
+            "urn:tg:near",
+            json!({
+                "id": "urn:tg:near", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                LOC: [ginst(&paris, IN, "g1")],
+            }),
+        ),
+        (
+            "urn:tg:far",
+            json!({
+                "id": "urn:tg:far", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                LOC: [ginst(&far, IN, "g2")],
+            }),
+        ),
+        // near Paris — but only OUTSIDE the window (S3: windowed instances)
+        (
+            "urn:tg:outwin",
+            json!({
+                "id": "urn:tg:outwin", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": OUT,
+                LOC: [ginst(&paris, OUT, "g3")],
+            }),
+        ),
+        // near Paris, in-window, but geo_value forced NULL below (pre-fill row)
+        (
+            "urn:tg:nullgeo",
+            json!({
+                "id": "urn:tg:nullgeo", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                LOC: [ginst(&paris, IN, "g4")],
+            }),
+        ),
+        // near Paris under a NON-default geoproperty, in-window
+        (
+            "urn:tg:custgp",
+            json!({
+                "id": "urn:tg:custgp", "type": [format!("{NS}Vehicle")],
+                "createdAt": OUT, "modifiedAt": IN,
+                &obs: [ginst(&paris, IN, "g5")],
+            }),
+        ),
+    ];
+    for (id, doc) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Temporal, id);
+        assert!(store
+            .create(&t, antares_sql::store::Kind::Temporal, id, doc.clone())
+            .expect("seed temporal"));
+    }
+    // simulate a pre-fill row: extraction never happened for this entity
+    antares_sql::sqlx::query("UPDATE attr_instances SET geo_value = NULL WHERE tenant_id = $1 AND entity_id = 'urn:tg:nullgeo'")
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("null out geo_value");
+
+    let range = antares_sql::compile::temporal::InstanceRange {
+        timerel: "between",
+        time_at: T0,
+        end_time_at: Some(T1),
+        timeproperty: "observedAt",
+    };
+    use antares_sql::compile::geo::{GeoSpec, Rel, LOCATION_IRI};
+    let expand = |s: &str| format!("{NS}{s}");
+    let coords = json!([2.29, 48.85]);
+    let poly = json!([[
+        [2.0, 48.5],
+        [2.6, 48.5],
+        [2.6, 49.2],
+        [2.0, 49.2],
+        [2.0, 48.5]
+    ]]);
+
+    // (spec, geoproperty IRI, must-return, must-exclude)
+    let near_spec = GeoSpec {
+        rel: Rel::Near {
+            max: Some(2000.0),
+            min: None,
+        },
+        geometry: "Point",
+        coordinates: &coords,
+        geoproperty_iri: "",
+    };
+    let within_spec = GeoSpec {
+        rel: Rel::Within,
+        geometry: "Polygon",
+        coordinates: &poly,
+        geoproperty_iri: "",
+    };
+    let cust_spec = GeoSpec {
+        rel: Rel::Near {
+            max: Some(2000.0),
+            min: None,
+        },
+        geometry: "Point",
+        coordinates: &coords,
+        geoproperty_iri: "",
+    };
+    let cases: Vec<(&GeoSpec, &str, Vec<&str>, Vec<&str>)> = vec![
+        (
+            &near_spec,
+            LOCATION_IRI,
+            vec!["urn:tg:near", "urn:tg:nullgeo"],
+            vec!["urn:tg:far", "urn:tg:outwin", "urn:tg:custgp"],
+        ),
+        (
+            &within_spec,
+            LOCATION_IRI,
+            vec!["urn:tg:near", "urn:tg:nullgeo"],
+            vec!["urn:tg:far", "urn:tg:outwin", "urn:tg:custgp"],
+        ),
+        (
+            &cust_spec,
+            &obs,
+            vec!["urn:tg:custgp"],
+            vec!["urn:tg:near", "urn:tg:far", "urn:tg:outwin"],
+        ),
+    ];
+    for (n, (spec, iri, keep, drop)) in cases.iter().enumerate() {
+        let tf = antares_sql::store::filter::TemporalFilter {
+            range: Some(antares_sql::compile::temporal::InstanceRange { ..range }),
+            geo: Some((spec, iri)),
+            expand: &expand,
+            ..Default::default()
+        };
+        let got = ids(&store.query_temporal(&t, &tf).expect("query").rows);
+        for want in keep {
+            assert!(
+                got.contains(&(*want).to_string()),
+                "case {n}: SQL dropped {want}, which the windowed evaluator matches\n  sql set: {got:?}"
+            );
+        }
+        for out in drop {
+            assert!(
+                !got.contains(&(*out).to_string()),
+                "case {n}: geo prefilter failed to exclude {out}\n  sql set: {got:?}"
+            );
+        }
+    }
+}

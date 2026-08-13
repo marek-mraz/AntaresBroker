@@ -1632,6 +1632,7 @@ pub(crate) async fn query_temporal_inner(
     // futures are Send; the store call itself is synchronous)
     let outcome = {
         let expand = |t: &str| ctx.expand_key(t);
+        let geo_pre = geo.as_ref().map(|g| g.to_instance_spec(&ctx));
         let tf = antares_sql::store::filter::TemporalFilter {
             ids: ids.as_deref(),
             types: types.as_deref(),
@@ -1657,6 +1658,7 @@ pub(crate) async fn query_temporal_inner(
             }),
             q: q_ast.as_ref(),
             expand: &expand,
+            geo: geo_pre.as_ref().map(|(s, iri)| (s, iri.as_str())),
         };
         st.store.query_temporal(&tenant, &tf)?
     };

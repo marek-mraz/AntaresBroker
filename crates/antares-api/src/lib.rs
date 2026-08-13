@@ -1925,6 +1925,79 @@ mod tests {
             .status()
     }
 
+    /// 4.3.6.1 on batch distribution: "all constraints specified in the
+    /// registration shall be respected" — a registration scoped to entity
+    /// type A must not swallow a batch item of type B. The B item is purely
+    /// local: it gets created; only the A item earns the Conflict part
+    /// (read-only registration), so the batch is a 207.
+    #[tokio::test]
+    async fn batch_items_outside_a_registrations_types_stay_local() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let app = app();
+        let reg = serde_json::json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:type-scope",
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ["retrieveEntity", "queryEntity"],
+            "information": [{"entities": [{"type": "ScopedType"}]}],
+            "endpoint": "http://127.0.0.1:1",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/csourceRegistrations")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", reg.to_string().len())
+                    .body(Body::from(reg.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let batch = serde_json::json!([
+            {"id": "urn:ngsi-ld:ScopedType:remote", "type": "ScopedType",
+             "name": {"type": "Property", "value": "x"}},
+            {"id": "urn:ngsi-ld:Other:local", "type": "OtherType",
+             "name": {"type": "Property", "value": "y"}},
+        ]);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/create")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", batch.to_string().len())
+                    .body(Body::from(batch.to_string()))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS, "one conflict part");
+
+        // the out-of-scope item was created locally…
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Other:local?local=true")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "non-matching item is local");
+        // …and the in-scope one was refused everywhere (redirect, read-only)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:ScopedType:remote?local=true")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn purge_rejects_id_and_idpattern_as_the_only_filter() {
         // 5.6.21.4: id/idPattern are legal input data (5.6.21.3) but are not

@@ -102,6 +102,12 @@ pub struct TemporalFilter<'a> {
     /// term → IRI, the request context's expander (the AST holds terms).
     /// `Sync` so a filter alive across an await keeps the handler future Send.
     pub expand: &'a (dyn Fn(&str) -> String + Sync),
+    /// 5.7.4.4 S3 prefilter: the geoquery plus the EXPANDED geoproperty IRI
+    /// whose windowed instances the EXISTS checks (per-instance rows carry
+    /// extracted geometries for EVERY geoproperty, not just `location`).
+    /// Superset like `q` — `GeoQuery::matches` stays the arbiter; rows with
+    /// an unextracted `geo_value` always survive.
+    pub geo: Option<(&'a crate::compile::geo::GeoSpec<'a>, &'a str)>,
 }
 
 impl Default for TemporalFilter<'_> {
@@ -116,6 +122,7 @@ impl Default for TemporalFilter<'_> {
             page: None,
             q: None,
             expand: &|t: &str| t.to_owned(),
+            geo: None,
         }
     }
 }

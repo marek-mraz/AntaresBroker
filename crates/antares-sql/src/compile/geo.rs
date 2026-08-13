@@ -74,15 +74,41 @@ pub struct GeoSpec<'a> {
 /// so it returns `None` and the evaluator does the work (the documented C11b
 /// fallback). `first_bind` numbers the geo binds; numeric binds follow them.
 pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<CompiledGeo> {
+    if !spec.geoproperty_iri.is_empty() && spec.geoproperty_iri != LOCATION_IRI {
+        return None;
+    }
+    // The un-extractable row always survives (module docs, point 1) — via the
+    // `location_ambiguous` column, not `location IS NULL`: rows WITHOUT any
+    // default GeoProperty can never match and are excluded in SQL, and the OR
+    // over two indexable conditions BitmapOrs (GIST + partial index) instead
+    // of forcing a sequential scan (audit 2026-08-08).
+    let mut c = predicate(spec, col, first_bind)?;
+    c.sql = format!("(({}) OR location_ambiguous)", c.sql);
+    Some(c)
+}
+
+/// The same predicate over a PER-INSTANCE geometry column
+/// (`attr_instances.geo_value`, 5.7.4.4 S3): each row is one instance, so
+/// there is no ambiguity flag — a NULL `geo_value` (unextracted value or a
+/// pre-0009 row) is the "reaches the evaluator" arm instead. No geoproperty
+/// restriction: the caller binds the attr IRI itself.
+pub fn compile_geo_instance(
+    spec: &GeoSpec<'_>,
+    col: &str,
+    first_bind: usize,
+) -> Option<CompiledGeo> {
+    let mut c = predicate(spec, col, first_bind)?;
+    c.sql = format!("(({}) OR {col} IS NULL)", c.sql);
+    Some(c)
+}
+
+fn predicate(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<CompiledGeo> {
     let GeoSpec {
         rel,
         geometry,
         coordinates,
-        geoproperty_iri,
+        ..
     } = spec;
-    if !geoproperty_iri.is_empty() && *geoproperty_iri != LOCATION_IRI {
-        return None;
-    }
     let geojson = serde_json::to_string(&serde_json::json!({
         "type": geometry, "coordinates": coordinates
     }))
@@ -129,14 +155,9 @@ pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<C
         Rel::Overlaps => format!("ST_Overlaps({col}, {g})"),
         Rel::Equals => format!("ST_Equals({col}, {g})"),
     };
-    // The un-extractable row always survives (module docs, point 1) — via the
-    // `location_ambiguous` column, not `location IS NULL`: rows WITHOUT any
-    // default GeoProperty can never match and are excluded in SQL, and the OR
-    // over two indexable conditions BitmapOrs (GIST + partial index) instead
-    // of forcing a sequential scan (audit 2026-08-08).
     geo_binds.shrink_to_fit();
     Some(CompiledGeo {
-        sql: format!("(({pred}) OR location_ambiguous)"),
+        sql: pred,
         geo_binds,
         num_binds,
     })
@@ -327,6 +348,38 @@ mod tests {
                 ""
             ),
             "location",
+            1
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn instance_variant_falls_back_to_null_and_takes_any_geoproperty() {
+        let c = compile_geo_instance(
+            &spec(Rel::Within, "Point", &coords(), ""),
+            "gi.geo_value",
+            2,
+        )
+        .expect("compiles");
+        assert!(
+            c.sql.ends_with(" OR gi.geo_value IS NULL)"),
+            "a NULL (unextracted / pre-0009) instance must reach the evaluator: {}",
+            c.sql
+        );
+        assert!(c.sql.contains("ST_Within(gi.geo_value,"), "{}", c.sql);
+        assert!(!c.sql.contains("location_ambiguous"), "{}", c.sql);
+        // the predicate core still refuses near-from-extended-geometry
+        assert!(compile_geo_instance(
+            &spec(
+                Rel::Near {
+                    max: Some(1.0),
+                    min: None
+                },
+                "Polygon",
+                &json!([[[0, 0], [1, 0], [1, 1], [0, 0]]]),
+                ""
+            ),
+            "gi.geo_value",
             1
         )
         .is_none());

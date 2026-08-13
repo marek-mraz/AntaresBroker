@@ -243,6 +243,18 @@ impl GeoQuery {
         &'a self,
         ctx: &antares_jsonld::Context,
     ) -> Option<antares_sql::compile::geo::GeoSpec<'a>> {
+        let (spec, iri) = self.to_instance_spec(ctx);
+        (iri == antares_sql::compile::geo::LOCATION_IRI).then_some(spec)
+    }
+
+    /// 5.7.4.4 S3: the prefilter shape for the temporal store — like
+    /// `to_sql_spec` but for the per-instance `attr_instances.geo_value`
+    /// rows, where EVERY geoproperty has extracted geometries; returns the
+    /// spec plus the expanded IRI the windowed EXISTS binds as `attr_id`.
+    pub fn to_instance_spec<'a>(
+        &'a self,
+        ctx: &antares_jsonld::Context,
+    ) -> (antares_sql::compile::geo::GeoSpec<'a>, String) {
         use antares_sql::compile::geo::Rel;
         let rel = match self.rel {
             Georel::Near { max, min } => Rel::Near { max, min },
@@ -253,21 +265,20 @@ impl GeoQuery {
             Georel::Disjoint => Rel::Disjoint,
             Georel::Overlaps => Rel::Overlaps,
         };
-        // an empty geoproperty means the default; expanding "" would not
         let iri = if self.geoproperty.is_empty() {
-            String::new()
+            antares_sql::compile::geo::LOCATION_IRI.to_owned()
         } else {
             ctx.expand_key(&self.geoproperty)
         };
-        if !iri.is_empty() && iri != antares_sql::compile::geo::LOCATION_IRI {
-            return None;
-        }
-        Some(antares_sql::compile::geo::GeoSpec {
-            rel,
-            geometry: &self.geometry,
-            coordinates: &self.coordinates,
-            geoproperty_iri: "",
-        })
+        (
+            antares_sql::compile::geo::GeoSpec {
+                rel,
+                geometry: &self.geometry,
+                coordinates: &self.coordinates,
+                geoproperty_iri: "",
+            },
+            iri,
+        )
     }
 
     /// One target GeoJSON value against the query. A malformed TARGET is a

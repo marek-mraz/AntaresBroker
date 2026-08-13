@@ -10,6 +10,9 @@ pub mod compile;
 pub mod maintenance;
 #[cfg(feature = "postgres")]
 pub mod pg;
+/// Re-export for integration tests that need raw SQL against the pool.
+#[cfg(feature = "postgres")]
+pub use sqlx;
 pub mod store;
 
 /// The four store backends, decided ONCE at startup and threaded as a value —

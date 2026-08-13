@@ -1265,7 +1265,14 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       5744_01/02 must be green on pg/timescale — those cells are where the
       SQL prefilter path actually executes (rule-8 local runs are
       memory-arm only).
-- [ ] 3. Geo prefilter on attr_instances.geo_value (perf, not
+- [x] 3. **DONE 2026-08-13 (commit below): migration 0009 try_geomfromgeojson
+      + decompose fill, compile_geo_instance (NULL fallback arm), windowed
+      EXISTS in pg_temporal query() with the attr IRI as a bind (any
+      geoproperty). Red-first pg_query_parity
+      temporal_geo_prefilter_narrows_but_never_drops vs live PostGIS
+      (superset + tightness + NULL survival + custom geoproperty); sql-crate
+      units 30/30; TP 5744_04 7/7 local memory broker (fork da7d728→).**
+      Geo prefilter on attr_instances.geo_value (perf, not
       conformance): S3 (p.209) judges geo on windowed GeoProperty
       instances, so a windowed EXISTS with a PostGIS predicate slots into
       the existing qprefilter framework; verdict stays with
