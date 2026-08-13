@@ -761,6 +761,8 @@ fn present_temporal(
                         if let Some(o) = ci.as_object_mut() {
                             o.remove("createdAt");
                             o.remove("modifiedAt");
+                            // 6.3.11: expiresAt is sysAttrs-gated too
+                            o.remove("expiresAt");
                         }
                     }
                     compact_instance(&ci, ctx)

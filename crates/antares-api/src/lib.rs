@@ -4720,3 +4720,124 @@ mod clause_5_2_23 {
         );
     }
 }
+
+#[cfg(test)]
+mod clause_6_3_11 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::response::Response;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// 6.3.11 Table 6.3.11-1: `expiresAt` is included in response payloads
+    /// only when `options=sysAttrs` — entity level, attribute level and
+    /// temporal instances alike (same gate as createdAt/modifiedAt).
+    #[tokio::test]
+    async fn clause_6_3_11_expires_at_gated_by_sysattrs() {
+        let mut st = AppState::new("antares-test".into());
+        crate::notify::wire(&mut st);
+        let app = router(st);
+        let entity = serde_json::json!({
+            "id": "urn:ngsi-ld:Building:exp6311", "type": "Building",
+            "expiresAt": "2100-01-01T00:00:00Z",
+            "name": {"type": "Property", "value": "x",
+                     "observedAt": "2026-08-13T00:00:00Z",
+                     "expiresAt": "2100-01-01T00:00:00Z"}
+        });
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let plain = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get("/ngsi-ld/v1/entities/urn:ngsi-ld:Building:exp6311")
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert!(
+            plain.get("expiresAt").is_none(),
+            "entity expiresAt must be sysAttrs-gated (6.3.11): {plain}"
+        );
+        assert!(
+            plain["name"].get("expiresAt").is_none(),
+            "attribute expiresAt must be sysAttrs-gated (6.3.11): {plain}"
+        );
+
+        let sys = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get(
+                        "/ngsi-ld/v1/entities/urn:ngsi-ld:Building:exp6311?options=sysAttrs",
+                    )
+                    .body(Body::empty())
+                    .expect("req"),
+                )
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert_eq!(sys["expiresAt"], "2100-01-01T00:00:00Z");
+        assert_eq!(sys["name"]["expiresAt"], "2100-01-01T00:00:00Z");
+
+        let inst_of = |body: &serde_json::Value| -> serde_json::Value {
+            let a = &body["name"];
+            if a.is_array() {
+                a[0].clone()
+            } else {
+                a.clone()
+            }
+        };
+        let t_plain = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get(
+                        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Building:exp6311?timerel=after&timeAt=2020-01-01T00:00:00Z",
+                    )
+                    .body(Body::empty())
+                    .expect("req"),
+                )
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert!(
+            inst_of(&t_plain).get("expiresAt").is_none(),
+            "temporal instance expiresAt must be sysAttrs-gated (6.3.11): {t_plain}"
+        );
+        let t_sys = body_json(
+            app.clone()
+                .oneshot(
+                    Request::get(
+                        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Building:exp6311?timerel=after&timeAt=2020-01-01T00:00:00Z&options=sysAttrs",
+                    )
+                    .body(Body::empty())
+                    .expect("req"),
+                )
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert_eq!(inst_of(&t_sys)["expiresAt"], "2100-01-01T00:00:00Z");
+    }
+}

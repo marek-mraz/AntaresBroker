@@ -224,7 +224,9 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
         let is_meta = ENTITY_META.contains(&k.as_str());
         if is_meta {
             match k.as_str() {
-                "createdAt" | "modifiedAt" if !r.sys_attrs => continue,
+                // 6.3.11 Table 6.3.11-1: expiresAt is a system temporal
+                // attribute — included only when options=sysAttrs.
+                "createdAt" | "modifiedAt" | "expiresAt" if !r.sys_attrs => continue,
                 _ => {}
             }
             // pick strictly constrains core members too (4.21)
@@ -326,7 +328,9 @@ fn transform_instance(inst: &Value, r: &Repr) -> Value {
     let mut out = Map::new();
     for (k, v) in &obj {
         match k.as_str() {
-            "createdAt" | "modifiedAt" if !r.sys_attrs => continue,
+            // 6.3.11: expiresAt shares the sysAttrs gate on attribute
+            // instances (current-state and temporal alike).
+            "createdAt" | "modifiedAt" | "expiresAt" if !r.sys_attrs => continue,
             "type" if r.concise => continue,
             _ => {}
         }
