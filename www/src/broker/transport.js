@@ -163,7 +163,8 @@ export async function brokerFetch(path, opts = {}) {
   const r = await rawFetch(path, opts);
   if (transport.reqlogOn) {
     const entry = {
-      tenant: opts.headers?.["NGSILD-Tenant"] ?? "default",
+      tenant:
+        opts.headers?.["NGSILD-Tenant"] ?? opts.headers?.["ngsild-tenant"] ?? "default",
       method: (opts.method ?? "GET").toUpperCase(),
       path,
       status: r.status,

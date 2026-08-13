@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { bootTransport, onNotification, transport } from "../broker/transport.js";
+import { bootTransport, brokerFetch, onNotification, transport } from "../broker/transport.js";
+import { installVirtualHost } from "../broker/virtualhost.js";
 import * as apiMod from "../broker/api.js";
 import { board, createDemo, refreshAll, startPolling, toast } from "../state/board.js";
 import { startAllPipes, startPipe } from "../state/pipes.js";
@@ -10,12 +11,16 @@ import TenantSheet from "./TenantSheet.jsx";
 import History from "./History.jsx";
 import RequestLog from "./RequestLog.jsx";
 
+// RapiDoc (~350 kB gz) rides along only when the console is opened.
+const ApiConsole = React.lazy(() => import("./ApiConsole.jsx"));
+
 export default function App() {
   useBoard();
   useTransport();
   const [health, setHealth] = useState(null);
   const [selectedSpace, setSelectedSpace] = useState("smart-city");
   const [picked, setPicked] = useState(null); // {space,id,attr,emoji,type}
+  const [apiOpen, setApiOpen] = useState(false);
   const [drawerW, setDrawerW] = useState(
     () => Number(localStorage.getItem("antares.drawerw")) || 420,
   );
@@ -24,6 +29,7 @@ export default function App() {
     let alive = true;
     (async () => {
       await bootTransport();
+      installVirtualHost(brokerFetch);
       const h = await apiMod.health().catch(() => null);
       if (!alive) return;
       setHealth(h);
@@ -56,7 +62,12 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar health={health} />
+      <TopBar health={health} onApi={() => setApiOpen(true)} />
+      {apiOpen && (
+        <React.Suspense fallback={null}>
+          <ApiConsole onClose={() => setApiOpen(false)} />
+        </React.Suspense>
+      )}
       <div className="stage">
         <Board
           selected={shownSpace}

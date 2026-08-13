@@ -6,10 +6,15 @@ import { chromium } from "playwright-core";
 
 // --host 127.0.0.1: vite's default "localhost" can bind ::1 only, and the
 // test (and CI runners) dial IPv4.
+// detached → its own process group, so killPreview can take down the npx
+// wrapper AND the vite child (kill(preview.pid) orphans vite, which then
+// holds the port and this process's stdio pipes open forever).
 const preview = spawn("npx", ["vite", "preview", "--port", "42096", "--strictPort", "--host", "127.0.0.1"], {
   cwd: new URL("..", import.meta.url).pathname,
   stdio: "pipe",
+  detached: true,
 });
+const killPreview = () => { try { process.kill(-preview.pid, "SIGKILL"); } catch {} };
 await new Promise((resolve, reject) => {
   preview.stdout.on("data", (d) => d.toString().includes("42096") && resolve());
   preview.stderr.on("data", (d) => process.stderr.write(d));
@@ -23,8 +28,8 @@ page.on("pageerror", (e) => console.log("[pageerror]", e.message));
 
 const fail = async (msg) => {
   console.error(`FAIL: ${msg}`);
-  await browser.close();
-  preview.kill();
+  await browser.close().catch(() => {});
+  killPreview();
   process.exit(1);
 };
 
@@ -95,10 +100,40 @@ try {
   );
   console.log("request log populated");
 
+  // API console: Swagger UI loads the vendored ETSI yaml, renders operations
+  await page.click('[data-testid="btn-api"]');
+  await page.waitForFunction(
+    () => document.querySelectorAll(".opblock").length > 20,
+    { timeout: 60_000 },
+  );
+  const ops = await page.evaluate(() => document.querySelectorAll(".opblock").length);
+  console.log(`API console renders the ETSI OpenAPI spec (${ops} operations)`);
+
+  // …and "Execute" round-trips into the wasm broker: GET /types → 200
+  const typesBlock = page
+    .locator(".opblock")
+    .filter({ has: page.locator(".opblock-summary-path", { hasText: /^\/types$/ }) })
+    .first();
+  await typesBlock.locator(".opblock-summary").click();
+  await page.waitForSelector(".opblock.is-open", { timeout: 10_000 });
+  // tryItOutEnabled pre-activates try-out; fall back to the button if not
+  if (!(await page.$(".opblock.is-open .btn.execute")))
+    await page.click(".opblock.is-open .try-out__btn");
+  await page.click(".opblock.is-open .btn.execute");
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(
+      ".opblock.is-open .live-responses-table .response-col_status",
+    )].some((n) => n.textContent.trim().startsWith("200")),
+    { timeout: 30_000 },
+  );
+  console.log("Execute GET /types via the console → 200 from the wasm broker");
+  await page.click('[data-testid="api-close"]');
+
   await page.screenshot({ path: "e2e/last-run.png" });
-  console.log("PASS: react app e2e — boot, demo board, sheet + filters, history, request log");
+  console.log("PASS: react app e2e — boot, demo board, sheet + filters, history, request log, api console");
   await browser.close();
-  preview.kill();
+  killPreview();
+  process.exit(0);
 } catch (e) {
   await page.screenshot({ path: "e2e/last-fail.png" }).catch(() => {});
   await fail(String(e));

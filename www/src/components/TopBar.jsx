@@ -6,7 +6,7 @@ import { registerLink } from "../broker/api.js";
 import { addPipe, deletePipe, startPipe } from "../state/pipes.js";
 import { GENERATORS, TENANT_RE, TYPES } from "../model.js";
 
-export default function TopBar({ health }) {
+export default function TopBar({ health, onApi }) {
   useTransport();
   const [busy, setBusy] = useState(false);
   const [tpl, setTpl] = useState(null); // template dialog text or null
@@ -47,6 +47,8 @@ export default function TopBar({ health }) {
         if (name == null) return;
         if (!addSpace(name.trim())) toast(`invalid name "${name}" — A-Za-z0-9 and - only`);
       }}>＋ space</button>
+      <button data-testid="btn-api" title="ETSI OpenAPI docs — try any NGSI-LD request against the in-tab broker"
+        onClick={onApi}>📖 API</button>
       <button onClick={() => setPipeDlg(true)}>＋ pipeline</button>
       <button onClick={() => setCsrDlg(true)} data-testid="btn-csr">＋ CSR</button>
       <button disabled={busy} data-testid="btn-reset"

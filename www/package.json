@@ -15,7 +15,8 @@
   "dependencies": {
     "@xyflow/react": "^12",
     "react": "^19",
-    "react-dom": "^19"
+    "react-dom": "^19",
+    "swagger-ui-dist": "^5.32.8"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6",

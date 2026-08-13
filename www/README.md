@@ -36,6 +36,10 @@ www/
 │   │   │                  # Exposes brokerFetch(), mode, onNotification(),
 │   │   │                  # and the request-log ring (every call: tenant,
 │   │   │                  # method, path, status — the 🛰 feature).
+│   │   ├── virtualhost.js # loopback.js's pattern one prefix further in:
+│   │   │                  # same-origin fetch to /ngsi-ld/* routes into
+│   │   │                  # brokerFetch — any client (Swagger UI, devtools
+│   │   │                  # console) talks to the in-tab broker like a server.
 │   │   └── api.js         # typed-ish NGSI-LD client: entities/CSRs/subs/
 │   │                      # temporal/types. The ONLY module that builds
 │   │                      # URLs. Origin attribution lives here too.
@@ -59,7 +63,14 @@ www/
 │       │                  # (local / per-peer); row click → History
 │       ├── History.jsx    # temporal chart for one attribute
 │       │                  # (GET /temporal/entities/{id}, lastN window)
-│       └── RequestLog.jsx # the 🛰 panel (ring buffer, toggleable)
+│       ├── RequestLog.jsx # the 🛰 panel (ring buffer, toggleable)
+│       └── ApiConsole.jsx # 📖 the ETSI CIM 009 OpenAPI 1.8.1 spec
+│                          # (public/openapi/, vendored from forge.etsi.org
+│                          # cim/ngsi-ld-openapi) in Swagger UI; "Execute"
+│                          # hits the in-tab broker via virtualhost.js.
+│                          # Lazy chunk. NOT RapiDoc — it hard-loops on the
+│                          # spec's recursive schemas; Models stay collapsed
+│                          # for the same reason.
 ├── test/                  # vitest: model invariants, demo idempotence,
 │                          # template round-trip, sheet filtering (RTL)
 └── e2e/smoke.mjs          # playwright-core against the BUILT app: boot,
@@ -115,6 +126,7 @@ client knows nothing about React; the vanilla `www/` page could adopt it.
 | **new:** whole-board mouse panning, wheel zoom, minimap | React Flow |
 | **new:** tenant spreadsheet with filters (text / type / origin) | this app |
 | **new:** temporal history chart per attribute | this app |
+| **new:** 📖 API console — ETSI OpenAPI docs, try any NGSI-LD request against the in-tab broker (Postman-in-browser) | this app |
 
 ## Commands
 
