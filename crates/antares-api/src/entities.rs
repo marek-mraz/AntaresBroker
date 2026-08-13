@@ -1430,26 +1430,41 @@ pub fn filter_entities_paged(
             })
         })
         .filter(|v| !v.is_empty());
+    // 5.7.2.4 split entities (p.202): the filters (q, geoquery, Scope query,
+    // Attributes) apply only AFTER remote parts and local information have
+    // been aggregated — so with federated candidates present the store must
+    // not drop (or pre-project) the LOCAL half of a split entity. The
+    // post-merge loop below applies them instead (`decided` is already
+    // false whenever `fed` is non-empty).
+    let split_agg = crate::federation::split_entities(params) && !fed.is_empty();
     let outcome = st.store.query_entities(
         tenant,
         &antares_sql::store::filter::EntityFilter {
             ids: ids.as_deref(),
             types: type_sel.as_deref(),
-            attrs: attr_filter.as_deref(),
-            q: q_ast.as_ref(),
-            scope_q: scope_q.map(String::as_str),
-            geo: geo_spec.as_ref(),
+            attrs: if split_agg {
+                None
+            } else {
+                attr_filter.as_deref()
+            },
+            q: if split_agg { None } else { q_ast.as_ref() },
+            scope_q: if split_agg {
+                None
+            } else {
+                scope_q.map(String::as_str)
+            },
+            geo: if split_agg { None } else { geo_spec.as_ref() },
             expand: &expand,
             page: page.map(|(offset, limit)| antares_sql::store::filter::Page {
                 offset: offset as i64,
                 limit: limit as i64,
             }),
-            keep_attrs: if geo_uncompiled {
+            keep_attrs: if geo_uncompiled || split_agg {
                 None
             } else {
                 keep_attrs.as_deref()
             },
-            drop_attrs: if geo_uncompiled {
+            drop_attrs: if geo_uncompiled || split_agg {
                 None
             } else {
                 drop_attrs.as_deref()

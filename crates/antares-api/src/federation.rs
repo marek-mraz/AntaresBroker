@@ -621,7 +621,7 @@ async fn read_body_capped(resp: reqwest::Response) -> Value {
 /// explicitly set, the default setting of the deployment allows split
 /// entities" — this deployment's default is OFF, so only the explicit flag
 /// engages the split branch.
-fn split_entities(params: &HashMap<String, String>) -> bool {
+pub(crate) fn split_entities(params: &HashMap<String, String>) -> bool {
     params.get("splitEntities").map(String::as_str) == Some("true")
 }
 
