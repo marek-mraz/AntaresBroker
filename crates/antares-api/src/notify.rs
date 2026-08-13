@@ -1661,11 +1661,7 @@ async fn deliver_as(
                         ri.push(("NGSILD-Snapshot".into(), sid.clone()));
                     }
                     let msg = build_message(&body, accept, Some(&link), &ri);
-                    Outbound::Mqtt(
-                        endpoint,
-                        params,
-                        serde_json::to_vec(&msg).unwrap_or_default(),
-                    )
+                    Outbound::Mqtt(endpoint, params, crate::negotiate::ordered_vec(&msg))
                 }
                 Err(e) => {
                     tracing::warn!("mqtt endpoint of subscription {sub_id} unusable: {e}");
@@ -1697,7 +1693,7 @@ async fn deliver_as(
         if let Some(sid) = &snapshot_id {
             req = req.header("NGSILD-Snapshot", sid.as_str());
         }
-        Outbound::Http(req, serde_json::to_vec(&body).unwrap_or_default())
+        Outbound::Http(req, crate::negotiate::ordered_vec(&body))
     };
     // Bookkeeping BEFORE the send (5.8.6/5.2.14.2: lastNotification is the
     // instant the notification is sent). The ETSI mock unblocks the test the

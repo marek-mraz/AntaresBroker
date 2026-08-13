@@ -68,6 +68,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "send_wrapper",
+ "serde",
  "serde_json",
  "sonic-rs",
  "tokio",

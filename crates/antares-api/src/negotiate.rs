@@ -225,7 +225,7 @@ pub fn respond_prefer(
                 (header::CONTENT_TYPE, "application/geo+json".to_owned()),
                 (header::LINK, link_header_value(ctx)),
             ],
-            axum::Json(payload),
+            ordered_vec(&payload),
         )
             .into_response();
         echo_tenant(tenant, &mut resp);
@@ -403,6 +403,45 @@ pub(crate) fn link_header_value(ctx: &Context) -> String {
 }
 
 /// Build a payload-carrying NGSI-LD response (6.3.6).
+/// Served-JSON key order (user request 2026-08-13): every object serializes
+/// `id` then `type` first, recursively (an attribute object leads with
+/// `"type": "Property"`, a GeoJSON Feature with `id`/`type` — the order the
+/// spec's own examples print). Cosmetic only: RFC 8259 objects are unordered
+/// and CIM 009 4.5.1 mandates presence, not position. Applied ONLY at egress
+/// (responses + notifications) — internal serialization (storage, temporal
+/// diff) stays byte-stable alphabetical and must not use this.
+pub(crate) struct SpecOrder<'a>(pub &'a Value);
+
+impl serde::Serialize for SpecOrder<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self.0 {
+            Value::Object(m) => {
+                let mut map = s.serialize_map(Some(m.len()))?;
+                for k in ["id", "type"] {
+                    if let Some(v) = m.get(k) {
+                        map.serialize_entry(k, &SpecOrder(v))?;
+                    }
+                }
+                for (k, v) in m {
+                    if k != "id" && k != "type" {
+                        map.serialize_entry(k, &SpecOrder(v))?;
+                    }
+                }
+                map.end()
+            }
+            Value::Array(a) => s.collect_seq(a.iter().map(SpecOrder)),
+            other => other.serialize(s),
+        }
+    }
+}
+
+/// Serialize a response/notification payload in spec key order
+/// (serializing a `Value` cannot fail).
+pub(crate) fn ordered_vec(v: &Value) -> Vec<u8> {
+    serde_json::to_vec(&SpecOrder(v)).unwrap_or_default()
+}
+
 pub fn respond(
     status: StatusCode,
     payload: Value,
@@ -418,7 +457,7 @@ pub fn respond(
                     (header::CONTENT_TYPE, "application/json".to_owned()),
                     (header::LINK, link_header_value(ctx)),
                 ],
-                axum::Json(payload),
+                ordered_vec(&payload),
             )
                 .into_response();
             r.headers_mut().remove(header::CONTENT_LENGTH);
@@ -429,7 +468,7 @@ pub fn respond(
             (
                 status,
                 [(header::CONTENT_TYPE, "application/ld+json".to_owned())],
-                axum::Json(with_ctx),
+                ordered_vec(&with_ctx),
             )
                 .into_response()
         }
@@ -448,7 +487,7 @@ pub fn respond(
                     (header::CONTENT_TYPE, "application/geo+json".to_owned()),
                     (header::LINK, link_header_value(ctx)),
                 ],
-                axum::Json(with_ctx),
+                ordered_vec(&with_ctx),
             )
                 .into_response()
         }
@@ -487,7 +526,7 @@ pub fn respond_list(
             };
             let mut buf = if i == 0 { Vec::new() } else { vec![b','] };
             // serializing a Value into a Vec cannot fail
-            let _ = serde_json::to_writer(&mut buf, &doc);
+            let _ = serde_json::to_writer(&mut buf, &SpecOrder(&doc));
             axum::body::Bytes::from(buf)
         }))
         .chain(std::iter::once(axum::body::Bytes::from_static(b"]")));
