@@ -298,3 +298,40 @@ evict and notify, which the 5.5.15 MAY does not require.
 
 **Action:** raise upstream with the other V1.9.1 doubts; no fork TP change
 needed (the official suite has no Snapshot coverage — 5161_01 is ours).
+
+## 2026-08-13 — CI matrix (6): 5.9.2.4 registration-vs-entity conflicts vs official dist-ops setups (fork fixed)
+
+**TPs:** D005_01_exc, D006_01/02_red, D009_01_exc, D013_01/02_red,
+D014_01/02_exc+red, D015_01_exc+red, D016_01_red, 436_02 (fork TP),
+IOP RetrieveEntity IOP_CNF_04_02 — plus cascade victims D001_01/02/03_03_inc
+and IOP QueryEntities "Via POST" (bare-string entities). 65 failures across
+file/postgres/timescale, deterministic.
+
+**Spec (verified verbatim, p.227-228):** 5.9.2.4 — exclusive: Conflict if an
+Entity with a registered id already carries a registered Attribute; redirect:
+Conflict if ANY existing Entity matches; auxiliary: operations limited to
+retrieveOps/retrieveEntity/queryEntity else BadRequestData. The official TPs
+(since_v1.6.1) create their entities BEFORE registering exclusive/redirect over
+them, which a V1.9.1-conformant broker must refuse.
+
+**Broker:** correct (`csource::check_entity_conflict`, c8ec8ea). The
+DistributedOperations tree was not re-run locally after c8ec8ea — the 2026-08-12
+resource-binding sweep list omitted it, which is how this reached CI first.
+
+**Action taken (fork):** setup order swapped in the genuine violators
+(registration first, then `local=true` creates — entity creation carries no
+5.9.2.4 restriction); `Purge Entities type=Vehicle local=true` guard in the
+idPattern-scoped `_red` setups (residual Vehicles from earlier PASSING tests
+legally 409 those registrations); 436_02 aux fixture → retrieve-ops (negative
+already pinned by 5922_01); IOP_CNF_01_02 POST query sends EntitySelector
+objects per 5.2.33 instead of bare id strings; 5243_01_05 rewritten — collation
+is HONOURED since the ICU work (4171ff4), so de-u-co-phonebk now asserts 200 +
+"Ähre" before "Zebra" (codepoint order proven to flip it), and a new 5243_01_06
+pins the 400 for an unparseable collation tag. Local runs: 36/36 + 17/17 green.
+Multi-broker IOP validation stays CI-only. To be raised upstream with the other
+V1.9.1 doubts (the D0xx setups predate the 5.9.2.4 conflict rules).
+
+**Still open from matrix (6):** postgres 5814_01_01 Wait-For-Request timeout
+(distsub on the new pg DistSub doc-kind tables — needs a docker-pg repro) and
+timescale 053_07_01 (ImplicitlyCreated @context listed as Cached — suspected
+in-process context-cache state carried across suites in the serial cell).
