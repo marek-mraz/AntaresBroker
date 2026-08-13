@@ -13,7 +13,53 @@ on temporal queries but never applied locally** — 5.7.4.4 S4 is
 unimplemented while the ledger says `implemented`. Everything else checked
 is either genuinely implemented (with test evidence) or a *documented*
 performance ceiling with the arbiter guaranteeing correctness — slower,
-never wrong. No case was found where a wrong answer can be served.
+never wrong. No case was found where a wrong answer can be served —
+except through the scopeQ gap itself.
+
+## 0. Discoveries (chronological, incl. the spec-verification pass)
+
+1. **scopeQ silently ignored on local temporal queries** (5.7.4.4 S4,
+   p.209). Reproduced: `scopeQ=/X` returns an `/A/B`-scoped entity. The
+   parameter is whitelisted (no 400) and *forwarded* to remote brokers by
+   `fed_query_temporal`, which made the path look implemented. Ledger
+   `5.7.4.4: implemented` is overstated.
+2. **The gap outlives the query via EntityMaps** (p.257): the local
+   EntityMap for a temporal query is "created based on S4" — a map built
+   from a scope-filtered query bakes in wrongly-included entities and
+   keeps serving them for the map's lifetime on map-pinned requests.
+3. **The split-entities arm must re-apply scope as S7** (p.210), and
+   Table 5.2.23's `splitEntities` row (p.126) independently lists `scopeQ`
+   among the filters that "have to be taken into account" after
+   aggregation — the fix has a second arm.
+4. **The naive fix would have been wrong** — the decisive verification
+   find: 4.18 (p.98) makes temporal scope REIFIED and VALIDITY-BOUNDED
+   ("a given Scope is considered valid from the time it has been set
+   until the time it has been explicitly removed", createdAt/modifiedAt/
+   deletedAt sub-Properties, at most one scope property). S4 matching
+   over a temporal doc must therefore respect scope validity over time —
+   a plain current-state `scope_matches(doc)` call is not enough. Annex
+   C.5.16 holds the worked example to implement against.
+5. **Cleared of suspicion:** subscription-side scopeQ IS applied
+   (`notify.rs:608` in conditions_match) — the silent-ignore is confined
+   to the local temporal query path. Every other whitelisted temporal
+   parameter is genuinely applied (§2 table).
+6. **The scope-matching arbiter is already spec-validated:** the 4.19
+   grammar (`+`, `#`, `/#`, and/or, comma-or) is verbatim-confirmed and
+   `scope_matches`' unit tests (antares-api lib.rs ~3103-3124) mirror the
+   spec's own examples one-for-one — reuse it for value matching; only
+   the validity dimension is new.
+7. **lastN doubt pinned verbatim** (Table 5.2.21-1, p.123): "Only the
+   last n instances, per Attribute, per Entity (under the specified time
+   interval) shall be retrieved" — window-scoped, silent on ordering vs
+   the values filter → legitimate upstream raise; withholding the lastN
+   pushdown under q/geo remains the correct posture meanwhile.
+8. **String ordering in q is cheaper to compile than assessed** (p.89):
+   RFC 8259 §8.3 code-unit comparison is the SHALL, UCA only a SHOULD —
+   the broker's byte-compare arbiter is the SHALL-compliant behavior, so
+   a `COLLATE "C"` SQL leaf can be *exact*, not merely superset.
+9. **Why the audit missed the gap:** the official 021 TP set has zero
+   scopeQ-on-temporal cases — the exact "test-suite-as-oracle blind spot"
+   claude.md rule 2 warns about; the fix ships with TP `5744_03`.
 
 ---
 
@@ -43,13 +89,16 @@ carries `status: implemented` — **overstated** until fixed.
 **Affected endpoints:** `GET /temporal/entities` and the POST query
 operation that routes through the same path.
 
-**Proposed fix (small, matches the entities path):** in the S-loop, after
-the geo check, apply `crate::scope_matches(sq, &doc)` — S4 note: scope is
-judged on Entity Scope *instances*; the temporal doc keeps instance-shaped
-scope arrays (`scope_instances` handling already exists in the renderer,
-temporal.rs ~450). Add TP `5744_03` (scopeQ match / non-match / `/#` /
-alternatives, on temporal + windowed scope instances), flip the ledger
-note, one commit `5.7.4.4:`.
+**Proposed fix (REVISED after the spec-verification pass — see
+discoveries 2–4):** a validity-aware scope check after the geo check in
+the S-loop (4.18: a scope is valid from set until explicitly removed —
+implement against annex C.5.16's worked example; reuse `scope_matches`
+for the value matching, the temporal doc keeps instance-shaped scope
+arrays via `scope_instances`, temporal.rs ~450), PLUS the S7
+re-application on the split-entities aggregate arm, PLUS EntityMap-content
+assertions (the map is "created based on S4", p.257). Add TP `5744_03`
+(scopeQ match / non-match / `/#` / alternatives / validity over time),
+flip the ledger note, one commit `5.7.4.4:`.
 
 **Not fixed in this analysis run** — per the standing measure-vs-modify
 rule this document is the deliverable; say the word and it gets built.
@@ -124,6 +173,11 @@ each leaves performance on the table, with the upgrade path named:
   actually exercise the SQL path.
 
 ## 5. Task checklist (proposed order)
+
+> SUPERSEDED: the authoritative, spec-verified checklist now lives in
+> `tasks.md` ("Temporal q= follow-up 2026-08-13") with per-item clause
+> citations and the 1b/1c/1d sub-items from the verification pass. The
+> list below is the original, kept for the record.
 
 - [ ] 1. `5.7.4.4:` implement S4 scopeQ on the temporal S-loop +
       TP 5744_03 + ledger note fix (the only *conformance* item).
