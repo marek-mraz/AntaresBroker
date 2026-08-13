@@ -1240,6 +1240,20 @@ decision contradicts any item; the S4 check SURFACED two aggravations
             EntityMap built from a scope-filtered temporal query currently
             bakes in wrongly-included entities; assert map contents in the
             fix's tests.
+      - [ ] 1d. 4.18 (p.98): in the TEMPORAL representation scope is
+            REIFIED (createdAt/modifiedAt/deletedAt sub-Properties, at most
+            one scope property, values merged on distributed merge) and "a
+            given Scope is considered valid from the time it has been set
+            until the time it has been explicitly removed" — so S4 matching
+            over a temporal doc is validity-aware, not a plain
+            current-state check; read annex C.5.16's worked example before
+            implementing. The 4.19 grammar (+, #, /#, and/or, comma-or) is
+            verbatim-confirmed and the existing scope_matches arbiter's
+            unit tests (lib.rs ~3103-3124) mirror the spec's own examples
+            — reuse it for the value matching, add the validity dimension.
+      - VERIFIED not-a-gap: subscription-side scopeQ IS applied
+        (notify.rs:608 scope_matches in conditions_match) — the
+        silent-ignore is temporal-query-local only.
 - [ ] 2. Watch the next CI 4×8 matrix: prefilter commits (b37aefb) + TPs
       5744_01/02 must be green on pg/timescale — those cells are where the
       SQL prefilter path actually executes (rule-8 local runs are
@@ -1254,20 +1268,25 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       prefilter is superset-only; limit=1 with q still materializes all
       candidates).
 - [ ] 5. Raise the lastN-vs-values-filter ordering doubt upstream
-      (docs/upstream/etsi-raises.md): p.208 defines lastN "within the
-      concerned temporal interval"; p.209 S2 checks q against "ALL the
-      Attribute instances resulting from the initial filtering performed by
-      the temporal query" — whether lastN is part of that "initial
-      filtering" is unspecified. Palace: no prior decision. Until resolved
-      the broker withholds the lastN cap when q/geo present
+      (docs/upstream/etsi-raises.md): Table 5.2.21-1 (p.123, verbatim):
+      lastN = "Only the last n instances, per Attribute, per Entity (under
+      the specified time interval) shall be retrieved" — window-scoped but
+      SILENT on ordering vs the values filter; p.209 S2 checks q against
+      "ALL the Attribute instances resulting from the initial filtering
+      performed by the temporal query" — whether lastN is part of that
+      "initial filtering" is unspecified. Palace: no prior decision. Until
+      resolved the broker withholds the lastN cap when q/geo present
       (behavior-preserving, per-attr lastN applied API-side).
 - [ ] 6. Optional compiler extensions (each widens narrowing, never
       correctness): [lang] brackets (p.90 semantics are exact:
       languageMap."en" jsonpath is expressible), != (p.91/92
       datatype-mismatch + array universal quantification must be
-      reproduced exactly or left refused), string ordering (needs a
-      collation strategy byte-identical to qeval::compare — COLLATE "C"),
-      deletedAt column fill in decompose for the column bound.
+      reproduced exactly or left refused), string ordering (EASIER than
+      first assessed: p.89 makes RFC 8259 §8.3 code-unit comparison the
+      SHALL and UCA only a SHOULD — qeval's byte compare is the
+      SHALL-compliant arbiter, so a COLLATE "C" SQL leaf can be exact, not
+      just superset), deletedAt column fill in decompose for the column
+      bound.
 - [ ] 7. Bracket-less q on a LanguageProperty is UNDEFINED in 4.9 (p.90
       defines only [lang] and [*] forms) — log in
       testsuite-doubts/etsi-raises if a TP is ever needed there; today the
