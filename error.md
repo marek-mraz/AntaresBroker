@@ -335,3 +335,22 @@ V1.9.1 doubts (the D0xx setups predate the 5.9.2.4 conflict rules).
 (distsub on the new pg DistSub doc-kind tables — needs a docker-pg repro) and
 timescale 053_07_01 (ImplicitlyCreated @context listed as Cached — suspected
 in-process context-cache state carried across suites in the serial cell).
+
+---
+
+## 2026-08-13 — [spec doubt] bracket-less q on a LanguageProperty is undefined (4.9)
+
+Clause 4.9 (p. 90) defines the values-filter semantics for a
+LanguageProperty ONLY for the bracketed forms `attr[lang]` and `attr[*]`
+— a bracket-less `attr=="hi"` against a LanguageProperty target has no
+defined behaviour (the Property arm speaks of "value", which a
+LanguageProperty does not have; languageMap is not a value). The broker's
+in-memory evaluator and the SQL prefilter leaf both answer "no match",
+and they agree — but that agreement is pinned only by the self-grounding
+parity battery (`pg_query_parity.rs`, expectation derived from `eval_q`
+itself), not by a spec-grounded TP: none can be written until the clause
+defines the case. Logged here so a future TP for this surface starts
+from the doubt, not from our implementation's behaviour. Candidate
+upstream ask: one sentence in 4.9, either "shall not match" (our
+behaviour, symmetric with the Relationship/ordering mismatch rules of
+p. 91-92) or an implicit `[*]` reading.
