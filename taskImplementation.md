@@ -210,12 +210,12 @@ with commit hash + green-run evidence, `python3 dev/spec.py check` green.
       TP 5744_05 3/3, tree 141/141.
 - [x] 5. DONE 2026-08-13, commit 5d1c25a — raise #6 drafted ready-to-file
       in docs/upstream/etsi-raises.md (filing is user-side).
-- [ ] 6. Compiler extensions (in progress 2026-08-13): string-ordering
-      leaves (COLLATE "C" per the p.89 code-unit SHALL), `[lang]`/`[*]`
-      brackets (languageMap wildcard, superset), `!=` as NOT-of-Eq
-      (universal-over-arrays + mismatch-matches fall out of the NOT form),
-      deletedAt column fill. Doubt for the bracket-less LP form logged
-      (item 7, commits 8175693 + fork 952e61e).
+- [x] 6. DONE 2026-08-13, commit 87a3e06 (fork TP 5744_06 = dab0838) —
+      string-ordering leaves (COLLATE "C" per the p.89 code-unit SHALL),
+      [lang]/[*] brackets (languageMap wildcard, superset), != as
+      NOT-of-Eq, deleted_at column fill + NULL-tolerant bound; red-first
+      parity tightness rows, TP 5744_06 8/8, tree 149/149. Bracket-less LP
+      doubt logged separately (commits 8175693 + fork 952e61e).
 
 Items 3–6 are performance/robustness; item 1 is the only place the broker
 currently gives a spec-wrong answer.

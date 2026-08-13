@@ -1311,7 +1311,7 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       "initial filtering" is unspecified. Palace: no prior decision. Until
       resolved the broker withholds the lastN cap when q/geo present
       (behavior-preserving, per-attr lastN applied API-side).
-- [x] 6. **DONE 2026-08-13 (commit below, fork TP 5744_06 = dab0838):
+- [x] 6. **DONE 2026-08-13, commit 87a3e06 (fork TP 5744_06 = dab0838):
       instance_predicate() extension leaves — [lang]/[*] → languageMap
       wildcard jsonpath (case-insensitive BCP 47 tag matching stays in
       memory, so ANY-language superset), != → NOT of the existential-Eq
