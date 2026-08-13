@@ -1,0 +1,156 @@
+name: strict
+
+# The scheduled strictness wall — checks too slow (or too nightly-only) for
+# the per-push gate in ci.yml:
+#
+#   DAILY  02:41 UTC : doc warnings + unused deps, fuzz-crash regression
+#                      replay (-runs=0), workspace coverage floor
+#   WEEKLY Sun 03:41 : ThreadSanitizer over the workspace tests, Miri over
+#                      the pure parsing crates
+#
+# workflow_dispatch runs everything. Scheduled workflows only run on the
+# default branch, so this always tests master.
+on:
+  schedule:
+    - cron: "41 2 * * *" # daily — hygiene + fuzz-regression + coverage
+    - cron: "41 3 * * 0" # weekly Sunday — tsan + miri
+  workflow_dispatch:
+
+jobs:
+  hygiene:
+    # Broken rustdoc links / malformed clause citations fail here instead of
+    # rotting; cargo-machete flags dependencies nothing uses (each one is
+    # advisory surface cargo-deny scans forever).
+    name: Doc warnings + unused deps (daily)
+    if: github.event.schedule != '41 3 * * 0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      # False positive (macro-only dep)? Whitelist it via
+      # [package.metadata.cargo-machete] ignored — never delete this step.
+      - run: cargo machete
+
+  fuzz-regression:
+    # Every crash fuzz.yml ever found is committed to
+    # fuzz/regressions/<target>/ alongside its fix; this replays them all
+    # (-runs=0 = execute the corpus, no new fuzzing) so a fixed crash can
+    # never come back between weekly fuzz runs.
+    name: Fuzz-crash regression replay (daily)
+    if: github.event.schedule != '41 3 * * 0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: Replay committed crash inputs
+        run: |
+          for t in parse_q scope_q geo_params expand_entity; do
+            cargo +nightly fuzz run "$t" "fuzz/regressions/$t" -- -runs=0
+          done
+
+  coverage:
+    # Line-coverage floor over the same live-service setup as ci.yml (so the
+    # pg/mqtt/nats integration tests count instead of skipping vacuously).
+    # The floor only ever ratchets UP: after a green run, raise it to just
+    # under the measured number. Never lower it to make a red run pass.
+    name: Coverage floor (daily)
+    if: github.event.schedule != '41 3 * * 0'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15432/antares
+      CARGO_TERM_COLOR: always
+    services:
+      postgis:
+        image: ghcr.io/baosystems/postgis:17-3.5
+        env:
+          POSTGRES_USER: antares
+          POSTGRES_PASSWORD: antares
+          POSTGRES_DB: antares
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U antares"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Start mosquitto for the MQTT e2e
+        run: |
+          sudo apt-get install -y -qq mosquitto
+          printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
+          sudo systemctl restart mosquitto
+          echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
+      - name: Start NATS (JetStream) for the bus tests
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2-alpine -js
+          echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Initial floor 60 = deliberately under the first measured number;
+      # ratchet it up once the daily run reports the real figure.
+      - run: cargo llvm-cov --workspace --fail-under-lines 60
+      - name: Coverage summary
+        if: always()
+        run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY" || true
+
+  tsan:
+    # ThreadSanitizer over the workspace tests — the machine check for the
+    # logical races rustc cannot see (lock ordering, RMW gaps, racy
+    # channel/map use in notify/federation fan-out). -Zbuild-std so std
+    # itself is instrumented (uninstrumented std = false positives).
+    # --exclude antares-broker: its jemalloc global allocator and TSan's
+    # interceptors do not coexist; the in-process race surface lives in
+    # antares-api/bus/notifier anyway. --tests skips doctests (TSan flags
+    # don't reach rustdoc's test binaries).
+    name: ThreadSanitizer (weekly)
+    if: github.event.schedule != '41 2 * * *'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: "-Zsanitizer=thread"
+      RUST_BACKTRACE: 1
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo +nightly test -Zbuild-std
+          --target aarch64-unknown-linux-gnu
+          --workspace --exclude antares-broker --tests
+
+  miri:
+    # Miri interprets the tests of the pure (no-I/O, no-tokio) parsing crates
+    # and aborts on any undefined behaviour — including in dependency code on
+    # our call paths. -Zmiri-disable-isolation permits clock reads so
+    # time-touching tests run instead of erroring out.
+    name: Miri UB check (weekly)
+    if: github.event.schedule != '41 2 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MIRIFLAGS: "-Zmiri-disable-isolation"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +nightly miri test -p antares-model -p antares-ql -p antares-matcher
