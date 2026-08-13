@@ -172,7 +172,32 @@ each leaves performance on the table, with the upgrade path named:
   commits pending Mac-side) — the pg/timescale cells are where 5744_01/02
   actually exercise the SQL path.
 
-## 5. Task checklist (proposed order)
+## 5. The /goal prompt — copy-paste this to run the follow-up to completion
+
+```
+/goal Work the "Temporal q= follow-up 2026-08-13" checklist in tasks.md
+top-to-bottom until every sandbox-side checkbox is [x] with evidence
+(commit hash + green run) recorded next to it. One item = one commit
+(clause-prefixed where clause work), each with full claude.md §0.3
+discipline: MemPalace first, TEST-FIRST red run as the fallibility proof,
+negative assertions (assert what must NOT be in the response), rule-8
+local Robot validation, ledger + palace updated. Use ponytail.
+Item 1 is the conformance fix and goes first, ALL FOUR ARMS:
+1a validity-aware scopeQ (4.18/C.5.16 — scope valid from set until
+   explicitly removed, not a current-state check) in the 5.7.4.4 S-loop,
+1b S7 re-application on the split-entities aggregate arm (p.210 +
+   Table 5.2.23), 1c EntityMap-content assertions (map "created based on
+   S4", p.257), 1d TP 5744_03 (match / non-match / '/#' / alternatives /
+   validity-over-time) — then flip the docs/spec/5/5.7.4.4.md note, one
+   commit `5.7.4.4:`. Items 3-6 follow in checklist order; the superset
+   contract stays inviolable (SQL may over-return, never under-return —
+   parity battery must stay green). Item 2 (CI watch) and Mac-side pushes
+   are NOT completable in the sandbox: list them for the user at the end
+   instead of blocking on them. DONE = every sandbox-side checkbox [x]
+   with evidence in tasks.md and `python3 dev/spec.py check` green.
+```
+
+## 6. Task checklist (proposed order)
 
 > SUPERSEDED: the authoritative, spec-verified checklist now lives in
 > `tasks.md` ("Temporal q= follow-up 2026-08-13") with per-item clause
