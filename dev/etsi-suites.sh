@@ -1,6 +1,6 @@
 # Sourced by dev/etsi-pipeline.sh and dev/etsi-run.sh — the ONE definition of
 # which serial suites exist (was duplicated in both scripts).
-SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/Provision ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
+SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/EntityMap ContextInformation/Provision ContextInformation/Snapshot ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
 
 # Completeness guard: a suite dir the runner doesn't know is a hard error, so
 # a fork update can never add tests that silently don't run. Two roots:
