@@ -177,6 +177,9 @@ CI enforcement (+ spec.py next/burndown).
   result retry with `/usr/bin/grep -a`.
 - No `ssh` in the sandbox: pushes to `git@github.com:` remotes must happen
   Mac-side.
+- The Mac-side auto-pusher also COMMITS uncommitted working-tree changes
+  with its own generic message (seen 2026-08-13: c7cc448). Commit promptly
+  after editing, or your change ships without its rationale.
 
 ## 5. Where things live
 
