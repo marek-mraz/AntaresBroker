@@ -1216,3 +1216,60 @@ Definition of done, all six measured rather than asserted:
       ~/mempalace-backups/ngsi-ld-handfiled-2026-08-12.json; mine re-filed
       54 changed files (2934 drawers); 4 decision chunks absorbed into the
       mined wing (content preserved in backup + mined copies).
+
+## Temporal q= follow-up 2026-08-13 (spec+palace-verified checklist)
+
+Source analysis: /workspace/taskImplementation.md (this list supersedes its
+§5). Every item re-checked against the clause text (MemPalace
+gs_cim009v010901p.pdf pages cited) and against palace decisions — no prior
+decision contradicts any item; the S4 check SURFACED two aggravations
+(items 1b/1c).
+
+- [ ] 1. **5.7.4.4 S4: scopeQ ignored on local temporal queries — the only
+      conformance bug.** p.209: "If the Scope query is present, from S3,
+      select those Entities whose Entity Scope instances match the Scope
+      query (4.19)". Reproduced: scopeQ=/X returns an /A/B-scoped entity
+      (memory broker, 2026-08-13). Ledger 5.7.4.4 `implemented` is
+      overstated until fixed. Fix: scope_matches after the geo check in the
+      S-loop; TP 5744_03 (match, non-match, /#, alternatives, windowed
+      scope instances); ledger note; commit `5.7.4.4:`.
+      - [ ] 1b. Split-entities arm re-applies scope as **S7** (p.210) —
+            when the 5.8.6 merge block runs, scope must filter the
+            AGGREGATED set too; cover in the same fix.
+      - [ ] 1c. p.257: the local EntityMap is "created based on S4" — an
+            EntityMap built from a scope-filtered temporal query currently
+            bakes in wrongly-included entities; assert map contents in the
+            fix's tests.
+- [ ] 2. Watch the next CI 4×8 matrix: prefilter commits (b37aefb) + TPs
+      5744_01/02 must be green on pg/timescale — those cells are where the
+      SQL prefilter path actually executes (rule-8 local runs are
+      memory-arm only).
+- [ ] 3. Geo prefilter on attr_instances.geo_value (perf, not
+      conformance): S3 (p.209) judges geo on windowed GeoProperty
+      instances, so a windowed EXISTS with a PostGIS predicate slots into
+      the existing qprefilter framework; verdict stays with
+      GeoQuery::matches (superset contract as for q).
+- [ ] 4. Exactness flag on compile::qprefilter → SQL entity-paging when
+      every leaf compiled (today paging is withheld with q/geo because the
+      prefilter is superset-only; limit=1 with q still materializes all
+      candidates).
+- [ ] 5. Raise the lastN-vs-values-filter ordering doubt upstream
+      (docs/upstream/etsi-raises.md): p.208 defines lastN "within the
+      concerned temporal interval"; p.209 S2 checks q against "ALL the
+      Attribute instances resulting from the initial filtering performed by
+      the temporal query" — whether lastN is part of that "initial
+      filtering" is unspecified. Palace: no prior decision. Until resolved
+      the broker withholds the lastN cap when q/geo present
+      (behavior-preserving, per-attr lastN applied API-side).
+- [ ] 6. Optional compiler extensions (each widens narrowing, never
+      correctness): [lang] brackets (p.90 semantics are exact:
+      languageMap."en" jsonpath is expressible), != (p.91/92
+      datatype-mismatch + array universal quantification must be
+      reproduced exactly or left refused), string ordering (needs a
+      collation strategy byte-identical to qeval::compare — COLLATE "C"),
+      deletedAt column fill in decompose for the column bound.
+- [ ] 7. Bracket-less q on a LanguageProperty is UNDEFINED in 4.9 (p.90
+      defines only [lang] and [*] forms) — log in
+      testsuite-doubts/etsi-raises if a TP is ever needed there; today the
+      broker's eval and the SQL leaf agree (no match), asserted only by the
+      self-grounding parity battery.
