@@ -24,6 +24,7 @@ TTL_SECS = int(os.environ.get("TTL_SECS", "180"))
 # temporal history ATTR_TTL_SECS after ingest (rolling window, no cron).
 ATTR_TTL_SECS = int(os.environ.get("ATTR_TTL_SECS", "600"))
 FLUSH_MS = int(os.environ.get("FLUSH_MS", "1000"))
+BATCH_LIMIT = int(os.environ.get("BATCH_LIMIT", "1000"))
 
 pending = {}  # entity id -> entity doc (latest wins)
 lock = threading.Lock()
@@ -87,26 +88,29 @@ def flusher():
             for v in e.values():
                 if isinstance(v, dict) and "type" in v:
                     v["expiresAt"] = attr_expires
-        t0 = time.monotonic()
-        try:
-            r = sess.post(f"{BROKER}/entityOperations/upsert?options=update",
-                          json=batch,
-                          headers={"Content-Type": "application/json"},
-                          timeout=30)
-            ms = (time.monotonic() - t0) * 1000
-            stats["batches"] += 1
-            stats["lat_ms"].append(ms)
-            if r.status_code in (201, 204, 207):
-                stats["upserted"] += len(batch)
-                if r.status_code == 207:
+        # chunk at the broker's batch cap (ANTARES_MAX_BATCH_ITEMS)
+        for lo in range(0, len(batch), BATCH_LIMIT):
+            chunk = batch[lo:lo + BATCH_LIMIT]
+            t0 = time.monotonic()
+            try:
+                r = sess.post(f"{BROKER}/entityOperations/upsert?options=update",
+                              json=chunk,
+                              headers={"Content-Type": "application/json"},
+                              timeout=30)
+                ms = (time.monotonic() - t0) * 1000
+                stats["batches"] += 1
+                stats["lat_ms"].append(ms)
+                if r.status_code in (201, 204, 207):
+                    stats["upserted"] += len(chunk)
+                    if r.status_code == 207:
+                        stats["http_err"] += 1
+                        print(f"207 partial: {r.text[:300]}")
+                else:
                     stats["http_err"] += 1
-                    print(f"207 partial: {r.text[:300]}")
-            else:
+                    print(f"HTTP {r.status_code}: {r.text[:300]}")
+            except Exception as exc:
                 stats["http_err"] += 1
-                print(f"HTTP {r.status_code}: {r.text[:300]}")
-        except Exception as exc:
-            stats["http_err"] += 1
-            print(f"upsert failed: {exc}")
+                print(f"upsert failed: {exc}")
 
 
 def reporter():

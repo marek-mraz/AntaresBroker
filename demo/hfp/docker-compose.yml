@@ -30,6 +30,7 @@ services:
       ANTARES_SWEEP_SECS: "10"        # 4.22 GC flush every 10 s
       ANTARES_TELEMETRY: "1"          # /q/metrics Prometheus render
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"   # allow notification delivery to in-network listeners
+      ANTARES_MAX_BATCH_ITEMS: "5000"        # full-fleet 1s flush in one batch (default 1000)
       RUST_LOG: info
     ports:
       - "42010:9090"
@@ -46,5 +47,6 @@ services:
       TTL_SECS: "180"                 # entity expiresAt = now + 3 min
       ATTR_TTL_SECS: "600"            # attribute expiresAt = now + 10 min (rolling history window)
       FLUSH_MS: "1000"
+      BATCH_LIMIT: "5000"             # matches ANTARES_MAX_BATCH_ITEMS
     depends_on:
       - antares

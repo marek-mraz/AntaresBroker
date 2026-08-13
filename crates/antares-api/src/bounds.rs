@@ -17,7 +17,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // → bare 413 (6.3.4)
 pub const MAX_URI_BYTES: usize = 8 * 1024; // → bare 414
 pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData (§16.3)
-pub const MAX_BATCH_ITEMS: usize = 1_000; // → 400 BadRequestData
+                                      // → 400 BadRequestData. Deployment knob (ANTARES_MAX_BATCH_ITEMS): the
+                                      // spec sets no batch ceiling — 1000 is this broker's DoS-bounds default,
+                                      // raised where a trusted producer legitimately batches larger (e.g. a
+                                      // full-fleet upsert). Read once at first use.
+pub static MAX_BATCH_ITEMS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_MAX_BATCH_ITEMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1_000)
+});
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
@@ -36,7 +46,7 @@ impl LimitStats {
             "maxBodyBytes": MAX_BODY_BYTES,
             "maxUriBytes": MAX_URI_BYTES,
             "maxJsonDepth": MAX_JSON_DEPTH,
-            "maxBatchItems": MAX_BATCH_ITEMS,
+            "maxBatchItems": *MAX_BATCH_ITEMS,
             "maxJoinLevel": MAX_JOIN_LEVEL,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,

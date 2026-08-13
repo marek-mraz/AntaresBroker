@@ -35,6 +35,9 @@ const KNOWN_KEYS: &[&str] = &[
     // 4.22 GC interval (memory/file arm); default 900 s, the ETSI stack runs
     // at 2 s so the transient TPs (422_01) exercise the sweep itself.
     "ANTARES_SWEEP_SECS",
+    // I2 batch entity-count cap (§16.3); default 1000 — raised where a
+    // trusted producer legitimately batches larger (the spec sets no ceiling).
+    "ANTARES_MAX_BATCH_ITEMS",
     // K1 drain: the LB notice window, and the ceiling on waiting for
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",

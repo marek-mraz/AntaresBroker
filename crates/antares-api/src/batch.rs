@@ -53,11 +53,11 @@ async fn parse_batch(
         );
     }
     // I2: batch entity count cap (§16.3)
-    if items.len() > crate::bounds::MAX_BATCH_ITEMS {
+    if items.len() > *crate::bounds::MAX_BATCH_ITEMS {
         return Err(NgsiError::BadRequestData(format!(
             "batch of {} exceeds the {}-entity limit",
             items.len(),
-            crate::bounds::MAX_BATCH_ITEMS
+            *crate::bounds::MAX_BATCH_ITEMS
         ))
         .into());
     }

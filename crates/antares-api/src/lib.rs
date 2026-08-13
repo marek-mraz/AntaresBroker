@@ -1448,7 +1448,7 @@ mod tests {
             .ends_with("TooManyResults"));
 
         // batch above the item cap → 400
-        let big: Vec<serde_json::Value> = (0..bounds::MAX_BATCH_ITEMS + 1)
+        let big: Vec<serde_json::Value> = (0..*bounds::MAX_BATCH_ITEMS + 1)
             .map(|i| serde_json::json!({"id": format!("urn:b:{i}"), "type": "T"}))
             .collect();
         let resp = app
