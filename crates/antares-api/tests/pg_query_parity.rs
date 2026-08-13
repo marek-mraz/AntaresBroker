@@ -597,7 +597,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
                     arr.retain(|i| {
                         i.get("observedAt")
                             .and_then(Value::as_str)
-                            .is_some_and(|s| s >= T0 && s < T1)
+                            .is_some_and(|s| (T0..T1).contains(&s))
                     });
                 }
             }
