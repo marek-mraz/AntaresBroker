@@ -1067,6 +1067,7 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
 
 /// Federated retrieve: internal docs from every matching registration,
 /// (aux, doc) pairs so callers can order the merge.
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn fed_retrieve(
     st: &AppState,
     tenant: &TenantId,

@@ -463,7 +463,6 @@ async fn fill_snapshot(st: &AppState, tenant: &TenantId, id: &str) {
         }
         tq_details.push(detail(r));
     }
-    drop(detail);
     if copied == 0 {
         materialize_tenant(st, &synth);
     }

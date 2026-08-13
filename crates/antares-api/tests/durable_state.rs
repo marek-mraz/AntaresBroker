@@ -3,6 +3,7 @@
 //! (Kind::Snapshot / Kind::EntityMap / Kind::DistSub) — reopening a
 //! file-mode store serves them again (pg/timescale get the same via the
 //! shared doc-kind path, exercised by CI).
+#![allow(clippy::unwrap_used)]
 
 use antares_api::AppState;
 use antares_sql::store::any::AnyStore;

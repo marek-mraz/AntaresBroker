@@ -3,6 +3,7 @@
 //! 5.2.41 Snapshot data type gates, background query execution into an
 //! isolated copy, NGSILD-Snapshot-scoped Core/Temporal operations, and the
 //! 5.3.4 SnapshotNotification.
+#![allow(clippy::unwrap_used)]
 
 use antares_api::AppState;
 use axum::body::Body;
