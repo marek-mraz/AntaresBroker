@@ -40,6 +40,16 @@ pub static MAX_FED_RESPONSE_BYTES: std::sync::LazyLock<usize> = std::sync::LazyL
         .filter(|n| *n > 0)
         .unwrap_or(16 * 1024 * 1024)
 });
+// Deployment knob (ANTARES_FED_FANOUT): concurrent forwards per distributed
+// read. 4.3.6.1 orders the MERGE (4.5.5), never the requests, so forwards
+// run concurrently; this bounds how many at once per request.
+pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_FED_FANOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(8)
+});
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
@@ -60,6 +70,7 @@ impl LimitStats {
             "maxJsonDepth": MAX_JSON_DEPTH,
             "maxBatchItems": *MAX_BATCH_ITEMS,
             "maxFedResponseBytes": *MAX_FED_RESPONSE_BYTES,
+            "maxFedFanout": *MAX_FED_FANOUT,
             "maxJoinLevel": MAX_JOIN_LEVEL,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,

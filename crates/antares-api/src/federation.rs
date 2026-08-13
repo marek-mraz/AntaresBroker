@@ -588,6 +588,25 @@ async fn read_body_capped(resp: reqwest::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// 4.3.6.1 fan-out: forwards to matching registrations run concurrently —
+/// the clause fixes the merge order (4.5.5 non-aux before aux), never the
+/// request order, and cross-source result ordering does not exist (the
+/// `ordering` parameter is a 400 outside local scope, 5.7.2.4). Results
+/// return in registration order so warning and merge processing stay
+/// deterministic. Concurrency per request is bounded by
+/// bounds::MAX_FED_FANOUT.
+async fn fan_out<I, T, F, Fut>(items: Vec<I>, per_item: F) -> Vec<T>
+where
+    F: FnMut(I) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use futures_util::StreamExt;
+    futures_util::stream::iter(items.into_iter().map(per_item))
+        .buffered(*crate::bounds::MAX_FED_FANOUT)
+        .collect()
+        .await
+}
+
 /// One forwarded request. `body` is compacted JSON (no @context member).
 #[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn forward(
@@ -934,16 +953,15 @@ pub async fn fed_retrieve_temporal(
         ..Default::default()
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
-    let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+    let ctx_url = &ctx_url;
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .into_iter()
         // 5.7.3.4: a live EntityMap in use is the ONLY source of matching
         // registrations; its linked map location travels with the forward.
-        let Some(reg) = map_gate(reg, map, id) else {
-            continue;
-        };
-        if !reg.supports("retrieveTemporal") {
-            continue;
-        }
+        .filter_map(|reg| map_gate(reg, map, id))
+        .filter(|reg| reg.supports("retrieveTemporal"))
+        .collect();
+    let fetched = fan_out(regs, move |reg| async move {
         // the temporal window travels with the forward; sysAttrs for the
         // 4.5.5.3 recency arbitration
         let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
@@ -964,10 +982,15 @@ pub async fn fed_retrieve_temporal(
             headers,
             tenant,
             &reg,
-            &ctx_url,
+            ctx_url,
             None,
         )
         .await;
+        (reg, status, body)
+    })
+    .await;
+    let mut out = Vec::new();
+    for (reg, status, body) in fetched {
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
@@ -1121,19 +1144,21 @@ pub async fn fed_retrieve(
         ..Default::default()
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
-    let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
+    let ctx_url = &ctx_url;
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .into_iter()
         // 5.8.6 splitEntities merge: "except for the one from which the
         // Notification has been received"
-        if except_reg.is_some_and(|x| x == reg.reg_id) {
-            continue;
-        }
+        .filter(|reg| !except_reg.is_some_and(|x| x == reg.reg_id))
         // 5.7.1.4: a live EntityMap in use is the ONLY source of matching
         // registrations; its linked map location travels with the forward.
-        let Some(reg) = map_gate(reg, map, id) else {
-            continue;
+        .filter_map(|reg| map_gate(reg, map, id))
+        .filter(|reg| reg.read_op().is_some())
+        .collect();
+    let fetched = fan_out(regs, move |reg| async move {
+        let Some(op) = reg.read_op() else {
+            return (reg, 0, Value::Null);
         };
-        let Some(op) = reg.read_op() else { continue };
         // sysAttrs on every forwarded read: conflicting instances resolve by
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
         // modifiedAt the winner would be arrival order, i.e. indeterminate.
@@ -1199,6 +1224,11 @@ pub async fn fed_retrieve(
                 .await
             }
         };
+        (reg, status, body)
+    })
+    .await;
+    let mut out = Vec::new();
+    for (reg, status, body) in fetched {
         // V-14: abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
         // as a failed overall response; 404-with-no-data is normal.
         if let Some((code, text)) = read_warning(status, &body) {
@@ -1275,9 +1305,15 @@ pub async fn fed_query(
 ) -> Vec<(bool, Value)> {
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
-    let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
-        let Some(op) = reg.read_op() else { continue };
+    let ctx_url = &ctx_url;
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .into_iter()
+        .filter(|r| r.read_op().is_some())
+        .collect();
+    let fetched = fan_out(regs, move |reg| async move {
+        let Some(op) = reg.read_op() else {
+            return (reg, 0, Value::Null);
+        };
         let (status, body) = if op == "queryBatch" && !reg.supports("queryEntity") {
             let mut sel = Map::new();
             if let Some(t) = params.get("type") {
@@ -1294,7 +1330,7 @@ pub async fn fed_query(
                 headers,
                 tenant,
                 &reg,
-                &ctx_url,
+                ctx_url,
                 Some(json!({"type": "Query", "entities": [Value::Object(sel)]})),
             )
             .await
@@ -1322,11 +1358,16 @@ pub async fn fed_query(
                 headers,
                 tenant,
                 &reg,
-                &ctx_url,
+                ctx_url,
                 None,
             )
             .await
         };
+        (reg, status, body)
+    })
+    .await;
+    let mut out = Vec::new();
+    for (reg, status, body) in fetched {
         // V-14: same NGSILD-Warning classification as fed_retrieve (6.3.17)
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
@@ -1368,11 +1409,12 @@ pub(crate) async fn fed_entity_maps(
 ) -> Vec<(String, Value)> {
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
-    let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
-        if !reg.supports(op) {
-            continue;
-        }
+    let ctx_url = &ctx_url;
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .into_iter()
+        .filter(|reg| reg.supports(op))
+        .collect();
+    let fetched = fan_out(regs, move |reg| async move {
         let mut query: Vec<(String, String)> = Vec::new();
         for k in [
             "id",
@@ -1412,10 +1454,15 @@ pub(crate) async fn fed_entity_maps(
             headers,
             tenant,
             &reg,
-            &ctx_url,
+            ctx_url,
             None,
         )
         .await;
+        (reg, status, body)
+    })
+    .await;
+    let mut out = Vec::new();
+    for (reg, status, body) in fetched {
         if (200..300).contains(&status) && body.get("entityMap").is_some() {
             out.push((reg.reg_id.clone(), body));
         }
@@ -1436,11 +1483,12 @@ pub async fn fed_query_temporal(
 ) -> Vec<(bool, Value)> {
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
-    let mut out = Vec::new();
-    for reg in matching_regs(st, tenant, &spec, ctx, headers) {
-        if !reg.supports("queryTemporal") {
-            continue;
-        }
+    let ctx_url = &ctx_url;
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+        .into_iter()
+        .filter(|reg| reg.supports("queryTemporal"))
+        .collect();
+    let fetched = fan_out(regs, move |reg| async move {
         let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
         for k in [
             "type",
@@ -1476,10 +1524,15 @@ pub async fn fed_query_temporal(
             headers,
             tenant,
             &reg,
-            &ctx_url,
+            ctx_url,
             None,
         )
         .await;
+        (reg, status, body)
+    })
+    .await;
+    let mut out = Vec::new();
+    for (reg, status, body) in fetched {
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
