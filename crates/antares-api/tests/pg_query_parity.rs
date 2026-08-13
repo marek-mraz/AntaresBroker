@@ -623,8 +623,41 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
         (r#"ref=="urn:dest:1""#, vec!["urn:tq:fast", "urn:tq:nowin"]),
         (r#"tags=="a""#, vec!["urn:tq:fast", "urn:tq:nowin"]),
         ("speed", vec!["urn:tq:shapes", "urn:tq:nowin"]),
-        ("!speed", vec![]),         // negated existence: trivial
-        ("speed!=10", vec![]),      // != caveats: trivial
+        ("!speed", vec![]), // negated existence: trivial
+        // != compiles as NOT-of-Eq over the instance (universal over arrays,
+        // datatype-mismatch matches — both fall out of the NOT form)
+        (
+            "speed!=10",
+            vec!["urn:tq:slow", "urn:tq:nowin", "urn:tq:shapes"],
+        ),
+        // Ne+List: unequal to ALL listed values — 10 and 30 knock out both
+        // slow (10) and fast (30); a string "10" would NOT (p.92: datatype
+        // mismatch matches !=), which is why the list is all-numeric here
+        (
+            "speed!=10,30",
+            vec![
+                "urn:tq:fast",
+                "urn:tq:slow",
+                "urn:tq:nowin",
+                "urn:tq:shapes",
+            ],
+        ),
+        // [lang] brackets compile to a languageMap wildcard (superset: any
+        // language — case-insensitive tag matching stays in memory)
+        (
+            r#"label[en]=="hi""#,
+            vec!["urn:tq:fast", "urn:tq:slow", "urn:tq:nowin", "urn:tq:multi"],
+        ),
+        (
+            r#"label[*]=="hi""#,
+            vec!["urn:tq:fast", "urn:tq:slow", "urn:tq:nowin", "urn:tq:multi"],
+        ),
+        // string ordering: COLLATE "C" byte compare (p.89 SHALL), arrays
+        // pass through to the evaluator
+        (
+            r#"name>="m""#,
+            vec!["urn:tq:fast", "urn:tq:slow", "urn:tq:nowin", "urn:tq:multi"],
+        ),
         (r#"label=="hi""#, vec![]), // languageMap semantics stay in memory? superset holds either way
         ("speed==10..40", vec!["urn:tq:nowin", "urn:tq:shapes"]),
         (

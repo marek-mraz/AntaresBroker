@@ -103,6 +103,7 @@ fn decompose(doc: &Value) -> Vec<Value> {
                     "observed_at": observed,
                     "created_at": s("createdAt").unwrap_or(observed),
                     "modified_at": s("modifiedAt").unwrap_or(observed),
+                    "deleted_at": s("deletedAt"),
                     "data": i,
                 }));
             }
@@ -127,10 +128,11 @@ async fn insert_rows(
     sqlx::query(
         "INSERT INTO attr_instances
            (tenant_id, entity_id, attr_id, instance_id, dataset_id, observed_at,
-            created_at, modified_at, data, geo_value)
+            created_at, modified_at, deleted_at, data, geo_value)
          SELECT $1, $2, e->>'attr_id', e->>'instance_id', e->>'dataset_id',
                 (e->>'observed_at')::timestamptz, (e->>'created_at')::timestamptz,
-                (e->>'modified_at')::timestamptz, e->'data',
+                (e->>'modified_at')::timestamptz, (e->>'deleted_at')::timestamptz,
+                e->'data',
                 CASE WHEN jsonb_typeof(e->'data'->'value') = 'object'
                       AND e->'data'->'value'->>'type' IN
                           ('Point','MultiPoint','LineString','MultiLineString',
@@ -140,6 +142,7 @@ async fn insert_rows(
          ON CONFLICT (tenant_id, entity_id, attr_id, instance_id, observed_at)
            DO UPDATE SET data = EXCLUDED.data, modified_at = EXCLUDED.modified_at,
                          dataset_id = EXCLUDED.dataset_id,
+                         deleted_at = EXCLUDED.deleted_at,
                          geo_value = EXCLUDED.geo_value",
     )
     .bind(tenant.as_str())

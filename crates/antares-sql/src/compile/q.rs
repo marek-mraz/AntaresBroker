@@ -143,11 +143,29 @@ fn value_or(
         Some((op, v)) => Some(cmp_filter(op, v)?),
         None => None,
     };
+    Some(value_or_filter(
+        prefix,
+        filter.as_deref(),
+        col,
+        first,
+        binds,
+    ))
+}
+
+/// The member-OR with a PRE-BUILT jsonpath filter — shared with the
+/// qprefilter's extension leaves (`!=` as NOT-of-Eq).
+pub(crate) fn value_or_filter(
+    prefix: &str,
+    filter: Option<&str>,
+    col: &str,
+    first: usize,
+    binds: &mut Vec<String>,
+) -> String {
     let mut parts = Vec::with_capacity(VALUE_KEYS.len());
     for key in VALUE_KEYS {
         // lax mode (the default) auto-unwraps arrays at every step, which is
         // exactly `qeval::compare`'s "any element of an array value matches".
-        let jp = match &filter {
+        let jp = match filter {
             Some(f) => format!("{prefix}.\"{key}\"{f}"),
             None => format!("{prefix}.\"{key}\""),
         };
@@ -157,7 +175,20 @@ fn value_or(
         parts.push(format!("{col} @? ${}::jsonpath", first + binds.len()));
         binds.push(jp);
     }
-    Some(format!("({})", parts.join(" OR ")))
+    format!("({})", parts.join(" OR "))
+}
+
+/// The equality jsonpath filter for `want` — the building block of the
+/// qprefilter's NOT-of-Eq `!=` leaf. `None` for shapes Eq itself refuses
+/// (string-endpoint ranges, exponent numbers …).
+pub(crate) fn eq_filter(want: &QValue) -> Option<String> {
+    cmp_filter(CmpOp::Eq, want)
+}
+
+/// The jsonpath filter for a `[lang]` leaf — same operator table as any
+/// other member (ordering-on-string / patterns / `!=` refuse as usual).
+pub(crate) fn lang_filter(op: CmpOp, want: &QValue) -> Option<String> {
+    cmp_filter(op, want)
 }
 
 /// Dotted q path → jsonpath prefix addressing the instance objects.

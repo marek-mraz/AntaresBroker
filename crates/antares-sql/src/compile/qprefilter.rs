@@ -17,9 +17,12 @@
 //!   values filter is checked against "the Attribute instances resulting
 //!   from the initial filtering performed by the temporal query", so the
 //!   window belongs INSIDE the existence test.
-//! * negated existence, `!=`, patterns, dotted/bracket/linked paths — TRUE
-//!   (`compile::q` refuses them; entity-level negation over per-instance
-//!   rows is not superset-safe to push).
+//! * extension leaves (superset-only, see `instance_predicate`): `!=` as
+//!   NOT-of-Eq, `[lang]`/`[*]` via the languageMap wildcard, string
+//!   ordering via `COLLATE "C"` with array pass-through.
+//! * negated existence, patterns, dotted/linked paths — TRUE (entity-level
+//!   negation over per-instance rows is not superset-safe to push; regex
+//!   dialects differ).
 //!
 //! `eval_q` remains the arbiter — the API always re-evaluates q on the rows
 //! that come back, so a defect here can only fail to narrow, never narrow
@@ -118,8 +121,9 @@ fn leaf(
     first: usize,
     expand: &dyn Fn(&str) -> String,
 ) -> Option<(String, Vec<String>, bool)> {
-    // same exact-subset rule as compile::q — anything fancier stays in memory
-    if !path.links.is_empty() || path.bracket.is_some() || path.path.len() != 1 {
+    // links and dotted paths stay in memory (compile::q's ambiguity rules);
+    // brackets are handled by the languageMap extension leaf below
+    if !path.links.is_empty() || path.path.len() != 1 {
         return None;
     }
     // binds: [attr IRI, timeproperty + window time(s)…, jsonpath(s)…]
@@ -152,16 +156,89 @@ fn leaf(
             }
         }
     }
-    let l = compile_instance_leaf(cmp, "qi.data", first + binds.len())?;
+    let (inner, arm_exact) = instance_predicate(path, cmp, first, &mut binds)?;
     let sql = format!(
         "EXISTS (SELECT 1 FROM attr_instances qi \
          WHERE qi.tenant_id = {entity}.tenant_id AND qi.entity_id = {entity}.id \
-         AND qi.attr_id = ${first}{window} AND {})",
-        l.sql
+         AND qi.attr_id = ${first}{window} AND {inner})"
     );
-    binds.extend(l.binds);
-    // existence leaves stay inexact: deletion-instance semantics differ
-    Some((sql, binds, win_exact && cmp.is_some()))
+    Some((sql, binds, win_exact && arm_exact))
+}
+
+/// The per-instance predicate inside the EXISTS: the exact `compile::q`
+/// leaf when possible, else one of the SUPERSET-ONLY extension leaves —
+/// each may only widen relative to `eval_q`, never narrow:
+///
+/// * `[lang]`/`[*]` — the value under ANY language (`languageMap.*`): a
+///   superset of the specific-tag semantics (case-insensitive BCP 47 tag
+///   matching stays in memory) and exactly `[*]`'s own meaning.
+/// * `!=` — NOT of the existential-equality member-OR: 4.9 p.91's
+///   universal quantification over arrays and p.92's datatype-mismatch-
+///   matches both fall out of the negation; a deletion instance passes to
+///   the evaluator (which is why the arm is never exact).
+/// * string ordering — `COLLATE "C"` byte comparison, the SQL spelling of
+///   the p.89 RFC 8259 code-unit SHALL; scalar strings compare exactly,
+///   array values pass through, non-string scalars are a datatype
+///   mismatch on both sides.
+fn instance_predicate(
+    path: &QPath,
+    cmp: Option<(CmpOp, &QValue)>,
+    first: usize,
+    binds: &mut Vec<String>,
+) -> Option<(String, bool)> {
+    use super::q;
+    if path.bracket.is_some() {
+        let filter = match cmp {
+            Some((op, v)) => Some(q::lang_filter(op, v)?),
+            None => None,
+        };
+        let jp = match filter {
+            Some(f) => format!("$.\"languageMap\".*{f}"),
+            None => "$.\"languageMap\".*".to_owned(),
+        };
+        let n = first + binds.len();
+        binds.push(jp);
+        return Some((format!("qi.data @? ${n}::jsonpath"), false));
+    }
+    if let Some((CmpOp::Ne, v)) = cmp {
+        let f = q::eq_filter(v)?;
+        // value_or_filter numbers as `first + binds.len()` itself — hand it
+        // the leaf's base offset, not an already-advanced one
+        let sql = q::value_or_filter("$", Some(&f), "qi.data", first, binds);
+        return Some((format!("NOT {sql}"), false));
+    }
+    if let Some(l) = compile_instance_leaf(cmp, "qi.data", first + binds.len()) {
+        binds.extend(l.binds);
+        // existence leaves stay inexact: deletion-instance semantics differ
+        return Some((l.sql, cmp.is_some()));
+    }
+    if let Some((op @ (CmpOp::Gt | CmpOp::Ge | CmpOp::Lt | CmpOp::Le), QValue::Str(sv))) = cmp {
+        let o = match op {
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+            CmpOp::Lt => "<",
+            _ => "<=",
+        };
+        let mut parts = Vec::new();
+        for key in [
+            "value",
+            "object",
+            "vocab",
+            "json",
+            "valueList",
+            "objectList",
+        ] {
+            let n = first + binds.len();
+            binds.push(sv.clone());
+            parts.push(format!(
+                "(jsonb_typeof(qi.data->'{key}') = 'string' \
+                 AND (qi.data->>'{key}') COLLATE \"C\" {o} ${n}::text) \
+                 OR jsonb_typeof(qi.data->'{key}') = 'array'"
+            ));
+        }
+        return Some((format!("({})", parts.join(" OR ")), false));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -279,14 +356,40 @@ mod tests {
     #[test]
     fn shapes_outside_the_exact_subset_are_trivial_not_wrong() {
         for q in [
-            "!speed",             // negated existence: not superset-safe per-row
-            "speed!=10",          // 4.9 != caveats (compile::q declines)
-            r#"name~="^x""#,      // regex dialect mismatch
-            r#"name>"m""#,        // string ordering vs collation
-            "a.b==1",             // dotted path ambiguity
-            r#"label[en]=="hi""#, // language-filter bracket
+            "!speed",        // negated existence: not superset-safe per-row
+            r#"name~="^x""#, // regex dialect mismatch
+            "a.b==1",        // dotted path ambiguity
         ] {
             assert!(pf(q).is_none(), "{q} must be trivial");
+        }
+    }
+
+    #[test]
+    fn extension_leaves_compile_superset_only() {
+        // != — NOT of the existential-equality member-OR
+        let c = pf("speed!=10").expect("compiles");
+        assert!(c.sql.contains("AND NOT ("), "{}", c.sql);
+        assert!(pf(r#"speed!="10",30"#).is_some(), "Ne+List");
+        assert!(pf(r#"name!~="^x""#).is_none(), "!~= stays a regex refusal");
+        // [lang]/[*] — the languageMap wildcard
+        let c = pf(r#"label[en]=="hi""#).expect("compiles");
+        assert!(
+            c.binds.iter().any(|b| b.starts_with("$.\"languageMap\".*")),
+            "{:?}",
+            c.binds
+        );
+        assert!(pf(r#"label[*]=="hi""#).is_some());
+        // string ordering — COLLATE "C" scalar compare + array pass-through
+        let c = pf(r#"name>"m""#).expect("compiles");
+        assert!(c.sql.contains("COLLATE \"C\" >"), "{}", c.sql);
+        assert!(c.sql.contains("= 'array'"), "{}", c.sql);
+        // all three are superset-only: never page-exact
+        let r = between();
+        for q in [r#"name>"m""#, "speed!=10", r#"label[en]=="hi""#] {
+            assert!(
+                !prefilter_exact(&parse_q(q).expect("parse"), Some(&r), &ex),
+                "{q} must stay inexact"
+            );
         }
     }
 
@@ -304,13 +407,17 @@ mod tests {
         let c = compile_prefilter(&ast, None, "m", 1, &ex).expect("compiles");
         assert!(!c.sql.contains("observed_at"), "{}", c.sql);
         assert_dense(&c, 1);
-        // a timeproperty without a parsed column: EXISTS still compiles,
-        // window stays out (superset either way)
+        // deletedAt now HAS a column bound — NULL-tolerant, because the
+        // column was unfilled before migration 0009's era
         let r = InstanceRange {
             timeproperty: "deletedAt",
             ..between()
         };
         let c = compile_prefilter(&ast, Some(&r), "m", 1, &ex).expect("compiles");
-        assert!(!c.sql.contains("deleted_at"), "{}", c.sql);
+        assert!(
+            c.sql.contains("qi.deleted_at IS NULL OR"),
+            "old rows must pass to the text predicate: {}",
+            c.sql
+        );
     }
 }

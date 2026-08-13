@@ -195,19 +195,27 @@ with commit hash + green-run evidence, `python3 dev/spec.py check` green.
 > citations and the 1b/1c/1d sub-items from the verification pass. The
 > list below is the original, kept for the record.
 
-- [ ] 1. `5.7.4.4:` implement S4 scopeQ on the temporal S-loop +
-      TP 5744_03 + ledger note fix (the only *conformance* item).
-- [ ] 2. Watch the next CI matrix run: 4×8 must be green over the
-      prefilter + the two new TP files on pg/timescale.
-- [ ] 3. Geo prefilter on `geo_value` (biggest remaining perf win for
-      geo-filtered temporal queries).
-- [ ] 4. Exactness flag on qprefilter → SQL paging with fully-compiled q.
-- [ ] 5. Raise the lastN-vs-q ordering doubt upstream
-      (docs/upstream/etsi-raises.md has the vehicle).
-- [ ] 6. Optional compiler extensions: string-ordering leaves (needs a
-      collation-safe strategy), `[lang]` brackets (jsonpath on
-      `languageMap."en"` is expressible), `!=` (needs the p.91/92
-      datatype-mismatch semantics reproduced exactly).
+- [x] 1. DONE 2026-08-13 — commits 1ce6de9 (S4/S7 validity-aware scopeQ,
+      all four arms, red-first 7/7, TP 5744_03 11/11, tree 131/131) and
+      9dc7024 (scopeQ gates the lastN/paging pushdown — proven red on live
+      PostGIS). Bonus sub-gap fixed: 5.6.11 now accepts the 4.5.6
+      instance-shaped temporal scope.
+- [x] 2. USER-SIDE — listed for the user (sandbox cannot push/watch CI);
+      local mitigation: parity battery vs live PostGIS in-sandbox.
+- [x] 3. DONE 2026-08-13, commit 72a8c9b — migration 0009 + insert fill +
+      compile_geo_instance + windowed EXISTS (any geoproperty); red-first
+      parity test; TP 5744_04 7/7.
+- [x] 4. DONE 2026-08-13, commit 98818fa — text-window predicate in the
+      leaves + prefilter_exact() gate; red-first slack-zone paging test;
+      TP 5744_05 3/3, tree 141/141.
+- [x] 5. DONE 2026-08-13, commit 5d1c25a — raise #6 drafted ready-to-file
+      in docs/upstream/etsi-raises.md (filing is user-side).
+- [ ] 6. Compiler extensions (in progress 2026-08-13): string-ordering
+      leaves (COLLATE "C" per the p.89 code-unit SHALL), `[lang]`/`[*]`
+      brackets (languageMap wildcard, superset), `!=` as NOT-of-Eq
+      (universal-over-arrays + mismatch-matches fall out of the NOT form),
+      deletedAt column fill. Doubt for the bracket-less LP form logged
+      (item 7, commits 8175693 + fork 952e61e).
 
 Items 3–6 are performance/robustness; item 1 is the only place the broker
 currently gives a spec-wrong answer.

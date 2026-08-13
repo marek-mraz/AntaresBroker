@@ -76,13 +76,18 @@ pub fn compile_instance_range(
 /// Only timeproperties with a parsed column compile; others prune by text
 /// alone (`None`).
 pub fn column_range_bound(r: &InstanceRange<'_>, alias: &str, time_bind: usize) -> Option<String> {
-    let col = match r.timeproperty {
-        "observedAt" => "observed_at",
-        "createdAt" => "created_at",
-        "modifiedAt" => "modified_at",
+    // deleted_at is nullable AND was unfilled before migration 0009's era —
+    // its bound must let NULL rows through to the text predicate (which
+    // decides membership either way); the other columns are NOT NULL since
+    // schema 0003, so their bounds stay bare.
+    let (col, nullable) = match r.timeproperty {
+        "observedAt" => ("observed_at", false),
+        "createdAt" => ("created_at", false),
+        "modifiedAt" => ("modified_at", false),
+        "deletedAt" => ("deleted_at", true),
         _ => return None,
     };
-    Some(match r.timerel {
+    let bound = match r.timerel {
         "before" => format!("{alias}.{col} < ${time_bind}::timestamptz + interval '48 hours'"),
         "after" => format!("{alias}.{col} >= ${time_bind}::timestamptz - interval '48 hours'"),
         "between" => {
@@ -94,6 +99,11 @@ pub fn column_range_bound(r: &InstanceRange<'_>, alias: &str, time_bind: usize) 
             )
         }
         _ => return None,
+    };
+    Some(if nullable {
+        format!("({alias}.{col} IS NULL OR ({bound}))")
+    } else {
+        bound
     })
 }
 
@@ -172,11 +182,14 @@ mod tests {
         assert!(column_range_bound(&created, "ai", 1)
             .expect("bound")
             .contains("ai.created_at"));
+        // deleted_at is nullable and historically unfilled — its bound must
+        // carry the IS NULL escape so old rows reach the text predicate
         let deleted = InstanceRange {
             timeproperty: "deletedAt",
             ..range("after", "t0", None)
         };
-        assert!(column_range_bound(&deleted, "ai", 1).is_none(), "no column");
+        let s = column_range_bound(&deleted, "ai", 1).expect("bound");
+        assert!(s.starts_with("(ai.deleted_at IS NULL OR ("), "{s}");
         assert!(column_range_bound(&range("any", "", None), "ai", 1).is_none());
         assert!(column_range_bound(&range("since", "t0", None), "ai", 1).is_none());
         assert!(column_range_bound(&range("between", "t0", None), "ai", 1).is_none());

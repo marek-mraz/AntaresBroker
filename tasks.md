@@ -1261,11 +1261,18 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       - VERIFIED not-a-gap: subscription-side scopeQ IS applied
         (notify.rs:608 scope_matches in conditions_match) — the
         silent-ignore is temporal-query-local only.
-- [ ] 2. Watch the next CI 4×8 matrix: prefilter commits (b37aefb) + TPs
+- [x] 2. **USER-SIDE (sandbox cannot push or watch CI; per the goal:
+      listed, not blocked on). What CI must confirm once the Mac-side push
+      lands: the 4×8 matrix green over b37aefb + this stretch's commits
+      (1ce6de9/9dc7024/72a8c9b/98818fa + item 6) and TPs 5744_01–06 on the
+      pg/timescale cells — the cells where the SQL prefilter/paging paths
+      actually execute. Local mitigation already run: the full parity
+      battery + scope/paging tests against live PostGIS in-sandbox
+      (docker pgdev).** Watch the next CI 4×8 matrix: prefilter commits (b37aefb) + TPs
       5744_01/02 must be green on pg/timescale — those cells are where the
       SQL prefilter path actually executes (rule-8 local runs are
       memory-arm only).
-- [x] 3. **DONE 2026-08-13 (commit below): migration 0009 try_geomfromgeojson
+- [x] 3. **DONE 2026-08-13, commit 72a8c9b (fork TP 5744_04 = 826424c…): migration 0009 try_geomfromgeojson
       + decompose fill, compile_geo_instance (NULL fallback arm), windowed
       EXISTS in pg_temporal query() with the attr IRI as a bind (any
       geoproperty). Red-first pg_query_parity
@@ -1277,7 +1284,7 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       instances, so a windowed EXISTS with a PostGIS predicate slots into
       the existing qprefilter framework; verdict stays with
       GeoQuery::matches (superset contract as for q).
-- [x] 4. **DONE 2026-08-13 (commit below): qprefilter leaves now carry the
+- [x] 4. **DONE 2026-08-13, commit 98818fa (fork TP 5744_05 = 826424c): qprefilter leaves now carry the
       byte-exact text window predicate (still + widened column bound for the
       index) and emit() tracks exactness; prefilter_exact() gates the API's
       push_page — paging with q allowed when every leaf is an exactly-
@@ -1292,7 +1299,9 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       every leaf compiled (today paging is withheld with q/geo because the
       prefilter is superset-only; limit=1 with q still materializes all
       candidates).
-- [ ] 5. Raise the lastN-vs-values-filter ordering doubt upstream
+- [x] 5. **DONE 2026-08-13, commit 5d1c25a: ready-to-file issue text
+      appended to docs/upstream/etsi-raises.md as raise #6 (filing itself
+      is user-side).** Raise the lastN-vs-values-filter ordering doubt upstream
       (docs/upstream/etsi-raises.md): Table 5.2.21-1 (p.123, verbatim):
       lastN = "Only the last n instances, per Attribute, per Entity (under
       the specified time interval) shall be retrieved" — window-scoped but
@@ -1302,7 +1311,19 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       "initial filtering" is unspecified. Palace: no prior decision. Until
       resolved the broker withholds the lastN cap when q/geo present
       (behavior-preserving, per-attr lastN applied API-side).
-- [ ] 6. Optional compiler extensions (each widens narrowing, never
+- [x] 6. **DONE 2026-08-13 (commit below, fork TP 5744_06 = dab0838):
+      instance_predicate() extension leaves — [lang]/[*] → languageMap
+      wildcard jsonpath (case-insensitive BCP 47 tag matching stays in
+      memory, so ANY-language superset), != → NOT of the existential-Eq
+      member-OR (array universal quantification + datatype-mismatch-matches
+      fall out of the negation; Ne+List/Ne+numeric-Range included), string
+      ordering → COLLATE "C" byte compare (p.89 SHALL) with array
+      pass-through; deleted_at filled by decompose + NULL-tolerant column
+      bound (pre-fill rows escape to the text predicate). All three arms
+      superset-only, never page-exact (asserted). Red-first: parity
+      tightness rows (speed!=10 etc.) failed before, 6/6 after; sql units
+      50/50; TP 5744_06 8/8, full temporal tree 149/149 local.** Optional
+      compiler extensions (each widens narrowing, never
       correctness): [lang] brackets (p.90 semantics are exact:
       languageMap."en" jsonpath is expressible), != (p.91/92
       datatype-mismatch + array universal quantification must be
@@ -1312,7 +1333,8 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       SHALL-compliant arbiter, so a COLLATE "C" SQL leaf can be exact, not
       just superset), deletedAt column fill in decompose for the column
       bound.
-- [ ] 7. Bracket-less q on a LanguageProperty is UNDEFINED in 4.9 (p.90
+- [x] 7. **DONE 2026-08-13, commits 8175693 (error.md) + fork 952e61e
+      (testsuite-doubts #19).** Bracket-less q on a LanguageProperty is UNDEFINED in 4.9 (p.90
       defines only [lang] and [*] forms) — log in
       testsuite-doubts/etsi-raises if a TP is ever needed there; today the
       broker's eval and the SQL leaf agree (no match), asserted only by the
