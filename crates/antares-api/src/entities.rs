@@ -891,52 +891,141 @@ async fn query_entities_outer(
     let ctx = request_context(&st.loader, headers).await?;
     // a request that references a live map does not create a new one
     params.remove("entityMap");
-    // 5.5.14: "The creating Context Source shall remove Entities from the
-    // EntityMap that do not match the filters of the query at the time of
-    // processing" — judgeable locally only for "@none" (local) entries.
-    let matching: std::collections::HashSet<String> = {
+    let (offset, limit, count) = page_params(st, &params)?;
+    // pagination links carry the ORIGINAL query, never the page's id list
+    let link_params = params.clone();
+    let accept = parse_accept_geo(headers)?;
+
+    // 5.5.9.3 paged fetch: the map fixes the candidate id set; candidates
+    // are fetched (locally + forwarded) chunk by chunk, "filters shall be
+    // rechecked before returning results" per chunk, and visited entries
+    // that no longer match are removed from the map — "Entities not or no
+    // longer fitting the query shall be removed from the Entity map during
+    // pagination". Pruning is judgeable only for "@none" (local) entries: a
+    // remote-backed id may merely have an unreachable source right now
+    // (5.5.14). Memory per request is O(chunk), never O(map) — the reason
+    // EntityMaps exist for the distributed case. count=true walks every
+    // candidate (the total needs each id checked), still chunk-bounded.
+    let ids: Vec<String> = map["entityMap"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    let looped = crate::federation::via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, &tenant),
+    );
+    let chunk_size = limit.max(20);
+    let mut page_ids: Vec<String> = Vec::new();
+    let (mut skipped, mut total, mut more, mut visited) = (0usize, 0usize, false, 0usize);
+    for chunk in ids.chunks(chunk_size) {
         let mut p = params.clone();
         p.remove("limit");
         p.remove("offset");
-        filter_entities(st, &tenant, &p, &ctx)?
+        p.remove("count");
+        p.insert("id".into(), chunk.join(","));
+        // the final page fetch below re-surfaces the same peers' warnings
+        let mut chunk_warnings = Vec::new();
+        let fed = if crate::federation::active(&p) && !looped {
+            crate::federation::fed_query(st, &tenant, headers, &ctx, &p, &mut chunk_warnings).await
+        } else {
+            Vec::new()
+        };
+        let docs = filter_entities_fed(st, &tenant, &p, &ctx, fed)?;
+        let matched: std::collections::HashSet<&str> = docs
             .iter()
-            .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect()
-    };
-    if let Some(emap) = map.get_mut("entityMap").and_then(Value::as_object_mut) {
-        let stale: Vec<String> = emap
-            .iter()
-            .filter(|(eid, srcs)| {
-                srcs.as_array()
-                    .is_some_and(|a| a.len() == 1 && a[0] == "@none")
-                    && !matching.contains(*eid)
-            })
-            .map(|(k, _)| k.clone())
+            .filter_map(|d| d.get("id").and_then(Value::as_str))
             .collect();
-        for k in stale {
-            emap.remove(&k);
+        if let Some(emap) = map.get_mut("entityMap").and_then(Value::as_object_mut) {
+            for id in chunk {
+                let local_only = emap
+                    .get(id)
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| a.len() == 1 && a[0] == "@none");
+                if local_only && !matched.contains(id.as_str()) {
+                    emap.remove(id);
+                }
+            }
+        }
+        visited += chunk.len();
+        for id in chunk {
+            if !matched.contains(id.as_str()) {
+                continue;
+            }
+            total += 1;
+            if skipped < offset {
+                skipped += 1;
+            } else if page_ids.len() < limit {
+                page_ids.push(id.clone());
+            } else {
+                more = true;
+            }
+        }
+        if !count && page_ids.len() == limit {
+            // page full — next exists if an extra match was seen or
+            // unvisited candidates remain ("pages shall always be filled to
+            // the maximum, as long as Entities are available")
+            more = more || visited < ids.len();
+            break;
         }
     }
+    if count {
+        more = total > offset + limit;
+    }
     crate::entity_maps::map_put(st, &tenant, map.clone());
-    // fix the query to the Entities listed in the map (5.5.14)
-    let ids: Vec<&str> = map["entityMap"]
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+    // fix the final fetch to exactly the page's survivors (5.5.14: an empty
+    // set is fixed to nothing); one extra page-sized fetch keeps the whole
+    // repr pipeline shared instead of forked
     params.insert(
         "id".into(),
-        if ids.is_empty() {
-            // an empty map fixes the result set to nothing
+        if page_ids.is_empty() {
             "urn:ngsi-ld:entitymap:empty".to_owned()
         } else {
-            ids.join(",")
+            page_ids.join(",")
         },
     );
+    params.remove("offset");
+    params.remove("count");
+    if limit == 0 {
+        // count-only shape: the inner default limit is irrelevant against
+        // the empty id sentinel
+        params.remove("limit");
+    }
     let mut resp = query_entities_inner(st, &params, headers).await?;
     // "The location of the EntityMap used in the query operation is
     // returned in the response" (6.4.3.2-2)
     if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{map_id}").parse() {
         resp.headers_mut().insert("NGSILD-EntityMap", v);
+    }
+    if count {
+        if let Ok(v) = total.to_string().parse() {
+            resp.headers_mut().insert("NGSILD-Results-Count", v);
+        }
+    }
+    // 6.3.10 links from the original query — the inner call saw offset 0
+    // over exactly one page, so it emitted none
+    for (off, rel, cond) in [
+        (offset + limit, "next", more && limit > 0),
+        (offset.saturating_sub(limit.max(1)), "prev", offset > 0),
+    ] {
+        if !cond {
+            continue;
+        }
+        let mut qp: Vec<String> = link_params
+            .iter()
+            .filter(|(k, _)| k.as_str() != "offset")
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        qp.push(format!("offset={off}"));
+        qp.sort(); // deterministic order — the suite string-compares links
+        let ty = match accept {
+            Accept::LdJson => ";type=\"application/ld+json\"",
+            Accept::Json => ";type=\"application/json\"",
+            Accept::GeoJson => ";type=\"application/geo+json\"",
+        };
+        if let Ok(v) = format!("</ngsi-ld/v1/entities?{}>; rel=\"{rel}\"{ty}", qp.join("&")).parse()
+        {
+            resp.headers_mut().append(axum::http::header::LINK, v);
+        }
     }
     Ok(resp)
 }
