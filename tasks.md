@@ -1225,7 +1225,14 @@ gs_cim009v010901p.pdf pages cited) and against palace decisions — no prior
 decision contradicts any item; the S4 check SURFACED two aggravations
 (items 1b/1c).
 
-- [ ] 1. **5.7.4.4 S4: scopeQ ignored on local temporal queries — the only
+- [x] 1. **DONE 2026-08-13, commit 1ce6de9 (suite fork da7d728): red-first
+      tests/temporal_scope_5_7_4.rs 0/7→7/7; TP 5744_03 11/11; full
+      QueryTemporalEvolutionOfEntities tree 131/131 local; api lib 177 +
+      jsonld + autorecord/expand-values/entity-maps/snapshots regressions
+      green; `dev/spec.py check` 0 violations. Bonus sub-gap found+fixed on
+      the red run: 5.6.11 rejected the 4.5.6 instance-shaped temporal scope
+      ("scope entries must be strings" 400) — expand.rs temporal arm.**
+      **5.7.4.4 S4: scopeQ ignored on local temporal queries — the only
       conformance bug.** p.209: "If the Scope query is present, from S3,
       select those Entities whose Entity Scope instances match the Scope
       query (4.19)". Reproduced: scopeQ=/X returns an /A/B-scoped entity
@@ -1233,14 +1240,14 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       overstated until fixed. Fix: scope_matches after the geo check in the
       S-loop; TP 5744_03 (match, non-match, /#, alternatives, windowed
       scope instances); ledger note; commit `5.7.4.4:`.
-      - [ ] 1b. Split-entities arm re-applies scope as **S7** (p.210) —
+      - [x] 1b. (in 1ce6de9 — the check sits after the federation merge, so aggregated entities are re-filtered) Split-entities arm re-applies scope as **S7** (p.210) —
             when the 5.8.6 merge block runs, scope must filter the
             AGGREGATED set too; cover in the same fix.
-      - [ ] 1c. p.257: the local EntityMap is "created based on S4" — an
+      - [x] 1c. (in 1ce6de9 — clause_5_14_5_temporal_map_created_based_on_s4 asserts map contents) p.257: the local EntityMap is "created based on S4" — an
             EntityMap built from a scope-filtered temporal query currently
             bakes in wrongly-included entities; assert map contents in the
             fix's tests.
-      - [ ] 1d. 4.18 (p.98): in the TEMPORAL representation scope is
+      - [x] 1d. (in 1ce6de9 — scope_match_intervals: [set-time, next-set) validity intervals, C.5.16 A8311 instance bounding + B9211 carry-in both asserted) 4.18 (p.98): in the TEMPORAL representation scope is
             REIFIED (createdAt/modifiedAt/deletedAt sub-Properties, at most
             one scope property, values merged on distributed merge) and "a
             given Scope is considered valid from the time it has been set
