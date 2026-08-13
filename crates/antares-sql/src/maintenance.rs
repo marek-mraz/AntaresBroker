@@ -109,24 +109,6 @@ pub async fn temporal_maintenance(
     if reaped > 0 {
         done.push(format!("reaped {reaped} expired transient entities (4.22)"));
     }
-    // 4.22 also names Properties/Relationships: an attribute instance whose
-    // expiresAt has passed "should be deleted from an NGSI-LD system". Reads
-    // already refuse expired instances (pg_temporal read filter), so this
-    // reap only bounds storage — same sanctioned lag as the entity reap.
-    // Runs on both backends (row DELETE is chunk/partition-transparent).
-    let reaped_inst = sqlx::query(
-        "DELETE FROM attr_instances
-         WHERE data->>'expiresAt' IS NOT NULL
-           AND (data->>'expiresAt')::timestamptz < now()",
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if reaped_inst > 0 {
-        done.push(format!(
-            "reaped {reaped_inst} expired attribute instances (4.22)"
-        ));
-    }
     if backend == TemporalBackend::Hypertable {
         if let Some(days) = retention_days {
             sqlx::query("SELECT public.drop_chunks('attr_instances', older_than => make_interval(days => $1::int))")
@@ -238,8 +220,39 @@ pub async fn temporal_maintenance(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // 4.22 also names Properties/Relationships: an attribute instance whose
+    // expiresAt has passed "should be deleted from an NGSI-LD system". Reads
+    // already refuse expired instances (pg_temporal read filter), so this
+    // reap only bounds storage — same sanctioned lag as the entity reap.
+    // It runs in its OWN transaction, after the claimed work has committed:
+    // the DELETE contends with concurrent ingest on the same rows, and a
+    // deadlock must cost only this reap — not roll back the partition and
+    // entity work (seen live under ~1.2k msg/s ingest). Next tick retries.
+    match reap_expired_instances(pool).await {
+        Ok(0) => {}
+        Ok(n) => done.push(format!("reaped {n} expired attribute instances (4.22)")),
+        Err(e) => done.push(format!("instance reap skipped ({e})")),
+    }
     if done.is_empty() {
         done.push("nothing to do".into());
     }
     Ok(done.join("; "))
+}
+
+/// The 4.22 expired-instance DELETE, isolated so a deadlock with concurrent
+/// ingest never poisons the main maintenance transaction. Service role: the
+/// reap is cross-tenant work (RLS would hide other tenants' rows).
+async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::pg::set_service(&mut tx).await?;
+    let n = sqlx::query(
+        "DELETE FROM attr_instances
+         WHERE data->>'expiresAt' IS NOT NULL
+           AND (data->>'expiresAt')::timestamptz < now()",
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(n)
 }
