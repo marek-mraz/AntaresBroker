@@ -175,6 +175,13 @@ pub struct FedReg {
     /// registration "will act only on data held directly by the registered
     /// Context Source itself" — every forward carries `local=true`.
     pub local_only: bool,
+    /// 5.2.34 timeout: "Maximum period of time in milliseconds which may
+    /// elapse before a forwarded request is assumed to have failed."
+    pub timeout_ms: Option<u64>,
+    /// 5.2.34 cooldown: "Minimum period of time in milliseconds which shall
+    /// elapse before attempting to make a subsequent forwarded request to
+    /// the same endpoint after failure."
+    pub cooldown_ms: Option<u64>,
 }
 
 impl FedReg {
@@ -475,6 +482,18 @@ pub fn matching_regs(
                     }
                 }
             }
+            // 5.2.9: a declared observation/management interval gates
+            // temporal fan-out on overlap with the temporal query; without
+            // any declared interval the registration is unconstrained.
+            if let Some(tq) = &spec.temporal {
+                if doc.get("observationInterval").is_some()
+                    || doc.get("managementInterval").is_some()
+                {
+                    if !crate::csource::temporal_interval_matches(&doc, tq) {
+                        return None;
+                    }
+                }
+            }
             let alias = doc
                 .get("contextSourceAlias")
                 .and_then(Value::as_str)
@@ -581,6 +600,14 @@ pub fn matching_regs(
                             .and_then(Value::as_bool)
                     })
                     .unwrap_or(false),
+                timeout_ms: doc
+                    .get("management")
+                    .and_then(|m| m.get("timeout"))
+                    .and_then(Value::as_u64),
+                cooldown_ms: doc
+                    .get("management")
+                    .and_then(|m| m.get("cooldown"))
+                    .and_then(Value::as_u64),
             })
         })
         .collect()
@@ -705,6 +732,15 @@ pub async fn forward(
     if st.egress.is_open(&url) {
         tracing::debug!("federation forward to {url} short-circuited (breaker open)");
         return (503, Value::Null, Vec::new());
+    }
+    // 5.2.34 cooldown (per REGISTRATION, distinct from the §16.7 host:port
+    // breaker): inside the declared window "a timeout error response for
+    // the registration is automatically returned" — the source is not
+    // contacted.
+    if let Some(cd) = reg.cooldown_ms {
+        if st.egress.reg_in_cooldown(&reg.reg_id, cd) {
+            return (504, Value::Null, Vec::new());
+        }
     }
     // 4.3.6.6 (V-29): the four contextSourceInfo keys with processing
     // semantics. Values were validated at registration time (5.9.2).
@@ -863,11 +899,20 @@ pub async fn forward(
         // wasm has no client-level timeout — bound the forward per request
         // (mirrors the native fed_http 8 s total, §16.7); a timed-out
         // forward is the only failure class that feeds the breaker.
-        let sent = antares_jsonld::io_deadline(req.send(), 8_000).await;
+        // 5.2.34 timeout bounds the forward below the 8 s ceiling (§16.7).
+        // Natively io_deadline is a passthrough (the client owns the 8 s
+        // default), so the per-registration budget rides on the request.
+        let deadline: u32 = reg.timeout_ms.map_or(8_000, |t| t.min(8_000) as u32);
+        #[cfg(not(target_arch = "wasm32"))]
+        let req = req.timeout(std::time::Duration::from_millis(deadline as u64));
+        let sent = antares_jsonld::io_deadline(req.send(), deadline).await;
         let sent = match sent {
             Some(r) => r,
             None => {
                 st.egress.record_failure(&url);
+                if reg.cooldown_ms.is_some() {
+                    st.egress.reg_record(&reg.reg_id, false);
+                }
                 return (504, Value::Null, Vec::new());
             }
         };
@@ -880,6 +925,12 @@ pub async fn forward(
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
                 st.egress.record_success(&url);
+                if reg.cooldown_ms.is_some() {
+                    // 5.2.9 Table 5.2.9-2 failure definition: any response
+                    // code other than 2xx
+                    st.egress
+                        .reg_record(&reg.reg_id, (200..300).contains(&status));
+                }
                 let peer_warnings: Vec<String> = resp
                     .headers()
                     .get_all("NGSILD-Warning")
@@ -891,13 +942,23 @@ pub async fn forward(
             }
             Err(e) if e.is_timeout() => {
                 st.egress.record_failure(&url);
+                if reg.cooldown_ms.is_some() {
+                    st.egress.reg_record(&reg.reg_id, false);
+                }
                 (504, Value::Null, Vec::new())
             }
             Err(_) => {
                 // connect refused/reset: fails in milliseconds — no U1 need;
-                // clearing avoids stale suppression of a restarted peer
+                // clearing avoids stale suppression of a restarted peer.
+                // 503 (not 502): NO HTTP response was received, so the read
+                // path classifies it under Table 6.3.17-1 code 199 ("No
+                // response was received from the registration endpoint"),
+                // never 299 ("An error response ... was received").
                 st.egress.record_success(&url);
-                (502, Value::Null, Vec::new())
+                if reg.cooldown_ms.is_some() {
+                    st.egress.reg_record(&reg.reg_id, false);
+                }
+                (503, Value::Null, Vec::new())
             }
         }
     })
@@ -943,6 +1004,10 @@ fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value>
         antares_jsonld::ExpandOpts {
             sys: true,
             temporal: true,
+            // 4.5.7: deletion instances (value urn:ngsi-ld:null +
+            // deletedAt) are part of a Temporal Evolution — a remote
+            // tombstone must import, not be dropped as an invalid payload.
+            allow_null: true,
             ..Default::default()
         },
     )
@@ -1011,6 +1076,14 @@ pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
             .map(str::to_owned),
         csi: Vec::new(),
         local_only: false,
+        timeout_ms: reg
+            .get("management")
+            .and_then(|m| m.get("timeout"))
+            .and_then(Value::as_u64),
+        cooldown_ms: reg
+            .get("management")
+            .and_then(|m| m.get("cooldown"))
+            .and_then(Value::as_u64),
     }
 }
 
@@ -1052,6 +1125,9 @@ pub async fn fed_retrieve_temporal(
 ) -> Vec<(bool, Value)> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
+        temporal: crate::temporal::TemporalQ::from_params(params, false)
+            .ok()
+            .flatten(),
         ..Default::default()
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
@@ -1609,7 +1685,10 @@ pub async fn fed_query_temporal(
     params: &HashMap<String, String>,
     warnings: &mut Vec<String>,
 ) -> Vec<(bool, Value)> {
-    let spec = query_spec(ctx, params);
+    let mut spec = query_spec(ctx, params);
+    spec.temporal = crate::temporal::TemporalQ::from_params(params, false)
+        .ok()
+        .flatten();
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
     let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
@@ -2089,6 +2168,8 @@ mod tests {
             alias: None,
             csi: vec![],
             local_only: false,
+            timeout_ms: None,
+            cooldown_ms: None,
         }
     }
 

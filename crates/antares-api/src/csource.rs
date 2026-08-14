@@ -736,6 +736,7 @@ pub fn check_proxied_overlap(
                 attrs: (!attrs.is_empty()).then_some(attrs),
                 csf: None,
                 geo: None,
+                temporal: None,
             };
             if csr_matches(&spec, other, ctx) {
                 let oid = other.get("id").and_then(Value::as_str).unwrap_or("?");
@@ -1087,7 +1088,7 @@ fn q_attr_roots(node: &antares_ql::QNode, out: &mut Vec<String>) {
 }
 
 /// 5.10.2.4 temporal matching against observationInterval/managementInterval.
-fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::TemporalQ) -> bool {
+pub(crate) fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::TemporalQ) -> bool {
     let key = if tq.timeproperty == "observedAt" {
         "observationInterval"
     } else {
@@ -1131,6 +1132,12 @@ pub struct CsrSpec {
     /// to provide information") + 4.3.6.1: a geo query is only distributed
     /// to registrations whose location geometry matches it.
     pub geo: Option<crate::geo::GeoQuery>,
+    /// 5.2.9 observationInterval/managementInterval: "matched against the
+    /// observationInterval for overlap" — a temporal read is only
+    /// distributed to registrations whose declared interval overlaps the
+    /// temporal query; a registration declaring NO interval stays
+    /// unconstrained (both members are optional).
+    pub temporal: Option<crate::temporal::TemporalQ>,
 }
 
 /// 5.2.8: EntityInfo type is a String or String[] — yield every named type.

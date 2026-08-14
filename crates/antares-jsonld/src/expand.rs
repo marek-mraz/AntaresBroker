@@ -241,6 +241,19 @@ pub fn expand_entity(
         out.insert("expiresAt".into(), Value::String(s.to_owned()));
     }
 
+    // 4.8: with sys expansion the ENTITY-level system timestamps survive —
+    // a federated import (5.7.2.4 forwards request options=sysAttrs) must
+    // keep the remote system's createdAt/modifiedAt/deletedAt rather than
+    // dropping them (they are re-stamped only on local writes).
+    if opts.sys {
+        for k in ["createdAt", "modifiedAt", "deletedAt"] {
+            if let Some(Value::String(ts)) = doc.get(k) {
+                if parse_datetime(ts) {
+                    out.insert(k.to_owned(), Value::String(ts.clone()));
+                }
+            }
+        }
+    }
     for (key, v) in doc {
         match key.as_str() {
             "id" | "@id" | "type" | "@type" | "@context" | "scope" | "expiresAt" | "createdAt"
@@ -796,7 +809,10 @@ fn expand_instance(
         out.insert("expiresAt".into(), Value::String(s.to_owned()));
     }
     if opts.sys {
-        for k in ["createdAt", "modifiedAt"] {
+        // 4.8/4.5.7: deletedAt marks a deletion instance in a Temporal
+        // Evolution — dropping it here would strip remote tombstones of the
+        // timestamp their deletedAt-window matching needs (5.7.3.4 merge).
+        for k in ["createdAt", "modifiedAt", "deletedAt"] {
             if let Some(Value::String(s)) = obj.get(k) {
                 if parse_datetime(s) {
                     out.insert(k.into(), Value::String(s.clone()));

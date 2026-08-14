@@ -32,6 +32,9 @@ struct Breaker {
 pub struct Egress {
     policy: antares_jsonld::EgressPolicy,
     breakers: Mutex<HashMap<String, Breaker>>,
+    /// 5.2.34 cooldown: instant of the last failed forward per registration
+    /// id — only consulted for registrations that DECLARE management.cooldown.
+    reg_failures: Mutex<HashMap<String, Instant>>,
 }
 
 impl Default for Egress {
@@ -45,6 +48,30 @@ impl Egress {
         Self {
             policy,
             breakers: Mutex::new(HashMap::new()),
+            reg_failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 5.2.34 cooldown: "If requests are received before the cooldown
+    /// period has expired, a timeout error response for the registration is
+    /// automatically returned." True while the per-registration window is
+    /// still open.
+    pub fn reg_in_cooldown(&self, reg_id: &str, cooldown_ms: u64) -> bool {
+        self.reg_failures
+            .lock()
+            .expect("reg_failures lock")
+            .get(reg_id)
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(cooldown_ms))
+    }
+
+    /// 5.2.34 cooldown bookkeeping: a failed forward stamps the window, a
+    /// successful one clears it.
+    pub fn reg_record(&self, reg_id: &str, ok: bool) {
+        let mut m = self.reg_failures.lock().expect("reg_failures lock");
+        if ok {
+            m.remove(reg_id);
+        } else {
+            m.insert(reg_id.to_owned(), Instant::now());
         }
     }
 

@@ -251,6 +251,7 @@ fn upsert_temporal_local(
 
 // ---------- temporal query params (4.11) ----------
 
+#[derive(Clone)]
 pub struct TemporalQ {
     pub timerel: String,
     pub time_at: String,
