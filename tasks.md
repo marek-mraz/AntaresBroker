@@ -1348,3 +1348,108 @@ TMP_03/MAP/TEN/ERR/MSC), each clause-cited, none duplicating the 102
 existing IOP_TP cases. Work order: one group = one commit, red-first;
 three known-red items flagged in the file's footer (508 inclusive-loop
 over-application, cooldown-vs-breaker posture, splitEntities merge).
+
+## Backlog 2026-08-14 (production-ready)
+
+Goal: the repo reads as a production-ready project from the GitHub front
+page — badges, a CLICKABLE ETSI conformance report (stats like 1652/1652
+visible without downloading any artifact), current docs, and the two
+operational claims (rolling update, NATS bus) proven by tests that run on
+a cadence, not only on `v*` tags. Grounded in the 2026-08-14 repo audit:
+what already EXISTS is `dev/rolling-update.sh` + `dev/k6-continuity.py` +
+k8s kind smoke (all in full.yml, tag/dispatch-only), NATS bus tests in
+ci.yml, per-store `GITHUB_STEP_SUMMARY` tables + `ETSI-matrix-results`
+artifact in etsi-matrix.yml, and a GitHub Pages site owned by wasm.yml
+(www playground). Don't rebuild those — surface and extend them.
+
+### The /goal prompt — copy-paste this to run the backlog to completion
+
+```
+/goal Work the "## Backlog 2026-08-14 (production-ready)" checklist in
+tasks.md top-to-bottom until every box is [x] with evidence (commit hash +
+green run / rendered page) recorded next to it. One item = one commit.
+Full claude.md discipline: MemPalace first, TEST-FIRST red run as the
+fallibility proof, negative assertions, rule 8 (one local broker, no
+compose stacks, no host Docker) and rule 9 stay hard; ponytail throughout.
+CI workflow edits are validated by actionlint/yaml parse + local script
+dry-runs (the sandbox cannot trigger GitHub runs); anything that needs a
+GitHub push, Pages settings, or a license choice goes on the "Mac-side /
+user" list at the end of the section instead of blocking. Ask only when an
+item forces a genuine user decision (license, Pages mechanics if both
+options fail).
+```
+
+### Checklist
+
+- [ ] 1. **ETSI report clickable from the README (the headline ask).**
+      etsi-matrix.yml's summary job already builds
+      `cells/_combined/matrix-summary.md` + per-store `run-summary.md` and
+      robot `report.html`/`log.html`. Publish them: assemble a static
+      `site/reports/latest/` (index.html rendering the matrix summary with
+      per-store pass/total, linking each store's robot report.html) and
+      fold it into the ONE GitHub Pages deployment. Constraint: Pages has
+      one deployment source and wasm.yml currently owns it — recommended
+      shape: ONE pages deploy job that combines the www playground artifact
+      + the latest reports (e.g. wasm.yml's site assembly downloads the
+      newest `ETSI-matrix-results` via `gh api`, or a single pages.yml
+      triggered by both). Also emit `site/reports/badge.json` in shields
+      endpoint schema ("ETSI 4×1652 green" / red). Acceptance: a README
+      link → a page showing the stats, zero downloads. Local validation:
+      run `dev/etsi-matrix-summary.py` over an existing `results/` cell
+      set + open the generated index in-sandbox (serve on 42040 for the
+      user to click).
+- [ ] 2. **README production pass.** Badges at top (ci, etsi-matrix, the
+      shields endpoint badge from item 1, coverage); FIX the stale targets
+      table (still the pre-2026-08-10 10× smaller contract — claude.md §1
+      is the authority: 100M entities / 10k tenants / 100k subs);
+      quickstart section (docker run + compose, the four store modes in
+      two lines); link the conformance report page and a docs index.
+      Negative check: no claim in the README that CI does not actually
+      prove.
+- [ ] 3. **Repo hygiene files.** LICENSE is MISSING (deny.toml gates dep
+      licenses; the repo itself has none) — license choice is the USER's,
+      ask once and add. SECURITY.md (contact + the §16 security-wall
+      posture, link docs/security-audit-2026-08-04.md), CONTRIBUTING.md
+      (build, `-j 2` linker rule, test protocol, one-clause-one-commit),
+      CHANGELOG.md seeded from the `v*` tags.
+- [ ] 4. **NATS visible + tested at runtime ("check NATS is working").**
+      `/q/health` reports store mode and file commit-queue but NOTHING
+      about the bus — add `bus: {mode, connected, reconnects}` when
+      ANTARES_BUS=nats (red-first unit on the health payload; assert the
+      field is ABSENT for bus=local). Then a NATS-outage e2e (tests/,
+      gated on ANTARES_TEST_NATS_URL like the existing F9 bus tests, live
+      NATS via the private-dind recipe in the palace): kill NATS mid-run →
+      health flips connected:false, broker keeps serving API traffic,
+      restart NATS → reconnect + subscription notifications resume, no
+      panic. Assert the DEFINED semantics, whatever the current
+      implementation's contract is — read bus.rs first.
+- [ ] 5. **Rolling-update proof on a cadence, not only on tags.**
+      full.yml's K1/K3 job (haproxy + `dev/rolling-update.sh` +
+      `k6-continuity.py` under load) runs only on `v*` push/dispatch — add
+      `schedule:` (weekly, offset from etsi-coverage's Mon 04:41) to
+      full.yml or split the HA/rolling job into a scheduled workflow
+      reusing the same steps. Surface the result: workflow badge in README
+      + one line on the reports page. Sandbox validation: yaml/actionlint
+      + a dry parse of the job's script steps; the run itself is CI's.
+- [ ] 6. **Production-readiness re-audit.** Walk every P0/P1 in
+      docs/production-readiness-audit-2026-08-09.md; for each, record
+      CLOSED (commit + test evidence) or still-open. Still-open items
+      become new checkboxes appended to THIS list (that is the "if
+      something is missing, it should also be tested" clause). Write the
+      updated status table back into that doc with today's date.
+- [ ] 7. **Docs index + operations runbook.** docs/README.md mapping the
+      docs tree (deep-analysis, adr/, spec/ ledger, audits, upstream
+      raises); docs/operations.md runbook: deploy (compose + deploy/k8s),
+      per-store backup table (README already has the redb stop-copy rule —
+      link, don't duplicate), rolling update procedure (`rolling-update.sh`
+      + the file-mode-cannot-roll K10 rule), health/metrics endpoints,
+      state-reset discipline (§2). Mostly assembling existing text — no
+      new claims without a test behind them.
+- [ ] 8. **Coverage surfaced.** etsi-coverage.yml already produces
+      lcov+html weekly — publish the merged HTML + a % badge json to the
+      same `site/reports/` area (item 1's mechanism), README badge. No new
+      floor/ratchet (strict.yml owns the unit floor) — display only.
+
+Mac-side / user (collect here as items complete, do not block on them):
+push master + workflow changes, enable/verify the Pages source, pick the
+LICENSE, trigger the first scheduled runs.
