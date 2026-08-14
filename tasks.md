@@ -1339,3 +1339,12 @@ decision contradicts any item; the S4 check SURFACED two aggravations
       testsuite-doubts/etsi-raises if a TP is ever needed there; today the
       broker's eval and the SQL leaf agree (no match), asserted only by the
       self-grounding parity battery.
+
+## IOP TP backlog 2026-08-14
+
+118 new spec-grounded IOP tests (incl. edge cases) listed in
+`docs/iop-tp-checklist.md` — 12 groups (REG/CAS/CSI/UNI/PRV/SUB/CSN/
+TMP_03/MAP/TEN/ERR/MSC), each clause-cited, none duplicating the 102
+existing IOP_TP cases. Work order: one group = one commit, red-first;
+three known-red items flagged in the file's footer (508 inclusive-loop
+over-application, cooldown-vs-breaker posture, splitEntities merge).
