@@ -66,16 +66,18 @@ locally on run-five.
 - [x] REG_01_13 Default operations = `"federationOps"` — createEntity is NOT in it, so a create never forwards to a default-ops CSR (4.20, 5.6.1.4)
 - [x] REG_01_14 Geo-scoped CSR (location member): only a geo query intersecting the registered geometry forwards (5.2.9 location)
 
-## B. Cascading, loops, Via — IOP_EXT_CAS_01 (4.3.6.4, 6.3.17)
+## B. Cascading, loops, Via — IOP_EXT_CAS_01 (4.3.6.4, 6.3.17, 6.3.18, 5.2.34)
 
-- [ ] CAS_01_01 Forwarded request carries a Via header naming the forwarding broker; two hops → two Via entries in order (6.3.17)
-- [ ] CAS_01_02 Exclusive registration redirecting back onto the broker itself → 508 Loop Detected (6.3.17, p.278 — exclusive/redirect only)
-- [ ] CAS_01_03 Redirect self-loop → 508 Loop Detected (6.3.17)
-- [ ] CAS_01_04 INCLUSIVE loop (b1→b2→b1) → NGSILD-Warning 199 + local data served, NOT 508 (6.3.17 — 508 is exclusive/redirect-only; edge the audit flagged as over-applied)
-- [ ] CAS_01_05 Auxiliary loop → NGSILD-Warning 199, response 200 (6.3.17)
-- [ ] CAS_01_06 Three-broker chain b1→b2→b3: entity found only on b3 reaches b1's client exactly once (4.3.6.4 dedup)
-- [ ] CAS_01_07 Diamond topology (b1→b2→b4, b1→b3→b4): b4's entity appears once in the union (4.3.6.4 duplicates)
-- [ ] CAS_01_08 localOnly on the forwarded leg: b2 answers from its own storage, b3 is never contacted — assert b3's access log empty (4.3.6.4, 5.2.34 localOnly)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Cascading/IOP_EXT_CAS_01.robot` (fork commit db4cfea), 8/8 green on run-five. The flagged CAS_01_04 known-red resolved by broker commit 43ad459 (`6.3.17:` peer NGSILD-Warning propagation on forwarded reads + single-proxy 508 passthrough in combine_attr_parts — red-first via CAS_01_02/04/05).
+
+- [x] CAS_01_01 Forwarded request carries a Via header naming the forwarding broker; two hops → two Via entries in order (6.3.18 Table 6.3.18-2 + 5.2.40 — citation corrected from 6.3.17: the Via/hostAlias mandate lives in 6.3.18, p.279)
+- [x] CAS_01_02 Exclusive registration redirecting back onto the broker itself → 508 Loop Detected on unsafe methods (6.3.17, p.278 — the 508/504/404/502 list sits in the unsafe-methods paragraph; standing audit posture keeps reads on Table 6.3.17-1 warnings)
+- [x] CAS_01_03 Redirect self-loop → 508 Loop Detected (6.3.17)
+- [x] CAS_01_04 INCLUSIVE loop (b1→b2→b1) → NGSILD-Warning 199 + local data served, NOT 508 (6.3.17 — 508 is exclusive/redirect-only; edge the audit flagged as over-applied)
+- [x] CAS_01_05 Auxiliary loop → NGSILD-Warning 199, response 200 (6.3.17)
+- [x] CAS_01_06 Three-broker chain b1→b2→b3: entity found only on b3 reaches b1's client exactly once (4.3.6.4 dedup)
+- [x] CAS_01_07 Diamond topology (b1→b2→b4, b1→b3→b4): b4's entity appears once in the union (4.3.6.4 duplicates)
+- [x] CAS_01_08 localOnly on the forwarded leg: b2 answers from its own storage, b3 is never contacted — assert b3's access log empty (4.3.6.4, 5.2.34 localOnly)
 
 ## C. contextSourceInfo — IOP_EXT_CSI_01 (4.3.6.5, 4.3.6.6, 5.2.10)
 
