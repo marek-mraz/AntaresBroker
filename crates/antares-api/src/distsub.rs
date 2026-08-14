@@ -476,7 +476,7 @@ async fn forward_sub(
 ) -> (u16, Value) {
     let fed = crate::federation::fed_reg_of(reg_id, reg);
     let ctx_url = crate::federation::ctx_link_url(&HeaderMap::new(), &st.loader.core().source);
-    crate::federation::forward(
+    let (status, body, _) = crate::federation::forward(
         st,
         method,
         url,
@@ -487,7 +487,8 @@ async fn forward_sub(
         &ctx_url,
         body,
     )
-    .await
+    .await;
+    (status, body)
 }
 
 /// 5.8.6 splitEntities=true inbound merge: each notified Entity "shall be

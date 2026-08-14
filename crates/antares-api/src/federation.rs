@@ -683,16 +683,19 @@ pub async fn forward(
     reg: &FedReg,
     ctx_url: &str,
     mut body: Option<Value>,
-) -> (u16, Value) {
+) -> (u16, Value, Vec<String>) {
+    // 6.3.17: NGSILD-Warning values received from the peer are returned to
+    // the caller — abnormal behaviour detected downstream in a cascade
+    // (4.3.6.4) must surface on the aggregated response, not vanish here.
     // I4: one policy for every outbound class — scheme allowlist,
     // private-range deny, per-destination circuit breaker (§16.4/§16.7).
     if let Err(e) = st.egress.check_url(&url).await {
         tracing::warn!("federation forward to {url} refused: {e}");
-        return (502, Value::Null);
+        return (502, Value::Null, Vec::new());
     }
     if st.egress.is_open(&url) {
         tracing::debug!("federation forward to {url} short-circuited (breaker open)");
-        return (503, Value::Null);
+        return (503, Value::Null, Vec::new());
     }
     // 4.3.6.6 (V-29): the four contextSourceInfo keys with processing
     // semantics. Values were validated at registration time (5.9.2).
@@ -837,7 +840,7 @@ pub async fn forward(
             Some(r) => r,
             None => {
                 st.egress.record_failure(&url);
-                return (504, Value::Null);
+                return (504, Value::Null, Vec::new());
             }
         };
         match sent {
@@ -849,18 +852,24 @@ pub async fn forward(
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
                 st.egress.record_success(&url);
+                let peer_warnings: Vec<String> = resp
+                    .headers()
+                    .get_all("NGSILD-Warning")
+                    .iter()
+                    .filter_map(|v| v.to_str().ok().map(str::to_owned))
+                    .collect();
                 let body = read_body_capped(resp).await;
-                (status, body)
+                (status, body, peer_warnings)
             }
             Err(e) if e.is_timeout() => {
                 st.egress.record_failure(&url);
-                (504, Value::Null)
+                (504, Value::Null, Vec::new())
             }
             Err(_) => {
                 // connect refused/reset: fails in milliseconds — no U1 need;
                 // clearing avoids stale suppression of a restarted peer
                 st.egress.record_success(&url);
-                (502, Value::Null)
+                (502, Value::Null, Vec::new())
             }
         }
     })
@@ -1039,7 +1048,7 @@ pub async fn fed_retrieve_temporal(
             let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
             query.push(("attrs".into(), names.join(",")));
         }
-        let (status, body) = forward(
+        let (status, body, peer_warns) = forward(
             st,
             reqwest::Method::GET,
             format!("{}/ngsi-ld/v1/temporal/entities/{id}", reg.endpoint),
@@ -1051,11 +1060,12 @@ pub async fn fed_retrieve_temporal(
             None,
         )
         .await;
-        (reg, status, body)
+        (reg, status, body, peer_warns)
     })
     .await;
     let mut out = Vec::new();
-    for (reg, status, body) in fetched {
+    for (reg, status, body, peer_warns) in fetched {
+        warnings.extend(peer_warns);
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
@@ -1222,7 +1232,7 @@ pub async fn fed_retrieve(
         .collect();
     let fetched = fan_out(regs, move |reg| async move {
         let Some(op) = reg.read_op() else {
-            return (reg, 0, Value::Null);
+            return (reg, 0, Value::Null, Vec::new());
         };
         // sysAttrs on every forwarded read: conflicting instances resolve by
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
@@ -1232,7 +1242,7 @@ pub async fn fed_retrieve(
             let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
             query.push(("attrs".into(), names.join(",")));
         }
-        let (status, body) = match op {
+        let (status, body, peer_warns) = match op {
             "retrieveEntity" => {
                 forward(
                     st,
@@ -1289,11 +1299,12 @@ pub async fn fed_retrieve(
                 .await
             }
         };
-        (reg, status, body)
+        (reg, status, body, peer_warns)
     })
     .await;
     let mut out = Vec::new();
-    for (reg, status, body) in fetched {
+    for (reg, status, body, peer_warns) in fetched {
+        warnings.extend(peer_warns);
         // V-14: abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
         // as a failed overall response; 404-with-no-data is normal.
         if let Some((code, text)) = read_warning(status, &body) {
@@ -1378,9 +1389,9 @@ pub async fn fed_query(
         .collect();
     let fetched = fan_out(regs, move |reg| async move {
         let Some(op) = reg.query_op() else {
-            return (reg, 0, Value::Null);
+            return (reg, 0, Value::Null, Vec::new());
         };
-        let (status, body) = if op == "queryBatch" {
+        let (status, body, peer_warns) = if op == "queryBatch" {
             let mut sel = Map::new();
             if let Some(t) = params.get("type") {
                 sel.insert("type".into(), Value::String(t.clone()));
@@ -1451,11 +1462,12 @@ pub async fn fed_query(
             )
             .await
         };
-        (reg, status, body)
+        (reg, status, body, peer_warns)
     })
     .await;
     let mut out = Vec::new();
-    for (reg, status, body) in fetched {
+    for (reg, status, body, peer_warns) in fetched {
+        warnings.extend(peer_warns);
         // V-14: same NGSILD-Warning classification as fed_retrieve (6.3.17)
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
@@ -1534,7 +1546,7 @@ pub(crate) async fn fed_entity_maps(
                 }
             }
         }
-        let (status, body) = forward(
+        let (status, body, _) = forward(
             st,
             reqwest::Method::GET,
             format!("{}/ngsi-ld/v1/{path}", reg.endpoint),
@@ -1616,7 +1628,7 @@ pub async fn fed_query_temporal(
         } else if let Some(a) = params.get("attrs") {
             query.push(("attrs".into(), a.clone()));
         }
-        let (status, body) = forward(
+        let (status, body, peer_warns) = forward(
             st,
             reqwest::Method::GET,
             format!("{}/ngsi-ld/v1/temporal/entities", reg.endpoint),
@@ -1628,11 +1640,12 @@ pub async fn fed_query_temporal(
             None,
         )
         .await;
-        (reg, status, body)
+        (reg, status, body, peer_warns)
     })
     .await;
     let mut out = Vec::new();
-    for (reg, status, body) in fetched {
+    for (reg, status, body, peer_warns) in fetched {
+        warnings.extend(peer_warns);
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
@@ -1855,7 +1868,7 @@ pub async fn forward_part(
     ctx_url: &str,
     body: Option<Value>,
 ) -> Part {
-    let (status, _) = forward(
+    let (status, _, _) = forward(
         st,
         method,
         url.clone(),

@@ -403,6 +403,20 @@ fn combine_attr_parts(
             }
         }
     }
+    // 6.3.17: "In the case of an exclusive or redirect registration, where
+    // all of the data is held outside of the Context Broker and held in a
+    // single registered source ... 508 Loop Detected" — a proxy part's loop
+    // verdict passes through instead of dissolving into 207/404.
+    if updated.is_empty()
+        && !any_fed_ok
+        && !matches!(local, LocalOutcome::Ok)
+        && regs
+            .iter()
+            .zip(fed_parts)
+            .any(|(r, p)| r.is_proxy() && p.status == 508)
+    {
+        return crate::federation::loop_508(tenant);
+    }
     // nothing was found anywhere → 404 ProblemDetails (6.6/6.7 tables)
     if matches!(&local, LocalOutcome::NotFound(_)) && !any_fed_ok && updated.is_empty() {
         if let LocalOutcome::NotFound(d) = local {
