@@ -179,9 +179,6 @@ dependencies = [
 [[package]]
 name = "antares-registry"
 version = "0.1.0"
-dependencies = [
- "antares-model",
-]
 
 [[package]]
 name = "antares-sql"
