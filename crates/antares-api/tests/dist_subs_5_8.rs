@@ -48,6 +48,13 @@ async fn send(
 /// Recording remote broker: stores "METHOD PATH\n\nBODY" per request,
 /// answers 201.
 fn recording_mock() -> (u16, Arc<Mutex<Vec<String>>>) {
+    recording_mock_with_delay(0)
+}
+
+/// Same, but holds the 201 for `delay_ms` after recording the request —
+/// models an httpctrl-style mock (ETSI TP 5814_01) whose reply waits for
+/// the test's assertions.
+fn recording_mock_with_delay(delay_ms: u64) -> (u16, Arc<Mutex<Vec<String>>>) {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -93,6 +100,9 @@ fn recording_mock() -> (u16, Arc<Mutex<Vec<String>>>) {
                 sink.lock()
                     .expect("sink")
                     .push(format!("{first}\n\n{body}"));
+                if delay_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
                 let _ = s.write_all(
                     b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
@@ -513,6 +523,101 @@ async fn clause_5_8_6_split_entities_inbound_merge() {
             .iter()
             .any(|r| r.starts_with("GET /ngsi-ld/v1/entities/")),
         "the origin Context Source must be excluded from the merge retrieval"
+    );
+}
+
+/// 5.8.5.4: the delete of a Subscription whose reduced copy is still in
+/// flight (the Context Source has RECEIVED the create but not yet answered)
+/// must still forward the delete — the remote-subscription mapping is
+/// broker-generated, so it exists independently of the create's response.
+/// This is the ETSI 5814_01_01 pg/timescale flake: the httpctrl mock holds
+/// its 201 until the test's assertions ran, and the test deletes right after.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_8_5_4_delete_races_slow_create_forward() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-distsub4".into());
+    antares_api::notify::wire(&mut st);
+    let (remote_port, remote_seen) = recording_mock_with_delay(800);
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:ds4",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:ds-race",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // the create-forward has ARRIVED at the Context Source (response pending)
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let remote_id: String = {
+        let seen = remote_seen.lock().expect("seen");
+        let r = seen
+            .iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .clone();
+        serde_json::from_str::<Value>(r.split("\n\n").nth(1).expect("body")).expect("json")["id"]
+            .as_str()
+            .expect("remote id")
+            .to_owned()
+    };
+
+    // delete while the create's 201 is still held back
+    let (status, _) = send(
+        &st,
+        "DELETE",
+        "/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:ds-race",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    wait_for("the forwarded remote delete", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with(&format!("DELETE /ngsi-ld/v1/subscriptions/{remote_id}")))
+    })
+    .await;
+    // the delete targets the REMOTE id — the own id never leaks to the source
+    assert!(
+        !remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.lines().next().is_some_and(|l| l.contains("ds-race"))),
+        "forwarded requests must use the broker-generated remote id"
     );
 }
 

@@ -313,6 +313,16 @@ pub(crate) async fn on_csource_notification(
                 let remote_id =
                     format!("urn:ngsi-ld:Subscription:distsub:{}", uuid::Uuid::new_v4());
                 let copy = reduced_copy(st, &sub, reg, &remote_id);
+                // 5.8.1.4/5.8.5.4: the mapping is stored BEFORE the forward —
+                // the remote id is broker-generated, and a delete Subscription
+                // arriving while the create-forward's response is still in
+                // flight must find the mapping or the delete-forward is lost
+                // (the ETSI 5814_01_01 pg race). A failed forward rolls the
+                // mapping back below.
+                inbound_put(st, &remote_id, tenant, own_id);
+                let mut doc = ds_get(st, tenant, own_id);
+                doc["remotes"][reg_id] = json!([endpoint.clone(), remote_id]);
+                ds_put(st, tenant, own_id, doc);
                 let (status, _) = forward_sub(
                     st,
                     tenant,
@@ -323,11 +333,16 @@ pub(crate) async fn on_csource_notification(
                     Some(copy),
                 )
                 .await;
-                if (200..300).contains(&status) {
-                    inbound_put(st, &remote_id, tenant, own_id);
-                    let mut doc = ds_get(st, tenant, own_id);
-                    doc["remotes"][reg_id] = json!([endpoint.clone(), remote_id]);
-                    ds_put(st, tenant, own_id, doc);
+                if !(200..300).contains(&status) {
+                    inbound_delete(st, &remote_id);
+                    // targeted mutate, never ds_put: a concurrent delete may
+                    // have removed the whole doc — do not resurrect it
+                    let _ = st.store.mutate(tenant, Kind::DistSub, own_id, |d| {
+                        if let Some(m) = d.get_mut("remotes").and_then(Value::as_object_mut) {
+                            m.remove(reg_id);
+                        }
+                        Ok::<_, std::convert::Infallible>(())
+                    });
                 }
             }
             ("updated", Some((_, remote_id)))
