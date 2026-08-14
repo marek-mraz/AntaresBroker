@@ -145,14 +145,16 @@ locally on run-five.
 
 ## G. CSR subscriptions & notifications — IOP_EXT_CSN_01 (5.11.2–5.11.7, 5.3.2, 6.3.9)
 
-- [ ] CSN_01_01 Subscribe to CSRs (POST /csourceSubscriptions); creating a matching CSR on the same broker notifies with the CSR body (5.11.2, 5.3.2)
-- [ ] CSN_01_02 Initial csourceNotification carries ALL currently-matching CSRs (5.11.2)
-- [ ] CSN_01_03 CSR update fires a csourceNotification with the changed registration (5.11.3)
-- [ ] CSN_01_04 CSR deletion notifies; subsequent CSR churn does not (5.11.6 + negative)
-- [ ] CSN_01_05 csourceSubscription entities filter: CSR for a different type does NOT notify (5.11.2 negative)
-- [ ] CSN_01_06 csourceNotification format members (id, type=ContextSourceNotification, subscriptionId, notifiedAt, data[]) exact (5.3.2 table — assert no extra members)
-- [ ] CSN_01_07 Update csourceSubscription watched type; old type stops, new type starts notifying (5.11.3)
-- [ ] CSN_01_08 Query + retrieve csourceSubscriptions return the stored subs; unknown id → 404 ResourceNotFound (5.11.4/5.11.5)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/CSourceSubscription/IOP_EXT_CSN_01.robot` (fork commit df4a012), 8/8 green on run-five first run — no broker gaps.
+
+- [x] CSN_01_01 Subscribe to CSRs (POST /csourceSubscriptions); creating a matching CSR on the same broker notifies with the CSR body (5.11.2, 5.3.2)
+- [x] CSN_01_02 Initial csourceNotification carries ALL currently-matching CSRs (5.11.2)
+- [x] CSN_01_03 CSR update fires a csourceNotification with the changed registration (5.11.3)
+- [x] CSN_01_04 CSR deletion notifies; subsequent CSR churn does not (5.11.6 + negative)
+- [x] CSN_01_05 csourceSubscription entities filter: CSR for a different type does NOT notify (5.11.2 negative)
+- [x] CSN_01_06 csourceNotification format members (id, type=ContextSourceNotification, subscriptionId, notifiedAt, data[]) exact (5.3.2 table — assert no extra members)
+- [x] CSN_01_07 Update csourceSubscription watched type; old type stops, new type starts notifying (5.11.3)
+- [x] CSN_01_08 Query + retrieve csourceSubscriptions return the stored subs; unknown id → 404 ResourceNotFound (5.11.4/5.11.5)
 
 ## H. Distributed temporal edges — IOP_EXT_TMP_03 (5.7.3.4, 5.7.4.4, 4.18)
 
