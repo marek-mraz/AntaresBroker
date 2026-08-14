@@ -743,13 +743,13 @@ fn deleted_instances<'a>(before: &'a Value, after: Option<&Value>, attr: &str) -
         .collect()
 }
 
-struct NotifShape {
-    repr: crate::repr::Repr,
-    show_changes: bool,
-    join: Option<(String, usize)>,
+pub(crate) struct NotifShape {
+    pub(crate) repr: crate::repr::Repr,
+    pub(crate) show_changes: bool,
+    pub(crate) join: Option<(String, usize)>,
 }
 
-fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
+pub(crate) fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
     let n = sub.get("notification").and_then(Value::as_object);
     let format = n
         .and_then(|n| n.get("format"))

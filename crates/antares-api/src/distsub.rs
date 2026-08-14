@@ -449,13 +449,30 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
         })
         .collect();
     if !reg_attrs.is_empty() {
-        if let Some(w) = o.get("watchedAttributes").and_then(Value::as_array) {
-            let kept: Vec<Value> = w
-                .iter()
-                .filter(|a| a.as_str().is_some_and(|a| reg_attrs.contains(&a)))
-                .cloned()
-                .collect();
-            o.insert("watchedAttributes".into(), Value::Array(kept));
+        match o.get("watchedAttributes").and_then(Value::as_array) {
+            Some(w) => {
+                let kept: Vec<Value> = w
+                    .iter()
+                    .filter(|a| a.as_str().is_some_and(|a| reg_attrs.contains(&a)))
+                    .cloned()
+                    .collect();
+                o.insert("watchedAttributes".into(), Value::Array(kept));
+            }
+            // 5.8.1.4 "reduced to what is matched by the registration
+            // information": a watch-everything Subscription still only
+            // watches the registered names at the source — otherwise an
+            // unregistered attribute change notifies through the chain.
+            None => {
+                o.insert(
+                    "watchedAttributes".into(),
+                    Value::Array(
+                        reg_attrs
+                            .iter()
+                            .map(|a| Value::String((*a).to_owned()))
+                            .collect(),
+                    ),
+                );
+            }
         }
     }
     // 5.8.1.4: with splitEntities the remote sees only fragments — the
@@ -556,7 +573,12 @@ async fn split_merge(
             }
         }
         if crate::notify::conditions_match(st, tenant, sub, &merged, &ctx) {
-            out.push(merged);
+            // 5.3.1/5.8.6: notification data carries Entities in their
+            // API representation — shape and compact the merged storage
+            // form exactly like the local notify path.
+            let shape = crate::notify::notif_shape(sub, &ctx);
+            let shaped = crate::repr::apply(&merged, &shape.repr);
+            out.push(crate::entities::compact_for(&shape.repr, &shaped, &ctx));
         }
     }
     out
