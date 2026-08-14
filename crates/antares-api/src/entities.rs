@@ -1700,8 +1700,13 @@ pub async fn delete_entity(
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
         let ctx = st.loader.core();
+        // 4.17/5.6.6.4: the type selector gates the target — a registration
+        // for a different type must not receive the forwarded delete.
         let spec = crate::csource::CsrSpec {
             ids: Some(vec![id.clone()]),
+            types: params
+                .get("type")
+                .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
             ..Default::default()
         };
         let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params, &headers);

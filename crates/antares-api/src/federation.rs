@@ -408,11 +408,20 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
     }
     match source {
         Value::String(s) => s.clone(),
+        // 5.5.7/6.3.5 fidelity: an inline @context has no dereferenceable
+        // URL — serialize it so forward() can embed it in the body as
+        // application/ld+json instead of dropping the term mappings.
+        Value::Array(a) if a.iter().any(|e| !e.is_string()) => {
+            serde_json::to_string(source).unwrap_or_else(|_| antares_jsonld::CORE_CONTEXT.into())
+        }
         Value::Array(a) => a
             .iter()
             .find_map(|e| e.as_str())
             .unwrap_or(antares_jsonld::CORE_CONTEXT)
             .to_owned(),
+        Value::Object(_) => {
+            serde_json::to_string(source).unwrap_or_else(|_| antares_jsonld::CORE_CONTEXT.into())
+        }
         _ => antares_jsonld::CORE_CONTEXT.to_owned(),
     }
 }
@@ -775,15 +784,27 @@ pub async fn forward(
             );
         }
     }
+    // An inline @context (serialized JSON from ctx_link_url) cannot travel
+    // as a Link header — it is embedded in the body below (5.5.7/6.3.5).
+    let inline_ctx: Option<Value> = if link_ctx.starts_with('[') || link_ctx.starts_with('{') {
+        serde_json::from_str(&link_ctx).ok()
+    } else {
+        None
+    };
     let mut req = st
         .fed_http
         .request(method, &url)
         .header("Accept", accept)
         .header(
+            "Via",
+            outbound_via(headers, &alias_for(&st.host_alias, tenant)),
+        );
+    if inline_ctx.is_none() {
+        req = req.header(
             "Link",
             format!("<{link_ctx}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""),
-        )
-        .header("Via", outbound_via(headers, &alias_for(&st.host_alias, tenant)));
+        );
+    }
     if !query.is_empty() {
         req = req.query(&query);
     }
@@ -819,7 +840,14 @@ pub async fn forward(
         // forwarded request shall be application/json").
         let want_ld = csi_get("contentType") == Some("application/ld+json")
             && csi_get("jsonldContext").is_none();
-        if want_ld {
+        if let Some(ic) = &inline_ctx {
+            // inline request @context: the only lossless carrier is the
+            // body itself, as application/ld+json (5.5.7/6.3.5).
+            if let Some(o) = b.as_object_mut() {
+                o.insert("@context".into(), ic.clone());
+            }
+            req = req.header("Content-Type", "application/ld+json");
+        } else if want_ld {
             if let Some(o) = b.as_object_mut() {
                 o.insert("@context".into(), Value::String(link_ctx.clone()));
             }
