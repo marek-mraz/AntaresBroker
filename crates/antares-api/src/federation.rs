@@ -812,7 +812,7 @@ pub async fn forward(
     antares_jsonld::http_interaction(async {
         // wasm has no client-level timeout — bound the forward per request
         // (mirrors the native fed_http 8 s total, §16.7); a timed-out
-        // forward counts against the peer like any 5xx.
+        // forward is the only failure class that feeds the breaker.
         let sent = antares_jsonld::io_deadline(req.send(), 8_000).await;
         let sent = match sent {
             Some(r) => r,
@@ -823,14 +823,13 @@ pub async fn forward(
         };
         match sent {
             Ok(resp) => {
+                // Any response — even 5xx — proves the peer answers within
+                // its own response time: no U1 deadline cost, so no breaker
+                // state. Only TIMEOUT-class failures trip (§16.7); a
+                // responding-but-erroring peer must keep being attempted,
+                // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
-                // 5xx from a peer counts against it too — a peer answering 500
-                // on every forward is as dead as one that times out.
-                if status >= 500 {
-                    st.egress.record_failure(&url);
-                } else {
-                    st.egress.record_success(&url);
-                }
+                st.egress.record_success(&url);
                 let body = read_body_capped(resp).await;
                 (status, body)
             }
@@ -839,7 +838,9 @@ pub async fn forward(
                 (504, Value::Null)
             }
             Err(_) => {
-                st.egress.record_failure(&url);
+                // connect refused/reset: fails in milliseconds — no U1 need;
+                // clearing avoids stale suppression of a restarted peer
+                st.egress.record_success(&url);
                 (502, Value::Null)
             }
         }

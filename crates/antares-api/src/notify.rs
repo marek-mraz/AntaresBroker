@@ -1738,11 +1738,16 @@ async fn deliver_as(
         }
     };
     let breaker_open = !refused && st.egress.is_open(uri);
-    let ok = if refused || breaker_open {
+    // (delivered, timed_out): only a TIMEOUT-class failure feeds the breaker
+    // — §16.7/U1 protects against peers that eat the deadline. An endpoint
+    // that ANSWERS (any status) is alive, costs only its own response time,
+    // and 6.3.8 says the notification shall be sent — suppressing sends to a
+    // responding host:port starves unrelated subscriptions sharing it.
+    let (ok, timed_out) = if refused || breaker_open {
         if breaker_open {
             tracing::debug!("notification to {uri} short-circuited (breaker open)");
         }
-        false
+        (false, false)
     } else {
         match outbound {
             Outbound::Http(req, bytes) => {
@@ -1753,26 +1758,29 @@ async fn deliver_as(
                 #[cfg(not(target_arch = "wasm32"))]
                 let page_handled = false;
                 if page_handled {
-                    true
+                    (true, false)
                 } else {
                     // V-17: endpoint.timeout (Table 5.2.15-1), clamped
-                    matches!(
-                        antares_jsonld::io_deadline(
-                            req.body(bytes).send(),
-                            endpoint_timeout_ms(ep)
-                        )
-                        .await,
-                        Some(Ok(r)) if r.status().is_success()
+                    match antares_jsonld::io_deadline(
+                        req.body(bytes).send(),
+                        endpoint_timeout_ms(ep),
                     )
+                    .await
+                    {
+                        Some(Ok(r)) => (r.status().is_success(), false),
+                        Some(Err(e)) => (false, e.is_timeout()),
+                        None => (false, true),
+                    }
                 }
             }
             #[cfg(feature = "mqtt")]
             Outbound::Mqtt(endpoint, params, bytes) => {
                 match st.mqtt.deliver(&endpoint, params, &bytes).await {
-                    Ok(()) => true,
+                    Ok(()) => (true, false),
                     Err(e) => {
                         tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
-                        false
+                        // broker/socket-level failure — keep the U1 guard
+                        (false, true)
                     }
                 }
             }
@@ -1781,8 +1789,12 @@ async fn deliver_as(
     if !refused && !breaker_open {
         if ok {
             st.egress.record_success(uri);
-        } else {
+        } else if timed_out {
             st.egress.record_failure(uri);
+        } else {
+            // the destination responded (or refused fast): alive — clear
+            // any stale consecutive-timeout state
+            st.egress.record_success(uri);
         }
     }
     // K12: delivery counters by sink scheme (facade — no-op without the
