@@ -83,7 +83,8 @@ pub struct AppState {
     pub nats: bool,
     /// The base URL remote Context Sources reach THIS broker at — used as
     /// the notification endpoint of forwarded subscription copies
-    /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to http://{host_alias}.
+    /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to
+    /// http://{host_alias}:{ANTARES_HTTP_PORT} (portless when 80/unset).
     pub public_url: String,
     /// 5.5.15 resource-pressure signal: max snapshots per tenant — above it
     /// the lowest-snapshotPriority snapshots are evicted. Snapshot documents
@@ -136,8 +137,16 @@ impl AppState {
                 }
             }));
         }
+        // 5.8.1.4: this URL is handed to peer brokers as the notification
+        // endpoint for distributed subscriptions — the default must carry
+        // the HTTP port or peers dial port 80 (ETSI-matrix ADV_02 shape).
         let public_url =
-            std::env::var("ANTARES_PUBLIC_URL").unwrap_or_else(|_| format!("http://{host_alias}"));
+            std::env::var("ANTARES_PUBLIC_URL").unwrap_or_else(|_| {
+                match std::env::var("ANTARES_HTTP_PORT") {
+                    Ok(p) if p != "80" => format!("http://{host_alias}:{p}"),
+                    _ => format!("http://{host_alias}"),
+                }
+            });
         Self {
             store,
             store_mode,

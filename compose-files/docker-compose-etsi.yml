@@ -78,6 +78,9 @@ services:
     environment:
       ANTARES_HTTP_PORT: "9090"
       ANTARES_HOST_ALIAS: antares1
+      # 5.8.1.4: handed to peer brokers as the dist-sub notification
+      # endpoint; host-networked stack => container names do not resolve
+      ANTARES_PUBLIC_URL: http://localhost:9090
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
@@ -93,6 +96,9 @@ services:
     environment:
       ANTARES_HTTP_PORT: "9091"
       ANTARES_HOST_ALIAS: antares2
+      # 5.8.1.4: handed to peer brokers as the dist-sub notification
+      # endpoint; host-networked stack => container names do not resolve
+      ANTARES_PUBLIC_URL: http://localhost:9091
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
@@ -108,6 +114,9 @@ services:
     environment:
       ANTARES_HTTP_PORT: "9092"
       ANTARES_HOST_ALIAS: antares3
+      # 5.8.1.4: handed to peer brokers as the dist-sub notification
+      # endpoint; host-networked stack => container names do not resolve
+      ANTARES_PUBLIC_URL: http://localhost:9092
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
@@ -123,6 +132,9 @@ services:
     environment:
       ANTARES_HTTP_PORT: "9093"
       ANTARES_HOST_ALIAS: antares4
+      # 5.8.1.4: handed to peer brokers as the dist-sub notification
+      # endpoint; host-networked stack => container names do not resolve
+      ANTARES_PUBLIC_URL: http://localhost:9093
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
@@ -138,6 +150,9 @@ services:
     environment:
       ANTARES_HTTP_PORT: "9094"
       ANTARES_HOST_ALIAS: antares5
+      # 5.8.1.4: handed to peer brokers as the dist-sub notification
+      # endpoint; host-networked stack => container names do not resolve
+      ANTARES_PUBLIC_URL: http://localhost:9094
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
