@@ -47,22 +47,24 @@ block. DONE = 118/118 [x] with evidence and the full IOP_TP tree green
 locally on run-five.
 ```
 
-## A. Registration semantics & modes — IOP_EXT_REG_01 (4.3.6.2/4.3.6.3, 5.2.9, 5.9, 5.10)
+## A. Registration semantics & modes — IOP_EXT_REG_01 (4.3.6.2/4.3.6.3, 5.2.9, 5.9.2.4/5.9.3.4, 4.20)
 
-- [ ] REG_01_01 Registration without `mode` behaves as inclusive — remote data merged with local (5.2.9: mode default inclusive)
-- [ ] REG_01_02 Creating an exclusive CSR whose Attributes already exist on a local entity → 409 Conflict (5.9.4)
-- [ ] REG_01_03 Creating a redirect CSR when an existing local Entity already matches → 409 Conflict (5.9.4, p.229)
-- [ ] REG_01_04 Updating a CSR to exclusive when local conflicting Attributes exist → 409 Conflict (5.10.4, p.229)
-- [ ] REG_01_05 Two overlapping redirect CSRs: the operation is distributed to BOTH context sources (4.3.6.3, p.42)
-- [ ] REG_01_06 Auxiliary data used ONLY where local/inclusive data is absent — auxiliary attr fills a gap, never shadows (4.3.6.3)
-- [ ] REG_01_07 Auxiliary vs inclusive both matching the same attr: inclusive instance is served, auxiliary is NOT in the response (4.3.6.3)
-- [ ] REG_01_08 Attribute-scoped CSR (propertyNames): query with attrs outside the registration is NOT forwarded (4.3.6.1 narrowing)
-- [ ] REG_01_09 relationshipNames-scoped CSR matches only Relationship attrs; a Property of the same name does not forward (5.2.10)
-- [ ] REG_01_10 idPattern-scoped CSR: retrieve of a non-matching id is served locally without a forward (5.2.9 entities.idPattern)
-- [ ] REG_01_11 CSR with `operations:["retrieveEntity"]`: queryEntity is NOT forwarded to it, retrieveEntity is (4.20)
-- [ ] REG_01_12 CSR with an operation GROUP (`"redirectionOps"`) expands to its member operations (4.20 Table)
-- [ ] REG_01_13 Default operations = `"federationOps"` — createEntity is NOT in it, so a create never forwards to a default-ops CSR (4.20, 5.6.1.4)
-- [ ] REG_01_14 Geo-scoped CSR (location member): only a geo query intersecting the registered geometry forwards (5.2.9 location)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Registration/IOP_EXT_REG_01.robot`, 14/14 green on run-five. Red-first broker fixes in the same commit: FedReg::query_op (4.20 — retrieveEntity-only sources no longer receive query forwards) + CsrSpec.geo location gate (5.2.9). Commit: see `IOP_EXT_REG_01:` in git log.
+
+- [x] REG_01_01 Registration without `mode` behaves as inclusive — remote data merged with local (5.2.9: mode default inclusive)
+- [x] REG_01_02 Creating an exclusive CSR whose Attributes already exist on a local entity → 409 Conflict (5.9.2.4 — citation corrected from 5.9.4: PDF p.227-228, 5.9.4 is Delete CSR)
+- [x] REG_01_03 Creating a redirect CSR when an existing local Entity already matches → 409 Conflict (5.9.2.4, p.228 — citation corrected from 5.9.4)
+- [x] REG_01_04 Updating a CSR to exclusive when local conflicting Attributes exist → 409 Conflict (5.9.3.4, p.229 — citation corrected from 5.10.4: Update CSR is 5.9.3)
+- [x] REG_01_05 Two overlapping redirect CSRs: the operation is distributed to BOTH context sources (4.3.6.3, p.42)
+- [x] REG_01_06 Auxiliary data used ONLY where local/inclusive data is absent — auxiliary attr fills a gap, never shadows (4.3.6.2 — citation corrected: auxiliary is an additive mode, defined in 4.3.6.2)
+- [x] REG_01_07 Auxiliary vs inclusive both matching the same attr: inclusive instance is served, auxiliary is NOT in the response (4.3.6.2 — citation corrected as above)
+- [x] REG_01_08 Attribute-scoped CSR (propertyNames): query with attrs outside the registration is NOT forwarded (4.3.6.1 narrowing)
+- [x] REG_01_09 relationshipNames-scoped CSR: only the registered names forward, forward narrowed to them (5.2.10 + 4.3.6.1 — reworded: prop-vs-rel discrimination of one name is not expressible at forward time; the PDF grounds name-scoped narrowing)
+- [x] REG_01_10 idPattern-scoped CSR: retrieve of a non-matching id is served locally without a forward (5.2.9 entities.idPattern)
+- [x] REG_01_11 CSR with `operations:["retrieveEntity"]`: queryEntity is NOT forwarded to it, retrieveEntity is (4.20)
+- [x] REG_01_12 CSR with an operation GROUP (`"redirectionOps"`) expands to its member operations (4.20 Table)
+- [x] REG_01_13 Default operations = `"federationOps"` — createEntity is NOT in it, so a create never forwards to a default-ops CSR (4.20, 5.6.1.4)
+- [x] REG_01_14 Geo-scoped CSR (location member): only a geo query intersecting the registered geometry forwards (5.2.9 location)
 
 ## B. Cascading, loops, Via — IOP_EXT_CAS_01 (4.3.6.4, 6.3.17)
 

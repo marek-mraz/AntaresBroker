@@ -735,6 +735,7 @@ pub fn check_proxied_overlap(
                     .map(str::to_owned),
                 attrs: (!attrs.is_empty()).then_some(attrs),
                 csf: None,
+                geo: None,
             };
             if csr_matches(&spec, other, ctx) {
                 let oid = other.get("id").and_then(Value::as_str).unwrap_or("?");
@@ -1126,6 +1127,10 @@ pub struct CsrSpec {
     /// whose Context Source Properties match it are considered (query,
     /// temporal query, purge, entityMaps — 5.7.2.4/5.7.4.4/5.6.21.4).
     pub csf: Option<antares_ql::QNode>,
+    /// 5.2.9 location ("Location for which the Context Source may be able
+    /// to provide information") + 4.3.6.1: a geo query is only distributed
+    /// to registrations whose location geometry matches it.
+    pub geo: Option<crate::geo::GeoQuery>,
 }
 
 /// 5.2.8: EntityInfo type is a String or String[] — yield every named type.

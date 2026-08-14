@@ -208,6 +208,15 @@ impl FedReg {
             .into_iter()
             .find(|op| self.supports(op))
     }
+    /// 4.20 Table 4.20-1: queryEntity/queryBatch implement 5.7.2 Query
+    /// Entities — retrieveEntity implements only 5.7.1, so a query is never
+    /// forwarded to a source that offers retrieveEntity alone (4.3.6.1:
+    /// "Context Brokers shall respect this").
+    pub fn query_op(&self) -> Option<&'static str> {
+        ["queryEntity", "queryBatch"]
+            .into_iter()
+            .find(|op| self.supports(op))
+    }
     /// 4.3.6.1: the registration's EntityInfo constraints gate which payload
     /// ITEMS a distributed write may carry — an item whose present id/type
     /// the registration does not name is not this source's data. An item
@@ -445,6 +454,16 @@ pub fn matching_regs(
             if let Some(csf) = &spec.csf {
                 if !crate::csource::csf_matches(csf, &doc, ctx) {
                     return None;
+                }
+            }
+            // 5.2.9 location + 4.3.6.1: a geo-scoped registration is only
+            // consulted when the query's geo filter matches its geometry;
+            // a registration without `location` is unconstrained.
+            if let Some(gq) = &spec.geo {
+                if let Some(geom) = doc.get("location") {
+                    if !gq.matches_geometry(geom) {
+                        return None;
+                    }
                 }
             }
             let alias = doc
@@ -1319,6 +1338,7 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource
         types,
         ids,
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
+        geo: crate::geo::GeoQuery::from_params(params).ok().flatten(),
         ..Default::default()
     }
 }
@@ -1354,13 +1374,13 @@ pub async fn fed_query(
     let ctx_url = &ctx_url;
     let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
         .into_iter()
-        .filter(|r| r.read_op().is_some())
+        .filter(|r| r.query_op().is_some())
         .collect();
     let fetched = fan_out(regs, move |reg| async move {
-        let Some(op) = reg.read_op() else {
+        let Some(op) = reg.query_op() else {
             return (reg, 0, Value::Null);
         };
-        let (status, body) = if op == "queryBatch" && !reg.supports("queryEntity") {
+        let (status, body) = if op == "queryBatch" {
             let mut sel = Map::new();
             if let Some(t) = params.get("type") {
                 sel.insert("type".into(), Value::String(t.clone()));
@@ -2243,6 +2263,19 @@ mod tests {
         });
         merge_docs(&mut base2, &add, false);
         assert_eq!(base2[attr][0]["value"], 2);
+    }
+
+    /// 4.20: retrieveEntity implements only 5.7.1 — a source offering it
+    /// alone is never a query target; queryEntity/queryBatch are.
+    #[test]
+    fn query_op_requires_query_support() {
+        let reg =
+            |ops: &[&str]| fed_reg_of("urn:r", &json!({"endpoint": "http://x", "operations": ops}));
+        assert_eq!(reg(&["retrieveEntity"]).query_op(), None);
+        assert_eq!(reg(&["queryEntity"]).query_op(), Some("queryEntity"));
+        assert_eq!(reg(&["queryBatch"]).query_op(), Some("queryBatch"));
+        assert_eq!(reg(&["federationOps"]).query_op(), Some("queryEntity"));
+        assert_eq!(reg(&["retrieveOps"]).query_op(), Some("queryEntity"));
     }
 
     /// 4.3.6.2: "Auxiliary distributed operations are limited to context
