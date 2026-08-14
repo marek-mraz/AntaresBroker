@@ -63,6 +63,7 @@ ANTARES_STORE="$STORE" \
 ANTARES_HTTP_PORT="$PORT" \
 ANTARES_PUBLIC_URL="http://localhost:$PORT" \
 ANTARES_EGRESS_ALLOW_PRIVATE=true \
+ANTARES_SWEEP_SECS=2 \
 "$BIN" > "${TMPDIR:-/tmp}/antares-coverage-$STORE.log" 2>&1 &
 BROKER_PID=$!
 trap 'kill -TERM "$BROKER_PID" 2>/dev/null || true; wait "$BROKER_PID" 2>/dev/null || true' EXIT
