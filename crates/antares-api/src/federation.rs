@@ -486,12 +486,11 @@ pub fn matching_regs(
             // temporal fan-out on overlap with the temporal query; without
             // any declared interval the registration is unconstrained.
             if let Some(tq) = &spec.temporal {
-                if doc.get("observationInterval").is_some()
-                    || doc.get("managementInterval").is_some()
+                if (doc.get("observationInterval").is_some()
+                    || doc.get("managementInterval").is_some())
+                    && !crate::csource::temporal_interval_matches(&doc, tq)
                 {
-                    if !crate::csource::temporal_interval_matches(&doc, tq) {
-                        return None;
-                    }
+                    return None;
                 }
             }
             let alias = doc
