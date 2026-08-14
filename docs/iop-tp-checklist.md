@@ -92,14 +92,16 @@ locally on run-five.
 
 ## D. Unitary query/retrieve — IOP_EXT_UNI_01 (4.3.6.7, 5.7.1.4, 5.7.2.4)
 
-- [ ] UNI_01_01 limit=1 on a federated query returns ONE assembled entity even when its parts live on two brokers (4.3.6.7 unitary)
-- [ ] UNI_01_02 A split entity counts ONCE toward NGSILD-Results-Count (5.7.2.4 + 6.3.13)
-- [ ] UNI_01_03 q filter over a split entity: predicate satisfied only by the COMBINATION of local+remote attrs matches (5.7.2.4 aggregate filter, splitEntities=true)
-- [ ] UNI_01_04 geo filter applied post-aggregation: geometry lives remote, q attr lives local, both must hold (5.7.2.4)
-- [ ] UNI_01_05 pick projection applied AFTER aggregation — picked attr exists only remotely, survives (5.7.2.4)
-- [ ] UNI_01_06 attrs= selector over the union: entity qualifying only via a remote attr is included (5.7.2.4 S-order)
-- [ ] UNI_01_07 Stable pagination: entity created remotely mid-walk does not appear in later pages of the pinned map (4.3.6.7, 5.14.1.1)
-- [ ] UNI_01_08 Retrieve unitary merge: same attr same datasetId — newest observedAt wins regardless of which broker holds it (4.3.6.3 conflict rule, both directions in one TP with two datasetIds)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Unitary/IOP_EXT_UNI_01.robot` (fork commit f86607b), 8/8 green on run-five first run — no broker gaps.
+
+- [x] UNI_01_01 limit=1 on a federated query returns ONE assembled entity even when its parts live on two brokers (4.3.6.7 unitary)
+- [x] UNI_01_02 A split entity counts ONCE toward NGSILD-Results-Count (5.7.2.4 + 6.3.13)
+- [x] UNI_01_03 q filter over a split entity: predicate satisfied only by the COMBINATION of local+remote attrs matches (5.7.2.4 aggregate filter, splitEntities=true) — written as a THREE-way split (b1+b2+b3) since the two-way case is already IOP_EXT_QRY_02_03
+- [x] UNI_01_04 geo filter applied post-aggregation: geometry lives remote, q attr lives local, both must hold (5.7.2.4)
+- [x] UNI_01_05 pick projection applied AFTER aggregation — picked attr exists only remotely, survives (5.7.2.4)
+- [x] UNI_01_06 attrs= selector over the union: entity qualifying only via a remote attr is included (5.7.2.4 S-order)
+- [x] UNI_01_07 Stable pagination: entity created remotely mid-walk does not appear in later pages of the pinned map (4.3.6.7, 5.14.1.1)
+- [x] UNI_01_08 Retrieve unitary merge: same attr same datasetId — newest observedAt wins regardless of which broker holds it (4.3.6.3 conflict rule, both directions in one TP with two datasetIds)
 
 ## E. Distributed provision — IOP_EXT_PRV_01/02 (5.6.1.4–5.6.10.4, 4.20)
 
