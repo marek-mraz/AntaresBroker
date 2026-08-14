@@ -16,6 +16,33 @@ Each TP keeps at least one negative assertion (what must NOT be in the
 response). Work order: one group = one commit (`IOP_EXT_<GRP>:` prefix),
 red-first where the behaviour is new.
 
+## The /goal prompt — copy-paste this to write all 118 TPs to completion
+
+```
+/goal Work docs/iop-tp-checklist.md top-to-bottom until every checkbox is
+[x] with commit hash + green-run evidence recorded next to it. One group =
+one commit (`IOP_EXT_<GRP>:` prefix). Per item, full claude.md §0.3
+discipline: SPEC FIRST — mempalace_search + mempalace_get_pdf_pages the
+cited clause and quote the requirement in [Documentation] BEFORE writing
+the TP (the clause is the requirement source, never the suite or the
+broker's current behaviour); follow IOP_TP conventions (clause tags in
+4_3_6_2 form, fixtures json.tool-validated, at least one NEGATIVE
+assertion per TP — what must NOT be in the response). Validate every TP
+locally per rule 8: --dryrun while iterating, then the REAL run on the
+5-broker dev/run-five.sh stack (b1..b5_url 9090-9094,
+notification_server_host:127.0.0.1, context_source_host:127.0.0.1) — a
+red run blocks the group's commit. Where the broker is wrong the TP is
+the red-first proof: fix the broker in the same commit (rule-9 scope test
+applies) or prove a spec doubt and log it in error.md +
+testsuite-doubts.md — never bend a TP to broken behaviour. The three
+flagged known-red items (CAS_01_04 508-on-inclusive-loop, ERR_01_06/07
+cooldown-vs-breaker posture, SUB_02_01/02 splitEntities merge) get broker
+fixes with their own clause-prefixed commits + ledger updates. Use
+ponytail throughout. Mac-side pushes + CI watch: list for the user, never
+block. DONE = 118/118 [x] with evidence and the full IOP_TP tree green
+locally on run-five.
+```
+
 ## A. Registration semantics & modes — IOP_EXT_REG_01 (4.3.6.2/4.3.6.3, 5.2.9, 5.9, 5.10)
 
 - [ ] REG_01_01 Registration without `mode` behaves as inclusive — remote data merged with local (5.2.9: mode default inclusive)
