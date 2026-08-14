@@ -22,10 +22,14 @@ red-first where the behaviour is new.
 /goal Work docs/iop-tp-checklist.md top-to-bottom until every checkbox is
 [x] with commit hash + green-run evidence recorded next to it. One group =
 one commit (`IOP_EXT_<GRP>:` prefix). Per item, full claude.md §0.3
-discipline: SPEC FIRST — mempalace_search + mempalace_get_pdf_pages the
-cited clause and quote the requirement in [Documentation] BEFORE writing
-the TP (the clause is the requirement source, never the suite or the
-broker's current behaviour); follow IOP_TP conventions (clause tags in
+discipline: PDF SPEC FIRST (hard rule, user 2026-08-14) — READ the cited
+clause's actual PDF pages via mempalace_get_pdf_pages (mempalace_search
+only locates them) and quote the requirement verbatim in [Documentation]
+BEFORE writing the TP; the checklist item itself is a POINTER, not the
+requirement — if the PDF text contradicts the item's wording, the PDF
+wins and the item is corrected in the same commit. Never write a TP from
+the ledger body, this checklist, memory, the suite, or the broker's
+current behaviour; follow IOP_TP conventions (clause tags in
 4_3_6_2 form, fixtures json.tool-validated, at least one NEGATIVE
 assertion per TP — what must NOT be in the response). Validate every TP
 locally per rule 8: --dryrun while iterating, then the REAL run on the
