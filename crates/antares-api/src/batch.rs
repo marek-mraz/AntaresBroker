@@ -638,11 +638,14 @@ async fn batch_write(
                     Some(Value::Array(arr)),
                 )
                 .await;
+                // 5.6.8.5: an upsert forward only CREATED entities when the
+                // remote said so — 201 (body lists the created ids); a 204
+                // means every forwarded entity was updated.
                 merge_remote_batch(
                     status,
                     &body,
                     &sent_ids,
-                    mode == BatchMode::Create || mode == BatchMode::Upsert,
+                    mode == BatchMode::Create || (mode == BatchMode::Upsert && status == 201),
                     &mut remote_ok,
                     &mut remote_err,
                 );

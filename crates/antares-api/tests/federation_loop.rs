@@ -867,6 +867,58 @@ async fn clause_5_6_8_upsert_forwarding_fallbacks() {
     );
 }
 
+/// 5.6.8.5: a 201 Upsert response lists ONLY the newly created ids — a
+/// forwarded upsertBatch answered with 204 means those entities were
+/// UPDATED on the source, so an all-updated distributed upsert returns
+/// 204 (matrix-9 D013_01/02: every remote batch success was tagged
+/// "created" and the aggregate flipped to 201).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_8_remote_204_upsert_is_update_not_create() {
+    let m =
+        mock_replying("HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    let st = state();
+    let reg = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:ups-204",
+        "type": "ContextSourceRegistration",
+        "mode": "redirect",
+        "operations": ["upsertBatch"],
+        "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+        "endpoint": format!("http://127.0.0.1:{}", m.port),
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/csourceRegistrations")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", reg.len())
+        .body(Body::from(reg))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let body = serde_json::json!([
+        {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 7}}
+    ])
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entityOperations/upsert")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT, "all updated → 204");
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert!(
+        bytes.is_empty(),
+        "204 carries no created-id list: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one batch forward");
+}
+
 /// 5.6.21.4: a matched registration forwards the purge only when it
 /// supports purgeEntity; an unsupported matched registration — any mode,
 /// redirect included — contributes a Conflict and is never contacted.
