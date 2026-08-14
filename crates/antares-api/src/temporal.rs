@@ -1642,12 +1642,16 @@ pub(crate) async fn query_temporal_inner(
         antares_sql::compile::qprefilter::prefilter_exact(ast, r.as_ref(), &|t| ctx.expand_key(t))
     });
     let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
+    // 5.7.4.4 + 5.5.9: pagination applies to the MERGED federated union, so
+    // the store may only pre-page when nothing will federate — otherwise
+    // page 1 is local-page + every remote row (matrix-9 IOP_EXT_TMP_03_04).
     let push_page = (exact_push || (geo.is_none() && scope_q.is_none() && q_page_exact))
         && id_pattern.is_none()
         && params.get("orderBy").is_none()
         && params.get("datasetId").is_none()
         && params.get("pick").is_none()
-        && p_limit > 0;
+        && p_limit > 0
+        && !crate::federation::would_federate(st, &tenant, &ctx, params, headers);
     // scoped: the &dyn expander must not live across an await (handler
     // futures are Send; the store call itself is synchronous)
     let outcome = {
