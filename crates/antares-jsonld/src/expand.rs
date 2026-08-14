@@ -1015,7 +1015,7 @@ fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError
     Ok(())
 }
 
-/// 4.6.3: supported Value geometries are "All the GeoJSON Geometries [8]
+/// 4.6.3: supported Value geometries are "All the GeoJSON Geometries \[8\]
 /// with the exception of GeometryCollection" — GEO_TYPES holds exactly that
 /// set, and every geometry carries coordinates.
 pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
@@ -1043,7 +1043,7 @@ pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
 /// - "All the referred components shall appear in the string; reduced
 ///   representations are not permitted" — a bare 19-char form has no zone.
 /// - "The Seconds component may optionally contain a decimal fraction …
-///   up to a maximum of six [digits]. … In requests, also a comma instead of a
+///   up to a maximum of six \[digits\]. … In requests, also a comma instead of a
 ///   decimal point may be used as separator for compatibility reasons."
 ///
 /// Digit-shape alone is not enough: `2026-13-45T00:00:00Z` is all digits in
