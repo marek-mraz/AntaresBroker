@@ -42,10 +42,21 @@ case "$STORE" in
     export ANTARES_DATA_DIR="${ANTARES_DATA_DIR:-$(mktemp -d)}" ;;
 esac
 
-# Instrumentation env: sets RUSTFLAGS + LLVM_PROFILE_FILE + a dedicated
-# target dir (target/llvm-cov-target), so the normal build cache is untouched.
+# Instrumentation env: cargo-llvm-cov 0.8 injects -C instrument-coverage via
+# a RUSTC_WRAPPER, which does NOT change cargo fingerprints — correctness
+# depends entirely on `clean` wiping stale uninstrumented artifacts. clean
+# refuses (but still exits 0! — hence the hard check below) when the target
+# dir lacks cargo's CACHEDIR.TAG marker; a target/ created by anything other
+# than cargo itself is missing it. Seen 2026-08-14: the silent clean failure
+# reused uninstrumented rlibs and the coverage map covered 4 of 11 crates.
+mkdir -p target
+[ -f target/CACHEDIR.TAG ] || printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > target/CACHEDIR.TAG
 source <(cargo llvm-cov show-env --export-prefix)
-cargo llvm-cov clean --workspace
+CLEAN_OUT=$(cargo llvm-cov clean --workspace 2>&1) || { echo "$CLEAN_OUT"; exit 1; }
+case "$CLEAN_OUT" in *"cannot clean"*)
+  echo "$CLEAN_OUT"
+  echo "clean failed — stale uninstrumented artifacts would corrupt the report"; exit 1;;
+esac
 
 if [ "${UNIT_TESTS:-0}" = 1 ]; then
   echo "=== workspace tests (instrumented) ==="
