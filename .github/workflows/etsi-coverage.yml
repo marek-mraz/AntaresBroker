@@ -1,0 +1,132 @@
+name: etsi-coverage
+
+# ETSI-driven coverage, per store mode — which broker code NO test executes.
+#
+# strict.yml's daily floor covers the Rust unit tests. This workflow answers
+# the other half: it instruments the broker binary, runs the workspace tests
+# AND the full Robot suite against it (memory / file / postgres / timescale),
+# and publishes per-store + merged reports. A zero-count line in the merged
+# view means no Rust test and no ETSI TP in ANY store mode ever ran it.
+#
+# Report-only (artifacts + step summary), no gate: suite green is ci.yml's
+# job, the unit floor is strict.yml's. Thin wrapper around
+# dev/etsi-coverage.sh — the run is identical locally.
+on:
+  schedule:
+    - cron: "41 4 * * 1" # weekly Monday — after strict.yml's daily slots
+  workflow_dispatch:
+
+jobs:
+  cover:
+    name: ETSI coverage (${{ matrix.store }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - store: memory
+          - store: file
+          - store: postgres
+            db_image: ghcr.io/baosystems/postgis:17-3.5
+          - store: timescale
+            db_image: timescale/timescaledb-ha:pg17
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # instrument-coverage RUSTFLAGS produce artifacts incompatible with
+          # the other workflows' caches — keep a separate one.
+          key: etsi-coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Start ${{ matrix.store }} database
+        if: matrix.db_image
+        run: |
+          docker run -d --name db \
+            -e POSTGRES_USER=antares -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
+            -p 15432:5432 ${{ matrix.db_image }}
+          for i in $(seq 60); do
+            docker exec db pg_isready -U antares && exit 0; sleep 2
+          done
+          echo "database never became ready"; exit 1
+
+      - name: Instrumented tests + ETSI suite
+        env:
+          STORE: ${{ matrix.store }}
+          UNIT_TESTS: "1"
+          MQTT: "1" # 058_* launch mosquitto via docker run — works here
+          # Same instance for the pg-gated unit tests and the broker: tests
+          # run first, dev/reset-broker.sh clears state between suites.
+          ANTARES_DATABASE_URL: ${{ matrix.db_image && 'postgresql://antares:antares@localhost:15432/antares' || '' }}
+          ANTARES_TEST_DATABASE_URL: ${{ matrix.db_image && 'postgresql://antares:antares@localhost:15432/antares' || '' }}
+        run: ./dev/etsi-coverage.sh
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## ETSI coverage — ${{ matrix.store }}"
+            echo '```'
+            cat results/coverage-${{ matrix.store }}/summary.txt
+            echo '```'
+            echo "<details><summary>First 50 functions no test ran</summary>"
+            echo
+            echo '```'
+            head -50 results/coverage-${{ matrix.store }}/uncovered-functions.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etsi-coverage-${{ matrix.store }}
+          path: results/coverage-${{ matrix.store }}
+          retention-days: 30
+
+  merge:
+    # The headline number: coverage with all four stores' profiles combined.
+    # A file at 0% here is code no test in the entire matrix ever executed.
+    name: Merged report (all stores)
+    needs: cover
+    if: always()
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: etsi-coverage-*
+          path: cells
+      - name: Merge lcov across stores
+        run: |
+          sudo apt-get install -y -qq lcov
+          ARGS=()
+          for f in cells/etsi-coverage-*/lcov.info; do ARGS+=(-a "$f"); done
+          lcov "${ARGS[@]}" -o merged.info --ignore-errors inconsistent
+          {
+            echo "## Merged coverage (memory ∪ file ∪ postgres ∪ timescale)"
+            echo '```'
+            lcov --list merged.info --ignore-errors inconsistent
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etsi-coverage-merged
+          path: merged.info
+          retention-days: 90
