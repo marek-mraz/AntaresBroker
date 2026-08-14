@@ -156,64 +156,74 @@ locally on run-five.
 - [x] CSN_01_07 Update csourceSubscription watched type; old type stops, new type starts notifying (5.11.3)
 - [x] CSN_01_08 Query + retrieve csourceSubscriptions return the stored subs; unknown id → 404 ResourceNotFound (5.11.4/5.11.5)
 
-## H. Distributed temporal edges — IOP_EXT_TMP_03 (5.7.3.4, 5.7.4.4, 4.18)
+## H. Distributed temporal edges — IOP_EXT_TMP_03 (5.7.3.4, 5.7.4.4, 5.2.9, 4.18)
 
-- [ ] TMP_03_01 aggrMethods (avg) computed over the MERGED series, not per-broker (5.7.4.4 post-aggregation + 4.5.19)
-- [ ] TMP_03_02 scopeQ on a federated temporal query: remote instances filtered validity-aware (5.7.4.4 S4 + 4.18)
-- [ ] TMP_03_03 timeproperty=modifiedAt window against remote instances (5.7.4.4 + 5.2.21)
-- [ ] TMP_03_04 Temporal pagination over a merged series: pages partition the union, no instance repeats (5.7.4.4 + 6.3.10)
-- [ ] TMP_03_05 Deleted attribute instance (urn:ngsi-ld:null marker) merged from remote appears as deletion (4.5.7 + 5.7.3.4)
-- [ ] TMP_03_06 Remote temporal 404 with local instances present: local series served + NGSILD-Warning (5.7.3.4 + 6.3.17)
-- [ ] TMP_03_07 CSR with observationInterval matching only part of the window: forward happens only when intervals intersect (5.2.9)
-- [ ] TMP_03_08 POST /temporal/entityOperations/query federates like GET (6.24 binding parity over the dist path)
-- [ ] TMP_03_09 lastN over merged series where remote alone has >lastN instances — cap applies after merge (5.7.4.4 + 5.2.21 window-scoped)
-- [ ] TMP_03_10 Temporal instance datasetId collision across brokers, same timestamp → one instance survives the merge (4.5.5.x dedup; mirrors the 4.5.5.3 same-slot rule)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Temporal/IOP_EXT_TMP_03.robot` (fork commit 63a87e5), 10/10 green on run-five (Temporal dir 25/25 incl. TMP_01/02). Red-first broker fixes: observationInterval/managementInterval now gate temporal fan-out on overlap (CsrSpec.temporal, TMP_03_07); remote deletion tombstones import (allow_null in import_temporal + instance deletedAt preserved by sys-expansion, TMP_03_05).
+
+- [x] TMP_03_01 aggrMethods (avg) computed over the MERGED series, not per-broker (5.7.4.4 post-aggregation + 4.5.19)
+- [x] TMP_03_02 scopeQ on a federated temporal query: remote instances filtered validity-aware (5.7.4.4 S4 + 4.18)
+- [x] TMP_03_03 timeproperty=modifiedAt window against remote instances (5.7.4.4 + 5.2.21)
+- [x] TMP_03_04 Temporal pagination over a merged series: pages partition the union, no instance repeats (5.7.4.4 + 6.3.10)
+- [x] TMP_03_05 Deleted attribute instance (urn:ngsi-ld:null marker) merged from remote appears as deletion under the deletedAt timeproperty window (4.5.7 + 5.7.3.4 + 4.11 — corrected: the tombstone carries only deletedAt, so that is the window it matches)
+- [x] TMP_03_06 Remote temporal 404 with local instances present: local series served SILENTLY (5.7.3.4 + 6.3.17 — corrected: a 404 source "should not be considered as abnormal behaviour", no warning)
+- [x] TMP_03_07 CSR with observationInterval matching only part of the window: forward happens only when intervals intersect (5.2.9)
+- [x] TMP_03_08 POST /temporal/entityOperations/query federates like GET (6.24 binding parity over the dist path)
+- [x] TMP_03_09 lastN over merged series where remote alone has >lastN instances — cap applies after merge (5.7.4.4 + 5.2.21 window-scoped)
+- [x] TMP_03_10 Temporal instance datasetId collision across brokers, same timestamp → one instance survives the merge (4.5.5.x dedup; mirrors the 4.5.5.3 same-slot rule)
 
 ## I. EntityMaps distributed — IOP_EXT_MAP_01 (5.14, 5.7.2.4, 6.3.18)
 
-- [ ] MAP_01_01 EntityMap from a federated query lists per-entity source brokers ("@none" for local) (5.2.39)
-- [ ] MAP_01_02 Expired map presented via NGSILD-EntityMap → fresh map recreated, response 201-style new map id (5.14.1.1)
-- [ ] MAP_01_03 Pinned map keeps serving an entity DELETED remotely mid-walk (map fixes the id set) — with the entity's current absence tolerated per 5.7.2.4 map usage
-- [ ] MAP_01_04 Map built from a scoped query never leaks non-matching remote ids on later pages (5.7.2.4 "created based on S4" analogue + negative)
-- [ ] MAP_01_05 PATCH /entityMaps/{id} expiresAt extends a federated map's life; other members rejected (5.14.3)
-- [ ] MAP_01_06 DELETE /entityMaps/{id} → later use of the header on that id recreates instead of 404-ing the query (5.14.4 + 5.14.1.1)
-- [ ] MAP_01_07 Temporal federated query creates a temporal-mode map; reuse serves identical instance sets (5.7.4.4 map arm)
-- [ ] MAP_01_08 Map id in the NGSILD-EntityMap RESPONSE header is a Location-style path — client strips to the last segment (6.4.3.2-2 trap regression)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/EntityMap/IOP_EXT_MAP_01.robot` (fork commit 38154aa), 8/8 green on run-five first run — no broker gaps.
+
+- [x] MAP_01_01 EntityMap from a federated query lists per-entity source brokers ("@none" for local) (5.2.39)
+- [x] MAP_01_02 Expired map presented via NGSILD-EntityMap → fresh map recreated, response 201-style new map id (5.14.1.1)
+- [x] MAP_01_03 Pinned map keeps serving an entity DELETED remotely mid-walk (map fixes the id set) — with the entity's current absence tolerated per 5.7.2.4 map usage
+- [x] MAP_01_04 Map built from a scoped query never leaks non-matching remote ids on later pages (5.7.2.4 "created based on S4" analogue + negative)
+- [x] MAP_01_05 PATCH /entityMaps/{id} expiresAt extends a federated map's life; output-only members IGNORED (5.14.2.4 — citation corrected from 5.14.3, and 5.2.39-2 says "shall ignore them", not reject)
+- [x] MAP_01_06 DELETE /entityMaps/{id} → later use of the header on that id recreates instead of 404-ing the query (5.14.3.4 + 5.7.2.4 — citation corrected: Delete EntityMap is 5.14.3)
+- [x] MAP_01_07 Temporal federated query creates a temporal-mode map; reuse serves identical instance sets (5.7.4.4 map arm)
+- [x] MAP_01_08 Map id in the NGSILD-EntityMap RESPONSE header is a Location-style path — client strips to the last segment (6.4.3.2-2 trap regression)
 
 ## J. Tenancy across brokers — IOP_EXT_TEN_01 (4.14, 6.3.14, 5.2.9 tenant)
 
-- [ ] TEN_01_01 Client tenant header propagates on the forward when the CSR has no tenant override (6.3.14)
-- [ ] TEN_01_02 CSR tenant member OVERRIDES the client tenant on the forward — assert remote received the override, not the client's (5.2.9 tenant)
-- [ ] TEN_01_03 Remote NonexistentTenant (404) degrades to local data + NGSILD-Warning, not a client-visible 404 (6.3.14 + 6.3.17)
-- [ ] TEN_01_04 Default-tenant client + tenant-scoped CSR: data written remotely lands in the CSR's tenant only (negative: default tenant on b2 stays empty) (5.2.9)
-- [ ] TEN_01_05 Same entity id in two tenants across brokers never merges (4.14 isolation + 4.3.6.3)
-- [ ] TEN_01_06 Distributed subscription chain preserves tenant end-to-end: notification carries the origin tenant (5.8.1.4 + 6.3.14)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Tenancy/IOP_EXT_TEN_01.robot` (fork commit 1891f26), 6/6 green on run-five first run — no broker gaps.
 
-## K. Errors, timeouts, resilience — IOP_EXT_ERR_01 (6.3.2, 6.3.17, 5.2.34, §16.7 posture)
+- [x] TEN_01_01 Without a CSR tenant the forward targets the DEFAULT tenant — the client tenant never propagates (4.14 — item REVERSED per PDF: "If no Tenant information is present in the Context Source Registration, no Tenant information is to be used")
+- [x] TEN_01_02 CSR tenant member OVERRIDES the client tenant on the forward — assert remote received the override, not the client's (5.2.9 tenant)
+- [x] TEN_01_03 Remote NonexistentTenant (404) degrades to local data SILENTLY (6.3.17 — corrected: a 404 source "should not be considered as abnormal behaviour", so no warning)
+- [x] TEN_01_04 Default-tenant client + tenant-scoped CSR: data written remotely lands in the CSR's tenant only (negative: default tenant on b2 stays empty) (5.2.9)
+- [x] TEN_01_05 Same entity id in two tenants across brokers never merges (4.14 isolation + 4.3.6.3)
+- [x] TEN_01_06 Distributed subscription chain preserves tenant end-to-end: notification carries the origin tenant (5.8.1.4 + 6.3.14)
 
-- [ ] ERR_01_01 Peer answering 500 on query: union = local + warning; the 500 body is NOT merged into results (6.3.17 + negative)
-- [ ] ERR_01_02 Peer timeout (stalling socket) on query → local data + NGSILD-Warning 199 within the deadline budget (6.3.17)
-- [ ] ERR_01_03 Redirect-only retrieve with the CS down → 503/504 class error to the client (nothing local to serve) (5.7.1.4 + Table 6.3.2-1)
-- [ ] ERR_01_04 Malformed JSON from a peer (mock returns garbage 200): treated as source failure, warning, local served (5.7.2.4 robustness)
-- [ ] ERR_01_05 management.timeout on the CSR bounds the forward — 1 ms timeout forces the warning path even on a fast peer (5.2.34)
-- [ ] ERR_01_06 management.cooldown: after a failure, a re-query within cooldown does NOT contact the CS (assert mock hit-count static), after it, does (5.2.34)
-- [ ] ERR_01_07 A responding-but-erroring CS keeps being attempted on every request — no breaker starvation (6.3.8 posture, commit 50bcefb regression TP)
-- [ ] ERR_01_08 NGSILD-Warning format: `199 <origin> "<msg>"` parseable, one warning per failed source, none per healthy source (6.3.17)
-- [ ] ERR_01_09 Forwarded op returning 401/403 from the CS surfaces as warning on inclusive, error passthrough on redirect (4.3.6.2 asymmetry)
-- [ ] ERR_01_10 Distributed delete where remote succeeds and local entity absent → 204 (remote-only success is success) (5.6.6.4)
-- [ ] ERR_01_11 207 response schema on partial dist update: updated[] + notUpdated[] with attributeName+reason exact (5.2.19 — assert no extra members)
-- [ ] ERR_01_12 Fed 404 on retrieve with NO local data and inclusive reg → 404 to client WITH the warning preserved (6.3.17, mirrors TP 6317_01 on the IOP stack)
+## K. Errors, timeouts, resilience — IOP_EXT_ERR_01 (6.3.17, 5.2.34, 5.2.18/5.2.19, §16.7 posture)
+
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Errors/IOP_EXT_ERR_01.robot` (fork commit ab8505a), 12/12 green on run-five. The flagged ERR_01_06/07 known-red resolved: management.cooldown + management.timeout are now HONOURED per 5.2.34 (per-registration cooldown window in egress.rs, per-request timeout in forward()) while the §16.7 host:port breaker stays timeout-only — reconciled, no starvation (ERR_01_07 pins re-attempts). Also fixed red-first: a connection-drop with no HTTP response now classifies as warning 199, not 299 (Table 6.3.17-1).
+
+- [x] ERR_01_01 Peer answering 500 on query: union = local + warning; the 500 body is NOT merged into results (6.3.17 + negative)
+- [x] ERR_01_02 Peer timeout (stalling socket) on query → local data + NGSILD-Warning 199 within the deadline budget (6.3.17)
+- [x] ERR_01_03 Redirect-only retrieve with the CS down → 404 + NGSILD-Warning (corrected per the standing 6.3.17 audit posture: the 508/504/502 list belongs to the unsafe-methods paragraph; reads surface failures as warnings)
+- [x] ERR_01_04 Malformed JSON from a peer (mock returns garbage 200): treated as source failure, warning, local served (5.7.2.4 robustness)
+- [x] ERR_01_05 management.timeout on the CSR bounds the forward — 1 ms timeout forces the warning path even on a fast peer (5.2.34)
+- [x] ERR_01_06 management.cooldown: after a failure, a re-query within cooldown does NOT contact the CS (assert mock hit-count static), after it, does (5.2.34)
+- [x] ERR_01_07 A responding-but-erroring CS keeps being attempted on every request — no breaker starvation (6.3.8 posture, commit 50bcefb regression TP)
+- [x] ERR_01_08 NGSILD-Warning format: `199 <origin> "<msg>"` parseable, one warning per failed source, none per healthy source (6.3.17)
+- [x] ERR_01_09 A 403 source surfaces as warning 299 on reads, union served (6.3.17 Table 6.3.17-1 — corrected: read-side passthrough is not the audited posture; the bullet statuses are unsafe-methods)
+- [x] ERR_01_10 Distributed delete where remote succeeds and local entity absent → 204 (remote-only success is success) (5.6.6.4)
+- [x] ERR_01_11 207 response schema on partial dist update: updated[] + notUpdated[] with attributeName+reason(+registrationId) exact (5.2.18/5.2.19 — assert no extra members)
+- [x] ERR_01_12 Fed 404 on retrieve with NO local data and inclusive reg → 404 to client WITH the warning preserved (6.3.17, mirrors TP 6317_01 on the IOP stack)
 
 ## L. Cross-cutting — IOP_EXT_MSC_01 (csf, GeoJSON, lang, snapshots, counts)
 
-- [ ] MSC_01_01 csf selects by CSR property (csf=endpoint=="...") — only matching CSRs consulted; assert the excluded mock got no hit (5.2.23 csf + negative)
-- [ ] MSC_01_02 csf with timerel over CSR sysAttrs (registered-after) gates forwards (5.2.23)
-- [ ] MSC_01_03 GeoJSON federated RETRIEVE of a split entity: geometry from remote default GeoProperty, properties merged (4.5.16 + 5.7.1.4)
-- [ ] MSC_01_04 lang=* on a remote LanguageProperty returns the full languageMap through the merge (4.5.18)
-- [ ] MSC_01_05 Snapshot fill (5.16.1.4) executes its snapshotQueries over the DISTRIBUTED path — snapshot contains remote entities; status=success
-- [ ] MSC_01_06 Snapshot fill with one dead source → status=partial with ExecutionResultDetails naming it (5.16.1.4, 5.2.42)
-- [ ] MSC_01_07 count=true on a three-broker union equals the deduped entity count, not the sum of broker counts (6.3.13 + 4.3.6.4)
-- [ ] MSC_01_08 options=sysAttrs on a federated query: remote createdAt/modifiedAt survive; the FORWARDING broker's own timestamps do NOT replace them (4.5.2 + negative)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/CrossCutting/IOP_EXT_MSC_01.robot` (fork commit cab2a48), 8/8 green on run-five. Red-first broker fix: entity-level createdAt/modifiedAt now survive sys-expansion so remote system timestamps reach the aggregated result (MSC_01_08).
+
+- [x] MSC_01_01 csf selects by CSR property (csf=endpoint=="...") — only matching CSRs consulted; assert the excluded mock got no hit (5.2.23 csf + negative)
+- [x] MSC_01_02 csf value comparisons over Context Source Properties gate forwards (5.7.2.4 + 4.9 — reworded: csf targets "properties that describe them"; registration system timestamps are not a grounded csf surface)
+- [x] MSC_01_03 GeoJSON federated RETRIEVE of a split entity: geometry from remote default GeoProperty, properties merged (4.5.16 + 5.7.1.4)
+- [x] MSC_01_04 lang=* on a remote LanguageProperty converts to a Property in ONE supported language + lang subproperty (4.15 — corrected: the wildcard example returns "a string in any supported language", not the map)
+- [x] MSC_01_05 Snapshot fill (5.16.1.4) executes its snapshotQueries over the DISTRIBUTED path — snapshot contains remote entities; status=success
+- [x] MSC_01_06 Snapshot fill where one query yields nothing → status=partial with per-query details (5.16.1.4 — corrected: status grades per QUERY, not per source)
+- [x] MSC_01_07 count=true on a three-broker union equals the deduped entity count, not the sum of broker counts (6.3.13 + 4.3.6.4)
+- [x] MSC_01_08 options=sysAttrs on a federated query: remote createdAt/modifiedAt survive; the FORWARDING broker's own timestamps do NOT replace them (4.5.2 + negative)
 
 ## Tally
 
@@ -226,7 +236,7 @@ locally on run-five.
 | PRV | 16 | | ERR | 12 |
 | SUB | 14 | | MSC | 8 |
 
-**Total: 118** — all new, all clause-cited, edge cases throughout (every
+**Total: 118 — ALL DONE 2026-08-14 (AntaresBroker): 118/118 [x], full IOP_TP tree 220/220 green locally on run-five (102 pre-existing + 118 new).** All new, all clause-cited, edge cases throughout (every
 group carries its error-path and negative-assertion items; CAS_01_04,
 REG_01_02-04, ERR_01_* and SUB_02_06 exist ONLY as edge cases).
 
