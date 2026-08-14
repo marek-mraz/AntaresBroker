@@ -49,7 +49,7 @@ locally on run-five.
 
 ## A. Registration semantics & modes — IOP_EXT_REG_01 (4.3.6.2/4.3.6.3, 5.2.9, 5.9.2.4/5.9.3.4, 4.20)
 
-**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Registration/IOP_EXT_REG_01.robot`, 14/14 green on run-five. Red-first broker fixes in the same commit: FedReg::query_op (4.20 — retrieveEntity-only sources no longer receive query forwards) + CsrSpec.geo location gate (5.2.9). Commit: see `IOP_EXT_REG_01:` in git log.
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/Registration/IOP_EXT_REG_01.robot`, 14/14 green on run-five. Red-first broker fixes in the same commit: FedReg::query_op (4.20 — retrieveEntity-only sources no longer receive query forwards) + CsrSpec.geo location gate (5.2.9). Repo commit 826afac.
 
 - [x] REG_01_01 Registration without `mode` behaves as inclusive — remote data merged with local (5.2.9: mode default inclusive)
 - [x] REG_01_02 Creating an exclusive CSR whose Attributes already exist on a local entity → 409 Conflict (5.9.2.4 — citation corrected from 5.9.4: PDF p.227-228, 5.9.4 is Delete CSR)
@@ -79,14 +79,16 @@ locally on run-five.
 - [x] CAS_01_07 Diamond topology (b1→b2→b4, b1→b3→b4): b4's entity appears once in the union (4.3.6.4 duplicates)
 - [x] CAS_01_08 localOnly on the forwarded leg: b2 answers from its own storage, b3 is never contacted — assert b3's access log empty (4.3.6.4, 5.2.34 localOnly)
 
-## C. contextSourceInfo — IOP_EXT_CSI_01 (4.3.6.5, 4.3.6.6, 5.2.10)
+## C. contextSourceInfo — IOP_EXT_CSI_01 (4.3.6.5, 4.3.6.6, 6.3.19)
 
-- [ ] CSI_01_01 contextSourceInfo key/value pair becomes an HTTP header on the forwarded request — assert at the mock CS (4.3.6.5)
-- [ ] CSI_01_02 Multiple contextSourceInfo pairs → all present as headers, values verbatim (4.3.6.5)
-- [ ] CSI_01_03 `jsonldContext` key is PRE-PROCESSED: applied as the @context of the forward, NOT sent as a literal header (4.3.6.6)
-- [ ] CSI_01_04 `Authorization` pair reaches the CS; assert it is NOT echoed back to the client response (4.3.6.5 + negative)
-- [ ] CSI_01_05 contextSourceInfo on an inclusive reg applies to query forwards; absent pairs → no extra headers (negative baseline) (4.3.6.5)
-- [ ] CSI_01_06 Header-name case-insensitivity: key `accept` does not break the forward's own content negotiation (4.3.6.6 edge)
+**DONE 2026-08-14** — TP file `IOP_TP/NGSI-LD/Interoperability/ContextSourceInfo/IOP_EXT_CSI_01.robot` (fork commit 5aa07d5), 6/6 green on run-five first run — no broker gaps.
+
+- [x] CSI_01_01 contextSourceInfo key/value pair becomes an HTTP header on the forwarded request — assert at the mock CS (4.3.6.5)
+- [x] CSI_01_02 Multiple contextSourceInfo pairs → all present as headers, values verbatim (4.3.6.5)
+- [x] CSI_01_03 `jsonldContext` key is PRE-PROCESSED: applied as the @context of the forward, NOT sent as a literal header (4.3.6.6)
+- [x] CSI_01_04 `Authorization` pair reaches the CS; assert it is NOT echoed back to the client response (4.3.6.5 + negative)
+- [x] CSI_01_05 contextSourceInfo on an inclusive reg applies to query forwards; absent pairs → no extra headers (negative baseline) (4.3.6.5)
+- [x] CSI_01_06 Header-name case-insensitivity: key `accept` does not break the forward's own content negotiation (4.3.6.6 edge)
 
 ## D. Unitary query/retrieve — IOP_EXT_UNI_01 (4.3.6.7, 5.7.1.4, 5.7.2.4)
 
