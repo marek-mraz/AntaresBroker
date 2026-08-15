@@ -23,8 +23,8 @@ Standing conclusions this checklist encodes:
 First copy the checklist below into tasks.md as "## Perf & observability
 2026-08-14", then one item = one commit with full §0.3 discipline where it
 applies (MemPalace first, TEST-FIRST red run, negative assertions, rule-8
-local Robot validation, claude.md §6 + ledger notes updated, ponytail
-throughout). Perf TPs are repo EXTENSIONS, not conformance — tag `perf`,
+local Robot validation, claude.md §6 + ledger notes updated, minimal
+diffs throughout). Perf TPs are repo EXTENSIONS, not conformance — tag `perf`,
 keep them out of every conformance run. DONE = every checkbox [x] in
 tasks.md with commit hash + green-run evidence.
 

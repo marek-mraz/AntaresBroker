@@ -1,7 +1,7 @@
 //! `file` mode e2e (tasks.md B8/B10/A2/A4): the real binary, real HTTP, real
 //! SIGKILL. Commit-before-ack means an entity acknowledged with 201 MUST
 //! survive an immediate `kill -9`; deletes must reach redb too (the Scorpio
-//! phantom-409 trap). std-only harness — no test frameworks (`ponytail:`).
+//! phantom-409 trap). std-only harness — no test frameworks.
 #![cfg(unix)]
 
 use std::io::{Read, Write};

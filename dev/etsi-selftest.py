@@ -4,7 +4,7 @@
 The two pieces with real logic in them: the sampler's /proc parsing, and the
 report's sample↔TP interval join. Both fail silently if they break — an empty
 CSV column looks exactly like "nothing happened" — so they get one assert-based
-check. std-only, no framework (`ponytail:`).
+check. std-only, no framework.
 
 Run: python3 dev/etsi-selftest.py
 """

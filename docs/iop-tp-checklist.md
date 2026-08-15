@@ -42,7 +42,7 @@ testsuite-doubts.md — never bend a TP to broken behaviour. The three
 flagged known-red items (CAS_01_04 508-on-inclusive-loop, ERR_01_06/07
 cooldown-vs-breaker posture, SUB_02_01/02 splitEntities merge) get broker
 fixes with their own clause-prefixed commits + ledger updates. Use
-ponytail throughout. Mac-side pushes + CI watch: list for the user, never
+minimal diffs throughout. Mac-side pushes + CI watch: list for the user, never
 block. DONE = 118/118 [x] with evidence and the full IOP_TP tree green
 locally on run-five.
 ```

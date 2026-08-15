@@ -365,7 +365,7 @@ pub fn is_deletion_instance(inst: &Value) -> bool {
 /// 4.6.2 Supported names: `name = unicodeLetter *(unicodeLetter /
 /// unicodeNumber / "_")`. A key containing ':' is a compact or absolute IRI
 /// (the spec's prefix:name production) and is outside the term grammar.
-// ponytail: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
+// Known ceiling: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
 // through as an IRI; tighten to per-part validation if it ever matters.
 /// 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
 /// unicodeLetter *(letter/digit/_) — shared by entity scopes and the 5.2.9

@@ -1398,7 +1398,7 @@ async fn query_temporal_outer(
     params.remove("entityMap");
     // 5.5.14: the creator removes Entities that no longer match the query
     // filters at processing time — judgeable locally only for "@none"
-    // entries. ponytail: this recheck is a second temporal query per
+    // entries. Known cost: this recheck is a second temporal query per
     // map-using request, same shape as the entity query's filter re-run.
     let matching: std::collections::HashSet<String> = {
         let mut eff = params.clone();

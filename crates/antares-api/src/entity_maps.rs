@@ -469,7 +469,7 @@ pub async fn create_entity_map_post(
 /// temporal query pipeline itself (5.7.4.4) run unpaged — the ids of its
 /// result set form the EntityMap; the createEntityMapQueryTemporal
 /// registrations are then merged like 5.14.4.
-/// ponytail: candidate ids are read from the internal 5.7.4 response capped
+/// Known ceiling: candidate ids are read from the internal 5.7.4 response capped
 /// at max_limit; raise the cap if temporal sets outgrow it.
 pub(crate) async fn build_temporal_map(
     st: &AppState,

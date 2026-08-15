@@ -43,7 +43,7 @@ settings, first scheduled runs) — collect those on the "Mac-side /
 user" list instead of blocking.
 Full claude.md discipline throughout: MemPalace first, TEST-FIRST red
 run as the fallibility proof, negative assertions, rules 8 and 9 hard,
-ponytail, one item = one commit with its box ticked in the same commit;
+minimal diffs, one item = one commit with its box ticked in the same commit;
 CI workflow edits validated by actionlint/yaml parse + local dry-runs.
 DONE = all 58 campaign boxes + 08-14 items 1-8 (plus any boxes item 6
 appends) [x] with evidence and the Mac-side list written. Ask only for
@@ -107,7 +107,7 @@ tasks.md top-to-bottom until every box is [x] with evidence (commit hash +
 green run / rendered page) recorded next to it. One item = one commit.
 Full claude.md discipline: MemPalace first, TEST-FIRST red run as the
 fallibility proof, negative assertions, rule 8 (one local broker, no
-compose stacks, no host Docker) and rule 9 stay hard; ponytail throughout.
+compose stacks, no host Docker) and rule 9 stay hard; keep diffs minimal throughout.
 CI workflow edits are validated by actionlint/yaml parse + local script
 dry-runs (the sandbox cannot trigger GitHub runs); anything that needs a
 GitHub push, Pages settings, or a license choice goes on the "Mac-side /
@@ -467,7 +467,7 @@ against the broker = prove it from the clause text: broker bug → fix
 red-first with unit tests per §0.3 and commit `<clause>:` separately;
 suite/spec defect → error.md + testsuite-doubts.md, never hack the broker.
 Group commits per IDR file; tick boxes with evidence as you go; ledger
-notes on touched clauses updated. Rules 8 and 9 stay hard; use ponytail;
+notes on touched clauses updated. Rules 8 and 9 stay hard; keep diffs minimal;
 Mac-side pushes are out of scope — list them at the end. Ask only when
 rule 9 leaves you genuinely unsure.
 ```

@@ -10,7 +10,7 @@
 //! geometries measure from their true closest points); the small
 //! equirectangular residual vs PostGIS `ST_DWithin` on geography is the
 //! remaining documented ceiling (the SQL path C11b is the metric authority).
-//! ponytail: per-call relate without a prepared edge index — a
+//! Known ceiling: per-call relate without a prepared edge index — a
 //! PreparedGeometry cache is the §6.5 matcher lever when 10k subscriptions
 //! demand it.
 
@@ -102,7 +102,7 @@ const DEG_M: f64 = 111_319.490_793;
 /// (x = lon·cos(lat₀)), so closest-point selection is metric and EXTENDED
 /// reference and target geometries both measure from their true closest
 /// points; intersecting/containing pairs are distance 0.
-/// ponytail: equirectangular residual (<~0.5 % over sub-1000 km spans, no
+/// Known ceiling: equirectangular residual (<~0.5 % over sub-1000 km spans, no
 /// antimeridian wrap) — the PostGIS geography path stays the metric
 /// authority; geodesic segment distance if a geo TP ever demands exactness.
 fn min_distance_m(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) -> f64 {

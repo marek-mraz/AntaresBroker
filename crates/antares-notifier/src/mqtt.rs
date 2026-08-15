@@ -53,7 +53,7 @@ impl MqttEndpoint {
                 None => (Some(u.to_owned()), None),
             },
         };
-        // ponytail: no IPv6-literal hosts — the binding's URI convention
+        // Deliberately no IPv6-literal hosts — the binding's URI convention
         // (i.19) and the ETSI suite use hostnames; add bracket parsing when a
         // deployment needs it.
         let (host, port) = match hostport.split_once(':') {

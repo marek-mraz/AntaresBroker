@@ -28,7 +28,7 @@ impl SinkRegistry {
     }
 
     pub fn sink_for(&self, scheme: &str) -> Option<&dyn NotificationSink> {
-        // ponytail: linear scan over <5 sinks; a map when sinks multiply.
+        // Linear scan is fine at <5 sinks; switch to a map when sinks multiply.
         self.sinks
             .iter()
             .find(|s| s.schemes().contains(&scheme))

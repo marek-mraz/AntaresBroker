@@ -1725,6 +1725,7 @@ async fn deliver_as(
             tracing::warn!("bookkeeping writeback failed: {e}");
             None
         });
+    mirror_bookkeeping(st, tenant, kind, &sub_id);
     // I4: the notification endpoint is an egress destination like any other
     // — policy check once, breaker consulted before the attempt (§16.4).
     // A refusal is a delivery failure for bookkeeping (status "failed",
@@ -1832,6 +1833,27 @@ async fn deliver_as(
                 tracing::warn!("failure-status writeback failed: {e}");
                 None
             });
+        mirror_bookkeeping(st, tenant, kind, &sub_id);
+    }
+}
+
+/// P0-7 (audit 2026-08-09): the matcher reads subscriptions from the
+/// SubMirror, so every notification bookkeeping writeback must be applied
+/// there too — otherwise the mirror copy never gains
+/// `notification.lastNotification` and 5.2.12 `throttling` suppresses
+/// nothing. In-process apply only: a KV write per notification would not
+/// scale to the 100k-sub target, so in bus=nats multi-pod deployments the
+/// throttling window is per-pod approximate.
+/// Known ceiling: exact distributed throttling = per-notification KV sync or a
+/// store read in `throttled()`; add if a deployment needs the strict window.
+fn mirror_bookkeeping(st: &AppState, tenant: &TenantId, kind: Kind, sub_id: &str) {
+    if kind != Kind::Subscription {
+        return;
+    }
+    if let Some(m) = &st.sub_mirror {
+        if let Ok(Some(doc)) = st.store.get(tenant, kind, sub_id) {
+            m.apply(tenant.as_str(), sub_id, Some(doc));
+        }
     }
 }
 

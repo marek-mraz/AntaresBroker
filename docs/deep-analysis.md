@@ -73,7 +73,7 @@ Non-goals for v1: **the WebSocket binding** (decision 2026-08-03 — deferred; t
 Rules that make the budget hold:
 1. **Every buffer is bounded and configured** — WS frame size, HTTP body size, batch op count, JetStream prefetch, notification queue depth. Any unbounded queue is a 3am page.
 2. **Backpressure over buffering** — slow WS consumer ⇒ notification coalescing then disconnect with `1013 Try Again Later`, never unbounded queueing (see WS binding close-code registry).
-3. **One copy of the truth in memory** — entities live in Postgres, period. The broker holds no entity cache in v1. (`ponytail:` no entity cache; add a per-request read-through cache only if p99 read latency measurably needs it.)
+3. **One copy of the truth in memory** — entities live in Postgres, period. The broker holds no entity cache in v1. (Deliberately no entity cache; add a per-request read-through cache only if p99 read latency measurably needs it.)
 
 **Measured memory profile (release binary, 2026-08-07)** — the facts future optimization work starts from:
 - Idle RSS 16.7 MiB: **resident binary code 10.9 MiB** (largest idle consumer — hence `strip = "symbols"` + `lto = "thin"` in `[profile.release]`; tradeoff: panic backtraces show addresses, not names), live heap ~5.4 MB (core context, runtime, caches), libc ~1.5 MiB.
@@ -134,7 +134,7 @@ The design goal is that **no per-tenant lock exists anywhere** — tenants share
    - The version is internal in v1; exposing it as an HTTP `ETag`/`If-Match` precondition is a cheap future feature the schema already supports (clients doing read-modify-write get optimistic concurrency for free).
 4. **Tenant auto-creation is a one-row upsert** — `INSERT … ON CONFLICT DO NOTHING`. Two concurrent first-writes both succeed; compare Scorpio's version of this race: concurrent `CREATE DATABASE` + Flyway deadlocking (issue #653, §14.7).
 5. **`SET LOCAL antares.tenant` cannot leak across tenants**: it is transaction-scoped, and a pooled connection is exclusively checked out for the duration of that transaction (sqlx guarantee). There is no code path that issues session-level `SET` (§6.2), so a recycled connection carries no tenant residue.
-6. **Scheduled work is single-winner by lock, not by leader election**: interval-subscription firings and plain-mode partition jobs claim rows via `SELECT … FOR UPDATE SKIP LOCKED` — N broker instances race, exactly one wins each job, no coordinator. (`ponytail:` skip-locked job rows; a real scheduler only if job volume ever demands it.)
+6. **Scheduled work is single-winner by lock, not by leader election**: interval-subscription firings and plain-mode partition jobs claim rows via `SELECT … FOR UPDATE SKIP LOCKED` — N broker instances race, exactly one wins each job, no coordinator. (Skip-locked job rows are deliberate; a real scheduler only if job volume ever demands it.)
 
 Test hooks (§9.5): a concurrency suite runs parallel PATCH/append/merge storms against one entity and asserts final-state convergence + no lost updates; the 2-instance e2e includes out-of-order publish injection to prove version-LWW holds.
 
@@ -157,7 +157,7 @@ Scorpio 7.0.0 (Quarkus/Mutiny, Vert.x PgClient, SmallRye messaging) decomposes i
 | InfoManager | `/info/sourceIdentity` | `antares-api` (one handler) |
 | Commons | vendored reactive jsonld-java fork (~11k LOC), query AST→SQL terms, HttpUtils (2k LOC incl. six 207 builders), ConnectionManager | dissolved into `antares-jsonld`, `antares-ql`, `antares-sql`, `antares-model` |
 | AllInOneRunner | all-in-one JVM, in-memory messaging | `antares-broker` binary with `--roles` (§9) |
-| SnsFanoutMessaging | AWS SNS/SQS broadcast shim | dropped — NATS only, one transport (`ponytail:` multi-transport abstraction cut; add a second bus only if a deployment ever demands it) |
+| SnsFanoutMessaging | AWS SNS/SQS broadcast shim | dropped — NATS only, one transport (multi-transport abstraction cut deliberately; add a second bus only if a deployment ever demands it) |
 
 Two Scorpio facts that shape the port:
 
@@ -515,7 +515,7 @@ CREATE INDEX ON entities (tenant_id, modified_at DESC);         -- pagination/or
 CREATE INDEX ON entities USING gin  (scopes);                   -- scopeQ
 ```
 
-Scorpio's `q=` engine (QQueryTerm, 4k LOC) compiles to `jsonb_path_query`/`jsonb_path_exists` + correlated `JSONB_ARRAY_ELEMENTS` subqueries over the expanded document, with LEFT JOIN traversal for linked-entity queries — that compilation strategy is proven against the ETSI suite and ports directly to `antares-ql`→`antares-sql`. An extracted-attribute side table is **not** in v1 (Scorpio passes the suite without one); it's the named perf lever if the 10M-row benchmark says the JSONB path is too slow. (`ponytail:` JSONB-only querying; add the attribute side table when the phase-0 benchmark demands it.)
+Scorpio's `q=` engine (QQueryTerm, 4k LOC) compiles to `jsonb_path_query`/`jsonb_path_exists` + correlated `JSONB_ARRAY_ELEMENTS` subqueries over the expanded document, with LEFT JOIN traversal for linked-entity queries — that compilation strategy is proven against the ETSI suite and ports directly to `antares-ql`→`antares-sql`. An extracted-attribute side table is **not** in v1 (Scorpio passes the suite without one); it's the named perf lever if the 10M-row benchmark says the JSONB path is too slow. (JSONB-only querying is deliberate; add the attribute side table when the phase-0 benchmark demands it.)
 
 ### 8.2 Temporal — two modes: with TimescaleDB and without
 

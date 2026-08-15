@@ -4,7 +4,7 @@
 //! cache behind the same six methods the loader uses. Bounded is the
 //! requirement (R4 rule: every cache has a max size); recency-optimal
 //! eviction is not — a browser tab's @context set is tiny.
-// ponytail: FIFO eviction; port moka's TinyLFU here only if a browser
+// FIFO eviction is deliberate; port moka's TinyLFU here only if a browser
 // workload ever shows cache thrash.
 
 use std::collections::{HashMap, VecDeque};

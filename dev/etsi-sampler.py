@@ -14,7 +14,7 @@ suite name there), which is what lets a spike be traced back to the suite that
 caused it. Per-TEST attribution is a post-processing join on `ts` against the
 Robot output.xml timestamps — see the report step in dev/etsi-pipeline.sh.
 
-`ponytail:` main-pid CPU only (the broker is one process); sum the cgroup if a
+Main-pid CPU only (the broker is one process); sum the cgroup if a
 role ever forks workers.
 """
 import argparse

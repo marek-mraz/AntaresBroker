@@ -22,7 +22,7 @@ Usage:
       [--type ContinuityProbe]
 
 The drill script starts this, performs its chaos (roll, SIGTERM, SIGKILL),
-then waits for the exit code. stdlib only (`ponytail:`).
+then waits for the exit code. stdlib only.
 """
 import argparse
 import http.server

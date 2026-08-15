@@ -177,7 +177,7 @@ each leaves performance on the table, with the upgrade path named:
 ```
 /goal Complete taskImplementation.md: work its checklist top-to-bottom
 with full claude.md §0.3 discipline (MemPalace first, TEST-FIRST red run,
-negative assertions, rule-8 local Robot, ponytail), one item = one commit.
+negative assertions, rule-8 local Robot, minimal diffs), one item = one commit.
 Item 1 first, all four arms (1a validity-aware scopeQ per 4.18/C.5.16,
 1b S7 split-entities, 1c EntityMap assertions, 1d ledger flip), commit
 `5.7.4.4:`. EVERY item ships ngsi-ld-test-suite Robot TPs with varied

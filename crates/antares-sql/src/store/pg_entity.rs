@@ -6,7 +6,7 @@
 //! Extracted columns are computed in Rust at write time (§4 — no triggers):
 //! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and (C11b)
 //! `location`, the default GeoProperty, converted by PostGIS itself from
-//! bound GeoJSON text (`ponytail:` `ST_GeomFromGeoJSON` over a geozero
+//! bound GeoJSON text (`ST_GeomFromGeoJSON` rather than a geozero
 //! dependency — the DB already owns the conversion, and the value still
 //! travels as a bind).
 

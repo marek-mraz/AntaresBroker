@@ -167,7 +167,7 @@ impl Shadow {
     /// One txn per mutation, fsynced before return (B3). A failed commit
     /// aborts the process: the alternative is acking writes the file does not
     /// hold, which is the one lie a durable store must never tell.
-    /// (`ponytail:` abort-on-commit-failure; per-request error plumbing only
+    /// (Deliberately abort-on-commit-failure; per-request error plumbing only
     /// if a recoverable commit failure mode ever shows up in practice.)
     fn write(&self, table: TableDefinition<&[u8], &[u8]>, key: &[u8], value: Option<&[u8]>) {
         let result = (|| -> Result<(), String> {
