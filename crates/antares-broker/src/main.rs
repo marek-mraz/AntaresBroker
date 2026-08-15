@@ -466,6 +466,11 @@ async fn run(
     // before the task is spawned — incrementing inside the task would race the
     // drain's first check and let a just-accepted connection be missed.
     let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // K1 (2026-08-15): the drain signal each connection listens for. On drain,
+    // hyper's graceful_shutdown closes IDLE keep-alive connections immediately
+    // (the LB holds one per backend — counting them as in-flight made every
+    // api roll burn the full deadline) while an active request still finishes.
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
     // K1: the signal future is created ONCE and polled by reference. Written
     // inline in the select, it would be dropped and re-created on every
     // accepted connection — and a SIGTERM landing in that drop-to-recreate
@@ -488,19 +493,21 @@ async fn run(
                     tokio::select! {
                         r = listener.accept() => {
                             let (stream, _) = r?;
-                            serve(stream, app.clone(), inflight.clone());
+                            serve(stream, app.clone(), inflight.clone(), drain_rx.clone());
                         }
                         _ = tokio::time::sleep_until(until) => break,
                     }
                 }
-                // 3–6: listener dropped, in-flight drained, pools closed.
+                // 3–6: listener dropped, idle conns told to close (active
+                // requests finish), in-flight drained, pools closed.
                 drop(listener);
+                let _ = drain_tx.send(true);
                 shutdown::drain(&inflight, &store_for_drain).await;
                 tracing::info!("shutting down");
                 return Ok(());
             }
         };
-        serve(stream, app.clone(), inflight.clone());
+        serve(stream, app.clone(), inflight.clone(), drain_rx.clone());
     }
 }
 
@@ -514,6 +521,7 @@ fn serve(
     stream: tokio::net::TcpStream,
     app: App,
     inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    mut drain_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
@@ -524,11 +532,34 @@ fn serve(
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
         builder.http1().title_case_headers(true);
-        let _ = builder
-            .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
-            .await;
+        let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), svc);
+        let mut conn = std::pin::pin!(conn);
+        // K1: on drain, close an IDLE keep-alive connection immediately —
+        // hyper finishes any active request first, then closes. Without this
+        // the LB's idle keep-alives count as in-flight and every roll waits
+        // out the entire drain deadline.
+        tokio::select! {
+            r = conn.as_mut() => { let _ = r; }
+            _ = wait_drain(&mut drain_rx) => {
+                conn.as_mut().graceful_shutdown();
+                let _ = conn.as_mut().await;
+            }
+        }
         inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
+}
+
+/// Resolves when the drain signal fires; pends forever once the sender is
+/// gone (the connection future then completes on its own in the select).
+async fn wait_drain(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(test)]

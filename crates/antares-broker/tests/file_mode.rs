@@ -471,3 +471,69 @@ fn unknown_key_is_fatal_but_the_test_prefix_is_reserved() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// K1 follow-up (2026-08-15): the drain must wait on ACTIVE REQUESTS, not on
+/// open connections. A load balancer holds idle keep-alive connections to
+/// every backend; if those count as in-flight, every api pod burns the FULL
+/// drain deadline on every roll doing nothing (measured: the fleet's api
+/// rolls always paid the whole ceiling behind haproxy). An idle keep-alive
+/// connection must not delay shutdown; a request arriving during the notice
+/// window is still served (the ordering test above pins that half).
+#[test]
+fn idle_keepalive_connection_does_not_stall_the_drain() {
+    let dir = tempdir("drain-idle");
+    let port = free_port();
+    let mut broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            // far above the assertion bound: red = the drain waited it out
+            .env("ANTARES_DRAIN_DEADLINE_SECS", "15")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    wait_healthy(port);
+
+    // an idle keep-alive connection, exactly like haproxy holds to every
+    // backend: one served request, socket deliberately kept open
+    let mut idle = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    idle.write_all(b"GET /q/health HTTP/1.1\r\nHost: x\r\n\r\n")
+        .expect("write");
+    let mut buf = [0u8; 4096];
+    let n = idle.read(&mut buf).expect("read response");
+    assert!(
+        n > 0,
+        "keep-alive request must be answered before the drain"
+    );
+
+    let t0 = Instant::now();
+    let killed = Command::new("sh")
+        .args(["-c", &format!("kill -TERM {}", broker.id())])
+        .status()
+        .expect("kill -TERM");
+    assert!(killed.success(), "SIGTERM not delivered");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = broker.try_wait().expect("try_wait") {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "broker never exited after SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let took = t0.elapsed();
+    assert!(
+        status.success(),
+        "graceful shutdown must exit 0: {status:?}"
+    );
+    assert!(
+        took < Duration::from_secs(6),
+        "drain took {took:?} — an idle keep-alive connection stalled it to the deadline"
+    );
+    drop(idle);
+    let _ = std::fs::remove_dir_all(&dir);
+}
