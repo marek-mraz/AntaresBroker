@@ -84,6 +84,24 @@ pub enum AnyStore {
 }
 
 impl AnyStore {
+    /// Readiness ping (audit P0-3): can the store answer a trivial request
+    /// RIGHT NOW? Memory/file are in-process (always ready); the Pg arm runs
+    /// `SELECT 1` so a lost database (failover, network partition) flips
+    /// /q/ready to 503 and the Service stops routing to this pod.
+    pub fn ping(&self) -> Result<(), NgsiError> {
+        match self {
+            AnyStore::Mem(_) => Ok(()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                sqlx::query("SELECT 1")
+                    .execute(p.docs.pool())
+                    .await
+                    .map(|_| ())
+            })
+            .map_err(db),
+        }
+    }
+
     /// B13: (queued writers, peak) of the memory/file write-critical section;
     /// `None` for the Pg arm (Postgres has no single-writer commit queue).
     pub fn commit_queue(&self) -> Option<(usize, usize)> {

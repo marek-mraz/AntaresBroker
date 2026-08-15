@@ -154,6 +154,19 @@ fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
 /// locally here (Table 4.3.5-2 row "integrated temporal + integrated Context
 /// Registry"); JSONLDContext API implemented; optional Snapshot API offered
 /// (5.16, resources 6.36-6.38, NGSILD-Snapshot scoping 6.3.22).
+/// Ops-only router (audit P0-4): what a pod WITHOUT the api role serves —
+/// health, readiness and metrics, nothing else. The shipped antares-worker
+/// Deployment used to answer the full read/write NGSI-LD API on its pod IP
+/// (and a subscription created there was never KV-synced, because the sync
+/// hooks are wired `if roles.api`); a worker now 404s the API surface.
+pub fn ops_router(state: AppState) -> Router {
+    Router::new()
+        .route("/q/health", get(health))
+        .route("/q/ready", get(ready))
+        .route("/q/metrics", get(metrics_endpoint))
+        .with_state(state)
+}
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         // entities (6.4/6.5)
@@ -303,6 +316,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/q/health", get(health))
+        .route("/q/ready", get(ready))
         // 5.8.1.4 consumer half: where forwarded subscription copies point
         // their notifications; remapped to the original subscriber.
         .route(
@@ -510,6 +524,36 @@ async fn health(
     (code, axum::Json(body))
 }
 
+/// Readiness (audit P0-3), distinct from /q/health liveness: ready = not
+/// draining AND the store answers a trivial request AND (when bus=nats) the
+/// bus is connected. On a Postgres failover or a NATS partition the pod is
+/// still alive (liveness stays 200 — a restart fixes nothing) but must stop
+/// receiving traffic, so the readinessProbe points HERE.
+async fn ready(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let draining = state.draining.load(std::sync::atomic::Ordering::Relaxed);
+    let store_ok = state.store.ping().is_ok();
+    let bus = state.bus_stats.as_ref().map(|b| b());
+    let bus_ok = bus
+        .as_ref()
+        .is_none_or(|b| b.get("connected").and_then(serde_json::Value::as_bool) == Some(true));
+    let ready = !draining && store_ok && bus_ok;
+    let mut body = serde_json::json!({
+        "status": if ready { "READY" } else { "NOT_READY" },
+        "store": store_ok,
+    });
+    if let Some(b) = bus {
+        body["bus"] = b;
+    }
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, axum::Json(body))
+}
+
 /// CIM 009 5.15.1 / 6.33 — Context Source identity.
 /// 5.15.1 Retrieve Context Source Identity Information: the 5.2.40
 /// ContextSourceIdentity object for this source (per tenant in the
@@ -640,6 +684,60 @@ mod tests {
         assert_eq!(body["bus"]["mode"], "nats");
         assert_eq!(body["bus"]["connected"], true);
         assert_eq!(body["bus"]["reconnects"], 2);
+    }
+
+    /// Audit P0-3: /q/ready is READINESS — 200 on a healthy store, 503 the
+    /// moment the bus reports disconnected (a pod that cannot process must
+    /// stop receiving traffic while staying alive for liveness).
+    #[tokio::test]
+    async fn ready_gates_on_store_and_bus() {
+        let resp = app()
+            .oneshot(Request::get("/q/ready").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["status"], "READY");
+
+        let mut st = AppState::new("antares-test".into());
+        st.bus_stats = Some(std::sync::Arc::new(
+            || serde_json::json!({"mode": "nats", "connected": false, "reconnects": 3}),
+        ));
+        let resp = router(st)
+            .oneshot(Request::get("/q/ready").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a disconnected bus must flip readiness"
+        );
+        assert_eq!(body_json(resp).await["status"], "NOT_READY");
+    }
+
+    /// Audit P0-4: a pod without the api role serves ops endpoints ONLY —
+    /// the NGSI-LD surface must NOT be reachable on it.
+    #[tokio::test]
+    async fn ops_router_serves_no_ngsi_ld_surface() {
+        let st = AppState::new("antares-test".into());
+        let app = ops_router(st);
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        for path in ["/ngsi-ld/v1/entities", "/ngsi-ld/v1/subscriptions"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).expect("req"))
+                .await
+                .expect("resp");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not exist on a worker pod"
+            );
+        }
     }
 
     /// 5.6.2.4: "no existing Entity whose id (URI), and where specified
