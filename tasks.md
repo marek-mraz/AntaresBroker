@@ -1453,3 +1453,187 @@ options fail).
 Mac-side / user (collect here as items complete, do not block on them):
 push master + workflow changes, enable/verify the Pages source, pick the
 LICENSE, trigger the first scheduled runs.
+
+## Backlog 2026-08-15 — IOP id/idPattern routing campaign (this goal)
+
+**Why.** ADR-001 (Urbivita URN standard) claims a CSR with an anchored
+`idPattern` prefix (`^urn:ngsi-ld:{Typ}:{Razidlo}:{Evidencia}:.*$`) gives
+(a) exact routing of `GET /entities/{id}` to the ONE owning source and
+(b) pruning — the broker never dials a source whose pattern cannot match,
+so federation cost scales with matching CSRs, not total CSRs. Verified
+live 2026-08-15 (AntaresBroker, two memory brokers): the exact ADR CSR
+routed retrieve + type-query to B2 (dark entity, `local=true` 404), and a
+`sk_presov` id 404'd with NO `NGSILD-Warning` while B2 was down — B1 never
+dialed it. Code anchor: `entity_info_matches` (csource.rs:1160, clause
+5.12) — exact-eq on `EntityInfo.id`, `regex::find` (UNanchored substring)
+on `EntityInfo.idPattern`; this is exactly the full-match-vs-substring
+divergence ADR-001's mandatory `^...$` neutralizes. Spec anchors: 5.12
+(pp. 241-242, the four match conditions), 5.2.8 (idPattern = IEEE 1003.2
+regex), 4.3.6.1-4.3.6.4, 5.7.1.4/5.7.2.4, 5.6.x.4, 5.8.1.4, 4.14, 4.20,
+6.3.17.
+
+**Deliverable.** 50 new Robot TP cases in the suite fork under
+`IOP_TP/NGSI-LD/Interoperability/Routing/` (6 files, IOP_EXT_IDR_01..06),
+following IOP_TP conventions: `${b1_url}..${b5_url}` variables,
+`InteropUtils.resource` keywords, `Setup Interop Ids`/`Cleanup Interop
+Fixtures`, `[Tags]` carrying the clause (`5_12`, `4_3_6` form), broker
+fleet via `dev/run-five.sh`, HttpCtrl mocks where "zero forwarded
+requests" must be asserted. Every case carries at least one NEGATIVE
+assertion (what must NOT be in the response / which mock must record NO
+request). ADR-shaped URNs (`urn:ngsi-ld:WasteContainer:sk_banskabystrica:
+odpady:...`) are the fixture id vocabulary throughout. Broker gaps found
+by a red TP are fixed red-first per §0.3 (one clause = one commit).
+
+### IOP_EXT_IDR_01 — retrieve-by-id routing via EntityInfo id/idPattern (B1→B2)
+
+- [ ] 1. Anchored ADR prefix pattern routes `GET /entities/{id}` B1→B2;
+      entity exists only in B2 → 200 via B1; `local=true` still 404 (5.7.1.4, 5.12).
+- [ ] 2. Non-matching razidlo (`sk_presov`) → B1 404s WITHOUT contacting B2 —
+      mock context source asserts ZERO forwarded requests (5.12; the pruning claim).
+- [ ] 3. Exact `EntityInfo.id`, no pattern: that one id routes; a sibling id
+      under the same prefix is NOT forwarded (5.12 cond 2).
+- [ ] 4. UNanchored pattern `sk_banskabystrica:odpady` matches by substring
+      (regex find) — id carrying it mid-URN forwards; documents why ADR-001
+      mandates `^...$` (5.2.8, 5.12).
+- [ ] 5. EntityInfo with type only (no id/idPattern) matches every id of that
+      type (5.12 cond 1).
+- [ ] 6. idPattern matches but EntityInfo type ≠ requested type → NOT
+      forwarded (5.12 type-selector gate).
+- [ ] 7. Multiple EntityInfo elements in one RegistrationInfo — any-of: id
+      matching only the second element still forwards (5.12).
+- [ ] 8. Two CSRs with disjoint razidlo prefixes → retrieve dials EXACTLY one
+      endpoint; the other mock records zero hits (5.12, 4.3.6.2).
+- [ ] 9. Invalid regex in idPattern → 400 BadRequestData at registration,
+      nothing registered (5.2.8; csource.rs:143 already validates — assert).
+- [ ] 10. Case sensitivity: pattern `sk_banskabystrica` does not match an id
+      containing `SK_BanskaBystrica` (IEEE 1003.2; ADR lowercase rule).
+
+### IOP_EXT_IDR_02 — query-entities routing (query id/idPattern × CSR id/idPattern)
+
+- [ ] 11. `?id=A,B` where only A matches the CSR pattern → forwarded query
+      narrowed to A (mock asserts), B answered locally (5.7.2.4, 4.3.6.1).
+- [ ] 12. Query `?idPattern=` matching `EntityInfo.id` → forwarded (5.12 cond 4).
+- [ ] 13. Query pattern + CSR pattern both present → assumed compatible,
+      forwarded (5.12).
+- [ ] 14. Query pattern anchored to a foreign razidlo vs CSR ids of another
+      razidlo → NOT forwarded, zero mock hits (5.12).
+- [ ] 15. Type-only query against an id-restricted CSR → forwarded (broker
+      cannot exclude; assert current Antares behaviour and cite 5.12).
+- [ ] 16. Fan-out merge: 3 brokers, one razidlo each; type query via B1
+      returns the exact union, no duplicate ids (5.7.2.4, 4.5.5).
+- [ ] 17. `local=true` query never forwards regardless of pattern match (5.5.13).
+- [ ] 18. Dark entity: exists ONLY behind the CSR; query via B1 includes it;
+      `local=true` query does not (4.3.6.2).
+- [ ] 19. CSR discovery `GET /csourceRegistrations?id=<urn>` returns only CSRs
+      whose EntityInfo id/idPattern matches; `?idPattern=` matches
+      EntityInfo.id too (5.10.2, 5.12).
+
+### IOP_EXT_IDR_03 — provision routing by id (redirect/exclusive/inclusive)
+
+- [ ] 20. redirect CSR, anchored pattern: POST /entities with matching id is
+      created at B2, NOT held at B1 (`local=true` 404) (5.6.1.4, 4.3.6.2).
+- [ ] 21. Create with non-matching id stays local at B1; redirect mock records
+      zero requests (5.6.1.4).
+- [ ] 22. `DELETE /entities/{id}` routed by pattern → 204, gone at B2;
+      non-matching delete never leaves B1 (5.6.6.4).
+- [ ] 23. PATCH / partial-attribute-update routed by id through the pattern
+      (5.6.2.4, 5.6.3.4).
+- [ ] 24. Batch create with MIXED razidlos: matching subset forwarded, rest
+      local; success arrays carry ALL ids exactly once (5.6.7.4, 5.6.8.5).
+- [ ] 25. Deterministic-URN idempotency (ADR claim): same upsert twice via B1 →
+      second is UPDATE (remote 204 ⇒ updated-list, per 2c6c10b), federation-wide
+      query still exactly ONE entity (5.6.8.5).
+- [ ] 26. Exclusive CSR without explicit EntityInfo.id + attributes → rejected
+      at registration (5.2.9, 4.3.6.2; validate_exclusive).
+- [ ] 27. Exclusive CSR by exact id: update routes ONLY to the remote; a local
+      shadow copy is never created nor consulted (4.3.6.2).
+- [ ] 28. Registration narrowing on forwards: mock asserts the forwarded
+      request carries only the registered id scope — no broadening (4.3.6.1).
+- [ ] 29. Batch upsert across 3 disjoint-razidlo redirect CSRs splits three
+      ways; each mock receives ONLY its ids (5.6.8.4).
+
+### IOP_EXT_IDR_04 — multi-broker topologies (3-5 brokers, run-five fleet)
+
+- [ ] 30. Star B1→{B2..B5}, four razidlos: retrieve dials exactly one; unique
+      per-broker marker attribute proves the source; others unhit (5.7.1.4).
+- [ ] 31. Same star: type query = exact union of four remotes + B1-local
+      (5.7.2.4).
+- [ ] 32. Cascade B1→B2→B3 (B2 holds a CSR for B3's narrower prefix):
+      retrieve via B1 resolves through the chain (4.3.6.4).
+- [ ] 33. Loop B1↔B2 with overlapping patterns: Via header terminates the
+      cycle, request completes with correct data (4.3.6.3, 6.3.18).
+- [ ] 34. `localOnly=true` on B1's CSR → B2 answers from its own data only,
+      does NOT cascade to its B3 registration (4.3.6.4, 5.2.34).
+- [ ] 35. Overlapping redirect CSRs — two endpoints both match one id: the
+      operation is distributed to ALL matching (4.3.6.3).
+- [ ] 36. Prefix shadowing: coarse `Typ:Razidlo:.*` CSR→B2 + fine
+      `Typ:Razidlo:odpady:.*` CSR→B3 — both match, both consulted, merged
+      result correct (5.12, 4.5.5).
+- [ ] 37. Matched endpoint down: retrieve returns 404/partial WITH
+      `NGSILD-Warning` 199; a non-matching id returns 404 WITHOUT the warning
+      (6.3.17; verified live 2026-08-15 — pin it).
+- [ ] 38. Registration timeout+cooldown honoured: second request inside the
+      cooldown fails fast, mock sees exactly ONE dial (5.2.34).
+- [ ] 39. Routing follows the live CSR set: delete the CSR → next retrieve
+      404s and the mock records zero new hits (5.9.4, 5.12).
+
+### IOP_EXT_IDR_05 — subscriptions & notifications routed by id
+
+- [ ] 40. Subscription at B1 with `entities:[{type,idPattern}]` overlapping a
+      CSR → distributed sub created at B2; create at B2 → notification via B1
+      (5.8.1.4).
+- [ ] 41. Subscription pattern disjoint from the CSR pattern → NO remote sub
+      created at B2 (assert absence via B2's subscription list) (5.8.1.4).
+- [ ] 42. Create matching + non-matching ids at B2 → exactly ONE notification;
+      the non-matching id absent from every payload (5.8.6, negative).
+- [ ] 43. csourceSubscription with EntityInfo idPattern: registering a matching
+      CSR notifies, a disjoint CSR does not (5.11.3 — ADR's discovery
+      automation).
+- [ ] 44. Remote entity deleted → default notificationTrigger excludes
+      deletions; with entityDeleted requested the notification fires (5.2.12).
+- [ ] 45. Subscription with exact id list: only the listed id notifies across
+      the federation; id takes precedence over idPattern (5.2.33, 5.8.1.4).
+
+### IOP_EXT_IDR_06 — ADR-001 URN grammar edge cases on the wire
+
+- [ ] 46. Hierarchy colons in the local segment
+      (`...odpady:kontajner:sektor-a:0042`) route through the prefix pattern;
+      full ADR validator regex accepted end-to-end (5.12).
+- [ ] 47. Crockford-base32 random-suffix ids route identically to natural
+      keys (5.12).
+- [ ] 48. Unescaped-dot trap: pattern `sk.banskabystrica` (dot = any char)
+      ALSO matches `sk_banskabystrica` ids — TP documents why razidlo uses
+      `_` and patterns escape metacharacters (5.2.8).
+- [ ] 49. Multi-type entity (`["Device","Camera"]`): CSR pattern registered
+      with the supertype still matches after the specialization type is
+      appended; retrieve via B1 works (4.5.2, 5.12).
+- [ ] 50. CSR `tenant` member (4.14): forward to B2 uses the REGISTRATION's
+      tenant, the client tenant never propagates; and with
+      `operations:["federationOps"]` a write through that CSR must NOT reach
+      B2 (4.20 query-op gate, 826afac) — the ADR's read-only agent-tenant
+      posture, both halves asserted.
+
+### The /goal prompt — copy-paste to run this campaign
+
+```
+/goal Work the "Backlog 2026-08-15 — IOP id/idPattern routing campaign"
+checklist in tasks.md top-to-bottom until all 50 boxes are [x] with
+evidence (commit hash + green local run) recorded next to each. Per case:
+MemPalace FIRST (5.12 pp.241-242, 5.2.8, 4.3.6.x via mempalace_search +
+mempalace_get_pdf_pages — cite the clause in [Documentation]); check
+existing TPs for overlap before writing (grep the official TP/ + IOP_TP/
+trees — never duplicate an ETSI TP); write the TP in the suite fork under
+IOP_TP/NGSI-LD/Interoperability/Routing/ per IOP_TP conventions
+(b1_url..b5_url, InteropUtils keywords, clause tags like 5_12/4_3_6,
+ADR-shaped fixture URNs, at least one negative assertion per case —
+what must NOT appear / which mock must record ZERO requests); --dryrun
+while iterating, then the REAL run per rule 8 against the dev/run-five.sh
+fleet (memory store, no docker; kill the brokers afterwards). A red TP
+against the broker = prove it from the clause text: broker bug → fix
+red-first with unit tests per §0.3 and commit `<clause>:` separately;
+suite/spec defect → error.md + testsuite-doubts.md, never hack the broker.
+Group commits per IDR file; tick boxes with evidence as you go; ledger
+notes on touched clauses updated. Rules 8 and 9 stay hard; use ponytail;
+Mac-side pushes are out of scope — list them at the end. Ask only when
+rule 9 leaves you genuinely unsure.
+```
