@@ -64,7 +64,10 @@ async fn clause_5_2_12_throttling_suppresses_consecutive_notifications() {
         "throttling": 30,
         "notification": {"endpoint": {"uri": uri}},
     });
-    assert_eq!(send(&st, "POST", "subscriptions", sub).await, StatusCode::CREATED);
+    assert_eq!(
+        send(&st, "POST", "subscriptions", sub).await,
+        StatusCode::CREATED
+    );
 
     let e = json!({"id": "urn:ngsi-ld:Vehicle:thr", "type": "Vehicle",
         "speed": {"type": "Property", "value": 1}});
@@ -87,13 +90,7 @@ async fn clause_5_2_12_throttling_suppresses_consecutive_notifications() {
     for v in [2, 3, 4] {
         let frag = json!({"speed": {"type": "Property", "value": v}});
         assert_eq!(
-            send(
-                &st,
-                "PATCH",
-                "entities/urn:ngsi-ld:Vehicle:thr/attrs",
-                frag
-            )
-            .await,
+            send(&st, "PATCH", "entities/urn:ngsi-ld:Vehicle:thr/attrs", frag).await,
             StatusCode::NO_CONTENT
         );
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
