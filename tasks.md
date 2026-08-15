@@ -64,6 +64,27 @@ genuine user decisions (license, rule-9 doubt).
 
 ## Backlog 2026-08-15b — role-split rolling NATS matrix + per-cell README badges
 
+**STATUS 2026-08-15 (AntaresBroker): COMPLETE — all 8 boxes [x] with
+evidence.** Commits 04f9261 (overlay+smoke), 5dc3b01 (pair e2e), ddc4d39
+(roles rolling), 3e969c4 (pipeline lever), b6bc145 (six cells), 99943b4
+(per-cell badges), fad646f (pages auto-deploy), c737d88 (docs). Live
+in-sandbox proof (private dind): 10-container fleet up, roles-smoke PASS
+via real haproxy, CommonBehaviours 56/56 through the LB with the fleet
+rolling, full 10-pod roll ≈43 s with 52/52 LB requests answered and never
+0 ready per role group, nats_e2e 5/5 vs live PG+NATS. Mac-side list below.
+
+**Mac-side / user (2026-08-15b — nothing blocks):**
+1. Push master (8 campaign commits above).
+2. Watch the FIRST six-cell matrix run — the two `-nats` cells are new;
+   their wall-clock is the open cost question (if a per-push 6-cell wall
+   is too slow, the cadence-vs-scope call is yours — say the word and the
+   `-nats` cells move to a schedule instead).
+3. pages.yml auto-deploy is live on the next push (overturns the
+   2026-08-07 manual-only decision as flagged) — verify Pages source is
+   "GitHub Actions"; the six per-cell README badges light up after the
+   first matrix bundle + pages deploy. Say the word if you want the
+   manual-only posture back.
+
 **Ask (user, 2026-08-15).** (a) A TRUE role-split fleet: 5 roles × 2
 replicas = 10 broker containers (api×2 behind the LB, matcher×2,
 notifier×2, temporal×2, registry×2), bus=nats, shared Postgres — with the
