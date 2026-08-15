@@ -97,7 +97,6 @@ fn unknown_config_key(key: &str) -> bool {
     !injected
 }
 
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // K12: tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
