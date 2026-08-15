@@ -84,6 +84,27 @@ jobs:
           echo '<!doctype html><meta http-equiv="refresh" content="0; url=../"><a href="../">moved to /</a>' > site/app/index.html
           # custom domain: the CNAME file travels with every deploy
           echo "$PAGES_DOMAIN" > site/CNAME
+      - name: Fold the latest ETSI conformance report into the site
+        # Backlog 08-14 item 1: the ONE Pages deployment carries the
+        # playground AND /reports/ — the newest ETSI-matrix-results bundle is
+        # rendered to a static page + shields badge. A missing bundle (no
+        # matrix run in the retention window) renders a placeholder instead
+        # of failing the site deploy.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          id=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=ETSI-matrix-results&per_page=1"                -q '.artifacts[0].id' 2>/dev/null || true)
+          mkdir -p site/reports/latest
+          if [ -n "$id" ] && [ "$id" != "null" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > matrix.zip
+            mkdir -p cells && unzip -q matrix.zip -d cells
+            python3 dev/etsi-report-site.py cells site/reports/latest
+          else
+            echo '<!doctype html><title>ETSI report</title><p>No ETSI-matrix-results bundle in the retention window — dispatch the etsi-matrix workflow.'               > site/reports/latest/index.html
+            echo '{"schemaVersion":1,"label":"ETSI CIM 009","message":"no recent run","color":"lightgrey"}'               > site/reports/badge.json
+          fi
       - uses: actions/upload-artifact@v6
         with:
           name: antares-www

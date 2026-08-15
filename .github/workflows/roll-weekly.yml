@@ -99,6 +99,7 @@ jobs:
             results/roll-postgres/failures.csv
             results/roll-postgres/roll-loop.log
             results/roll-postgres/**/log.html
+            results/roll-postgres/**/report.html
           retention-days: 14
 
       - name: Gate — green under continuous rolls

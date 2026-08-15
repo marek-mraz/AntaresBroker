@@ -255,6 +255,7 @@ jobs:
             results/serial-${{ matrix.store }}/resource-samples.csv
             results/serial-${{ matrix.store }}/resource-by-test.csv
             results/serial-${{ matrix.store }}/**/log.html
+            results/serial-${{ matrix.store }}/**/report.html
           retention-days: 14
 
       - name: Gate — the serial run is 100% green
@@ -310,6 +311,7 @@ jobs:
             results/wasm-node/gate-status.txt
             results/wasm-node/failures.csv
             results/wasm-node/**/log.html
+            results/wasm-node/**/report.html
           retention-days: 14
       - name: Gate — the wasm Node tier is green
         run: |
@@ -371,6 +373,7 @@ jobs:
             results/roll-postgres/failures.csv
             results/roll-postgres/roll-loop.log
             results/roll-postgres/**/log.html
+            results/roll-postgres/**/report.html
           retention-days: 14
 
       - name: Gate — green under continuous rolls

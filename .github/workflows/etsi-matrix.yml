@@ -104,6 +104,7 @@ jobs:
             results/${{ matrix.store }}/resource-by-test.csv
             results/${{ matrix.store }}/*-console.log
             results/${{ matrix.store }}/**/log.html
+            results/${{ matrix.store }}/**/report.html
           retention-days: 7
 
       - name: Gate — this store 100% green
