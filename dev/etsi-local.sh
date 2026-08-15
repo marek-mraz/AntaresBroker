@@ -16,7 +16,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== workspace tests ==="
-cargo test --workspace
+# -j 2: default parallelism OOM-kills the linker on dev boxes (claude.md §2)
+cargo test --workspace -j 2
 
 case "${STORE:-memory}" in
   all) STORES=(file postgres timescale) ;;
