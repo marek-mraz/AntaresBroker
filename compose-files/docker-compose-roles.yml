@@ -1,0 +1,154 @@
+# Role-split overlay (tasks.md backlog 2026-08-15b item 1) — layered ON TOP
+# of the ETSI stack, like the K2 HA overlay but a TRUE role split:
+#
+#   STORE=postgres docker compose -f compose-files/docker-compose-etsi.yml \
+#                  -f compose-files/docker-compose-roles.yml --profile db up -d
+#
+# Shape: 5 roles × 2 replicas = 10 broker containers, ALL one broker
+# (ANTARES_HOST_ALIAS antares1, one shared postgres1, ANTARES_BUS=nats):
+#   haproxy owns 9090, fronting antares1 (moved to 9095, ANTARES_ROLES=api)
+#   and api2 (9096) — the only two pods serving the NGSI-LD surface (P0-4:
+#   workers expose /q/health,/q/ready,/q/metrics and nothing else).
+#   matcher1/2 (9110/9111) + notifier1/2 (9112/9113): both roles join the ONE
+#   shared "matcher" durable (wiring.rs — each change processed exactly once
+#   across the four), tick the single-winner interval loop, and deliver
+#   notifications (hence the mosquitto extra_hosts + egress-private).
+#   temporal1/2 (9114/9115): no bus consumer BY DESIGN — auto-recording is
+#   synchronous in the api write path (K8 lesson); these pods carry the
+#   SKIP-LOCKED single-winner temporal maintenance job.
+#   registry1/2 (9116/9117): hold the §9.3 role's fleet slot; the F5
+#   registration mirror rides on api pods today (wiring.rs has no
+#   registry-role consumer), so these pods prove ops/rolling behaviour for
+#   the role, not registry data flow — do not claim otherwise in docs.
+# Brokers 2-5 stay as in the base stack (own DBs, bus=local, all roles) —
+# the IOP suite needs them as genuinely separate brokers.
+#
+# Store modes: postgres | timescale ONLY (ANTARES_BUS=nats refuses
+# per-process state; memory/file cannot back ten instances). No compose
+# healthchecks on brokers: the image is distroless (no shell to exec a
+# probe), so readiness is polled from OUTSIDE — dev/roles-smoke.sh and
+# dev/rolling-update.sh poll /q/health (api) and /q/ready (workers).
+
+x-worker: &worker
+  image: antares-local:latest
+  network_mode: host
+  restart: unless-stopped
+  # K1 contract: stop_grace_period must exceed drain delay (0.5 s) +
+  # drain deadline (20 s), or `docker stop` turns the drain into a kill.
+  stop_grace_period: 30s
+  depends_on: [nats]
+  # notification delivery to the suite's mosquitto runs on these pods
+  extra_hosts:
+    - "ngsi-ld-test-suite-mosquitto-container:172.29.9.2"
+
+x-worker-env: &worker-env
+  # Same alias as antares1 ON PURPOSE: all ten pods are ONE broker, and
+  # Via-chain loop detection must treat them as one hop.
+  ANTARES_HOST_ALIAS: antares1
+  ANTARES_STORE: ${STORE:-postgres}
+  ANTARES_BUS: nats
+  ANTARES_NATS_URL: nats://localhost:4222
+  # Shares antares1's database — that is what makes the ten pods one broker.
+  ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
+  ANTARES_EGRESS_ALLOW_PRIVATE: "true"
+  ANTARES_SWEEP_SECS: "2"
+
+services:
+  nats:
+    image: nats:2-alpine
+    container_name: antares-nats
+    network_mode: host
+    restart: unless-stopped
+    command: ["-js"]
+
+  antares1:
+    environment:
+      ANTARES_HTTP_PORT: "9095"
+      ANTARES_ROLES: api
+      ANTARES_BUS: nats
+      ANTARES_NATS_URL: nats://localhost:4222
+    depends_on: [nats]
+    stop_grace_period: 30s
+
+  api2:
+    <<: *worker
+    container_name: api2
+    volumes: ["api2-data:/data"]
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: api
+      ANTARES_HTTP_PORT: "9096"
+      # Behind the LB with antares1 — peers dial the LB, never a replica.
+      ANTARES_PUBLIC_URL: http://localhost:9090
+      ANTARES_DATA_DIR: /data
+
+  matcher1:
+    <<: *worker
+    container_name: matcher1
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: matcher
+      ANTARES_HTTP_PORT: "9110"
+  matcher2:
+    <<: *worker
+    container_name: matcher2
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: matcher
+      ANTARES_HTTP_PORT: "9111"
+
+  notifier1:
+    <<: *worker
+    container_name: notifier1
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: notifier
+      ANTARES_HTTP_PORT: "9112"
+  notifier2:
+    <<: *worker
+    container_name: notifier2
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: notifier
+      ANTARES_HTTP_PORT: "9113"
+
+  temporal1:
+    <<: *worker
+    container_name: temporal1
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: temporal
+      ANTARES_HTTP_PORT: "9114"
+  temporal2:
+    <<: *worker
+    container_name: temporal2
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: temporal
+      ANTARES_HTTP_PORT: "9115"
+
+  registry1:
+    <<: *worker
+    container_name: registry1
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: registry
+      ANTARES_HTTP_PORT: "9116"
+  registry2:
+    <<: *worker
+    container_name: registry2
+    environment:
+      <<: *worker-env
+      ANTARES_ROLES: registry
+      ANTARES_HTTP_PORT: "9117"
+
+  lb:
+    image: haproxy:3.0-alpine
+    container_name: antares-lb
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./haproxy-ha.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+
+volumes:
+  api2-data:

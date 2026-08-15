@@ -85,7 +85,16 @@ rolling worker pods).
 
 ### Checklist
 
-- [ ] 1. **Role-split compose overlay** `docker-compose-roles.yml`:
+- [x] 1. **Role-split compose overlay** `docker-compose-roles.yml`:
+      ✅ DONE 2026-08-15: compose config parses (STORE=postgres, both files,
+      --profile db); live process-level fleet validated in-sandbox (10 broker
+      processes with the overlay's exact env vs dind postgis+NATS): all 10
+      pods ready (api /q/health, workers /q/ready), entity create → exactly
+      ONE notification through the split matcher/notifier chain, 5/5 stable
+      reruns, invert→FAIL→restore on the exactly-once count. Smoke flake
+      root-caused and fixed IN the script: receiver must accept before the
+      sub exists (delivery is ~ms and 5.8.6 failure is terminal — pinned by
+      times_sent=1/last_failure in PG). Full 10-container compose run = CI.
       10 brokers — api1/api2 (ANTARES_ROLES=api) behind the existing K2
       haproxy, matcher1/2, notifier1/2, temporal1/2, registry1/2 — all
       ANTARES_BUS=nats against the overlay NATS, one shared PG
