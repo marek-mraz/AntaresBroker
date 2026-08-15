@@ -239,9 +239,19 @@ options fail).
       same `site/reports/` area (item 1's mechanism), README badge. No new
       floor/ratchet (strict.yml owns the unit floor) — display only.
 
-Mac-side / user (collect here as items complete, do not block on them):
-push master + workflow changes, enable/verify the Pages source, pick the
-LICENSE, trigger the first scheduled runs.
+Mac-side / user (consolidated 2026-08-15 — nothing below blocks anything):
+1. Push master (~25 commits: routing campaign fixes, audit closures, NATS
+   health, workflows, docs/hygiene) and the suite fork (7 IDR TP commits).
+2. Watch the next 4×8 matrix — with edc57cc/8cb8256/0cb0447 aboard all
+   cells should be 1652+/green incl. the 58 new Routing TPs.
+3. Pages: verify the source is "GitHub Actions", then dispatch wasm.yml
+   with deploy_pages ✔ — that publishes the playground + /reports/latest/
+   + /reports/coverage/ and lights the two shields badges in the README.
+4. Trigger/verify the first scheduled runs: roll-weekly (Tue 04:17 UTC)
+   and etsi-coverage (Mon 04:41 UTC) — or dispatch both once now.
+5. LICENSE: added as BSD-3-Clause following the STANDING declaration in
+   Cargo.toml + the README — say the word if you want a different license.
+6. Stale branch delete: `git push origin --delete fed-alias-tenant`.
 
 ## Backlog 2026-08-15 — IOP id/idPattern routing campaign (this goal)
 
