@@ -37,7 +37,9 @@ async fn outbox_enqueue_is_transactional() {
     .await
     .expect("enqueue");
     tx.commit().await.expect("commit");
-    let page = outbox::peek(&pool, 10).expect("peek");
+    // 1000, not 10: sibling tests enqueue concurrently and a small page can
+    // miss our row without any bug existing
+    let page = outbox::peek(&pool, 1000).expect("peek");
     assert!(page
         .iter()
         .any(|(s, tn, e)| *s == seq && tn == "pgoutbox" && e["id"] == "urn:o:1"));
@@ -152,8 +154,12 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
     // A commits between peek and ack — the audited loss window
     tx_a.commit().await.expect("commit a");
 
-    // ack what was actually published
-    outbox::ack(&pool, &published).expect("ack");
+    // Ack exactly OUR published seq — not the whole peeked page: sibling
+    // tests share this table and acking their in-flight rows steals them
+    // (CI #101 flake: the transactional test's own ack then deletes 0 rows).
+    // The P0-6 regression power is unchanged — under the old blanket
+    // `DELETE WHERE seq <= max` an ack of just seq_b still kills seq_a.
+    outbox::ack(&pool, &[seq_b]).expect("ack");
 
     // the gap row MUST survive to be published next round
     let page = outbox::peek(&pool, 1000).expect("peek 2");
