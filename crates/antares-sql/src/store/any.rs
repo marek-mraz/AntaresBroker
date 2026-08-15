@@ -140,15 +140,16 @@ impl AnyStore {
         }
     }
 
-    /// F3 drain: delete everything published up to and including `seq`.
+    /// F3 drain: delete EXACTLY the published rows (P0-6: never a blanket
+    /// `seq <= max`, which loses a row committing between peek and ack).
     pub fn outbox_ack(
         &self,
-        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seq: i64,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] seqs: &[i64],
     ) -> Result<u64, NgsiError> {
         match self {
             AnyStore::Mem(_) => Ok(0),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::outbox::ack(p.docs.pool(), seq).map_err(db),
+            AnyStore::Pg(p) => super::outbox::ack(p.docs.pool(), seqs).map_err(db),
         }
     }
 

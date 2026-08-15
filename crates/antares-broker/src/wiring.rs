@@ -238,13 +238,16 @@ pub async fn wire_nats(
                         .await;
                         continue;
                     }
-                    let mut acked = 0i64;
+                    // P0-6: ack the EXACT published seqs — a blanket
+                    // up-to-max delete loses a lower-seq row whose
+                    // transaction commits between peek and ack.
+                    let mut acked: Vec<i64> = Vec::new();
                     for (seq, _tenant, event) in rows {
                         match serde_json::from_value::<ChangeEvent>(event) {
                             Ok(mut ev) => {
                                 ev.seq = seq;
                                 match bus_for_drain.publish(&ev).await {
-                                    Ok(()) => acked = seq,
+                                    Ok(()) => acked.push(seq),
                                     Err(e) => {
                                         tracing::warn!("outbox publish of seq {seq} failed: {e}");
                                         break; // retry from here next round
@@ -254,13 +257,13 @@ pub async fn wire_nats(
                             Err(e) => {
                                 // an undecodable row would wedge the drain forever
                                 tracing::error!("outbox row {seq} undecodable ({e}) — skipped");
-                                acked = seq;
+                                acked.push(seq);
                             }
                         }
                     }
-                    if acked > 0 {
-                        if let Err(e) = store.outbox_ack(acked) {
-                            tracing::warn!("outbox ack {acked} failed: {e}");
+                    if !acked.is_empty() {
+                        if let Err(e) = store.outbox_ack(&acked) {
+                            tracing::warn!("outbox ack {acked:?} failed: {e}");
                         }
                     }
                 }

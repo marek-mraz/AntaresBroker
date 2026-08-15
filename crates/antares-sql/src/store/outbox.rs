@@ -72,13 +72,20 @@ pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx
     })
 }
 
-/// Ack everything published up to and including `seq`.
-pub fn ack(pool: &PgPool, seq: i64) -> Result<u64, sqlx::Error> {
+/// Ack EXACTLY the published seqs (P0-6, audit 2026-08-09): bigserial
+/// allocates at INSERT and commits land out of order, so a blanket
+/// `seq <= max` deletes a lower-seq row that commits between peek and ack —
+/// an event lost unpublished. Deleting by exact seq can never touch a row
+/// the drain did not publish.
+pub fn ack(pool: &PgPool, seqs: &[i64]) -> Result<u64, sqlx::Error> {
+    if seqs.is_empty() {
+        return Ok(0);
+    }
     wait(async {
         let mut tx = pool.begin().await?;
         crate::pg::set_service(&mut tx).await?;
-        let n = sqlx::query("DELETE FROM outbox WHERE seq <= $1")
-            .bind(seq)
+        let n = sqlx::query("DELETE FROM outbox WHERE seq = ANY($1)")
+            .bind(seqs)
             .execute(&mut *tx)
             .await?
             .rows_affected();
