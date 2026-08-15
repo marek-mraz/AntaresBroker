@@ -118,7 +118,13 @@ options fail).
 
 ### Checklist
 
-- [ ] 1. **ETSI report clickable from the README (the headline ask).**
+- [x] 1. **ETSI report clickable from the README (the headline ask).**
+      ✅ DONE 2026-08-15 (2fa0eb2): dev/etsi-report-site.py renders the
+      ETSI-matrix-results bundle to a static page + shields badge.json;
+      wasm.yml folds it under /reports/ in the ONE Pages deployment (gh api
+      newest-bundle download, placeholder when absent); report.html added to
+      cell/roll uploads. Local validation: generated over results/g4-* (badge
+      "4×122 green"), served in-sandbox on :42040; actionlint clean.
       etsi-matrix.yml's summary job already builds
       `cells/_combined/matrix-summary.md` + per-store `run-summary.md` and
       robot `report.html`/`log.html`. Publish them: assemble a static
@@ -135,7 +141,11 @@ options fail).
       run `dev/etsi-matrix-summary.py` over an existing `results/` cell
       set + open the generated index in-sandbox (serve on 42040 for the
       user to click).
-- [ ] 2. **README production pass.** Badges at top (ci, etsi-matrix, the
+- [x] 2. **README production pass.**
+      ✅ DONE 2026-08-15 (6b2db61): badges (ci, strict, roll-weekly, ETSI
+      endpoint, coverage endpoint); targets table = claude.md §1 with a
+      targets-vs-proven note; compose quickstart; /q/ready; report page +
+      docs index linked; stray /goal line removed; negative check applied. Badges at top (ci, etsi-matrix, the
       shields endpoint badge from item 1, coverage); FIX the stale targets
       table (still the pre-2026-08-10 10× smaller contract — claude.md §1
       is the authority: 100M entities / 10k tenants / 100k subs);
@@ -143,7 +153,13 @@ options fail).
       two lines); link the conformance report page and a docs index.
       Negative check: no claim in the README that CI does not actually
       prove.
-- [ ] 3. **Repo hygiene files.** LICENSE is MISSING (deny.toml gates dep
+- [x] 3. **Repo hygiene files.**
+      ✅ DONE 2026-08-15 (3d72999): LICENSE = BSD-3-Clause per the STANDING
+      declaration in Cargo.toml `license` + the README License section (NOT a
+      new choice — flag on the user list to swap if unwanted); SECURITY.md
+      (contact + §16 posture + both audits); CONTRIBUTING.md (-j 2, spec-
+      first, TEST-FIRST, one-clause-one-commit, local Robot gate);
+      CHANGELOG.md seeded (no v* tag exists yet — noted). LICENSE is MISSING (deny.toml gates dep
       licenses; the repo itself has none) — license choice is the USER's,
       ask once and add. SECURITY.md (contact + the §16 security-wall
       posture, link docs/security-audit-2026-08-04.md), CONTRIBUTING.md
@@ -203,7 +219,11 @@ options fail).
       become new checkboxes appended to THIS list (that is the "if
       something is missing, it should also be tested" clause). Write the
       updated status table back into that doc with today's date.
-- [ ] 7. **Docs index + operations runbook.** docs/README.md mapping the
+- [x] 7. **Docs index + operations runbook.**
+      ✅ DONE 2026-08-15 (4eae426): docs/README.md tree map + live artifacts;
+      docs/operations.md runbook (deploy, health/ready/metrics with the
+      proven NATS-outage contract, per-store backup, rolling update + K10
+      file-mode rule, state reset, claims→workflows table). docs/README.md mapping the
       docs tree (deep-analysis, adr/, spec/ ledger, audits, upstream
       raises); docs/operations.md runbook: deploy (compose + deploy/k8s),
       per-store backup table (README already has the redb stop-copy rule —
@@ -211,7 +231,10 @@ options fail).
       + the file-mode-cannot-roll K10 rule), health/metrics endpoints,
       state-reset discipline (§2). Mostly assembling existing text — no
       new claims without a test behind them.
-- [ ] 8. **Coverage surfaced.** etsi-coverage.yml already produces
+- [x] 8. **Coverage surfaced.**
+      ✅ DONE 2026-08-15: merged genhtml in the etsi-coverage-merged
+      artifact; wasm.yml publishes /reports/coverage/ + coverage-badge.json
+      (% from merged.info); README badge wired. Display only — no floor. etsi-coverage.yml already produces
       lcov+html weekly — publish the merged HTML + a % badge json to the
       same `site/reports/` area (item 1's mechanism), README badge. No new
       floor/ratchet (strict.yml owns the unit floor) — display only.
