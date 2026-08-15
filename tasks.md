@@ -168,7 +168,14 @@ options fail).
       restart NATS → reconnect + subscription notifications resume, no
       panic. Assert the DEFINED semantics, whatever the current
       implementation's contract is — read bus.rs first.
-- [ ] 5. **Rolling-update proof on a cadence, not only on tags.**
+- [x] 5. **Rolling-update proof on a cadence, not only on tags.**
+      ✅ DONE 2026-08-15: .github/workflows/roll-weekly.yml — schedule Tue
+      04:17 UTC (offset from etsi-coverage Mon 04:41) + dispatch; build job
+      = etsi-matrix build shape (shared type=gha cache), roll job = full.yml
+      etsi-roll verbatim (postgres, HA=1, ROLL_DURING_RUN=1, PASS gate).
+      Validated: yaml parse + actionlint 1.7.7 clean (sandbox cannot trigger
+      GitHub runs). README badge + reports-page line land with items 1-2;
+      first scheduled run = Mac-side list.
       full.yml's K1/K3 job (haproxy + `dev/rolling-update.sh` +
       `k6-continuity.py` under load) runs only on `v*` push/dispatch — add
       `schedule:` (weekly, offset from etsi-coverage's Mon 04:41) to

@@ -1,0 +1,109 @@
+name: roll-weekly
+
+# The rolling-update proof on a CADENCE, not only on v* tags (tasks.md
+# backlog 08-14 item 5): the K8 roll-under-suite job — the FULL ETSI suite
+# through the K2 haproxy while dev/rolling-update.sh rolls the two broker1
+# replicas underneath it, postgres mode (shared state + bus=nats) — runs
+# weekly so the "zero-downtime rolling update" README claim is continuously
+# proven, and its badge goes red the week it stops being true. Same steps as
+# full.yml's etsi-roll job (kept in sync by hand — the job is 40 lines);
+# the image build is the etsi-matrix build job shape and shares its
+# type=gha layer cache, so a quiet week rebuilds only the antares-* crates.
+
+on:
+  schedule:
+    # Tue 04:17 UTC — offset from etsi-coverage's Mon 04:41 so the two
+    # weekly walls never queue on the same day.
+    - cron: "17 4 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: roll-weekly
+  cancel-in-progress: false
+
+env:
+  MEM_LIMIT_MB: 350
+
+jobs:
+  build:
+    name: Build the image under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:latest (dep layer cached across runs)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export it for the roll job
+        run: docker save antares-local:latest | gzip > antares-image.tgz
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: antares-image
+          path: antares-image.tgz
+          retention-days: 3
+
+  etsi-roll:
+    # K8: identical to full.yml's etsi-roll — the suite has no retries and
+    # asserts exact single responses, so ANY red TP is a real K1 drain bug.
+    name: K8 roll-under-suite (postgres)
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch the ETSI test suite (submodule)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule sync
+          git submodule update --init --depth 1
+
+      - name: Load the image built for this run
+        uses: actions/download-artifact@v7
+        with:
+          name: antares-image
+
+      - run: docker load < antares-image.tgz
+
+      - name: Full suite through the LB while the brokers roll
+        env:
+          STORE: postgres
+          HA: "1"
+          ROLL_DURING_RUN: "1"
+          SKIP_BUILD: "1"
+          STOP_ON_ERROR: "0"
+          CALLBACK_HOST: localhost
+          RESULTS_DIR: results/roll-postgres
+        run: ./dev/etsi-pipeline.sh || true
+
+      - name: Upload roll results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ETSI-roll-weekly
+          path: |
+            results/roll-postgres/run-summary.md
+            results/roll-postgres/gate-status.txt
+            results/roll-postgres/failures.csv
+            results/roll-postgres/roll-loop.log
+            results/roll-postgres/**/log.html
+          retention-days: 14
+
+      - name: Gate — green under continuous rolls
+        run: |
+          gate=$(cat results/roll-postgres/gate-status.txt 2>/dev/null || echo MISSING)
+          echo "K8 roll gate = $gate"
+          cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          [ "$gate" = PASS ]
