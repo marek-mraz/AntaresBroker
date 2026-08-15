@@ -62,6 +62,104 @@ appends) [x] with evidence and the Mac-side list written. Ask only for
 genuine user decisions (license, rule-9 doubt).
 ```
 
+## Backlog 2026-08-15b — role-split rolling NATS matrix + per-cell README badges
+
+**Ask (user, 2026-08-15).** (a) A TRUE role-split fleet: 5 roles × 2
+replicas = 10 broker containers (api×2 behind the LB, matcher×2,
+notifier×2, temporal×2, registry×2), bus=nats, shared Postgres — with the
+containers CONTINUOUSLY rolling/restarting for the entire ETSI suite.
+(b) Per-push-to-main result cells: memory, file, postgres, timescale
+(single-broker, bus=local — as today) PLUS postgres-nats and
+timescale-nats (the 10-container rolling role fleet). (c) The per-cell
+pass counts visible from the README like "file 1652/1652" — live shields
+badges per cell, not a stale hand-edited table.
+
+Grounding in what EXISTS (don't rebuild): docker-compose-ha.yml already
+runs 2 all-roles replicas + haproxy + NATS with HA_BUS; rolling-update.sh
+rolls ${ROLL_SERVICES}; etsi-pipeline.sh has the HA=1/ROLL_DURING_RUN=1
+levers; etsi-matrix.yml is the reusable 3-cell matrix ci.yml runs per
+push; dev/etsi-report-site.py + the wasm.yml fold publish /reports/ and
+badge.json (item-1 mechanism); ops_router/readiness landed 2026-08-15
+(workers serve /q/health,/q/ready,/q/metrics only — the probe basis for
+rolling worker pods).
+
+### Checklist
+
+- [ ] 1. **Role-split compose overlay** `docker-compose-roles.yml`:
+      10 brokers — api1/api2 (ANTARES_ROLES=api) behind the existing K2
+      haproxy, matcher1/2, notifier1/2, temporal1/2, registry1/2 — all
+      ANTARES_BUS=nats against the overlay NATS, one shared PG
+      (STORE=postgres|timescale). Worker healthchecks poll /q/ready (they
+      serve ops endpoints only since P0-4). Bring-up green: every
+      container healthy, one entity create via the LB notifies through
+      the split matcher/notifier chain (smoke script, not a TP).
+- [ ] 2. **Role-pair semantics verified red-first** (the F7 class): with
+      2 matchers on the shared durable a notification fires EXACTLY once
+      (no duplicate delivery from the pair — negative assertion on the
+      receiver count); interval subscriptions fire single-winner across
+      the pair (§3.1.6 claim); registry×2 keeps federation mirrors
+      consistent; temporal×2 keeps auto-recording exactly-once per write.
+      Unit/e2e level (nats_e2e style, env-gated), BEFORE the suite runs.
+- [ ] 3. **Continuous role rolling**: extend dev/rolling-update.sh (or a
+      roles variant) to loop over ALL 10 containers in role-group order —
+      never 0 healthy per role group (api waits for LB re-admission per
+      the K1 contract; workers wait for /q/ready). ROLL_DURING_RUN=1
+      keeps rolling for the WHOLE suite duration, same as today's K8.
+- [ ] 4. **Pipeline lever** `ROLES_SPLIT=1`: STORE=postgres ROLES_SPLIT=1
+      ROLL_DURING_RUN=1 dev/etsi-pipeline.sh runs the FULL suite through
+      the LB against the rolling 10-container fleet →
+      results/roles-<store>/ with the same run-summary/gate/failures
+      shape every other cell produces. Local validation per §2: ONE
+      store mode sandbox-side if the sandbox allows compose, else
+      yaml/script dry-runs + the item-2 e2es (the full fleet run is CI's).
+- [ ] 5. **Six cells per push to main**: etsi-matrix.yml matrix grows to
+      memory, file, postgres, timescale (single-broker bus=local, as
+      today) + postgres-nats + timescale-nats (item-4 fleet, rolling).
+      One image build feeds all six; fail-fast: false; the aggregate
+      summary + ETSI-matrix-results bundle fold all six cells (STORES
+      env in etsi-matrix-summary.py/etsi-report-site.py). Watch runner
+      wall-clock: the nats cells are the K8 job cost — if a per-push
+      6-cell wall is too slow, the DECISION (user) is cadence vs scope,
+      not silent dropping.
+- [ ] 6. **Per-cell badges**: dev/etsi-report-site.py additionally emits
+      badge-<store>.json per cell ("1652/1652" green / "1640/1652" red)
+      next to the combined badge.json; README gets one shields endpoint
+      badge per cell (file, memory, postgres, timescale, postgres-nats,
+      timescale-nats) linking the report page — the "1024/1024 file"
+      view, live.
+- [ ] 7. **Badges track main automatically**: a pages.yml with
+      `workflow_run` on ci.yml completion (main only) that rebuilds the
+      site (www artifact reuse or rebuild) + folds the fresh bundle and
+      deploys Pages — so a push to main updates the README numbers
+      without a manual wasm dispatch. NOTE: this OVERTURNS the 2026-08-07
+      "Pages deploys are manual-only" decision — flag it in the commit
+      and keep wasm.yml's manual dispatch working for playground-only
+      deploys.
+- [ ] 8. **README + runbook updated**: the badge row (item 6), a
+      role-split deployment paragraph (10-container shape, what rolls,
+      what the cells prove), docs/operations.md gains the roles fleet;
+      negative check — no README claim a cell does not actually gate.
+
+### The /goal prompt — copy-paste to run this campaign
+
+```
+/goal Work the "Backlog 2026-08-15b — role-split rolling NATS matrix +
+per-cell README badges" checklist in tasks.md top-to-bottom until every
+box is [x] with evidence (commit hash + green run / rendered artifact)
+recorded next to it. One item = one commit. Full claude.md discipline:
+MemPalace first, TEST-FIRST red run as the fallibility proof (item 2's
+exactly-once negatives especially), negative assertions everywhere,
+ponytail. Rule 8 nuance: compose stacks for THIS campaign run only where
+sanctioned — prefer the private/sibling-container recipe from the palace
+for live PG+NATS e2es, keep the full 10-container fleet runs in CI, and
+validate workflow edits with actionlint/yaml parse + script dry-runs
+(the sandbox cannot trigger GitHub runs). Anything needing a push, Pages
+settings, or a cadence/cost decision goes on the "Mac-side / user" list
+instead of blocking. Ask only for genuine user decisions (per-push
+6-cell wall-clock cost if it proves too slow, the Pages auto-deploy
+overturn if unwanted).
+```
+
 ## Blocked / user-side (carried from the completed ladder)
 
 - [ ] E8. ⛔ NEEDS-YOU (policy decision, one line): the CI `publish` job
