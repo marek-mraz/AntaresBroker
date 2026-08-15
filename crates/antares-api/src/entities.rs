@@ -1935,6 +1935,8 @@ async fn purge_inner(
         ids: params
             .get("id")
             .map(|s| s.split(',').map(str::to_owned).collect()),
+        // 5.12: the purge's idPattern is part of the Entity specification too
+        id_pattern: params.get("idPattern").cloned(),
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         ..Default::default()
     };

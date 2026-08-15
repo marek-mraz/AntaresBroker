@@ -159,6 +159,12 @@ pub struct FedReg {
     /// EntityInfo ids/types of the matched RegistrationInfo elements.
     pub ent_ids: Vec<String>,
     pub ent_types: Vec<String>,
+    /// EntityInfo idPattern values (5.2.8 IEEE 1003.2 regexes).
+    pub ent_patterns: Vec<String>,
+    /// True when any matched RegistrationInfo carries an EntityInfo with
+    /// neither id nor idPattern (or no entities at all) — the registration
+    /// imposes no id restriction (5.12 condition 1).
+    pub ent_unrestricted: bool,
     /// 5.2.9 `tenant`: the Tenant to specify in all requests to this Context
     /// Source. None ⇒ the requesting tenant is carried through unchanged.
     pub tenant: Option<String>,
@@ -203,6 +209,18 @@ impl FedReg {
     }
     pub fn is_proxy(&self) -> bool {
         self.mode == "exclusive" || self.mode == "redirect"
+    }
+    /// 4.3.6.1 ("all constraints specified in the registration shall be
+    /// respected" — including Entity IDs): can this registration's
+    /// EntityInfo id constraints match `id`? Patterns use regex find,
+    /// mirroring `entity_info_matches` (5.12).
+    pub fn can_match_id(&self, id: &str) -> bool {
+        self.ent_unrestricted
+            || self.ent_ids.iter().any(|i| i == id)
+            || self
+                .ent_patterns
+                .iter()
+                .any(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()))
     }
     /// Does this registration cover the given expanded attribute IRI?
     pub fn covers_attr(&self, iri: &str) -> bool {
@@ -533,6 +551,8 @@ pub fn matching_regs(
             let mut attrs: Option<Vec<String>> = Some(Vec::new());
             let mut ent_ids = Vec::new();
             let mut ent_types = Vec::new();
+            let mut ent_patterns = Vec::new();
+            let mut ent_unrestricted = false;
             for info in &infos {
                 let props = info.get("propertyNames").and_then(Value::as_array);
                 let rels = info.get("relationshipNames").and_then(Value::as_array);
@@ -548,6 +568,14 @@ pub fn matching_regs(
                         if let Some(i) = e.get("id").and_then(Value::as_str) {
                             ent_ids.push(i.to_owned());
                         }
+                        if let Some(p) = e.get("idPattern").and_then(Value::as_str) {
+                            ent_patterns.push(p.to_owned());
+                        }
+                        // 5.12 condition 1: neither id nor idPattern ⇒ the
+                        // element restricts by type only, never by id
+                        if e.get("id").is_none() && e.get("idPattern").is_none() {
+                            ent_unrestricted = true;
+                        }
                         // 5.2.8: type may be a String or String[]
                         match e.get("type") {
                             Some(Value::String(t)) => ent_types.push(t.clone()),
@@ -556,6 +584,9 @@ pub fn matching_regs(
                             _ => {}
                         }
                     }
+                } else {
+                    // an attributes-only RegistrationInfo imposes no id scope
+                    ent_unrestricted = true;
                 }
             }
             let tenant = doc.get("tenant").and_then(Value::as_str).map(str::to_owned);
@@ -585,6 +616,8 @@ pub fn matching_regs(
                 attrs,
                 ent_ids,
                 ent_types,
+                ent_patterns,
+                ent_unrestricted,
                 tenant,
                 alias,
                 csi,
@@ -1068,6 +1101,9 @@ pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
         attrs: None,
         ent_ids: Vec::new(),
         ent_types: Vec::new(),
+        ent_patterns: Vec::new(),
+        // minimal view: no EntityInfo scope loaded ⇒ never narrow by it
+        ent_unrestricted: true,
         tenant: reg.get("tenant").and_then(Value::as_str).map(str::to_owned),
         alias: reg
             .get("contextSourceAlias")
@@ -1451,6 +1487,9 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource
     crate::csource::CsrSpec {
         types,
         ids,
+        // 5.12: "the id pattern (if present)" is part of the query-side
+        // Entity specification matched against EntityInfo elements
+        id_pattern: params.get("idPattern").cloned(),
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         geo: crate::geo::GeoQuery::from_params(params).ok().flatten(),
         ..Default::default()
@@ -1519,10 +1558,22 @@ pub async fn fed_query(
             if let Some(t) = params.get("type") {
                 query.push(("type".into(), t.clone()));
             }
-            if let Some(id) = reg.ent_ids.first() {
-                query.push(("id".into(), id.clone()));
-            } else if let Some(ids) = params.get("id") {
-                query.push(("id".into(), ids.clone()));
+            if let Some(ids) = params.get("id") {
+                // 4.3.6.1: the forwarded id list carries only ids this
+                // registration can match — never the full client list.
+                let keep: Vec<&str> = ids
+                    .split(',')
+                    .filter(|i| reg.can_match_id(i.trim()))
+                    .collect();
+                if !keep.is_empty() {
+                    query.push(("id".into(), keep.join(",")));
+                }
+            } else if !reg.ent_unrestricted
+                && reg.ent_patterns.is_empty()
+                && !reg.ent_ids.is_empty()
+            {
+                // the registration is scoped to exact ids only — ask for those
+                query.push(("id".into(), reg.ent_ids.join(",")));
             }
             if let Some(scope) = &reg.attrs {
                 let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
@@ -2163,6 +2214,8 @@ mod tests {
             attrs: None,
             ent_ids: vec![],
             ent_types: vec![],
+            ent_patterns: vec![],
+            ent_unrestricted: false,
             tenant: None,
             alias: None,
             csi: vec![],
