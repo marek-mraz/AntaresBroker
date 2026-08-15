@@ -360,18 +360,21 @@ pattern vs exact EntityInfo id, asserted as written.
 
 ### IOP_EXT_IDR_06 — ADR-001 URN grammar edge cases on the wire
 
-- [ ] 46. Hierarchy colons in the local segment
+Evidence (46-50): suite fork commit (IDR_06) 5/5 green on run-five
+2026-08-15; fallibility cycle on case 50 (tenant isolation half).
+
+- [x] 46. Hierarchy colons in the local segment
       (`...odpady:kontajner:sektor-a:0042`) route through the prefix pattern;
       full ADR validator regex accepted end-to-end (5.12).
-- [ ] 47. Crockford-base32 random-suffix ids route identically to natural
+- [x] 47. Crockford-base32 random-suffix ids route identically to natural
       keys (5.12).
-- [ ] 48. Unescaped-dot trap: pattern `sk.banskabystrica` (dot = any char)
+- [x] 48. Unescaped-dot trap: pattern `sk.banskabystrica` (dot = any char)
       ALSO matches `sk_banskabystrica` ids — TP documents why razidlo uses
       `_` and patterns escape metacharacters (5.2.8).
-- [ ] 49. Multi-type entity (`["Device","Camera"]`): CSR pattern registered
+- [x] 49. Multi-type entity (`["Device","Camera"]`): CSR pattern registered
       with the supertype still matches after the specialization type is
       appended; retrieve via B1 works (4.5.2, 5.12).
-- [ ] 50. CSR `tenant` member (4.14): forward to B2 uses the REGISTRATION's
+- [x] 50. CSR `tenant` member (4.14): forward to B2 uses the REGISTRATION's
       tenant, the client tenant never propagates; and with
       `operations:["federationOps"]` a write through that CSR must NOT reach
       B2 (4.20 query-op gate, 826afac) — the ADR's read-only agent-tenant
