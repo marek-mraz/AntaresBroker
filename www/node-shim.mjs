@@ -7,6 +7,16 @@
 //
 // Build www/pkg first: dev/wasm-build.sh
 import { readFile } from "node:fs/promises";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  openSync,
+  readSync,
+  writeSync,
+} from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import dns from "node:dns";
@@ -89,11 +99,54 @@ const port = Number(process.argv[2] ?? 9090);
 await init({
   module_or_path: await readFile(new URL("./pkg/antares_wasm_bg.wasm", import.meta.url)),
 });
+// N4 outside the browser: ANTARES_STORE=file runs the SAME redb
+// write-through shadow the OPFS worker uses, over node:fs sync calls —
+// the six methods FileSystemSyncAccessHandle exposes, fs-backed. O_RDWR
+// (never "a+": append mode ignores the positional writes redb depends on).
+class FsSyncAccessHandle {
+  constructor(path) {
+    this.fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_CREAT);
+  }
+  getSize() {
+    return fstatSync(this.fd).size;
+  }
+  read(buf, opts) {
+    return readSync(this.fd, buf, 0, buf.length, opts?.at ?? 0);
+  }
+  write(buf, opts) {
+    return writeSync(this.fd, buf, 0, buf.length, opts?.at ?? 0);
+  }
+  truncate(len) {
+    ftruncateSync(this.fd, len);
+  }
+  flush() {
+    fsyncSync(this.fd);
+  }
+  close() {
+    closeSync(this.fd);
+  }
+}
+
 // allowPrivateEgress: the suite's mocks (notification receivers, context
 // servers) live on loopback/private nets — same knob the container sets.
 // The per-port hostAlias keeps Via loop detection honest across the five
 // shims of the federation tier (five instances named alike = 508 storm).
-const broker = new AntaresBroker(true, `antares-wasm-${port}`);
+const storeMode = process.env.ANTARES_STORE ?? "memory";
+let broker;
+if (storeMode === "file") {
+  const file = process.env.ANTARES_FILE ?? `antares-${port}.redb`;
+  broker = AntaresBroker.persistentWithHandle(
+    new FsSyncAccessHandle(file),
+    `fs:${file}`,
+    true,
+    `antares-wasm-${port}`,
+  );
+} else if (storeMode === "memory") {
+  broker = new AntaresBroker(true, `antares-wasm-${port}`);
+} else {
+  console.error(`ANTARES_STORE=${storeMode}: the wasm artifact has memory and file only`);
+  process.exit(2);
+}
 
 const server = createServer(async (req, res) => {
   try {

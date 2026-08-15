@@ -39,5 +39,34 @@ done
 echo "node tier OK (create 201, notification sent over real HTTP)"
 kill $SHIM $RECV 2>/dev/null || true
 
+# --- File-store tier (N4 persistence outside the browser) -----------------
+# ANTARES_STORE=file: the SAME .wasm over an fs-backed sync-access handle
+# (the Node stand-in for OPFS). Proof is restart survival; the negative half
+# proves memory mode does NOT survive — otherwise this tier tests nothing.
+FDIR="$(mktemp -d)"
+FURN="urn:ngsi-ld:Smoke:persist"
+ANTARES_STORE=file ANTARES_FILE="$FDIR/antares.redb" node www/node-shim.mjs "$PORT" & SHIM=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/q/health" >/dev/null && break; sleep 0.2; done
+curl -s "http://127.0.0.1:$PORT/q/health" | grep -q '"store":"file"' \
+  || { echo "file tier: /q/health must report store=file" >&2; exit 1; }
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/ngsi-ld/v1/entities" \
+  -H 'Content-Type: application/ld+json' \
+  -d "{\"id\":\"$FURN\",\"type\":\"Smoke\",\"v\":{\"type\":\"Property\",\"value\":1},\"@context\":\"$CTX\"}")
+[ "$code" = 201 ] || { echo "file tier: create expected 201, got $code" >&2; exit 1; }
+kill $SHIM 2>/dev/null || true; wait $SHIM 2>/dev/null || true
+ANTARES_STORE=file ANTARES_FILE="$FDIR/antares.redb" node www/node-shim.mjs "$PORT" & SHIM=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/q/health" >/dev/null && break; sleep 0.2; done
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/ngsi-ld/v1/entities/$FURN")
+[ "$code" = 200 ] || { echo "file tier: entity must survive a restart, got $code" >&2; exit 1; }
+kill $SHIM 2>/dev/null || true; wait $SHIM 2>/dev/null || true
+# negative: the memory shim restarted on the same port loses everything
+node www/node-shim.mjs "$PORT" & SHIM=$!
+for _ in $(seq 1 50); do curl -sf "http://127.0.0.1:$PORT/q/health" >/dev/null && break; sleep 0.2; done
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/ngsi-ld/v1/entities/$FURN")
+[ "$code" = 404 ] || { echo "file tier negative: memory restart must 404, got $code" >&2; exit 1; }
+kill $SHIM 2>/dev/null || true
+rm -rf "$FDIR"
+echo "file tier OK (store=file reported, restart survival held, memory negative held)"
+
 # --- Browser tier ---------------------------------------------------------
 node www/test/browser-test.mjs

@@ -33,6 +33,16 @@ fn io_err(op: &str, e: JsValue) -> std::io::Error {
 }
 
 impl OpfsBackend {
+    /// Wrap an already-acquired handle — or any object exposing the same six
+    /// sync methods. The Node tier (N7a) enters here with an fs-backed
+    /// stand-in: `node:fs` sync calls are the same shape OPFS exposes, and
+    /// every call below is a duck-typed JS method call at runtime.
+    pub fn from_handle(handle: web_sys::FileSystemSyncAccessHandle) -> Self {
+        Self {
+            handle: SendWrapper::new(handle),
+        }
+    }
+
     /// Open (or create) `name` in the origin-private file system and take its
     /// exclusive sync access handle. Dedicated-worker-only by platform rule.
     pub async fn acquire(name: &str) -> Result<Self, String> {

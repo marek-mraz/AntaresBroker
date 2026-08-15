@@ -55,11 +55,12 @@ where
 pub mod page_sink {
     use std::sync::OnceLock;
 
-    type Hook = (String, Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>);
+    type Sink = Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>;
+    type Hook = (String, Sink);
     static HOOK: OnceLock<Hook> = OnceLock::new();
 
     /// Register the sink (once per module instance).
-    pub fn set(prefix: String, h: Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>) {
+    pub fn set(prefix: String, h: Sink) {
         let _ = HOOK.set((prefix, h));
     }
 

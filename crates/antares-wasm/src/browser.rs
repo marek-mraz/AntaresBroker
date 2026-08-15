@@ -9,6 +9,7 @@
 //! the event loop, so no `Send`/`Sync` is required of anything held here.
 
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// The handle page JS (or the Service Worker) holds.
 #[wasm_bindgen]
@@ -60,10 +61,48 @@ impl AntaresBroker {
         let backend = crate::opfs::OpfsBackend::acquire(&name)
             .await
             .map_err(|e| JsValue::from_str(&e))?;
+        Self::open_persistent(backend, &format!("opfs:{name}"), host_alias)
+    }
+
+    /// `AntaresBroker.persistentWithHandle(handle, label?, allowPrivateEgress?,
+    /// hostAlias?)` — the same N4 redb write-through shadow over a
+    /// CALLER-SUPPLIED sync-access handle: OPFS's
+    /// `FileSystemSyncAccessHandle`, or any duck-typed object with the same
+    /// six sync methods. The Node tier (N7a) passes an fs-backed stand-in so
+    /// the browser artifact runs the native `file` mode outside a browser
+    /// (STORE=file for the ETSI wasm cell). Exclusivity is the CALLER's
+    /// contract here — OPFS enforces it (N4b), an fs stand-in must lock or
+    /// own the file itself.
+    #[wasm_bindgen(js_name = persistentWithHandle)]
+    pub fn persistent_with_handle(
+        handle: JsValue,
+        label: Option<String>,
+        allow_private_egress: Option<bool>,
+        host_alias: Option<String>,
+    ) -> Result<AntaresBroker, JsValue> {
+        console_error_panic_hook::set_once();
+        antares_jsonld::loader::allow_private_egress(allow_private_egress == Some(true));
+        // No instanceof check on purpose: web_sys method calls are duck-typed
+        // at runtime, and the whole point is accepting a non-OPFS handle.
+        let backend = crate::opfs::OpfsBackend::from_handle(handle.unchecked_into());
+        Self::open_persistent(
+            backend,
+            &label.unwrap_or_else(|| "handle".to_owned()),
+            host_alias,
+        )
+    }
+
+    /// Shared tail of both persistent constructors: redb over the backend,
+    /// store rebuild from the file, `file` mode wiring.
+    fn open_persistent(
+        backend: crate::opfs::OpfsBackend,
+        label: &str,
+        host_alias: Option<String>,
+    ) -> Result<AntaresBroker, JsValue> {
         let db = redb::Database::builder()
             .create_with_backend(backend)
-            .map_err(|e| JsValue::from_str(&format!("opening redb over OPFS: {e}")))?;
-        let store = antares_sql::store::Store::from_database(db, &format!("opfs:{name}"))
+            .map_err(|e| JsValue::from_str(&format!("opening redb over {label}: {e}")))?;
+        let store = antares_sql::store::Store::from_database(db, label)
             .map_err(|e| JsValue::from_str(&e))?;
         Ok(Self {
             inner: crate::Broker::with_store_alias(store, "file", host_alias),
