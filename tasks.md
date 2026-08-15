@@ -142,7 +142,18 @@ rolling worker pods).
       sandbox .venv predated the suite's vendored HttpCtrl (ModuleNotFound
       → exitonfailure cascade), fixed by pip -r requirements.txt — a venv
       defect, not a fleet bug. Full 8-suite fleet runs are CI's (item 5).
-- [ ] 5. **Six cells per push to main**: etsi-matrix.yml matrix grows to
+- [x] 5. **Six cells per push to main**:
+      ✅ DONE 2026-08-15: etsi-matrix.yml matrix include grows to six cells —
+      memory/file/postgres/timescale (bus=local, as today) + postgres-nats/
+      timescale-nats (ROLES_SPLIT=1 + ROLL_DURING_RUN=1, RESULTS_DIR per
+      cell, 120-min timeout vs 90). One image build feeds all six;
+      fail-fast: false kept; aggregate sets STORES to all six for the fold.
+      Validated: yaml parse + actionlint 1.7.7 clean; etsi-matrix-summary.py
+      dry-run over six synthetic cells → exit 0 all-green, 6 sections in
+      matrix-summary.md, missing-cell → red exit (sandbox cannot trigger
+      GitHub runs; the first real 6-cell wall-clock is the watch item —
+      cadence-vs-scope is the USER's call if too slow, on the Mac-side list).
+      etsi-matrix.yml matrix grows to
       memory, file, postgres, timescale (single-broker bus=local, as
       today) + postgres-nats + timescale-nats (item-4 fleet, rolling).
       One image build feeds all six; fail-fast: false; the aggregate

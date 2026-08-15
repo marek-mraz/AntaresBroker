@@ -1,8 +1,11 @@
 name: etsi-matrix
 
-# Reusable (workflow_call only): ONE image build feeding THREE parallel
-# store jobs (file, postgres, timescale) — each runs ALL 8 suites through
-# the one pipeline — folded into the per-store summary tables + one bundle.
+# Reusable (workflow_call only): ONE image build feeding SIX parallel cells
+# — memory, file, postgres, timescale (single broker, bus=local) plus
+# postgres-nats and timescale-nats (the 5-role × 2-replica fleet behind the
+# LB, ANTARES_BUS=nats, CONTINUOUSLY rolling for the whole suite — backlog
+# 08-15b item 5). Each cell runs ALL 8 suites through the one pipeline,
+# folded into the per-cell summary tables + one bundle.
 # Callers: ci.yml (every commit) and full.yml (manual / v* tags).
 
 on:
@@ -52,19 +55,27 @@ jobs:
           echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
 
   etsi-cell:
-    # Three parallel store jobs, each running ALL 8 suites serially through
-    # the SAME pipeline (with the between-suite state-reset pairing). Data
-    # output is identical to the old per-suite cells: per-suite pass/fail
-    # rows, 1 Hz resource samples labelled per suite, failures with full
-    # detail — just 3 stacks instead of 32.
-    name: ${{ matrix.store }} (all suites)
+    # Six parallel cells, each running ALL 8 suites serially through the
+    # SAME pipeline (with the between-suite state-reset pairing). The four
+    # single-broker cells run bus=local as always; the two -nats cells run
+    # the role-split fleet (ROLES_SPLIT=1) with the containers rolling in
+    # role-group order for the WHOLE run (ROLL_DURING_RUN=1) — the suite has
+    # no retries, so any red there is a real drain/exactly-once bug.
+    name: ${{ matrix.cell }} (all suites)
     needs: [build]
     strategy:
       fail-fast: false
       matrix:
-        store: [file, postgres, timescale]
+        include:
+          - { cell: memory, store: memory }
+          - { cell: file, store: file }
+          - { cell: postgres, store: postgres }
+          - { cell: timescale, store: timescale }
+          - { cell: postgres-nats, store: postgres, roles: "1" }
+          - { cell: timescale-nats, store: timescale, roles: "1" }
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # the rolling-fleet cells pay the restart wall-clock on top of the suites
+    timeout-minutes: ${{ matrix.roles && 120 || 90 }}
     permissions:
       contents: read
     steps:
@@ -86,31 +97,35 @@ jobs:
       - name: Run every suite through the ONE pipeline
         env:
           STORE: ${{ matrix.store }}
+          ROLES_SPLIT: ${{ matrix.roles || '0' }}
+          ROLL_DURING_RUN: ${{ matrix.roles || '0' }}
+          RESULTS_DIR: results/${{ matrix.cell }}
           SKIP_BUILD: "1"
           STOP_ON_ERROR: "0"
           CALLBACK_HOST: localhost
         run: ./dev/etsi-pipeline.sh || true
 
-      - name: Upload store results
+      - name: Upload cell results
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ETSI-cell-${{ matrix.store }}
+          name: ETSI-cell-${{ matrix.cell }}
           path: |
-            results/${{ matrix.store }}/run-summary.md
-            results/${{ matrix.store }}/gate-status.txt
-            results/${{ matrix.store }}/failures.csv
-            results/${{ matrix.store }}/resource-samples.csv
-            results/${{ matrix.store }}/resource-by-test.csv
-            results/${{ matrix.store }}/*-console.log
-            results/${{ matrix.store }}/**/log.html
-            results/${{ matrix.store }}/**/report.html
+            results/${{ matrix.cell }}/run-summary.md
+            results/${{ matrix.cell }}/gate-status.txt
+            results/${{ matrix.cell }}/failures.csv
+            results/${{ matrix.cell }}/resource-samples.csv
+            results/${{ matrix.cell }}/resource-by-test.csv
+            results/${{ matrix.cell }}/roll-loop.log
+            results/${{ matrix.cell }}/*-console.log
+            results/${{ matrix.cell }}/**/log.html
+            results/${{ matrix.cell }}/**/report.html
           retention-days: 7
 
-      - name: Gate — this store 100% green
+      - name: Gate — this cell 100% green
         run: |
-          gate=$(cat "results/${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
-          echo "gate(${{ matrix.store }}) = $gate"
+          gate=$(cat "results/${{ matrix.cell }}/gate-status.txt" 2>/dev/null || echo MISSING)
+          echo "gate(${{ matrix.cell }}) = $gate"
           [ "$gate" = PASS ]
 
   etsi-aggregate:
@@ -137,6 +152,8 @@ jobs:
       - name: Fold the cells into the combined bundle + report
         # Gate result captured, not enforced here — the bundle must upload
         # and the summary must render even when cells are red.
+        env:
+          STORES: memory file postgres timescale postgres-nats timescale-nats
         run: ./dev/etsi-matrix-summary.py cells || echo "RED_CELLS=$?" >> "$GITHUB_ENV"
 
       - name: Upload the ONE results bundle
