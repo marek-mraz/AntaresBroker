@@ -335,19 +335,27 @@ run-five fleet 2026-08-15; fallibility cycle on case 34 (localOnly).
 
 ### IOP_EXT_IDR_05 — subscriptions & notifications routed by id
 
-- [ ] 40. Subscription at B1 with `entities:[{type,idPattern}]` overlapping a
+Evidence (40-45): suite fork commit (IDR_05) 6/6 green on run-five
+2026-08-15; cases 42/45 ran red -> broker fix 0cb0447 (inbound remote
+notifications re-filtered by the original entities selector; red-first unit
+clause_5_2_33_inbound_notification_refiltered_by_selector). NOTE box 41
+corrected in the TP: disjoint sub-pattern vs CSR-PATTERN still matches per
+5.12 (both patterns => compatible); the decidable no-match half is sub
+pattern vs exact EntityInfo id, asserted as written.
+
+- [x] 40. Subscription at B1 with `entities:[{type,idPattern}]` overlapping a
       CSR → distributed sub created at B2; create at B2 → notification via B1
       (5.8.1.4).
-- [ ] 41. Subscription pattern disjoint from the CSR pattern → NO remote sub
+- [x] 41. Subscription pattern disjoint from the CSR pattern → NO remote sub
       created at B2 (assert absence via B2's subscription list) (5.8.1.4).
-- [ ] 42. Create matching + non-matching ids at B2 → exactly ONE notification;
+- [x] 42. Create matching + non-matching ids at B2 → exactly ONE notification;
       the non-matching id absent from every payload (5.8.6, negative).
-- [ ] 43. csourceSubscription with EntityInfo idPattern: registering a matching
+- [x] 43. csourceSubscription with EntityInfo idPattern: registering a matching
       CSR notifies, a disjoint CSR does not (5.11.3 — ADR's discovery
       automation).
-- [ ] 44. Remote entity deleted → default notificationTrigger excludes
+- [x] 44. Remote entity deleted → default notificationTrigger excludes
       deletions; with entityDeleted requested the notification fires (5.2.12).
-- [ ] 45. Subscription with exact id list: only the listed id notifies across
+- [x] 45. Subscription with exact id list: only the listed id notifies across
       the federation; id takes precedence over idPattern (5.2.33, 5.8.1.4).
 
 ### IOP_EXT_IDR_06 — ADR-001 URN grammar edge cases on the wire
