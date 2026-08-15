@@ -183,7 +183,21 @@ options fail).
       reusing the same steps. Surface the result: workflow badge in README
       + one line on the reports page. Sandbox validation: yaml/actionlint
       + a dry parse of the job's script steps; the run itself is CI's.
-- [ ] 6. **Production-readiness re-audit.** Walk every P0/P1 in
+- [x] 6. **Production-readiness re-audit.**
+      ✅ DONE 2026-08-15: every P0/P1 walked at HEAD; status table written
+      into docs/production-readiness-audit-2026-08-09.md ("Re-audit
+      2026-08-15"). Closed-with-evidence: P0 2/5/8/9/10, P1 all but one
+      (one refuted by the audit itself, one closed-by-decision with the
+      doc-comment anchor). Still-open items appended below and WORKED:
+      - [x] 6a. P0-1 k8s manifests boot (reproduced first) — 25c59f2
+      - [x] 6b. P0-3 /q/ready readiness (store ping + bus gate) — 7584be7
+      - [x] 6c. P0-4 roles gate the API (ops_router on workers) — 25c59f2
+      - [x] 6d. P0-6 outbox exact-seq ack (loss reproduced red on live
+            PG, then pinned) — a86054e
+      - [x] 6e. P0-7 throttling no-op (mirror bookkeeping) — c9aa821
+      - [x] 6f. P1 temporal types frozen at first touch — 8a8b39f
+      All red-first with units/pg-gated tests; nats_e2e 4/4 live,
+      antares-api + antares-sql suites green. Walk every P0/P1 in
       docs/production-readiness-audit-2026-08-09.md; for each, record
       CLOSED (commit + test evidence) or still-open. Still-open items
       become new checkboxes appended to THIS list (that is the "if

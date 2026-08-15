@@ -705,6 +705,57 @@ right now the ledger claims conformance the code deliberately does not have.
   inside that loop is dead code — `"json"` is not in the iterated list — and should
   be removed as part of the same change.
 
+
+## Re-audit 2026-08-15 (backlog 08-14 item 6) — status of every P0/P1
+
+Walked at HEAD against the code, the ledger and the test evidence; OPEN
+items were fixed the same day (commit hashes below). Method: reproduce or
+grep the exact audited site, then name the closing commit/test.
+
+### P0
+
+| # | Finding | Status 2026-08-15 |
+|---|---|---|
+| 1 | k8s manifests cannot boot (service links) | **CLOSED 2026-08-15** — reproduced at HEAD first (`ANTARES_PORT=tcp://… → fatal`); `enableServiceLinks: false` on all three pod specs + `unknown_config_key` exempts exactly the kubelet shapes of our Service names (unit `kubelet_service_links_are_not_typos`, incl. the ANTARES_HTPT_PORT typo staying fatal); boot verified with injected env |
+| 2 | Purge id/idPattern tenant wipe | CLOSED earlier — `qualifies_non_wide` excludes id/idPattern (entities.rs comment cites this finding); 5.6.21.4 ledger |
+| 3 | Readiness is a liveness check | **CLOSED 2026-08-15** — `/q/ready` = not-draining ∧ `AnyStore::ping()` (`SELECT 1` on Pg) ∧ bus connected (when nats); readinessProbes repointed; unit `ready_gates_on_store_and_bus` |
+| 4 | `--roles` does not gate the HTTP API | **CLOSED 2026-08-15** — `ops_router` (health/ready/metrics only) served when `!roles.api`; unit `ops_router_serves_no_ngsi_ld_surface`; nats_e2e role-split 4/4 live |
+| 5 | q= ValueList/Range wrong answers | CLOSED 2026-08-09 (C2) + 87a3e06 extension leaves; ETSI q suites green |
+| 6 | Outbox deletes unpublished events | **CLOSED 2026-08-15 (a86054e)** — exact-seq ack (`DELETE WHERE seq = ANY`); the loss reproduced red on live PostGIS (`outbox_ack_never_deletes_an_unpublished_gap_row`), then pinned green |
+| 7 | Throttling is a no-op | **CLOSED 2026-08-15** — bookkeeping writebacks now re-applied to the SubMirror (`mirror_bookkeeping`); red-first `throttling_5_2_12` (3 in-window updates → 1 notification). Ceiling: bus=nats multi-pod throttling is per-pod approximate (documented in code) |
+| 8 | Offset-bearing past expiresAt never expires | CLOSED earlier — `parse_datetime` is Z-only (4.6.3) so offsets are 400 at input, `dt_key` normalizes comparisons (cd42d0d); TP IOP_EXT_IDR_07_54 pins the offset rejection |
+| 9 | Malformed expiresAt = temporal DoS | CLOSED earlier — `parse_datetime` validates a real calendar via chrono (4.6.3 ledger, `2026-13-45` rejected) |
+| 10 | Serial unbounded fan-out | CLOSED earlier — `fan_out` = `buffered(MAX_FED_FANOUT)` + per-source timeout (5.2.34) + breaker (§16.7); bounds surfaced on /q/health limits |
+
+### P1
+
+| Finding | Status 2026-08-15 |
+|---|---|
+| orderBy + projection pushdown | CLOSED — orderBy gates the paging pushdown (entities.rs `orderBy is_none` guard) and the projection gate names it |
+| `!=` datatype mismatch | CLOSED 2026-08-09 (C3) + 87a3e06 (Ne as NOT-of-Eq) |
+| DateTime compared lexicographically | CLOSED — `dt_key` canonical keys (4.11) everywhere; SQL casts `::timestamptz` |
+| POST temporal query drops members | CLOSED — temporal_q maps entities[].id/idPattern/geoQ/aggregation (021_27 work, 2026-08-13) |
+| aggregatedValues numeric-only | CLOSED — `AggrClass` per Table 4.5.19.1 (Number/Text/List/TimeOfDay/Relationship/Opaque) + eligibility 400s |
+| aggrPeriodDuration rejects spec example | CLOSED — `parse_iso_duration` handles Y/M/W/D/T/H/M/S (`P3Y6M4DT12H30M5S` parses) |
+| 5.6.11 upsert replaces instead of adds | CLOSED — 5.6.11 ledger implemented; instance-keyed upsert |
+| temporal_entities types frozen at first touch | **CLOSED 2026-08-15** — append shell upsert refreshes types/scopes/meta on change (IS DISTINCT FROM guard); red-first `append_refreshes_types_after_first_touch` on live PostGIS |
+| Entity delete destroys temporal evolution | CLOSED-BY-DECISION — delete-temporal-on-core-delete is deliberate ETSI-suite-parity (doc comment at `mirror_delete_entity`); attribute-level deletion instances (4.5.7/4.5.8) ARE recorded |
+| format=simplified missing wrappers | CLOSED — 4.5.4 wrapped languageMap/json/vocab (TP 454_01) |
+| expiresAt without sysAttrs | CLOSED — 6.3.11 gate in repr.rs (`"createdAt"\|"modifiedAt"\|"expiresAt" if !sys_attrs`) |
+| Accept precedence header-order | CLOSED — parse_accept ranks q → specificity → 6.3.4 list rank (C7) |
+| type=* matches nothing | CLOSED — `filter(\|s\| *s != "*")` + Table 6.4.3.2-1 local rules (C9) |
+| Batch forwarding union spec | CLOSED 2026-08-15 (8cb8256) — covers_item + batch-delete sent_ids gate per registration (IDR campaign) |
+| entityUpdated without attributeDeleted tombstones | CLOSED — ChangeClass::Deleted computed per attr incl. instance-level; deleted-attr payload forms per 4.5.7/4.5.8 |
+| Batch upsert duplicate divergence | REFUTED in this audit's own appendix (rounds split duplicates) |
+| Expiry boundary differs by mode | CLOSED — filter.rs parses both stamps to instants "matching the SQL path" |
+| /info/sourceIdentity wrong members | CLOSED — 5.2.40 members (contextSourceAlias/Uptime/TimeAt), 5.15.1 ledger |
+| Dead sources silently dropped | CLOSED — 6.3.17 NGSILD-Warning on every abnormal outcome (199/299/111), TPs incl. IOP_EXT_ERR/IDR |
+| urn:ngsi-ld:null accepted as data | CLOSED — 5.5.4 `reject_first_level_nulls` at every input (df3d33b) |
+
+P2 and the structural items stay as written (scale work is the 🖥 J4/L1/L2
+rigs); the C-appendix items were closed by the audit loop (C1..C10 all have
+ledger anchors above).
+
 ## What is genuinely solid
 
 Worth stating plainly, because the list above is one-sided. SQL injection is
