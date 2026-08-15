@@ -969,16 +969,13 @@ pub async fn batch_delete(
             let ctx_url = crate::federation::ctx_link_url(&headers, &st.loader.core().source);
             for reg in &regs {
                 // "Remove from IN all Entities not matched by CSR" — an
-                // id-scoped registration only receives its own ids.
-                let sent_ids: Vec<String> = if reg.ent_ids.is_empty() {
-                    id_strs.clone()
-                } else {
-                    id_strs
-                        .iter()
-                        .filter(|i| reg.ent_ids.contains(i))
-                        .cloned()
-                        .collect()
-                };
+                // id-scoped registration (exact ids OR idPattern, 5.12)
+                // only receives its own ids (4.3.6.1).
+                let sent_ids: Vec<String> = id_strs
+                    .iter()
+                    .filter(|i| reg.can_match_id(i))
+                    .cloned()
+                    .collect();
                 if sent_ids.is_empty() {
                     continue;
                 }

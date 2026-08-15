@@ -248,9 +248,9 @@ impl FedReg {
     /// without a `type` member (attribute fragments) cannot be disproven and
     /// stays covered.
     pub fn covers_item(&self, obj: &Map<String, Value>, ctx: &Context) -> bool {
-        if !self.ent_ids.is_empty() {
+        if !self.ent_ids.is_empty() || !self.ent_patterns.is_empty() {
             if let Some(id) = obj.get("id").and_then(Value::as_str) {
-                if !self.ent_ids.iter().any(|x| x == id) {
+                if !self.can_match_id(id) {
                     return false;
                 }
             }
@@ -2223,6 +2223,33 @@ mod tests {
             timeout_ms: None,
             cooldown_ms: None,
         }
+    }
+
+    /// 4.3.6.1/5.12: an idPattern-scoped registration gates payload items
+    /// exactly like an exact-id one — a foreign-razidlo item is not this
+    /// source's data; an id-less fragment cannot be disproven.
+    #[test]
+    fn covers_item_honours_entityinfo_id_patterns() {
+        let mut r = reg("redirect");
+        r.ent_patterns = vec!["^urn:ngsi-ld:V:sk_bb:.*$".into()];
+        let st = AppState::new("me".into());
+        let ctx = st.loader.core();
+        let item = |id: Option<&str>| {
+            let mut m = Map::new();
+            if let Some(id) = id {
+                m.insert("id".into(), Value::String(id.into()));
+            }
+            m
+        };
+        assert!(r.covers_item(&item(Some("urn:ngsi-ld:V:sk_bb:1")), &ctx));
+        assert!(
+            !r.covers_item(&item(Some("urn:ngsi-ld:V:sk_po:1")), &ctx),
+            "a foreign-razidlo item must not be covered"
+        );
+        assert!(
+            r.covers_item(&item(None), &ctx),
+            "id-less fragments stay covered"
+        );
     }
 
     /// Table 5.2.40-1: "In the multi-tenancy use case (see clause 4.14), this
