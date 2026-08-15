@@ -210,3 +210,115 @@ async fn clause_5_12_type_only_entityinfo_keeps_the_full_id_list() {
     assert!(head.contains(ID_BB), "both ids forwarded: {head}");
     assert!(head.contains(ID_PRESOV), "both ids forwarded: {head}");
 }
+
+/// 5.12 attribute conditions on the query fan-out: a RegistrationInfo
+/// listing only fillLevel is NOT dialed for ?attrs= of another attribute;
+/// an entities-only RegistrationInfo (empty combination) matches any attrs.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_12_attrs_scope_gates_the_query_fanout() {
+    let st = state();
+    let m = mock_replying(EMPTY_ARR);
+    let info = serde_json::json!(
+        [{"entities": [{"type": "Vehicle"}], "propertyNames": ["fillLevel"]}]
+    );
+    register(&st, info, m.port).await;
+
+    let res = send(
+        &st,
+        query("/ngsi-ld/v1/entities?type=Vehicle&attrs=speed".into()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        0,
+        "an attribute-scope mismatch must not forward (5.12)"
+    );
+
+    let res = send(
+        &st,
+        query("/ngsi-ld/v1/entities?type=Vehicle&attrs=fillLevel".into()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "the registered attribute IS forwarded (5.12)"
+    );
+
+    // entities-only registration: "the combination … is empty" ⇒ match
+    let st2 = state();
+    let m2 = mock_replying(EMPTY_ARR);
+    let info = serde_json::json!([{"entities": [{"type": "Vehicle"}]}]);
+    register(&st2, info, m2.port).await;
+    let res = send(
+        &st2,
+        query("/ngsi-ld/v1/entities?type=Vehicle&attrs=whatever".into()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m2.hits.load(Ordering::SeqCst),
+        1,
+        "an entities-only RegistrationInfo matches any attrs (5.12)"
+    );
+}
+
+/// 5.12 datasetId condition (should-level, implemented): disjoint datasetId
+/// sets do not match; only one side specifying is a match.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_12_dataset_id_common_value_gates_matching() {
+    let st = state();
+    let m = mock_replying(EMPTY_ARR);
+    let doc = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:idr-ds",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "datasetId": ["urn:ngsi-ld:Dataset:b"],
+        "endpoint": format!("http://127.0.0.1:{}", m.port),
+    });
+    let body = doc.to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/csourceRegistrations")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let res = send(
+        &st,
+        query("/ngsi-ld/v1/entities?type=Vehicle&datasetId=urn:ngsi-ld:Dataset:a".into()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        0,
+        "disjoint datasetId sets must not match (5.12)"
+    );
+
+    // only the registration specifies a datasetId ⇒ match
+    let res = send(&st, query("/ngsi-ld/v1/entities?type=Vehicle".into())).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        1,
+        "one-sided datasetId is a match (5.12)"
+    );
+
+    // a common value ⇒ match
+    let res = send(
+        &st,
+        query("/ngsi-ld/v1/entities?type=Vehicle&datasetId=urn:ngsi-ld:Dataset:b,urn:ngsi-ld:Dataset:c".into()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        m.hits.load(Ordering::SeqCst),
+        2,
+        "a common datasetId value is a match (5.12)"
+    );
+}

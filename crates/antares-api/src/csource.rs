@@ -734,6 +734,7 @@ pub fn check_proxied_overlap(
                     .find_map(|e| e.get("idPattern").and_then(Value::as_str))
                     .map(str::to_owned),
                 attrs: (!attrs.is_empty()).then_some(attrs),
+                dataset_ids: None,
                 csf: None,
                 geo: None,
                 temporal: None,
@@ -1124,6 +1125,10 @@ pub struct CsrSpec {
     pub id_pattern: Option<String>,
     /// Expanded attribute IRIs.
     pub attrs: Option<Vec<String>>,
+    /// 5.12 datasetId condition (should-level): with both the request and
+    /// the CSourceRegistration specifying datasetId, they match only with
+    /// "at least one value in common"; one side alone always matches.
+    pub dataset_ids: Option<Vec<String>>,
     /// 4.9 Context Source Filter: with a csf present, only registrations
     /// whose Context Source Properties match it are considered (query,
     /// temporal query, purge, entityMaps — 5.7.2.4/5.7.4.4/5.6.21.4).

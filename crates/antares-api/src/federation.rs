@@ -490,6 +490,20 @@ pub fn matching_regs(
                     return None;
                 }
             }
+            // 5.12 datasetId condition (should-level): both sides
+            // specifying datasetId match only with a value in common;
+            // one side alone always matches.
+            if let Some(ds) = &spec.dataset_ids {
+                if let Some(reg_ds) = doc.get("datasetId").and_then(Value::as_array) {
+                    if !reg_ds
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|d| ds.iter().any(|q| q == d))
+                    {
+                        return None;
+                    }
+                }
+            }
             // 5.2.9 location + 4.3.6.1: a geo-scoped registration is only
             // consulted when the query's geo filter matches its geometry;
             // a registration without `location` is unconstrained.
@@ -1490,6 +1504,15 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource
         // 5.12: "the id pattern (if present)" is part of the query-side
         // Entity specification matched against EntityInfo elements
         id_pattern: params.get("idPattern").cloned(),
+        // 5.12 attribute conditions: the "list of Attribute names (if
+        // present)" gates which RegistrationInfos match
+        attrs: params
+            .get("attrs")
+            .map(|s| s.split(',').map(|a| ctx.expand_key(a.trim())).collect()),
+        // 5.12 datasetId condition (should-level): disjoint sets don't match
+        dataset_ids: params
+            .get("datasetId")
+            .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect()),
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         geo: crate::geo::GeoQuery::from_params(params).ok().flatten(),
         ..Default::default()
