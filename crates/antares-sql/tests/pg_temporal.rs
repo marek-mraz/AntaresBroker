@@ -310,3 +310,40 @@ async fn clause_4_22_expired_attr_instances_reaped() {
         .expect("cleanup");
     let _ = s.delete(&t, "urn:t:exp422");
 }
+
+/// Audit P1-8: the append fast-path's shell insert was ON CONFLICT DO
+/// NOTHING — an entity that gained a type after first touch stayed frozen
+/// with its original types and was invisible to type-filtered temporal
+/// queries forever. The shell upsert must carry new types/scopes forward.
+#[tokio::test(flavor = "multi_thread")]
+async fn append_refreshes_types_after_first_touch() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let s = PgTemporalStore::new(pool.clone());
+    let t = TenantId::new("pgtempretype").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Vehicle:retype";
+    let _ = s.delete(&t, id);
+    let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let shell1 = json!({"id": id, "type": "Vehicle",
+        "createdAt": "2026-08-15T09:00:00Z", "modifiedAt": "2026-08-15T09:00:00Z"});
+    let adds = json!({attr: [{"type": "Property", "value": 1,
+        "observedAt": "2026-08-15T09:00:00Z",
+        "instanceId": "urn:ngsi-ld:Instance:rt1"}]});
+    s.append(&t, id, &shell1, &adds).expect("append 1");
+
+    let shell2 = json!({"id": id, "type": ["Vehicle", "Camera"],
+        "createdAt": "2026-08-15T09:00:00Z", "modifiedAt": "2026-08-15T09:01:00Z"});
+    let adds2 = json!({attr: [{"type": "Property", "value": 2,
+        "observedAt": "2026-08-15T09:01:00Z",
+        "instanceId": "urn:ngsi-ld:Instance:rt2"}]});
+    s.append(&t, id, &shell2, &adds2).expect("append 2");
+
+    let got = s.get(&t, id).expect("get").expect("present");
+    assert!(
+        got["type"].to_string().contains("Camera"),
+        "a type gained after first touch must reach the temporal evolution: {}",
+        got["type"]
+    );
+    let _ = s.delete(&t, id);
+}

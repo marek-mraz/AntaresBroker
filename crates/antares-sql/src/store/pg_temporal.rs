@@ -259,11 +259,23 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
+            // Audit P1-8: DO NOTHING froze types/scopes at first touch — an
+            // entity gaining a type stayed invisible to type-filtered
+            // temporal queries forever. The shell carries the CURRENT
+            // entity, so refresh on change; the IS DISTINCT FROM guard keeps
+            // the common no-change append from churning the meta row.
             sqlx::query(
                 "INSERT INTO temporal_entities
                    (tenant_id, id, types, scopes, meta, created_at, modified_at)
                  VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
-                 ON CONFLICT (tenant_id, id) DO NOTHING",
+                 ON CONFLICT (tenant_id, id) DO UPDATE SET
+                   types = EXCLUDED.types,
+                   scopes = EXCLUDED.scopes,
+                   meta = EXCLUDED.meta,
+                   modified_at = EXCLUDED.modified_at
+                 WHERE temporal_entities.types IS DISTINCT FROM EXCLUDED.types
+                    OR temporal_entities.scopes IS DISTINCT FROM EXCLUDED.scopes
+                    OR temporal_entities.meta IS DISTINCT FROM EXCLUDED.meta",
             )
             .bind(tenant.as_str())
             .bind(id)
