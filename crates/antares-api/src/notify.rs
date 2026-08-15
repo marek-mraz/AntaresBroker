@@ -547,7 +547,7 @@ fn is_active(sub: &Value) -> bool {
 }
 
 /// entities selector (5.2.33) against an internal entity doc.
-fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
+pub(crate) fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
     let Some(sel) = sub.get("entities").and_then(Value::as_array) else {
         return true; // watchedAttributes-only subscription
     };

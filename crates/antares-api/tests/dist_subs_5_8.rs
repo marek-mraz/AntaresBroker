@@ -668,3 +668,135 @@ async fn clause_5_8_1_4_local_only_subscription_stays_local() {
     let (_, body) = send(&st, "GET", "/ngsi-ld/v1/csourceSubscriptions", None).await;
     assert_eq!(body.as_array().map(Vec::len), Some(0), "{body}");
 }
+
+/// 5.2.33 / 5.8.1.4 / 5.8.6: the reduced remote copy may be broader than
+/// the original Subscription (it carries the REGISTRATION's entity scope) —
+/// inbound notification entities are re-filtered against the ORIGINAL
+/// Subscription's entities selector before forwarding: an id the selector's
+/// idPattern does not match reaches the subscriber in NO payload.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-distsub-idr".into());
+    antares_api::notify::wire(&mut st);
+
+    let (remote_port, remote_seen) = recording_mock();
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:ds-idr",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (orig_port, orig_seen) = recording_mock();
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:ds-idr",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle",
+                      "idPattern": "^urn:ngsi-ld:Vehicle:sk_bb:.*$"}],
+        "notification": {"endpoint":
+            {"uri": format!("http://127.0.0.1:{orig_port}/original")}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let remote_id: String = {
+        let seen = remote_seen.lock().expect("seen");
+        let r = seen
+            .iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .clone();
+        serde_json::from_str::<Value>(r.split("\n\n").nth(1).expect("body")).expect("json")["id"]
+            .as_str()
+            .expect("remote id")
+            .to_owned()
+    };
+
+    // mixed inbound: one matching, one foreign-razidlo id
+    let inbound = json!({
+        "id": "urn:ngsi-ld:Notification:idr1",
+        "type": "Notification",
+        "subscriptionId": remote_id,
+        "notifiedAt": "2026-08-15T12:00:00Z",
+        "data": [
+            {"id": "urn:ngsi-ld:Vehicle:sk_bb:1", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 1}},
+            {"id": "urn:ngsi-ld:Vehicle:sk_po:1", "type": "Vehicle",
+             "speed": {"type": "Property", "value": 2}},
+        ],
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(inbound.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    wait_for("the filtered notification at the subscriber", || {
+        orig_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:sk_bb:1"))
+    })
+    .await;
+    assert!(
+        !orig_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:sk_po:1")),
+        "an id outside the selector pattern must reach the subscriber in NO payload"
+    );
+
+    // an inbound carrying ONLY foreign ids is acknowledged but never forwarded
+    let before = orig_seen.lock().expect("seen").len();
+    let inbound = json!({
+        "id": "urn:ngsi-ld:Notification:idr2",
+        "type": "Notification",
+        "subscriptionId": remote_id,
+        "notifiedAt": "2026-08-15T12:01:00Z",
+        "data": [{"id": "urn:ngsi-ld:Vehicle:sk_po:2", "type": "Vehicle",
+                  "speed": {"type": "Property", "value": 3}}],
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(inbound.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        orig_seen.lock().expect("seen").len(),
+        before,
+        "a notification with no selector-matching entity is not forwarded"
+    );
+}

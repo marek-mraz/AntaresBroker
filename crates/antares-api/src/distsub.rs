@@ -650,6 +650,29 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // 5.2.33 / 5.8.1.4: the remote copy carries the REGISTRATION's entity
+    // scope, which may be broader than the original Subscription's own
+    // entities selector — re-filter inbound entities against the original
+    // selector (id over idPattern precedence included) before forwarding.
+    let sel_ctx = crate::notify::sub_context(st, &sub).await;
+    data.retain(|e| {
+        let id = e.get("id").and_then(Value::as_str).unwrap_or("");
+        let types: Vec<Value> = match e.get("type") {
+            Some(Value::String(t)) => vec![Value::String(sel_ctx.expand_key(t))],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|t| Value::String(sel_ctx.expand_key(t)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let shim = serde_json::json!({"id": id, "type": types});
+        crate::notify::selector_match(&sub, &shim, &sel_ctx)
+    });
+    if data.is_empty() {
+        // acknowledged; nothing the original Subscription selected
+        return Ok(StatusCode::OK.into_response());
+    }
     // 5.8.6 splitEntities=true: the notified Entities are fragments —
     // retrieve them locally and from all other Context Sources (except the
     // origin), merge, and re-filter by the local Subscription's conditions.
