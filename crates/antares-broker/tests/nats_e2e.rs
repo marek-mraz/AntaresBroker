@@ -903,3 +903,98 @@ fn nats_outage_flips_health_and_recovers() {
     let h = http(port, "GET", "/q/health", None, None);
     assert!(h.starts_with("HTTP/1.1 200"), "no panic, still UP: {h}");
 }
+
+/// 5.2.34 cooldown across api pods (fleet run 2026-08-15, IOP_EXT_ERR_01_06
+/// red): the per-registration cooldown stamped after a failed forward must
+/// be visible to EVERY api pod — round-robin otherwise re-dials the failed
+/// source from the pod that never saw the failure. The stamp rides the
+/// ANTARES_REGISTRY broadcast (seconds-scale state; deliberately not
+/// persisted). Negative: the source records exactly ONE dial.
+#[test]
+fn cooldown_stamp_is_shared_across_api_pods() {
+    let _serial = serial();
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("cool{run}");
+    let etype = format!("CoolProbe{run}");
+
+    // a source that ACCEPTS and never answers: every forward is
+    // timeout-class, and accepted connections are the dial count
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind source");
+    let src_port = listener.local_addr().expect("addr").port();
+    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = dials.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(s) = stream else { continue };
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(s); // keep the socket open, never reply
+        }
+    });
+
+    let api1 = free_port();
+    let api2 = free_port();
+    let _a1 = start(api1, "api", &db, &nats);
+    let _a2 = start(api2, "api", &db, &nats);
+    wait_healthy(api1);
+    wait_healthy(api2);
+
+    let csr = format!(
+        r#"{{"id":"urn:ngsi-ld:ContextSourceRegistration:cool:{run}",
+            "type":"ContextSourceRegistration",
+            "information":[{{"entities":[{{"type":"{etype}"}}]}}],
+            "management":{{"timeout":500,"cooldown":20000}},
+            "endpoint":"http://127.0.0.1:{src_port}"}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(&tenant),
+        Some(&csr),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "csr: {resp}");
+    // both pods' registration mirrors must know the CSR before the queries
+    std::thread::sleep(Duration::from_millis(500));
+
+    // pod 1 dials, times out (~500 ms), stamps the cooldown
+    let r = http(
+        api1,
+        "GET",
+        &format!("/ngsi-ld/v1/entities?type={etype}"),
+        Some(&tenant),
+        None,
+    );
+    assert!(r.starts_with("HTTP/1.1 200"), "query via api1: {r}");
+    wait_for("the failed dial to be recorded", 10, || {
+        dials.load(std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    std::thread::sleep(Duration::from_millis(300)); // stamp broadcast settle
+
+    // pod 2, inside the window: must fail fast WITHOUT contacting the source
+    let r = http(
+        api2,
+        "GET",
+        &format!("/ngsi-ld/v1/entities?type={etype}"),
+        Some(&tenant),
+        None,
+    );
+    assert!(r.starts_with("HTTP/1.1 200"), "query via api2: {r}");
+    std::thread::sleep(Duration::from_millis(300));
+    let total = dials.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        total, 1,
+        "the cooldown must suppress pod 2's dial — {total} dials means the \
+         stamp stayed per-process"
+    );
+}

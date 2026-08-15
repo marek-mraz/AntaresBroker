@@ -184,6 +184,21 @@ pub async fn wire_nats(
             });
         }));
 
+        // 5.2.34 write side: a cooldown stamp is broadcast to the other api
+        // pods on the registry stream (seconds-scale state, deliberately not
+        // persisted) — per-process stamps re-dial a failed source from every
+        // pod behind the LB.
+        let bus_for_cool = bus.clone();
+        state.reg_fail_sync = Some(Arc::new(move |reg_id: &str, ok: bool| {
+            let bus = bus_for_cool.clone();
+            let delta = serde_json::json!({"cooldownReg": reg_id, "ok": ok});
+            tokio::spawn(async move {
+                if let Err(e) = bus.publish_registry("cooldown", &delta).await {
+                    tracing::warn!("cooldown stamp publish failed: {e}");
+                }
+            });
+        }));
+
         // F5 read side: the ONE compiled registration mirror this instance's
         // federation path reads. Consumer created BEFORE the hydrate so no
         // delta can fall between them; last-writer-wins per key converges.
@@ -191,6 +206,7 @@ pub async fn wire_nats(
         let reg_consumer = bus.consume_registry_broadcast().await?;
         hydrate(reg_mirror.as_ref(), &state.store, Kind::Registration);
         state.reg_mirror = Some(reg_mirror.clone());
+        let egress_for_cool = state.egress.clone();
         tokio::spawn(async move {
             let mut msgs = match reg_consumer.messages().await {
                 Ok(m) => m,
@@ -200,6 +216,13 @@ pub async fn wire_nats(
                 }
             };
             while let Some(delta) = nats::next_delta(&mut msgs).await {
+                // 5.2.34 read side: a cooldown stamp updates this pod's map
+                // (a marker delta has no tenant/id — apply_delta ignores it
+                // on pods that predate the member).
+                if let Some(rid) = delta.get("cooldownReg").and_then(serde_json::Value::as_str) {
+                    egress_for_cool.reg_record(rid, delta["ok"].as_bool().unwrap_or(false));
+                    continue;
+                }
                 apply_delta(reg_mirror.as_ref(), &delta);
             }
             tracing::warn!("registry broadcast consumer stream ended");

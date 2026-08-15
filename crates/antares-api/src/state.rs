@@ -70,6 +70,11 @@ pub struct AppState {
     /// delta-fed from `ANTARES_REGISTRY`; expiry stays filtered at the single
     /// yield point (`federation::matching_regs`). `None` in local mode.
     pub reg_mirror: Option<Arc<crate::notify::DocMirror>>,
+    /// 5.2.34 (bus=nats): shares a cooldown stamp with the other api pods —
+    /// a per-process stamp re-dials a failed source from every pod behind
+    /// the LB (fleet run 2026-08-15). Seconds-scale state: broadcast on the
+    /// registry stream, deliberately not persisted. `None` in local mode.
+    pub reg_fail_sync: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
     /// Temporal auto-recording happens synchronously in the write path in
     /// EVERY bus mode (K8 lesson — read-your-writes; the F8 recorder
     /// consumer is gone). The flag stays as the tests' lever for exercising
@@ -221,6 +226,7 @@ impl AppState {
             sub_sync: None,
             sub_mirror: None,
             reg_sync: None,
+            reg_fail_sync: None,
             reg_mirror: None,
             record_locally: true,
             metrics_render: None,
@@ -239,6 +245,15 @@ impl AppState {
     ) {
         if let Some(h) = &self.sub_sync {
             h(tenant, id, doc);
+        }
+    }
+
+    /// 5.2.34: stamp the per-registration cooldown locally AND on the other
+    /// api pods (no-op half in local mode).
+    pub fn reg_cooldown_stamp(&self, reg_id: &str, ok: bool) {
+        self.egress.reg_record(reg_id, ok);
+        if let Some(h) = &self.reg_fail_sync {
+            h(reg_id, ok);
         }
     }
 

@@ -957,7 +957,7 @@ pub async fn forward(
             None => {
                 st.egress.record_failure(&url);
                 if reg.cooldown_ms.is_some() {
-                    st.egress.reg_record(&reg.reg_id, false);
+                    st.reg_cooldown_stamp(&reg.reg_id, false);
                 }
                 return (504, Value::Null, Vec::new());
             }
@@ -974,8 +974,7 @@ pub async fn forward(
                 if reg.cooldown_ms.is_some() {
                     // 5.2.9 Table 5.2.9-2 failure definition: any response
                     // code other than 2xx
-                    st.egress
-                        .reg_record(&reg.reg_id, (200..300).contains(&status));
+                    st.reg_cooldown_stamp(&reg.reg_id, (200..300).contains(&status));
                 }
                 let peer_warnings: Vec<String> = resp
                     .headers()
@@ -989,7 +988,7 @@ pub async fn forward(
             Err(e) if e.is_timeout() => {
                 st.egress.record_failure(&url);
                 if reg.cooldown_ms.is_some() {
-                    st.egress.reg_record(&reg.reg_id, false);
+                    st.reg_cooldown_stamp(&reg.reg_id, false);
                 }
                 (504, Value::Null, Vec::new())
             }
@@ -1002,7 +1001,7 @@ pub async fn forward(
                 // never 299 ("An error response ... was received").
                 st.egress.record_success(&url);
                 if reg.cooldown_ms.is_some() {
-                    st.egress.reg_record(&reg.reg_id, false);
+                    st.reg_cooldown_stamp(&reg.reg_id, false);
                 }
                 (503, Value::Null, Vec::new())
             }
