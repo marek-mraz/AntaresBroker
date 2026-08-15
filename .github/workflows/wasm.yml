@@ -87,40 +87,15 @@ jobs:
       - name: Fold the latest ETSI conformance report into the site
         # Backlog 08-14 item 1: the ONE Pages deployment carries the
         # playground AND /reports/ — the newest ETSI-matrix-results bundle is
-        # rendered to a static page + shields badge. A missing bundle (no
-        # matrix run in the retention window) renders a placeholder instead
-        # of failing the site deploy.
+        # rendered to a static page + shields badges (combined + per-cell).
+        # The fold lives in dev/fold-reports.sh, SHARED with pages.yml
+        # (08-15b item 7) so the two Pages paths cannot drift; a missing
+        # bundle renders a placeholder instead of failing the site deploy.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          id=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=ETSI-matrix-results&per_page=1"                -q '.artifacts[0].id' 2>/dev/null || true)
-          mkdir -p site/reports/latest
-          if [ -n "$id" ] && [ "$id" != "null" ]; then
-            gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > matrix.zip
-            mkdir -p cells && unzip -q matrix.zip -d cells
-            python3 dev/etsi-report-site.py cells site/reports/latest
-          else
-            echo '<!doctype html><title>ETSI report</title><p>No ETSI-matrix-results bundle in the retention window — dispatch the etsi-matrix workflow.'               > site/reports/latest/index.html
-            echo '{"schemaVersion":1,"label":"ETSI CIM 009","message":"no recent run","color":"lightgrey"}'               > site/reports/badge.json
-          fi
-          # backlog 08-14 item 8: the weekly merged coverage (html + % badge)
-          cid=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=etsi-coverage-merged&per_page=1" \
-                -q '.artifacts[0].id' 2>/dev/null || true)
-          if [ -n "$cid" ] && [ "$cid" != "null" ]; then
-            gh api "repos/${{ github.repository }}/actions/artifacts/$cid/zip" > cov.zip
-            mkdir -p cov && unzip -q cov.zip -d cov
-            mkdir -p site/reports/coverage
-            [ -d cov/html ] && cp -r cov/html/. site/reports/coverage/ || true
-            pct=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{printf "%.1f", (lf?100*lh/lf:0)}' cov/merged.info)
-            color=$(awk -v p="$pct" 'BEGIN{print (p>=80)?"brightgreen":((p>=60)?"yellow":"red")}')
-            printf '{"schemaVersion":1,"label":"coverage (ETSI+unit)","message":"%s%%","color":"%s"}' "$pct" "$color" \
-              > site/reports/coverage-badge.json
-          else
-            echo '{"schemaVersion":1,"label":"coverage","message":"no recent run","color":"lightgrey"}' \
-              > site/reports/coverage-badge.json
-          fi
+          REPO: ${{ github.repository }}
+        run: ./dev/fold-reports.sh
       - uses: actions/upload-artifact@v6
         with:
           name: antares-www

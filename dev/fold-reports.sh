@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Fold the newest ETSI-matrix-results bundle + weekly coverage into site/
+# (site/reports/latest, badge.json + per-cell badge-<cell>.json,
+# site/reports/coverage + coverage-badge.json). Shared by wasm.yml and
+# pages.yml so the two Pages paths cannot drift. Needs: GH_TOKEN, REPO.
+# A missing bundle renders a placeholder instead of failing the deploy.
+set -e
+id=$(gh api "repos/$REPO/actions/artifacts?name=ETSI-matrix-results&per_page=1" \
+     -q '.artifacts[0].id' 2>/dev/null || true)
+mkdir -p site/reports/latest
+if [ -n "$id" ] && [ "$id" != "null" ]; then
+  gh api "repos/$REPO/actions/artifacts/$id/zip" > matrix.zip
+  mkdir -p cells && unzip -q matrix.zip -d cells
+  python3 dev/etsi-report-site.py cells site/reports/latest
+else
+  echo '<!doctype html><title>ETSI report</title><p>No ETSI-matrix-results bundle in the retention window — dispatch the etsi-matrix workflow.' \
+    > site/reports/latest/index.html
+  echo '{"schemaVersion":1,"label":"ETSI CIM 009","message":"no recent run","color":"lightgrey"}' \
+    > site/reports/badge.json
+fi
+# the weekly merged coverage (html + % badge)
+cid=$(gh api "repos/$REPO/actions/artifacts?name=etsi-coverage-merged&per_page=1" \
+      -q '.artifacts[0].id' 2>/dev/null || true)
+if [ -n "$cid" ] && [ "$cid" != "null" ]; then
+  gh api "repos/$REPO/actions/artifacts/$cid/zip" > cov.zip
+  mkdir -p cov && unzip -q cov.zip -d cov
+  mkdir -p site/reports/coverage
+  [ -d cov/html ] && cp -r cov/html/. site/reports/coverage/ || true
+  pct=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{printf "%.1f", (lf?100*lh/lf:0)}' cov/merged.info)
+  color=$(awk -v p="$pct" 'BEGIN{print (p>=80)?"brightgreen":((p>=60)?"yellow":"red")}')
+  printf '{"schemaVersion":1,"label":"coverage (ETSI+unit)","message":"%s%%","color":"%s"}' "$pct" "$color" \
+    > site/reports/coverage-badge.json
+else
+  echo '{"schemaVersion":1,"label":"coverage","message":"no recent run","color":"lightgrey"}' \
+    > site/reports/coverage-badge.json
+fi

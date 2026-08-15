@@ -178,7 +178,19 @@ rolling worker pods).
       badge per cell (file, memory, postgres, timescale, postgres-nats,
       timescale-nats) linking the report page — the "1024/1024 file"
       view, live.
-- [ ] 7. **Badges track main automatically**: a pages.yml with
+- [x] 7. **Badges track main automatically**:
+      ✅ DONE 2026-08-15: .github/workflows/pages.yml — workflow_run on ci
+      completion, master only (+ manual dispatch), deploys on success AND
+      failure (badges must turn red, not go stale); reuses the newest
+      antares-www artifact (never rebuilds wasm) + folds the fresh bundle
+      via the NEW shared dev/fold-reports.sh (extracted from wasm.yml's
+      inline fold so the two Pages paths cannot drift; wasm.yml now calls
+      it too and its manual dispatch keeps working). ⚠ OVERTURNS the
+      2026-08-07 "Pages deploys are manual-only" decision — flagged in the
+      commit. Validated: actionlint + yaml parse clean; fold script
+      dry-run offline → placeholder badges, exit 0 (first live deploy
+      needs a push + Pages settings = Mac-side list).
+      a pages.yml with
       `workflow_run` on ci.yml completion (main only) that rebuilds the
       site (www artifact reuse or rebuild) + folds the fresh bundle and
       deploys Pages — so a push to main updates the README numbers

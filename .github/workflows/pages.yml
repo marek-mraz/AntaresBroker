@@ -1,0 +1,82 @@
+name: pages
+
+# Auto-redeploy of the Pages site after every ci run on master (backlog
+# 08-15b item 7) — a push to master updates the README's live per-cell ETSI
+# badges and the /reports/ page without any manual dispatch.
+#
+# This OVERTURNS the 2026-08-07 "Pages deploys are manual-only" decision for
+# the REPORTS half of the site. The playground half is REUSED from the
+# newest antares-www artifact (produced by a wasm.yml run) — this workflow
+# never rebuilds wasm; wasm.yml's manual dispatch keeps working and remains
+# the only path that rebuilds/updates the playground itself.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+env:
+  PAGES_DOMAIN: antares-ngsi-ld-demo.marek-mraz.com
+
+jobs:
+  publish:
+    name: Fold reports + deploy Pages
+    # Deploy on a RED ci run too: the badges and report page must turn red,
+    # not silently go stale on the last green numbers. Only cancellation and
+    # skipping are non-events.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Reuse the newest playground bundle (antares-www)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p site
+          id=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=antares-www&per_page=1" \
+               -q '.artifacts[0].id' 2>/dev/null || true)
+          if [ -n "$id" ] && [ "$id" != "null" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > www.zip
+            unzip -q www.zip -d site
+          else
+            # no playground bundle in retention: reports still deploy; the
+            # playground appears after the next wasm.yml dispatch
+            echo '<!doctype html><title>Antares</title><p>Playground pending a wasm.yml run — <a href="reports/latest/">ETSI conformance report</a>.' \
+              > site/index.html
+          fi
+          echo "$PAGES_DOMAIN" > site/CNAME
+
+      - name: Fold the latest ETSI report + coverage into the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: ./dev/fold-reports.sh
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
