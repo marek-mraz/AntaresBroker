@@ -572,6 +572,39 @@ fn expand_instance(
                  under ngsildproof (4.5.2.2)"
             )));
         }
+        // 4.5.2.2 / C.11 / annex B: ngsildproof's NON-REIFIED sealed
+        // subproperties — entityIdSealed is a plain string term,
+        // entityTypeSealed is "@type": "@vocab" (it seals the entity type,
+        // so its value expands like a type name). They are reserved
+        // members, so without this explicit copy they silently vanish.
+        if name == "ngsildproof" {
+            if let Some(v) = obj.get("entityIdSealed") {
+                let s = v.as_str().ok_or_else(|| {
+                    bad(format!(
+                        "attribute {name}: entityIdSealed must be a string (4.5.2.2)"
+                    ))
+                })?;
+                out.insert("entityIdSealed".into(), Value::String(s.to_owned()));
+            }
+            if let Some(v) = obj.get("entityTypeSealed") {
+                let s = v.as_str().ok_or_else(|| {
+                    bad(format!(
+                        "attribute {name}: entityTypeSealed must be a string (4.5.2.2)"
+                    ))
+                })?;
+                out.insert("entityTypeSealed".into(), Value::String(ctx.expand_key(s)));
+            }
+            // "The value of its \"value\" element shall be an object
+            // containing the W3C Data integrity \"proof\" structure"
+            if let Some(v) = obj.get("value") {
+                if !v.is_object() && !(opts.allow_null && is_ngsi_null(v)) {
+                    return Err(bad(format!(
+                        "attribute {name}: ngsildproof value shall be an object \
+                         containing the W3C proof structure (4.5.2.2)"
+                    )));
+                }
+            }
+        }
         // 4.5.3.2: "unitCode shall never be present, as Relationships are
         // unitless." 4.5.18.2/3 and 4.5.20.2/3 extend the prohibition to
         // LanguageProperty and VocabProperty ("always strings and hence
@@ -1107,6 +1140,86 @@ mod tests {
             "speed": [{"type": "Property", "value": 1},
                       {"type": "Property", "value": 2, "datasetId": "@none"}]});
         assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
+
+    /// 4.5.2.2 / C.11: "ngsildproof": a Property with the non-reified
+    /// subproperties "entityIdSealed" and "entityTypeSealed" as specified
+    /// in [35]; annex B maps entityIdSealed as a plain term and
+    /// entityTypeSealed with "@type": "@vocab" (the value expands like a
+    /// type name). Both must survive the expand→compact round trip — they
+    /// were RESERVED_MEMBERS with no explicit copy and silently vanished.
+    #[test]
+    fn ngsildproof_sealed_members_round_trip() {
+        let doc = json!({"id": "urn:ngsi-ld:Store:002", "type": "Store",
+            "ngsildproof": {"type": "Property",
+                "entityIdSealed": "urn:ngsi-ld:Store:002",
+                "entityTypeSealed": "Store",
+                "value": {"type": "DataIntegrityProof",
+                          "cryptosuite": "eddsa-rdfc-2022",
+                          "created": "2025-01-27T21:02:24Z",
+                          "proofPurpose": "assertionMethod",
+                          "proofValue": "zQeVbY4oey5q2M3XKaxup3tmzN4DRFTLVqpLMweBrSxMY"}}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("C.11-shaped ngsildproof is valid");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/ngsildproof"][0];
+        assert_eq!(inst["entityIdSealed"], "urn:ngsi-ld:Store:002");
+        assert_eq!(
+            inst["entityTypeSealed"], "https://uri.etsi.org/ngsi-ld/default-context/Store",
+            "entityTypeSealed is @vocab-coerced (annex B)"
+        );
+
+        let back = crate::compact::compact_entity(&out, &core());
+        let np = &back["ngsildproof"];
+        assert_eq!(np["entityIdSealed"], "urn:ngsi-ld:Store:002");
+        assert_eq!(np["entityTypeSealed"], "Store", "compacts back to the term");
+        assert_eq!(
+            np["value"]["proofValue"], "zQeVbY4oey5q2M3XKaxup3tmzN4DRFTLVqpLMweBrSxMY",
+            "the W3C proof structure is untouched"
+        );
+        // negative: non-reified means BARE strings — never Property objects,
+        // and never dropped
+        assert!(np["entityIdSealed"].is_string());
+        assert!(np["entityTypeSealed"].is_string());
+    }
+
+    /// 4.5.2.2: the sealed members are strings ([35] seals the entity id and
+    /// type); "The value of its \"value\" element shall be an object
+    /// containing the W3C Data integrity \"proof\" structure" — a
+    /// non-object proof value is BadRequestData.
+    #[test]
+    fn ngsildproof_shapes_are_validated() {
+        // non-string sealed members
+        for bad_seal in [json!(42), json!({"type": "Property", "value": true})] {
+            let doc = json!({"id": "urn:x", "type": "Store",
+                "ngsildproof": {"type": "Property", "value": {"type": "DataIntegrityProof"},
+                    "entityIdSealed": bad_seal}});
+            assert!(
+                expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+                "entityIdSealed must be a string"
+            );
+        }
+        let doc = json!({"id": "urn:x", "type": "Store",
+            "ngsildproof": {"type": "Property", "value": {"type": "DataIntegrityProof"},
+                "entityTypeSealed": ["Store"]}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "entityTypeSealed must be a string"
+        );
+        // the proof value shall be an object
+        let doc = json!({"id": "urn:x", "type": "Store",
+            "ngsildproof": {"type": "Property", "value": "not-a-proof"}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "ngsildproof value shall be an object (4.5.2.2)"
+        );
+        // sealed members on an ordinary attribute stay rejected (the
+        // existing 4.5.2.2 guard — pinned here as the negative pair)
+        let doc = json!({"id": "urn:x", "type": "Store",
+            "speed": {"type": "Property", "value": 1, "entityIdSealed": "urn:x"}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "sealed members only under ngsildproof"
+        );
     }
 
     /// 4.5.3.3: "type: If missing, Relationship can be inferred by the

@@ -105,6 +105,11 @@ pub fn compact_instance(inst: &Value, ctx: &Context) -> Value {
             out.insert(k.clone(), compacted);
         } else if k == "objectType" {
             out.insert("objectType".into(), compact_types(v, ctx));
+        } else if k == "entityTypeSealed" {
+            // 4.5.2.2 / annex B: @vocab-coerced — compacts back to a term
+            // exactly like a type name; entityIdSealed needs no arm (a
+            // plain string passes through the default member handling)
+            out.insert("entityTypeSealed".into(), compact_types(v, ctx));
         } else if k == "objectList" || k == "previousObjectList" {
             // 4.5.22.2: the normalized objectList is an ordered array of
             // JSON objects each "containing a single Attribute with a key
