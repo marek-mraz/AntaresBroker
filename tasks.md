@@ -130,13 +130,18 @@ rolling worker pods).
       requests through the LB answered 200, every role group ≥1 ready pod
       the entire time (group_fail=0); negative proven: peer stopped → "peer
       matcher2 unhealthy — aborting roll". file/memory refusals fire.
-- [ ] 4. **Pipeline lever** `ROLES_SPLIT=1`: STORE=postgres ROLES_SPLIT=1
-      ROLL_DURING_RUN=1 dev/etsi-pipeline.sh runs the FULL suite through
-      the LB against the rolling 10-container fleet →
-      results/roles-<store>/ with the same run-summary/gate/failures
-      shape every other cell produces. Local validation per §2: ONE
-      store mode sandbox-side if the sandbox allows compose, else
-      yaml/script dry-runs + the item-2 e2es (the full fleet run is CI's).
+- [x] 4. **Pipeline lever** `ROLES_SPLIT=1`:
+      ✅ DONE 2026-08-15: etsi-pipeline.sh lever wired (roles overlay,
+      pg/ts-only + HA-exclusive guards proven to fire, results default
+      results/roles-$STORE, roll loop passes ROLES_SPLIT through). Validated
+      LIVE in-sandbox (dind compose allowed): STORE=postgres ROLES_SPLIT=1
+      ROLL_DURING_RUN=1 SUITES=CommonBehaviours → gate PASS, 56/56 green
+      through the real haproxy LB with the fleet rolling, results in
+      results/roles-postgres/ with the standard shape (+ roll-loop.log);
+      roles-smoke PASS via the LB. First attempt red-herring root-caused:
+      sandbox .venv predated the suite's vendored HttpCtrl (ModuleNotFound
+      → exitonfailure cascade), fixed by pip -r requirements.txt — a venv
+      defect, not a fleet bug. Full 8-suite fleet runs are CI's (item 5).
 - [ ] 5. **Six cells per push to main**: etsi-matrix.yml matrix grows to
       memory, file, postgres, timescale (single-broker bus=local, as
       today) + postgres-nats + timescale-nats (item-4 fleet, rolling).

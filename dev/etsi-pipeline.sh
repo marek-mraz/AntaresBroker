@@ -26,14 +26,22 @@
 #   HA=1                             layer the K2 overlay: haproxy owns 9090,
 #                                    two broker1 replicas behind it — the
 #                                    suite talks to the LB and cannot tell
-#   ROLL_DURING_RUN=1                (needs HA=1) K8: roll the two replicas in
-#                                    a loop for the whole run via
-#                                    dev/rolling-update.sh. The suite has no
-#                                    retries and asserts exact single
+#   ROLL_DURING_RUN=1                (needs HA=1 or ROLES_SPLIT=1) K8: roll
+#                                    the replicas in a loop for the whole run
+#                                    via dev/rolling-update.sh. The suite has
+#                                    no retries and asserts exact single
 #                                    responses, so ANY failure is a real K1
 #                                    drain bug, not flake. postgres/timescale
 #                                    only (shared state makes replicas one
 #                                    broker; K10: file cannot roll)
+#   ROLES_SPLIT=1                    (backlog 08-15b item 4) layer the TRUE
+#                                    role-split overlay instead of the HA
+#                                    pair: 5 roles x 2 replicas = 10 broker
+#                                    containers behind the LB, bus=nats, one
+#                                    shared PG. postgres/timescale only.
+#                                    Results default to results/roles-$STORE.
+#                                    Combine with ROLL_DURING_RUN=1 for the
+#                                    rolling-fleet cell (pg-nats/ts-nats).
 #
 # Locally run ONE cell at a time:   STORE=postgres SUITES=Consumption dev/etsi-pipeline.sh
 # (dev/etsi-local.sh loops the full store × suite matrix serially; CI builds
@@ -70,7 +78,7 @@ cd "$(dirname "$0")/.."
 
 STORE="${STORE:-memory}"
 if [ "${WASM:-0}" = 1 ]; then
-  [ "${HA:-0}" = 1 ] || [ "${ROLL_DURING_RUN:-0}" = 1 ] && { echo "WASM=1 has no HA/roll story"; exit 2; }
+  [ "${HA:-0}" = 1 ] || [ "${ROLL_DURING_RUN:-0}" = 1 ] || [ "${ROLES_SPLIT:-0}" = 1 ] && { echo "WASM=1 has no HA/roll story"; exit 2; }
   [ "$STORE" = memory ] || { echo "WASM=1 implies STORE=memory (the artifact's only backend here)"; exit 2; }
   export MQTT=0
 elif [ "${BROWSER:-0}" = 1 ]; then
@@ -97,7 +105,14 @@ export STORE DB_IMAGE
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml)
 # K2/K8: the HA overlay moves antares1 behind an LB on 9090; with
 # ROLL_DURING_RUN the replicas roll continuously under the running suite.
-if [ "${HA:-0}" = 1 ]; then
+if [ "${ROLES_SPLIT:-0}" = 1 ]; then
+  [ "${HA:-0}" = 1 ] && { echo "ROLES_SPLIT=1 and HA=1 are exclusive (both own the LB on 9090)"; exit 2; }
+  case "$STORE" in
+    postgres|timescale) ;;
+    *) echo "ROLES_SPLIT=1 needs STORE=postgres|timescale (the roles overlay is ANTARES_BUS=nats)"; exit 2 ;;
+  esac
+  COMPOSE+=(-f compose-files/docker-compose-roles.yml)
+elif [ "${HA:-0}" = 1 ]; then
   COMPOSE+=(-f compose-files/docker-compose-ha.yml)
   # F10: replicas of one broker talk over NATS (shared matcher durable,
   # claimed interval firings). memory mode keeps bus=local — it exercises
@@ -114,10 +129,14 @@ if [ "${HA:-0}" = 1 ]; then
     esac
   fi
 elif [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
-  echo "ROLL_DURING_RUN=1 requires HA=1 (nothing to roll without the LB)"; exit 2
+  echo "ROLL_DURING_RUN=1 requires HA=1 or ROLES_SPLIT=1 (nothing to roll without the LB)"; exit 2
 fi
 COMPOSE+=("${PROFILE[@]}")
-RESULTS="${RESULTS_DIR:-results/$STORE}"
+if [ "${ROLES_SPLIT:-0}" = 1 ]; then
+  RESULTS="${RESULTS_DIR:-results/roles-$STORE}"
+else
+  RESULTS="${RESULTS_DIR:-results/$STORE}"
+fi
 MEM_LIMIT_MB="${MEM_LIMIT_MB:-350}"
 mkdir -p "$RESULTS"
 
@@ -210,11 +229,16 @@ done
 ROLL_PID=""
 if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
   ( while :; do
-      STORE="$STORE" bash dev/rolling-update.sh || echo "ROLL FAILED rc=$? at $(date +%T)"
+      STORE="$STORE" ROLES_SPLIT="${ROLES_SPLIT:-0}" bash dev/rolling-update.sh \
+        || echo "ROLL FAILED rc=$? at $(date +%T)"
       sleep 5
     done > "$RESULTS/roll-loop.log" 2>&1 ) &
   ROLL_PID=$!
-  echo "K8: rolling antares1/antares1b continuously (pid $ROLL_PID)"
+  if [ "${ROLES_SPLIT:-0}" = 1 ]; then
+    echo "K8/roles: rolling the 10-pod role fleet continuously (pid $ROLL_PID)"
+  else
+    echo "K8: rolling antares1/antares1b continuously (pid $ROLL_PID)"
+  fi
 fi
 
 # 4. Resource monitor: CPU + RSS of every antares container, every second, for
