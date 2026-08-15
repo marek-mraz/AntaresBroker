@@ -85,29 +85,33 @@ enum CtxEntry {
     Core(String),
 }
 
-/// Build the Cached-entry view of a store row: identity from the row (the
-/// shared truth), lastUsage/hits overlaid from THIS instance's loader stats.
-async fn cached_from_row(st: &AppState, doc: &Value) -> CtxEntry {
-    let url = doc["url"].as_str().unwrap_or_default().to_owned();
+/// Usage view of a store row — the SHARED truth (K8: per-instance loader
+/// stats split-brain behind a load balancer; the usage_bump hook keeps the
+/// row's counters current from every instance).
+fn row_usage(doc: &Value) -> antares_jsonld::CtxUsage {
     let created_at = doc["createdAt"].as_str().unwrap_or_default().to_owned();
-    let local = st.loader.usage_get(&url).await;
-    CtxEntry::Cached(antares_jsonld::CtxUsage {
+    antares_jsonld::CtxUsage {
+        url: doc["url"].as_str().unwrap_or_default().to_owned(),
         local_id: doc["localId"].as_str().unwrap_or_default().to_owned(),
-        last_usage: local
-            .as_ref()
-            .map(|u| u.last_usage.clone())
+        last_usage: doc["lastUsage"]
+            .as_str()
+            .map(str::to_owned)
             .unwrap_or_else(|| created_at.clone()),
-        hits: local.map(|u| u.hits).unwrap_or(0),
-        url,
+        hits: doc["numberOfHits"].as_u64().unwrap_or(0),
         created_at,
-    })
+    }
+}
+
+/// Build the Cached-entry view of a store row.
+fn cached_from_row(doc: &Value) -> CtxEntry {
+    CtxEntry::Cached(row_usage(doc))
 }
 
 async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
     if let Some(doc) = st.store.context_get(id).ok()? {
         // Cached rows are addressable by their deterministic localId too.
         if doc["kind"].as_str() == Some("Cached") {
-            return Some(cached_from_row(st, &doc).await);
+            return Some(cached_from_row(&doc));
         }
         return Some(CtxEntry::Stored(doc));
     }
@@ -133,7 +137,7 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
         let rid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id.as_bytes()).to_string();
         if let Some(doc) = st.store.context_get(&rid).ok()? {
             if doc["kind"].as_str() == Some("Cached") {
-                return Some(cached_from_row(st, &doc).await);
+                return Some(cached_from_row(&doc));
             }
         }
     }
@@ -241,7 +245,8 @@ pub async fn list_contexts(
                 continue;
             }
             let url = c["url"].as_str().unwrap_or_default().to_owned();
-            let usage = st.loader.usage_get(&url).await;
+            // counters from the ROW (shared truth), never this instance's map
+            let usage = Some(row_usage(&c));
             entries.push((
                 url,
                 c["localId"].as_str().unwrap_or_default().to_owned(),
@@ -316,13 +321,13 @@ pub async fn serve_context(
                 let kind = doc["kind"].as_str().unwrap_or("Hosted");
                 let url = doc["url"].as_str().unwrap_or_default();
                 if details {
-                    let usage = st.loader.usage_get(url).await;
+                    let usage = row_usage(doc);
                     details_obj(
                         url,
                         doc["localId"].as_str().unwrap_or_default(),
                         kind,
                         doc["createdAt"].as_str().unwrap_or_default(),
-                        usage.as_ref(),
+                        Some(&usage),
                     )
                 } else {
                     doc["body"].clone()
@@ -355,10 +360,12 @@ pub async fn serve_context(
         match &entry {
             CtxEntry::Stored(doc) if doc["kind"] == "ImplicitlyCreated" => {
                 if let Some(u) = doc["url"].as_str() {
-                    st.loader.bump_url(u).await;
+                    let _ = st.loader.bump_url(u).await;
                 }
             }
-            CtxEntry::Cached(u) => st.loader.bump_url(&u.url).await,
+            CtxEntry::Cached(u) => {
+                let _ = st.loader.bump_url(&u.url).await;
+            }
             _ => {}
         }
         let mut resp = (

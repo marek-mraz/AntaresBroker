@@ -129,15 +129,64 @@ impl AppState {
                     return; // broker-local (Hosted/Implicit) URLs are not Cached entries
                 }
                 let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
+                // A refetch (staleness, delete+reload) must keep the row's
+                // identity and hit counters — only the body is new.
+                let prior = store.context_get(&id.to_string()).ok().flatten();
+                let field = |k: &str| {
+                    prior
+                        .as_ref()
+                        .and_then(|p| p[k].as_str())
+                        .map(str::to_owned)
+                };
+                let created = field("createdAt").unwrap_or_else(now_iso);
                 let doc = serde_json::json!({
                     "url": url,
                     "localId": id.to_string(),
                     "kind": "Cached",
-                    "createdAt": now_iso(),
+                    "createdAt": created,
+                    "numberOfHits": prior
+                        .as_ref()
+                        .and_then(|p| p["numberOfHits"].as_u64())
+                        .unwrap_or(0),
+                    "lastUsage": field("lastUsage"),
                     "body": {"@context": ctx_value},
                 });
                 if let Err(e) = store.context_put(&id.to_string(), doc) {
                     tracing::warn!("@context write-through failed for {url}: {e}");
+                }
+            }));
+        }
+        // K8/5.13.3.5: hit counters live in the SHARED row, not per instance
+        // — behind a load balancer per-instance counters split-brain (fleet
+        // run 2026-08-15: 7 red TPs). A bump that finds the row gone reports
+        // a cross-instance delete; the loader then drops its warm copies so
+        // the delete is honoured everywhere (5.13.5.4). Pinned core contexts
+        // have no row and are never evicted.
+        {
+            let store = store.clone();
+            loader.set_usage_bump(Box::new(move |url| {
+                if Loader::is_pinned_core(url) {
+                    return true;
+                }
+                let id = match url.find("/ngsi-ld/v1/jsonldContexts/") {
+                    Some(pos) => url[pos + "/ngsi-ld/v1/jsonldContexts/".len()..].to_string(),
+                    None => {
+                        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
+                    }
+                };
+                match store.context_get(&id) {
+                    Ok(Some(mut doc)) => {
+                        let hits = doc["numberOfHits"].as_u64().unwrap_or(0) + 1;
+                        doc["numberOfHits"] = serde_json::json!(hits);
+                        doc["lastUsage"] = serde_json::json!(now_iso());
+                        if let Err(e) = store.context_put(&id, doc) {
+                            tracing::warn!("@context hit bump failed for {url}: {e}");
+                        }
+                        true
+                    }
+                    Ok(None) => false,
+                    // a store hiccup must never evict a healthy cache entry
+                    Err(_) => true,
                 }
             }));
         }

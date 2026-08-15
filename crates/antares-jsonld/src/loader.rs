@@ -412,10 +412,16 @@ pub struct Loader {
     /// hook (the broker persists them as kind='Cached' rows) so the cache
     /// survives a restart. Set once at wiring; None in tests.
     cache_writer: std::sync::RwLock<Option<CacheWriter>>,
+    /// Shared-store hit counter (K8): bump the persisted row on every counted
+    /// use; a missing row reports a cross-instance delete. `None` in
+    /// compositions without a store (bare loader tests).
+    usage_bump: std::sync::RwLock<Option<UsageBump>>,
 }
 
 /// (url, parsed `@context` value) — called on every fresh remote fetch.
 pub type CacheWriter = Box<dyn Fn(&str, &Value) + Send + Sync>;
+/// url -> "the shared row still exists" (after bumping its hit counter).
+pub type UsageBump = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl Default for Loader {
     fn default() -> Self {
@@ -451,11 +457,20 @@ impl Loader {
             merged_urls: BoundedCache::new(256),
             resolve_permits: tokio::sync::Semaphore::new(32),
             cache_writer: std::sync::RwLock::new(None),
+            usage_bump: std::sync::RwLock::new(None),
         }
     }
 
     pub fn set_cache_writer(&self, w: CacheWriter) {
         *self.cache_writer.write().expect("writer lock") = Some(w);
+    }
+
+    /// Wire the shared-store usage bump (K8/5.13.3.5): called on every
+    /// counted use of a URL. Returns whether the shared row still exists —
+    /// `false` means another instance deleted the @context, and this
+    /// instance must drop its warm copies so the delete is honoured here.
+    pub fn set_usage_bump(&self, f: UsageBump) {
+        *self.usage_bump.write().expect("bump lock") = Some(f);
     }
 
     /// Boot preload (J2): re-seed a Cached entry persisted by the writer —
@@ -486,27 +501,44 @@ impl Loader {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
 
-    /// Bump usage stats (numberOfHits / lastUsage, 5.13.3.5) for one URL.
-    pub async fn bump_url(&self, url: &str) {
+    /// Bump usage stats (numberOfHits / lastUsage, 5.13.3.5) for one URL —
+    /// in this instance's registry AND, via the usage_bump hook, in the
+    /// shared store row (K8: per-instance counters split-brain behind a
+    /// load balancer). Returns true when the hook reported the row GONE
+    /// (deleted through another instance): local copies are evicted so the
+    /// next resolution refetches and re-creates the entry.
+    pub async fn bump_url(&self, url: &str) -> bool {
         let now = Self::now();
-        let mut map = self.usage.write().await;
-        map.entry(url.to_owned())
-            .and_modify(|u| {
-                u.hits += 1;
-                u.last_usage = now.clone();
-            })
-            .or_insert_with(|| CtxUsage {
-                url: url.to_owned(),
-                // deterministic (uuid5 of the URL): the same identity names
-                // this entry in the usage registry, the persisted Cached row
-                // (J2 write-through) and across restarts — an API delete can
-                // therefore always find the row (5.13.5).
-                local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
-                    .to_string(),
-                created_at: now.clone(),
-                last_usage: now,
-                hits: 1,
-            });
+        {
+            let mut map = self.usage.write().await;
+            map.entry(url.to_owned())
+                .and_modify(|u| {
+                    u.hits += 1;
+                    u.last_usage = now.clone();
+                })
+                .or_insert_with(|| CtxUsage {
+                    url: url.to_owned(),
+                    // deterministic (uuid5 of the URL): the same identity names
+                    // this entry in the usage registry, the persisted Cached row
+                    // (J2 write-through) and across restarts — an API delete can
+                    // therefore always find the row (5.13.5).
+                    local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
+                        .to_string(),
+                    created_at: now.clone(),
+                    last_usage: now,
+                    hits: 1,
+                });
+        }
+        let row_exists = match self.usage_bump.read().expect("bump lock").as_ref() {
+            Some(f) => f(url),
+            None => true,
+        };
+        if row_exists {
+            return false;
+        }
+        self.usage.write().await.remove(url);
+        self.evict(url).await;
+        true
     }
 
     pub async fn usage_list(&self) -> Vec<CtxUsage> {
@@ -574,13 +606,21 @@ impl Loader {
         let key = user.to_string();
         if let Some(hit) = self.merged.get(&key) {
             if count {
-                // cache hit: bump every URL this context resolution involves
+                // cache hit: bump every URL this context resolution involves.
+                // A bump that finds the shared row GONE means another
+                // instance deleted this @context — do NOT serve the warm
+                // copy; fall through and rebuild (refetch re-creates it).
                 let urls = self.merged_urls.get(&key);
+                let mut deleted_elsewhere = false;
                 for url in urls.iter().flat_map(|u| u.iter()) {
-                    self.bump_url(url).await;
+                    deleted_elsewhere |= self.bump_url(url).await;
                 }
+                if !deleted_elsewhere {
+                    return Ok(hit);
+                }
+            } else {
+                return Ok(hit);
             }
-            return Ok(hit);
         }
         // J3: cold resolution is the expensive path — bound its concurrency.
         let _permit = self
@@ -602,7 +642,7 @@ impl Loader {
         }
         if count {
             for url in &urls {
-                self.bump_url(url).await; // only after successful resolution
+                let _ = self.bump_url(url).await; // only after successful resolution
             }
         }
         // Core context last: its (protected) terms win — CIM 009 4.4.
