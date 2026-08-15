@@ -161,12 +161,15 @@ dialed it. Code anchor: `entity_info_matches` (csource.rs:1160, clause
 5.12) — exact-eq on `EntityInfo.id`, `regex::find` (UNanchored substring)
 on `EntityInfo.idPattern`; this is exactly the full-match-vs-substring
 divergence ADR-001's mandatory `^...$` neutralizes. Spec anchors: 5.12
-(pp. 241-242, the four match conditions), 5.2.8 (idPattern = IEEE 1003.2
+(pp. 241-242, the FIVE EntityInfo match conditions — no-id/pattern,
+ids-vs-id, ids-vs-idPattern, pattern-vs-id, both-patterns-present — plus
+the attribute-overlap and datasetId-common-value conditions and the
+4.3.6.4 previously-encountered exclusion), 5.2.8 (idPattern = IEEE 1003.2
 regex), 4.3.6.1-4.3.6.4, 5.7.1.4/5.7.2.4, 5.6.x.4, 5.8.1.4, 4.14, 4.20,
 6.3.17.
 
-**Deliverable.** 50 new Robot TP cases in the suite fork under
-`IOP_TP/NGSI-LD/Interoperability/Routing/` (6 files, IOP_EXT_IDR_01..06),
+**Deliverable.** 58 new Robot TP cases in the suite fork under
+`IOP_TP/NGSI-LD/Interoperability/Routing/` (7 files, IOP_EXT_IDR_01..07),
 following IOP_TP conventions: `${b1_url}..${b5_url}` variables,
 `InteropUtils.resource` keywords, `Setup Interop Ids`/`Cleanup Interop
 Fixtures`, `[Tags]` carrying the clause (`5_12`, `4_3_6` form), broker
@@ -306,11 +309,54 @@ by a red TP are fixed red-first per §0.3 (one clause = one commit).
       B2 (4.20 query-op gate, 826afac) — the ADR's read-only agent-tenant
       posture, both halves asserted.
 
+### IOP_EXT_IDR_07 — negative routing: the spec's must-NOT-forward surface
+
+Verbatim grounds (verified against the PDF 2026-08-15): p.41 — brokers
+"shall respect" a source's limited operations "to avoid unnecessarily
+sending distributed operation requests which are always guaranteed to
+fail"; 4.3.6.2 — auxiliary registrations "are limited to context
+information consumption operations (see clause 5.7)"; 4.3.6.4 — "no
+registration shall match if the CSourceRegistration contextSourceAlias
+can be found within the listing of previously encountered Context
+Sources" and "each Tenant … shall be considered separately"; 5.12 —
+attribute-overlap and datasetId-common-value match conditions. Every case
+here asserts the mock records ZERO requests (the routing decision itself
+is the subject under test).
+
+- [ ] 51. Attribute-scope mismatch: request `?attrs=speed`, RegistrationInfo
+      lists only `propertyNames:["fillLevel"]` → CSR not matched, NOT
+      forwarded even though the idPattern matches (5.12 attribute conditions).
+- [ ] 52. Over-pruning guard (the opposite bound): RegistrationInfo with
+      EMPTY propertyNames/relationshipNames (entities only) DOES match any
+      `?attrs=` — must still forward (5.12: empty combination = match).
+- [ ] 53. datasetId disjoint: request `datasetId=urn:a`, CSR
+      `datasetId:["urn:b"]` → not matched, no forward; only ONE side
+      specifying datasetId → match, forwarded (5.12, should-level — note it).
+- [ ] 54. Expired CSR (`expiresAt` in the past) never matches: retrieve/query
+      with a matching id does not dial it, discovery omits it (5.2.9;
+      reg_expired csource.rs:604 — also pins the audited L-finding that
+      string-compared timestamps; use a non-Z offset timestamp as the edge).
+- [ ] 55. Operation gating on reads: CSR with `operations:["createEntity"]`
+      (or updateOps only) must NOT be dialed for `GET /entities/{id}` or
+      query even when the idPattern matches (4.3.6.1 p.41 guaranteed-to-fail
+      rule, 4.20; query_op gate 826afac).
+- [ ] 56. Auxiliary CSR never receives provision ops: create/update/delete
+      with a matching id stays local, auxiliary mock records zero requests;
+      the SAME auxiliary CSR is consulted for retrieve (4.3.6.2 —
+      consumption-only, both halves asserted).
+- [ ] 57. Tenant separation: CSR registered under tenant A must not route
+      tenant B's request for a matching id — B gets a clean 404, zero mock
+      hits (4.3.6.4 "each Tenant … considered separately", 4.14).
+- [ ] 58. Previously-encountered exclusion: a request arriving WITH a Via /
+      encountered-sources listing containing the CSR's contextSourceAlias →
+      that CSR shall not match, no re-forward (4.3.6.4; sharpens case 33
+      from the receiving broker's side).
+
 ### The /goal prompt — copy-paste to run this campaign
 
 ```
 /goal Work the "Backlog 2026-08-15 — IOP id/idPattern routing campaign"
-checklist in tasks.md top-to-bottom until all 50 boxes are [x] with
+checklist in tasks.md top-to-bottom until all 58 boxes are [x] with
 evidence (commit hash + green local run) recorded next to each. Per case:
 MemPalace FIRST (5.12 pp.241-242, 5.2.8, 4.3.6.x via mempalace_search +
 mempalace_get_pdf_pages — cite the clause in [Documentation]); check
