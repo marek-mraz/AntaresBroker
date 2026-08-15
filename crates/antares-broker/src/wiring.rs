@@ -99,6 +99,18 @@ pub async fn wire_nats(
     roles: Roles,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bus = Arc::new(NatsBus::connect(url).await?);
+    // /q/health `bus` member: live connection state + reconnect count.
+    // Installed HERE so bus=local never carries the member at all.
+    {
+        let b = bus.clone();
+        state.bus_stats = Some(Arc::new(move || {
+            serde_json::json!({
+                "mode": "nats",
+                "connected": b.connected(),
+                "reconnects": b.reconnects(),
+            })
+        }));
+    }
     // Multi-process mode: interval firings need the single-winner claim
     // (§3.1.6) — keyed off this flag, not off mirror presence (L3 wires a
     // mirror in local mode too).

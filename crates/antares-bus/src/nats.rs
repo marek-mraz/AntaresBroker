@@ -46,12 +46,38 @@ pub const MAX_ACK_PENDING: i64 = 256;
 
 pub struct NatsBus {
     js: jetstream::Context,
+    client: async_nats::Client,
+    /// `Event::Connected` occurrences (the initial connect included; the
+    /// getter subtracts it — surfaced on /q/health as `reconnects`).
+    reconnects: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NatsBus {
     /// Connect and ensure the streams + KV bucket exist (idempotent).
     pub async fn connect(url: &str) -> Result<Self, BusError> {
-        let client = async_nats::connect(url).await.map_err(err)?;
+        let reconnects = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = reconnects.clone();
+        let client = async_nats::ConnectOptions::new()
+            .event_callback(move |ev| {
+                let counter = counter.clone();
+                async move {
+                    match ev {
+                        // fires per successful (re)connect after the initial
+                        // ConnectOptions::connect returned
+                        async_nats::Event::Connected => {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::info!("bus reconnected to NATS");
+                        }
+                        async_nats::Event::Disconnected => {
+                            tracing::warn!("bus lost the NATS connection — reconnecting");
+                        }
+                        other => tracing::debug!("bus event: {other}"),
+                    }
+                }
+            })
+            .connect(url)
+            .await
+            .map_err(err)?;
         // §16.1/§7: the change stream carries every tenant's ChangeEvent bodies
         // and MUST stay internal. If the server requires no auth, anything that
         // reaches it can read or forge all-tenant events — warn loudly so an
@@ -63,10 +89,28 @@ impl NatsBus {
                  nkey/creds/mTLS and network-isolate the JetStream cluster in production"
             );
         }
-        let js = jetstream::new(client);
-        let bus = Self { js };
+        let js = jetstream::new(client.clone());
+        let bus = Self {
+            js,
+            client,
+            reconnects,
+        };
         bus.ensure_streams().await?;
         Ok(bus)
+    }
+
+    /// Live connection state for /q/health.
+    pub fn connected(&self) -> bool {
+        self.client.connection_state() == async_nats::connection::State::Connected
+    }
+
+    /// Successful reconnects since startup. `Event::Connected` fires on
+    /// EVERY successful connect including the initial one (connector.rs
+    /// emits it unconditionally), so the first event is subtracted.
+    pub fn reconnects(&self) -> u64 {
+        self.reconnects
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(1)
     }
 
     async fn ensure_streams(&self) -> Result<(), BusError> {

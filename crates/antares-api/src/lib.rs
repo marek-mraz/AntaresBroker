@@ -502,6 +502,11 @@ async fn health(
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
     }
+    // Bus visibility: present only when the nats wiring installed the
+    // provider — bus=local carries NO bus member.
+    if let Some(bus) = &state.bus_stats {
+        body["bus"] = bus();
+    }
     (code, axum::Json(body))
 }
 
@@ -604,6 +609,37 @@ mod tests {
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["status"], "UP");
+    }
+
+    /// Backlog 08-14 item 4: /q/health reports the bus — `bus: {mode,
+    /// connected, reconnects}` when the nats wiring installed bus_stats,
+    /// and the field is ABSENT for bus=local (no stats installed).
+    #[tokio::test]
+    async fn health_reports_the_bus_only_when_nats_is_wired() {
+        // bus=local: no bus_stats ⇒ no `bus` member at all
+        let resp = app()
+            .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let body = body_json(resp).await;
+        assert!(
+            body.get("bus").is_none(),
+            "bus member must be ABSENT for bus=local: {body}"
+        );
+
+        // nats wiring installs the closure ⇒ the live state is reported
+        let mut st = AppState::new("antares-test".into());
+        st.bus_stats = Some(std::sync::Arc::new(
+            || serde_json::json!({"mode": "nats", "connected": true, "reconnects": 2}),
+        ));
+        let resp = router(st)
+            .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let body = body_json(resp).await;
+        assert_eq!(body["bus"]["mode"], "nats");
+        assert_eq!(body["bus"]["connected"], true);
+        assert_eq!(body["bus"]["reconnects"], 2);
     }
 
     /// 5.6.2.4: "no existing Entity whose id (URI), and where specified

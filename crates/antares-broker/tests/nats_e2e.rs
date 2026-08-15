@@ -457,3 +457,187 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
         store.outbox_peek(1).expect("peek").is_empty()
     });
 }
+
+// ---------- NATS outage drill (backlog 08-14 item 4) ----------
+
+/// A stoppable TCP proxy in front of the real NATS server: killing it (and
+/// hard-shutting its live connections) IS the outage from the broker's
+/// viewpoint; re-arming on the same port is the restart. The real NATS
+/// server is never touched.
+struct Proxy {
+    port: u16,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    conns: Arc<Mutex<Vec<TcpStream>>>,
+}
+
+fn start_proxy(port: u16, upstream: String) -> Proxy {
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let conns: Arc<Mutex<Vec<TcpStream>>> = Arc::default();
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("proxy bind");
+    let (a, c) = (alive.clone(), conns.clone());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if !a.load(std::sync::atomic::Ordering::SeqCst) {
+                break; // listener drops here — the port frees for a restart
+            }
+            let Ok(client) = stream else { continue };
+            let Ok(server) = TcpStream::connect(&*upstream) else {
+                continue;
+            };
+            {
+                let mut held = c.lock().expect("conns");
+                held.push(client.try_clone().expect("clone"));
+                held.push(server.try_clone().expect("clone"));
+            }
+            let (mut cr, cw) = (client.try_clone().expect("clone"), client);
+            let (mut sr, sw) = (server.try_clone().expect("clone"), server);
+            let mut sw2 = sw;
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut cr, &mut sw2);
+                let _ = sw2.shutdown(std::net::Shutdown::Both);
+            });
+            let mut cw2 = cw;
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut sr, &mut cw2);
+                let _ = cw2.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    Proxy { port, alive, conns }
+}
+
+fn kill_proxy(p: &Proxy) {
+    p.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    for s in p.conns.lock().expect("conns").drain(..) {
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
+    // unblock accept() so the listener thread exits and releases the port
+    let _ = TcpStream::connect(("127.0.0.1", p.port));
+}
+
+/// Kill NATS mid-run: /q/health flips `bus.connected` to false while the
+/// API keeps serving writes; on restart the client reconnects (reconnects
+/// counter increments), the outbox drains the outage-time backlog, and
+/// subscription notifications resume — no panic, no lost event.
+#[test]
+fn nats_outage_flips_health_and_recovers() {
+    let _serial = serial();
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let upstream = nats
+        .trim_start_matches("nats://")
+        .trim_end_matches('/')
+        .to_string();
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("outage{run}");
+    let etype = format!("OutageVeh{run}");
+
+    let proxy_port = free_port();
+    let proxy = start_proxy(proxy_port, upstream.clone());
+    let port = free_port();
+    let _broker = start(port, "all", &db, &format!("nats://127.0.0.1:{proxy_port}"));
+    wait_healthy(port);
+    wait_for("health reports bus connected", 15, || {
+        http(port, "GET", "/q/health", None, None).contains("\"connected\":true")
+    });
+
+    // a subscription + a first entity prove the notify chain BEFORE the outage
+    let (recv_port, seen) = receiver();
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:outage{run}","type":"Subscription","entities":[{{"type":"{etype}"}}],"notification":{{"endpoint":{{"uri":"http://127.0.0.1:{recv_port}/notify"}}}}}}"#
+    );
+    let r = http(
+        port,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(r.starts_with("HTTP/1.1 201"), "subscription: {r}");
+    let entity = |n: u32| {
+        format!(
+            r#"{{"id":"urn:ngsi-ld:{etype}:{n}","type":"{etype}","speed":{{"type":"Property","value":{n}}}}}"#
+        )
+    };
+    let r = http(
+        port,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&entity(1)),
+    );
+    assert!(r.starts_with("HTTP/1.1 201"), "create 1: {r}");
+    wait_for("the pre-outage notification", 20, || {
+        seen.lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains(":1\""))
+    });
+
+    // ---- outage ----
+    kill_proxy(&proxy);
+    wait_for("health flips bus.connected to false", 20, || {
+        let h = http(port, "GET", "/q/health", None, None);
+        h.starts_with("HTTP/1.1 200") && h.contains("\"connected\":false")
+    });
+    // the API keeps serving while the bus is down (the write lands in the
+    // outbox; nothing may panic or 5xx)
+    let r = http(
+        port,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&entity(2)),
+    );
+    assert!(
+        r.starts_with("HTTP/1.1 201"),
+        "the API must keep serving during the outage: {r}"
+    );
+    assert!(
+        !seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains(":2\"")),
+        "no notification can arrive while the bus is down"
+    );
+
+    // ---- restart ----
+    let _proxy2 = start_proxy(proxy_port, upstream);
+    wait_for("reconnect visible on health", 30, || {
+        let h = http(port, "GET", "/q/health", None, None);
+        h.contains("\"connected\":true") && !h.contains("\"reconnects\":0")
+    });
+    // the outage-time write drains from the outbox — at-least-once holds
+    wait_for("the outage-time notification after reconnect", 30, || {
+        seen.lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains(":2\""))
+    });
+    // and new work flows end to end again
+    let r = http(
+        port,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&entity(3)),
+    );
+    assert!(r.starts_with("HTTP/1.1 201"), "create 3: {r}");
+    wait_for("the post-restart notification", 30, || {
+        seen.lock()
+            .expect("seen")
+            .iter()
+            .any(|b| b.contains(":3\""))
+    });
+    let h = http(port, "GET", "/q/health", None, None);
+    assert!(h.starts_with("HTTP/1.1 200"), "no panic, still UP: {h}");
+}

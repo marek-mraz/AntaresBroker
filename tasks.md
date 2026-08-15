@@ -149,7 +149,15 @@ options fail).
       posture, link docs/security-audit-2026-08-04.md), CONTRIBUTING.md
       (build, `-j 2` linker rule, test protocol, one-clause-one-commit),
       CHANGELOG.md seeded from the `v*` tags.
-- [ ] 4. **NATS visible + tested at runtime ("check NATS is working").**
+- [x] 4. **NATS visible + tested at runtime ("check NATS is working").**
+      ✅ DONE 2026-08-15 (commit: health bus member + outage e2e): /q/health
+      `bus:{mode,connected,reconnects}` via bus_stats provider (absent for
+      bus=local, unit-asserted + invert-proven); NatsBus connected()/
+      reconnects() over ConnectOptions event_callback;
+      nats_outage_flips_health_and_recovers e2e (killable TCP proxy fronting
+      real NATS): health flips false, API keeps serving during the outage,
+      reconnect + outbox drain + notifications resume, at-least-once held —
+      nats_e2e 4/4 green vs live PG+NATS (sibling-container recipe).
       `/q/health` reports store mode and file commit-queue but NOTHING
       about the bus — add `bus: {mode, connected, reconnects}` when
       ANTARES_BUS=nats (red-first unit on the health payload; assert the

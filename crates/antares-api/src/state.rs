@@ -38,6 +38,10 @@ pub struct AppState {
     pub limits: Arc<crate::bounds::LimitStats>,
     /// J7: allocator stats provider (set by the broker; None in tests/wasm).
     pub mem_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
+    /// Bus state provider for /q/health (`bus: {mode, connected,
+    /// reconnects}`) — installed by the nats wiring only, so the member is
+    /// absent for bus=local.
+    pub bus_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
     /// I4: one egress policy for notifications and federation forwards
     /// (scheme allowlist, private-range deny, per-destination breakers).
     pub egress: Arc<crate::egress::Egress>,
@@ -162,6 +166,7 @@ impl AppState {
             mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
+            bus_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sub_sync: None,
