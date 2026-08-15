@@ -6,6 +6,50 @@ are done and removed — full text in git history (last pre-prune tree:
 commit `99023be`). Working discipline lives in `claude.md` (§0.3 loop,
 rules 8/9); this file holds only OPEN work.
 
+## The master /goal (scoped by the user 2026-08-15) — copy-paste this
+
+Scope: ONLY (a) the id/idPattern routing campaign, (b) NATS runtime
+proof, (c) production testing across all four store types, (d) the
+rolling-update (rollout) proof, (e) a production-looking repository
+with all docs. Explicitly out: M1 crates.io prep, E8, J4/K11/L1/L2
+(hardware), M3, anything Mac-side.
+
+```
+/goal Work ONLY these tracks, in this order, until every named box in
+tasks.md is [x] with evidence (commit hash + green local run / rendered
+page) recorded next to it:
+(1) ETSI id/idPattern routing — "## Backlog 2026-08-15 — IOP
+id/idPattern routing campaign": execute its own /goal prompt (end of
+that section) VERBATIM, all 58 boxes.
+(2) NATS — backlog-08-14 item 4: bus health field + NATS-outage e2e,
+exactly as the item specifies (read bus.rs first, red-first, absence
+asserted for bus=local).
+(3) Production testing, all store types + rollout — backlog-08-14
+items 5 and 6: the rolling-update/HA job on a weekly cadence, and the
+production-readiness re-audit (every P0/P1 CLOSED-with-evidence or
+appended as a new box and then worked). Store-type proof: each claim
+tested in the mode it touches — memory/file locally per rule 8 and §2
+(`STORE=<mode> dev/etsi-local.sh` where the sandbox allows), postgres/
+timescale via targeted pg-gated tests on the private-dind recipe where
+already sanctioned, and the CI 4×8 matrix as the authority for the
+full grid — no claim marked proven for a store the evidence doesn't
+cover.
+(4) Production-look repository — backlog-08-14 items 1, 2, 3, 7, 8:
+clickable ETSI report page, README pass with badges and corrected
+targets table, hygiene files (LICENSE is the user's choice — ask once),
+docs index + operations runbook, coverage surfaced.
+SKIP: M1/E8/J4/K11/L1/L2/M3 and anything Mac-side (pushes, Pages
+settings, first scheduled runs) — collect those on the "Mac-side /
+user" list instead of blocking.
+Full claude.md discipline throughout: MemPalace first, TEST-FIRST red
+run as the fallibility proof, negative assertions, rules 8 and 9 hard,
+ponytail, one item = one commit with its box ticked in the same commit;
+CI workflow edits validated by actionlint/yaml parse + local dry-runs.
+DONE = all 58 campaign boxes + 08-14 items 1-8 (plus any boxes item 6
+appends) [x] with evidence and the Mac-side list written. Ask only for
+genuine user decisions (license, rule-9 doubt).
+```
+
 ## Blocked / user-side (carried from the completed ladder)
 
 - [ ] E8. ⛔ NEEDS-YOU (policy decision, one line): the CI `publish` job
