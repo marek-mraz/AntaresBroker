@@ -278,51 +278,59 @@ tests/id_routing_5_12.rs 3/3 and antares-api suite green.
 
 ### IOP_EXT_IDR_03 — provision routing by id (redirect/exclusive/inclusive)
 
-- [ ] 20. redirect CSR, anchored pattern: POST /entities with matching id is
+Evidence (20-29): suite fork commit (IDR_03) 10/10 green on run-five
+2026-08-15; cases 24/28/29 ran red and drove broker fix 8cb8256 (batch items
+gated by EntityInfo idPattern via can_match_id; covers_item + batch-delete
+sent_ids), unit covers_item_honours_entityinfo_id_patterns, crate suite green.
+
+- [x] 20. redirect CSR, anchored pattern: POST /entities with matching id is
       created at B2, NOT held at B1 (`local=true` 404) (5.6.1.4, 4.3.6.2).
-- [ ] 21. Create with non-matching id stays local at B1; redirect mock records
+- [x] 21. Create with non-matching id stays local at B1; redirect mock records
       zero requests (5.6.1.4).
-- [ ] 22. `DELETE /entities/{id}` routed by pattern → 204, gone at B2;
+- [x] 22. `DELETE /entities/{id}` routed by pattern → 204, gone at B2;
       non-matching delete never leaves B1 (5.6.6.4).
-- [ ] 23. PATCH / partial-attribute-update routed by id through the pattern
+- [x] 23. PATCH / partial-attribute-update routed by id through the pattern
       (5.6.2.4, 5.6.3.4).
-- [ ] 24. Batch create with MIXED razidlos: matching subset forwarded, rest
+- [x] 24. Batch create with MIXED razidlos: matching subset forwarded, rest
       local; success arrays carry ALL ids exactly once (5.6.7.4, 5.6.8.5).
-- [ ] 25. Deterministic-URN idempotency (ADR claim): same upsert twice via B1 →
+- [x] 25. Deterministic-URN idempotency (ADR claim): same upsert twice via B1 →
       second is UPDATE (remote 204 ⇒ updated-list, per 2c6c10b), federation-wide
       query still exactly ONE entity (5.6.8.5).
-- [ ] 26. Exclusive CSR without explicit EntityInfo.id + attributes → rejected
+- [x] 26. Exclusive CSR without explicit EntityInfo.id + attributes → rejected
       at registration (5.2.9, 4.3.6.2; validate_exclusive).
-- [ ] 27. Exclusive CSR by exact id: update routes ONLY to the remote; a local
+- [x] 27. Exclusive CSR by exact id: update routes ONLY to the remote; a local
       shadow copy is never created nor consulted (4.3.6.2).
-- [ ] 28. Registration narrowing on forwards: mock asserts the forwarded
+- [x] 28. Registration narrowing on forwards: mock asserts the forwarded
       request carries only the registered id scope — no broadening (4.3.6.1).
-- [ ] 29. Batch upsert across 3 disjoint-razidlo redirect CSRs splits three
+- [x] 29. Batch upsert across 3 disjoint-razidlo redirect CSRs splits three
       ways; each mock receives ONLY its ids (5.6.8.4).
 
 ### IOP_EXT_IDR_04 — multi-broker topologies (3-5 brokers, run-five fleet)
 
-- [ ] 30. Star B1→{B2..B5}, four razidlos: retrieve dials exactly one; unique
+Evidence (30-39): suite fork commit (IDR_04) 10/10 green on the five-broker
+run-five fleet 2026-08-15; fallibility cycle on case 34 (localOnly).
+
+- [x] 30. Star B1→{B2..B5}, four razidlos: retrieve dials exactly one; unique
       per-broker marker attribute proves the source; others unhit (5.7.1.4).
-- [ ] 31. Same star: type query = exact union of four remotes + B1-local
+- [x] 31. Same star: type query = exact union of four remotes + B1-local
       (5.7.2.4).
-- [ ] 32. Cascade B1→B2→B3 (B2 holds a CSR for B3's narrower prefix):
+- [x] 32. Cascade B1→B2→B3 (B2 holds a CSR for B3's narrower prefix):
       retrieve via B1 resolves through the chain (4.3.6.4).
-- [ ] 33. Loop B1↔B2 with overlapping patterns: Via header terminates the
+- [x] 33. Loop B1↔B2 with overlapping patterns: Via header terminates the
       cycle, request completes with correct data (4.3.6.3, 6.3.18).
-- [ ] 34. `localOnly=true` on B1's CSR → B2 answers from its own data only,
+- [x] 34. `localOnly=true` on B1's CSR → B2 answers from its own data only,
       does NOT cascade to its B3 registration (4.3.6.4, 5.2.34).
-- [ ] 35. Overlapping redirect CSRs — two endpoints both match one id: the
+- [x] 35. Overlapping redirect CSRs — two endpoints both match one id: the
       operation is distributed to ALL matching (4.3.6.3).
-- [ ] 36. Prefix shadowing: coarse `Typ:Razidlo:.*` CSR→B2 + fine
+- [x] 36. Prefix shadowing: coarse `Typ:Razidlo:.*` CSR→B2 + fine
       `Typ:Razidlo:odpady:.*` CSR→B3 — both match, both consulted, merged
       result correct (5.12, 4.5.5).
-- [ ] 37. Matched endpoint down: retrieve returns 404/partial WITH
+- [x] 37. Matched endpoint down: retrieve returns 404/partial WITH
       `NGSILD-Warning` 199; a non-matching id returns 404 WITHOUT the warning
       (6.3.17; verified live 2026-08-15 — pin it).
-- [ ] 38. Registration timeout+cooldown honoured: second request inside the
+- [x] 38. Registration timeout+cooldown honoured: second request inside the
       cooldown fails fast, mock sees exactly ONE dial (5.2.34).
-- [ ] 39. Routing follows the live CSR set: delete the CSR → next retrieve
+- [x] 39. Routing follows the live CSR set: delete the CSR → next retrieve
       404s and the mock records zero new hits (5.9.4, 5.12).
 
 ### IOP_EXT_IDR_05 — subscriptions & notifications routed by id
