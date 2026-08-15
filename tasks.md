@@ -162,7 +162,17 @@ rolling worker pods).
       wall-clock: the nats cells are the K8 job cost — if a per-push
       6-cell wall is too slow, the DECISION (user) is cadence vs scope,
       not silent dropping.
-- [ ] 6. **Per-cell badges**: dev/etsi-report-site.py additionally emits
+- [x] 6. **Per-cell badges**:
+      ✅ DONE 2026-08-15: etsi-report-site.py emits badge-<cell>.json per
+      cell (label=cell, message "ok/total", green on gate PASS / red
+      otherwise) next to badge.json, and now AUTO-DISCOVERS cells from the
+      bundle when STORES is unset — so the Pages fold renders whatever the
+      newest matrix ran (an old 3-cell bundle keeps rendering green instead
+      of inventing missing cells). README gets the six-badge live row
+      (memory/file/postgres/timescale/postgres-nats/timescale-nats), each
+      linking /reports/latest/. Validated: script run over 6-cell and old
+      3-cell synthetic bundles — correct badges both ways.
+      dev/etsi-report-site.py additionally emits
       badge-<store>.json per cell ("1652/1652" green / "1640/1652" red)
       next to the combined badge.json; README gets one shields endpoint
       badge per cell (file, memory, postgres, timescale, postgres-nats,

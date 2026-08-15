@@ -4,14 +4,18 @@
 Usage: etsi-report-site.py <cells-dir> <out-dir>
   <cells-dir> is the ETSI-matrix-results bundle layout: one
   ETSI-cell-<store>/ per store (run-summary.md, gate-status.txt,
-  failures.csv, per-suite robot report.html/log.html). Stores come from
-  STORES (default "file postgres timescale"); a missing cell renders red.
+  failures.csv, per-suite robot report.html/log.html). Cells come from the
+  STORES env when set (a listed-but-missing cell renders red); otherwise
+  they are AUTO-DISCOVERED from the bundle, so the Pages fold renders
+  whatever the newest matrix actually ran — a 3-cell bundle from before the
+  six-cell matrix still renders green instead of inventing missing cells.
 
 Writes <out-dir>/:
   index.html      per-store pass/total + per-suite rows, each linking the
                   store's Robot report/log for that suite — the stats are
                   ON the page, nothing to download
-  badge.json      shields.io endpoint schema ("ETSI 3×1652 green" / red)
+  badge.json      shields.io endpoint schema ("ETSI 6×1652 green" / red)
+  badge-<cell>.json  one endpoint badge PER CELL ("1652/1652", 08-15b item 6)
   <store>/<suite>/report.html|log.html   copied from the bundle
 """
 import glob
@@ -22,11 +26,24 @@ import re
 import shutil
 import sys
 
-STORES = (os.environ.get("STORES") or "file postgres timescale").split()
-
 cells = sys.argv[1] if len(sys.argv) > 1 else "cells"
 out = sys.argv[2] if len(sys.argv) > 2 else "site/reports/latest"
 os.makedirs(out, exist_ok=True)
+
+PREFERRED = "memory file postgres timescale postgres-nats timescale-nats".split()
+if os.environ.get("STORES"):
+    STORES = os.environ["STORES"].split()
+else:
+    found = [
+        os.path.basename(d)[len("ETSI-cell-"):]
+        for d in glob.glob(f"{cells}/ETSI-cell-*")
+        if os.path.isdir(d)
+    ]
+    STORES = [s for s in PREFERRED if s in found] + sorted(
+        s for s in found if s not in PREFERRED
+    )
+    if not STORES:  # empty/absent bundle: keep the historical shape (renders red)
+        STORES = ["file", "postgres", "timescale"]
 
 
 def find(d, name):
@@ -79,6 +96,22 @@ json.dump(
     },
     open(os.path.join(out, os.pardir, "badge.json"), "w"),
 )
+
+# 08-15b item 6: one shields endpoint badge PER CELL next to the combined
+# one — the README's live "file 1652/1652" row reads these.
+for st, gate, suites in stores:
+    ok = sum(o for _, o, _, _, _ in suites)
+    tot = sum(o + f + sk for _, o, f, sk, _ in suites)
+    green = gate == "PASS"
+    json.dump(
+        {
+            "schemaVersion": 1,
+            "label": st,
+            "message": f"{ok}/{tot}" if tot else gate.lower(),
+            "color": "brightgreen" if green else "red",
+        },
+        open(os.path.join(out, os.pardir, f"badge-{st}.json"), "w"),
+    )
 
 rows = []
 for st, gate, suites in stores:

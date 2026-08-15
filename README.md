@@ -8,6 +8,17 @@
 [![ETSI conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fcoverage-badge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/)
 
+Per-cell ETSI results, live from the latest matrix run on `master`
+(single-broker cells, plus the two `-nats` cells where the 10-container
+role-split fleet rolls continuously under the whole suite):
+
+[![memory](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-memory.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![file](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-file.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![postgres](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-postgres.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![timescale](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-timescale.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![postgres-nats](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-postgres-nats.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![timescale-nats](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-timescale-nats.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+
 
 
 Antares is the brightest star in the Scorpius constellation — and a rust-red
