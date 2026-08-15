@@ -99,27 +99,51 @@ wait_healthy() { # $1=service $2=deadline-secs
 }
 
 SERVICES="${ROLL_SERVICES:-$DEFAULT_SERVICES}"
-for svc in $SERVICES; do
+
+roll_one() { # $1=service — its group peers must be healthy before it goes down
+  local svc=$1 port group t0
   port=$(port_of "$svc")
+  group=$(group_of "$svc")
   echo "=== rolling $svc (:$port) ==="
 
   # Sanity: every OTHER member of this role group must be healthy before we
   # take this one down, or the roll turns into a per-role outage.
-  group=$(group_of "$svc")
   for other in $SERVICES; do
     [ "$other" = "$svc" ] && continue
     [ "$(group_of "$other")" = "$group" ] || continue
-    wait_healthy "$other" 30 || { echo "peer $other unhealthy — aborting roll"; exit 1; }
+    wait_healthy "$other" 30 || { echo "peer $other unhealthy — aborting roll"; return 1; }
   done
 
   t0=$SECONDS
   "${COMPOSE[@]}" stop "$svc"          # SIGTERM -> K1 drain -> clean exit
   "${COMPOSE[@]}" up -d "$svc"         # recreate on the current image
-  wait_healthy "$svc" 60
+  wait_healthy "$svc" 60 || return 1
   # api only: haproxy needs `rise 2` consecutive passing checks (200 ms apart)
   # before it routes here again; wait that out so the next stop never leaves
   # 0 backends. Workers are not behind the LB — no rise window to wait.
   if [ "$group" = api ]; then sleep 1; fi
   echo "=== $svc rolled in $((SECONDS - t0))s ==="
-done
+}
+
+# ROLL_PARALLEL (default: on for the roles fleet, off for the HA pair):
+# each role GROUP rolls independently and CONCURRENTLY — k8s rolls its
+# Deployments the same way — while inside a group members still go one at a
+# time, so the per-group never-0-healthy invariant is untouched. Cycle time
+# collapses from the sum of all pods to the slowest group's pair.
+if [ "${ROLL_PARALLEL:-${ROLES_SPLIT:-0}}" = 1 ]; then
+  groups=$(for s in $SERVICES; do group_of "$s"; done | awk '!seen[$0]++')
+  pids=()
+  for g in $groups; do
+    ( for svc in $SERVICES; do
+        [ "$(group_of "$svc")" = "$g" ] || continue
+        roll_one "$svc" || exit 1
+      done ) &
+    pids+=($!)
+  done
+  rc=0
+  for p in "${pids[@]}"; do wait "$p" || rc=1; done
+  [ "$rc" = 0 ] || { echo "parallel roll FAILED"; exit 1; }
+else
+  for svc in $SERVICES; do roll_one "$svc" || exit 1; done
+fi
 echo "rolling update complete"
