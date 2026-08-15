@@ -394,31 +394,40 @@ attribute-overlap and datasetId-common-value match conditions. Every case
 here asserts the mock records ZERO requests (the routing decision itself
 is the subject under test).
 
-- [ ] 51. Attribute-scope mismatch: request `?attrs=speed`, RegistrationInfo
+Evidence (51-58): suite fork commit (IDR_07) 8/8 green on run-five
+2026-08-15; cases 51/53 ran red -> broker fix edc57cc (query-side attrs into
+CsrSpec per the 5.12 attribute conditions + the should-level datasetId
+common-value gate, red-first units in id_routing_5_12.rs); case 54 pins the
+offset-timestamp edge as 400 at input (4.6.3 Z-only), closing the audited
+string-compare path; case 52 red was a vendored-stub artifact (attrs-aware
+stub needs the attribute in its body), fixed in the TP. Full Routing tree
+58/58.
+
+- [x] 51. Attribute-scope mismatch: request `?attrs=speed`, RegistrationInfo
       lists only `propertyNames:["fillLevel"]` → CSR not matched, NOT
       forwarded even though the idPattern matches (5.12 attribute conditions).
-- [ ] 52. Over-pruning guard (the opposite bound): RegistrationInfo with
+- [x] 52. Over-pruning guard (the opposite bound): RegistrationInfo with
       EMPTY propertyNames/relationshipNames (entities only) DOES match any
       `?attrs=` — must still forward (5.12: empty combination = match).
-- [ ] 53. datasetId disjoint: request `datasetId=urn:a`, CSR
+- [x] 53. datasetId disjoint: request `datasetId=urn:a`, CSR
       `datasetId:["urn:b"]` → not matched, no forward; only ONE side
       specifying datasetId → match, forwarded (5.12, should-level — note it).
-- [ ] 54. Expired CSR (`expiresAt` in the past) never matches: retrieve/query
+- [x] 54. Expired CSR (`expiresAt` in the past) never matches: retrieve/query
       with a matching id does not dial it, discovery omits it (5.2.9;
       reg_expired csource.rs:604 — also pins the audited L-finding that
       string-compared timestamps; use a non-Z offset timestamp as the edge).
-- [ ] 55. Operation gating on reads: CSR with `operations:["createEntity"]`
+- [x] 55. Operation gating on reads: CSR with `operations:["createEntity"]`
       (or updateOps only) must NOT be dialed for `GET /entities/{id}` or
       query even when the idPattern matches (4.3.6.1 p.41 guaranteed-to-fail
       rule, 4.20; query_op gate 826afac).
-- [ ] 56. Auxiliary CSR never receives provision ops: create/update/delete
+- [x] 56. Auxiliary CSR never receives provision ops: create/update/delete
       with a matching id stays local, auxiliary mock records zero requests;
       the SAME auxiliary CSR is consulted for retrieve (4.3.6.2 —
       consumption-only, both halves asserted).
-- [ ] 57. Tenant separation: CSR registered under tenant A must not route
+- [x] 57. Tenant separation: CSR registered under tenant A must not route
       tenant B's request for a matching id — B gets a clean 404, zero mock
       hits (4.3.6.4 "each Tenant … considered separately", 4.14).
-- [ ] 58. Previously-encountered exclusion: a request arriving WITH a Via /
+- [x] 58. Previously-encountered exclusion: a request arriving WITH a Via /
       encountered-sources listing containing the CSR's contextSourceAlias →
       that CSR shall not match, no re-forward (4.3.6.4; sharpens case 33
       from the receiving broker's side).
