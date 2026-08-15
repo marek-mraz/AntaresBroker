@@ -198,10 +198,19 @@ rolling worker pods).
       "Pages deploys are manual-only" decision — flag it in the commit
       and keep wasm.yml's manual dispatch working for playground-only
       deploys.
-- [ ] 8. **README + runbook updated**: the badge row (item 6), a
-      role-split deployment paragraph (10-container shape, what rolls,
-      what the cells prove), docs/operations.md gains the roles fleet;
-      negative check — no README claim a cell does not actually gate.
+- [x] 8. **README + runbook updated**:
+      ✅ DONE 2026-08-15: README — role-split fleet section (10-container
+      shape, smoke + roll commands, what the -nats cells prove) + ETSI
+      section rewritten from "4 × 8 / 32 cells" to the six-cell truth with
+      the local repro commands; badge row landed in item 6.
+      docs/operations.md — roles overlay in Deploy, ROLES_SPLIT roll
+      procedure with measured timings, proofs table rows for the six-cell
+      matrix + role-pair exactly-once e2e. claude.md §0.3/§2 living
+      references updated 4×8 → six cells. Negative check done: ci.yml
+      `cargo test --workspace` runs nats_e2e (incl. the new pair e2e) with
+      live PG+NATS per push, and ci.yml calls etsi-matrix.yml — every
+      claimed gate exists; no stale 4×8/32-cell claim remains in
+      README/operations.
 
 ### The /goal prompt — copy-paste to run this campaign
 

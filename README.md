@@ -118,6 +118,26 @@ docker compose -f compose-files/docker-compose.yml up          # one broker, pos
 docker compose -f compose-files/docker-compose-ha.yml up       # 2 replicas + haproxy + NATS (the rolling-update shape)
 ```
 
+**Role-split fleet** (the scale-out shape): 5 roles × 2 replicas = 10 broker
+containers from the same binary — `api`×2 behind haproxy (the only pods
+serving the NGSI-LD API), `matcher`×2 + `notifier`×2 on one shared JetStream
+durable, `temporal`×2 and `registry`×2 as ops-only pods — one shared
+Postgres, `ANTARES_BUS=nats`:
+
+```bash
+STORE=postgres docker compose -f compose-files/docker-compose-etsi.yml \
+  -f compose-files/docker-compose-roles.yml --profile db up -d
+dev/roles-smoke.sh        # fleet ready + notify chain fires EXACTLY once
+STORE=postgres ROLES_SPLIT=1 bash dev/rolling-update.sh   # roll all 10, role-group order
+```
+
+This is the shape the CI `postgres-nats`/`timescale-nats` cells gate on
+every push: the full ETSI suite through the LB while the fleet rolls
+continuously in role-group order (never 0 healthy pods per role), plus the
+`nats_e2e` pair semantics — one change → exactly one notification across
+the duplicated matcher/notifier pods, single-winner interval firings,
+exactly-once temporal recording.
+
 Tags: `:dev` = latest green master, `:dev-<run>` = a specific CI run,
 `:latest` = latest release. Images are multi-arch (linux/amd64 + linux/arm64).
 The amd64 image is the exact bytes the ETSI gates tested; the arm64 half is
@@ -186,12 +206,16 @@ STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # single suite/mode while 
 ```
 
 **Locally: one store mode — the one you are touching.** A dev box runs the
-cells serially, so all four modes cost ~4× wall-clock for a signal CI already
-produces. **CI runs all four modes in parallel** (`.github/workflows/ci.yml`,
-a 4 × 8 store × suite matrix, `fail-fast: false`, one image build feeding
-every cell) and is the authority; `:latest` publishes only when all 32 cells
-are green. `STORE=all dev/etsi-local.sh` reproduces the full matrix locally
-when you actually need it.
+cells serially, so every mode costs its own wall-clock for a signal CI
+already produces. **CI runs six cells in parallel per push**
+(`.github/workflows/ci.yml` → `etsi-matrix.yml`: memory, file, postgres,
+timescale single-broker, plus `postgres-nats`/`timescale-nats` — the
+10-container role-split fleet rolling continuously under the whole suite —
+`fail-fast: false`, one image build feeding every cell) and is the
+authority; publication gates on every cell green. `STORE=all
+dev/etsi-local.sh` reproduces the store matrix locally when you actually
+need it; `STORE=postgres ROLES_SPLIT=1 ROLL_DURING_RUN=1 dev/etsi-pipeline.sh`
+reproduces a rolling-fleet cell.
 
 The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
 is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same

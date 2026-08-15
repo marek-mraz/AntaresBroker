@@ -10,8 +10,11 @@ is named inline).
 infrastructure; `file` needs a mounted volume; `postgres`/`timescale` need
 `ANTARES_DATABASE_URL`. Compose stacks in `compose-files/`
 (`docker-compose.yml` one broker + PostGIS; `docker-compose-ha.yml` adds a
-second broker1 replica + haproxy + NATS — the rolling-update shape; both are
-what CI's ETSI cells run).
+second broker1 replica + haproxy + NATS — the rolling-update shape;
+`docker-compose-roles.yml` is the TRUE role split: 5 roles × 2 replicas =
+10 broker containers — api×2 behind haproxy, matcher/notifier/temporal/
+registry ×2 as ops-only worker pods — one shared PG, `ANTARES_BUS=nats`;
+these stacks are what CI's ETSI cells run).
 
 **Kubernetes (reference manifests, `deploy/k8s/`):** `namespace.yaml`,
 `nats.yaml` (3-replica JetStream), `postgres-dev.yaml` (dev-only single PG;
@@ -64,11 +67,20 @@ rise window before the next instance. Preconditions and env are documented
 in the script header. **file mode cannot roll** (redb allows one process per
 volume — K10): use a `Recreate` strategy there, as `broker-file.yaml` does.
 
+**Role fleet:** `ROLES_SPLIT=1 dev/rolling-update.sh` rolls all 10 pods of
+the role-split stack in role-group order — the same-group peer must be
+healthy before its twin goes down, so no role ever has 0 live pods (api
+pods gate on `/q/health` + the LB rise window; workers on `/q/ready`).
+Measured in-sandbox 2026-08-15: full roll ≈ 43 s (the api pod pays the
+~21 s drain, workers ~2 s each), 52/52 LB requests answered 200 across the
+whole roll.
+
 Proven: full.yml's `etsi-roll` job and the weekly `roll-weekly` workflow run
 the FULL ETSI suite through the LB while the replicas roll in a loop — the
-suite has no retries, so any red TP is a real drain bug. On k8s the same
-contract holds via the readiness probe + `terminationGracePeriodSeconds`
-exceeding drain delay + deadline.
+suite has no retries, so any red TP is a real drain bug. The per-push
+`postgres-nats`/`timescale-nats` matrix cells do the same over the
+10-container role fleet. On k8s the same contract holds via the readiness
+probe + `terminationGracePeriodSeconds` exceeding drain delay + deadline.
 
 ## State reset (test/staging discipline)
 
@@ -82,8 +94,9 @@ maps survive an external clean).
 
 | Claim | Workflow |
 |---|---|
-| ETSI conformance, 4 stores × 8 suites | ci.yml matrix (every push); etsi-matrix.yml bundle feeds [the report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) |
-| Zero-downtime rolling update | full.yml `etsi-roll` (tags/dispatch) + `roll-weekly` (Tue 04:17 UTC) |
+| ETSI conformance, six cells (memory/file/postgres/timescale + the two rolling role-fleet cells) × 8 suites | ci.yml → etsi-matrix.yml (every push); the bundle feeds [the report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) + per-cell badges |
+| Zero-downtime rolling update | full.yml `etsi-roll` (tags/dispatch) + `roll-weekly` (Tue 04:17 UTC) + the per-push `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
+| Role-pair exactly-once semantics (duplicated matcher/notifier/temporal/registry pods) | ci.yml nats job (`nats_e2e::role_pairs_exactly_once_semantics`, live PG + NATS) |
 | NATS bus + role split e2e | ci.yml nats job (`nats_e2e`, live PG + NATS) |
 | k8s manifests boot | full.yml `k8s-manifests` kind smoke |
 | Coverage | etsi-coverage.yml (Mon 04:41 UTC) → merged lcov/html on the report page |
