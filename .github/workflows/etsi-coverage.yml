@@ -125,8 +125,13 @@ jobs:
             lcov --list merged.info --ignore-errors inconsistent
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Render the merged HTML report
+        # published under /reports/coverage/ by the Pages deploy (item 8)
+        run: genhtml merged.info -o html --ignore-errors inconsistent
       - uses: actions/upload-artifact@v4
         with:
           name: etsi-coverage-merged
-          path: merged.info
+          path: |
+            merged.info
+            html
           retention-days: 90
