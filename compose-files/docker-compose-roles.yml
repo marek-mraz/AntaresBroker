@@ -52,6 +52,12 @@ x-worker-env: &worker-env
   ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
   ANTARES_EGRESS_ALLOW_PRIVATE: "true"
   ANTARES_SWEEP_SECS: "2"
+  # Shorter rolls (user ask 2026-08-15): behind haproxy an api pod always
+  # pays the FULL drain deadline (idle keep-alive conns never close), so the
+  # default 20 s dominates roll time. 10 s is the safe floor — it must stay
+  # above the 8 s federation egress deadline or a roll can cut a live
+  # forwarded query. stop_grace_period 30 s still exceeds delay + deadline.
+  ANTARES_DRAIN_DEADLINE_SECS: "10"
 
 services:
   nats:
@@ -67,6 +73,7 @@ services:
       ANTARES_ROLES: api
       ANTARES_BUS: nats
       ANTARES_NATS_URL: nats://localhost:4222
+      ANTARES_DRAIN_DEADLINE_SECS: "10"
     depends_on: [nats]
     stop_grace_period: 30s
 
