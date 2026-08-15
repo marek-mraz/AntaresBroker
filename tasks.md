@@ -226,26 +226,29 @@ by a red TP are fixed red-first per §0.3 (one clause = one commit).
 
 ### IOP_EXT_IDR_01 — retrieve-by-id routing via EntityInfo id/idPattern (B1→B2)
 
-- [ ] 1. Anchored ADR prefix pattern routes `GET /entities/{id}` B1→B2;
+Evidence (1-10): suite fork commit a2cbe01, IOP_EXT_IDR_01.robot 10/10 green
+on the run-five memory fleet 2026-08-15; fallibility cycle on case 03.
+
+- [x] 1. Anchored ADR prefix pattern routes `GET /entities/{id}` B1→B2;
       entity exists only in B2 → 200 via B1; `local=true` still 404 (5.7.1.4, 5.12).
-- [ ] 2. Non-matching razidlo (`sk_presov`) → B1 404s WITHOUT contacting B2 —
+- [x] 2. Non-matching razidlo (`sk_presov`) → B1 404s WITHOUT contacting B2 —
       mock context source asserts ZERO forwarded requests (5.12; the pruning claim).
-- [ ] 3. Exact `EntityInfo.id`, no pattern: that one id routes; a sibling id
+- [x] 3. Exact `EntityInfo.id`, no pattern: that one id routes; a sibling id
       under the same prefix is NOT forwarded (5.12 cond 2).
-- [ ] 4. UNanchored pattern `sk_banskabystrica:odpady` matches by substring
+- [x] 4. UNanchored pattern `sk_banskabystrica:odpady` matches by substring
       (regex find) — id carrying it mid-URN forwards; documents why ADR-001
       mandates `^...$` (5.2.8, 5.12).
-- [ ] 5. EntityInfo with type only (no id/idPattern) matches every id of that
+- [x] 5. EntityInfo with type only (no id/idPattern) matches every id of that
       type (5.12 cond 1).
-- [ ] 6. idPattern matches but EntityInfo type ≠ requested type → NOT
+- [x] 6. idPattern matches but EntityInfo type ≠ requested type → NOT
       forwarded (5.12 type-selector gate).
-- [ ] 7. Multiple EntityInfo elements in one RegistrationInfo — any-of: id
+- [x] 7. Multiple EntityInfo elements in one RegistrationInfo — any-of: id
       matching only the second element still forwards (5.12).
-- [ ] 8. Two CSRs with disjoint razidlo prefixes → retrieve dials EXACTLY one
+- [x] 8. Two CSRs with disjoint razidlo prefixes → retrieve dials EXACTLY one
       endpoint; the other mock records zero hits (5.12, 4.3.6.2).
-- [ ] 9. Invalid regex in idPattern → 400 BadRequestData at registration,
+- [x] 9. Invalid regex in idPattern → 400 BadRequestData at registration,
       nothing registered (5.2.8; csource.rs:143 already validates — assert).
-- [ ] 10. Case sensitivity: pattern `sk_banskabystrica` does not match an id
+- [x] 10. Case sensitivity: pattern `sk_banskabystrica` does not match an id
       containing `SK_BanskaBystrica` (IEEE 1003.2; ADR lowercase rule).
 
 ### IOP_EXT_IDR_02 — query-entities routing (query id/idPattern × CSR id/idPattern)
