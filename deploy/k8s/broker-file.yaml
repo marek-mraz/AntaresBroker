@@ -37,6 +37,10 @@ spec:
     metadata:
       labels: { app: antares-file }
     spec:
+      # P0-1: the `antares*` Services make kubelet inject ANTARES_PORT/
+      # ANTARES_SERVICE_* into every pod — fatal under the unknown-key
+      # check. Belt at main.rs skips the injected shapes; this is braces.
+      enableServiceLinks: false
       # K1: must exceed ANTARES_DRAIN_DELAY_MS + ANTARES_DRAIN_DEADLINE_SECS,
       # or the kubelet turns a drain into a kill.
       terminationGracePeriodSeconds: 30
@@ -50,7 +54,7 @@ spec:
           ports:
             - { containerPort: 9090 }
           readinessProbe:
-            httpGet: { path: /q/health, port: 9090 }
+            httpGet: { path: /q/ready, port: 9090 }
             periodSeconds: 2
           livenessProbe:
             httpGet: { path: /q/health, port: 9090 }

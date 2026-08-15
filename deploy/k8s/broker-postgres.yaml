@@ -34,6 +34,10 @@ spec:
     metadata:
       labels: { app: antares, role: api }
     spec:
+      # P0-1: the `antares*` Services make kubelet inject ANTARES_PORT/
+      # ANTARES_SERVICE_* into every pod — fatal under the unknown-key
+      # check. Belt at main.rs skips the injected shapes; this is braces.
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30 # K1: > drain delay + deadline
       # §16.5 runtime hardening: non-root (image is uid 65532), read-only
       # rootfs (postgres mode writes nothing there; /tmp is a tmpfs), all caps
@@ -75,7 +79,7 @@ spec:
           ports:
             - { containerPort: 9090 }
           readinessProbe:
-            httpGet: { path: /q/health, port: 9090 }
+            httpGet: { path: /q/ready, port: 9090 }
             periodSeconds: 1
           livenessProbe:
             httpGet: { path: /q/health, port: 9090 }
@@ -101,6 +105,10 @@ spec:
     metadata:
       labels: { app: antares, role: worker }
     spec:
+      # P0-1: the `antares*` Services make kubelet inject ANTARES_PORT/
+      # ANTARES_SERVICE_* into every pod — fatal under the unknown-key
+      # check. Belt at main.rs skips the injected shapes; this is braces.
+      enableServiceLinks: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -133,7 +141,7 @@ spec:
           ports:
             - { containerPort: 9090 } # health only; no Service routes here
           readinessProbe:
-            httpGet: { path: /q/health, port: 9090 }
+            httpGet: { path: /q/ready, port: 9090 }
             periodSeconds: 2
           livenessProbe:
             httpGet: { path: /q/health, port: 9090 }

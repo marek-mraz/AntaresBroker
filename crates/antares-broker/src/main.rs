@@ -69,6 +69,35 @@ const KNOWN_KEYS: &[&str] = &[
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// §14.3 unknown-config-is-fatal, minus what the platform injects (audit
+/// P0-1): a Service named `antares*` makes kubelet write ANTARES_PORT,
+/// ANTARES_PORT_9090_TCP*, ANTARES_SERVICE_* (and the antares-file /
+/// antares-api variants) into every pod, and treating those as typos put the
+/// shipped manifests into 100% CrashLoopBackOff. The manifests also set
+/// enableServiceLinks: false — this check is the belt for clusters that
+/// re-enable links or add their own Services.
+fn unknown_config_key(key: &str) -> bool {
+    if !key.starts_with("ANTARES_") || key.starts_with("ANTARES_TEST_") {
+        return false;
+    }
+    if KNOWN_KEYS.contains(&key) {
+        return false;
+    }
+    // kubelet service-link shapes for the Services OUR manifests ship
+    // (antares, antares-file, antares-api, antares-worker): {NAME}_PORT,
+    // {NAME}_PORT_<n>_<proto>*, {NAME}_SERVICE_*. Only those exact name
+    // infixes are exempt — an arbitrary ANTARES_*-shaped var stays a fatal
+    // typo (§14.3), and foreign Services are covered by
+    // enableServiceLinks: false in the manifests.
+    let rest = &key["ANTARES_".len()..];
+    let injected = ["", "FILE_", "API_", "WORKER_"].iter().any(|infix| {
+        rest.strip_prefix(infix)
+            .is_some_and(|t| t == "PORT" || t.starts_with("PORT_") || t.starts_with("SERVICE_"))
+    });
+    !injected
+}
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // K12: tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
@@ -81,10 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // any broker a test spawns. Reserving the prefix here beats making every
     // spawn site remember an env_remove allowlist.
     for (key, _) in std::env::vars() {
-        if key.starts_with("ANTARES_")
-            && !key.starts_with("ANTARES_TEST_")
-            && !KNOWN_KEYS.contains(&key.as_str())
-        {
+        if unknown_config_key(&key) {
             return Err(format!("unknown config key {key} (known: {KNOWN_KEYS:?})").into());
         }
     }
@@ -422,9 +448,17 @@ async fn run(
     // close last.
     let draining = state.draining.clone();
     let store_for_drain = state.store.clone();
+    // P0-4: only the api role serves the NGSI-LD surface — a worker pod
+    // exposes health/ready/metrics and nothing else (a subscription created
+    // on a worker would bypass the roles.api KV sync and never notify).
+    let routed = if roles.api {
+        antares_api::router(state)
+    } else {
+        antares_api::ops_router(state)
+    };
     let app = tower::Layer::layer(
         &tower_http::normalize_path::NormalizePathLayer::trim_trailing_slash(),
-        antares_api::router(state),
+        routed,
     );
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -496,4 +530,42 @@ fn serve(
             .await;
         inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
+}
+
+#[cfg(test)]
+mod config_key_tests {
+    use super::unknown_config_key;
+
+    /// P0-1: kubelet-injected service links must never be fatal; real typos
+    /// must stay fatal.
+    #[test]
+    fn kubelet_service_links_are_not_typos() {
+        for k in [
+            "ANTARES_PORT",
+            "ANTARES_PORT_9090_TCP",
+            "ANTARES_PORT_9090_TCP_ADDR",
+            "ANTARES_SERVICE_HOST",
+            "ANTARES_SERVICE_PORT",
+            "ANTARES_API_SERVICE_HOST",
+            "ANTARES_FILE_PORT_9090_TCP_PROTO",
+        ] {
+            assert!(!unknown_config_key(k), "{k} is platform-injected");
+        }
+        for k in [
+            "ANTARES_HTTP_PORT",
+            "ANTARES_STORE",
+            "ANTARES_TEST_ANYTHING",
+        ] {
+            assert!(!unknown_config_key(k), "{k} is known/reserved");
+        }
+        assert!(
+            unknown_config_key("ANTARES_STROE"),
+            "a real typo stays fatal (§14.3)"
+        );
+        assert!(
+            unknown_config_key("ANTARES_HTPT_PORT"),
+            "a typo'd *_PORT var is NOT a service link"
+        );
+        assert!(unknown_config_key("ANTARES_BOGUS_FLAG"));
+    }
 }
