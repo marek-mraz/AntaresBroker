@@ -253,21 +253,26 @@ on the run-five memory fleet 2026-08-15; fallibility cycle on case 03.
 
 ### IOP_EXT_IDR_02 — query-entities routing (query id/idPattern × CSR id/idPattern)
 
-- [ ] 11. `?id=A,B` where only A matches the CSR pattern → forwarded query
+Evidence (11-19): suite fork commit (IDR_02) 9/9 green on run-five 2026-08-15;
+found TWO broker gaps, fixed red-first in 416c274 (query-side idPattern into
+CsrSpec; forwarded id-list narrowing via FedReg::can_match_id) with
+tests/id_routing_5_12.rs 3/3 and antares-api suite green.
+
+- [x] 11. `?id=A,B` where only A matches the CSR pattern → forwarded query
       narrowed to A (mock asserts), B answered locally (5.7.2.4, 4.3.6.1).
-- [ ] 12. Query `?idPattern=` matching `EntityInfo.id` → forwarded (5.12 cond 4).
-- [ ] 13. Query pattern + CSR pattern both present → assumed compatible,
+- [x] 12. Query `?idPattern=` matching `EntityInfo.id` → forwarded (5.12 cond 4).
+- [x] 13. Query pattern + CSR pattern both present → assumed compatible,
       forwarded (5.12).
-- [ ] 14. Query pattern anchored to a foreign razidlo vs CSR ids of another
+- [x] 14. Query pattern anchored to a foreign razidlo vs CSR ids of another
       razidlo → NOT forwarded, zero mock hits (5.12).
-- [ ] 15. Type-only query against an id-restricted CSR → forwarded (broker
+- [x] 15. Type-only query against an id-restricted CSR → forwarded (broker
       cannot exclude; assert current Antares behaviour and cite 5.12).
-- [ ] 16. Fan-out merge: 3 brokers, one razidlo each; type query via B1
+- [x] 16. Fan-out merge: 3 brokers, one razidlo each; type query via B1
       returns the exact union, no duplicate ids (5.7.2.4, 4.5.5).
-- [ ] 17. `local=true` query never forwards regardless of pattern match (5.5.13).
-- [ ] 18. Dark entity: exists ONLY behind the CSR; query via B1 includes it;
+- [x] 17. `local=true` query never forwards regardless of pattern match (5.5.13).
+- [x] 18. Dark entity: exists ONLY behind the CSR; query via B1 includes it;
       `local=true` query does not (4.3.6.2).
-- [ ] 19. CSR discovery `GET /csourceRegistrations?id=<urn>` returns only CSRs
+- [x] 19. CSR discovery `GET /csourceRegistrations?id=<urn>` returns only CSRs
       whose EntityInfo id/idPattern matches; `?idPattern=` matches
       EntityInfo.id too (5.10.2, 5.12).
 
