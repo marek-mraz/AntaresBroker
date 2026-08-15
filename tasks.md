@@ -102,7 +102,18 @@ rolling worker pods).
       serve ops endpoints only since P0-4). Bring-up green: every
       container healthy, one entity create via the LB notifies through
       the split matcher/notifier chain (smoke script, not a TP).
-- [ ] 2. **Role-pair semantics verified red-first** (the F7 class): with
+- [x] 2. **Role-pair semantics verified red-first** (the F7 class):
+      ✅ DONE 2026-08-15 (item-1 commit 04f9261; this item's test commit
+      below): nats_e2e.rs role_pairs_exactly_once_semantics — full 10-process
+      fleet (api/matcher/notifier/temporal/registry ×2 each) vs live PG+NATS:
+      one change → EXACTLY one notification (count==1 after settle);
+      timeInterval=2 over 9 s fires 2..=6 single-winner (double-fire = ≥8);
+      CSR via api-1 makes api-2 dial the source (F5 mirror consistent across
+      the api pair — registry-role pods are ops-only, per the overlay's
+      honest note); temporal write via either api records exactly 2 instances
+      (negative recheck after settle); P0-4 negative (worker rejects API
+      writes). Green first run (semantics already held); fallibility by
+      invert→FAILED→restore on the exactly-once count; full nats_e2e 5/5.
       2 matchers on the shared durable a notification fires EXACTLY once
       (no duplicate delivery from the pair — negative assertion on the
       receiver count); interval subscriptions fire single-winner across

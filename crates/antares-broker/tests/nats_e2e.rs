@@ -131,7 +131,9 @@ fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
                         Err(_) => break,
                     }
                 }
-                let body = String::from_utf8_lossy(&buf[header_end..]).to_string();
+                // record request line + headers along with the body so tests
+                // can assert WHICH endpoint/path was dialed, not only payloads
+                let body = String::from_utf8_lossy(&buf[..]).to_string();
                 sink.lock().expect("sink").push(body);
                 let _ = stream.write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -456,6 +458,266 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
     wait_for("outbox drained", 30, || {
         store.outbox_peek(1).expect("peek").is_empty()
     });
+}
+
+/// Decode an HTTP response body (Content-Length or chunked) from a raw
+/// response string, for the few assertions that must PARSE a payload.
+fn response_json(raw: &str) -> Option<serde_json::Value> {
+    let (headers, body) = raw.split_once("\r\n\r\n")?;
+    let body = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        let mut out = String::new();
+        let mut rest = body;
+        loop {
+            let (size_line, tail) = rest.split_once("\r\n")?;
+            let size = usize::from_str_radix(size_line.trim(), 16).ok()?;
+            if size == 0 {
+                break;
+            }
+            out.push_str(tail.get(..size)?);
+            rest = tail.get(size + 2..)?; // skip chunk + CRLF
+        }
+        out
+    } else {
+        body.to_string()
+    };
+    serde_json::from_str(&body).ok()
+}
+
+/// The 5-role × 2-replica fleet (docker-compose-roles.yml shape): every
+/// role-PAIR claim asserted with its negative, exactly the F7 class —
+/// duplicated consumers must not duplicate work.
+///   matcher×2 + notifier×2: one change → exactly ONE notification (the four
+///     pods share the "matcher" durable; a duplicate means two consumers
+///     processed one change);
+///   matcher pair ticking intervals: firings single-winner by row-lock claim
+///     (§3.1.6) — a doubled rate means the claim is broken;
+///   registry×2 present: the F5 registration mirror stays consistent across
+///     BOTH api pods (a CSR registered via api-1 makes api-2 dial the source);
+///   temporal×2 present: auto-recording is synchronous in the api write path
+///     (K8) — a write through either api pod records exactly ONE instance;
+///   P0-4 negative: worker pods serve ops endpoints only, never the API.
+#[test]
+fn role_pairs_exactly_once_semantics() {
+    let _serial = serial();
+    let (Ok(db), Ok(nats)) = (
+        std::env::var("ANTARES_TEST_DATABASE_URL"),
+        std::env::var("ANTARES_TEST_NATS_URL"),
+    ) else {
+        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL / ANTARES_TEST_NATS_URL not set");
+        return;
+    };
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tenant = format!("pair{run}");
+
+    let api1 = free_port();
+    let api2 = free_port();
+    let _a1 = start(api1, "api", &db, &nats);
+    let _a2 = start(api2, "api", &db, &nats);
+    let worker_roles = [
+        "matcher", "matcher", "notifier", "notifier", "temporal", "temporal", "registry",
+        "registry",
+    ];
+    let workers: Vec<(u16, Broker)> = worker_roles
+        .iter()
+        .map(|r| {
+            let p = free_port();
+            (p, start(p, r, &db, &nats))
+        })
+        .collect();
+    wait_healthy(api1);
+    wait_healthy(api2);
+    for (p, _) in &workers {
+        wait_healthy(*p);
+        wait_for("worker /q/ready", 30, || {
+            http(*p, "GET", "/q/ready", None, None).starts_with("HTTP/1.1 200")
+        });
+    }
+
+    // P0-4 negative: a worker pod must NOT serve the NGSI-LD surface
+    let (m1, _) = workers[0];
+    let r = http(
+        m1,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(r#"{"id":"urn:x:1","type":"X"}"#),
+    );
+    assert!(
+        !r.contains("HTTP/1.1 2"),
+        "worker pod accepted an API write: {r}"
+    );
+
+    // ---- exactly-once through matcher×2 + notifier×2 ----
+    let (rx_port, seen) = receiver();
+    let sub = format!(
+        r#"{{"id":"urn:ngsi-ld:Subscription:pair:{run}","type":"Subscription",
+            "entities":[{{"type":"PairProbe"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "sub: {resp}");
+    let eid = format!("urn:ngsi-ld:PairProbe:{run}");
+    let resp = http(
+        api2,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&format!(
+            r#"{{"id":"{eid}","type":"PairProbe","temperature":{{"type":"Property","value":21}}}}"#
+        )),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "entity: {resp}");
+    wait_for("the pair notification", 30, || {
+        seen.lock().expect("seen").iter().any(|b| b.contains(&eid))
+    });
+    // settle long enough for any duplicate consumer to have fired too
+    std::thread::sleep(Duration::from_secs(5));
+    let hits = seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .filter(|b| b.contains(&eid))
+        .count();
+    assert_eq!(
+        hits, 1,
+        "expected exactly ONE notification from the matcher/notifier pairs, got {hits}"
+    );
+
+    // ---- interval firings single-winner across the ticking pair ----
+    let iv_sub_id = format!("urn:ngsi-ld:Subscription:pairiv:{run}");
+    let sub = format!(
+        r#"{{"id":"{iv_sub_id}","type":"Subscription","timeInterval":2,
+            "entities":[{{"type":"PairProbe"}}],
+            "notification":{{"endpoint":{{"uri":"http://127.0.0.1:{rx_port}/notify"}}}}}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(&tenant),
+        Some(&sub),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "interval sub: {resp}");
+    std::thread::sleep(Duration::from_secs(9));
+    let firings = seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .filter(|b| b.contains(&iv_sub_id))
+        .count();
+    assert!(
+        (2..=6).contains(&firings),
+        "timeInterval=2 over 9 s must fire ~4 times single-winner; {firings} means \
+         the pair double-fires (§3.1.6 claim broken) or intervals stopped"
+    );
+
+    // ---- registration mirror consistent across BOTH api pods ----
+    let (src_port, src_seen) = receiver();
+    let ftype = format!("FedProbe{run}");
+    let csr = format!(
+        r#"{{"id":"urn:ngsi-ld:ContextSourceRegistration:pair:{run}",
+            "type":"ContextSourceRegistration",
+            "information":[{{"entities":[{{"type":"{ftype}"}}]}}],
+            "endpoint":"http://127.0.0.1:{src_port}"}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(&tenant),
+        Some(&csr),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "csr via api-1: {resp}");
+    // api-2's mirror learns the CSR via the ANTARES_REGISTRY broadcast; the
+    // query is retried until the dial proves it (the mirror lag is the race)
+    wait_for("api-2 dials the registered source", 30, || {
+        let _ = http(
+            api2,
+            "GET",
+            &format!("/ngsi-ld/v1/entities?type={ftype}"),
+            Some(&tenant),
+            None,
+        );
+        src_seen
+            .lock()
+            .expect("src")
+            .iter()
+            .any(|b| b.contains("/entities") && b.contains(&ftype))
+    });
+
+    // ---- temporal auto-recording exactly once per write ----
+    let tid = format!("urn:ngsi-ld:PairTemporal:{run}");
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(&tenant),
+        Some(&format!(
+            r#"{{"id":"{tid}","type":"PairTemporal","temperature":{{"type":"Property","value":1}}}}"#
+        )),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "temporal create: {resp}");
+    let resp = http(
+        api2,
+        "POST",
+        &format!("/ngsi-ld/v1/entities/{tid}/attrs"),
+        Some(&tenant),
+        Some(r#"{"temperature":{"type":"Property","value":2}}"#),
+    );
+    assert!(resp.starts_with("HTTP/1.1 204"), "temporal update: {resp}");
+    // both instances readable immediately (synchronous recording), and
+    // EXACTLY two — a third means a temporal pod double-recorded a write
+    wait_for("two temporal instances, no duplicates", 30, || {
+        let raw = http(
+            api1,
+            "GET",
+            &format!("/ngsi-ld/v1/temporal/entities/{tid}"),
+            Some(&tenant),
+            None,
+        );
+        if !raw.starts_with("HTTP/1.1 200") {
+            return false;
+        }
+        let Some(doc) = response_json(&raw) else {
+            return false;
+        };
+        match doc.get("temperature") {
+            Some(serde_json::Value::Array(a)) => a.len() == 2,
+            _ => false,
+        }
+    });
+    // negative re-check after a settle: the count must STAY 2
+    std::thread::sleep(Duration::from_secs(3));
+    let raw = http(
+        api1,
+        "GET",
+        &format!("/ngsi-ld/v1/temporal/entities/{tid}"),
+        Some(&tenant),
+        None,
+    );
+    let doc = response_json(&raw).expect("temporal body parses");
+    let n = doc
+        .get("temperature")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(
+        n, 2,
+        "temporal instances must stay exactly 2 (create + update); {n} means a \
+         temporal/worker pod re-recorded a write"
+    );
 }
 
 // ---------- NATS outage drill (backlog 08-14 item 4) ----------
