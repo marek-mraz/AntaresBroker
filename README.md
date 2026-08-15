@@ -2,7 +2,11 @@
 
 **An NGSI-LD Context Broker in Rust.**
 
-/goal Tick every untagged box in tasks.md, spec-first, with the ETSI pipeline green in all four store modes as the proof.
+[![ci](https://github.com/marek-mraz/AntaresBroker/actions/workflows/ci.yml/badge.svg)](https://github.com/marek-mraz/AntaresBroker/actions/workflows/ci.yml)
+[![strict](https://github.com/marek-mraz/AntaresBroker/actions/workflows/strict.yml/badge.svg)](https://github.com/marek-mraz/AntaresBroker/actions/workflows/strict.yml)
+[![roll-weekly](https://github.com/marek-mraz/AntaresBroker/actions/workflows/roll-weekly.yml/badge.svg)](https://github.com/marek-mraz/AntaresBroker/actions/workflows/roll-weekly.yml)
+[![ETSI conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fcoverage-badge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/)
 
 
 
@@ -13,21 +17,30 @@ Stellio) and reimplements the broker in Rust with hard resource targets.
 > Status: the full store ladder (`memory → file → postgres → timescale`),
 > NATS JetStream scale-out with split roles, HTTP + MQTT notifications,
 > federation and the security wall are implemented, with the ETSI Robot suite
-> green in every store mode. Architecture:
-> [docs/deep-analysis.md](docs/deep-analysis.md); remaining work and its
+> green in every store mode ([the conformance report, per store, with each
+> run's Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
+> Docs index: [docs/README.md](docs/README.md) · operations runbook:
+> [docs/operations.md](docs/operations.md) · architecture:
+> [docs/deep-analysis.md](docs/deep-analysis.md) · remaining work and its
 > hardware/decision blockers: [tasks.md](tasks.md).
 
-## Targets (v1 contract)
+## Targets (the design contract)
+
+These are the DESIGN targets the architecture is sized for (claude.md §1) —
+what CI proves today is the ETSI conformance matrix, the resource gate and
+the rolling-update drill; the 100M-row load rigs are open hardware tasks
+(tasks.md J4/L1/L2).
 
 | Dimension | Target |
 |---|---|
-| Entities | 10,000,000 in one PostgreSQL |
-| Tenants | 1,000 — **one shared schema**, `tenant_id` + Row-Level Security |
-| Subscriptions | 10,000 active (HTTP + MQTT delivery) |
-| CSource registrations | 1,000+ per tenant (broad federation) |
-| Broker memory | < 500 MB RSS (CI gate: 350 MiB during the ETSI suite) |
+| Entities | 100,000,000 — current-state, one PostgreSQL cluster |
+| Tenants | 10,000 — **one shared schema**, `tenant_id` + Row-Level Security |
+| Subscriptions | 100,000 per broker (HTTP + MQTT delivery) |
+| CSource registrations | 100,000+ per broker — matching stays index-shaped, fan-out bounded |
+| Broker memory | < 500 MB RSS at full load (CI gate: 350 MiB during the ETSI suite) |
 | Postgres memory | < 16 GB, PostGIS required, **TimescaleDB optional** (two temporal modes) |
-| Compliance | ETSI CIM 009 V1.9.1, gated on the ETSI Robot test suite |
+| Compliance | full NGSI-LD (ETSI CIM 009 V1.9.1), gated on the ETSI Robot suite + this repo's extension TPs |
+| HA | stateless broker pods, NATS JetStream, Postgres primary/replica — the rolling-update drill runs weekly (`roll-weekly`) |
 
 ## Architecture in one paragraph
 
@@ -87,6 +100,13 @@ docker run --rm -p 9090:9090 \
   ghcr.io/marek-mraz/antares-broker:dev
 ```
 
+Or the local compose stacks (broker + PostGIS + NATS + mosquitto):
+
+```bash
+docker compose -f compose-files/docker-compose.yml up          # one broker, postgres store
+docker compose -f compose-files/docker-compose-ha.yml up       # 2 replicas + haproxy + NATS (the rolling-update shape)
+```
+
 Tags: `:dev` = latest green master, `:dev-<run>` = a specific CI run,
 `:latest` = latest release. Images are multi-arch (linux/amd64 + linux/arm64).
 The amd64 image is the exact bytes the ETSI gates tested; the arm64 half is
@@ -123,7 +143,8 @@ curl -s localhost:9090/q/health
 ## Observability
 
 ```bash
-curl -s localhost:9090/q/health    # liveness + store mode; 503 DRAINING during a roll
+curl -s localhost:9090/q/health    # liveness + store mode (+ bus state under bus=nats); 503 DRAINING during a roll
+curl -s localhost:9090/q/ready     # readiness: store ping + bus connected — what the k8s readinessProbe polls
 curl -s localhost:9090/q/metrics   # Prometheus text format, antares_ prefixed
 ```
 
@@ -141,6 +162,11 @@ nothing. For `tokio-console` in dev, build the broker with
 `--features console` and `RUSTFLAGS="--cfg tokio_unstable"`.
 
 ## ETSI conformance suite
+
+The latest per-store results are a click away — stats on the page, each
+suite linking Robot's own drill-down:
+**<https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/>** (rebuilt
+with every Pages deploy from the newest `etsi-matrix` bundle).
 
 ```bash
 dev/etsi-local.sh                       # local gate: workspace tests + ONE store mode (default memory)
