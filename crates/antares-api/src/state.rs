@@ -74,6 +74,7 @@ pub struct AppState {
     /// a per-process stamp re-dials a failed source from every pod behind
     /// the LB (fleet run 2026-08-15). Seconds-scale state: broadcast on the
     /// registry stream, deliberately not persisted. `None` in local mode.
+    #[allow(clippy::type_complexity)]
     pub reg_fail_sync: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
     /// Temporal auto-recording happens synchronously in the write path in
     /// EVERY bus mode (K8 lesson — read-your-writes; the F8 recorder
