@@ -8,6 +8,18 @@ rules 8/9); this file holds only OPEN work.
 
 ## The master /goal (scoped by the user 2026-08-15) — copy-paste this
 
+**STATUS 2026-08-15: COMPLETE.** All four tracks done, everything ticked with
+evidence below: (1) routing campaign 58/58 green (full IOP_TP 278/278;
+broker fixes 416c274/8cb8256/0cb0447/edc57cc); (2) NATS health member +
+outage e2e (a754272, live PG+NATS 4/4); (3) roll-weekly.yml (f273950) +
+re-audit with six open findings fixed red-first
+(25c59f2/7584be7/a86054e/c9aa821/8a8b39f, table in the audit doc); (4)
+report page/badges/README/hygiene/docs/coverage
+(2fa0eb2/6b2db61/3d72999/4eae426/d6e01f9). Final local gates: workspace
+tests green (-j 2 fix eb234f4), official HTTP Subscription tree 125/125 vs
+one memory broker (058_x MQTT = mosquitto DNS, CI-only as always).
+Remaining actions are ONLY the "Mac-side / user" list below.
+
 Scope: ONLY (a) the id/idPattern routing campaign, (b) NATS runtime
 proof, (c) production testing across all four store types, (d) the
 rolling-update (rollout) proof, (e) a production-looking repository
