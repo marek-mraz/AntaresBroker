@@ -72,7 +72,7 @@ services:
 
   api2:
     <<: *worker
-    container_name: api2
+    container_name: antares-api2
     volumes: ["api2-data:/data"]
     environment:
       <<: *worker-env
@@ -84,14 +84,14 @@ services:
 
   matcher1:
     <<: *worker
-    container_name: matcher1
+    container_name: antares-matcher1
     environment:
       <<: *worker-env
       ANTARES_ROLES: matcher
       ANTARES_HTTP_PORT: "9110"
   matcher2:
     <<: *worker
-    container_name: matcher2
+    container_name: antares-matcher2
     environment:
       <<: *worker-env
       ANTARES_ROLES: matcher
@@ -99,14 +99,14 @@ services:
 
   notifier1:
     <<: *worker
-    container_name: notifier1
+    container_name: antares-notifier1
     environment:
       <<: *worker-env
       ANTARES_ROLES: notifier
       ANTARES_HTTP_PORT: "9112"
   notifier2:
     <<: *worker
-    container_name: notifier2
+    container_name: antares-notifier2
     environment:
       <<: *worker-env
       ANTARES_ROLES: notifier
@@ -114,14 +114,14 @@ services:
 
   temporal1:
     <<: *worker
-    container_name: temporal1
+    container_name: antares-temporal1
     environment:
       <<: *worker-env
       ANTARES_ROLES: temporal
       ANTARES_HTTP_PORT: "9114"
   temporal2:
     <<: *worker
-    container_name: temporal2
+    container_name: antares-temporal2
     environment:
       <<: *worker-env
       ANTARES_ROLES: temporal
@@ -129,14 +129,14 @@ services:
 
   registry1:
     <<: *worker
-    container_name: registry1
+    container_name: antares-registry1
     environment:
       <<: *worker-env
       ANTARES_ROLES: registry
       ANTARES_HTTP_PORT: "9116"
   registry2:
     <<: *worker
-    container_name: registry2
+    container_name: antares-registry2
     environment:
       <<: *worker-env
       ANTARES_ROLES: registry

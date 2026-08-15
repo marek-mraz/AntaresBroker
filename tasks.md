@@ -120,11 +120,16 @@ rolling worker pods).
       the pair (§3.1.6 claim); registry×2 keeps federation mirrors
       consistent; temporal×2 keeps auto-recording exactly-once per write.
       Unit/e2e level (nats_e2e style, env-gated), BEFORE the suite runs.
-- [ ] 3. **Continuous role rolling**: extend dev/rolling-update.sh (or a
-      roles variant) to loop over ALL 10 containers in role-group order —
-      never 0 healthy per role group (api waits for LB re-admission per
-      the K1 contract; workers wait for /q/ready). ROLL_DURING_RUN=1
-      keeps rolling for the WHOLE suite duration, same as today's K8.
+- [x] 3. **Continuous role rolling**:
+      ✅ DONE 2026-08-15: dev/rolling-update.sh gained ROLES_SPLIT=1 — all 10
+      containers in role-group order, peer-of-same-group healthy before its
+      twin goes down (api /q/health + LB rise window per K1; workers
+      /q/ready). Validated LIVE in-sandbox on the containerized fleet (dind):
+      full roll = 10 pods in ~43 s (antares1 23 s K1 drain, workers 2 s);
+      availability probe every 0.5 s across the whole roll — 52/52 API
+      requests through the LB answered 200, every role group ≥1 ready pod
+      the entire time (group_fail=0); negative proven: peer stopped → "peer
+      matcher2 unhealthy — aborting roll". file/memory refusals fire.
 - [ ] 4. **Pipeline lever** `ROLES_SPLIT=1`: STORE=postgres ROLES_SPLIT=1
       ROLL_DURING_RUN=1 dev/etsi-pipeline.sh runs the FULL suite through
       the LB against the rolling 10-container fleet →
