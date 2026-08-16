@@ -4,4 +4,5 @@
 
 - [Getting started](getting-started.md)
 - [Configuration](configuration.md)
+- [Deployment](deployment.md)
 - [Operations](operations.md)

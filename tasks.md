@@ -88,10 +88,10 @@ explicitly says "decide with the user".
       parse sites (main.rs/state.rs/bounds.rs/shutdown.rs/loader.rs/
       telemetry.rs/wiring.rs/nats.rs). dev/check-env-docs.sh green locally,
       wired into workspace.yml next to spec.py check. Evidence: this commit.
-- [ ] C4. Deployment guide per mode: single node (memory/file), Postgres,
-      TimescaleDB, HA (NATS + LB + stateless pods, `docker-compose-ha.yml`
-      as the worked example), and resource sizing from the measured matrix
-      numbers (RSS avg/peak tables exist in CI summaries — cite them).
+- [x] C4. docs/src/deployment.md: sizing table from full #4 measurements,
+      single-node/pg/HA/role-split shapes (each one a CI-exercised compose
+      file), k8s manifests with their store-dictated strategies, upgrade
+      contract. Evidence: this commit.
 - [ ] C5. Federation guide: CSRs, distributed operations, Via/loop
       protection, EntityMap paging, the 5-broker compose stack as the worked
       example.
