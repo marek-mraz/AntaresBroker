@@ -1,8 +1,8 @@
-//! K12 (§9.1): tracing + Prometheus metrics + env-gated OTLP span export.
+//! Tracing + Prometheus metrics + env-gated OTLP span export.
 //!
 //! Naming follows Prometheus conventions with the `antares_` prefix and
 //! unit suffixes. The `metrics` facade is what core crates speak; THIS
-//! module is the only place an exporter exists (§9.2 — only the
+//! module is the only place an exporter exists (only the
 //! composition root knows). `/q/metrics` renders the Prometheus text
 //! format via the closure wired onto AppState.
 //!
@@ -10,7 +10,7 @@
 //! the recorder, the sampler and (with ANTARES_OTLP_ENDPOINT) the OTLP
 //! pipeline at startup; the default constructs NONE of it — `metrics::`
 //! macro calls no-op without a recorder (zero allocations), and
-//! /q/metrics answers 404. One build, lean by default (§2.1); flip the
+//! /q/metrics answers 404. One build, lean by default; flip the
 //! env and restart where a dashboard actually scrapes.
 //!
 //! OTLP: set ANTARES_OTLP_ENDPOINT (e.g. http://collector:4318/v1/traces)
@@ -89,7 +89,7 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
     Ok(Some(Arc::new(move || handle.render())))
 }
 
-/// Metric metadata — names per §9.1 (antares_ prefix, unit suffixes).
+/// Metric metadata — Prometheus-convention names (antares_ prefix, unit suffixes).
 fn describe() {
     use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
     describe_counter!(
@@ -120,7 +120,7 @@ fn describe() {
     describe_gauge!(
         "antares_draining",
         Unit::Count,
-        "1 while this instance drains (K1) — a roll is visible on a dashboard"
+        "1 while this instance drains — a roll is visible on a dashboard"
     );
     describe_gauge!(
         "antares_uptime_seconds",
@@ -140,12 +140,12 @@ fn describe() {
     describe_gauge!(
         "antares_commit_queue_depth",
         Unit::Count,
-        "file mode: writers queued behind the single redb committer (B13)"
+        "file mode: writers queued behind the single redb committer"
     );
     describe_gauge!(
         "antares_limit_rejections_total",
         Unit::Count,
-        "I2 bounds-wall rejections, by limit"
+        "bounds-wall rejections, by limit"
     );
 }
 
@@ -176,9 +176,9 @@ pub fn spawn_sampler(state: antares_api::AppState) {
             if let Some((depth, _peak)) = state.store.commit_queue() {
                 metrics::gauge!("antares_commit_queue_depth").set(depth as f64);
             }
-            // I2 counters live in LimitStats (incremented at rejection
+            // Limit counters live in LimitStats (incremented at rejection
             // sites); exported here so the wall is observable BEFORE users
-            // hit it (§16.3).
+            // hit it.
             if let Some(map) = state.limits.snapshot().as_object() {
                 for (key, n) in map {
                     if let Some(limit) = key.strip_prefix("rejected") {

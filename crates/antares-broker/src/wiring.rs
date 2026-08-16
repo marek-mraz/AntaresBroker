@@ -1,26 +1,26 @@
-//! F-phase wiring (§9.3): roles × bus. The composition root is the ONLY
+//! Bus wiring: roles × bus. The composition root is the ONLY
 //! place that knows both the bus variant and which consumers exist.
 //!
 //! bus=local — single process, all roles: the store's change hook feeds the
 //! in-process matcher (`notify::wire`), temporal recording stays synchronous
 //! in the write path. Exactly v0's behaviour; the ETSI pipeline runs this.
 //!
-//! bus=nats — the scale-out spine (F1..F8):
-//!   api role      produces: same-tx outbox rows (F3 producer switch), the
+//! bus=nats — the scale-out spine:
+//!   api role      produces: same-tx outbox rows, the
 //!                 outbox drain publishing to `ANTARES_CHANGES` with
-//!                 `Nats-Msg-Id` dedup, subscription CUD → KV (F4),
-//!                 registration CUD → `ANTARES_REGISTRY` (F5), and the
+//!                 `Nats-Msg-Id` dedup, subscription CUD → KV,
+//!                 registration CUD → `ANTARES_REGISTRY`, and the
 //!                 per-instance registration mirror its federation path reads.
 //!   matcher /     one shared DURABLE ("matcher"): decode → process_change →
 //!   notifier      ack AFTER processing; the KV-watched subscription mirror;
 //!                 the interval loop (single-winner by row-lock claim).
 //!   temporal      no bus consumer — auto-recording is synchronous in the
-//!                 write path (K8 lesson); the role only carries the
+//!                 write path; the role only carries the
 //!                 plain-mode partition job, wired in main.rs.
 //!
 //! Concurrent drains on N api pods double-publish only within the stream's
 //! duplicate window, where `Nats-Msg-Id` = outbox seq absorbs them — that is
-//! the design, not an accident (§6.4 at-least-once, engineered idempotent).
+//! the design, not an accident (at-least-once, engineered idempotent).
 
 use antares_api::AppState;
 use antares_bus::nats::{self, NatsBus};
@@ -90,7 +90,7 @@ fn kv_key(tenant: &str, id: &str) -> String {
 }
 
 /// Wire everything bus=nats needs onto the state. Async: connects, hydrates
-/// mirrors, creates consumers, asserts topology (F7) — all before the broker
+/// mirrors, creates consumers, asserts topology — all before the broker
 /// starts accepting traffic, so a mis-shapen topology is a startup failure,
 /// never a silent runtime drift.
 pub async fn wire_nats(
@@ -112,17 +112,17 @@ pub async fn wire_nats(
         }));
     }
     // Multi-process mode: interval firings need the single-winner claim
-    // (§3.1.6) — keyed off this flag, not off mirror presence (L3 wires a
-    // mirror in local mode too).
+    // — keyed off this flag, not off mirror presence (local mode wires a
+    // mirror too).
     state.nats = true;
-    // F3: entity writes now enqueue their events in the write transaction.
+    // Entity writes now enqueue their events in the write transaction.
     state.store.set_outbox(true);
-    // Auto-recording stays SYNCHRONOUS in the write path in every bus mode
-    // (K8 lesson): every write goes through an api-role pod that has the
+    // Auto-recording stays SYNCHRONOUS in the write path in every bus mode:
+    // every write goes through an api-role pod that has the
     // shared store, so recording in-request gives read-your-writes — the
     // ETSI suite asserts history immediately after a write — and kills the
     // late-replay resurrection race (a consumer re-applying a pre-delete
-    // event AFTER a direct temporal delete). The F8 recorder consumer this
+    // event AFTER a direct temporal delete). The recorder consumer this
     // replaced double-applied by design; it bought nothing but the races.
 
     // The drain nudge: a same-process write pokes its own drain, so publish
@@ -152,7 +152,7 @@ pub async fn wire_nats(
     let mut durables: Vec<&'static str> = Vec::new();
 
     if roles.api {
-        // F4 write side: subscription CUD → KV (tombstone = null doc).
+        // Subscription write side: subscription CUD → KV (tombstone = null doc).
         let kv = bus.subs_kv().await?;
         let kv_for_hook = kv.clone();
         state.sub_sync = Some(Arc::new(move |tenant: &TenantId, id: &str, doc| {
@@ -169,7 +169,7 @@ pub async fn wire_nats(
             });
         }));
 
-        // F5 write side: registration CUD → ANTARES_REGISTRY delta.
+        // Registration write side: registration CUD → ANTARES_REGISTRY delta.
         let bus_for_reg = bus.clone();
         state.reg_sync = Some(Arc::new(move |tenant: &TenantId, id: &str, doc| {
             let bus = bus_for_reg.clone();
@@ -199,7 +199,7 @@ pub async fn wire_nats(
             });
         }));
 
-        // F5 read side: the ONE compiled registration mirror this instance's
+        // Registration read side: the ONE compiled registration mirror this instance's
         // federation path reads. Consumer created BEFORE the hydrate so no
         // delta can fall between them; last-writer-wins per key converges.
         let reg_mirror = Arc::new(antares_api::notify::DocMirror::default());
@@ -228,10 +228,10 @@ pub async fn wire_nats(
             tracing::warn!("registry broadcast consumer stream ended");
         });
 
-        // F3: the outbox drain. Runs on every api pod; concurrent drains are
+        // The outbox drain. Runs on every api pod; concurrent drains are
         // absorbed by Nats-Msg-Id dedup within the duplicate window.
         // ANTARES_OUTBOX_DRAIN=off leaves the rows for another pod's drain —
-        // the K9 crash-drill lever and the dedicated-drainer split.
+        // the crash-drill lever and the dedicated-drainer split.
         let drain_on = std::env::var("ANTARES_OUTBOX_DRAIN")
             .map(|v| v != "off")
             .unwrap_or(true);
@@ -261,7 +261,7 @@ pub async fn wire_nats(
                         .await;
                         continue;
                     }
-                    // P0-6: ack the EXACT published seqs — a blanket
+                    // Ack the EXACT published seqs — a blanket
                     // up-to-max delete loses a lower-seq row whose
                     // transaction commits between peek and ack.
                     let mut acked: Vec<i64> = Vec::new();
@@ -295,7 +295,7 @@ pub async fn wire_nats(
     }
 
     if roles.matcher || roles.notifier {
-        // F4 read side: consumer-before-hydrate, same convergence argument.
+        // Subscription read side: consumer-before-hydrate, same convergence argument.
         let sub_mirror = Arc::new(antares_api::notify::SubMirror::default());
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
@@ -327,7 +327,7 @@ pub async fn wire_nats(
                     }
                 };
                 while let Some(Ok(msg)) = msgs.next().await {
-                    // K12: change lag = stream-publish → matcher-processing
+                    // Change lag = stream-publish → matcher-processing
                     // age, from the JetStream metadata timestamp.
                     if let Ok(info) = msg.info() {
                         // OffsetDateTime → SystemTime (impl in `time`/std),
@@ -349,7 +349,7 @@ pub async fn wire_nats(
         });
 
         // Interval subscriptions: every matcher pod ticks; the row-lock claim
-        // in interval_tick makes each firing single-winner (§3.1.6).
+        // in interval_tick makes each firing single-winner.
         let st = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -364,7 +364,7 @@ pub async fn wire_nats(
     // synchronous in the write path (see above), and plain-mode partition
     // maintenance runs from main.rs regardless of bus mode.
 
-    // F7: the server must agree these are shared durables (R10 lesson).
+    // The server must agree these are shared durables.
     bus.assert_topology(&durables).await?;
     tracing::info!(?roles, "bus=nats wired");
     Ok(())
@@ -402,9 +402,9 @@ fn apply_delta(mirror: &dyn antares_api::notify::Mirror, delta: &serde_json::Val
     mirror.apply(tenant, id, doc);
 }
 
-/// Resolve claim-check references (§7): consumers fetch oversized bodies
+/// Resolve claim-check references: consumers fetch oversized bodies
 /// from the store. The current row may be newer than the referenced version —
-/// ordinary at-least-once reality; the matcher is ordering-tolerant (§3.1).
+/// ordinary at-least-once reality; the matcher is ordering-tolerant.
 fn resolve_payloads(
     st: &AppState,
     ev: &ChangeEvent,

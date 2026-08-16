@@ -1,4 +1,4 @@
-//! Graceful shutdown drain (tasks.md K1; §9.3 `shutdown.rs`).
+//! Graceful shutdown drain.
 //!
 //! The ORDER is the whole feature, and it exists because of one asymmetry: a
 //! load balancer learns this instance is going away only by polling
@@ -12,14 +12,14 @@
 //!    update into a burst of connection-refused
 //! 3. stop accepting
 //! 4. wait for in-flight connections, bounded by `ANTARES_DRAIN_DEADLINE_SECS`
-//! 5. flush the outbox (F3 — see the note in `drain`)
+//! 5. flush the outbox (see the note in `drain`)
 //! 6. close the pools
 //!
 //! Operational contract: the container `stopGracePeriod` (compose
 //! `stop_grace_period`, K8s `terminationGracePeriodSeconds`) MUST exceed
 //! delay + deadline, or the orchestrator turns a drain into a kill. The
 //! defaults below (0.5 s + 20 s) fit inside Docker's 10 s default only if the
-//! in-flight work is short; K5's manifests set both explicitly.
+//! in-flight work is short; the reference manifests set both explicitly.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -83,9 +83,9 @@ pub async fn drain(inflight: &Arc<AtomicUsize>, store: &antares_sql::store::any:
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    // Outbox flush (F3) is deliberately absent, not forgotten: the outbox
-    // table is written same-tx today (C8) and nothing drains it yet, so there
-    // is no buffer to flush. When F3 lands, its drain stops HERE — after the
+    // An outbox flush is deliberately absent, not forgotten: the outbox
+    // table is written same-tx today and nothing drains it yet, so there
+    // is no buffer to flush. When the drain lands, it stops HERE — after the
     // last request has committed its row and before the pool closes.
     store.close().await;
     tracing::info!("drain complete in {:?}", started.elapsed());
@@ -94,7 +94,7 @@ pub async fn drain(inflight: &Arc<AtomicUsize>, store: &antares_sql::store::any:
 /// Step 1, so the flip and the log line stay in one place.
 pub fn begin(draining: &Arc<AtomicBool>) {
     draining.store(true, Ordering::Relaxed);
-    // K12: immediate, not sampler-paced — a roll must be visible on a
+    // Immediate, not sampler-paced — a roll must be visible on a
     // dashboard for its whole (short) duration.
     metrics::gauge!("antares_draining").set(1.0);
     tracing::info!(

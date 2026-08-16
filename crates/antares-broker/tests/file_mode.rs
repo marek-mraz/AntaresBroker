@@ -1,4 +1,4 @@
-//! `file` mode e2e (tasks.md B8/B10/A2/A4): the real binary, real HTTP, real
+//! `file` mode e2e: the real binary, real HTTP, real
 //! SIGKILL. Commit-before-ack means an entity acknowledged with 201 MUST
 //! survive an immediate `kill -9`; deletes must reach redb too (the Scorpio
 //! phantom-409 trap). std-only harness — no test frameworks.
@@ -45,8 +45,8 @@ impl std::ops::DerefMut for Broker {
 
 fn start(port: u16, dir: &Path, store: &str) -> Broker {
     // Harness vars (ANTARES_TEST_*) are inherited from CI but are not broker
-    // config; the §14.3 guard reserves that prefix, so no env_remove allowlist
-    // to keep in sync here.
+    // config; the unknown-key guard reserves that prefix, so no env_remove
+    // allowlist to keep in sync here.
     Broker(
         Command::new(env!("CARGO_BIN_EXE_antares"))
             .env("ANTARES_HTTP_PORT", port.to_string())
@@ -95,7 +95,7 @@ fn tempdir(name: &str) -> PathBuf {
     dir
 }
 
-/// K9, memory arm: SIGKILL loses EVERYTHING and that is the documented
+/// Memory arm: SIGKILL loses EVERYTHING and that is the documented
 /// contract of the rung — asserted so the mode's limits stay honest instead
 /// of drifting into an assumed durability nobody built.
 #[test]
@@ -145,7 +145,7 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
     // 1. create, get the 201 ack, SIGKILL immediately — no drain, no grace.
     let mut broker = start(port, &dir, "file");
     let health = wait_healthy(port);
-    assert!(health.contains(r#""store":"file""#), "A4 health: {health}");
+    assert!(health.contains(r#""store":"file""#), "health: {health}");
     let resp = http(
         port,
         &format!(
@@ -158,7 +158,7 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
     broker.kill().expect("SIGKILL");
     broker.wait().expect("reap");
 
-    // 2. restart from the same volume: the acked write is there (B3/B8).
+    // 2. restart from the same volume: the acked write is there.
     let mut broker = start(port, &dir, "file");
     wait_healthy(port);
     let resp = http(
@@ -172,7 +172,7 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
     assert!(resp.contains("urn:ngsi-ld:Test:kill9"));
 
     // 3. delete, SIGKILL, restart: the delete reached redb — recreate gets
-    //    201, not a phantom 409 (B10).
+    //    201, not a phantom 409.
     let resp = http(
         port,
         "DELETE /ngsi-ld/v1/entities/urn:ngsi-ld:Test:kill9 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
@@ -206,8 +206,8 @@ fn kill_dash_nine_right_after_201_loses_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// K10, half one: redb takes an EXCLUSIVE file lock, so `file` mode is
-/// single-instance by construction — which is exactly why §K pins
+/// Redb takes an EXCLUSIVE file lock, so `file` mode is
+/// single-instance by construction — which is exactly why the manifests pin
 /// `strategy: Recreate` for it and never RollingUpdate. The drill asserts the
 /// refusal IS the contract: the second process dies with a nameable error,
 /// and the FIRST one keeps serving. Never silent corruption, never two
@@ -256,21 +256,21 @@ fn double_start_refuses_the_lock_instead_of_corrupting() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// K10, half two: because `file` mode can only ever be recreated (never
+/// Because `file` mode can only ever be recreated (never
 /// rolled), the restart gap IS the downtime — so it has to be bounded rather
 /// than assumed. Boot rebuild scans the redb tables back into the in-memory
-/// maps; §K measured 257k entities/s, which puts the gap at process start
+/// maps at a measured 257k entities/s, which puts the gap at process start
 /// rather than at the scan.
 ///
-/// Scale note: §K writes the gate as "<2 s at 100k entities", but E3 measured
-/// `file` at ~19 KB RSS per entity, so 100k is ~1.9 GB — past the mode's own
-/// documented ~10k ceiling and past the 350 MiB gate. The drill therefore
+/// Scale note: the gate was first written as "<2 s at 100k entities", but
+/// `file` measures ~19 KB RSS per entity, so 100k is ~1.9 GB — past the mode's
+/// own documented ~10k ceiling and past the 350 MiB gate. The drill therefore
 /// runs at that documented ceiling and reports the implied rate, which is the
 /// honest measurement; 100k belongs to a `postgres` box, not to this rung.
 #[test]
 fn restart_gap_stays_under_the_gate() {
     const SEED: usize = 10_000;
-    const BATCH: usize = 1_000; // = MAX_BATCH_ITEMS (I2 bounds wall)
+    const BATCH: usize = 1_000; // = MAX_BATCH_ITEMS (the batch bounds wall)
 
     let dir = tempdir("restartgap");
     let port = free_port();
@@ -325,7 +325,7 @@ fn restart_gap_stays_under_the_gate() {
     );
 
     println!(
-        "K10 restart gap: {:?} for {SEED} entities ({:.0} entities/s implied)",
+        "restart gap: {:?} for {SEED} entities ({:.0} entities/s implied)",
         gap,
         SEED as f64 / gap.as_secs_f64()
     );
@@ -339,7 +339,7 @@ fn restart_gap_stays_under_the_gate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// K1: the drain ORDER, which is the whole feature. A load balancer only
+/// The drain ORDER, which is the whole feature. A load balancer only
 /// learns an instance is going away by polling `/q/health`, so health must go
 /// 503 while the socket STILL WORKS — flipping it at the same moment the
 /// listener closes is what turns a rolling update into connection-refused.
@@ -423,12 +423,12 @@ fn unknown_store_mode_is_fatal() {
     let status = start(23999, &dir, "bogus").wait().expect("wait");
     assert!(
         !status.success(),
-        "unknown ANTARES_STORE must be fatal (A2)"
+        "unknown ANTARES_STORE must be fatal"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// §14.3: an unknown ANTARES_* key is fatal, but ANTARES_TEST_* is the reserved
+/// An unknown ANTARES_* key is fatal, but ANTARES_TEST_* is the reserved
 /// harness namespace. CI exports ANTARES_TEST_DATABASE_URL / ANTARES_TEST_MQTT_URL
 /// for the integration tests and they land in the env of every broker a test
 /// spawns — reserving the prefix is what keeps that from killing the process.
@@ -472,7 +472,7 @@ fn unknown_key_is_fatal_but_the_test_prefix_is_reserved() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// K1 follow-up (2026-08-15): the drain must wait on ACTIVE REQUESTS, not on
+/// The drain must wait on ACTIVE REQUESTS, not on
 /// open connections. A load balancer holds idle keep-alive connections to
 /// every backend; if those count as in-flight, every api pod burns the FULL
 /// drain deadline on every roll doing nothing (measured: the fleet's api

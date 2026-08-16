@@ -1,7 +1,7 @@
-//! Antares — NGSI-LD context broker (composition root, §9.3).
+//! Antares — NGSI-LD context broker (composition root).
 //!
-//! Config: ANTARES_* env vars only for v0 (antares.toml layering lands with
-//! figment in phase 1). Unknown ANTARES_* keys are fatal (§14.3).
+//! Config: ANTARES_* env vars only for v0 (antares.toml layering can land
+//! later via figment). Unknown ANTARES_* keys are fatal.
 
 mod shutdown;
 mod telemetry;
@@ -11,7 +11,7 @@ use antares_api::AppState;
 use antares_bus::LocalBus;
 
 // ANTARES_DATABASE_URL: accepted — the ETSI compose wires one DB per broker —
-// consumed when the phase-1 sqlx store lands (§8.2 temporal.store).
+// consumed by the postgres/timescale store modes.
 const KNOWN_KEYS: &[&str] = &[
     "ANTARES_HTTP_PORT",
     "ANTARES_HOST_ALIAS",
@@ -23,54 +23,54 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
     "ANTARES_DATA_DIR",
-    // §16.4 egress: private-range destinations are denied by default; the
+    // Egress: private-range destinations are denied by default; the
     // ETSI/IOP stacks (mock servers on localhost) set this to true.
     "ANTARES_EGRESS_ALLOW_PRIVATE",
-    // §16.1: refuse to start when the DB role bypasses RLS (production gate;
+    // Refuse to start when the DB role bypasses RLS (production gate;
     // default off so the dev/ETSI superuser stack still boots).
     "ANTARES_REQUIRE_RLS",
-    // C9/D4 temporal retention horizon in days; absent = keep forever (a
+    // Temporal retention horizon in days; absent = keep forever (a
     // maintenance job must never default to dropping data).
     "ANTARES_TEMPORAL_RETENTION_DAYS",
     // 4.22 GC interval (memory/file arm); default 900 s, the ETSI stack runs
     // at 2 s so the transient TPs (422_01) exercise the sweep itself.
     "ANTARES_SWEEP_SECS",
-    // I2 batch entity-count cap (§16.3); default 1000 — raised where a
+    // Batch entity-count cap; default 1000 — raised where a
     // trusted producer legitimately batches larger (the spec sets no ceiling).
     "ANTARES_MAX_BATCH_ITEMS",
-    // K1 drain: the LB notice window, and the ceiling on waiting for
+    // Drain: the LB notice window, and the ceiling on waiting for
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",
     "ANTARES_DRAIN_DEADLINE_SECS",
-    // §16.4: optional PEM bundle of extra TLS trust anchors (private CAs,
-    // incomplete-chain servers — see error.md). Never disables verification.
+    // Optional PEM bundle of extra TLS trust anchors (private CAs,
+    // incomplete-chain servers). Never disables verification.
     "ANTARES_EXTRA_CA_FILE",
-    // F1/§9.2: the bus seam. local (default, single process, all roles) or
+    // The bus seam: local (default, single process, all roles) or
     // nats (the JetStream spine — requires a postgres/timescale store and
     // ANTARES_NATS_URL).
     "ANTARES_BUS",
     "ANTARES_NATS_URL",
-    // §10 K5: stream/KV replication factor on a clustered JetStream (3 for
+    // Stream/KV replication factor on a clustered JetStream (3 for
     // the reference manifests' R3; default 1 for single-node).
     "ANTARES_NATS_REPLICAS",
-    // K12: OTLP/HTTP span export endpoint (e.g. http://collector:4318/v1/traces);
+    // OTLP/HTTP span export endpoint (e.g. http://collector:4318/v1/traces);
     // unset = no OTLP anywhere.
     "ANTARES_OTLP_ENDPOINT",
     "ANTARES_TELEMETRY",
-    // F3/K9: outbox drain on this pod, on (default) | off. `off` is the
+    // Outbox drain on this pod, on (default) | off. `off` is the
     // crash-drill lever (rows commit but this pod never publishes them —
     // another pod's drain must) and the knob for a dedicated-drainer split.
     "ANTARES_OUTBOX_DRAIN",
 ];
 
-/// J7 (§6.1): jemalloc with decay-based purging — RSS returns to ~live×1.2
-/// when idle; tune via MALLOC_CONF (e.g. dirty_decay_ms). glibc malloc's
-/// arena fragmentation is the §2.1 anti-choice.
+/// Jemalloc with decay-based purging — RSS returns to ~live×1.2 when idle;
+/// tune via MALLOC_CONF (e.g. dirty_decay_ms). Deliberately not glibc
+/// malloc, whose arena fragmentation never gives memory back.
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// §14.3 unknown-config-is-fatal, minus what the platform injects (audit
-/// P0-1): a Service named `antares*` makes kubelet write ANTARES_PORT,
+/// Unknown-config-is-fatal, minus what the platform injects: a Service
+/// named `antares*` makes kubelet write ANTARES_PORT,
 /// ANTARES_PORT_9090_TCP*, ANTARES_SERVICE_* (and the antares-file /
 /// antares-api variants) into every pod, and treating those as typos put the
 /// shipped manifests into 100% CrashLoopBackOff. The manifests also set
@@ -87,7 +87,7 @@ fn unknown_config_key(key: &str) -> bool {
     // (antares, antares-file, antares-api, antares-worker): {NAME}_PORT,
     // {NAME}_PORT_<n>_<proto>*, {NAME}_SERVICE_*. Only those exact name
     // infixes are exempt — an arbitrary ANTARES_*-shaped var stays a fatal
-    // typo (§14.3), and foreign Services are covered by
+    // typo, and foreign Services are covered by
     // enableServiceLinks: false in the manifests.
     let rest = &key["ANTARES_".len()..];
     let injected = ["", "FILE_", "API_", "WORKER_"].iter().any(|infix| {
@@ -98,7 +98,7 @@ fn unknown_config_key(key: &str) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // E5: --version answers without starting anything (a bare `antares
+    // --version answers without starting anything (a bare `antares
     // --version` used to boot a server).
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!(
@@ -108,11 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    // K12: tracing (fmt + env-gated OTLP [+ console feature]) and, with the
+    // Tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
     let metrics_render = telemetry::init()?;
 
-    // Unknown-config-is-fatal (§14.3): catch typos before they become Scorpio's
+    // Unknown-config-is-fatal: catch typos before they become Scorpio's
     // $[quarkus.uuid} class of silent misconfiguration. ANTARES_TEST_* is the
     // reserved harness namespace (ANTARES_TEST_DATABASE_URL, ANTARES_TEST_MQTT_URL,
     // …) — CI exports those for the integration tests, and they land in the env of
@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // reserved as the tenant separator (federation::alias_for), so allowing
     // it in the configured alias would let `a~b` in the default tenant
     // collide with `a` in tenant `b` and cross-detect as a loop. Fatal at
-    // startup, like every other bad config value (§14.3).
+    // startup, like every other bad config value.
     if host_alias.is_empty()
         || !host_alias
             .bytes()
@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
-    // A2: unknown store mode is fatal BEFORE the runtime spins up. The mode
+    // Unknown store mode is fatal BEFORE the runtime spins up. The mode
     // is decided ONCE here as a typed value and threaded everywhere — no
     // string comparisons, no runtime re-probing downstream.
     let mode: antares_sql::StoreMode = std::env::var("ANTARES_STORE")
@@ -171,10 +171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
 }
 
-/// ANTARES_STORE → store construction (A2/A3): `file` requires
-/// ANTARES_DATA_DIR (never a default inside the image, B5); postgres and
-/// timescale require ANTARES_DATABASE_URL, connect ONE shared pool, run the
-/// embedded migrations at start (§C-i) and serve from the Pg backend (C13).
+/// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
+/// (never a default inside the image); postgres and timescale require
+/// ANTARES_DATABASE_URL, connect ONE shared pool, run the embedded
+/// migrations at start and serve from the Pg backend.
 async fn build_store(
     mode: antares_sql::StoreMode,
 ) -> Result<
@@ -214,7 +214,7 @@ async fn build_store(
                         let backend = antares_sql::maintenance::detect_temporal_backend(&pool)
                             .await
                             .map_err(|e| format!("ANTARES_STORE={mode}: {e}"))?;
-                        // D3: never silently fall back — timescale mode whose
+                        // Never silently fall back — timescale mode whose
                         // database is not hypertable-shaped is a config error,
                         // not a downgrade (extension missing at first boot, or
                         // installed only after the migrations ran).
@@ -229,12 +229,12 @@ async fn build_store(
                         }
                         if mode == StoreMode::Postgres && backend == TemporalBackend::Hypertable {
                             tracing::info!(
-                                "attr_instances is a hypertable (§8.2 — migrations ran with \
+                                "attr_instances is a hypertable (migrations ran with \
                                  the timescaledb extension present); the plain-mode partition \
                                  job stands down, retention runs via drop_chunks"
                             );
                         }
-                        // §16.1: RLS is a belt only when the role wears it —
+                        // RLS is a belt only when the role wears it —
                         // superuser/BYPASSRLS makes every policy inert. Warn
                         // always; in production set ANTARES_REQUIRE_RLS=1 to turn
                         // the warning into a hard refusal so a superuser DSN can
@@ -275,7 +275,7 @@ async fn build_store(
     }
 }
 
-/// B5: warn when the data dir shares a device with its parent — i.e. it is
+/// Warn when the data dir shares a device with its parent — i.e. it is
 /// not a mount point, so the redb file dies with the container.
 #[cfg(unix)]
 fn warn_if_not_mount_point(dir: &std::path::Path) {
@@ -308,11 +308,11 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
     let roles = wiring::Roles::parse(&roles)?;
-    // F1/§9.2 bus seam: local (default) or nats. Unknown value fatal (§14.3).
+    // Bus seam: local (default) or nats. An unknown value is fatal.
     let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());
     match bus_mode.as_str() {
         "local" => {
-            // §9.2: bus=local means ONE process running every role — a role
+            // bus=local means ONE process running every role — a role
             // split without a shared bus would silently drop whole concerns.
             if !roles.all() {
                 return Err(
@@ -338,11 +338,11 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
-    // K12: /q/metrics renders through this closure (None without the
+    // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.
     state.metrics_render = metrics_render;
-    // J7: heap stats on /q/health (allocated/resident bytes via jemalloc-ctl)
+    // Heap stats on /q/health (allocated/resident bytes via jemalloc-ctl)
     state.mem_stats = Some(std::sync::Arc::new(|| {
         use tikv_jemalloc_ctl::{epoch, stats};
         let _ = epoch::advance();
@@ -352,8 +352,8 @@ async fn run(
         })
     }));
     if bus_mode == "nats" {
-        // F1..F8: outbox producer + drain, KV/registry mirrors, durable
-        // consumers per role, topology asserted before traffic (F7).
+        // Outbox producer + drain, KV/registry mirrors, durable
+        // consumers per role, topology asserted before traffic.
         let url = std::env::var("ANTARES_NATS_URL")
             .map_err(|_| "ANTARES_BUS=nats requires ANTARES_NATS_URL")?;
         wiring::wire_nats(&mut state, &url, roles).await?;
@@ -362,10 +362,10 @@ async fn run(
     }
     telemetry::spawn_sampler(state.clone());
 
-    // J2 boot preload — Cached rows persisted by the AppState write-through
+    // Boot preload — Cached rows persisted by the AppState write-through
     // re-seed the parsed-context cache on start, so expansion doesn't refetch
     // what a previous life already downloaded. (The writer itself is wired in
-    // AppState::with_store — rows are the 5.13 source of truth, K8 lesson.)
+    // AppState::with_store — rows are the 5.13 source of truth.)
     {
         for row in state.store.context_list().unwrap_or_default() {
             if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
@@ -412,8 +412,8 @@ async fn run(
             }
         });
     }
-    // C9/D4: temporal maintenance — plain-mode partition pre-creation and the
-    // (opt-in) retention horizon, single-winner via SKIP LOCKED (§3.1.6).
+    // Temporal maintenance — plain-mode partition pre-creation and the
+    // (opt-in) retention horizon, single-winner via SKIP LOCKED.
     // The branch is PINNED to the detected backend (never re-probed): memory
     // and file modes have no backend and get no job, for sure.
     if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
@@ -452,12 +452,12 @@ async fn run(
             }
         });
     }
-    // K1: handles the drain needs, taken before `state` is consumed by the
+    // Handles the drain needs, taken before `state` is consumed by the
     // router — the flag the health endpoint reads, and the store whose pools
     // close last.
     let draining = state.draining.clone();
     let store_for_drain = state.store.clone();
-    // P0-4: only the api role serves the NGSI-LD surface — a worker pod
+    // Only the api role serves the NGSI-LD surface — a worker pod
     // exposes health/ready/metrics and nothing else (a subscription created
     // on a worker would bypass the roles.api KV sync and never notify).
     let routed = if roles.api {
@@ -472,16 +472,16 @@ async fn run(
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://0.0.0.0:{port}");
-    // K1: count open connections so the drain can wait for them. Incremented
+    // Count open connections so the drain can wait for them. Incremented
     // before the task is spawned — incrementing inside the task would race the
     // drain's first check and let a just-accepted connection be missed.
     let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // K1 (2026-08-15): the drain signal each connection listens for. On drain,
+    // The drain signal each connection listens for. On drain,
     // hyper's graceful_shutdown closes IDLE keep-alive connections immediately
     // (the LB holds one per backend — counting them as in-flight made every
     // api roll burn the full deadline) while an active request still finishes.
     let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
-    // K1: the signal future is created ONCE and polled by reference. Written
+    // The signal future is created ONCE and polled by reference. Written
     // inline in the select, it would be dropped and re-created on every
     // accepted connection — and a SIGTERM landing in that drop-to-recreate
     // window is lost for good (tokio signal streams do not replay events from
@@ -544,7 +544,7 @@ fn serve(
         builder.http1().title_case_headers(true);
         let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), svc);
         let mut conn = std::pin::pin!(conn);
-        // K1: on drain, close an IDLE keep-alive connection immediately —
+        // On drain, close an IDLE keep-alive connection immediately —
         // hyper finishes any active request first, then closes. Without this
         // the LB's idle keep-alives count as in-flight and every roll waits
         // out the entire drain deadline.
@@ -576,7 +576,7 @@ async fn wait_drain(rx: &mut tokio::sync::watch::Receiver<bool>) {
 mod config_key_tests {
     use super::unknown_config_key;
 
-    /// P0-1: kubelet-injected service links must never be fatal; real typos
+    /// Kubelet-injected service links must never be fatal; real typos
     /// must stay fatal.
     #[test]
     fn kubelet_service_links_are_not_typos() {
@@ -600,7 +600,7 @@ mod config_key_tests {
         }
         assert!(
             unknown_config_key("ANTARES_STROE"),
-            "a real typo stays fatal (§14.3)"
+            "a real typo stays fatal"
         );
         assert!(
             unknown_config_key("ANTARES_HTPT_PORT"),

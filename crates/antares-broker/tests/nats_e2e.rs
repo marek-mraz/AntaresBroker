@@ -1,11 +1,11 @@
-//! F9/F10 — the 2-instance e2e: real binaries, roles split across processes,
+//! The 2-instance e2e: real binaries, roles split across processes,
 //! one shared Postgres + one NATS. Instance A serves the API only; instance B
 //! runs matcher+notifier+temporal only. A subscription and an entity created
 //! through A must produce a notification matched and delivered BY B (the KV
 //! mirror + outbox drain + durable consumer spine, end to end). Temporal
-//! auto-recording is synchronous in A's write path (every mode — K8 lesson),
+//! auto-recording is synchronous in A's write path (every mode),
 //! so the evolution must be readable immediately through A.
-//! Plus the §3.1 ordering-tolerance hook: events injected out of order still
+//! Plus the ordering-tolerance hook: events injected out of order still
 //! both notify (the matcher projects no state).
 //!
 //! Env-gated on BOTH ANTARES_TEST_DATABASE_URL and ANTARES_TEST_NATS_URL.
@@ -232,7 +232,7 @@ fn roles_split_across_two_instances_notifies_and_records() {
         .starts_with("HTTP/1.1 200")
     });
 
-    // §3.1 ordering tolerance: v5 injected before v4 — the matcher projects
+    // Ordering tolerance: v5 injected before v4 — the matcher projects
     // no state, so BOTH fire. (Direct publish, bypassing the outbox.)
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -273,7 +273,7 @@ fn roles_split_across_two_instances_notifies_and_records() {
     });
 }
 
-/// K4: N≥2 api pods + N≥2 worker pods. A subscription created through api-1
+/// N≥2 api pods + N≥2 worker pods. A subscription created through api-1
 /// matches an entity created through api-2 (any pod, one broker), and after
 /// one worker dies with SIGKILL the shared durable rebalances — notifications
 /// keep flowing without it.
@@ -358,7 +358,7 @@ fn api_pods_interchangeable_and_worker_group_survives_a_kill() {
     });
 }
 
-/// K9 (postgres arm): a change committed but not yet published survives a
+/// Postgres arm: a change committed but not yet published survives a
 /// SIGKILL — the outbox republishes it on restart. The kill loop retries
 /// until it catches the drain with rows still pending (outbox_peek > 0 at
 /// the moment of death), so the assertion is about the crash window itself,
@@ -398,7 +398,7 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
     // The victim pod's own drain is OFF — the deterministic stand-in for a
     // crash in the commit→publish window (with the drain nudge the live race
     // is ~1 ms wide and unwinnable from outside). Rows commit, nothing
-    // publishes them, the pod dies: exactly the state F3 must recover from.
+    // publishes them, the pod dies: exactly the state the outbox must recover from.
     let api_port = free_port();
     let mut api = start_env(
         api_port,
@@ -487,18 +487,18 @@ fn response_json(raw: &str) -> Option<serde_json::Value> {
 }
 
 /// The 5-role × 2-replica fleet (docker-compose-roles.yml shape): every
-/// role-PAIR claim asserted with its negative, exactly the F7 class —
+/// role-PAIR claim asserted with its negative —
 /// duplicated consumers must not duplicate work.
 ///   matcher×2 + notifier×2: one change → exactly ONE notification (the four
 ///     pods share the "matcher" durable; a duplicate means two consumers
 ///     processed one change);
 ///   matcher pair ticking intervals: firings single-winner by row-lock claim
-///     (§3.1.6) — a doubled rate means the claim is broken;
-///   registry×2 present: the F5 registration mirror stays consistent across
+///     — a doubled rate means the claim is broken;
+///   registry×2 present: the registration mirror stays consistent across
 ///     BOTH api pods (a CSR registered via api-1 makes api-2 dial the source);
 ///   temporal×2 present: auto-recording is synchronous in the api write path
-///     (K8) — a write through either api pod records exactly ONE instance;
-///   P0-4 negative: worker pods serve ops endpoints only, never the API.
+///     — a write through either api pod records exactly ONE instance;
+///   worker negative: worker pods serve ops endpoints only, never the API.
 #[test]
 fn role_pairs_exactly_once_semantics() {
     let _serial = serial();
@@ -539,7 +539,7 @@ fn role_pairs_exactly_once_semantics() {
         });
     }
 
-    // P0-4 negative: a worker pod must NOT serve the NGSI-LD surface
+    // Negative: a worker pod must NOT serve the NGSI-LD surface
     let (m1, _) = workers[0];
     let r = http(
         m1,
@@ -620,7 +620,7 @@ fn role_pairs_exactly_once_semantics() {
     assert!(
         (2..=6).contains(&firings),
         "timeInterval=2 over 9 s must fire ~4 times single-winner; {firings} means \
-         the pair double-fires (§3.1.6 claim broken) or intervals stopped"
+         the pair double-fires or intervals stopped"
     );
 
     // ---- registration mirror consistent across BOTH api pods ----

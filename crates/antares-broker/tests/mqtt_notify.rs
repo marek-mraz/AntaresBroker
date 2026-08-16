@@ -1,4 +1,4 @@
-//! MQTT notification binding e2e (tasks.md G1/G3; CIM 009 clause 7.2): the
+//! MQTT notification binding e2e (CIM 009 clause 7.2): the
 //! real binary delivers a `{metadata, body}` message to a live MQTT server.
 //! Gated on ANTARES_TEST_MQTT_URL (e.g. `mqtt://127.0.0.1:1883`) — CI installs
 //! mosquitto and sets it; without it the test is skipped, not green-lied.

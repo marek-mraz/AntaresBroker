@@ -1,6 +1,6 @@
-//! K12: the observability surface, proven against the real binary.
+//! The observability surface, proven against the real binary.
 //! /q/metrics serves the Prometheus text format with antares_-prefixed,
-//! unit-suffixed instruments (§9.1) and the counters actually move.
+//! unit-suffixed instruments and the counters actually move.
 //! The stack is a runtime switch (ANTARES_TELEMETRY=1, default OFF —
 //! nothing telemetry-shaped is allocated); this spawns the broker with
 //! the switch ON, plus proves the off-default answers 404.
@@ -87,7 +87,7 @@ fn q_metrics_serves_prometheus_text_and_counters_move() {
         port,
         "POST",
         "/ngsi-ld/v1/entities",
-        Some(r#"{"id":"urn:ngsi-ld:K12:1","type":"K12","p":{"type":"Property","value":1}}"#),
+        Some(r#"{"id":"urn:ngsi-ld:Sensor:1","type":"Sensor","p":{"type":"Property","value":1}}"#),
     );
     assert!(create.starts_with("HTTP/1.1 201"), "create: {create}");
 
@@ -96,7 +96,7 @@ fn q_metrics_serves_prometheus_text_and_counters_move() {
         metrics.starts_with("HTTP/1.1 200"),
         "metrics endpoint: {metrics}"
     );
-    // §9.1: antares_ prefix + unit suffixes, and the request counter moved
+    // antares_ prefix + unit suffixes, and the request counter moved
     // (at least the create above and this scrape's own health probes).
     assert!(
         metrics.contains("antares_http_requests_total"),
