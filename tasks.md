@@ -208,9 +208,9 @@ explicitly says "decide with the user".
       conformance deviation with mandatory clause + quoted SHALL; feature)
       + PR template with the proof checklist (targeted tests, Robot,
       test-first, changelog, DCO). YAML validated. Evidence: this commit.
-- [ ] G5. Positioning page (docs or website): Antares within the FIWARE /
-      NGSI-LD ecosystem — compliant peer, not a fork; the wasm/edge story;
-      the city-as-code configuration plane as the companion project.
+- [x] G5. docs/src/ecosystem.md: compliant-peer positioning, the three
+      fit stories (edge, browser, dense multi-tenancy), the vanilla-broker
+      + city-as-code split, standards posture. Evidence: this commit.
 
 ---
 

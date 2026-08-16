@@ -9,3 +9,4 @@
 - [Browser & WebAssembly](wasm.md)
 - [Operations](operations.md)
 - [Conformance](conformance.md)
+- [Ecosystem & positioning](ecosystem.md)
