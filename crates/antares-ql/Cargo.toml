@@ -4,6 +4,7 @@ description = "NGSI-LD query language parsers (q=, scopeQ, geoQ) -> typed AST. P
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

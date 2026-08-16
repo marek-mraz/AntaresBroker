@@ -122,3 +122,16 @@ jobs:
           ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
             | grep -v 'crates/antares-sql/'
 
+
+  msrv:
+    # F2: the declared rust-version stays PROVEN as stable moves on.
+    name: MSRV check (1.97)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace -j 2

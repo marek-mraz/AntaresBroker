@@ -4,6 +4,7 @@ description = "Notification delivery: NotificationSink trait keyed by endpoint.u
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

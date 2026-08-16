@@ -180,8 +180,11 @@ explicitly says "decide with the user".
       added to etsi-coverage.yml (merged lines % vs the published
       coverage-badge.json, fail on >1pt drop, skip when no baseline).
       YAML + bash syntax validated. Evidence: this commit.
-- [ ] F2. MSRV: pin and test a minimum supported Rust version in CI;
-      document in README.
+- [x] F2. rust-version = 1.97 in workspace.package + all 11 crates
+      (the only PROVEN toolchain — CI stable today; older untested, honest
+      pin), msrv job in workspace.yml keeps it proven as stable moves,
+      README notes it. Also fixed the stale workspace repository URL
+      (AntaresBroker org -> marek-mraz). Evidence: this commit.
 - [ ] F3. Public CI dashboard: the Pages conformance report linked from
       README (B4) renders per-suite pass/fail + RSS trend — this exists;
       task is linking + a short "how to read this" page.

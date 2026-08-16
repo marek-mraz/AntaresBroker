@@ -4,6 +4,7 @@ description = "NGSI-LD HTTP binding (TS 104 176 shape): axum routers. Thin handl
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

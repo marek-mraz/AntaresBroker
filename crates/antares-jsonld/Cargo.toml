@@ -4,6 +4,7 @@ description = "JSON-LD layer: caching Loader, pinned core contexts, NGSI-LD expa
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

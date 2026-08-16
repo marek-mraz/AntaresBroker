@@ -4,6 +4,7 @@ description = "Change-event bus: ChangeEvent + the local in-process impl and the
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

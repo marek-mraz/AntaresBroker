@@ -21,7 +21,8 @@ exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2021"
 license = "EUPL-1.2"
-repository = "https://github.com/AntaresBroker/AntaresBroker"
+repository = "https://github.com/marek-mraz/AntaresBroker"
+rust-version = "1.97"
 
 [workspace.dependencies]
 antares-model = { path = "crates/antares-model" }

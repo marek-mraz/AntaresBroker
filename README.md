@@ -69,7 +69,8 @@ curl -s 'localhost:9090/ngsi-ld/v1/entities?type=TemperatureSensor'
 #   "temperature":{"type":"Property","unitCode":"CEL","value":21.5}}]
 ```
 
-No Docker? `cargo run -p antares-broker` serves the same API on :9090.
+No Docker? `cargo run -p antares-broker` serves the same API on :9090
+(MSRV: Rust 1.97).
 
 > Status: the full store ladder (`memory → file → postgres → timescale`),
 > NATS JetStream scale-out with split roles, HTTP + MQTT notifications,

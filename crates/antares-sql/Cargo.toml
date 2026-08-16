@@ -4,6 +4,7 @@ description = "AST -> SQL compiler + schema migrations. sqlx store impls land in
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }

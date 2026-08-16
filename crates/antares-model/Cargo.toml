@@ -4,6 +4,7 @@ description = "NGSI-LD data model types (CIM 009 V1.9.1). Publishable as ngsild-
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true }
