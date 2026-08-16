@@ -1,7 +1,7 @@
-// N7a: the Node tier — the SAME .wasm the browser loads, fronted by a thin
+// The Node tier — the SAME .wasm the browser loads, fronted by a thin
 // http.createServer shim so the ETSI Robot suite can talk to it over real
 // TCP. No CORS, unrestricted outbound fetch (undici), so every serial suite
-// is in scope here; the browser tier's structural limits (N7c) don't apply.
+// is in scope here; the browser tier's structural limits don't apply.
 //
 //   node www/node-shim.mjs [port]       (default 9090)
 //
@@ -31,8 +31,8 @@ dns.setDefaultResultOrder("ipv4first");
 // Transport fidelity: the JS Headers class lowercases every header name,
 // but the broker emits RFC-cased names natively ("Location", "Via",
 // "X-Additional-Key") and several ETSI keywords assert them
-// CASE-SENSITIVELY (error.md 2026-08-06 — same class as the K8 haproxy
-// h1-case-adjust). node:http sends names verbatim, so this shim restores
+// CASE-SENSITIVELY (the same class of problem haproxy's h1-case-adjust
+// solves). node:http sends names verbatim, so this shim restores
 // the conventional case on both directions instead of shipping whatever
 // the Headers class kept.
 const CASE = new Map([
@@ -99,7 +99,7 @@ const port = Number(process.argv[2] ?? 9090);
 await init({
   module_or_path: await readFile(new URL("./pkg/antares_wasm_bg.wasm", import.meta.url)),
 });
-// N4 outside the browser: ANTARES_STORE=file runs the SAME redb
+// Persistence outside the browser: ANTARES_STORE=file runs the SAME redb
 // write-through shadow the OPFS worker uses, over node:fs sync calls —
 // the six methods FileSystemSyncAccessHandle exposes, fs-backed. O_RDWR
 // (never "a+": append mode ignores the positional writes redb depends on).

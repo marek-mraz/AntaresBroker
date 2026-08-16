@@ -1,4 +1,4 @@
-// N9: the loopback host. The broker's own outbound HTTP (federation
+// The loopback host. The broker's own outbound HTTP (federation
 // forwards, notifications outside the page sink) leaves through the global
 // fetch of whatever JS context hosts it — and a fetch made INSIDE a Service
 // Worker or dedicated worker never re-enters that worker's own handler. So

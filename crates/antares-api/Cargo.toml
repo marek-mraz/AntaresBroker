@@ -25,13 +25,13 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-# K12: the metrics FACADE only — a no-op unless the broker installs a
-# recorder, so tests and future wasm builds cost nothing (§9.2).
+# The metrics facade only — a no-op unless the broker installs a recorder,
+# so tests and wasm builds cost nothing.
 metrics = { workspace = true }
 
-# N2: the native tokio/reqwest builds carry sockets and rustls; the wasm32
-# build takes the same crates with the target's own backends. A dependency
-# TARGET section, not a logic change — the code above is identical either way.
+# The native tokio/reqwest builds carry sockets and rustls; the wasm32 build
+# takes the same crates with the target's own backends. Target sections only —
+# the code above is identical either way.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
@@ -42,7 +42,7 @@ tokio = { version = "1", default-features = false, features = ["sync", "macros"]
 # uuid v4 randomness on the browser target (crypto.getRandomValues)
 uuid = { workspace = true, features = ["js"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# default axum minus "http1"+"tokio": the router without the listener (§N).
+# default axum minus "http1"+"tokio": the router without the listener.
 axum = { version = "0.8", default-features = false, features = [
     "form", "json", "matched-path", "original-uri", "query", "tower-log", "tracing",
 ] }
@@ -52,14 +52,14 @@ gloo-timers = { workspace = true }
 web-time = { workspace = true }
 
 [features]
-# Clause 7 MQTT notification binding (G1); on by default — the 058 TPs need it.
-# `postgres` forwards the antares-sql gate (N2): on for every native build,
-# off for the browser, where the memory store is the only backend.
+# Clause 7 MQTT notification binding; on by default — the 058 TPs need it.
+# `postgres` forwards the antares-sql gate: on for every native build, off
+# for the browser, where the memory store is the only backend.
 default = ["mqtt", "postgres"]
 mqtt = ["antares-notifier/mqtt"]
 postgres = ["antares-sql/postgres"]
-# J6: sonic-rs on the batch-ingest hot path (x86_64/aarch64); serde_json is
-# always the compiled fallback (§6.1).
+# sonic-rs on the batch-ingest hot path (x86_64/aarch64); serde_json is
+# always the compiled fallback.
 sonic = ["dep:sonic-rs"]
 
 [dev-dependencies]

@@ -59,7 +59,7 @@ mkdir -p "$RESULTS_DIR"
 EXTRA=()
 [ "$STOP_ON_ERROR" = 1 ] && EXTRA+=(--exitonfailure)
 # MQTT TPs (058_*) launch mosquitto via `docker run` (MqttUtils.resource), so
-# they run wherever docker works — the pipeline (G4). MQTT=0 excludes them on
+# they run wherever docker works. MQTT=0 excludes them on
 # dockerless boxes; the CI definition of green INCLUDES them.
 [ "${MQTT:-1}" = 1 ] || EXTRA+=(--exclude '*mqtt*')
 

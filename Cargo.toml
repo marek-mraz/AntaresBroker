@@ -13,7 +13,7 @@ members = [
     "crates/antares-broker",
     "crates/antares-wasm",
 ]
-# §16.2 fuzz harness: own lockfile/profile, built only by cargo-fuzz on
+# Fuzz harness: own lockfile/profile, built only by cargo-fuzz on
 # nightly (.github/workflows/fuzz.yml) — never part of the normal build.
 exclude = ["fuzz"]
 
@@ -52,24 +52,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redb = "4.1"
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
-# H7 geoquery evaluator (4.10): DE-9IM relate + GeoJSON conversion
+# Geoquery evaluator (4.10): DE-9IM relate + GeoJSON conversion
 geo = "0.33"
 geo-types = "0.7"
 geojson = "0.24"
-# J2 @context parsed-LRU / J6 sonic ingest fast path / J7 allocator
+# @context parsed-LRU, sonic ingest fast path, allocator
 moka = { version = "0.12", features = ["sync"] }
 sonic-rs = "0.5"
 tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "json", "chrono", "uuid", "migrate", "macros"] }
-# F1 (§6.4): the JetStream change spine — official client, KV + streams in core
-# (0.50 verified on crates.io 2026-08-03, §6.1; pre-1.0 pin — upgrade in dedicated PRs)
+# The JetStream change spine — official client, KV + streams in core
+# (0.50 verified 2026-08-03; pre-1.0 pin — upgrade in dedicated PRs)
 async-nats = "0.50"
 futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
-# K12 observability: antares_ Prometheus metrics (§9.1), env-gated OTLP traces
+# Observability: antares_ Prometheus metrics, env-gated OTLP traces
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 opentelemetry = "0.32"
@@ -85,7 +85,7 @@ console-subscriber = "0.5"
 # dev
 http-body-util = "0.1"
 
-# N: browser build (antares-wasm + the wasm32 target sections of core crates)
+# Browser build (antares-wasm + the wasm32 target sections of core crates)
 http = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -93,17 +93,17 @@ js-sys = "0.3"
 web-sys = "0.3"
 console_error_panic_hook = "0.1"
 # std::time re-export natively; performance.now()-backed on wasm32 —
-# std::time::Instant::now() PANICS on wasm32-unknown-unknown (N2 clock rule).
+# std::time::Instant::now() PANICS on wasm32-unknown-unknown.
 web-time = "1"
 gloo-timers = { version = "0.3", features = ["futures"] }
 # Sound single-thread Send/Sync bridge (runtime-checked) — reqwest's wasm
 # client/futures are !Send but axum demands Send everywhere.
 send_wrapper = { version = "0.6", features = ["futures"] }
 
-# N5: the browser artifact optimizes for size (opt-level z + fat LTO); the
+# The browser artifact optimizes for size (opt-level z + fat LTO); the
 # native release profile stays throughput-tuned and untouched.
 [profile.release]
-# §2.1: resident code is the largest idle-RSS consumer (measured 10.9 MiB
+# Resident code is the largest idle-RSS consumer (measured 10.9 MiB
 # of a 37.5 MB unstripped binary). Symbols stripped (cargo-auditable's
 # .dep-v0 section survives), thin LTO for smaller + slightly faster code.
 strip = "symbols"

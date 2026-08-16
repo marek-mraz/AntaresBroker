@@ -19,9 +19,9 @@ mqtt = ["dep:rumqttc"]
 [lints]
 workspace = true
 
-# N2: same crates, target-appropriate backends (sockets + rustls natively,
-# the browser's own fetch/timers on wasm32). A dependency TARGET section, not
-# a logic change.
+# Same crates, target-appropriate backends (sockets + rustls natively, the
+# browser's own fetch/timers on wasm32). Target sections only — no logic
+# differs between them.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 

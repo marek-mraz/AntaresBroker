@@ -1,8 +1,8 @@
-// N6: the React playground (www/dist), driven headless — the CI proof
+// The React playground (www/dist), driven headless — the CI proof
 // that the browser build actually runs IN A BROWSER: broker up (OPFS worker
 // preferred), the auto-demo populates the board through the real NGSI-LD API,
-// a subscription delivers an in-page notification, N9 cross-tenant federation
-// over the loopback host, and the N4 persistence contract: state survives a
+// a subscription delivers an in-page notification, cross-tenant federation
+// works over the loopback host, and persistence holds: state survives a
 // page reload, and a second tab gets the exclusive-owner fallback instead of
 // a torn store. Run:
 //
@@ -128,7 +128,7 @@ try {
   );
   console.log("notification observed in-page");
 
-  // N9: cross-tenant federation inside the ONE in-browser broker — space-a
+  // Cross-tenant federation inside the ONE in-browser broker — space-a
   // holds a CSR whose endpoint is the loopback host and whose `tenant`
   // member (5.2.9) names space-b; a federated query in space-a must return
   // space-b's entity, and local=true must not.
@@ -203,8 +203,8 @@ try {
     }
     await page2.close();
 
-    // N4: persistence — reload releases the worker's handle; the fresh
-    // worker must rebuild the SAME store from OPFS (boot rebuild, B4).
+    // Persistence — reload releases the worker's handle; the fresh
+    // worker must rebuild the SAME store from OPFS (boot rebuild).
     // The auto-demo runs only once (localStorage), so surviving state is
     // proof of OPFS, not of a re-seed.
     await page.reload({ waitUntil: "load" });

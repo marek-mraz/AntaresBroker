@@ -1,6 +1,6 @@
 [package]
 name = "antares-registry"
-description = "Context Source Registrations, distributed operations, federation (phase 3)."
+description = "Context Source Registrations, distributed operations, federation."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "antares-wasm"
-description = "The Antares broker compiled to WebAssembly: the same router, fed by a Service Worker instead of a TCP listener (tasks.md §N)."
+description = "The Antares broker compiled to WebAssembly: the same router, fed by a Service Worker instead of a TCP listener."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,7 +20,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 serde_json = { workspace = true }
 
-# default axum minus "http1"+"tokio": the router without the listener (§N).
+# default axum minus "http1"+"tokio": the router without the listener.
 axum = { version = "0.8", default-features = false, features = [
     "form", "json", "matched-path", "original-uri", "query", "tower-log", "tracing",
 ] }
@@ -30,7 +30,7 @@ axum = { version = "0.8", default-features = false, features = [
 # it to crypto.getRandomValues via wasm-bindgen (feature unification applies
 # it to every uuid user in this build).
 uuid = { workspace = true, features = ["js"] }
-# N4: redb over the OPFS StorageBackend (src/opfs.rs)
+# redb over the OPFS StorageBackend (src/opfs.rs)
 redb = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
@@ -42,7 +42,7 @@ web-sys = { workspace = true, features = [
     "RequestInit",
     "Response",
     "ResponseInit",
-    # N4 OPFS surface (dedicated-worker sync access handles)
+    # OPFS surface (dedicated-worker sync access handles)
     "FileSystemDirectoryHandle",
     "FileSystemFileHandle",
     "FileSystemGetFileOptions",
@@ -57,7 +57,7 @@ send_wrapper = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-# N9 test: a real TCP listener that feeds the SAME broker instance — the
+# Tests need a real TCP listener feeding the SAME broker instance — the
 # native stand-in for the browser loopback host (tests/handle.rs).
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true }

@@ -50,7 +50,7 @@ jobs:
         run: |
           ./dev/install-wasm-tools.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Build + size budget (N5)
+      - name: Build + size budget
         run: |
           ./dev/wasm-build.sh | tee wasm-size.txt
           echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"
@@ -62,7 +62,7 @@ jobs:
           npx playwright-core install --with-deps chromium
           npx vitest run
           npm run build
-      - name: Node tier smoke + browser tier (N6)
+      - name: Node tier smoke + browser tier
         run: ./dev/wasm-test.sh
       - name: Upload the wasm bundle (release asset source)
         uses: actions/upload-artifact@v6

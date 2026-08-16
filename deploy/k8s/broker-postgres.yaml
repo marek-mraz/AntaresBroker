@@ -46,11 +46,11 @@ spec:
     metadata:
       labels: { app: antares, role: api }
     spec:
-      # P0-1: the `antares*` Services make kubelet inject ANTARES_PORT/
+      # The `antares*` Services make kubelet inject ANTARES_PORT/
       # ANTARES_SERVICE_* into every pod — fatal under the unknown-key
       # check. Belt at main.rs skips the injected shapes; this is braces.
       enableServiceLinks: false
-      terminationGracePeriodSeconds: 30 # K1: > drain delay + deadline
+      terminationGracePeriodSeconds: 30 # > drain delay + deadline
       # Runtime hardening: non-root (image is uid 65532), read-only
       # rootfs (postgres mode writes nothing there; /tmp is a tmpfs), all caps
       # dropped, no privilege escalation.
@@ -118,7 +118,7 @@ spec:
     metadata:
       labels: { app: antares, role: worker }
     spec:
-      # P0-1: the `antares*` Services make kubelet inject ANTARES_PORT/
+      # The `antares*` Services make kubelet inject ANTARES_PORT/
       # ANTARES_SERVICE_* into every pod — fatal under the unknown-key
       # check. Belt at main.rs skips the injected shapes; this is braces.
       enableServiceLinks: false

@@ -1,6 +1,6 @@
 [package]
 name = "antares-bus"
-description = "Change-event bus: ChangeEvent + the local in-process impl and the NATS JetStream impl (F1)."
+description = "Change-event bus: ChangeEvent + the local in-process impl and the NATS JetStream impl."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

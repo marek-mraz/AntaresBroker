@@ -48,7 +48,7 @@ jobs:
         run: |
           ./dev/install-wasm-tools.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Build + size budget (N5)
+      - name: Build + size budget
         run: |
           ./dev/wasm-build.sh | tee wasm-size.txt
           echo "## Browser artifact" >> "$GITHUB_STEP_SUMMARY"

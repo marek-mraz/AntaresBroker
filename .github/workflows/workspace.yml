@@ -63,7 +63,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # Live MQTT server for the clause-7 e2e (G1) — without the env var the
+      # Live MQTT server for the clause-7 e2e — without the env var the
       # test skips vacuously and CI proves nothing about MQTT delivery.
       - name: Start mosquitto for the MQTT e2e
         run: |

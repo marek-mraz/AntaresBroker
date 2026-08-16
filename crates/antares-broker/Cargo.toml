@@ -11,7 +11,7 @@ name = "antares"
 path = "src/main.rs"
 
 [dependencies]
-# N2: the workspace dep is default-features=false so the wasm crate can shed
+# The workspace dep is default-features=false so the wasm crate can shed
 # the Pg arm; the native binary turns everything back on here.
 antares-api = { workspace = true, features = ["mqtt", "postgres"] }
 axum = { workspace = true }
@@ -28,11 +28,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
-# K12: Prometheus render at /q/metrics + env-gated OTLP span export. Only the
-# composition root knows the exporters exist (§9.2) — core crates speak the
+# Prometheus render at /q/metrics + env-gated OTLP span export. Only the
+# composition root knows the exporters exist — core crates speak the
 # `metrics` facade at most (a no-op without an installed recorder). The
-# whole stack is a RUNTIME switch: ANTARES_TELEMETRY=1 installs it, the
-# default allocates none of it (§2.1 lean posture).
+# whole stack is a runtime switch: ANTARES_TELEMETRY=1 installs it, the
+# default allocates none of it.
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 opentelemetry = { workspace = true }
@@ -42,20 +42,20 @@ tracing-opentelemetry = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
 
 [features]
-# K12: tokio-console in dev — build with RUSTFLAGS="--cfg tokio_unstable"
+# tokio-console in dev — build with RUSTFLAGS="--cfg tokio_unstable"
 # and run `tokio-console` against the default port. Never on in release
 # images. The layer only arms under cfg(tokio_unstable), so an
 # --all-features build without the RUSTFLAGS stays a no-op instead of
 # panicking at startup.
 console = ["dep:console-subscriber"]
-# J7: decay-purging allocator + heap stats (§6.1; glibc malloc is the one
-# wrong answer). Unix-only: the wasm target (§N) keeps the default.
+# Decay-purging allocator + heap stats (glibc malloc holds far more RSS).
+# Unix-only: the wasm target keeps the default allocator.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 
 [dev-dependencies]
-# mqtt e2e (G1/G4 local proof): sync rumqttc client against a live mosquitto
+# mqtt e2e: sync rumqttc client against a live mosquitto
 rumqttc = { workspace = true }
 serde_json = { workspace = true }
 

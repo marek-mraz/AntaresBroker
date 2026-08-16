@@ -42,7 +42,7 @@ function dispatchNotification(body) {
   for (const fn of noteHandlers) fn(doc);
 }
 
-// ?allowPrivateEgress=1 — harness knob (N7b): the ETSI mocks live on
+// ?allowPrivateEgress=1 — harness knob: the ETSI mocks live on
 // private/loopback addresses the broker's egress policy denies by default.
 const ALLOW_PRIVATE_EGRESS = new URLSearchParams(location.search).get(
   "allowPrivateEgress",

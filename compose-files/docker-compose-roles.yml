@@ -1,5 +1,5 @@
-# Role-split overlay (tasks.md backlog 2026-08-15b item 1) — layered ON TOP
-# of the ETSI stack, like the K2 HA overlay but a TRUE role split:
+# Role-split overlay — layered ON TOP of the ETSI stack, like the HA
+# overlay but a TRUE role split:
 #
 #   STORE=postgres docker compose -f compose-files/docker-compose-etsi.yml \
 #                  -f compose-files/docker-compose-roles.yml --profile db up -d
@@ -7,16 +7,16 @@
 # Shape: 5 roles × 2 replicas = 10 broker containers, ALL one broker
 # (ANTARES_HOST_ALIAS antares1, one shared postgres1, ANTARES_BUS=nats):
 #   haproxy owns 9090, fronting antares1 (moved to 9095, ANTARES_ROLES=api)
-#   and api2 (9096) — the only two pods serving the NGSI-LD surface (P0-4:
-#   workers expose /q/health,/q/ready,/q/metrics and nothing else).
+#   and api2 (9096) — the only two pods serving the NGSI-LD surface; workers
+#   expose /q/health, /q/ready, /q/metrics and nothing else.
 #   matcher1/2 (9110/9111) + notifier1/2 (9112/9113): both roles join the ONE
 #   shared "matcher" durable (wiring.rs — each change processed exactly once
 #   across the four), tick the single-winner interval loop, and deliver
 #   notifications (hence the mosquitto extra_hosts + egress-private).
 #   temporal1/2 (9114/9115): no bus consumer BY DESIGN — auto-recording is
-#   synchronous in the api write path (K8 lesson); these pods carry the
+#   synchronous in the api write path; these pods carry the
 #   SKIP-LOCKED single-winner temporal maintenance job.
-#   registry1/2 (9116/9117): hold the §9.3 role's fleet slot; the F5
+#   registry1/2 (9116/9117): hold the registry role's fleet slot; the
 #   registration mirror rides on api pods today (wiring.rs has no
 #   registry-role consumer), so these pods prove ops/rolling behaviour for
 #   the role, not registry data flow — do not claim otherwise in docs.
@@ -33,7 +33,7 @@ x-worker: &worker
   image: antares-local:latest
   network_mode: host
   restart: unless-stopped
-  # K1 contract: stop_grace_period must exceed drain delay (0.5 s) +
+  # stop_grace_period must exceed drain delay (0.5 s) +
   # drain deadline (20 s), or `docker stop` turns the drain into a kill.
   stop_grace_period: 30s
   depends_on: [nats]

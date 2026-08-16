@@ -1,6 +1,6 @@
 [package]
 name = "antares-sql"
-description = "AST -> SQL compiler + schema migrations. sqlx store impls land in phase 1."
+description = "AST -> SQL compiler + schema migrations, plus the sqlx store implementations."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ sqlx = { workspace = true, optional = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 
-# N2: tokio carries sockets natively; on wasm32 only the sync primitives —
+# tokio carries sockets natively; on wasm32 only the sync primitives —
 # the on_blocking helper compiles to a plain inline call there.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -25,10 +25,10 @@ tokio = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
 
 [features]
-# N2: the Pg arm is the only part of this crate that cannot cross to wasm32
+# The Pg arm is the only part of this crate that cannot cross to wasm32
 # (sqlx needs sockets). Default-on everywhere else; the browser build turns
-# it off and gets the memory store through the same seam. A FEATURE GATE,
-# not a logic change — every gated item keeps its behaviour verbatim.
+# it off and gets the memory store through the same seam. A feature gate
+# only — every gated item keeps its behaviour verbatim.
 default = ["postgres"]
 postgres = ["dep:sqlx"]
 

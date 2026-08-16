@@ -1,34 +1,34 @@
-# HA overlay (tasks.md K2) — layered ON TOP of the ETSI stack:
+# HA overlay — layered ON TOP of the ETSI stack:
 #
 #   docker compose -f compose-files/docker-compose-etsi.yml \
 #                  -f compose-files/docker-compose-ha.yml [--profile db] up -d
 #
-# The task says "profile"; this is an overlay file instead, for a compose
-# reason: a profile can only ADD services, and HA must also MOVE antares1 off
-# port 9090 so the load balancer can take it. An overlay does both; the normal
-# ETSI stack file is untouched, which is the property the task actually wants.
+# An overlay file rather than a compose profile, for a compose reason: a
+# profile can only ADD services, and HA must also MOVE antares1 off port 9090
+# so the load balancer can take it. An overlay does both and leaves the normal
+# ETSI stack file untouched.
 #
 # Shape: haproxy owns 9090, fronting antares1 (moved to 9095) and antares1b
 # (9096) — both host-networked like every broker, so the ETSI mocks and
 # notification callbacks keep resolving via localhost. The other four brokers
 # and the suite are unchanged: to the Robot runner this stack is
-# indistinguishable from the normal one, which is what makes the K8
+# indistinguishable from the normal one, which is what makes the
 # ETSI-during-roll gate meaningful.
 #
 # Store modes: postgres / timescale only — both instances share postgres1,
 # which is what makes them replicas of ONE broker rather than two brokers.
 # `file` mode CANNOT run this overlay: redb's exclusive lock allows one
-# process per volume (K10 proved the refusal), which is why the K-section
-# table says Recreate, never RollingUpdate, for that rung. `memory` mode
+# process per volume (the second opener is refused), which is why that mode
+# must be deployed Recreate, never RollingUpdate. `memory` mode
 # comes up but the replicas have independent state — good enough to exercise
 # the LB/drain mechanics, meaningless for data consistency.
 #
-# F10/K4: the replicas run ANTARES_BUS=nats against the overlay's own NATS.
+# The replicas run ANTARES_BUS=nats against the overlay's own NATS.
 # That is what makes two instances ONE broker for notifications too: the
 # matcher is a shared durable (each change matched once, wherever it was
 # written), interval firings are single-winner by row-lock claim, and the
 # temporal recorder is a balanced consumer — bus=local replicas would each
-# tick their own intervals and double-fire (§9.2: local means one process).
+# tick their own intervals and double-fire (bus=local means one process).
 
 services:
   nats:
@@ -47,7 +47,7 @@ services:
       ANTARES_BUS: ${HA_BUS:-nats}
       ANTARES_NATS_URL: nats://localhost:4222
     depends_on: [nats]
-    # K1 contract: stop_grace_period must exceed drain delay (0.5 s) +
+    # stop_grace_period must exceed drain delay (0.5 s) +
     # drain deadline (20 s), or `docker stop` turns the drain into a kill.
     stop_grace_period: 30s
 

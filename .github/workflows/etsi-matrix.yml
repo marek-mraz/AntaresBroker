@@ -7,8 +7,8 @@ name: etsi-matrix
 #           2-replica fleet behind the LB, ANTARES_BUS=nats, CONTINUOUSLY
 #           rolling for the whole suite) and wasm-file (the BROWSER
 #           artifact: five dockerized node shims over the redb file store —
-#           the same .wasm a page loads, MQTT structurally excluded per
-#           N8). Runs every 3 days (etsi-full.yml), on v* tags (full.yml)
+#           the same .wasm a page loads, MQTT structurally excluded there).
+#           Runs every 3 days (etsi-full.yml), on v* tags (full.yml)
 #           and on manual dispatch.
 # Each cell runs ALL 8 suites through the one pipeline, folded into the
 # per-cell summary tables + one bundle (quick bundles are named

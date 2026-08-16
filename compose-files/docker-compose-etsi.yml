@@ -178,7 +178,7 @@ services:
       ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5437/antares
 
 # One volume per broker: `file` mode keeps its redb file here, and the volume
-# is what makes the data survive a container swap (B5: never inside the image).
+# is what makes the data survive a container swap — never inside the image.
 volumes:
   antares1-data:
   antares2-data:

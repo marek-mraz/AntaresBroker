@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# C3 gate: every ANTARES_* env var read by non-test code must have a row in
+# Gate: every ANTARES_* env var read by non-test code must have a row in
 # docs/src/configuration.md. Grep-based on purpose — cheap and loud.
 set -euo pipefail
 cd "$(dirname "$0")/.."

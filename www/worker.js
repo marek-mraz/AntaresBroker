@@ -1,6 +1,6 @@
-// N4: the persistence host — a DEDICATED worker, because OPFS sync access
+// The persistence host — a DEDICATED worker, because OPFS sync access
 // handles exist nowhere else (not the main thread, not a Service Worker).
-// It owns the exclusive handle on antares.redb (N4b: second opener gets a
+// It owns the exclusive handle on antares.redb (a second opener gets a
 // clear error) and runs the same broker over the same redb shadow as native
 // `file` mode: commit-before-ack, format check, boot rebuild.
 import init, { AntaresBroker } from "./pkg/antares_wasm.js";

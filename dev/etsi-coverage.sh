@@ -94,7 +94,7 @@ MQTT="${MQTT:-0}" STOP_ON_ERROR=0 RESULTS_DIR="$RESULTS_DIR" \
   dev/etsi-run.sh || true
 
 # Graceful stop: the .profraw is written by the exit hook — SIGTERM drains
-# and exits cleanly (K1/K7); SIGKILL would lose the whole broker profile.
+# and exits cleanly; SIGKILL would lose the whole broker profile.
 kill -TERM "$BROKER_PID"
 wait "$BROKER_PID" || true
 trap - EXIT

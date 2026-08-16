@@ -1,4 +1,4 @@
-// N7b: the browser tier — the ETSI suite talks real HTTP to THIS process,
+// The browser tier — the ETSI suite talks real HTTP to THIS process,
 // and every request is forwarded INTO a headless-Chromium page hosting the
 // React playground (www/dist → transport ladder: OPFS worker / in-page).
 // The response the suite sees is byte-for-byte what window.brokerFetch
@@ -6,14 +6,14 @@
 // browser runs, on the engine's own Request/Response/fetch/OPFS plumbing.
 //
 //   node www/test/etsi-proxy.mjs        binds 9090..9094 (all → the one page;
-//                                       the N7b suite set only queries 9090,
+//                                       the suite set only queries 9090,
 //                                       the pipeline health-waits all five)
 //
 // Chromium runs with --disable-web-security: a HARNESS-ONLY CORS bypass so
 // the broker's own egress (suite @context servers, notification receivers —
 // none of which send CORS headers) works from inside the page. The REAL
-// browser limits stay documented as N7c; this tier proves engine-correctness,
-// not CORS policy.
+// browser limits stay documented elsewhere; this tier proves
+// engine-correctness, not CORS policy.
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";

@@ -1,6 +1,6 @@
 [package]
 name = "antares-matcher"
-description = "Subscription matching: compiled subscriptions, candidate index, in-memory evaluation (phase 2)."
+description = "Subscription matching: compiled subscriptions, candidate index, in-memory evaluation."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
