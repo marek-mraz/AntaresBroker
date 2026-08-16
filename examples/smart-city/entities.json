@@ -1,0 +1,1140 @@
+[
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:000",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:001",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.139,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:002",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:003",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.147,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:004",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:005",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.155,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:006",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.159,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:007",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.163,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:008",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.167,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:009",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.171,
+     48.73
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:010",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:011",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.139,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:012",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:013",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.147,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:014",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:015",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.155,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:016",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.159,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:017",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.163,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:018",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "occupied"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.167,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:ParkingSpot:bb:019",
+  "type": "ParkingSpot",
+  "status": {
+   "type": "Property",
+   "value": "free"
+  },
+  "category": {
+   "type": "Property",
+   "value": "onStreet"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.171,
+     48.734
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:000",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "off"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:001",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.139,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:002",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:003",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.147,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:004",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "off"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:005",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.155,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:006",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.159,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:007",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.163,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:008",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "off"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.167,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:009",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.171,
+     48.731
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:010",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.735
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:011",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.139,
+     48.735
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:012",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "off"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.735
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:013",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.147,
+     48.735
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:Streetlight:bb:014",
+  "type": "Streetlight",
+  "powerState": {
+   "type": "Property",
+   "value": "on"
+  },
+  "lanternHeight": {
+   "type": "Property",
+   "value": 8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.735
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:000",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 25.7,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 18.3,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.732
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:001",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 13.4,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 20.9,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.732
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:002",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 29.0,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 26.8,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.732
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:003",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 34.3,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 19.1,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.159,
+     48.732
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:004",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 18.3,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 18.4,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.167,
+     48.732
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:005",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 11.4,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 24.6,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.736
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:006",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 4.9,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 20.6,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.736
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:AirQualityObserved:bb:007",
+  "type": "AirQualityObserved",
+  "pm25": {
+   "type": "Property",
+   "value": 26.1,
+   "unitCode": "GQ"
+  },
+  "temperature": {
+   "type": "Property",
+   "value": 25.1,
+   "unitCode": "CEL"
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.736
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:000",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.26
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.733
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:001",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.6
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.733
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:002",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.151,
+     48.733
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:003",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.06
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.159,
+     48.733
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:004",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.8
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.167,
+     48.733
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:005",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.7
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.135,
+     48.737
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ },
+ {
+  "id": "urn:ngsi-ld:WasteContainer:bb:006",
+  "type": "WasteContainer",
+  "fillingLevel": {
+   "type": "Property",
+   "value": 0.37
+  },
+  "location": {
+   "type": "GeoProperty",
+   "value": {
+    "type": "Point",
+    "coordinates": [
+     19.143,
+     48.737
+    ]
+   }
+  },
+  "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+ }
+]

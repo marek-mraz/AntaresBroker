@@ -131,9 +131,11 @@ explicitly says "decide with the user".
       bytes — health UP + create 201. In-page flow is the hosted
       playground, page-tested by dev/wasm-test.sh in CI. Evidence: this
       commit.
-- [ ] D5. `examples/smart-city/` — small realistic dataset (Smart Data
-      Models types, ~50 entities), the demo that sells the digital-twin
-      story; reused by README screenshots.
+- [x] D5. examples/smart-city/: 50 entities (ParkingSpot/Streetlight/
+      AirQualityObserved/WasteContainer), idempotent upsert seed, five
+      city questions. Executed locally: 13 free spots, 4 lights off,
+      4 pm25>25, 3 containers >=70%, 16 within 500 m. Evidence: this
+      commit.
 - [ ] D6. CI job `examples.yml`: every example's run script executes on
       every release tag (gate) and weekly (drift catch).
 
