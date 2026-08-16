@@ -69,15 +69,46 @@ jobs:
           echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
           echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
 
+  build-wasm:
+    # The browser artifact for the wasm-file cell — built ONCE in parallel
+    # with the image build (the caller's graph: workspace -> builds -> cells),
+    # instead of every wasm cell paying its own toolchain + compile. Full
+    # preset only: quick has no wasm cell.
+    name: Build the wasm bundle
+    if: inputs.preset != 'quick'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build + size budget
+        run: |
+          ./dev/install-wasm-tools.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          ./dev/wasm-build.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: matrix-wasm-pkg
+          path: www/pkg
+          retention-days: 3
+
   etsi-cell:
-    # Six parallel cells, each running ALL 8 suites serially through the
-    # SAME pipeline (with the between-suite state-reset pairing). The four
+    # Parallel cells, each running ALL 8 suites serially through the SAME
+    # pipeline (with the between-suite state-reset pairing). The
     # single-broker cells run bus=local as always; the two -nats cells run
     # the role-split fleet (ROLES_SPLIT=1) with the containers rolling in
     # role-group order for the WHOLE run (ROLL_DURING_RUN=1) — the suite has
     # no retries, so any red there is a real drain/exactly-once bug.
     name: ${{ matrix.cell }} (all suites)
-    needs: [build]
+    needs: [build, build-wasm]
+    # build-wasm is SKIPPED on the quick preset — accept skipped, demand
+    # success otherwise (a plain `needs` would skip every cell with it).
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs['build-wasm'].result == 'success' || needs['build-wasm'].result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -121,23 +152,19 @@ jobs:
       - if: ${{ !matrix.wasm }}
         run: docker load < antares-image.tgz
 
-      # The wasm cell tests the BROWSER artifact, not the native image:
-      # build www/pkg here (rust-cache keeps it fast), then the pipeline
-      # runs the five shims as containers (Dockerfile.wasm, WASM_DOCKER=1).
-      - name: Rust with wasm32 target (wasm cell)
+      # The wasm cell tests the BROWSER artifact, not the native image: the
+      # bundle comes from the parallel build-wasm job (built once), the cell
+      # only wraps it in the shim image (seconds) — then the pipeline runs
+      # the five shims as containers (Dockerfile.wasm, WASM_DOCKER=1).
+      - name: Fetch the wasm bundle built once for this run
         if: ${{ matrix.wasm }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/download-artifact@v7
         with:
-          targets: wasm32-unknown-unknown
-      - if: ${{ matrix.wasm }}
-        uses: Swatinem/rust-cache@v2
-      - name: Build the browser artifact + shim image (wasm cell)
+          name: matrix-wasm-pkg
+          path: www/pkg
+      - name: Build the shim image (wasm cell)
         if: ${{ matrix.wasm }}
-        run: |
-          ./dev/install-wasm-tools.sh
-          export PATH="$HOME/.local/bin:$PATH"
-          ./dev/wasm-build.sh
-          docker build -f Dockerfile.wasm -t antares-wasm-local:latest .
+        run: docker build -f Dockerfile.wasm -t antares-wasm-local:latest .
 
       - name: Run every suite through the ONE pipeline
         env:

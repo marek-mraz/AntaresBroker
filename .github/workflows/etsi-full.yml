@@ -24,8 +24,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  workspace:
+    # Same gate as every other run (shared workflow_call definition):
+    # workspace tests first, then builds, then the matrix.
+    name: Workspace tests
+    uses: ./.github/workflows/workspace.yml
+
   matrix:
     name: ETSI full matrix (7 cells)
+    needs: workspace
     uses: ./.github/workflows/etsi-matrix.yml
     with:
       preset: full

@@ -2,17 +2,18 @@ name: ci
 
 # The DEV pipeline — workspace tests GATE everything downstream:
 #
-#   workspace tests ──→ [image build → 3-store (file postgres timescale) all-suites matrix → summary]
-#                   └──→ build arm64 image ──────────────────────────────→ publish :dev (master, all green)
+#   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
+#                   ├──→ build arm64 image ─────────────┐
+#                   └──→ build wasm bundle (smoked) ────┴→ publish :dev (master, all green)
 #
-# fmt + clippy + the full workspace suite run FIRST. If any of them fail the
-# image is never built and the ETSI matrix never runs — the whole pipeline
-# stops at the gate (matrix + build-arm `needs: workspace`).
+# fmt + clippy + the full workspace suite run FIRST (the shared
+# workspace.yml). If any of them fail no image or bundle is built and the
+# ETSI matrix never runs — the whole pipeline stops at the gate.
 #
-# Nothing else lives here. The browser/wasm artifact, the serial all-suites
-# runs, K8 roll-under-suite, N7a and the k8s manifest smoke are full.yml
-# (manual dispatch or v* tags). The matrix itself is the reusable
-# etsi-matrix.yml, shared by both pipelines.
+# Nothing else lives here. The full seven-cell matrix runs in etsi-full.yml
+# (every 3 days) and full.yml (v* tags); the browser-tier wasm proof, K8
+# roll-under-suite, N7a and the k8s manifest smoke are full.yml. The matrix
+# itself is the reusable etsi-matrix.yml, shared by all three pipelines.
 
 # Runs on push to master, on pull requests, and on manual dispatch.
 on:
@@ -28,110 +29,10 @@ concurrency:
 
 jobs:
   workspace:
-    # fmt + clippy + the workspace test suite across the feature matrix, with
-    # live PostGIS / TimescaleDB / mosquitto so no integration test skips
-    # vacuously.
+    # The shared workspace-test gate (workflow_call) — one definition for
+    # ci/full/etsi-full, see .github/workflows/workspace.yml.
     name: Workspace tests
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    env:
-      # Live PostGIS for the antares-sql integration tests (C14) — without this
-      # they skip vacuously and CI proves nothing about the Pg store.
-      ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15432/antares
-      CARGO_TERM_COLOR: always
-    services:
-      postgis:
-        image: ghcr.io/baosystems/postgis:17-3.5
-        env:
-          POSTGRES_USER: antares
-          POSTGRES_PASSWORD: antares
-          POSTGRES_DB: antares
-        # host ports must stay below 32768: the ephemeral range (32768-60999)
-        # collides with random outbound source ports -> "address already in use"
-        ports: ["15432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U antares"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-      # D5: the store integration tests run against BOTH temporal modes —
-      # this one carries the timescaledb extension (plus PostGIS).
-      timescaledb:
-        image: timescale/timescaledb-ha:pg17
-        env:
-          POSTGRES_USER: antares
-          POSTGRES_PASSWORD: antares
-          POSTGRES_DB: antares
-        ports: ["15433:5432"]
-        options: >-
-          --health-cmd "pg_isready -U antares"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-    steps:
-      - uses: actions/checkout@v5
-      # The ledger check (dev/spec.py check) resolves robot: lists against
-      # the suite's TP tree — an empty submodule reads as 100% robot drift.
-      - name: Fetch the ETSI test suite (submodule)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync
-          git submodule update --init --depth 1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      # Live MQTT server for the clause-7 e2e (G1) — without the env var the
-      # test skips vacuously and CI proves nothing about MQTT delivery.
-      - name: Start mosquitto for the MQTT e2e
-        run: |
-          sudo apt-get install -y -qq mosquitto
-          printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
-          sudo systemctl restart mosquitto
-          echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
-      # Live NATS (JetStream) for the F9 bus tests + the 2-instance roles e2e.
-      # A `docker run` step, not a service: services cannot pass the `-js`
-      # command argument the JetStream engine needs.
-      - name: Start NATS (JetStream) for the bus tests
-        run: |
-          docker run -d --name nats -p 4222:4222 nats:2-alpine -js
-          echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      # feature matrix (§9.5): no defaults + all features
-      - run: cargo test --workspace --no-default-features
-      - run: cargo test --workspace --all-features
-      # D5: same store tests, timescale temporal mode (hypertable DDL branch,
-      # compression-vs-RLS ordering, D3 detection).
-      - name: Store tests against the timescale temporal mode
-        env:
-          ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15433/antares
-        run: |
-          # psql is not preinstalled on the arm runner image (exit 127)
-          which psql >/dev/null || sudo apt-get install -y -qq postgresql-client
-          PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
-            -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
-          cargo test -p antares-sql
-      # D4/§16.5: license gate (nothing links TSL — Timescale is talked to
-      # over SQL only) + advisories. Not the cargo-deny-action: its docker
-      # image ships an x86_64 binary — Exec format error on this arm runner.
-      - name: cargo-deny (licenses + advisories)
-        run: |
-          V=0.20.2
-          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
-            | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
-          cargo deny --log-level warn check licenses advisories
-      # E9g: the ETSI resource sampler + its sample↔TP join fail silently when
-      # broken (an empty column reads as "nothing happened") — check them here.
-      - name: ETSI sampling self-check
-        run: python3 dev/etsi-selftest.py
-      # §0.3 ledger integrity: a clause file that stops parsing silently
-      # drops out of every count — make that (and status typos, robot drift)
-      # a red build instead.
-      - name: conformance ledger check
-        run: pip install --quiet pyyaml && python3 dev/spec.py check
-      # SQL-injection guard (§16.2): no string-built queries outside antares-sql
-      - name: no format! into SQL outside the compiler
-        run: |
-          ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
-            | grep -v 'crates/antares-sql/'
+    uses: ./.github/workflows/workspace.yml
 
   matrix:
     # The per-commit ETSI gate: the QUICK preset (file postgres timescale).
