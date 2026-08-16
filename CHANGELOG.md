@@ -1,12 +1,37 @@
 # Changelog
 
-Release images are published by CI: `:dev` on every green master run,
-`:dev-<run>` per run, `:<version>` + `:latest` on `v*` tags (full.yml).
-No `v*` tag has been cut yet — the entries below are the dated milestones
-of the pre-release line; the first tagged release will start the versioned
-history.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versioning per CONTRIBUTING "Versioning & releases". Release images are
+published by CI: `:dev` on every green master run, `:dev-<run>` per run,
+`:<version>` + `:latest` on `v*` tags. No `v*` tag has been cut yet — the
+first tagged release will move the Unreleased section under its heading.
 
-## Unreleased
+## [Unreleased]
+
+### Added
+- User documentation book (mdBook, rendered to the Pages site under
+  `/docs/`): getting started, configuration reference (CI-checked against
+  the code's env vars), deployment, federation, wasm, operations,
+  conformance.
+- `examples/`: quickstart, federation pair, subscriptions (HTTP + MQTT),
+  browser shim, smart-city dataset — each executed before commit and run
+  by the `examples` workflow on tags and weekly.
+- Semver/release policy (CONTRIBUTING) and this changelog format.
+
+### Changed
+- **License: BSD-3-Clause → EUPL-1.2.**
+- README rewritten around measured differentiators, with a 60-second
+  quickstart and an honest broker comparison table.
+- Repo hygiene: working notes and analysis downloads moved out of the
+  repository; root carries only product files.
+
+### Fixed
+- wasm Node tier: 6.3.4 Content-Length enforcement (bare 411 for
+  POST/PATCH/PUT without the header) — the browser seam's stamped
+  content-length had masked the check in the `wasm-file` cell
+  (046_01, the cell's last 3 reds).
+
+### Pre-release milestones
 
 ### 2026-08-15
 - IOP id/idPattern routing campaign: 58 new Robot TPs (IOP_EXT_IDR_01..07)

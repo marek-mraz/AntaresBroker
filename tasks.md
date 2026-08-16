@@ -150,8 +150,9 @@ explicitly says "decide with the user".
       spec-pinned, env vars, store formats), pre-1.0 MINOR-for-breaking
       rule, migration-note duty, tag-triggered gated releases, Keep a
       Changelog discipline. Evidence: this commit.
-- [ ] E2. CHANGELOG.md → Keep-a-Changelog format, `[Unreleased]` section
-      maintained per merge; release tag moves it under the version heading.
+- [x] E2. CHANGELOG in Keep-a-Changelog form: [Unreleased] with
+      Added/Changed/Fixed carrying today's work; dated history kept as
+      pre-release milestones. Evidence: this commit.
 - [ ] E3. Release workflow (`release.yml`, triggered by `v*` tag): full
       seven-cell ETSI matrix MUST be green as the gate (etsi-full on the
       tag already runs — wire it as the release gate, not just a report);
