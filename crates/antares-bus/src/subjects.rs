@@ -1,4 +1,4 @@
-//! Subject encoding (§6.4/§9.1): `changes.{tenant}.{type_hash}.{id_hash}`.
+//! Subject encoding: `changes.{tenant}.{type_hash}.{id_hash}`.
 //!
 //! Entity types and ids are IRIs/URNs containing `.` and `:` — illegal or
 //! ambiguous as NATS subject tokens — so both segments are FNV-1a 64 hashes
@@ -26,7 +26,7 @@ pub fn change_subject(tenant: &str, first_type: &str, entity_id: &str) -> String
     )
 }
 
-/// Registration CUD deltas (§7 `ANTARES_REGISTRY`): broadcast, per tenant.
+/// Registration CUD deltas (`ANTARES_REGISTRY`): broadcast, per tenant.
 pub fn registry_subject(tenant: &str) -> String {
     format!("registry.{tenant}")
 }

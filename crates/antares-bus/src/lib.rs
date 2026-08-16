@@ -1,10 +1,10 @@
-//! Change-event bus (docs/deep-analysis.md §7).
+//! Change-event bus.
 //!
 //! Two implementations behind one closed enum (the AnyStore pattern,
 //! ADR-0005): `local` — an in-process broadcast ring, single-node mode, no
 //! infrastructure beyond the store — and `nats` — the JetStream spine
 //! (`ANTARES_CHANGES`, durable pull consumers, KV subscription mirror) that
-//! makes multi-instance roles possible (F1). `bus = local` is the default and
+//! makes multi-instance roles possible. `bus = local` is the default and
 //! what the ETSI pipeline runs; `nats` becomes mandatory only on scale-out.
 
 pub mod nats;
@@ -14,7 +14,7 @@ use antares_model::{EntityId, TenantId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-/// Operation kind — mirrors Scorpio's requestType int registry as an enum (§7).
+/// Operation kind — mirrors Scorpio's requestType int registry as an enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeOp {
@@ -31,7 +31,7 @@ pub enum ChangeOp {
     BatchMerge,
 }
 
-/// Claim-check reference (§7): events whose payload exceeds
+/// Claim-check reference: events whose payload exceeds
 /// [`CLAIM_CHECK_BYTES`] carry this instead of the inline body — consumers
 /// fetch the document from the store. NATS caps messages at ~1 MB and Antares
 /// never chunks.
@@ -41,15 +41,15 @@ pub struct PayloadRef {
     pub version: i64,
 }
 
-/// Inline-payload ceiling before the claim check kicks in (§7: 256 KB).
+/// Inline-payload ceiling before the claim check kicks in (256 KB).
 pub const CLAIM_CHECK_BYTES: usize = 256 * 1024;
 
 /// One entity change. Self-contained: carries payload AND prev_payload so
 /// consumers (matcher, temporal recorder) never re-read the DB per event.
-/// `version` is the entity row version bumped under the write lock (§3.1) —
+/// `version` is the entity row version bumped under the write lock —
 /// state-projecting consumers apply last-writer-wins on
 /// `(incarnation, version)`; `incarnation` is the row's created_at, which
-/// disambiguates delete/recreate (the version restarts at 1, §3.1.3).
+/// disambiguates delete/recreate (the version restarts at 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeEvent {
     pub tenant: TenantId,
@@ -63,10 +63,10 @@ pub struct ChangeEvent {
     /// The row's created_at — the incarnation half of the ordering key.
     #[serde(default)]
     pub incarnation: String,
-    /// Outbox row id (F3) — the `Nats-Msg-Id` dedup key. 0 = local bus.
+    /// Outbox row id — the `Nats-Msg-Id` dedup key. 0 = local bus.
     #[serde(default)]
     pub seq: i64,
-    /// Claim-check (§7): set when `payload` was stripped for size.
+    /// Claim-check: set when `payload` was stripped for size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_ref: Option<PayloadRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,7 +74,7 @@ pub struct ChangeEvent {
 }
 
 impl ChangeEvent {
-    /// §7 claim-check: replace any inline body over `limit` bytes with a
+    /// Claim-check: replace any inline body over `limit` bytes with a
     /// reference. Oversized entities are rare; the common path is untouched.
     pub fn claim_check(mut self, limit: usize) -> Self {
         let over = |v: &Option<serde_json::Value>| {
@@ -123,7 +123,7 @@ impl LocalBus {
     }
 }
 
-/// The closed bus seam (`bus = local | nats`, §9.2): core crates see only
+/// The closed bus seam (`bus = local | nats`): core crates see only
 /// this; the broker's wiring picks the variant and starts the consumers that
 /// match it.
 #[derive(Clone)]
@@ -136,7 +136,7 @@ impl AnyBus {
     /// Publish one change event. On the NATS arm this is the DIRECT path
     /// (used by the outbox drain, which owns retry/dedup); producers in
     /// postgres mode never call this straight from a request handler —
-    /// they enqueue in the write transaction (F3, §10).
+    /// they enqueue in the write transaction instead.
     pub async fn publish(&self, event: ChangeEvent) -> Result<(), nats::BusError> {
         match self {
             AnyBus::Local(b) => {

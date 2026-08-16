@@ -1,10 +1,10 @@
-//! F1 — the JetStream implementation (§6.4).
+//! The JetStream implementation of the bus.
 //!
 //! One `ANTARES_CHANGES` stream (Interest retention, subjects `changes.>`),
 //! one `ANTARES_REGISTRY` stream for registration deltas, one KV bucket
-//! (`antares_subscriptions`) for the compiled-subscription mirror (F4).
+//! (`antares_subscriptions`) for the compiled-subscription mirror.
 //!
-//! Consumer discipline, asserted not assumed (F7, the R10 lesson):
+//! Consumer discipline, asserted not assumed (a lesson from Scorpio):
 //! *balanced* work (matcher, temporal recorder) = a shared DURABLE pull
 //! consumer — instances joining the same durable load-balance; *broadcast*
 //! work (per-instance mirrors) = an EPHEMERAL pull consumer — every instance
@@ -40,7 +40,7 @@ pub const CHANGES_STREAM: &str = "ANTARES_CHANGES";
 pub const REGISTRY_STREAM: &str = "ANTARES_REGISTRY";
 pub const SUBS_BUCKET: &str = "antares_subscriptions";
 
-/// Bounded prefetch (§6.4/§2.1): how many unacked messages one consumer may
+/// Bounded prefetch: how many unacked messages one consumer may
 /// hold. Any unbounded queue is a 3am page.
 pub const MAX_ACK_PENDING: i64 = 256;
 
@@ -78,7 +78,7 @@ impl NatsBus {
             .connect(url)
             .await
             .map_err(err)?;
-        // §16.1/§7: the change stream carries every tenant's ChangeEvent bodies
+        // The change stream carries every tenant's ChangeEvent bodies
         // and MUST stay internal. If the server requires no auth, anything that
         // reaches it can read or forge all-tenant events — warn loudly so an
         // unauthenticated JetStream cluster is not shipped by accident.
@@ -114,9 +114,9 @@ impl NatsBus {
     }
 
     async fn ensure_streams(&self) -> Result<(), BusError> {
-        // §10: R3 on a 3-node JetStream cluster. Stream replication is a
-        // CLIENT-side stream setting, so the K5 manifests set
-        // ANTARES_NATS_REPLICAS=3; single-node dev/CI keeps 1.
+        // Production runs replicas=3 on a 3-node JetStream cluster. Stream
+        // replication is a CLIENT-side stream setting, so the deployment
+        // manifests set ANTARES_NATS_REPLICAS=3; single-node dev/CI keeps 1.
         let replicas: usize = std::env::var("ANTARES_NATS_REPLICAS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -127,7 +127,7 @@ impl NatsBus {
                 subjects: vec!["changes.>".into()],
                 // Interest retention: each durable sees every message; a
                 // message dies once every interested consumer acked it.
-                // (WorkQueue would forbid multiple consumer groups, §6.4.)
+                // (WorkQueue would forbid multiple consumer groups.)
                 retention: stream::RetentionPolicy::Interest,
                 duplicate_window: std::time::Duration::from_secs(120),
                 num_replicas: replicas,
@@ -159,8 +159,8 @@ impl NatsBus {
         Ok(())
     }
 
-    /// Publish one change event with `Nats-Msg-Id` dedup (§6.4). The id is
-    /// the outbox seq (F3) so a drain retry after a crash is absorbed by the
+    /// Publish one change event with `Nats-Msg-Id` dedup. The id is
+    /// the outbox seq so a drain retry after a crash is absorbed by the
     /// stream's duplicate window, not delivered twice.
     pub async fn publish(&self, ev: &ChangeEvent) -> Result<(), BusError> {
         let ev = ev.clone().claim_check(crate::CLAIM_CHECK_BYTES);
@@ -185,7 +185,7 @@ impl NatsBus {
         Ok(())
     }
 
-    /// Publish a registration CUD delta (F5): the full registration document
+    /// Publish a registration CUD delta: the full registration document
     /// (or a `{"deleted": id}` tombstone) on the tenant's registry subject.
     pub async fn publish_registry(
         &self,
@@ -240,12 +240,12 @@ impl NatsBus {
         .map_err(err)
     }
 
-    /// The KV bucket holding the compiled-subscription mirror (F4).
+    /// The KV bucket holding the compiled-subscription mirror.
     pub async fn subs_kv(&self) -> Result<async_nats::jetstream::kv::Store, BusError> {
         self.js.get_key_value(SUBS_BUCKET).await.map_err(err)
     }
 
-    /// F7 (the R10 `$[quarkus.uuid}` lesson): assert at startup that every
+    /// The Scorpio `$[quarkus.uuid}` lesson: assert at startup that every
     /// balanced concern really is a shared durable on the server — a typo'd
     /// durable name would silently turn work-sharing into a private queue
     /// (or broadcast into load-balancing). Fatal on mismatch.
@@ -260,7 +260,7 @@ impl NatsBus {
             if info.config.durable_name.as_deref() != Some(*durable) {
                 return Err(BusError(format!(
                     "topology: consumer '{durable}' is not durable — balanced work would \
-                     not be shared across instances (R10 class)"
+                     not be shared across instances"
                 )));
             }
         }
@@ -274,7 +274,7 @@ impl NatsBus {
 
 /// Decode one JetStream message into a `ChangeEvent`. `None` = alien bytes —
 /// log-and-ack territory for the consumer (redelivering garbage forever is
-/// the alternative). §16.1.5: the subject's tenant segment must agree with
+/// the alternative). Defence in depth: the subject's tenant segment must agree with
 /// the event body — consumers re-verify so a subject-mapping bug can never
 /// route one tenant's change into another tenant's processing.
 pub fn decode(msg: &async_nats::jetstream::Message) -> Option<ChangeEvent> {
@@ -283,14 +283,14 @@ pub fn decode(msg: &async_nats::jetstream::Message) -> Option<ChangeEvent> {
         tracing::error!(
             subject = %msg.subject,
             tenant = %ev.tenant.as_str(),
-            "dropping change event: subject tenant segment disagrees with body (§16.1.5)"
+            "dropping change event: subject tenant segment disagrees with body"
         );
         return None;
     }
     Some(ev)
 }
 
-/// The §16.1.5 check, unit-testable: `changes.{tenant}.…` must carry the
+/// The tenant-agreement check, unit-testable: `changes.{tenant}.…` must carry the
 /// event's own tenant. Non-`changes` subjects pass (registry deltas carry
 /// tenant in the body only).
 pub fn subject_tenant_agrees(subject: &str, ev: &ChangeEvent) -> bool {
@@ -361,7 +361,7 @@ mod tests {
         assert!(subject_tenant_agrees("changes.acme.aa.bb", &ev));
         assert!(
             !subject_tenant_agrees("changes.other.aa.bb", &ev),
-            "a mis-mapped subject must be dropped, not processed (§16.1.5)"
+            "a mis-mapped subject must be dropped, not processed"
         );
         assert!(
             subject_tenant_agrees("registry.other", &ev),

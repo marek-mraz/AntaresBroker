@@ -1,5 +1,5 @@
-//! F9 — live-NATS integration (env-gated, same pattern as the live-PG
-//! tests): the R10 broadcast-vs-balanced assertion, the §7 claim check on
+//! Live-NATS integration (env-gated, same pattern as the live-PG
+//! tests): the broadcast-vs-balanced assertion, the claim check on
 //! the wire, and Nats-Msg-Id dedup. Skips loudly without
 //! ANTARES_TEST_NATS_URL (CI runs a nats:2 -js service).
 
@@ -45,7 +45,7 @@ fn event(tenant: &TenantId, id: &str, seq: i64) -> ChangeEvent {
     }
 }
 
-/// R10: two instances on the SAME durable split the work — each message is
+/// Two instances on the SAME durable split the work — each message is
 /// delivered to exactly one of them; two ephemeral registry consumers each
 /// see EVERY delta. The distinction that Scorpio's `$[quarkus.uuid}` typo
 /// silently destroyed, asserted against a live server.
@@ -130,7 +130,7 @@ async fn balanced_splits_and_broadcast_duplicates() {
     }
 }
 
-/// §7: a payload over the claim-check threshold travels as a reference, and
+/// A payload over the claim-check threshold travels as a reference, and
 /// the whole message stays far under NATS's ~1 MB cap.
 #[tokio::test(flavor = "multi_thread")]
 async fn claim_check_strips_oversized_payloads_on_the_wire() {
@@ -173,7 +173,7 @@ async fn claim_check_strips_oversized_payloads_on_the_wire() {
     assert_eq!(r.version, 1);
 }
 
-/// §6.4: a drain retry republishing the same outbox seq is absorbed by the
+/// A drain retry republishing the same outbox seq is absorbed by the
 /// stream's duplicate window — one delivery, not two.
 #[tokio::test(flavor = "multi_thread")]
 async fn msg_id_dedup_absorbs_republish() {
