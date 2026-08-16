@@ -1,0 +1,34 @@
+name: etsi-full
+
+# The production-proof matrix on a cadence: ALL SEVEN ETSI cells (memory,
+# file, postgres, timescale, postgres-nats + timescale-nats rolling role
+# fleets, dockerized wasm-file) — the runs too heavy for every commit.
+# Cadence decision 2026-08-16: per-commit ci.yml gates on the QUICK preset
+# (file/postgres/timescale); this workflow carries the full grid every
+# 3 days + on demand. Its ETSI-matrix-results bundle is what the Pages
+# report + the seven README badges render (pages.yml listens to THIS
+# workflow, not ci) — so the public numbers always describe a full run.
+# The K1/K3 haproxy rolling-update drill stays in roll-weekly.yml; v* tags
+# run the same full preset via full.yml.
+
+on:
+  schedule:
+    # every 3rd day-of-month; offset from etsi-coverage (Mon 04:41) and
+    # roll-weekly (Tue 04:17). Cron cannot do a true 72 h period — the
+    # month-boundary gap (31st -> 1st) is accepted.
+    - cron: "23 3 */3 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: etsi-full
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: ETSI full matrix (7 cells)
+    uses: ./.github/workflows/etsi-matrix.yml
+    with:
+      preset: full
+    permissions:
+      contents: read
+      actions: write # the summary job deletes the merged per-cell artifacts

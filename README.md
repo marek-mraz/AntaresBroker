@@ -208,14 +208,15 @@ STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # single suite/mode while 
 
 **Locally: one store mode — the one you are touching.** A dev box runs the
 cells serially, so every mode costs its own wall-clock for a signal CI
-already produces. **CI runs seven cells in parallel per push**
-(`.github/workflows/ci.yml` → `etsi-matrix.yml`: memory, file, postgres,
-timescale single-broker, `postgres-nats`/`timescale-nats` — the
-10-container role-split fleet rolling continuously under the whole suite —
-plus `wasm-file`: the BROWSER artifact, five dockerized Node shims over
-the redb file store, serial suites + IOP with MQTT structurally excluded —
-`fail-fast: false`, one image build feeding every native cell) and is the
-authority; publication gates on every cell green. `STORE=all
+already produces. **CI gates every commit on the QUICK preset** — file,
+postgres, timescale (`ci.yml` → `etsi-matrix.yml`, one image build feeding
+the cells) — and **runs the FULL seven-cell matrix every 3 days**
+(`etsi-full.yml`, also on `v*` tags and manual dispatch): those three plus
+memory, `postgres-nats`/`timescale-nats` — the 10-container role-split
+fleet rolling continuously under the whole suite — and `wasm-file`: the
+BROWSER artifact, five dockerized Node shims over the redb file store,
+serial suites + IOP with MQTT structurally excluded. The report page and
+the per-cell badges always render the newest FULL run. `STORE=all
 dev/etsi-local.sh` reproduces the store matrix locally when you actually
 need it; `STORE=postgres ROLES_SPLIT=1 ROLL_DURING_RUN=1 dev/etsi-pipeline.sh`
 reproduces a rolling-fleet cell; `WASM=1 WASM_DOCKER=1 STORE=file

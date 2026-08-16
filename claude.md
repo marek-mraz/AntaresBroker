@@ -134,14 +134,17 @@ CI enforcement (+ spec.py next/burndown).
 - Locally run **one store mode — the one your change touches**:
   `STORE=<memory|file|postgres|timescale> dev/etsi-local.sh`, or
   `STORE=<mode> STOP_ON_ERROR=1 dev/etsi-pipeline.sh` for the tight debug
-  loop. **CI is the authority**: `.github/workflows/ci.yml` fans out seven
-  ETSI cells per push — memory/file/postgres/timescale single-broker,
-  postgres-nats/timescale-nats (the 10-container role fleet rolling under
-  the whole suite), plus wasm-file (the browser artifact: five dockerized
-  node shims over the redb file store, `WASM=1 WASM_DOCKER=1 STORE=file`;
-  MQTT structurally excluded per N8) — each running all 8 suites
-  (`fail-fast: false`, one image build);
-  a `v*` tag adds the serial all-suites job and publishes `:<version>` +
+  loop. **CI is the authority**, on a two-tier cadence (2026-08-16):
+  every push gates on the QUICK preset — file/postgres/timescale, all 8
+  suites (`ci.yml` → `etsi-matrix.yml preset: quick`); the FULL seven-cell
+  matrix — those plus memory, postgres-nats/timescale-nats (the
+  10-container role fleet rolling under the whole suite) and wasm-file
+  (the browser artifact: five dockerized node shims over the redb file
+  store, `WASM=1 WASM_DOCKER=1 STORE=file`; MQTT structurally excluded per
+  N8) — runs every 3 days (`etsi-full.yml`), on `v*` tags and on dispatch
+  (`fail-fast: false`, one image build). Pages badges/report render FULL
+  runs only (quick bundles are named ETSI-quick-results and never folded).
+  A `v*` tag adds the serial all-suites job and publishes `:<version>` +
   `:latest`.
 - **Never build (cargo or docker) while a measured ETSI run is in flight** —
   CPU contention manufactures phantom mock-502 and notification-timeout

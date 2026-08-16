@@ -1,17 +1,30 @@
 name: etsi-matrix
 
-# Reusable (workflow_call only): ONE image build feeding SEVEN parallel
-# cells — memory, file, postgres, timescale (single broker, bus=local),
-# postgres-nats and timescale-nats (the 5-role × 2-replica fleet behind the
-# LB, ANTARES_BUS=nats, CONTINUOUSLY rolling for the whole suite — backlog
-# 08-15b item 5), plus wasm-file (the BROWSER artifact: five dockerized
-# node shims over the N4 file store — the same .wasm a page loads, MQTT
-# structurally excluded per N8). Each cell runs ALL 8 suites through the
-# one pipeline, folded into the per-cell summary tables + one bundle.
-# Callers: ci.yml (every commit) and full.yml (manual / v* tags).
+# Reusable (workflow_call only): ONE image build feeding the cell matrix.
+# Two presets (cadence decision 2026-08-16):
+#   quick — file, postgres, timescale. The per-commit gate (ci.yml).
+#   full  — those PLUS memory, postgres-nats/timescale-nats (the 5-role ×
+#           2-replica fleet behind the LB, ANTARES_BUS=nats, CONTINUOUSLY
+#           rolling for the whole suite) and wasm-file (the BROWSER
+#           artifact: five dockerized node shims over the N4 file store —
+#           the same .wasm a page loads, MQTT structurally excluded per
+#           N8). Runs every 3 days (etsi-full.yml), on v* tags (full.yml)
+#           and on manual dispatch.
+# Each cell runs ALL 8 suites through the one pipeline, folded into the
+# per-cell summary tables + one bundle (quick bundles are named
+# ETSI-quick-results so the Pages fold only ever renders full runs).
 
 on:
   workflow_call:
+    inputs:
+      preset:
+        # quick = the per-commit gate (file/postgres/timescale — decision
+        #         2026-08-16: memory/nats-roll/wasm move to the 3-day full run);
+        # full  = all seven cells (the 3-day etsi-full schedule, full.yml tags,
+        #         manual dispatches).
+        description: "quick (3 cells, per commit) or full (all 7 cells)"
+        type: string
+        default: full
 
 env:
   MEM_LIMIT_MB: 350 # per-broker peak-RSS gate, same limit as ScorpioBroker's pipeline
@@ -68,14 +81,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { cell: memory, store: memory }
-          - { cell: file, store: file }
-          - { cell: postgres, store: postgres }
-          - { cell: timescale, store: timescale }
-          - { cell: postgres-nats, store: postgres, roles: "1" }
-          - { cell: timescale-nats, store: timescale, roles: "1" }
-          - { cell: wasm-file, store: file, wasm: "1" }
+        # ONE source of truth for both presets — quick is a strict subset.
+        include: >-
+          ${{ inputs.preset == 'quick'
+          && fromJSON('[
+               { "cell": "file",      "store": "file" },
+               { "cell": "postgres",  "store": "postgres" },
+               { "cell": "timescale", "store": "timescale" }
+             ]')
+          || fromJSON('[
+               { "cell": "memory",    "store": "memory" },
+               { "cell": "file",      "store": "file" },
+               { "cell": "postgres",  "store": "postgres" },
+               { "cell": "timescale", "store": "timescale" },
+               { "cell": "postgres-nats",  "store": "postgres",  "roles": "1" },
+               { "cell": "timescale-nats", "store": "timescale", "roles": "1" },
+               { "cell": "wasm-file", "store": "file", "wasm": "1" }
+             ]') }}
     runs-on: ubuntu-latest
     # the rolling-fleet cells pay the restart wall-clock on top of the suites
     timeout-minutes: ${{ matrix.roles && 120 || 90 }}
@@ -178,14 +200,20 @@ jobs:
         # Gate result captured, not enforced here — the bundle must upload
         # and the summary must render even when cells are red.
         env:
-          STORES: memory file postgres timescale postgres-nats timescale-nats wasm-file
+          STORES: >-
+            ${{ inputs.preset == 'quick'
+            && 'file postgres timescale'
+            || 'memory file postgres timescale postgres-nats timescale-nats wasm-file' }}
         run: ./dev/etsi-matrix-summary.py cells || echo "RED_CELLS=$?" >> "$GITHUB_ENV"
 
       - name: Upload the ONE results bundle
         id: bundle
         uses: actions/upload-artifact@v6
         with:
-          name: ETSI-matrix-results
+          # quick bundles carry a different name ON PURPOSE: the Pages fold
+          # (dev/fold-reports.sh) downloads the newest ETSI-matrix-results,
+          # and a 3-cell quick bundle must never shrink the 7-cell report.
+          name: ${{ inputs.preset == 'quick' && 'ETSI-quick-results' || 'ETSI-matrix-results' }}
           path: cells
           retention-days: 14
 
