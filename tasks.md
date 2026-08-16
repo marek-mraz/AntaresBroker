@@ -159,9 +159,10 @@ explicitly says "decide with the user".
 ## G. License, community, positioning (decide with the user — company/OSS
       discussion of 2026-08-16)
 
-- [ ] G1. License decision: Apache-2.0 / EUPL-1.2 / AGPL-3.0 for the broker
-      (current LICENSE file — verify it matches the decision). Blocks E7
-      (the release publishes the license). Decide with the user.
+- [x] G1. License = EUPL-1.2 (user decision 2026-08-16). LICENSE replaced
+      with the canonical SPDX text (was BSD-3-Clause), Cargo.toml workspace
+      license updated, deny.toml allowlists EUPL-1.2; `cargo deny check
+      licenses` green. Evidence: this commit.
 - [ ] G2. CONTRIBUTING.md rewrite: how to run the suite locally (the
       etsi-local recipe), clause-citation convention for normative code,
       PR expectations (targeted tests + robot proof), DCO or CLA decision.
