@@ -58,6 +58,20 @@ impl Broker {
         // Same in-process matcher/notifier path as bus=local (§9.2): the
         // store's change hook feeds it, no bus process exists to talk to.
         antares_api::notify::wire(&mut state);
+        // 5.8.1.4: distributed subscriptions hand this URL to the remote
+        // broker as the notification callback. wasm32 has no process env
+        // (the native default reads ANTARES_PUBLIC_URL + appends the port),
+        // so the SAME variable comes off `globalThis` — set it before
+        // construction, like ANTARES_SWEEP_SECS below. Absent → the portless
+        // host-alias default, which no peer outside a browser can dial.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(url) = js_sys::Reflect::get(&js_sys::global(), &"ANTARES_PUBLIC_URL".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty())
+        {
+            state.public_url = url;
+        }
         // 4.22 GC: the native broker sweeps on a tokio interval (main.rs,
         // ANTARES_SWEEP_SECS). The browser has no env, so the SAME variable is
         // read off `globalThis.ANTARES_SWEEP_SECS` (seconds, set before

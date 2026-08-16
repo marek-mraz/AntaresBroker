@@ -131,6 +131,20 @@ class FsSyncAccessHandle {
 // servers) live on loopback/private nets — same knob the container sets.
 // The per-port hostAlias keeps Via loop detection honest across the five
 // shims of the federation tier (five instances named alike = 508 storm).
+// 4.22 GC parity with the native harness: the wasm sweep loop reads
+// globalThis.ANTARES_SWEEP_SECS (wasm32 has no process env) — forward the
+// env var BEFORE construction, where the loop samples it.
+if (process.env.ANTARES_SWEEP_SECS) {
+  globalThis.ANTARES_SWEEP_SECS = Number(process.env.ANTARES_SWEEP_SECS);
+}
+// 5.8.1.4: the callback URL distributed subscriptions hand to remote
+// brokers — same globalThis route (wasm32 has no process env). Without it
+// the portless host-alias default is undialable between local processes.
+if (process.env.ANTARES_PUBLIC_URL) {
+  globalThis.ANTARES_PUBLIC_URL = process.env.ANTARES_PUBLIC_URL;
+}
+const hostAlias = process.env.ANTARES_HOST_ALIAS ?? `antares-wasm-${port}`;
+
 const storeMode = process.env.ANTARES_STORE ?? "memory";
 let broker;
 if (storeMode === "file") {
@@ -139,10 +153,10 @@ if (storeMode === "file") {
     new FsSyncAccessHandle(file),
     `fs:${file}`,
     true,
-    `antares-wasm-${port}`,
+    hostAlias,
   );
 } else if (storeMode === "memory") {
-  broker = new AntaresBroker(true, `antares-wasm-${port}`);
+  broker = new AntaresBroker(true, hostAlias);
 } else {
   console.error(`ANTARES_STORE=${storeMode}: the wasm artifact has memory and file only`);
   process.exit(2);
@@ -160,10 +174,18 @@ const server = createServer(async (req, res) => {
       duplex: "half",
     });
     const resp = await broker.fetch(request);
-    const headers = [];
-    resp.headers.forEach((v, k) => headers.push([recase(k), v]));
-    res.writeHead(resp.status, Object.fromEntries(headers));
-    res.end(Buffer.from(await resp.arrayBuffer()));
+    const headers = {};
+    resp.headers.forEach((v, k) => {
+      headers[recase(k)] = v;
+    });
+    // 6.3.6: null-body statuses (204 above all) carry NO Content-Length.
+    // Natively hyper strips it at serialization; this shim IS the
+    // serialization layer here, so it does the same (the axum parts carry
+    // "content-length: 0" through the wasm Response).
+    const noBody = [101, 103, 204, 205, 304].includes(resp.status);
+    if (noBody) delete headers["Content-Length"];
+    res.writeHead(resp.status, headers);
+    res.end(noBody ? undefined : Buffer.from(await resp.arrayBuffer()));
   } catch (e) {
     console.error("shim error:", e);
     res.writeHead(500, { "content-type": "application/json" });
