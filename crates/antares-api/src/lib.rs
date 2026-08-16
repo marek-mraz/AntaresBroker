@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn i2_bounds_wall_rejects_spec_shaped() {
+    async fn bounds_wall_rejects_spec_shaped() {
         // Every cap answers with the spec error, before any parse.
         let app = app();
 
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn h3_preadoptions_attr_get_value_options_head() {
+    async fn preadoptions_attr_get_value_options_head() {
         // 2.0 pre-adoptions: #14 GET .../attrs/{attrId},
         // #15 .../value, #58 HEAD, #59 OPTIONS with the route's Allow set.
         let app = app();
