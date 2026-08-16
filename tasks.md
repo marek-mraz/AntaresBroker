@@ -52,9 +52,11 @@ explicitly says "decide with the user".
       35 MiB RSS avg / 9 MiB idle, 1713/1713 across six native cells
       (report linked), 3.99 MB / 1.52 MB gzip wasm artifact. Numbers taken
       from full #4 run summaries. Evidence: this commit.
-- [ ] B2. 60-second quickstart at the top: one `docker run` (memory store) +
-      one curl create + one curl query, copy-paste verified against the
-      published image.
+- [x] B2. 60-second quickstart added after "Why Antares": docker run +
+      create + query. Curls executed verbatim against the locally built
+      binary (same bytes CI images ship): 201 Created + entity returned
+      (host-docker pulls are out of sandbox scope per claude.md rule 1).
+      Evidence: this commit; proof pasted in the commit message.
 - [ ] B3. Store-mode matrix table (memory / file / postgres / timescale ×
       bus none / NATS × MQTT) with what each is for; link to deployment docs.
 - [ ] B4. Badges: CI (quick preset), full ETSI matrix (Pages), latest

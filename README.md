@@ -45,6 +45,31 @@ Three properties, each backed by a number CI reproduces on every full run:
    demos, edge devices and offline-first tooling. No other NGSI-LD broker
    has this.
 
+## 60-second quickstart
+
+```bash
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+```
+
+Create an entity and query it back (no infrastructure — the default is the
+in-memory store):
+
+```bash
+curl -i -X POST localhost:9090/ngsi-ld/v1/entities \
+  -H 'Content-Type: application/ld+json' \
+  -d '{"id":"urn:ngsi-ld:TemperatureSensor:001","type":"TemperatureSensor",
+       "temperature":{"type":"Property","value":21.5,"unitCode":"CEL"},
+       "@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+# HTTP/1.1 201 Created
+# Location: /ngsi-ld/v1/entities/urn:ngsi-ld:TemperatureSensor:001
+
+curl -s 'localhost:9090/ngsi-ld/v1/entities?type=TemperatureSensor'
+# [{"id":"urn:ngsi-ld:TemperatureSensor:001","type":"TemperatureSensor",
+#   "temperature":{"type":"Property","unitCode":"CEL","value":21.5}}]
+```
+
+No Docker? `cargo run -p antares-broker` serves the same API on :9090.
+
 > Status: the full store ladder (`memory → file → postgres → timescale`),
 > NATS JetStream scale-out with split roles, HTTP + MQTT notifications,
 > federation and the security wall are implemented, with the ETSI Robot suite
