@@ -6,6 +6,19 @@ Email **contact@marek-mraz.com**. Please include a reproduction (request +
 config) and the store/bus mode. You will get an acknowledgement within a few
 days; coordinated disclosure preferred.
 
+## Supported versions
+
+Pre-1.0: only the latest `0.x` release line receives fixes — upgrade to
+the newest release before reporting. From 1.0 on, the latest MINOR of the
+current MAJOR is supported; anything older gets fixes only for
+critical-severity issues, best effort.
+
+| Version | Supported |
+|---|---|
+| latest release | yes |
+| older releases | critical fixes, best effort |
+| `master` / `:dev` images | yes (fixes land here first) |
+
 ## Security posture (what is in scope)
 
 Antares draws a deliberate line (docs/deep-analysis.md §16): the broker

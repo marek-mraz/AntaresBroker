@@ -198,8 +198,9 @@ explicitly says "decide with the user".
 - [ ] G2. CONTRIBUTING.md rewrite: how to run the suite locally (the
       etsi-local recipe), clause-citation convention for normative code,
       PR expectations (targeted tests + robot proof), DCO or CLA decision.
-- [ ] G3. SECURITY.md: real disclosure contact + supported-versions table
-      (tracks E1 policy).
+- [x] G3. SECURITY.md already had the disclosure contact + posture/audit
+      links; supported-versions table added (latest-release policy,
+      pre-1.0 rule). Evidence: this commit.
 - [ ] G4. Issue/PR templates: bug (broker version, store mode, repro
       payload), conformance deviation (clause number required), feature.
 - [ ] G5. Positioning page (docs or website): Antares within the FIWARE /
