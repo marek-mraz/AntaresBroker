@@ -91,7 +91,7 @@ jobs:
           ./dev/wasm-build.sh
       - uses: actions/upload-artifact@v6
         with:
-          name: matrix-wasm-pkg
+          name: antares-wasm-pkg
           path: www/pkg
           retention-days: 3
 
@@ -160,7 +160,7 @@ jobs:
         if: ${{ matrix.wasm }}
         uses: actions/download-artifact@v7
         with:
-          name: matrix-wasm-pkg
+          name: antares-wasm-pkg
           path: www/pkg
       - name: Build the shim image (wasm cell)
         if: ${{ matrix.wasm }}

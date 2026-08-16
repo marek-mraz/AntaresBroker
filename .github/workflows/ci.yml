@@ -3,8 +3,12 @@ name: ci
 # The DEV pipeline — workspace tests GATE everything downstream:
 #
 #   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
-#                   ├──→ build arm64 image ─────────────┐
-#                   └──→ build wasm bundle (smoked) ────┴→ publish :dev (master, all green)
+#                   └──→ build arm64 image ──────────────→ publish :dev (master, all green)
+#
+# No wasm here (decision 2026-08-16): the browser bundle is built, ETSI-
+# tested (wasm-file cell) and published as antares-wasm-broker:dev by
+# etsi-full.yml — publish follows proof, and a commit that only touches
+# native code doesn't pay a wasm toolchain.
 #
 # fmt + clippy + the full workspace suite run FIRST (the shared
 # workspace.yml). If any of them fail no image or bundle is built and the
@@ -82,77 +86,21 @@ jobs:
           path: antares-image-arm64.tgz
           retention-days: 3
 
-  build-wasm:
-    # The browser artifact half of the master publish — built per commit,
-    # gated by the node + file tiers of dev/wasm-test.sh (the same shim +
-    # store the ETSI wasm-file cell exercises; the chromium browser tier and
-    # the full ETSI proof stay in wasm.yml / etsi-full.yml — same precedent
-    # as build-arm: publish what compiles + smokes, prove fully on cadence).
-    name: Build the wasm bundle (node+file smoke)
-    needs: workspace
-    if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - name: Build + size budget + node/file tier smoke
-        run: |
-          ./dev/install-wasm-tools.sh
-          export PATH="$HOME/.local/bin:$PATH"
-          ./dev/wasm-build.sh
-          BROWSER_TIER=0 ./dev/wasm-test.sh
-      - uses: actions/upload-artifact@v6
-        with:
-          name: antares-wasm-pkg
-          path: www/pkg
-          retention-days: 14
-
   publish-dev:
-    # Every green commit on master ships the DEV artifacts: the multi-arch
-    # broker image AND the wasm broker image (Dockerfile.wasm over the same
-    # www/pkg bytes a page loads), each under the sha and a moving `dev`
-    # tag. Never `latest` — that belongs to a released version, so
+    # Every green commit on master ships a DEV image: the sha and a moving
+    # `dev` tag. Never `latest` — that belongs to a released version, so
     # `docker pull …:latest` can't silently land on an untagged master build.
-    name: Publish the dev images to GHCR
+    # The wasm broker image publishes from etsi-full.yml, after its cell.
+    name: Publish the dev image to GHCR
     # Master pushes/dispatches publish :dev; PRs never do. All signals —
     # workspace tests, the cell matrix (quick preset, all 8 suites incl.
-    # IOP per cell) and both artifact builds — must be green.
+    # IOP per cell) and the arm build — must be green.
     if: github.ref == 'refs/heads/master' && success()
-    needs: [workspace, matrix, build-arm, build-wasm]
+    needs: [workspace, matrix, build-arm]
     runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Download the wasm bundle
-        uses: actions/download-artifact@v7
-        with:
-          name: antares-wasm-pkg
-          path: www/pkg
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish the wasm broker image (multi-arch — the .wasm bytes are arch-neutral)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.wasm
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/antares-wasm-broker:dev
-            ghcr.io/${{ github.repository_owner }}/antares-wasm-broker:dev-${{ github.run_number }}
       - name: Download the tested image
         uses: actions/download-artifact@v7
         with:
@@ -178,4 +126,3 @@ jobs:
             -t "$IMG:$SHA" -t "$IMG:dev" -t "$IMG:dev-${{ github.run_number }}" \
             "$IMG:$SHA-amd64" "$IMG:$SHA-arm64"
           echo -e "\n## Published dev: \`$IMG:dev\` + \`$IMG:dev-${{ github.run_number }}\` + \`$IMG:$SHA\` (multi-arch amd64+arm64; amd64 = the tested bytes, all store gates green)" >> "$GITHUB_STEP_SUMMARY"
-          echo "Also published: \`ghcr.io/${{ github.repository_owner }}/antares-wasm-broker:dev\` (multi-arch, Dockerfile.wasm over the node+file-smoked bundle) + the \`antares-wasm-pkg\` artifact (www/pkg, drop-in for a page)" >> "$GITHUB_STEP_SUMMARY"
