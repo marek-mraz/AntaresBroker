@@ -421,10 +421,7 @@ fn sigterm_flips_health_before_it_closes_the_socket() {
 fn unknown_store_mode_is_fatal() {
     let dir = tempdir("badmode");
     let status = start(23999, &dir, "bogus").wait().expect("wait");
-    assert!(
-        !status.success(),
-        "unknown ANTARES_STORE must be fatal"
-    );
+    assert!(!status.success(), "unknown ANTARES_STORE must be fatal");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -469,6 +466,138 @@ fn unknown_key_is_fatal_but_the_test_prefix_is_reserved() {
         "the guard must fall through to the store check: {err}"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// bus=local wires an in-process notification matcher into every replica,
+/// so N replicas over one shared database fire every notification N times.
+/// The combination must be refused at startup — before any connection
+/// attempt — unless the deployment opts in as strictly single-process.
+#[test]
+fn local_bus_with_shared_store_is_fatal_without_optin() {
+    let dir = tempdir("localpg");
+    let refused = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .env("ANTARES_BUS", "local")
+        .env("ANTARES_STORE", "postgres")
+        .env("ANTARES_DATA_DIR", &dir)
+        .output()
+        .expect("run broker");
+    assert!(
+        !refused.status.success(),
+        "bus=local over a shared store must be fatal"
+    );
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("ANTARES_ALLOW_SHARED_LOCAL"),
+        "the refusal must fire before any store connection and name the \
+         opt-in, not stumble into a DB connect error: {err}"
+    );
+
+    // With the opt-in the guard steps aside and the store check runs next
+    // (no ANTARES_DATABASE_URL here, so THAT is the error it must reach).
+    let opted_in = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .env("ANTARES_BUS", "local")
+        .env("ANTARES_STORE", "postgres")
+        .env("ANTARES_ALLOW_SHARED_LOCAL", "1")
+        .env("ANTARES_DATA_DIR", &dir)
+        .output()
+        .expect("run broker");
+    let err = String::from_utf8_lossy(&opted_in.stderr);
+    assert!(
+        err.contains("requires ANTARES_DATABASE_URL"),
+        "the opt-in must fall through to the store checks: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A connection that never finishes sending its request headers must be
+/// closed at the header read timeout — otherwise a trickle of idle sockets
+/// holds server slots forever.
+#[test]
+fn slow_header_connection_is_closed_at_the_timeout() {
+    let dir = tempdir("hdrtimeout");
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("ANTARES_HEADER_READ_TIMEOUT_MS", "300")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    wait_healthy(port);
+
+    // half a request line, then silence
+    let mut slow = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    slow.write_all(b"GET /q/hea").expect("write");
+    slow.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut buf = [0u8; 256];
+    let closed = loop {
+        match slow.read(&mut buf) {
+            Ok(0) => break true,   // EOF: the server closed the connection
+            Ok(_) => continue,     // e.g. an error response before the close
+            Err(_) => break false, // still open after 2 s — the timeout is absent
+        }
+    };
+    assert!(
+        closed,
+        "a header-idle connection must be closed at the 300 ms header read timeout"
+    );
+
+    // a normal request on a fresh connection is unaffected
+    let resp = http(
+        port,
+        "GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(resp.starts_with("HTTP/1.1 200"), "normal request: {resp}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Connections above ANTARES_MAX_CONNECTIONS are dropped at accept —
+/// refusing cheaply beats queueing work the box cannot serve — while the
+/// connections already inside the cap keep working.
+#[test]
+fn connections_beyond_the_cap_are_dropped() {
+    let dir = tempdir("conncap");
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("ANTARES_MAX_CONNECTIONS", "1")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    wait_healthy(port);
+
+    // this connection takes the single slot
+    let mut first = TcpStream::connect(("127.0.0.1", port)).expect("connect first");
+    std::thread::sleep(Duration::from_millis(200)); // let the accept loop claim the slot
+
+    // over the cap: must be dropped immediately, not served or left hanging
+    let mut second = TcpStream::connect(("127.0.0.1", port)).expect("connect second");
+    second
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut buf = [0u8; 64];
+    match second.read(&mut buf) {
+        Ok(0) => {} // dropped — the cap works
+        other => panic!("an over-cap connection must be closed at accept, got {other:?}"),
+    }
+
+    // the in-cap connection still serves
+    first
+        .write_all(b"GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .expect("write");
+    let mut out = String::new();
+    first.read_to_string(&mut out).expect("read");
+    assert!(
+        out.contains("200"),
+        "the in-cap connection must still serve: {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

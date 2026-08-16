@@ -61,6 +61,20 @@ const KNOWN_KEYS: &[&str] = &[
     // crash-drill lever (rows commit but this pod never publishes them —
     // another pod's drain must) and the knob for a dedicated-drainer split.
     "ANTARES_OUTBOX_DRAIN",
+    // Postgres pool size (max connections); default 20.
+    "ANTARES_PG_POOL",
+    // bus=local over a shared postgres/timescale store is refused — every
+    // replica would run its own matcher and fire its own copy of each
+    // notification. This opt-in states the deployment runs exactly ONE
+    // broker process against that database.
+    "ANTARES_ALLOW_SHARED_LOCAL",
+    // HTTP/1 header read timeout in ms (default 10000): a connection that
+    // never finishes its request headers is closed instead of holding a
+    // slot forever.
+    "ANTARES_HEADER_READ_TIMEOUT_MS",
+    // Ceiling on concurrently served connections (default 10000);
+    // connections accepted above it are dropped immediately.
+    "ANTARES_MAX_CONNECTIONS",
 ];
 
 /// Jemalloc with decay-based purging — RSS returns to ~live×1.2 when idle;
@@ -152,6 +166,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "memory".into())
         .parse()
         .map_err(|e| format!("unknown ANTARES_STORE: {e}"))?;
+    // bus=local wires an in-process matcher into every process, so N
+    // replicas over ONE shared database each fire their own copy of every
+    // notification. Refused here — before any store connection is attempted
+    // — unless the deployment states it runs exactly one broker process.
+    // (Mirror of the nats arm's store check in `run`.)
+    let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());
+    if bus_mode == "local"
+        && mode.is_pg()
+        && !std::env::var("ANTARES_ALLOW_SHARED_LOCAL")
+            .is_ok_and(|v| matches!(v.as_str(), "1" | "true"))
+    {
+        return Err(format!(
+            "ANTARES_BUS=local with ANTARES_STORE={mode} double-fires notifications when \
+             more than one broker process shares the database (each process runs its own \
+             matcher). Use ANTARES_BUS=nats, or set ANTARES_ALLOW_SHARED_LOCAL=1 for a \
+             strictly single-process deployment"
+        )
+        .into());
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -169,6 +202,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         })
+}
+
+/// ANTARES_PG_POOL → pool size: absent defaults to 20; anything that is not
+/// a positive integer is fatal (a misread size must never silently run with
+/// a default, matching the unknown-key policy).
+fn parse_pg_pool(raw: Option<&str>) -> Result<u32, String> {
+    match raw {
+        None => Ok(20),
+        Some(v) => match v.parse::<u32>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!(
+                "ANTARES_PG_POOL must be a positive integer (got {v:?})"
+            )),
+        },
+    }
 }
 
 /// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
@@ -202,10 +250,11 @@ async fn build_store(
         StoreMode::Postgres | StoreMode::Timescale => {
             let url = std::env::var("ANTARES_DATABASE_URL")
                 .map_err(|_| format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL"))?;
+            let pool_size = parse_pg_pool(std::env::var("ANTARES_PG_POOL").ok().as_deref())?;
             // The DB container may still be booting — bounded retry, then die.
             let mut last = String::new();
             for _ in 0..30 {
-                match antares_sql::pg::connect(&url, 20).await {
+                match antares_sql::pg::connect(&url, pool_size).await {
                     Ok(pool) => {
                         // The temporal backend is what the migrations actually
                         // BUILT, detected once from the catalog and pinned —
@@ -470,6 +519,32 @@ async fn run(
         routed,
     );
 
+    // A connection that never finishes its request headers must not hold a
+    // slot forever; hyper closes it after this timeout.
+    let header_read_timeout = std::env::var("ANTARES_HEADER_READ_TIMEOUT_MS")
+        .ok()
+        .map(|v| {
+            v.parse::<u64>().map_err(|_| {
+                format!("ANTARES_HEADER_READ_TIMEOUT_MS must be an integer (got {v:?})")
+            })
+        })
+        .transpose()?
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10));
+    // Ceiling on concurrently served connections: accepted streams beyond
+    // it are dropped at once — refusing cheaply beats queueing work the box
+    // cannot serve (each served connection is a spawned task).
+    let max_connections = std::env::var("ANTARES_MAX_CONNECTIONS")
+        .ok()
+        .map(|v| {
+            v.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                format!("ANTARES_MAX_CONNECTIONS must be a positive integer (got {v:?})")
+            })
+        })
+        .transpose()?
+        .unwrap_or(10_000);
+    let conn_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
+
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("listening on http://0.0.0.0:{port}");
     // Count open connections so the drain can wait for them. Incremented
@@ -503,7 +578,8 @@ async fn run(
                     tokio::select! {
                         r = listener.accept() => {
                             let (stream, _) = r?;
-                            serve(stream, app.clone(), inflight.clone(), drain_rx.clone());
+                            serve(stream, app.clone(), inflight.clone(), drain_rx.clone(),
+                                  conn_permits.clone(), header_read_timeout);
                         }
                         _ = tokio::time::sleep_until(until) => break,
                     }
@@ -517,7 +593,14 @@ async fn run(
                 return Ok(());
             }
         };
-        serve(stream, app.clone(), inflight.clone(), drain_rx.clone());
+        serve(
+            stream,
+            app.clone(),
+            inflight.clone(),
+            drain_rx.clone(),
+            conn_permits.clone(),
+            header_read_timeout,
+        );
     }
 }
 
@@ -532,16 +615,29 @@ fn serve(
     app: App,
     inflight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     mut drain_rx: tokio::sync::watch::Receiver<bool>,
+    conn_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    header_read_timeout: std::time::Duration,
 ) {
+    // Over the connection cap: drop the accepted stream immediately. The
+    // permit rides in the connection task, so the slot frees exactly when
+    // the connection ends — and never enters the inflight drain accounting.
+    let Ok(permit) = conn_permits.try_acquire_owned() else {
+        return;
+    };
     inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
+        let _permit = permit;
         let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             let mut app = app.clone();
             async move { tower::Service::call(&mut app, req.map(axum::body::Body::new)).await }
         });
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-        builder.http1().title_case_headers(true);
+        builder
+            .http1()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(header_read_timeout)
+            .title_case_headers(true);
         let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), svc);
         let mut conn = std::pin::pin!(conn);
         // On drain, close an IDLE keep-alive connection immediately —
@@ -595,6 +691,10 @@ mod config_key_tests {
             "ANTARES_HTTP_PORT",
             "ANTARES_STORE",
             "ANTARES_TEST_ANYTHING",
+            "ANTARES_PG_POOL",
+            "ANTARES_ALLOW_SHARED_LOCAL",
+            "ANTARES_HEADER_READ_TIMEOUT_MS",
+            "ANTARES_MAX_CONNECTIONS",
         ] {
             assert!(!unknown_config_key(k), "{k} is known/reserved");
         }
@@ -607,5 +707,28 @@ mod config_key_tests {
             "a typo'd *_PORT var is NOT a service link"
         );
         assert!(unknown_config_key("ANTARES_BOGUS_FLAG"));
+    }
+}
+
+#[cfg(test)]
+mod pg_pool_tests {
+    use super::parse_pg_pool;
+
+    /// ANTARES_PG_POOL: absent defaults to 20; a value that is not a
+    /// positive integer is fatal — misconfiguration must never silently
+    /// run with a default.
+    #[test]
+    fn pg_pool_parse_defaults_and_rejects() {
+        assert_eq!(parse_pg_pool(None).expect("default"), 20);
+        assert_eq!(parse_pg_pool(Some("7")).expect("explicit"), 7);
+        assert!(
+            parse_pg_pool(Some("abc")).is_err(),
+            "non-numeric ANTARES_PG_POOL must be fatal"
+        );
+        assert!(
+            parse_pg_pool(Some("0")).is_err(),
+            "a zero-sized pool must be fatal"
+        );
+        assert!(parse_pg_pool(Some("-3")).is_err());
     }
 }

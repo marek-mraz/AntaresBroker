@@ -11,12 +11,43 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// One shared pool for all tenants — never per-tenant pools.
 /// `max_connections` ≈ 2× the PG box's cores; the default suits a small dev
 /// Postgres, deployments size it via config.
+///
+/// Every acquisition and session is bounded: a saturated pool fails the one
+/// request after 5 s instead of queueing forever; idle/aged connections are
+/// recycled; and each session carries `statement_timeout`/`lock_timeout` so
+/// a runaway query or lost lock can never wedge a pooled connection.
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
+    use std::time::Duration;
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(600))
+        .max_lifetime(Duration::from_secs(1800))
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                use sqlx::Executor;
+                conn.execute(sqlx::raw_sql(
+                    "SET statement_timeout = '30s'; SET lock_timeout = '5s'",
+                ))
+                .await?;
+                Ok(())
+            })
+        })
         .connect(url)
         .await?;
-    MIGRATOR.run(&pool).await?;
+    // DDL is exempt from the per-session statement timeout: building an index
+    // on a large attr_instances legitimately runs longer than a query ever
+    // should. The lock timeout stays — a migration blocked on a lock must
+    // fail rather than hold the boot path.
+    let mut migrate_conn = pool.acquire().await?;
+    {
+        use sqlx::Executor;
+        migrate_conn
+            .execute(sqlx::raw_sql("SET statement_timeout = 0"))
+            .await?;
+        MIGRATOR.run(&mut *migrate_conn).await?;
+    }
+    drop(migrate_conn);
     Ok(pool)
 }
 

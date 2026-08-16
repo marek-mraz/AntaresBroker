@@ -20,10 +20,13 @@ use super::pg_temporal::PgTemporalStore;
 use super::{ChangeHook, Kind, Store};
 
 /// 5.5.6: unexpected failures (database errors, timeouts) surface as
-/// InternalError.
+/// InternalError. The client-visible detail is deliberately generic —
+/// driver internals (SQL text, constraint names, connection state) go to
+/// the server log only.
 #[cfg(feature = "postgres")]
 fn db(e: sqlx::Error) -> NgsiError {
-    NgsiError::InternalError(format!("database error: {e}"))
+    tracing::error!("database error: {e}");
+    NgsiError::InternalError("database error".into())
 }
 
 /// 4.22: the read-boundary "now" — every entity read strips expired docs and
@@ -730,5 +733,22 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.docs.context_list().map_err(db),
         }
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod db_error_tests {
+    /// 5.5.6 InternalError: the RFC 7807 `detail` a client sees must be
+    /// generic — driver internals (SQL text, row counts, connection
+    /// strings) belong in the server log, never in the response body.
+    #[test]
+    fn db_error_detail_is_generic() {
+        let pd = super::db(sqlx::Error::RowNotFound).to_problem_details();
+        assert_eq!(pd.detail, "database error");
+        assert!(
+            !pd.detail.contains("no rows"),
+            "sqlx internals leaked into the client-visible detail: {}",
+            pd.detail
+        );
     }
 }

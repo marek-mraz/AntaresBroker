@@ -150,6 +150,50 @@ pub fn build_message(
     Value::Object(msg)
 }
 
+/// The key a pooled MQTT session is shared under. Everything that changes
+/// WHO the session is authenticated as (or how) must participate — two
+/// subscriptions whose endpoints differ only in password must never reuse
+/// one another's authenticated session. Keys are map keys only: never log
+/// them.
+fn pool_key(ep: &MqttEndpoint, params: MqttParams) -> String {
+    // The password participates via a one-way hash so the plaintext never
+    // sits in a map key. DefaultHasher collisions are acceptable here — a
+    // collision only merges two pool slots, it does not skip broker-side
+    // authentication.
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ep.password.hash(&mut h);
+    format!(
+        "{}:{:016x}:{}@{}:{}/v{}",
+        ep.username.as_deref().unwrap_or(""),
+        h.finish(),
+        ep.secure,
+        ep.host,
+        ep.port,
+        if params.v5 { 5 } else { 3 }
+    )
+}
+
+/// The mqtts trust store, built ONCE per process. Loading the platform
+/// certificate store on every connect is wasted work, and rumqttc's
+/// `TlsConfiguration::default()` panics when the store is unreadable — a
+/// bad cert bundle must fail the one delivery, not the broker.
+fn shared_tls_config() -> Result<rumqttc::TlsConfiguration, NgsiError> {
+    static TLS: std::sync::OnceLock<Option<rumqttc::TlsConfiguration>> = std::sync::OnceLock::new();
+    TLS.get_or_init(|| {
+        // `TlsConfiguration::default()` is the only rumqttc constructor
+        // that loads the platform trust store, and it panics on failure —
+        // contain that so a broken cert bundle degrades to failed mqtts
+        // deliveries instead of killing the process. The failure is cached:
+        // a store unreadable at first use will not become readable later.
+        std::panic::catch_unwind(rumqttc::TlsConfiguration::default)
+            .map_err(|_| tracing::error!("mqtts: loading the platform certificate store failed"))
+            .ok()
+    })
+    .clone()
+    .ok_or_else(|| NgsiError::InternalError("mqtts trust store unavailable".into()))
+}
+
 /// One pooled connection: the client plus its event-loop pump task.
 enum Client {
     V3(rumqttc::AsyncClient),
@@ -199,14 +243,7 @@ impl MqttSink {
         params: MqttParams,
         message: &[u8],
     ) -> Result<(), NgsiError> {
-        let key = format!(
-            "{}:{}@{}:{}/v{}",
-            ep.username.as_deref().unwrap_or(""),
-            ep.secure,
-            ep.host,
-            ep.port,
-            if params.v5 { 5 } else { 3 }
-        );
+        let key = pool_key(ep, params);
         // one retry with a fresh connection: a pooled client whose broker
         // restarted fails the first publish; a dead broker fails both.
         for attempt in 0..2 {
@@ -284,10 +321,14 @@ impl MqttSink {
     /// Connect and wait for ConnAck (a dead broker must fail delivery, not
     /// queue forever), then hand the event loop to a pump task.
     async fn connect(&self, ep: &MqttEndpoint, params: MqttParams) -> Result<Conn, NgsiError> {
+        // A monotonic counter, not a timestamp: `Instant::now().elapsed()` is
+        // ~0 for every caller, so two connects in one process would claim the
+        // same client id and the broker would kick the older session.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = format!(
             "antares-{}-{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let refused = |e: String| {
             NgsiError::InternalError(format!("mqtt connect {}:{}: {e}", ep.host, ep.port))
@@ -299,7 +340,7 @@ impl MqttSink {
                 opts.set_credentials(u, ep.password.as_deref().unwrap_or(""));
             }
             if ep.secure {
-                opts.set_transport(rumqttc::Transport::Tls(rumqttc::TlsConfiguration::default()));
+                opts.set_transport(rumqttc::Transport::Tls(shared_tls_config()?));
             }
             let (client, mut eventloop) = rumqttc::v5::AsyncClient::new(opts, 16);
             tokio::time::timeout(self.timeout, async {
@@ -329,7 +370,7 @@ impl MqttSink {
                 opts.set_credentials(u, ep.password.as_deref().unwrap_or(""));
             }
             if ep.secure {
-                opts.set_transport(rumqttc::Transport::Tls(rumqttc::TlsConfiguration::default()));
+                opts.set_transport(rumqttc::Transport::Tls(shared_tls_config()?));
             }
             let (client, mut eventloop) = rumqttc::AsyncClient::new(opts, 16);
             tokio::time::timeout(self.timeout, async {
@@ -410,6 +451,53 @@ mod tests {
         assert_eq!(p, MqttParams { qos: 2, v5: false });
         assert!(MqttParams::from_notifier_info([("MQTT-QoS", "3")]).is_err());
         assert!(MqttParams::from_notifier_info([("MQTT-Version", "mqtt4")]).is_err());
+    }
+
+    /// The pool key must separate sessions by credentials: same user with
+    /// two different passwords = two different authenticated principals,
+    /// which must never share one session. The plaintext password itself
+    /// must not appear in the key.
+    #[test]
+    fn pool_key_separates_credentials() {
+        let p = MqttParams::default();
+        let a = MqttEndpoint::parse("mqtt://u:secret-one@host/t").expect("a");
+        let b = MqttEndpoint::parse("mqtt://u:secret-two@host/t").expect("b");
+        let c = MqttEndpoint::parse("mqtt://u:secret-one@host/t").expect("c");
+        assert_ne!(
+            pool_key(&a, p),
+            pool_key(&b, p),
+            "different passwords must not share an authenticated session"
+        );
+        assert_eq!(
+            pool_key(&a, p),
+            pool_key(&c, p),
+            "identical endpoints must keep pooling"
+        );
+        assert!(
+            !pool_key(&a, p).contains("secret-one"),
+            "the plaintext password must never appear in the key"
+        );
+        // no password vs some password are different principals too
+        let none = MqttEndpoint::parse("mqtt://u@host/t").expect("none");
+        assert_ne!(pool_key(&a, p), pool_key(&none, p));
+    }
+
+    /// The mqtts trust store is loaded once and the same shared rustls
+    /// config is handed to every connect. (The failure path — an unreadable
+    /// platform store — cannot be simulated in a unit test; the helper's
+    /// error contract covers it.)
+    #[test]
+    fn tls_config_is_built_once_and_shared() {
+        let a = shared_tls_config().expect("first load");
+        let b = shared_tls_config().expect("second load");
+        let (rumqttc::TlsConfiguration::Rustls(a), rumqttc::TlsConfiguration::Rustls(b)) = (a, b)
+        else {
+            panic!("expected the injected-rustls variant");
+        };
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "each call built a fresh trust store instead of sharing one"
+        );
     }
 
     #[test]

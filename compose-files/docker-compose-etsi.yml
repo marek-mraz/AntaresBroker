@@ -82,6 +82,9 @@ services:
       # endpoint; host-networked stack => container names do not resolve
       ANTARES_PUBLIC_URL: http://localhost:9090
       ANTARES_STORE: ${STORE:-memory}
+      # Each broker owns its own database, so one process per store is the
+      # deployment shape the default bus assumes.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
       # not only the read-boundary filter (prod default: 15 min)
@@ -100,6 +103,9 @@ services:
       # endpoint; host-networked stack => container names do not resolve
       ANTARES_PUBLIC_URL: http://localhost:9091
       ANTARES_STORE: ${STORE:-memory}
+      # Each broker owns its own database, so one process per store is the
+      # deployment shape the default bus assumes.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
       # not only the read-boundary filter (prod default: 15 min)
@@ -118,6 +124,9 @@ services:
       # endpoint; host-networked stack => container names do not resolve
       ANTARES_PUBLIC_URL: http://localhost:9092
       ANTARES_STORE: ${STORE:-memory}
+      # Each broker owns its own database, so one process per store is the
+      # deployment shape the default bus assumes.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
       # not only the read-boundary filter (prod default: 15 min)
@@ -136,6 +145,9 @@ services:
       # endpoint; host-networked stack => container names do not resolve
       ANTARES_PUBLIC_URL: http://localhost:9093
       ANTARES_STORE: ${STORE:-memory}
+      # Each broker owns its own database, so one process per store is the
+      # deployment shape the default bus assumes.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
       # not only the read-boundary filter (prod default: 15 min)
@@ -154,6 +166,9 @@ services:
       # endpoint; host-networked stack => container names do not resolve
       ANTARES_PUBLIC_URL: http://localhost:9094
       ANTARES_STORE: ${STORE:-memory}
+      # Each broker owns its own database, so one process per store is the
+      # deployment shape the default bus assumes.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATA_DIR: /data
       # 4.22 GC every 2 s so the transient TPs (422_01) exercise the sweep,
       # not only the read-boundary filter (prod default: 15 min)
