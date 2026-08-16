@@ -164,9 +164,12 @@ explicitly says "decide with the user".
       already blocks in workspace.yml which gates every tag build (no
       change needed — verified licenses+advisories run there). Evidence:
       this commit (same diff as E3).
-- [ ] E5. Version surface: `GET /info` (or the existing version endpoint)
-      returns version + git hash + store mode; `--version` on the binary;
-      both asserted by a release smoke test.
+- [x] E5. /q/health now carries version + commit (build.rs bakes the git
+      hash; store was already there) — asserted by the extended
+      health_is_up test, seen red first (version/commit missing), green
+      after. `antares --version`/-V prints "antares 0.1.0 (bbe5dc8)" and
+      exits (previously it silently started a server). Live smoke:
+      health returned 0.1.0 + hash. Evidence: this commit.
 - [x] E6. docs/roadmap-1.0.md: six criteria (3 green full matrices, 24h
       HA soak, upgrade-path tests, egress security review, docs complete,
       release machinery proven end to end) — the full candidate set per

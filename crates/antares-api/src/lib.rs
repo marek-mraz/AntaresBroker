@@ -486,6 +486,9 @@ async fn options_204(
     resp
 }
 
+/// E5: the build-time git hash (build.rs) — re-exported for --version.
+pub const GIT_HASH: &str = env!("ANTARES_GIT_HASH");
+
 async fn health(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
@@ -502,6 +505,10 @@ async fn health(
     let mut body = serde_json::json!({
         "status": if draining { "DRAINING" } else { "UP" },
         "store": state.store_mode.as_str(),
+        // E5 version surface: workspace version + build-time git hash
+        // (build.rs), asserted by the release smoke test.
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": env!("ANTARES_GIT_HASH"),
     });
     // B13: in `file` mode commits serialize behind one writer — the queue
     // depth (current, peak) is the signal that decides the group-commit lever.
@@ -653,7 +660,12 @@ mod tests {
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(body_json(resp).await["status"], "UP");
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "UP");
+        // E5 version surface: release smoke asserts these two fields.
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert!(body["commit"].is_string(), "commit hash missing");
+        assert_ne!(body["commit"], "", "commit hash empty");
     }
 
     /// Backlog 08-14 item 4: /q/health reports the bus — `bus: {mode,

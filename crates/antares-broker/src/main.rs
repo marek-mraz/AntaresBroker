@@ -98,6 +98,16 @@ fn unknown_config_key(key: &str) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // E5: --version answers without starting anything (a bare `antares
+    // --version` used to boot a server).
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!(
+            "antares {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            antares_api::GIT_HASH
+        );
+        return Ok(());
+    }
     // K12: tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
     let metrics_render = telemetry::init()?;
