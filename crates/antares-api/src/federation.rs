@@ -288,7 +288,7 @@ pub fn active(params: &HashMap<String, String>) -> bool {
 
 /// The full inbound Via chain, joined across header FIELDS.
 ///
-/// RFC 7230 §3.2.2/§5.7.1: Via is a list header — senders may split the
+/// RFC 7230 sections 3.2.2 and 5.7.1: Via is a list header — senders may split the
 /// chain over any number of `Via:` field lines, and the two forms are
 /// equivalent. Reading only the first field (`headers.get`) made a loop
 /// pseudonym in a later field invisible (undetected cycle) AND rebuilt the
@@ -344,7 +344,7 @@ pub fn alias_for(host_alias: &str, tenant: &TenantId) -> String {
 ///
 /// RFC 7230: `Via = 1#( received-protocol RWS received-by [ RWS comment ] )`
 /// — received-by is the SECOND whitespace token of each element and is a
-/// token compared for equality, never by suffix (audit V-30: `ends_with`
+/// token compared for equality, never by suffix (`ends_with`
 /// made alias `b1` match peer `sub-b1`). A malformed element with no
 /// protocol falls back to its first token.
 pub fn via_tokens(headers: &HeaderMap) -> Vec<String> {
@@ -458,7 +458,7 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 /// when determining matching registrations" — so a registration whose
 /// `contextSourceAlias` is already in the chain is filtered out HERE, at the
 /// one place every read and write path resolves its candidates. Keeping it
-/// out of the call sites is the §4.1 rule: a loop check the callers own is a
+/// out of the call sites is deliberate: a loop check the callers own is a
 /// loop check some caller forgets.
 pub fn matching_regs(
     st: &AppState,
@@ -468,8 +468,8 @@ pub fn matching_regs(
     headers: &HeaderMap,
 ) -> Vec<FedReg> {
     let seen = via_tokens(headers);
-    // F5: the ONE compiled mirror when wired (bus=nats), the store otherwise.
-    // Expiry is filtered HERE and only here — the single yield point (§4.1).
+    // The ONE compiled mirror when wired (bus=nats), the store otherwise.
+    // Expiry is filtered HERE and only here — the single yield point.
     let regs = match &st.reg_mirror {
         Some(m) => m.docs(tenant.as_str()),
         None => st
@@ -680,7 +680,7 @@ const CSI_SKIP: &[&str] = &[
     "ngsildconformance",
 ];
 
-/// §16.3 bounds wall on the forwarded-read path: a peer response larger than
+/// Bounds wall on the forwarded-read path: a peer response larger than
 /// ANTARES_MAX_FED_RESPONSE_BYTES is never held in memory — the part fails
 /// exactly like an unparseable payload (Table 6.3.17-1, warning 111 via the
 /// 2xx-with-null-body arm of `read_warning`).
@@ -769,8 +769,8 @@ pub async fn forward(
     // 6.3.17: NGSILD-Warning values received from the peer are returned to
     // the caller — abnormal behaviour detected downstream in a cascade
     // (4.3.6.4) must surface on the aggregated response, not vanish here.
-    // I4: one policy for every outbound class — scheme allowlist,
-    // private-range deny, per-destination circuit breaker (§16.4/§16.7).
+    // One policy for every outbound class — scheme allowlist,
+    // private-range deny, per-destination circuit breaker.
     if let Err(e) = st.egress.check_url(&url).await {
         tracing::warn!("federation forward to {url} refused: {e}");
         return (502, Value::Null, Vec::new());
@@ -779,7 +779,7 @@ pub async fn forward(
         tracing::debug!("federation forward to {url} short-circuited (breaker open)");
         return (503, Value::Null, Vec::new());
     }
-    // 5.2.34 cooldown (per REGISTRATION, distinct from the §16.7 host:port
+    // 5.2.34 cooldown (per REGISTRATION, distinct from the host:port
     // breaker): inside the declared window "a timeout error response for
     // the registration is automatically returned" — the source is not
     // contacted.
@@ -939,13 +939,13 @@ pub async fn forward(
         }
         req = req.body(serde_json::to_vec(&b).unwrap_or_default());
     }
-    // N2: the whole HTTP interaction is one Send unit (http_interaction) so
+    // The whole HTTP interaction is one Send unit (http_interaction) so
     // the handler futures above stay Send on wasm32 too.
     antares_jsonld::http_interaction(async {
         // wasm has no client-level timeout — bound the forward per request
-        // (mirrors the native fed_http 8 s total, §16.7); a timed-out
+        // (mirrors the native fed_http 8 s total); a timed-out
         // forward is the only failure class that feeds the breaker.
-        // 5.2.34 timeout bounds the forward below the 8 s ceiling (§16.7).
+        // 5.2.34 timeout bounds the forward below the 8 s ceiling.
         // Natively io_deadline is a passthrough (the client owns the 8 s
         // default), so the per-registration budget rides on the request.
         let deadline: u32 = reg.timeout_ms.map_or(8_000, |t| t.min(8_000) as u32);
@@ -965,8 +965,8 @@ pub async fn forward(
         match sent {
             Ok(resp) => {
                 // Any response — even 5xx — proves the peer answers within
-                // its own response time: no U1 deadline cost, so no breaker
-                // state. Only TIMEOUT-class failures trip (§16.7); a
+                // its own response time: no deadline cost, so no breaker
+                // state. Only TIMEOUT-class failures trip; a
                 // responding-but-erroring peer must keep being attempted,
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
@@ -993,7 +993,7 @@ pub async fn forward(
                 (504, Value::Null, Vec::new())
             }
             Err(_) => {
-                // connect refused/reset: fails in milliseconds — no U1 need;
+                // connect refused/reset: fails in milliseconds — no deadline cost;
                 // clearing avoids stale suppression of a restarted peer.
                 // 503 (not 502): NO HTTP response was received, so the read
                 // path classifies it under Table 6.3.17-1 code 199 ("No
@@ -1277,7 +1277,7 @@ fn push_down_expires(doc: &mut Value) {
     }
 }
 
-/// 4.5.5.3 first step (audit V-19): "if an expiresAt DateTime is present on
+/// 4.5.5.3 first step: "if an expiresAt DateTime is present on
 /// the Attribute and the date lies in the past, it shall be discarded" —
 /// BEFORE any recency comparison.
 fn expired(inst: &Value, now: &str) -> bool {
@@ -2209,7 +2209,7 @@ mod tests {
         h
     }
 
-    /// RFC 7230 received-by is a TOKEN compared for equality (audit V-30):
+    /// RFC 7230 received-by is a TOKEN compared for equality:
     /// `ends_with` made alias `b1` match pseudonym `sub-b1` (spurious loop)
     /// and could never catch the converse.
     #[test]
@@ -2604,7 +2604,7 @@ mod tests {
         assert!(full.contains_key("color") && !full.contains_key("@context"));
     }
 
-    /// 4.5.5.3 p.60 (audit V-19): "if an expiresAt DateTime is present on the
+    /// 4.5.5.3 p.60: "if an expiresAt DateTime is present on the
     /// Attribute and the date lies in the past, it shall be discarded" —
     /// BEFORE the observedAt/modifiedAt recency comparison.
     #[test]

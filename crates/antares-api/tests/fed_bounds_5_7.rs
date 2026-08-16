@@ -1,4 +1,4 @@
-//! Federation response byte cap (§16.3 bounds wall, applied to the 5.7.2.4
+//! Federation response byte cap (the input bounds wall applied to the 5.7.2.4
 //! forwarded-query read path). A registered Context Source answering with a
 //! payload above ANTARES_MAX_FED_RESPONSE_BYTES is treated exactly like one
 //! whose "payload of the response was invalid" (Table 6.3.17-1, warning 111):

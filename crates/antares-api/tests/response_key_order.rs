@@ -1,4 +1,4 @@
-//! Served-JSON key order (user request 2026-08-13): every response object
+//! Served-JSON key order: every response object
 //! leads with `id` then `type` (the spec-example order), recursively — an
 //! attribute object prints `"type": "Property"` first. Pure serialization
 //! cosmetics: RFC 8259 objects are unordered and CIM 009 4.5.1 mandates

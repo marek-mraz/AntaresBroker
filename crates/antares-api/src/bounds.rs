@@ -1,10 +1,10 @@
-//! Input bounds wall (tasks.md I2; §16.3): every request-shaped resource has
+//! Input bounds wall: every request-shaped resource has
 //! a configured cap, rejected with the spec-shaped error. One middleware
 //! enforces the transport-level caps (URI length 414, body size 413, JSON
-//! nesting 400) — size and depth are checked BEFORE any parse (the WS-44
-//! order). The per-feature caps (batch count, joinLevel, @context fetch
+//! nesting 400) — size and depth are checked BEFORE any parse. The
+//! per-feature caps (batch count, joinLevel, @context fetch
 //! count, q= complexity, result ceiling) live at their parse points.
-//! Rejections are counted and exported via /q/health (observability, §16.3).
+//! Rejections are counted and exported via /q/health.
 
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// every value is spec-shaped on rejection).
 pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // → bare 413 (6.3.4)
 pub const MAX_URI_BYTES: usize = 8 * 1024; // → bare 414
-pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData (§16.3)
+pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData
                                       // → 400 BadRequestData. Deployment knob (ANTARES_MAX_BATCH_ITEMS): the
                                       // spec sets no batch ceiling — 1000 is this broker's DoS-bounds default,
                                       // raised where a trusted producer legitimately batches larger (e.g. a
@@ -31,7 +31,7 @@ pub static MAX_BATCH_ITEMS: std::sync::LazyLock<usize> = std::sync::LazyLock::ne
 // Deployment knob (ANTARES_MAX_FED_RESPONSE_BYTES): ceiling on one forwarded
 // (4.3.6) response body. The spec sets no ceiling; an over-cap peer part
 // fails like an unparseable payload (Table 6.3.17-1, warning 111) instead of
-// ballooning broker memory — one misbehaving peer must not break the §1
+// ballooning broker memory — one misbehaving peer must not break the
 // 500 MB RSS budget. Read once at first use.
 pub static MAX_FED_RESPONSE_BYTES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
     std::env::var("ANTARES_MAX_FED_RESPONSE_BYTES")
@@ -82,7 +82,7 @@ impl LimitStats {
 }
 
 /// Maximum brace/bracket nesting of a JSON byte stream, string-aware.
-/// A scan, not a parse — depth is checked before serde ever runs (WS-44).
+/// A scan, not a parse — depth is checked before serde ever runs.
 pub fn json_depth(bytes: &[u8]) -> usize {
     let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
     for &b in bytes {

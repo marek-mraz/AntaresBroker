@@ -1,15 +1,15 @@
-//! C11c — store-mode parity for the compiled query path (tasks.md C10/C11/
-//! C11b/C11c). ONE fixture set, run through BOTH engines:
+//! Store-mode parity for the compiled query path. ONE fixture set, run
+//! through BOTH engines:
 //!
 //! * the in-memory evaluator (`geo::GeoQuery::matches`, `scope_matches`,
-//!   `qeval::eval_q`) — the H7 arbiter, and what `memory`/`file` modes use;
+//!   `qeval::eval_q`) — the arbiter, and what `memory`/`file` modes use;
 //! * the compiled SQL (`antares-sql/src/compile/*`) executed by PostGIS.
 //!
 //! The invariant under test is the one the whole pushdown rests on: **SQL may
 //! only narrow.** Every entity the evaluator accepts must come back from SQL;
 //! extra rows are fine because the caller re-filters. A violation here is a
 //! compliance bug — two store modes answering the same query differently —
-//! which is exactly what C11c exists to catch.
+//! which is exactly what this suite exists to catch.
 //!
 //! Skips loudly without ANTARES_TEST_DATABASE_URL (see antares-sql/tests/pg.rs
 //! for the container recipe).
@@ -241,7 +241,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
                 },
             )
             .expect("sql query");
-        // C11: geo carries a metric residual (near geography vs haversine) —
+        // Geo carries a metric residual (near geography vs haversine) —
         // it narrows, it never decides. When the spec declined to compile the
         // store never saw a geo predicate and truthfully claims decided; the
         // API layer forfeits every pushdown in that case (geo_uncompiled gate
@@ -337,7 +337,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
     );
 }
 
-/// C11: the pushdown ladder — when every present predicate compiles exactly,
+/// The pushdown ladder — when every present predicate compiles exactly,
 /// SQL DECIDES (equality, not superset), pages, counts and projects; any
 /// inexact predicate forfeits all of it and falls back to narrowing.
 #[tokio::test(flavor = "multi_thread")]
@@ -743,7 +743,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
     );
 }
 
-/// C11: temporal instance pruning is byte-exact against instance_matches, and
+/// Temporal instance pruning is byte-exact against instance_matches, and
 /// the lastN RANK() cap keeps timestamp ties.
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_pruning_matches_the_window_and_keeps_ties() {
@@ -996,7 +996,7 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
     }
 }
 
-/// C11/5.7.4.4 — entity paging WITH a values filter: safe only when the
+/// 5.7.4.4 — entity paging WITH a values filter: safe only when the
 /// prefilter is EXACT, i.e. the windowed EXISTS carries the byte-exact text
 /// predicate, not just the ±48 h widened column bound. An entity whose only
 /// q-matching instance lies in the slack zone (outside the true window,

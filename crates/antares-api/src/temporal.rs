@@ -1611,7 +1611,7 @@ pub(crate) async fn query_temporal_inner(
     let entity_attr_filter = trepr.attrs.clone();
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    // C11: push entity narrowing (ids/types/attrs) and instance-window
+    // Push entity narrowing (ids/types/attrs) and instance-window
     // pruning (range + RANK()-capped lastN) into the store. The loop below
     // and window() stay the arbiters — pruning is byte-exact against
     // instance_matches (compile::temporal), so it cannot change an answer.
@@ -1623,9 +1623,9 @@ pub(crate) async fn query_temporal_inner(
     // scopeQ joins q/geo here: the 4.18 validity filter drops entities and
     // instances AFTER SQL, so a pushed page/lastN cap would under-return.
     let exact_push = q_ast.is_none() && geo.is_none() && scope_q.is_none();
-    // Entity-page pushdown (audit 2026-08-08): a temporal query used to
-    // materialize the tenant's ENTIRE history. Pushed only when every filter
-    // the store cannot see is absent — same gate family as C11 entities.
+    // Entity-page pushdown: a temporal query used to materialize the
+    // tenant's ENTIRE history. Pushed only when every filter the store
+    // cannot see is absent — same gate family as the entity-query pushdown.
     // A values filter no longer blocks paging when its prefilter compiles
     // EXACTLY (every leaf a Cmp with the byte-exact text window): the SQL
     // entity verdict then equals the evaluator's. datasetId/pick still
@@ -2072,7 +2072,7 @@ async fn retrieve_temporal_inner(
         }
         let last_n = trepr.last_n;
         antares_model::EntityId::new(id)?;
-        // C11: instance pruning pushed into the store (no q=/geo on retrieve,
+        // Instance pruning pushed into the store (no q=/geo on retrieve,
         // so it is always safe here); window() below stays the arbiter.
         let tf = antares_sql::store::filter::TemporalFilter {
             range: tq

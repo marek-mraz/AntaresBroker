@@ -1,5 +1,5 @@
 //! Geoquery evaluation (CIM 009 4.10) — in-memory, over GeoJSON values,
-//! via `geo`'s DE-9IM relate (tasks.md H7: polygon holes, edge-crossing
+//! via `geo`'s DE-9IM relate (polygon holes, edge-crossing
 //! intersects, line/line, MultiPolygon, topological equals — the planar
 //! approximations this file used to carry are retired).
 //!
@@ -9,9 +9,9 @@
 //! closest-point selection is metric and extended reference/target
 //! geometries measure from their true closest points); the small
 //! equirectangular residual vs PostGIS `ST_DWithin` on geography is the
-//! remaining documented ceiling (the SQL path C11b is the metric authority).
+//! remaining documented ceiling (the SQL path is the metric authority).
 //! Known ceiling: per-call relate without a prepared edge index — a
-//! PreparedGeometry cache is the §6.5 matcher lever when 10k subscriptions
+//! PreparedGeometry cache is the matcher lever when 10k subscriptions
 //! demand it.
 
 use antares_jsonld::Context;
@@ -39,12 +39,12 @@ pub struct GeoQuery {
     pub geometry: String,
     pub coordinates: Value,
     pub geoproperty: String,
-    /// Parsed once at construction (H7).
+    /// Parsed once at construction.
     query_geom: geo_types::Geometry<f64>,
 }
 
 /// 4.7.1: Polygon/MultiPolygon rings need ≥4 positions and closure — the
-/// malformed shapes the suite probes with (testsuite-doubts class) are 400s.
+/// malformed shapes the suite probes with are 400s.
 fn validate_rings(gtype: &str, coords: &Value) -> Result<(), String> {
     let check_ring = |ring: &Value| -> Result<(), String> {
         let pts = ring.as_array().ok_or("ring must be an array")?;
@@ -236,7 +236,7 @@ impl GeoQuery {
         })
     }
 
-    /// C11b: the same query, in the shape `antares-sql` compiles to PostGIS.
+    /// The same query, in the shape `antares-sql` compiles to PostGIS.
     /// `geoproperty` is expanded here because the compiler only pushes down
     /// the DEFAULT GeoProperty — the one with an extracted column.
     pub fn to_sql_spec<'a>(
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn within_polygon_and_holes() {
-        // H7: a polygon HOLE excludes points — the planar approximation
+        // A polygon HOLE excludes points — the planar approximation
         // this replaces got this wrong by only reading outer rings.
         let g = q(
             "within",

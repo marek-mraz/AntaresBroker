@@ -85,7 +85,7 @@ enum CtxEntry {
     Core(String),
 }
 
-/// Usage view of a store row — the SHARED truth (K8: per-instance loader
+/// Usage view of a store row — the SHARED truth (per-instance loader
 /// stats split-brain behind a load balancer; the usage_bump hook keeps the
 /// row's counters current from every instance).
 fn row_usage(doc: &Value) -> antares_jsonld::CtxUsage {
@@ -130,7 +130,7 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
     if Loader::is_pinned_core(id) {
         return Some(CtxEntry::Core(id.to_owned()));
     }
-    // Cached entries: the persisted row is the ONE existence truth (K8: the
+    // Cached entries: the persisted row is the ONE existence truth (the
     // per-instance usage map split-brains behind a load balancer). The row id
     // is uuid5(url), so a URL-shaped id resolves in O(1).
     if id.starts_with("http://") || id.starts_with("https://") {
@@ -256,7 +256,7 @@ pub async fn list_contexts(
             ));
         }
         // Cached entries come from the store rows walked above — the shared
-        // truth every instance sees (K8). Loader-only usage entries are NOT
+        // truth every instance sees. Loader-only usage entries are NOT
         // listed (an entry another instance deleted must not resurface),
         // with one exception: pinned core contexts never get a row and stay
         // listable from local usage.
@@ -426,7 +426,7 @@ pub async fn delete_context(
             }
             Some(CtxEntry::Cached(u)) => {
                 st.loader.usage_remove(&u.url).await;
-                // J2 write-through row shares the deterministic local id —
+                // The write-through row shares the deterministic local id —
                 // deleting the API entry must delete the persisted copy too,
                 // or a restart resurrects a deleted @context (5.13.5).
                 let _ = st.store.context_delete(&u.local_id);

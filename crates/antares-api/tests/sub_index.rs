@@ -1,9 +1,9 @@
-//! L3 (§1.1): subscription matching is index-shaped. The `SubMirror`
+//! Subscription matching is index-shaped. The `SubMirror`
 //! candidate lookup must (a) never miss a subscription that could fire —
 //! the safety property, checked against a naive reference — and (b) never
 //! degrade into a scan: a change only surfaces the subscriptions keyed to
 //! its types/attrs plus the broad bucket. The ignored release bench encodes
-//! the scaling gate the way J1 encodes the expansion gate.
+//! the scaling gate.
 
 #![allow(clippy::unwrap_used)]
 
@@ -181,7 +181,7 @@ fn candidates_are_a_superset_of_the_naive_reference() {
     }
 }
 
-/// The L3 scaling gate (run with --release --ignored, the J1 pattern):
+/// The scaling gate (run with --release --ignored):
 /// candidate lookup must not scale with the total subscription count. With
 /// 10k type-keyed subscriptions across 1k types, one lookup touches ~10
 /// docs; 100k lookups in well under a second proves the index is doing the

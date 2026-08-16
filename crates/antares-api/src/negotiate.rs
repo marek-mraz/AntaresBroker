@@ -554,8 +554,8 @@ pub fn respond_list(
 /// included" reads as [user, core] — but the ENTIRE ETSI validation
 /// ecosystem (68 official expectation files, strict-compared; the suite is
 /// validated against Scorpio/Stellio) pins the user context ALONE, treating
-/// the core as implicit per 4.4. Antares follows the ecosystem reading; the
-/// wording doubt is logged in testsuite-doubts.md (2026-08-11).
+/// the core as implicit per 4.4. Antares follows the ecosystem reading;
+/// the clause wording itself is ambiguous.
 pub(crate) fn served_context(ctx: &Context) -> Value {
     if ctx.source.is_null() {
         Value::String(CORE_CONTEXT.to_owned())
@@ -885,7 +885,7 @@ mod clause_5_2_3 {
     /// echoes the user context where present (core implicit per 4.4) and
     /// falls back to the core context alone otherwise. The literal-wording
     /// alternative ([user, core]) fails 68 strict-compared official
-    /// expectations — see testsuite-doubts.md 2026-08-11.
+    /// expectations.
     #[test]
     fn served_context_echoes_user_or_core() {
         let out = inject_context(json!({"id": "urn:x"}), &ctx_with(Value::Null));

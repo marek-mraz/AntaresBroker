@@ -4,7 +4,7 @@
 //! a (before, after) pair; attribute-level changes are derived by diffing —
 //! one hook point instead of one call per write handler.
 //!
-//! L3 (§1.1): candidate lookup is index-shaped. `SubMirror` keeps inverted
+//! Candidate lookup is index-shaped. `SubMirror` keeps inverted
 //! (tenant, type) and (tenant, watched-attr) maps next to the docs, so one
 //! change evaluates only the subscriptions that could possibly fire — never
 //! a scan over all of a tenant's subscriptions. Subscriptions the index
@@ -31,7 +31,7 @@ enum ChangeClass {
     Deleted,
 }
 
-/// F4/F5: a per-instance tenant-keyed document mirror (bus=nats). One
+/// A per-instance tenant-keyed document mirror (bus=nats). One
 /// instance holds subscriptions (fed by the KV watcher), another holds
 /// registrations (fed by `ANTARES_REGISTRY` deltas). Postgres stays the
 /// system of record — this map is a cache with exactly one writer (the
@@ -55,7 +55,7 @@ impl Mirror for DocMirror {
     }
 }
 
-/// L3: the subscription mirror — docs plus the inverted candidate index.
+/// The subscription mirror — docs plus the inverted candidate index.
 ///
 /// Bucketing per subscription (conservative, union-of-buckets = candidates):
 /// - has an `entities` selector whose every entry names a plain expanded
@@ -174,7 +174,7 @@ impl SubMirror {
         }
     }
 
-    /// The L3 hot path: subscriptions that could possibly fire for a change
+    /// The hot path: subscriptions that could possibly fire for a change
     /// touching these entity types and these changed attributes. Union of
     /// the type hits, the attr hits and the broad bucket — a superset of
     /// the firing set, never a subset.
@@ -265,7 +265,7 @@ impl DocMirror {
 }
 
 /// Where the matcher reads candidates from: the indexed mirror (both bus
-/// modes wire one — L3), with the store scan only as the never-wired
+/// modes wire one), with the store scan only as the never-wired
 /// fallback so a missing mirror degrades to correct-but-slow.
 fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) -> Vec<Value> {
     match &st.sub_mirror {
@@ -279,7 +279,7 @@ fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) 
 
 /// Wire the store hook and background tasks. Call once at startup.
 pub fn wire(state: &mut AppState) {
-    // L3 (bus=local): the same indexed mirror the nats wiring builds, fed
+    // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
     for tenant_str in state.store.subscription_tenants().unwrap_or_default() {
@@ -323,7 +323,7 @@ pub fn wire(state: &mut AppState) {
     let st = state.clone();
     crate::spawn(async move {
         loop {
-            // N2: tokio's timer natively; the browser's own timer on wasm32
+            // Tokio's timer natively; the browser's own timer on wasm32
             // (tokio time never fires without a reactor there).
             #[cfg(not(target_arch = "wasm32"))]
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -992,8 +992,8 @@ pub async fn process_change(
     };
     let eval_doc = after.as_ref().or(before.as_ref());
     let Some(eval_doc) = eval_doc else { return };
-    // L3: candidate lookup by the entity's types and the changed attribute
-    // IRIs — the linear scan §1.1 forbids at 10k subs is gone.
+    // Candidate lookup by the entity's types and the changed attribute
+    // IRIs — no linear scan over all subscriptions.
     let types: Vec<&str> = eval_doc
         .get("type")
         .and_then(Value::as_array)
@@ -1077,8 +1077,8 @@ pub async fn process_change(
 }
 
 /// timeInterval subscriptions: fire when due, with all matching entities.
-/// F6 multi-instance: claim one interval firing under the subscription row
-/// lock — N matcher pods race, exactly one wins (§3.1.6: single-winner by
+/// Multi-instance: claim one interval firing under the subscription row
+/// lock — N matcher pods race, exactly one wins (single-winner by
 /// lock, no leader election). The due-check reruns INSIDE the lock; the
 /// winner stamps `lastNotification` as its claim, losers see not-due and
 /// roll back. Only engaged in bus=nats mode — single-process behaviour (and
@@ -1354,7 +1354,7 @@ pub async fn prepare_csource_jobs(
 
 pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<CsourceJob>) {
     for job in jobs {
-        // §4.1 L4 / 5.11.7: re-check the subscription still exists right
+        // 5.11.7: re-check the subscription still exists right
         // before the send — a deleted subscription must never notify.
         let sub_id = job
             .sub
@@ -1533,9 +1533,9 @@ async fn deliver_as(
     }
     let is_mqtt = uri.starts_with("mqtt://") || uri.starts_with("mqtts://");
     if !uri.starts_with("http") && !is_mqtt {
-        return; // creation rejects unknown schemes with 422 (§9.2); belt only
+        return; // creation rejects unknown schemes with 422; belt only
     }
-    // V-16: endpoint.cooldown — drop (never queue) while the window is open.
+    // endpoint.cooldown — drop (never queue) while the window is open.
     // Before any bookkeeping: a suppressed notification was never sent, so
     // timesSent/lastNotification must not move.
     if in_cooldown(sub, chrono::Utc::now()) {
@@ -1671,7 +1671,7 @@ async fn deliver_as(
         }
         #[cfg(not(feature = "mqtt"))]
         {
-            return; // no sink compiled: creation already answered 422 (G3)
+            return; // no sink compiled: creation already answered 422
         }
     } else {
         let mut req = st.http.post(uri);
@@ -1726,8 +1726,8 @@ async fn deliver_as(
             None
         });
     mirror_bookkeeping(st, tenant, kind, &sub_id);
-    // I4: the notification endpoint is an egress destination like any other
-    // — policy check once, breaker consulted before the attempt (§16.4).
+    // The notification endpoint is an egress destination like any other
+    // — policy check once, breaker consulted before the attempt.
     // A refusal is a delivery failure for bookkeeping (status "failed",
     // lastSuccess rolled back below) but never breaker state: the policy
     // verdict says nothing about the endpoint's health.
@@ -1740,7 +1740,7 @@ async fn deliver_as(
     };
     let breaker_open = !refused && st.egress.is_open(uri);
     // (delivered, timed_out): only a TIMEOUT-class failure feeds the breaker
-    // — §16.7/U1 protects against peers that eat the deadline. An endpoint
+    // — that protects against peers that eat the deadline. An endpoint
     // that ANSWERS (any status) is alive, costs only its own response time,
     // and 6.3.8 says the notification shall be sent — suppressing sends to a
     // responding host:port starves unrelated subscriptions sharing it.
@@ -1752,7 +1752,7 @@ async fn deliver_as(
     } else {
         match outbound {
             Outbound::Http(req, bytes) => {
-                // N3 (wasm): the page sink takes matching endpoints — a page
+                // Wasm: the page sink takes matching endpoints — a page
                 // cannot listen on a socket, so this IS its delivery channel.
                 #[cfg(target_arch = "wasm32")]
                 let page_handled = crate::page_sink::try_deliver(uri, &bytes);
@@ -1780,7 +1780,7 @@ async fn deliver_as(
                     Ok(()) => (true, false),
                     Err(e) => {
                         tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
-                        // broker/socket-level failure — keep the U1 guard
+                        // broker/socket-level failure — keep the timeout guard
                         (false, true)
                     }
                 }
@@ -1798,7 +1798,7 @@ async fn deliver_as(
             st.egress.record_success(uri);
         }
     }
-    // K12: delivery counters by sink scheme (facade — no-op without the
+    // Delivery counters by sink scheme (facade — no-op without the
     // broker's recorder).
     let scheme = if is_mqtt { "mqtt" } else { "http" };
     if ok {
@@ -1837,7 +1837,7 @@ async fn deliver_as(
     }
 }
 
-/// P0-7 (audit 2026-08-09): the matcher reads subscriptions from the
+/// The matcher reads subscriptions from the
 /// SubMirror, so every notification bookkeeping writeback must be applied
 /// there too — otherwise the mirror copy never gains
 /// `notification.lastNotification` and 5.2.12 `throttling` suppresses
@@ -1866,7 +1866,7 @@ mod endpoint_tests {
         v.as_object().expect("map").clone()
     }
 
-    /// Table 5.2.15-1 `timeout` (audit V-17): honored, clamped, defaulted.
+    /// Table 5.2.15-1 `timeout`: honored, clamped, defaulted.
     #[test]
     fn endpoint_timeout_is_honored_clamped_and_defaulted() {
         assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": 1500}))), 1500);
@@ -1879,7 +1879,7 @@ mod endpoint_tests {
         assert_eq!(endpoint_timeout_ms(&ep(json!({"timeout": -5}))), 5_000);
     }
 
-    /// Table 5.2.15-1 `cooldown` (audit V-16): gate opens only after a
+    /// Table 5.2.15-1 `cooldown`: gate opens only after a
     /// failure and closes once the window elapses or a success lands.
     #[test]
     fn cooldown_gates_only_failed_subscriptions_within_the_window() {

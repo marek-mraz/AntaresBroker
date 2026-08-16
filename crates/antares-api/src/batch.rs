@@ -18,8 +18,8 @@ use crate::negotiate::CleanParams;
 
 /// Parse a batch body: JSON array of entity documents; per-document context
 /// resolution (ld+json ⇒ each doc's own @context; json ⇒ Link header).
-/// J6: batch bodies are the ingest hot path — sonic-rs (3–4× parse) behind
-/// the `sonic` feature, serde_json always compiled as the fallback (§6.1).
+/// Batch bodies are the ingest hot path — sonic-rs (3–4× parse) behind
+/// the `sonic` feature, serde_json always compiled as the fallback.
 #[cfg(feature = "sonic")]
 fn parse_batch_body(body: &[u8]) -> Result<Value, String> {
     sonic_rs::from_slice(body).map_err(|e| e.to_string())
@@ -52,7 +52,7 @@ async fn parse_batch(
             NgsiError::BadRequestData("batch array must not contain null items".into()).into(),
         );
     }
-    // I2: batch entity count cap (§16.3)
+    // Batch entity count cap
     if items.len() > *crate::bounds::MAX_BATCH_ITEMS {
         return Err(NgsiError::BadRequestData(format!(
             "batch of {} exceeds the {}-entity limit",
@@ -346,8 +346,8 @@ async fn batch_write(
     let mut any_updated = false;
     let proxies: Vec<&crate::federation::FedReg> =
         fed_regs.iter().filter(|r| r.is_proxy()).collect();
-    // C5: creates are collected and written as ONE multi-row statement (§4);
-    // upsert/update/merge run batched per round below (C5+, audit 2026-08-08).
+    // Creates are collected and written as ONE multi-row statement;
+    // upsert/update/merge run batched per round below.
     let mut pending_creates: Vec<(String, Value)> = Vec::new();
     let mut prepped: Vec<(String, Value)> = Vec::new();
     for (item, ctx) in items {
@@ -387,7 +387,7 @@ async fn batch_write(
             }
             continue;
         }
-        // C5+ phase 1 (audit 2026-08-08): expansion/validation per item only;
+        // Expansion/validation per item only;
         // the store operations run BATCHED below — one transaction per round
         // instead of one per item.
         let prep = || -> Result<(String, Value), NgsiError> {
@@ -553,7 +553,7 @@ async fn batch_write(
             }
         }
     }
-    // C5: the collected creates, one multi-row statement, one transaction.
+    // The collected creates, one multi-row statement, one transaction.
     if !pending_creates.is_empty() {
         let flags = st.store.batch_create(&tenant, pending_creates.clone())?;
         for ((id, _), created) in pending_creates.iter().zip(flags) {
@@ -930,7 +930,7 @@ pub async fn batch_delete(
             success: vec![],
             errors: vec![],
         };
-        // C5: one multi-row DELETE for the whole batch; flags in input order.
+        // One multi-row DELETE for the whole batch; flags in input order.
         let id_strs: Vec<String> = ids
             .iter()
             .filter_map(Value::as_str)
@@ -950,7 +950,7 @@ pub async fn batch_delete(
             if flags.next().unwrap_or(false) {
                 // 5.6.10 deletes carry the same temporal-deletion semantics
                 // as 5.6.6 — without this, batch-deleted entities live on in
-                // the temporal store (N7b: the reset's batch delete leaked
+                // the temporal store (the reset's batch delete leaked
                 // every prior suite's Buildings into the orderBy queries).
                 crate::entities::mirror_delete_entity(&st, &tenant, id);
                 local_ok.insert(id.to_owned());

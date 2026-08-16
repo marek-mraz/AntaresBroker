@@ -1,7 +1,7 @@
-//! I5 — tenant isolation test pack (§16.1), the router-level half: no
-//! existence oracle across tenants (§16.1.6) and tenant-keyed store state
-//! (§16.1.4). The RLS denial half runs against live Postgres in
-//! `antares-sql/tests`; the NATS subject re-verification half lands with F5.
+//! Tenant isolation, the router-level half: no existence oracle across
+//! tenants and tenant-keyed store state. The RLS denial half runs against
+//! live Postgres in `antares-sql/tests`; the NATS subject re-verification
+//! half lands with the NATS messaging backend.
 
 use antares_api::AppState;
 use axum::body::Body;
@@ -44,7 +44,7 @@ async fn create_entity(st: &AppState, tenant: &str, id: &str) {
     assert_eq!(status, StatusCode::CREATED, "seed {id} in {tenant}: {body}");
 }
 
-/// §16.1.6: for a tenant-B observer, an id that exists in tenant A must be
+/// For a tenant-B observer, an id that exists in tenant A must be
 /// EXACTLY as absent as an id that exists nowhere — same status, same body
 /// shape. A difference is an existence oracle across the tenant boundary.
 #[tokio::test(flavor = "multi_thread")]
@@ -93,7 +93,7 @@ async fn cross_tenant_probe_is_indistinguishable_from_nonexistence() {
     );
     let _ = (s_ghost, b_ghost);
 
-    // same property for subscriptions and registrations (§16.1.6 lists all)
+    // same property for subscriptions and registrations
     for (path, seed_body) in [
         (
             "/ngsi-ld/v1/subscriptions",
@@ -142,7 +142,7 @@ async fn cross_tenant_probe_is_indistinguishable_from_nonexistence() {
     }
 }
 
-/// §16.1.4: the F4/F5 in-memory mirrors are tenant-keyed — one tenant's
+/// The in-memory mirrors are tenant-keyed — one tenant's
 /// subscriptions/registrations never appear in another tenant's yield.
 #[test]
 fn doc_mirror_is_tenant_keyed() {
@@ -172,7 +172,7 @@ fn doc_mirror_is_tenant_keyed() {
     );
 }
 
-/// §16.1.4: store state is tenant-keyed — nothing leaks into another tenant's
+/// Store state is tenant-keyed — nothing leaks into another tenant's
 /// list/query/delete view, and a cross-tenant delete cannot destroy data.
 #[tokio::test(flavor = "multi_thread")]
 async fn store_state_is_tenant_keyed() {

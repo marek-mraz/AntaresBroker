@@ -1,5 +1,5 @@
-//! 6.3.8 / 5.8.6: notifications and forwards SHALL be attempted — the §16.7
-//! per-destination breaker exists only for the U1 lesson (an UNRESPONSIVE
+//! 6.3.8 / 5.8.6: notifications and forwards SHALL be attempted — the
+//! per-destination breaker exists for one failure shape only (an UNRESPONSIVE
 //! peer must not spend the full deadline on every request). An endpoint that
 //! ANSWERS — even with 404/500 — is alive, costs only its own response
 //! time, and must never suppress later sends to the same host:port (the
@@ -34,7 +34,7 @@ fn mock_counting(reply: &'static str) -> (u16, Arc<AtomicUsize>) {
     (port, hits)
 }
 
-/// Accepts, reads, never answers — the U1 deadline-eater.
+/// Accepts, reads, never answers — the deadline-eater.
 fn mock_stalling() -> (u16, Arc<AtomicUsize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -152,7 +152,7 @@ async fn responding_endpoint_errors_never_suppress_later_sends() {
     );
 }
 
-/// The U1 guard stays: a deadline-eating endpoint IS breaker-suppressed
+/// The guard stays: a deadline-eating endpoint IS breaker-suppressed
 /// after enough consecutive timeouts.
 #[tokio::test(flavor = "multi_thread")]
 async fn stalling_endpoint_still_trips_the_breaker() {

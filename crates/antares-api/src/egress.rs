@@ -1,16 +1,16 @@
-//! Outbound safety for the request-path egress classes (tasks.md I4; §16.4):
+//! Outbound safety for the request-path egress classes:
 //! notification delivery and federation forwarding. The third class,
 //! @context fetching, enforces the same policy inside `antares-jsonld`
 //! (that is where the fetch happens) — this module governs the two that
 //! leave from `antares-api`.
 //!
-//! Per-destination circuit breakers close the U1 lesson at federation scale
-//! (§16.7): a dead peer must not spend its full timeout on every request.
+//! Per-destination circuit breakers matter at federation scale: a dead
+//! peer must not spend its full timeout on every request.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
-// N2 clock rule: std Instant panics on wasm32; web-time is the std re-export
+// Clock rule: std Instant panics on wasm32; web-time is the std re-export
 // natively and performance.now() in the browser.
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -75,7 +75,7 @@ impl Egress {
         }
     }
 
-    /// scheme allowlist + private-range deny (§16.4). `Err` is a reason
+    /// scheme allowlist + private-range deny. `Err` is a reason
     /// string for the caller\'s log/207 detail.
     pub async fn check_url(&self, url: &str) -> Result<(), String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad URL {url}: {e}"))?;

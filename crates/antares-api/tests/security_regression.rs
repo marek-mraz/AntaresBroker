@@ -1,14 +1,14 @@
-//! I7 — the §16.6 security regression suite: the §14 Scorpio findings with
-//! security character, kept failing-forever as tests.
+//! Security regression suite: known context-broker CVE-class findings,
+//! kept failing-forever as tests.
 //!
-//! * R4-class: caches keyed by client-supplied URLs must have a SIZE cap,
+//! * Caches keyed by client-supplied URLs must have a SIZE cap,
 //!   not just a TTL — asserted by overfilling the @context cache.
-//! * L6-class: deleting a subscription must remove ALL its state — no
+//! * Deleting a subscription must remove ALL its state — no
 //!   orphaned bookkeeping keeps notifying (Scorpio's callback-UUID leak).
-//! * WS-44-class: the SIZE verdict comes before any parse — an oversized
+//! * The SIZE verdict comes before any parse — an oversized
 //!   body of invalid JSON answers 413, never a parse error.
-//! * Cross-tenant probes run per-commit in tenant_isolation.rs (§16.1), a
-//!   stricter cadence than the per-release e2e the task names.
+//! * Cross-tenant probes run per-commit in tenant_isolation.rs, a
+//!   stricter cadence than a per-release e2e.
 
 use antares_api::AppState;
 use axum::body::Body;
@@ -26,7 +26,7 @@ async fn send(st: &AppState, req: Request<Body>) -> StatusCode {
         .status()
 }
 
-/// WS-44 order: 5 MB of garbage that is NOT JSON must bounce off the size
+/// Size before parse: 5 MB of garbage that is NOT JSON must bounce off the size
 /// wall (bare 413) — a 400 here would mean something tried to parse it.
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_body_is_rejected_before_any_parse() {
@@ -44,7 +44,7 @@ async fn oversized_body_is_rejected_before_any_parse() {
     assert_eq!(send(&st, req).await, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-/// R4-class: the parsed-@context cache is capped — 400 distinct
+/// The parsed-@context cache is capped — 400 distinct
 /// client-supplied URLs cannot grow it past its max size.
 #[tokio::test(flavor = "multi_thread")]
 async fn context_cache_size_cap_holds_under_client_keyed_load() {
@@ -61,11 +61,11 @@ async fn context_cache_size_cap_holds_under_client_keyed_load() {
     let fetched = stats["fetched"].as_u64().expect("count");
     assert!(
         fetched <= 256,
-        "client-keyed cache must be size-capped (R4): {fetched} entries"
+        "client-keyed cache must be size-capped: {fetched} entries"
     );
 }
 
-/// L6-class: after DELETE, a subscription's state is GONE — later matching
+/// After DELETE, a subscription's state is GONE — later matching
 /// changes produce no delivery attempt. (Scorpio orphaned callback UUIDs
 /// forever; the wrong-typed-key NPE meant the delete path never cleaned up.)
 #[tokio::test(flavor = "multi_thread")]
@@ -85,7 +85,7 @@ async fn deleted_subscription_stops_notifying() {
         }
     });
 
-    // egress: the receiver is loopback, which is denied by default (§16.4) —
+    // egress: the receiver is loopback, which is denied by default —
     // allow it for this process the way the ETSI stacks do
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
     let mut st = AppState::new("test".into());
@@ -163,6 +163,6 @@ async fn deleted_subscription_stops_notifying() {
     assert_eq!(
         hits.load(Ordering::SeqCst),
         before,
-        "a deleted subscription kept notifying — orphaned state (L6)"
+        "a deleted subscription kept notifying — orphaned state"
     );
 }

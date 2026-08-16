@@ -16,8 +16,8 @@ use crate::negotiate::CleanParams;
 
 /// Validate + normalize a CSourceRegistration (5.2.9): types and attribute
 /// names inside `information` expand to IRIs.
-/// §16.3 cardinality caps on a CSourceRegistration. Generous against any real
-/// federation topology (§16.7 sizes a tenant at 1000+ registrations, not one
+/// Cardinality caps on a CSourceRegistration. Generous against any real
+/// federation topology (a tenant is sized at 1000+ registrations, not one
 /// registration at 1000+ selectors) and small enough that the worst case is
 /// MAX_INFORMATION × MAX_INFO_MEMBERS² index rows, not 10^10.
 const MAX_INFORMATION: usize = 128;
@@ -65,7 +65,7 @@ pub fn normalize_registration(
                     .as_array()
                     .filter(|a| !a.is_empty())
                     .ok_or_else(|| bad("information must be a non-empty array (5.2.9)".into()))?;
-                // §16.3: the csource_index explosion is |entities| ×
+                // The csource_index explosion is |entities| ×
                 // (|propertyNames| + |relationshipNames|) PER information
                 // element, materialised in memory before any SQL runs. Under
                 // only the 4 MiB body cap that is ~10^10 objects — an OOM from
@@ -429,7 +429,7 @@ pub fn normalize_registration(
                 out.insert(k.clone(), v.clone());
             }
             _ => {
-                // tolerant reader (§15.1)
+                // tolerant reader: keep unknown members
                 out.insert(k.clone(), v.clone());
             }
         }

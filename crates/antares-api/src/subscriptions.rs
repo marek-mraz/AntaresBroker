@@ -277,7 +277,7 @@ pub fn normalize_subscription(
                 antares_model::EntityId::new(uri)
                     .map_err(|_| bad(format!("endpoint.uri is not a valid URI: {uri:?}")))?;
                 let scheme = uri.split(':').next().unwrap_or("");
-                // G3: a scheme with no registered sink is 422 at creation.
+                // A scheme with no registered sink is 422 at creation.
                 #[cfg(feature = "mqtt")]
                 let supported = ["http", "https", "mqtt", "mqtts"];
                 #[cfg(not(feature = "mqtt"))]
@@ -425,7 +425,7 @@ pub fn normalize_subscription(
             | "datasetId" => {
                 out.insert(k.clone(), v.clone());
             }
-            // tolerant reader: keep unknown members (§15.1)
+            // tolerant reader: keep unknown members
             _ => {
                 out.insert(k.clone(), v.clone());
             }
@@ -600,8 +600,8 @@ pub async fn create(
     let ts = now_iso();
     norm.insert("createdAt".into(), Value::String(ts.clone()));
     norm.insert("modifiedAt".into(), Value::String(ts.clone()));
-    // notification @context = the creating request's context (5.8.6; §8.3
-    // stores it as its own column) — internal member, stripped on output.
+    // notification @context = the creating request's context (5.8.6),
+    // stored as its own column — internal member, stripped on output.
     norm.insert("__context".into(), parsed.ctx.source.clone());
     // Array @context (>1 entry): the broker must host it at its own URL as an
     // ImplicitlyCreated @context, surfaced via jsonldContext (5.13.1, 050_03)

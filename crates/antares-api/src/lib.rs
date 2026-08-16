@@ -1,4 +1,4 @@
-//! NGSI-LD HTTP binding (docs/deep-analysis.md §9.3): axum routers, thin
+//! NGSI-LD HTTP binding: axum routers, thin
 //! handlers per spec operation.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
@@ -26,7 +26,7 @@ pub mod types_attrs;
 
 pub use state::AppState;
 
-/// N2: spawn for both targets — tokio natively, the JS microtask queue on
+/// Spawn for both targets — tokio natively, the JS microtask queue on
 /// wasm32 (no tokio runtime exists in a browser). Call sites are identical;
 /// only the executor differs. Send is required natively (worker threads) and
 /// meaningless on single-threaded wasm.
@@ -46,11 +46,11 @@ where
     wasm_bindgen_futures::spawn_local(fut);
 }
 
-/// N3 (wasm only): a page-registered notification sink. A browser page has no
+/// Wasm only: a page-registered notification sink. A browser page has no
 /// inbound socket to receive notification callbacks on, so a subscription
 /// whose endpoint matches the registered URL prefix is delivered to page JS
 /// instead of the network. Endpoints outside the prefix still leave via
-/// fetch — the N7a Node tier registers nothing and keeps pure HTTP delivery.
+/// fetch — the Node tier registers nothing and keeps pure HTTP delivery.
 #[cfg(target_arch = "wasm32")]
 pub mod page_sink {
     use std::sync::OnceLock;
@@ -155,7 +155,7 @@ fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
 /// locally here (Table 4.3.5-2 row "integrated temporal + integrated Context
 /// Registry"); JSONLDContext API implemented; optional Snapshot API offered
 /// (5.16, resources 6.36-6.38, NGSILD-Snapshot scoping 6.3.22).
-/// Ops-only router (audit P0-4): what a pod WITHOUT the api role serves —
+/// Ops-only router: what a pod WITHOUT the api role serves —
 /// health, readiness and metrics, nothing else. The shipped antares-worker
 /// Deployment used to answer the full read/write NGSI-LD API on its pod IP
 /// (and a subscription created there was never KV-synced, because the sync
@@ -193,13 +193,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/entities/{id}/attrs/{attr}",
-            // GET is the 2.0 #14 pre-adoption (H3, §15.1)
+            // GET is the 2.0 #14 pre-adoption
             get(entities::retrieve_entity_attr)
                 .patch(attrs::partial_update_attr)
                 .put(attrs::replace_attr)
                 .delete(attrs::delete_attr),
         )
-        // 2.0 #15 pre-adoption (H3): the bare attribute value
+        // 2.0 #15 pre-adoption: the bare attribute value
         .route(
             "/entities/{id}/attrs/{attr}/value",
             get(entities::retrieve_entity_attr_value),
@@ -324,20 +324,20 @@ pub fn router(state: AppState) -> Router {
             "/ngsi-ld/ex/remote-notify",
             post(distsub::remote_notify).with_state(state.clone()),
         )
-        // K12: Prometheus text format. 404 until the broker installs the
-        // renderer — the api crate never depends on an exporter (§9.2).
+        // Prometheus text format. 404 until the broker installs the
+        // renderer — the api crate never depends on an exporter.
         .route("/q/metrics", get(metrics_endpoint))
         // 6.3.6/6.3.21: Prefer: ngsi-ld=<version> → 4.3.6.8 amendment +
         // Preference-Applied (+203 when altered) on every API response.
-        // OPTIONS (2.0 #59 pre-adoption, H3): axum's MethodRouter already
+        // OPTIONS (2.0 #59 pre-adoption): axum's MethodRouter already
         // computes the exact per-route Allow set for its 405s — the layer
         // turns an OPTIONS 405 into 204 + that same Allow. HEAD (#58) needs
         // nothing: axum's get() serves HEAD natively.
         .nest(
             API_ROOT,
             api.layer(axum::middleware::from_fn(conformance::prefer_version_layer))
-                // I2 bounds wall: URI length, body size, JSON depth — checked
-                // before any parse (size-check-before-parse, WS-44 class).
+                // Bounds wall: URI length, body size, JSON depth — checked
+                // before any parse (size-check-before-parse).
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     bounds::bounds_layer,
@@ -356,7 +356,7 @@ pub fn router(state: AppState) -> Router {
                 // axum's built-in extractor limit defaults to 2 MiB and fires
                 // BEFORE the bounds wall's documented cap — a 3 MiB body was
                 // 413'd although /q/health advertises maxBodyBytes = 4 MiB
-                // (found by mutation-testing the 413 wall, 2026-08-09). One
+                // (found by mutation-testing the 413 wall). One
                 // number governs both walls.
                 .layer(axum::extract::DefaultBodyLimit::max(bounds::MAX_BODY_BYTES)),
         )
@@ -365,7 +365,7 @@ pub fn router(state: AppState) -> Router {
         // Router itself, above any nested layer — only a layer wrapping the
         // WHOLE router sees it.
         .layer(axum::middleware::from_fn(options_204))
-        // K12: outermost so the duration covers the full stack.
+        // Outermost so the duration covers the full stack.
         .layer(axum::middleware::from_fn(http_metrics_layer))
         .with_state(state)
 }
@@ -424,7 +424,7 @@ async fn tenant_exists_layer(
     next.run(req).await
 }
 
-/// K12: /q/metrics — Prometheus exposition, rendered by the closure the
+/// /q/metrics — Prometheus exposition, rendered by the closure the
 /// broker installed; 404 when no recorder exists (tests, embedded builds).
 async fn metrics_endpoint(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
     match &state.metrics_render {
@@ -440,14 +440,14 @@ async fn metrics_endpoint(axum::extract::State(state): axum::extract::State<AppS
     }
 }
 
-/// K12: request counter + duration histogram, labelled by method and status
-/// class only (bounded cardinality — §16.1.7).
+/// Request counter + duration histogram, labelled by method and status
+/// class only (bounded cardinality).
 async fn http_metrics_layer(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
     let method = req.method().as_str().to_owned();
-    // N2 clock rule: std Instant panics on wasm32.
+    // Clock rule: std Instant panics on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
     #[cfg(target_arch = "wasm32")]
@@ -467,7 +467,7 @@ async fn http_metrics_layer(
     resp
 }
 
-/// 2.0 #59 pre-adoption (H3): OPTIONS → 204 No Content + the Allow set the
+/// 2.0 #59 pre-adoption: OPTIONS → 204 No Content + the Allow set the
 /// method router computed. Non-OPTIONS traffic passes through untouched.
 async fn options_204(
     req: axum::http::Request<axum::body::Body>,
@@ -486,13 +486,13 @@ async fn options_204(
     resp
 }
 
-/// E5: the build-time git hash (build.rs) — re-exported for --version.
+/// The build-time git hash (build.rs) — re-exported for --version.
 pub const GIT_HASH: &str = env!("ANTARES_GIT_HASH");
 
 async fn health(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
-    // K1 drain: the load balancer decides on the STATUS CODE, so draining has
+    // Drain: the load balancer decides on the STATUS CODE, so draining has
     // to be a 503 — a 200 body saying "DRAINING" would keep traffic arriving.
     // This flips BEFORE the listener stops accepting, which is the whole point
     // of the ordering: the LB must stop routing while the socket still works.
@@ -505,12 +505,12 @@ async fn health(
     let mut body = serde_json::json!({
         "status": if draining { "DRAINING" } else { "UP" },
         "store": state.store_mode.as_str(),
-        // E5 version surface: workspace version + build-time git hash
+        // Version surface: workspace version + build-time git hash
         // (build.rs), asserted by the release smoke test.
         "version": env!("CARGO_PKG_VERSION"),
         "commit": env!("ANTARES_GIT_HASH"),
     });
-    // B13: in `file` mode commits serialize behind one writer — the queue
+    // In `file` mode commits serialize behind one writer — the queue
     // depth (current, peak) is the signal that decides the group-commit lever.
     if state.store_mode == antares_sql::StoreMode::File {
         if let Some((depth, peak)) = state.store.commit_queue() {
@@ -518,9 +518,9 @@ async fn health(
             body["commitQueuePeak"] = peak.into();
         }
     }
-    // I2: configured caps + rejection counters (§16.3 observability).
+    // Configured caps + rejection counters, for observability.
     body["limits"] = state.limits.snapshot();
-    // J7: jemalloc heap stats (RSS ≈ live×1.2 is the §2.1 target).
+    // Jemalloc heap stats (RSS ≈ live×1.2 is the target).
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
     }
@@ -532,7 +532,7 @@ async fn health(
     (code, axum::Json(body))
 }
 
-/// Readiness (audit P0-3), distinct from /q/health liveness: ready = not
+/// Readiness, distinct from /q/health liveness: ready = not
 /// draining AND the store answers a trivial request AND (when bus=nats) the
 /// bus is connected. On a Postgres failover or a NATS partition the pod is
 /// still alive (liveness stays 200 — a restart fixes nothing) but must stop
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["status"], "UP");
-        // E5 version surface: release smoke asserts these two fields.
+        // Version surface: release smoke asserts these two fields.
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert!(body["commit"].is_string(), "commit hash missing");
         assert_ne!(body["commit"], "", "commit hash empty");
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(body["bus"]["reconnects"], 2);
     }
 
-    /// Audit P0-3: /q/ready is READINESS — 200 on a healthy store, 503 the
+    /// /q/ready is READINESS — 200 on a healthy store, 503 the
     /// moment the bus reports disconnected (a pod that cannot process must
     /// stop receiving traffic while staying alive for liveness).
     #[tokio::test]
@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(body_json(resp).await["status"], "NOT_READY");
     }
 
-    /// Audit P0-4: a pod without the api role serves ops endpoints ONLY —
+    /// A pod without the api role serves ops endpoints ONLY —
     /// the NGSI-LD surface must NOT be reachable on it.
     #[tokio::test]
     async fn ops_router_serves_no_ngsi_ld_surface() {
@@ -1526,7 +1526,7 @@ mod tests {
 
     #[tokio::test]
     async fn i2_bounds_wall_rejects_spec_shaped() {
-        // §16.3: every cap answers with the spec error, before any parse.
+        // Every cap answers with the spec error, before any parse.
         let app = app();
 
         // JSON nesting > 64 → 400 BadRequestData
@@ -1629,7 +1629,7 @@ mod tests {
 
     #[tokio::test]
     async fn h3_preadoptions_attr_get_value_options_head() {
-        // 2.0 pre-adoptions (§15.1, tasks.md H3): #14 GET .../attrs/{attrId},
+        // 2.0 pre-adoptions: #14 GET .../attrs/{attrId},
         // #15 .../value, #58 HEAD, #59 OPTIONS with the route's Allow set.
         let app = app();
         let entity = serde_json::json!({
@@ -1726,7 +1726,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Security audit C2 (2026-08-04): `information[].entities ×
+    /// `information[].entities ×
     /// (propertyNames + relationshipNames)` was expanded into an in-memory Vec
     /// before any SQL ran, with no cardinality cap — a 4 MiB body produced on
     /// the order of 10^10 objects and OOM-killed the process. Capped at the
@@ -1783,9 +1783,9 @@ mod tests {
 
     #[tokio::test]
     async fn tolerant_reader_echoes_unknown_members() {
-        // §15.1: unknown members of Subscription/Registration documents are
+        // Unknown members of Subscription/Registration documents are
         // stored and echoed, never rejected or stripped — a member added by a
-        // future spec version flows through a broker that predates it (H5).
+        // future spec version flows through a broker that predates it.
         let app = app();
         let sub = serde_json::json!({
             "id": "urn:ngsi-ld:Subscription:tol1", "type": "Subscription",
@@ -2495,7 +2495,7 @@ mod tests {
 
     #[tokio::test]
     async fn temporal_query_values_filter_respects_the_window() {
-        // 5.7.4.4 S2: "the values filter query shall be checked against all
+        // 5.7.4.4: "the values filter query shall be checked against all
         // the Attribute instances resulting from the initial filtering
         // performed by the temporal query" — an instance OUTSIDE the
         // interval must not satisfy q.
@@ -2901,7 +2901,7 @@ mod tests {
         // operations". The subject is the EXECUTION — a query no registration
         // matches runs locally whether or not the client passed local=true.
         // Reading it as "local=true is mandatory" fails ETSI 019_19, which
-        // orders without it (error.md 2026-08-09).
+        // orders without it.
         let app = app();
 
         // no registrations → local execution → ordering is fine
@@ -3126,7 +3126,7 @@ mod tests {
     /// 6.3.10 p.275: "At least, the type Link Target Attribute shall be
     /// included ... and its value shall be exactly equal to the media type
     /// resulting from the original request" — previously emitted only for
-    /// ld+json, never for plain application/json (audit V-23).
+    /// ld+json, never for plain application/json.
     #[tokio::test]
     async fn pagination_links_carry_the_type_attribute_for_plain_json() {
         let app = app();
@@ -3176,7 +3176,7 @@ mod tests {
         }
     }
 
-    /// 4.5.9 p.63/65 (audit V-24): in the simplified temporal representation
+    /// 4.5.9 p.63/65: in the simplified temporal representation
     /// a ListProperty pairs a BARE ordered array with its timestamp under
     /// `valueLists` (EXAMPLE 3), and a ListRelationship the same under
     /// `objectLists` — not a {"valueList"/"objectList"} wrapper object.

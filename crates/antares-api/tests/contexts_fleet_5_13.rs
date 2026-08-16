@@ -1,4 +1,4 @@
-//! 5.13 behind a load balancer (fleet run 2026-08-15, 7 red TPs): two api
+//! 5.13 behind a load balancer: two api
 //! instances share ONE store, and the Cached-@context bookkeeping must be
 //! shared with it — numberOfHits/lastUsage visible from either instance
 //! (5.13.3.5), and a delete through one instance honoured by the other

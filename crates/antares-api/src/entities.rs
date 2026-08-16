@@ -105,7 +105,7 @@ pub fn compact_for(
 // from a plain before/after append).
 
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
-/// representation too (suite configuration parity). F8: skipped on bus=nats
+/// representation too (suite configuration parity). Skipped on bus=nats
 /// api pods — the recorder applies the entityDeleted fence instead.
 pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
     if !st.record_locally {
@@ -630,7 +630,7 @@ pub fn parse_join(params: &HashMap<String, String>) -> ApiResult<Option<(String,
         Some(l) => l
             .parse::<usize>()
             .ok()
-            // I2: bounded traversal depth (§16.3)
+            // Bounded traversal depth
             .filter(|l| *l >= 1 && *l <= crate::bounds::MAX_JOIN_LEVEL)
             .ok_or_else(|| {
                 NgsiError::BadRequestData(format!(
@@ -1103,7 +1103,7 @@ async fn query_entities_inner(
     // 4.23.1: "Sort ordering is never applied to distributed operations."
     // The subject is the EXECUTION: a query nothing federates to runs locally
     // regardless of `local=true`, which is why this asks would_federate rather
-    // than active (ETSI 019_19 orders without local — see error.md).
+    // than active (ETSI 019_19 orders without local).
     if params.contains_key("orderBy")
         && crate::federation::would_federate(st, &tenant, &ctx, params, headers)
     {
@@ -1177,7 +1177,7 @@ async fn query_entities_inner(
         }
         Vec::new()
     };
-    // C11 pushdown gates. Pagination: only when every filter the store cannot
+    // Pushdown gates. Pagination: only when every filter the store cannot
     // see is absent — no federation candidates, no idPattern, no orderBy (its
     // 4.23 datatype comparison order is evaluator-owned), and a real limit
     // (limit=0 is the count-only shape). Projection additionally excludes
@@ -1316,7 +1316,7 @@ pub fn filter_entities_fed(
     Ok(filter_entities_paged(st, tenant, params, ctx, fed, None, None)?.docs)
 }
 
-/// C11: what the paged variant produced. `paged` = the store already applied
+/// What the paged variant produced. `paged` = the store already applied
 /// ORDER BY id + LIMIT/OFFSET (and `total` is the pre-LIMIT match count), so
 /// the caller must NOT slice again.
 pub struct Filtered {
@@ -1395,7 +1395,7 @@ pub fn filter_entities_paged(
     let scope_q = params.get("scopeQ");
     let geo = crate::geo::GeoQuery::from_params(params)?;
 
-    // C10/C11: hand the store what it can filter on. A backend that can push
+    // Hand the store what it can filter on. A backend that can push
     // the predicate down (postgres/timescale) returns fewer rows — and says
     // via `decided` whether it applied EVERY present predicate exactly, which
     // is what licenses pagination/projection pushdown and lets the loop below
@@ -1555,7 +1555,7 @@ pub fn paginate(
     paginate_impl(st, params, matches, path, Accept::Json, None)
 }
 
-/// C11: the store already applied ORDER BY id + LIMIT/OFFSET and counted the
+/// The store already applied ORDER BY id + LIMIT/OFFSET and counted the
 /// match set — `matches` IS the page; only count/links remain.
 pub fn paginate_pre(
     st: &AppState,
@@ -1570,7 +1570,7 @@ pub fn paginate_pre(
 /// 4.12 Pagination: clients specify a limit (page size), the server defines
 /// a default page size, and a hard ceiling is rejected with TooManyResults
 /// rather than silently clamped. The limit/offset/count triple of 6.3.10,
-/// validated (I2 ceilings included). Shared by `paginate_impl` and the C11
+/// validated (ceilings included). Shared by `paginate_impl` and the
 /// pushdown gate so the two paths can never disagree on what a page is.
 pub fn page_params(
     st: &AppState,
@@ -1585,7 +1585,7 @@ pub fn page_params(
     };
     // 5.5.6: "so many results that can potentially exhaust client or server
     // resources" — the implementation threshold is max_limit; 403
-    // TooManyResults, not silent clamping (ceiling choice: §16.3).
+    // TooManyResults, not silent clamping.
     if limit > st.max_limit {
         return Err(NgsiError::TooManyResults(format!(
             "limit {limit} exceeds the server maximum {}",
@@ -1636,7 +1636,7 @@ fn paginate_impl(
     let (offset, limit, count) = page_params(st, params)?;
     let total = pre.unwrap_or(matches.len());
     let page: Vec<Value> = match pre {
-        Some(_) => matches, // already exactly the page (C11 pushdown)
+        Some(_) => matches, // already exactly the page (store pushdown)
         None => matches.into_iter().skip(offset).take(limit).collect(),
     };
     let mut links = Vec::new();
@@ -1869,8 +1869,8 @@ async fn purge_inner(
         .into());
     }
     // 5.6.21.4: a syntactically invalid context source filter is
-    // BadRequestData. Named gap: csf is validated here but not yet applied
-    // to Context Source matching (broker-wide, see the csf param audits).
+    // BadRequestData. Known gap: csf is validated here but not yet applied
+    // to Context Source matching (broker-wide).
     if let Some(csf) = params.get("csf") {
         parse_q(csf)?;
     }
@@ -2764,7 +2764,7 @@ pub fn to_geojson_collection(
 }
 
 // ---------- GET /entities/{id}/attrs/{attrId} [+ /value] ----------
-// NGSI-LD 2.0 pre-adoptions #14/#15 (tasks.md H3, §15.1): retrieve a single
+// NGSI-LD 2.0 pre-adoptions #14/#15: retrieve a single
 // attribute of an entity, and its bare value. Additive-only: 2.0 defines the
 // resources, 1.9.1 clients never see them unless asked.
 

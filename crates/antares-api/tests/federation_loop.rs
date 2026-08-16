@@ -135,7 +135,7 @@ fn delete_with_via(tenant: Option<&str>, via: &str) -> Request<Body> {
 }
 
 fn state() -> AppState {
-    // the mock source is loopback, denied by default (§16.4)
+    // the mock source is loopback, denied by the egress policy by default
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
     AppState::new(ALIAS.into())
 }
@@ -157,7 +157,7 @@ async fn single_redirect_source_looping_back_is_508() {
 /// The same loop through an **inclusive** registration: Table 6.3.18-2 makes
 /// the Via listing amend matching, so the forward is dropped and the
 /// operation proceeds locally. (ETSI D018_01 registers `mode=inclusive` and
-/// still asserts 508 — logged in error.md as a suite defect.)
+/// still asserts 508 — a known suite defect.)
 #[tokio::test(flavor = "multi_thread")]
 async fn inclusive_source_looping_back_runs_locally() {
     let st = state();
@@ -221,7 +221,7 @@ async fn a_registered_source_already_in_the_chain_is_skipped() {
     );
 }
 
-/// RFC 7230 §3.2.2: Via is a list header — the chain may be split across any
+/// RFC 7230 section 3.2.2: Via is a list header — the chain may be split across any
 /// number of `Via:` field lines and the forms are equivalent. A pseudonym in
 /// the SECOND field is still a loop; reading only the first field would run
 /// the cycle undetected.
@@ -328,7 +328,7 @@ async fn single_proxy_source_failure_surfaces_as_502() {
 
 /// 6.3.17 p.278, single proxied source: "504 Gateway Timeout — if the single
 /// registered source fails to respond in time." The source accepts and goes
-/// silent; the broker's own forward deadline (8 s at construction, U1) must
+/// silent; the broker's own forward deadline (8 s at construction) must
 /// end the wait. Slowest test in the file — it IS the timeout.
 #[tokio::test(flavor = "multi_thread")]
 async fn single_proxy_source_timeout_is_504() {

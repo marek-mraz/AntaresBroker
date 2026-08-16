@@ -4,7 +4,7 @@ use antares_jsonld::Loader;
 use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
 use std::sync::Arc;
-// N2 clock rule: std Instant panics on wasm32.
+// Clock rule: std Instant panics on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
@@ -13,7 +13,7 @@ use web_time::Instant;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<AnyStore>,
-    /// Active store backend — reported by `/q/health` (A4; NOT in
+    /// Active store backend — reported by `/q/health` (NOT in
     /// `/info/sourceIdentity`, which is a spec resource). A typed value so
     /// mode-gated sections switch on an enum, never on strings.
     pub store_mode: antares_sql::StoreMode,
@@ -26,68 +26,68 @@ pub struct AppState {
     pub default_limit: usize,
     /// Hard ceiling on limit (TooManyResults guard).
     pub max_limit: usize,
-    /// One shared outbound client, timeouts at construction (U1 lesson).
+    /// One shared outbound client, timeouts set at construction.
     pub http: antares_jsonld::HttpClient,
     /// Federation-forwarding client — longer deadline: the ETSI mock replies
     /// to unstubbed forwards only when the robot side wakes (up to ~5 s).
     pub fed_http: antares_jsonld::HttpClient,
-    /// Clause 7 MQTT delivery: bounded pooled sink (L5/U1 lessons).
+    /// Clause 7 MQTT delivery: bounded pooled sink.
     #[cfg(feature = "mqtt")]
     pub mqtt: Arc<antares_notifier::mqtt::MqttSink>,
-    /// I2 bounds-wall rejection counters (exported by /q/health).
+    /// Bounds-wall rejection counters (exported by /q/health).
     pub limits: Arc<crate::bounds::LimitStats>,
-    /// J7: allocator stats provider (set by the broker; None in tests/wasm).
+    /// Allocator stats provider (set by the broker; None in tests/wasm).
     pub mem_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
     /// Bus state provider for /q/health (`bus: {mode, connected,
     /// reconnects}`) — installed by the nats wiring only, so the member is
     /// absent for bus=local.
     pub bus_stats: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>>,
-    /// I4: one egress policy for notifications and federation forwards
+    /// One egress policy for notifications and federation forwards
     /// (scheme allowlist, private-range deny, per-destination breakers).
     pub egress: Arc<crate::egress::Egress>,
-    /// K1: set the moment SIGTERM arrives, BEFORE the listener stops
+    /// Set the moment SIGTERM arrives, BEFORE the listener stops
     /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
     /// takes this instance out while its socket still works.
     pub draining: Arc<std::sync::atomic::AtomicBool>,
-    /// F4 (bus=nats): called after every Subscription CUD so the wiring can
+    /// bus=nats: called after every Subscription CUD so the wiring can
     /// push the change into the KV mirror bucket. `None` in local mode — this
     /// process's store already IS the truth every consumer reads.
     #[allow(clippy::type_complexity)]
     pub sub_sync: Option<
         Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
     >,
-    /// F4 (bus=nats): the KV-watched compiled-subscription mirror the matcher
-    /// reads, so the hot path never touches Postgres (§6.4). `None` in local
+    /// bus=nats: the KV-watched compiled-subscription mirror the matcher
+    /// reads, so the hot path never touches Postgres. `None` in local
     /// mode (the matcher reads the store directly).
     pub sub_mirror: Option<Arc<crate::notify::SubMirror>>,
-    /// F5 (bus=nats): called after every Registration CUD so the wiring can
+    /// bus=nats: called after every Registration CUD so the wiring can
     /// publish the delta on `ANTARES_REGISTRY`. `None` in local mode.
     #[allow(clippy::type_complexity)]
     pub reg_sync: Option<
         Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
     >,
-    /// F5 (bus=nats): the ONE per-process compiled registration mirror,
+    /// bus=nats: the ONE per-process compiled registration mirror,
     /// delta-fed from `ANTARES_REGISTRY`; expiry stays filtered at the single
     /// yield point (`federation::matching_regs`). `None` in local mode.
     pub reg_mirror: Option<Arc<crate::notify::DocMirror>>,
     /// 5.2.34 (bus=nats): shares a cooldown stamp with the other api pods —
     /// a per-process stamp re-dials a failed source from every pod behind
-    /// the LB (fleet run 2026-08-15). Seconds-scale state: broadcast on the
+    /// the LB. Seconds-scale state: broadcast on the
     /// registry stream, deliberately not persisted. `None` in local mode.
     #[allow(clippy::type_complexity)]
     pub reg_fail_sync: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
     /// Temporal auto-recording happens synchronously in the write path in
-    /// EVERY bus mode (K8 lesson — read-your-writes; the F8 recorder
+    /// EVERY bus mode (read-your-writes; the bus recorder
     /// consumer is gone). The flag stays as the tests' lever for exercising
     /// the no-local-recording shape.
     pub record_locally: bool,
-    /// K12: renders the Prometheus text format for /q/metrics. Installed by
-    /// the broker (the only crate that knows an exporter exists, §9.2);
+    /// Renders the Prometheus text format for /q/metrics. Installed by
+    /// the broker (the only crate that knows an exporter exists);
     /// `None` = 404, the facade calls elsewhere stay no-ops.
     pub metrics_render: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     /// True only under bus=nats (set by the broker's wiring): multiple
     /// processes share the store, so interval-subscription firings must be
-    /// claimed single-winner (§3.1.6). bus=local keeps the direct path — a
+    /// claimed single-winner. bus=local keeps the direct path — a
     /// claim there would disturb the 046_12 bookkeeping ordering for
     /// nothing.
     pub nats: bool,
@@ -118,14 +118,14 @@ impl AppState {
         store: Arc<AnyStore>,
         store_mode: antares_sql::StoreMode,
     ) -> Self {
-        // I4: one policy value, read once, shared by every outbound path —
+        // One policy value, read once, shared by every outbound path —
         // the gate (scheme/breakers) and the clients (DNS pinning, redirect
-        // cap) can never disagree about what is allowed (§16.4).
+        // cap) can never disagree about what is allowed.
         let egress_policy = antares_jsonld::EgressPolicy::from_env();
-        // J2/K8: Cached-@context rows are the ONE source of truth for 5.13
+        // Cached-@context rows are the ONE source of truth for 5.13
         // existence — wire the write-through HERE so every composition
         // (native binary, wasm, tests) gets it; a composition that forgets
-        // the writer is the L4b "expiry checked in some paths" disease with
+        // the writer is the "expiry checked in some paths" disease with
         // @contexts instead of expiry.
         let loader = Arc::new(Loader::new());
         {
@@ -162,9 +162,9 @@ impl AppState {
                 }
             }));
         }
-        // K8/5.13.3.5: hit counters live in the SHARED row, not per instance
-        // — behind a load balancer per-instance counters split-brain (fleet
-        // run 2026-08-15: 7 red TPs). A bump that finds the row gone reports
+        // 5.13.3.5: hit counters live in the SHARED row, not per instance
+        // — behind a load balancer per-instance counters split-brain.
+        // A bump that finds the row gone reports
         // a cross-instance delete; the loader then drops its warm copies so
         // the delete is honoured everywhere (5.13.5.4). Pinned core contexts
         // have no row and are never evicted.
@@ -237,7 +237,7 @@ impl AppState {
         }
     }
 
-    /// Fire the F4 subscription-sync hook (no-op in local mode).
+    /// Fire the subscription-sync hook (no-op in local mode).
     pub fn sub_changed(
         &self,
         tenant: &antares_model::TenantId,
@@ -258,7 +258,7 @@ impl AppState {
         }
     }
 
-    /// Fire the F5 registration-delta hook (no-op in local mode).
+    /// Fire the registration-delta hook (no-op in local mode).
     pub fn reg_changed(
         &self,
         tenant: &antares_model::TenantId,
@@ -271,10 +271,10 @@ impl AppState {
     }
 }
 
-/// The ONE outbound-client construction for this crate (U1: timeouts at
+/// The ONE outbound-client construction for this crate (timeouts at
 /// construction). Title-case headers are an http1 knob and timeouts are
 /// client-level knobs — both native-only; the browser's fetch supplies its
-/// own transport on wasm32 (§N, N2).
+/// own transport on wasm32.
 fn outbound_client(
     policy: antares_jsonld::EgressPolicy,
     total: std::time::Duration,
