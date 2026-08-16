@@ -1,5 +1,5 @@
-//! EXPLAIN-based index-usability regression tests (audit 2026-08-08): the
-//! audit found three of five entity indexes dead — the compiled q= used the
+//! EXPLAIN-based index-usability regression tests: a review once
+//! found three of five entity indexes dead — the compiled q= used the
 //! function form `jsonb_path_exists()` the GIN index can never match, and the
 //! geo predicate's `location IS NULL OR …` guard defeated the GIST index.
 //! These tests pin the repaired shapes: with `enable_seqscan = off` the
@@ -7,7 +7,7 @@
 //! sequential scan in the plan means the index went dead again.
 //!
 //! Literal values are inlined (EXPLAIN cannot carry extended-protocol binds);
-//! this is test-only SQL, never a pattern for request paths (§16.2).
+//! this is test-only SQL, never a pattern for request paths.
 
 use antares_sql::pg;
 

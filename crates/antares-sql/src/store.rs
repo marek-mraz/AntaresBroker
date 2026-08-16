@@ -1,9 +1,9 @@
 //! In-memory store — v0 storage backend.
 //!
-//! DELIBERATE DEVIATION (recorded in docs/adr/): deep-analysis.md targets
+//! DELIBERATE DEVIATION (recorded in docs/adr/): the target backend is
 //! Postgres; the suite-green loop uses an in-memory backend first. The store
-//! API is shaped like §9.3's store traits (tenant first parameter everywhere)
-//! so the sqlx implementation can land behind the same seam.
+//! API is shaped like the Postgres store traits (tenant first parameter
+//! everywhere) so the sqlx implementation can land behind the same seam.
 //!
 //! Documents are held in the *internal expanded form* produced by
 //! `antares_jsonld::expand` (IRI keys, instance arrays), with server-managed
@@ -30,16 +30,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::RwLock;
 
-// ---- `file` mode: redb write-through shadow (tasks.md §B) ------------------
+// ---- `file` mode: redb write-through shadow --------------------------------
 //
 // redb is durability only — queries and the matcher keep running on the
 // in-memory maps. Every mutation commits to redb (Durability::Immediate,
 // fsync) INSIDE the store's write-critical section, so redb apply order is
 // exactly memory apply order, and the commit happens before the store call
-// returns — i.e. before the HTTP ack (commit-before-ack, B3). Boot rebuilds
-// the maps from the file (B4) and refuses to start on a format mismatch (B11).
+// returns — i.e. before the HTTP ack (commit-before-ack). Boot rebuilds
+// the maps from the file and refuses to start on a format mismatch.
 //
-// Table per resource family, names per §9.1 (spec resource, snake_cased).
+// Table per resource family, named after the spec resource, snake_cased.
 // The v0 memory store keeps one temporal doc per entity, so `attr_instances`
 // has no separate table; entityMaps are TTL-ephemeral and not durable state.
 const T_ENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entities");
@@ -55,7 +55,7 @@ const T_SNAPSHOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapsho
 const T_ENTITY_MAP_DOCS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entity_map_docs");
 const T_DIST_SUBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dist_subs");
 const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
-/// On-disk format version (B11): bump on any key/value shape change; an older
+/// On-disk format version: bump on any key/value shape change; an older
 /// or newer file refuses to load rather than being misread as valid data.
 const FORMAT_VERSION: &str = "1";
 
@@ -127,7 +127,7 @@ const ALL_KINDS: [Kind; 8] = [
     Kind::DistSub,
 ];
 
-/// Key = `tenant \0 id` (B2). Unambiguous: TenantId is `[A-Za-z0-9_-]{1,64}`
+/// Key = `tenant \0 id`. Unambiguous: TenantId is `[A-Za-z0-9_-]{1,64}`
 /// by construction, so it can never contain the separator.
 fn key_bytes(tenant: &TenantId, id: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(tenant.as_str().len() + 1 + id.len());
@@ -145,8 +145,8 @@ fn split_key(key: &[u8]) -> Option<(String, String)> {
     ))
 }
 
-/// Run `f` off the tokio worker pool when called from a multi-thread runtime
-/// (B1b): a per-commit fsync must never stall an async worker. Outside a
+/// Run `f` off the tokio worker pool when called from a multi-thread runtime:
+/// a per-commit fsync must never stall an async worker. Outside a
 /// runtime (unit tests, startup) it just runs inline.
 fn on_blocking<T>(f: impl FnOnce() -> T) -> T {
     // wasm32 (§N): single-threaded, no tokio runtime — always inline.
@@ -164,7 +164,7 @@ struct Shadow {
 }
 
 impl Shadow {
-    /// One txn per mutation, fsynced before return (B3). A failed commit
+    /// One txn per mutation, fsynced before return. A failed commit
     /// aborts the process: the alternative is acking writes the file does not
     /// hold, which is the one lie a durable store must never tell.
     /// (Deliberately abort-on-commit-failure; per-request error plumbing only
@@ -195,7 +195,7 @@ impl Shadow {
 }
 
 /// Called with (tenant, before, after) on every entity write — the local-mode
-/// change feed (§7): create ⇒ (None, Some), delete ⇒ (Some, None).
+/// change feed: create ⇒ (None, Some), delete ⇒ (Some, None).
 pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send + Sync>;
 
 #[derive(Default)]
@@ -204,7 +204,7 @@ pub struct Store {
     hook: RwLock<Option<ChangeHook>>,
     /// `file` mode durability shadow; `None` = pure in-memory (`memory` mode).
     shadow: Option<Shadow>,
-    /// B13: writers currently queued behind the single write-critical section
+    /// Writers currently queued behind the single write-critical section
     /// (redb has ONE writer, so fsync commits serialize here). Exported via
     /// /q/health; the group-commit lever only gets built if a benchmark shows
     /// this depth sustained at the measured ~3.1k writes/s ceiling.
@@ -224,7 +224,7 @@ struct Inner {
     dist_subs: HashMap<String, BTreeMap<String, Value>>,
     /// tenant → entity id → temporal doc (attr IRI → instance array).
     temporal: HashMap<String, BTreeMap<String, Value>>,
-    /// hosted/cached @context documents, shared across tenants by design (§8.3).
+    /// hosted/cached @context documents, shared across tenants by design.
     contexts: BTreeMap<String, Value>,
 }
 
@@ -246,7 +246,7 @@ pub enum Kind {
 
 impl Store {
     /// Open (or create) the `file`-mode store: redb at `dir/antares.redb`,
-    /// format-checked (B11), in-memory maps rebuilt from the file (B4).
+    /// format-checked, in-memory maps rebuilt from the file.
     /// Any open/format/decode error refuses to start — never silently serve
     /// partial data.
     pub fn open_file(dir: &Path) -> Result<Self, String> {
@@ -256,12 +256,12 @@ impl Store {
         Self::from_database(db, &path.display().to_string())
     }
 
-    /// The target-independent half of `open_file` (N4): format check (B11) +
-    /// boot rebuild (B4) over an already-constructed redb `Database`. The
+    /// The target-independent half of `open_file`: format check +
+    /// boot rebuild over an already-constructed redb `Database`. The
     /// browser build calls this with an OPFS-backed database — same shadow,
     /// same commit-before-ack, different `StorageBackend`.
     pub fn from_database(db: Database, label: &str) -> Result<Self, String> {
-        // B11: format marker. Absent marker + existing data = a file this
+        // Format marker. Absent marker + existing data = a file this
         // binary cannot vouch for; refuse rather than guess.
         let stored_format = {
             let rt = db.begin_read().map_err(|e| e.to_string())?;
@@ -306,7 +306,7 @@ impl Store {
             }
         }
 
-        // B4: boot rebuild — scan every table into the in-memory maps.
+        // Boot rebuild — scan every table into the in-memory maps.
         let mut inner = Inner::default();
         let rt = db.begin_read().map_err(|e| e.to_string())?;
         for kind in ALL_KINDS {
@@ -364,7 +364,7 @@ impl Store {
         }
     }
 
-    /// B13: acquire the write-critical section, counting queued writers.
+    /// Acquire the write-critical section, counting queued writers.
     ///
     /// Poison recovery (`into_inner`) is deliberate: a panic inside a caller's
     /// mutate closure unwinds one request; poisoning would turn it into a
@@ -382,7 +382,7 @@ impl Store {
         guard
     }
 
-    /// B13: (currently queued writers, peak since start). The peak going
+    /// (Currently queued writers, peak since start). The peak going
     /// nowhere near sustained depth is the evidence that the group-commit
     /// lever stays unbuilt.
     pub fn commit_queue(&self) -> (usize, usize) {
@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn commit_queue_counts_writers() {
-        // B13: every write passes through the counted critical section.
+        // Every write passes through the counted critical section.
         let s = Store::default();
         assert_eq!(s.commit_queue(), (0, 0));
         let t = TenantId::new("t").unwrap();
@@ -715,7 +715,7 @@ mod tests {
         dir
     }
 
-    /// B8/B4: every kind + contexts round-trip through a close/reopen.
+    /// Every kind + contexts round-trip through a close/reopen.
     #[test]
     fn file_mode_survives_reopen() {
         let dir = tempdir("reopen");
@@ -742,7 +742,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B10: deletes and mutations reach redb — no phantom state after restart.
+    /// Deletes and mutations reach redb — no phantom state after restart.
     #[test]
     fn file_mode_deletes_and_updates_persist() {
         let dir = tempdir("delete");
@@ -770,7 +770,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B11: a future-format file refuses to load with a clear message.
+    /// A future-format file refuses to load with a clear message.
     #[test]
     fn file_mode_refuses_format_mismatch() {
         let dir = tempdir("format");
@@ -792,7 +792,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B12: the supported backup route is stop-copy — close the broker, copy
+    /// The supported backup route is stop-copy — close the broker, copy
     /// the file, reopen the copy. This test IS that route.
     #[test]
     fn file_mode_stop_copy_backup_restores() {

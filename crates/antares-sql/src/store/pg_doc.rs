@@ -1,11 +1,11 @@
-//! PgStore slice two (tasks.md C6/C7/C8 partial): the doc-table kinds —
+//! PgStore slice two: the doc-table kinds —
 //! `subscriptions`, `csource_registrations`, `csource_subscriptions` — plus
 //! cross-tenant `jsonld_contexts`. Same sync-facade shape as `pg_entity`.
 //!
-//! The v0 interchange form stores ONE doc per resource; §8.3's bookkeeping
+//! The v0 interchange form stores ONE doc per resource; the bookkeeping
 //! columns (`expires_at`, `is_active`, `times_sent`, `last_*`) are EXTRACTED
-//! from the doc on every write, so the row stays the truth (§14.1) while the
-//! API layer keeps its doc-shaped view until the C13 cutover completes.
+//! from the doc on every write, so the row stays the truth while the
+//! API layer keeps its doc-shaped view until the cutover completes.
 
 use antares_model::TenantId;
 use serde_json::Value;
@@ -48,7 +48,7 @@ impl DocKind {
     }
 }
 
-/// §8.3 bookkeeping, derived from the doc (5.2.14.2 output members).
+/// Bookkeeping columns, derived from the doc (5.2.14.2 output members).
 fn bookkeeping(
     doc: &Value,
 ) -> (
@@ -73,9 +73,9 @@ fn bookkeeping(
     )
 }
 
-// ---- C7: csource_index maintenance (§8.3) ----------------------------------
+// ---- csource_index maintenance ---------------------------------------------
 // The flattened federation match table, rebuilt in Rust inside the same
-// transaction as every registration write (§4: no triggers). Deleting a
+// transaction as every registration write (no triggers). Deleting a
 // registration cleans its rows via the FK ON DELETE CASCADE.
 
 /// Table 4.20-1 operation names; bit position in `csource_index.ops` = index.
@@ -231,7 +231,7 @@ fn mode_code(reg: &Value) -> i16 {
 }
 
 /// Hard ceiling on rows one registration may explode into. The API caps
-/// cardinality at the validation boundary (§16.3), but a document written
+/// cardinality at the validation boundary, but a document written
 /// through any other path — a restored dump, a future importer — must not be
 /// able to drive this quadratically. Truncating loses federation matches for
 /// an absurd registration; OOM loses the process.
@@ -240,10 +240,10 @@ pub const MAX_INDEX_ROWS: usize = 10_000;
 /// Explode one registration document into csource_index rows: each
 /// RegistrationInfo element yields entities × (propertyNames ∪
 /// relationshipNames) rows, with NULL placeholders when a dimension is
-/// absent — the Scorpio csourceinformation shape (§14.8) minus the 46
+/// absent — the Scorpio csourceinformation shape minus the 46
 /// boolean columns. Attribute/type names are stored as they appear in the
-/// document; canonical-IRI storage lands with the SQL matching path (§16.7).
-/// NGSI-LD 2.0 readiness (#31, §8.3): when propertyNames/relationshipNames
+/// document; canonical-IRI storage lands with the SQL matching path.
+/// NGSI-LD 2.0 readiness: when propertyNames/relationshipNames
 /// merge into attributeNames, the migration is a coalesce of the two name
 /// columns into one attribute_name column — no reshape.
 pub fn index_rows(reg: &Value) -> Vec<Value> {
@@ -258,7 +258,7 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
             "entity_type": entity.and_then(|e| e.get("type")).and_then(Value::as_str),
             "property_name": prop,
             "relationship_name": rel,
-            // C11b: a registration carries its geo scope as a RAW GeoJSON
+            // A registration carries its geo scope as a RAW GeoJSON
             // geometry under `location` (not instance-wrapped like an entity
             // attribute) — see antares_api::csource::csr_matches_subscription,
             // which hands exactly this value to `matches_geometry`.
@@ -399,8 +399,8 @@ impl PgDocStore {
             }
             let existed: bool = q.fetch_one(&mut *tx).await?.get("existed");
             if matches!(kind, DocKind::Registration) {
-                // C7: rebuild this registration's csource_index rows in the
-                // SAME transaction (delete + multi-row insert; §8.3).
+                // Rebuild this registration's csource_index rows in the
+                // SAME transaction (delete + multi-row insert).
                 sqlx::query(
                     "DELETE FROM csource_index WHERE tenant_id = $1 AND registration_id = $2",
                 )
@@ -459,8 +459,8 @@ impl PgDocStore {
         })
     }
 
-    /// Read-modify-write in ONE transaction under the row lock (§3.1.2
-    /// applied to doc kinds): `SELECT … FOR UPDATE` → apply → `UPDATE`.
+    /// Read-modify-write in ONE transaction under the row lock (the entity
+    /// pattern applied to doc kinds): `SELECT … FOR UPDATE` → apply → `UPDATE`.
     /// A missing row returns `None` and is NEVER inserted — a concurrent
     /// DELETE must win, not be resurrected by a bookkeeping writeback
     /// (the 047_06 leftover-subscription bug).
@@ -590,7 +590,7 @@ impl PgDocStore {
         })
     }
 
-    // jsonldContexts — the ONE cross-tenant table (§8.3), no RLS by design.
+    // jsonldContexts — the ONE cross-tenant table, no RLS by design.
     pub fn context_put(&self, id: &str, doc: &Value, kind: &str) -> Result<(), sqlx::Error> {
         wait(async {
             sqlx::query(

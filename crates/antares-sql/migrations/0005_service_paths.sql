@@ -1,12 +1,12 @@
--- Service-path RLS escape (audit 2026-08-08): the outbox drain and the
+-- Service-path RLS escape: the outbox drain and the
 -- temporal retention job are cross-tenant BY NATURE (one drain serves every
 -- tenant's events; retention reclaims every tenant's expired rows). Under the
 -- intended non-superuser role the plain tenant policy silences both — the
 -- drain peeks zero rows forever and the outbox grows unboundedly (the exact
--- R4 failure it exists to prevent). The escape is an explicit, transaction-
+-- failure it exists to prevent). The escape is an explicit, transaction-
 -- scoped GUC set ONLY by the two internal jobs (store/outbox.rs,
 -- maintenance.rs); no request path ever sets it, and the explicit
--- `tenant_id = $1` predicates (§3 suspenders) stay on every request query.
+-- `tenant_id = $1` predicates (the suspenders) stay on every request query.
 
 DROP POLICY tenant_isolation ON outbox;
 CREATE POLICY tenant_isolation ON outbox
@@ -14,7 +14,7 @@ CREATE POLICY tenant_isolation ON outbox
          OR current_setting('antares.service', true) = 'on')
   WITH CHECK (tenant_id = current_setting('antares.tenant', true));
 
--- ---- index repair (audit 2026-08-08) --------------------------------------
+-- ---- index repair ----------------------------------------------------------
 
 -- Geo decidability: `location IS NULL OR <pred>` defeated the GIST index on
 -- every geoquery (GIST cannot serve the IS NULL arm of an OR). Split the two

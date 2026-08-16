@@ -1,7 +1,7 @@
--- Temporal current-shape bridge (tasks.md §C-ii): temporal_entities per §8.2
+-- Temporal current-shape bridge: the temporal_entities table
 -- PLUS a `doc` column holding the v0 one-doc-per-entity temporal form.
--- The doc column is the CUTOVER BRIDGE only: when C9/D land the real
--- attr_instances decomposition (per-instance rows, range partitioning), the
+-- The doc column is the CUTOVER BRIDGE only: when the real
+-- attr_instances decomposition lands (per-instance rows, range partitioning), the
 -- doc column is dropped and this comment dies with it. Extracted columns are
 -- populated from the doc at write time either way, so queries that only need
 -- types/timestamps already read real columns.

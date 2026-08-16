@@ -1,4 +1,4 @@
-//! C11 — Temporal Query Language (CIM 009 clause 4.11) compiled to a
+//! Temporal Query Language (CIM 009 clause 4.11) compiled to a
 //! per-instance SQL predicate over a jsonb instance object.
 //!
 //! Exactness by construction: `TemporalQ::instance_matches` (antares-api)

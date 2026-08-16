@@ -1,6 +1,6 @@
-//! Postgres foundation integration tests (tasks.md C1–C4). Need a live
+//! Postgres foundation integration tests. Need a live
 //! PostGIS; skip (pass vacuously, loudly) when ANTARES_TEST_DATABASE_URL is
-//! unset so plain `cargo test` stays service-free (§9.5).
+//! unset so plain `cargo test` stays service-free.
 //!
 //! Local:  docker run -d --name pgdev -e POSTGRES_USER=antares \
 //!           -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
@@ -57,7 +57,7 @@ async fn migrations_apply_and_indexes_exist() {
     let url = require_db!();
     let pool = pg::connect(&url, 5).await.expect("connect+migrate");
 
-    // C3: the LIVE index set on entities — the exact indexes the compiled
+    // The LIVE index set on entities — the exact indexes the compiled
     // statements route through (0005 dropped the dead scopes/modified pair;
     // pg_explain.rs proves usability, this proves existence).
     for idx in [
@@ -77,7 +77,7 @@ async fn migrations_apply_and_indexes_exist() {
         assert_eq!(n, 1, "index {idx} missing on entities");
     }
 
-    // C2: every §8.3 table exists.
+    // Every schema table exists.
     for table in [
         "tenants",
         "entities",
@@ -107,13 +107,13 @@ async fn tenant_upsert_is_idempotent() {
     let url = require_db!();
     let pool = pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("race_tenant").expect("tenant");
-    // §3.1.4: two concurrent first-writes both succeed.
+    // Two concurrent first-writes both succeed.
     let (a, b) = tokio::join!(pg::ensure_tenant(&pool, &t), pg::ensure_tenant(&pool, &t));
     a.expect("first");
     b.expect("second");
 }
 
-/// §16.1.3 RLS denial: connect as a NON-superuser role (superusers bypass
+/// RLS denial: connect as a NON-superuser role (superusers bypass
 /// RLS) and prove a tenant sees zero foreign rows even with tenant-less SQL.
 #[tokio::test]
 async fn rls_denies_cross_tenant_reads_and_writes() {

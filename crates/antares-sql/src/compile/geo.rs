@@ -1,5 +1,5 @@
-//! C11/C11b — Geoquery Language (CIM 009 clause 4.10) compiled to PostGIS
-//! over the extracted `entities.location` column (GIST-indexed, §8.1).
+//! Geoquery Language (CIM 009 clause 4.10) compiled to PostGIS
+//! over the extracted `entities.location` column (GIST-indexed).
 //!
 //! Same one-directional contract as the other compilers: this may only
 //! NARROW, and `antares_api::geo::GeoQuery::matches` stays the arbiter. Three
@@ -8,7 +8,7 @@
 //!
 //! 1. **Rows without an extracted geometry.** `location` holds the DEFAULT
 //!    GeoProperty and only when the entity carries exactly one instance of it
-//!    (§4.5.5 multi-instance sets have no single-geometry spelling, and a
+//!    (clause 4.5.5 multi-instance sets have no single-geometry spelling, and a
 //!    GEOMETRYCOLLECTION would make `within` mean "all of them", which is
 //!    stricter). Rows that CARRY the geoproperty but defeated extraction are
 //!    flagged `location_ambiguous` at write time; every predicate ORs that
@@ -26,7 +26,7 @@
 //!    `minDistance` it narrows — so `near` compiles only for a Point query
 //!    geometry, where the two are the same point by definition.
 //!
-//! §16.2: the query geometry travels as bound GeoJSON text (`ST_GeomFromGeoJSON
+//! The query geometry travels as bound GeoJSON text (`ST_GeomFromGeoJSON
 //! ($n)`), never as SQL text, and so does every distance.
 
 use serde_json::Value;
@@ -71,7 +71,7 @@ pub struct GeoSpec<'a> {
 /// Compile a geoquery over `col` (a `geometry(Geometry,4326)`).
 ///
 /// A `geoproperty` other than the default `location` has no extracted column,
-/// so it returns `None` and the evaluator does the work (the documented C11b
+/// so it returns `None` and the evaluator does the work (the documented
 /// fallback). `first_bind` numbers the geo binds; numeric binds follow them.
 pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<CompiledGeo> {
     if !spec.geoproperty_iri.is_empty() && spec.geoproperty_iri != LOCATION_IRI {
@@ -81,7 +81,7 @@ pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<C
     // `location_ambiguous` column, not `location IS NULL`: rows WITHOUT any
     // default GeoProperty can never match and are excluded in SQL, and the OR
     // over two indexable conditions BitmapOrs (GIST + partial index) instead
-    // of forcing a sequential scan (audit 2026-08-08).
+    // of forcing a sequential scan.
     let mut c = predicate(spec, col, first_bind)?;
     c.sql = format!("(({}) OR location_ambiguous)", c.sql);
     Some(c)
@@ -163,7 +163,7 @@ fn predicate(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<Compile
     })
 }
 
-/// Extract the geometry to store in `entities.location` at write time (C11b).
+/// Extract the geometry to store in `entities.location` at write time.
 /// `Some(geojson)` only for exactly one default-GeoProperty instance carrying
 /// a GeoJSON value — see module docs, point 1, for why more than one is
 /// deliberately `None`.

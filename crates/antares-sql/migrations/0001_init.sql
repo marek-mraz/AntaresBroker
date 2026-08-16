@@ -1,10 +1,10 @@
--- Antares initial schema (docs/deep-analysis.md §8).
--- Shared schema, tenant_id on every row, RLS as the safety net (§3).
+-- Antares initial schema.
+-- Shared schema, tenant_id on every row, RLS as the safety net.
 -- Timescale-only statements are guarded so the same migration runs in
--- `plain` mode (§8.2).
+-- `plain` mode.
 
 CREATE EXTENSION IF NOT EXISTS postgis;
-CREATE EXTENSION IF NOT EXISTS btree_gin;   -- tenant-scoped GIN composites (§8.1)
+CREATE EXTENSION IF NOT EXISTS btree_gin;   -- tenant-scoped GIN composites
 
 CREATE TABLE tenants (
   tenant_id  text PRIMARY KEY,
@@ -24,13 +24,13 @@ CREATE TABLE entities (
   modified_at timestamptz NOT NULL,
   expires_at  timestamptz,
   PRIMARY KEY (tenant_id, id)
-) WITH (fillfactor = 85);  -- HOT-update headroom on a JSONB-update-heavy table (§3.1)
+) WITH (fillfactor = 85);  -- HOT-update headroom on a JSONB-update-heavy table
 CREATE INDEX i_entities_location ON entities USING gist (location);
 CREATE INDEX i_entities_jsonb    ON entities USING gin  (entity jsonb_path_ops);
 CREATE INDEX i_entities_modified ON entities (tenant_id, modified_at DESC);
 CREATE INDEX i_entities_scopes   ON entities USING gin  (scopes);
 CREATE INDEX i_entities_types    ON entities USING gin  (tenant_id, types);  -- btree_gin
--- §3.1.3: eager autovacuum — dead-tuple bloat is Scorpio issue #573's suspect class.
+-- Eager autovacuum — dead-tuple bloat is Scorpio issue #573's suspect class.
 ALTER TABLE entities SET (
   autovacuum_vacuum_scale_factor = 0.05, autovacuum_analyze_scale_factor = 0.02);
 
@@ -48,7 +48,7 @@ CREATE TABLE subscriptions (
   PRIMARY KEY (tenant_id, id)
 );
 
-CREATE TABLE csource_subscriptions (      -- /csourceSubscriptions (§8.3, same shape)
+CREATE TABLE csource_subscriptions (      -- /csourceSubscriptions (same shape)
   tenant_id         text NOT NULL,
   id                text NOT NULL,
   subscription      jsonb NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE csource_registrations (
   PRIMARY KEY (tenant_id, id)
 );
 
--- §8.3 flattened federation match table; Scorpio's ~46 bool columns = one bitmask.
+-- Flattened federation match table; Scorpio's ~46 bool columns = one bitmask.
 CREATE TABLE csource_index (
   tenant_id         text NOT NULL,
   registration_id   text NOT NULL,
@@ -83,7 +83,7 @@ CREATE TABLE csource_index (
   expires_at        timestamptz,
   endpoint          text NOT NULL,
   mode              smallint NOT NULL,  -- 0 auxiliary | 1 inclusive | 2 redirect | 3 exclusive
-  ops               bigint NOT NULL,    -- Operation-enum bitmask (§4.20)
+  ops               bigint NOT NULL,    -- Operation-enum bitmask (clause 4.20)
   tenant_at_peer    text,
   headers           jsonb,
   host_alias        text,
@@ -95,7 +95,7 @@ CREATE INDEX i_csource_index_id   ON csource_index (tenant_id, entity_id);
 CREATE INDEX i_csource_index_geo  ON csource_index USING gist (location);
 
 CREATE TABLE jsonld_contexts (
-  id         text PRIMARY KEY,   -- deliberately cross-tenant (§8.3)
+  id         text PRIMARY KEY,   -- deliberately cross-tenant
   body       jsonb NOT NULL,
   kind       text NOT NULL CHECK (kind IN ('Hosted', 'Cached', 'ImplicitlyCreated')),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -124,7 +124,7 @@ CREATE TABLE outbox (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- §3 RLS backstop on every tenant-scoped table: ENABLE for app roles, FORCE
+-- RLS backstop on every tenant-scoped table: ENABLE for app roles, FORCE
 -- so the table owner is covered too. Superusers always bypass RLS — the
 -- broker must connect as a non-superuser role for the backstop to bite
 -- (the RLS denial test in tests/pg.rs proves it with a dedicated role).

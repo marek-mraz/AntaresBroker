@@ -1,9 +1,9 @@
-//! C10 — NGSI-LD `q=` (CIM 009 clause 4.9) compiled to SQL jsonpath.
+//! NGSI-LD `q=` (CIM 009 clause 4.9) compiled to SQL jsonpath.
 //!
-//! Strategy is Scorpio's, proven against the ETSI suite (§8.1): the predicate
+//! Strategy is Scorpio's, proven against the ETSI suite: the predicate
 //! becomes `entity @? $n::jsonpath` over the stored expanded document (the
 //! operator spelling of `jsonb_path_exists`, because only the operator form
-//! matches the GIN `jsonb_path_ops` index). §16.2 is absolute here — **the
+//! matches the GIN `jsonb_path_ops` index). One rule is absolute here — **the
 //! jsonpath travels as a bind, never
 //! as SQL text**. Nothing a client typed is ever concatenated into a
 //! statement; the compiler emits `$n` placeholders and hands the paths back
@@ -171,7 +171,7 @@ pub(crate) fn value_or_filter(
         };
         // the OPERATOR form of jsonb_path_exists: identical lax semantics,
         // but the planner can match `@?` against the GIN jsonb_path_ops
-        // index — the function form never uses it (audit 2026-08-08)
+        // index — the function form never uses it
         parts.push(format!("{col} @? ${}::jsonpath", first + binds.len()));
         binds.push(jp);
     }

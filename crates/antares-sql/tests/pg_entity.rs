@@ -1,4 +1,4 @@
-//! PgEntityStore integration (tasks.md C5 first slice + §3.1 concurrency).
+//! PgEntityStore integration, including the concurrency guarantees.
 //! Skips loudly without ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
@@ -94,7 +94,7 @@ async fn entity_crud_roundtrip_with_extracted_columns() {
         .is_none());
 }
 
-/// §3.1 / §9.5: parallel PATCH storm against ONE entity — no lost updates,
+/// Parallel PATCH storm against ONE entity — no lost updates,
 /// version strictly monotone, final state = sum of all increments.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_mutations_lose_nothing() {
@@ -144,7 +144,7 @@ async fn concurrent_mutations_lose_nothing() {
     );
 }
 
-/// C5: batch create/delete as single multi-row statements — created flags in
+/// Batch create/delete as single multi-row statements — created flags in
 /// input order, duplicate ids deduped (5.5.11.1/.4), delete returns prevs.
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_create_and_delete_multirow() {
@@ -191,7 +191,7 @@ async fn batch_create_and_delete_multirow() {
     let _ = s.batch_delete(&t, &["urn:b:2".into()]);
 }
 
-// ---- C10: query pushdown -------------------------------------------------
+// ---- query pushdown ------------------------------------------------------
 // The contract is one-directional and it is the whole reason the pushdown is
 // safe: SQL may only NARROW. Every row the in-memory evaluator would accept
 // must survive the WHERE clause; extra rows are fine because the caller

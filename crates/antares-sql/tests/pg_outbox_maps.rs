@@ -1,4 +1,4 @@
-//! C8: transactional outbox atomicity + entity_maps TTL sweep.
+//! Transactional outbox atomicity + entity_maps TTL sweep.
 //! Skips loudly without ANTARES_TEST_DATABASE_URL.
 
 use antares_model::TenantId;
@@ -18,7 +18,7 @@ macro_rules! require_db {
     };
 }
 
-/// §10: the outbox INSERT lives or dies WITH the surrounding transaction.
+/// The outbox INSERT lives or dies WITH the surrounding transaction.
 #[tokio::test(flavor = "multi_thread")]
 async fn outbox_enqueue_is_transactional() {
     let url = require_db!();
@@ -68,7 +68,7 @@ async fn outbox_enqueue_is_transactional() {
     assert!(!page.iter().any(|(s, _, _)| *s == seq));
 }
 
-/// §8.3 entity_maps: per-row registration ids (the B1 class) + TTL sweep.
+/// entity_maps: per-row registration ids + TTL sweep.
 #[tokio::test(flavor = "multi_thread")]
 async fn entity_maps_pages_and_ttl_sweep() {
     let url = require_db!();
@@ -89,7 +89,7 @@ async fn entity_maps_pages_and_ttl_sweep() {
     )
     .expect("put");
     let page = maps.page(&t, "urn:map:1", 0, 10).expect("page");
-    // B1 regression: each row keeps ITS OWN registration id, never the first's
+    // Regression: each row keeps ITS OWN registration id, never the first's
     assert_eq!(
         page,
         vec![
@@ -113,7 +113,7 @@ async fn entity_maps_pages_and_ttl_sweep() {
     assert_eq!(maps.page(&t, "urn:map:1", 0, 10).expect("live").len(), 2);
 }
 
-/// P0-6 (production-readiness audit 2026-08-09): ack must delete EXACTLY the
+/// Ack must delete EXACTLY the
 /// published seqs. bigserial allocates at INSERT and transactions commit out
 /// of order — a lower-seq row whose transaction commits BETWEEN peek and ack
 /// must survive the ack and be published next round. The blanket
@@ -157,7 +157,7 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
     // Ack exactly OUR published seq — not the whole peeked page: sibling
     // tests share this table and acking their in-flight rows steals them
     // (CI #101 flake: the transactional test's own ack then deletes 0 rows).
-    // The P0-6 regression power is unchanged — under the old blanket
+    // The regression power is unchanged — under the old blanket
     // `DELETE WHERE seq <= max` an ack of just seq_b still kills seq_a.
     outbox::ack(&pool, &[seq_b]).expect("ack");
 

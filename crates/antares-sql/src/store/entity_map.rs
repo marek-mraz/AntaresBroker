@@ -1,10 +1,10 @@
-//! EntityMap rows (tasks.md C8; §8.3 `entity_maps`, 5.5.9.3 distributed
+//! EntityMap rows (`entity_maps`, 5.5.9.3 distributed
 //! pagination). One row per (map, position): the id→source materialization
-//! that keeps broad federation pageable without re-fanning per page (§16.7).
+//! that keeps broad federation pageable without re-fanning per page.
 //!
-//! The EntityMaps API resource (5.14) is an H1-recorded gap; this store is
-//! its §8.3 storage. The B1 regression (per-row registration_id, never the
-//! first row's) is enforced by shape: registration_id is a per-row column
+//! The EntityMaps API resource (5.14) is a known gap; this store is
+//! its storage. Per-row registration ids (never the
+//! first row's) are enforced by shape: registration_id is a per-row column
 //! bound per element.
 
 use antares_model::TenantId;
@@ -24,7 +24,7 @@ impl EntityMapStore {
     }
 
     /// Materialize a map: rows carry (pos, entity_id, registration_id) —
-    /// per-element registration ids (the B1 fix class), one statement.
+    /// per-element registration ids, one statement.
     pub fn put(
         &self,
         tenant: &TenantId,
@@ -102,11 +102,11 @@ impl EntityMapStore {
         })
     }
 
-    /// TTL sweep (§8.3: Scorpio default 90 s TTL / 30 s sweep) — run by a
+    /// TTL sweep (Scorpio default 90 s TTL / 30 s sweep) — run by a
     /// broker job; returns swept row count. Per-tenant loop ON PURPOSE: the
     /// RLS policy makes a tenant-less DELETE silently match zero rows for a
     /// non-superuser broker role — a sweep that "works" only as superuser is
-    /// the kind of silent no-op §16.1.3 exists to catch.
+    /// exactly the kind of silent no-op to guard against.
     pub fn sweep(&self) -> Result<u64, sqlx::Error> {
         wait(async {
             let tenants: Vec<String> = sqlx::query_scalar("SELECT tenant_id FROM tenants")

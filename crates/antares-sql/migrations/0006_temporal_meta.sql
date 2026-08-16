@@ -1,4 +1,4 @@
--- C9/D read cutover (audit 2026-08-08): attr_instances becomes the READ path.
+-- Temporal read cutover: attr_instances becomes the READ path.
 -- The 0002 bridge doc dies here — temporal_entities keeps only the small
 -- `meta` document (id/type/scope/@context/createdAt/modifiedAt/deletedAt/
 -- expiresAt, verbatim strings so representations stay byte-faithful); every

@@ -1,5 +1,5 @@
-//! C11 — Scope Query Language (CIM 009 clause 4.19) compiled to SQL over the
-//! extracted `scopes text[]` column (GIN-indexed, §8.1).
+//! Scope Query Language (CIM 009 clause 4.19) compiled to SQL over the
+//! extracted `scopes text[]` column (GIN-indexed).
 //!
 //! Same one-directional contract as `q` (see `compile::q`): this may only
 //! NARROW. `antares_api::scope_matches` stays the arbiter, so a predicate
@@ -16,7 +16,7 @@
 //!   non-terminal `#`) — a pattern that puts it elsewhere refuses to compile.
 //!
 //! The generated regex is OURS; the only client-supplied text inside it is a
-//! literal segment, which is regex-escaped and then travels as a bind (§16.2).
+//! literal segment, which is regex-escaped and then travels as a bind.
 
 /// A compiled `scopeQ`: a SQL boolean expression plus the regex binds it
 /// references, numbered from the offset passed to [`compile_scope_q`].

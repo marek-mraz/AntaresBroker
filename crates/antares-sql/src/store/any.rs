@@ -1,7 +1,7 @@
-//! The store seam (tasks.md A1/A3): ONE closed set of backends behind the
+//! The store seam: ONE closed set of backends behind the
 //! memory store's 12-method surface. An enum, not a trait — `mutate<T, E>` is
-//! generic (dyn-incompatible), the backend set is closed by design (§8.2
-//! philosophy: exactly the implementations the product needs), and match
+//! generic (dyn-incompatible), the backend set is closed by design
+//! (exactly the implementations the product needs), and match
 //! exhaustiveness forces every backend to answer every method.
 //!
 //! Every method returns `Result<_, NgsiError>`: the memory/file backend never
@@ -74,7 +74,7 @@ impl PgBackend {
     }
 }
 
-/// A1/A3: what `antares-api` sees. No core crate names redb or sqlx.
+/// What `antares-api` sees. No core crate names redb or sqlx.
 // One AnyStore exists per process — variant size difference is irrelevant.
 #[allow(clippy::large_enum_variant)]
 pub enum AnyStore {
@@ -84,7 +84,7 @@ pub enum AnyStore {
 }
 
 impl AnyStore {
-    /// Readiness ping (audit P0-3): can the store answer a trivial request
+    /// Readiness ping: can the store answer a trivial request
     /// RIGHT NOW? Memory/file are in-process (always ready); the Pg arm runs
     /// `SELECT 1` so a lost database (failover, network partition) flips
     /// /q/ready to 503 and the Service stops routing to this pod.
@@ -102,7 +102,7 @@ impl AnyStore {
         }
     }
 
-    /// B13: (queued writers, peak) of the memory/file write-critical section;
+    /// (Queued writers, peak) of the memory/file write-critical section;
     /// `None` for the Pg arm (Postgres has no single-writer commit queue).
     pub fn commit_queue(&self) -> Option<(usize, usize)> {
         match self {
@@ -112,10 +112,10 @@ impl AnyStore {
         }
     }
 
-    /// K1, the last step of the drain: close the connection pool so in-flight
+    /// The last step of the drain: close the connection pool so in-flight
     /// transactions finish and the server sees a clean disconnect instead of
     /// N abandoned backends. A no-op for the memory/file arm, whose durability
-    /// is already commit-before-ack (B3) — there is nothing buffered to lose.
+    /// is already commit-before-ack — there is nothing buffered to lose.
     pub async fn close(&self) {
         match self {
             AnyStore::Mem(_) => {}
@@ -132,7 +132,7 @@ impl AnyStore {
         }
     }
 
-    /// F3: turn the same-tx outbox producer on (bus=nats). The memory arm has
+    /// Turn the same-tx outbox producer on (bus=nats). The memory arm has
     /// no outbox — the broker's wiring rejects bus=nats without a Pg store,
     /// so this is unreachable there by construction.
     pub fn set_outbox(
@@ -146,7 +146,7 @@ impl AnyStore {
         }
     }
 
-    /// F3 drain: oldest-first page of pending outbox rows `(seq, tenant, event)`.
+    /// Outbox drain: oldest-first page of pending rows `(seq, tenant, event)`.
     pub fn outbox_peek(
         &self,
         #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] limit: i64,
@@ -158,7 +158,7 @@ impl AnyStore {
         }
     }
 
-    /// F3 drain: delete EXACTLY the published rows (P0-6: never a blanket
+    /// Outbox drain: delete EXACTLY the published rows (never a blanket
     /// `seq <= max`, which loses a row committing between peek and ack).
     pub fn outbox_ack(
         &self,
@@ -171,7 +171,7 @@ impl AnyStore {
         }
     }
 
-    /// §3.1.4/6.3.14 implicit tenant creation on Pg write paths.
+    /// 6.3.14 implicit tenant creation on Pg write paths.
     #[cfg(feature = "postgres")]
     fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
         super::pg_entity::wait(async {
@@ -214,7 +214,7 @@ impl AnyStore {
         }
     }
 
-    /// C5 batch create (entities only): one multi-row statement on the Pg
+    /// Batch create (entities only): one multi-row statement on the Pg
     /// arm, per-item loop on the memory arm. Created-flags in input order.
     pub fn batch_create(
         &self,
@@ -240,7 +240,7 @@ impl AnyStore {
         }
     }
 
-    /// C5 batch delete (entities only): deleted-flags in input order; a
+    /// Batch delete (entities only): deleted-flags in input order; a
     /// duplicate id in the input deletes once and 404s the second time,
     /// matching the per-item loop's semantics (5.5.11.4).
     pub fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
@@ -400,7 +400,7 @@ impl AnyStore {
         Ok(rows)
     }
 
-    /// C10/C11: Query Entities with the filter pushed down where the backend
+    /// Query Entities with the filter pushed down where the backend
     /// can take it. `memory`/`file` have nothing to push into — their
     /// entities are already in RAM — so they return the same snapshot `list`
     /// does (never `decided`, never `paged`). Either way the caller applies
@@ -431,8 +431,8 @@ impl AnyStore {
         Ok(outcome)
     }
 
-    /// C11: Query Temporal Evolution with entity narrowing, instance-window
-    /// pruning AND (audit 2026-08-08) entity paging pushed down. Same
+    /// Query Temporal Evolution with entity narrowing, instance-window
+    /// pruning AND entity paging pushed down. Same
     /// contract: the API's window() is the arbiter; the memory arm returns
     /// the full snapshot, never paged.
     pub fn query_temporal(
@@ -460,7 +460,7 @@ impl AnyStore {
         Ok(outcome)
     }
 
-    /// Auto-recording fast path (audit 2026-08-08): append instances to an
+    /// Auto-recording fast path: append instances to an
     /// entity's temporal evolution, creating the meta shell on first touch.
     /// Pg: pure multi-row INSERT — no history read, no doc rewrite. Memory:
     /// the create-or-extend the mirror always did, under the store lock.
@@ -501,7 +501,7 @@ impl AnyStore {
         }
     }
 
-    /// C11: Retrieve Temporal Evolution with the same instance pruning.
+    /// Retrieve Temporal Evolution with the same instance pruning.
     pub fn get_temporal(
         &self,
         tenant: &TenantId,
@@ -537,8 +537,8 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => {
-                    // before/after captured for the change hook (§7
-                    // prev_payload) INSIDE the row lock — a before-image read
+                    // before/after captured for the change hook's
+                    // prev_payload INSIDE the row lock — a before-image read
                     // in its own transaction can belong to a different version
                     // than the one the lock serialized on.
                     let mut before: Option<Value> = None;
@@ -575,7 +575,7 @@ impl AnyStore {
         }
     }
 
-    /// Batch upsert with REPLACE semantics for entities (audit 2026-08-08):
+    /// Batch upsert with REPLACE semantics for entities:
     /// one statement + one transaction on the Pg arm, per-item loop on the
     /// memory arm. Created-flags in input order.
     pub fn batch_upsert(

@@ -1,8 +1,8 @@
-//! AST → SQL compilation + schema (docs/deep-analysis.md §8).
+//! AST → SQL compilation + schema.
 //!
-//! Phase-0 seed: the q= compiler emits parameterized SQL — structure from the
-//! compiler, values as binds ONLY (§16.2). sqlx store implementations land in
-//! phase 1; migrations live in `migrations/`.
+//! The q= compiler emits parameterized SQL — structure from the
+//! compiler, values as binds ONLY. The sqlx store implementations live in
+//! `store`; migrations live in `migrations/`.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compile;
@@ -63,6 +63,6 @@ impl std::fmt::Display for StoreMode {
     }
 }
 
-/// The transaction preamble that makes RLS effective (§3): always SET LOCAL,
+/// The transaction preamble that makes RLS effective: always SET LOCAL,
 /// never session-level SET.
 pub const SET_TENANT_SQL: &str = "SELECT set_config('antares.tenant', $1, true)";

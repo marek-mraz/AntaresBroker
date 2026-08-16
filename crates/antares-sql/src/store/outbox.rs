@@ -1,12 +1,12 @@
-//! Transactional outbox (tasks.md C8; deep-analysis §10): the change event is
+//! Transactional outbox: the change event is
 //! INSERTed in the SAME transaction as the entity write, so a broker crash
-//! between commit and publish can never lose an event. The drain loop (F3)
+//! between commit and publish can never lose an event. The drain loop
 //! publishes rows to the bus with `Nats-Msg-Id` = `seq` for dedup, then acks
 //! by deleting up to the published seq.
 //!
-//! Producer wiring into the entity write paths lands WITH the F3 drain:
-//! enqueuing events nothing consumes would only grow the table (the R4
-//! unbounded-growth lesson, §4.1).
+//! Producer wiring into the entity write paths lands WITH the drain:
+//! enqueuing events nothing consumes would only grow the table
+//! without bound.
 
 use antares_model::TenantId;
 use serde_json::Value;
@@ -15,7 +15,7 @@ use sqlx::Row;
 
 use super::pg_entity::wait;
 
-/// Enqueue one event INSIDE the caller's transaction (§10: same-tx INSERT).
+/// Enqueue one event INSIDE the caller's transaction (same-tx INSERT).
 pub async fn enqueue(
     tx: &mut PgConnection,
     tenant: &TenantId,
@@ -29,7 +29,7 @@ pub async fn enqueue(
     Ok(row.get::<i64, _>(0))
 }
 
-/// Enqueue a whole batch in ONE multi-row INSERT (audit 2026-08-08: the
+/// Enqueue a whole batch in ONE multi-row INSERT (a
 /// per-item loop cost N round-trips inside every batch transaction).
 pub async fn enqueue_many(
     tx: &mut PgConnection,
@@ -50,12 +50,12 @@ pub async fn enqueue_many(
     .map(|_| ())
 }
 
-/// Oldest-first page for the drain loop (F3). `seq` is the dedup id.
+/// Oldest-first page for the drain loop. `seq` is the dedup id.
 ///
 /// The drain is cross-tenant by nature — it runs under the transaction-scoped
 /// `antares.service` escape (migration 0005) so it stays correct under a
 /// non-superuser role, where the plain tenant policy would silently return
-/// zero rows forever (the R4 failure this table exists to prevent).
+/// zero rows forever (the very failure this table exists to prevent).
 pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx::Error> {
     wait(async {
         let mut tx = pool.begin().await?;
@@ -72,7 +72,7 @@ pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx
     })
 }
 
-/// Ack EXACTLY the published seqs (P0-6, audit 2026-08-09): bigserial
+/// Ack EXACTLY the published seqs: bigserial
 /// allocates at INSERT and commits land out of order, so a blanket
 /// `seq <= max` deletes a lower-seq row that commits between peek and ack —
 /// an event lost unpublished. Deleting by exact seq can never touch a row

@@ -1,6 +1,6 @@
-//! Query-filter shapes shared by every backend (C10/C11 pushdown contract).
+//! Query-filter shapes shared by every backend (the pushdown contract).
 //!
-//! Pure data — no sqlx, no I/O — split out of `pg_entity`/`pg_temporal` (N2)
+//! Pure data — no sqlx, no I/O — split out of `pg_entity`/`pg_temporal`
 //! so the wasm32 build (no `postgres` feature) keeps the same `AnyStore`
 //! query surface: the memory arm consumes these filters too, it just never
 //! gets a `decided` outcome.
@@ -16,24 +16,24 @@ pub struct EntityFilter<'a> {
     pub attrs: Option<&'a [String]>,
     /// `q=` AST; compiled when its shape is exactly reproducible, else skipped
     pub q: Option<&'a antares_ql::QNode>,
-    /// `scopeQ=` verbatim (4.19); compiled over the `scopes` column (C11)
+    /// `scopeQ=` verbatim (4.19); compiled over the `scopes` column
     pub scope_q: Option<&'a str>,
     /// `georel`/`geometry`/`coordinates`/`geoproperty` (4.10), compiled over
-    /// the extracted `location` column (C11b)
+    /// the extracted `location` column
     pub geo: Option<&'a crate::compile::geo::GeoSpec<'a>>,
     /// term → IRI, the request context's expander (the AST holds terms)
     pub expand: &'a dyn Fn(&str) -> String,
-    /// C11 pagination pushdown: applied ONLY when every present predicate
+    /// Pagination pushdown: applied ONLY when every present predicate
     /// compiled exactly (`decided`) — otherwise the caller's evaluator still
     /// has rows to drop and a SQL LIMIT would page over the wrong set. The
     /// caller passes it only when its own store-invisible filters (idPattern,
     /// federation, orderBy) are absent.
     pub page: Option<Page>,
-    /// C11 projection pushdown (4.21 `pick`, top-level): keep these expanded
+    /// Projection pushdown (4.21 `pick`, top-level): keep these expanded
     /// attr IRIs + every non-attribute member. Applied only when `decided` —
     /// a projected doc can no longer answer a q= re-check.
     pub keep_attrs: Option<&'a [String]>,
-    /// C11 projection pushdown (`omit`, top-level entries only): drop exactly
+    /// Projection pushdown (`omit`, top-level entries only): drop exactly
     /// these attr IRIs. Same `decided` gate.
     pub drop_attrs: Option<&'a [String]>,
 }
@@ -86,8 +86,8 @@ pub struct TemporalFilter<'a> {
     pub last_n: Option<i64>,
     /// ordering key for the lastN cap (the request's timeproperty)
     pub timeproperty: &'a str,
-    /// Entity-level LIMIT/OFFSET pushdown (audit 2026-08-08: a temporal query
-    /// used to materialize the tenant's ENTIRE history). Passed only when the
+    /// Entity-level LIMIT/OFFSET pushdown (without it a temporal query
+    /// materializes the tenant's ENTIRE history). Passed only when the
     /// caller has no store-invisible entity filters (idPattern, q, geo) —
     /// when honoured, SQL also applies the caller's entity-qualification rule
     /// (≥1 instance, in-window when a range is given), so the paged set is

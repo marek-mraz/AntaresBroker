@@ -22,7 +22,7 @@ CREATE TABLE dist_subs (
   PRIMARY KEY (tenant_id, id)
 );
 
--- same §3 RLS backstop as 0001
+-- same RLS backstop as 0001
 DO $$
 DECLARE t text;
 BEGIN

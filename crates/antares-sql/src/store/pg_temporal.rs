@@ -1,11 +1,11 @@
-//! PgStore slice three (tasks.md §C-ii): the temporal store over
-//! `attr_instances` ROWS (C9/D read cutover, audit 2026-08-08). The 0002
+//! PgStore slice three: the temporal store over
+//! `attr_instances` ROWS. The 0002
 //! bridge doc is gone — `temporal_entities` holds only the small `meta`
 //! document; every instance lives as a row, reads RECONSTRUCT the doc shape
 //! the API layer consumes (so window()/aggregation/presentation are
 //! untouched), and writes are deltas, never a full-history rewrite.
 //!
-//! What this buys (the §8.2 promises, now real): the hypertable/partition
+//! What this buys: the hypertable/partition
 //! machinery acts on the data queries actually read; retention shortens
 //! query results; instance pruning and entity paging run in SQL with the
 //! `(tenant_id, entity_id, attr_id, observed_at DESC)` index.
@@ -88,7 +88,7 @@ fn decompose(doc: &Value) -> Vec<Value> {
                 let Some(instance_id) = s("instanceId") else {
                     continue; // stamped by the API layer; belt only
                 };
-                // §8.2: observed_at falls back through the instance's own
+                // observed_at falls back through the instance's own
                 // timestamps — deletion instances carry only deletedAt and
                 // must NOT collapse onto the epoch (retention would reap them)
                 let observed = s("observedAt")
@@ -153,7 +153,7 @@ async fn insert_rows(
     Ok(())
 }
 
-// N2: TemporalFilter moved to `store::filter`; re-exported for path compat.
+// TemporalFilter lives in `store::filter`; re-exported for path compat.
 pub use super::filter::{TemporalFilter, TemporalOutcome};
 
 /// The correlated subquery reconstructing the attribute object for the meta
@@ -259,7 +259,7 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            // Audit P1-8: DO NOTHING froze types/scopes at first touch — an
+            // DO NOTHING froze types/scopes at first touch — an
             // entity gaining a type stayed invisible to type-filtered
             // temporal queries forever. The shell carries the CURRENT
             // entity, so refresh on change; the IS DISTINCT FROM guard keeps
@@ -318,7 +318,7 @@ impl PgTemporalStore {
         })
     }
 
-    /// C11 temporal query: entity narrowing (ids/types/attrs) in the WHERE,
+    /// Temporal query: entity narrowing (ids/types/attrs) in the WHERE,
     /// instance pruning (range + lastN cap) in the reconstruction, and —
     /// when the caller passes a page — entity qualification + LIMIT/OFFSET
     /// in SQL, so a temporal query no longer materializes the whole tenant.
@@ -479,7 +479,7 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            // §16.2 audit: `sql` is compiler literals + $n placeholders only.
+            // `sql` is compiler literals + $n placeholders only.
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
             for b in &binds {
                 qy = match b {
@@ -520,7 +520,7 @@ impl PgTemporalStore {
         })
     }
 
-    /// C11: single-entity fetch with the same instance pruning (Retrieve
+    /// Single-entity fetch with the same instance pruning (Retrieve
     /// Temporal Evolution, 5.7.3). `None` = entity absent.
     pub fn get_range(
         &self,

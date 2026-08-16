@@ -1,10 +1,10 @@
-//! PgStore, first slice (tasks.md C5): entity CRUD over the §8.1 `entities`
+//! PgStore, first slice: entity CRUD over the `entities`
 //! table. Sync facade — same signatures as the in-memory `Store`, sqlx driven
 //! internally via `block_in_place` + `Handle::block_on`, so the 63 existing
-//! call sites in `antares-api` never change when the cutover (C13) lands.
+//! call sites in `antares-api` never change when the cutover lands.
 //!
-//! Extracted columns are computed in Rust at write time (§4 — no triggers):
-//! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and (C11b)
+//! Extracted columns are computed in Rust at write time (no triggers):
+//! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and
 //! `location`, the default GeoProperty, converted by PostGIS itself from
 //! bound GeoJSON text (`ST_GeomFromGeoJSON` rather than a geozero
 //! dependency — the DB already owns the conversion, and the value still
@@ -17,33 +17,33 @@ use sqlx::Row;
 
 pub struct PgEntityStore {
     pool: PgPool,
-    /// F3: when on, every entity write enqueues its change event into the
-    /// outbox INSIDE the write transaction (§10 — a crash between commit and
+    /// When on, every entity write enqueues its change event into the
+    /// outbox INSIDE the write transaction (a crash between commit and
     /// publish can never lose an event). Off by default: with `bus = local`
     /// events flow through the in-process hook and undrained rows would only
-    /// grow the table (R4). The broker turns this on when `bus = nats`.
+    /// grow the table. The broker turns this on when `bus = nats`.
     outbox: std::sync::atomic::AtomicBool,
 }
 
-// N2: EntityFilter/Page/QueryOutcome moved to `store::filter` (pure data,
+// EntityFilter/Page/QueryOutcome live in `store::filter` (pure data,
 // shared with the wasm32 build); re-exported here so existing paths hold.
 pub use super::filter::{EntityFilter, Page, QueryOutcome};
 
 /// A bound value. Enumerated because the bind list is built dynamically while
-/// the SQL is assembled — the alternative is string interpolation (§16.2: no).
+/// the SQL is assembled — the alternative would be string interpolation.
 enum Bind {
     Text(String),
     TextArr(Vec<String>),
     /// jsonpath; bound as text and cast with `$n::jsonpath` in the SQL
     Path(String),
-    /// a distance in metres (C11b `near`)
+    /// a distance in metres (geoquery `near`)
     Num(f64),
-    /// LIMIT/OFFSET (C11 pagination pushdown)
+    /// LIMIT/OFFSET (pagination pushdown)
     Int(i64),
 }
 
 /// Run an async block from sync code without stalling a tokio worker
-/// (same rationale as the redb shadow's `on_blocking`, B1b).
+/// (same rationale as the redb shadow's `on_blocking`).
 pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -58,14 +58,14 @@ pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
     }
 }
 
-/// The internal doc's members that become extracted columns (§8.1).
+/// The internal doc's members that become extracted columns.
 pub(crate) struct Extracted {
     types: Vec<String>,
     scopes: Option<Vec<String>>,
     created: String,
     modified: String,
     expires: Option<String>,
-    /// C11b: the default GeoProperty as GeoJSON text, for `ST_GeomFromGeoJSON`.
+    /// The default GeoProperty as GeoJSON text, for `ST_GeomFromGeoJSON`.
     /// `None` (→ SQL NULL) whenever it cannot be represented as ONE geometry.
     location: Option<String>,
     /// True when the doc CARRIES the default GeoProperty but `location` could
@@ -103,7 +103,7 @@ fn extract(doc: &Value) -> Extracted {
     }
 }
 
-/// The outbox row's event JSON (F2/F3): what the drain turns into a
+/// The outbox row's event JSON: what the drain turns into a
 /// `ChangeEvent`. Field names are the bus crate's serde names; `seq` and the
 /// claim check are the drain's business.
 #[allow(clippy::too_many_arguments)]
@@ -117,7 +117,7 @@ fn change_event(
     version: i64,
     incarnation: &str,
 ) -> Value {
-    // §7: changed_attrs = top-level attribute IRIs that differ between the
+    // changed_attrs = top-level attribute IRIs that differ between the
     // before- and after-images (meta members excluded). Create lists every
     // attr, delete lists every prior attr.
     let meta = [
@@ -182,7 +182,7 @@ impl PgEntityStore {
         }
     }
 
-    /// F3 producer switch — the broker enables this exactly when `bus=nats`.
+    /// Outbox producer switch — the broker enables this exactly when `bus=nats`.
     pub fn set_outbox(&self, on: bool) {
         self.outbox.store(on, std::sync::atomic::Ordering::Relaxed);
     }
@@ -297,13 +297,13 @@ impl PgEntityStore {
         })
     }
 
-    /// C10 query pushdown. The predicates that compile EXACTLY go to
+    /// Query pushdown. The predicates that compile EXACTLY go to
     /// Postgres; everything else is simply left out of the WHERE clause, so
     /// the result is always a superset of the answer and the caller's
     /// in-memory evaluator remains the arbiter. That is the property that
     /// makes store modes agree: SQL removes rows, it never decides them.
     ///
-    /// §16.2: every value here is a bind. The only text this function
+    /// Every value here is a bind. The only text this function
     /// concatenates is its own operators and `$n` placeholders.
     pub fn query(
         &self,
@@ -316,7 +316,7 @@ impl PgEntityStore {
             // 4.22: expired entities never enter a result (or a page/total)
             "(expires_at IS NULL OR expires_at > now())".to_owned(),
         ];
-        // C11 exactness ledger: ids/types/attrs translate exactly by
+        // Exactness: ids/types/attrs translate exactly by
         // construction; q is exact IF it compiles (the compiler's contract);
         // scopeQ is documented loose-or-equal, geo has a metric residual
         // (`near` geography vs haversine) — both therefore forfeit
@@ -385,7 +385,7 @@ impl PgEntityStore {
         // fallback statement below reuses exactly this prefix
         let where_binds = binds.len();
 
-        // C11 projection pushdown, only once SQL decides row membership: the
+        // Projection pushdown, only once SQL decides row membership: the
         // kept doc must only need to feed `repr::apply`, never a re-check.
         // `pick` keeps listed attrs + every non-attribute member (attribute
         // keys are expanded IRIs — `http…` — so core members never match the
@@ -413,7 +413,7 @@ impl PgEntityStore {
             }
         }
 
-        // C11 pagination pushdown: ORDER BY id is the store's default order
+        // Pagination pushdown: ORDER BY id is the store's default order
         // either way; `count(*) OVER ()` rides the same statement so the
         // caller gets the pre-LIMIT total for count= and the next/prev links.
         let paged = decided && f.page.is_some();
@@ -438,8 +438,8 @@ impl PgEntityStore {
             crate::pg::set_tenant(&mut tx, tenant).await?;
             // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
             // construction: `sql` is built from this function's own literals
-            // plus `$n` placeholders — no caller-supplied text reaches it
-            // (§16.2). The audit lives here, next to the builder.
+            // plus `$n` placeholders — no caller-supplied text reaches it.
+            // The audit lives here, next to the builder.
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
             for b in &binds {
                 qy = match b {
@@ -449,7 +449,7 @@ impl PgEntityStore {
                     Bind::Int(n) => qy.bind(n),
                 };
             }
-            // J5 (J3/J11c lesson): stream rows, decode each to its Value and
+            // Stream rows, decode each to its Value and
             // drop the PgRow — the full row set never sits in memory twice.
             let mut docs: Vec<Value> = Vec::new();
             let mut total: Option<i64> = None;
@@ -538,7 +538,7 @@ impl PgEntityStore {
         })
     }
 
-    /// §3.1.2 read-modify-write: row lock via `SELECT … FOR UPDATE`, closure
+    /// Read-modify-write: row lock via `SELECT … FOR UPDATE`, closure
     /// applied in Rust, `version` bumped under the lock. Two racing PATCHes
     /// serialize in Postgres, neither is lost. `Ok(None)` = entity absent.
     pub fn mutate<T, E>(
@@ -613,8 +613,8 @@ impl PgEntityStore {
         })
     }
 
-    /// C5 batch create: ONE multi-row INSERT for the whole batch (§4 —
-    /// the jsonb elements form of UNNEST), one transaction, one commit.
+    /// Batch create: ONE multi-row INSERT for the whole batch (the jsonb
+    /// elements form of UNNEST), one transaction, one commit.
     /// Returns a created-flag per input item, input order preserved.
     /// Duplicate ids within one batch are pre-deduped here: `ON CONFLICT DO
     /// NOTHING` raises "cannot affect row a second time" otherwise — the
@@ -694,7 +694,7 @@ impl PgEntityStore {
         })
     }
 
-    /// C5 batch delete: ONE statement, returning each deleted row's previous
+    /// Batch delete: ONE statement, returning each deleted row's previous
     /// document (the change-hook before-image).
     pub fn batch_delete(
         &self,
@@ -741,7 +741,7 @@ impl PgEntityStore {
         })
     }
 
-    /// C5+ (audit 2026-08-08): batch upsert in REPLACE semantics — ONE
+    /// Batch upsert in REPLACE semantics — ONE
     /// `INSERT … ON CONFLICT DO UPDATE` for the whole batch, one transaction.
     /// Returns a created-flag per input item (input order; duplicates of one
     /// id report the first outcome). Before-images for the change events are
@@ -851,7 +851,7 @@ impl PgEntityStore {
         })
     }
 
-    /// C5+ (audit 2026-08-08): batch read-modify-write — ONE transaction,
+    /// Batch read-modify-write — ONE transaction,
     /// all rows locked in a single ordered `FOR UPDATE` select, the closure
     /// applied per doc in Rust, and ONE multi-row UPDATE writeback. Per-item
     /// results align with `ids`: `None` = absent, `Some(Err)` = the closure
@@ -965,7 +965,7 @@ impl PgEntityStore {
         })
     }
 
-    /// Current row version (test hook for the §3.1 monotonicity assertions).
+    /// Current row version (test hook for the version-monotonicity assertions).
     pub fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;

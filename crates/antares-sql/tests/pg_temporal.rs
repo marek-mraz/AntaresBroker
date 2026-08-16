@@ -1,4 +1,4 @@
-//! PgTemporalStore integration (tasks.md §C-ii temporal bridge). Skips
+//! PgTemporalStore integration (the temporal bridge). Skips
 //! loudly without ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
@@ -27,7 +27,7 @@ macro_rules! require_db {
 static PARTITION_DDL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// Maintenance is single-winner by design (§3.1.6 `FOR UPDATE SKIP LOCKED`),
+/// Maintenance is single-winner by design (`FOR UPDATE SKIP LOCKED`),
 /// so a concurrent caller legitimately gets "skipped" — including a sibling
 /// test. A real deployment retries on the next tick; so do we, rather than
 /// weakening an assertion about what a winning pass must do.
@@ -95,9 +95,9 @@ async fn temporal_doc_roundtrip_and_instance_append() {
     assert!(s.get(&t, id).expect("get").is_none());
 }
 
-/// C9: the bridge doc decomposes into attr_instances rows in the same tx,
+/// The bridge doc decomposes into attr_instances rows in the same tx,
 /// and the maintenance pass creates plain-mode partitions under the
-/// SKIP LOCKED claim (§3.1.6).
+/// SKIP LOCKED claim.
 #[tokio::test(flavor = "multi_thread")]
 async fn attr_instances_decomposition_and_maintenance() {
     let url = require_db!();
@@ -134,7 +134,7 @@ async fn attr_instances_decomposition_and_maintenance() {
     .await
     .expect("count");
     assert_eq!(n, 2, "one row per instance");
-    // observed_at falls back to modified_at when absent (§8.2)
+    // observed_at falls back to modified_at when absent
     let obs: String = sqlx::query_scalar(
         "SELECT observed_at::text FROM attr_instances
          WHERE tenant_id = 'pgtempdec' AND instance_id = 'urn:i:2'",
@@ -311,7 +311,7 @@ async fn clause_4_22_expired_attr_instances_reaped() {
     let _ = s.delete(&t, "urn:t:exp422");
 }
 
-/// Audit P1-8: the append fast-path's shell insert was ON CONFLICT DO
+/// Regression: the append fast-path's shell insert was ON CONFLICT DO
 /// NOTHING — an entity that gained a type after first touch stayed frozen
 /// with its original types and was invisible to type-filtered temporal
 /// queries forever. The shell upsert must carry new types/scopes forward.

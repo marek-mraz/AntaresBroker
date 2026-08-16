@@ -1,4 +1,4 @@
-//! PgDocStore integration (tasks.md C6/C7/C8 partial). Skips loudly without
+//! PgDocStore integration. Skips loudly without
 //! ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
@@ -51,7 +51,7 @@ async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
         assert!(s.delete(&t, kind, &id).expect("delete"));
     }
 
-    // §14.1 rows-are-truth: bookkeeping columns really extracted from the doc.
+    // Rows-are-truth: bookkeeping columns really extracted from the doc.
     let id = "urn:ngsi-ld:Subscription:bk";
     let _ = s.delete(&t, DocKind::Subscription, id);
     let doc = json!({
@@ -147,7 +147,7 @@ async fn mutate_never_resurrects_a_deleted_row() {
     );
 }
 
-/// C7: registration writes rebuild csource_index in the same transaction;
+/// Registration writes rebuild csource_index in the same transaction;
 /// deleting the registration cascades its rows away.
 #[tokio::test(flavor = "multi_thread")]
 async fn registration_maintains_csource_index() {
@@ -204,8 +204,8 @@ async fn registration_maintains_csource_index() {
         .delete(&t, DocKind::Registration, "urn:csr:idx1")
         .expect("delete"));
     assert_eq!(count(&pool).await, 0, "cascade cleaned the index");
-    // C11b: a registration's own `location` becomes an indexed geometry so
-    // federation matching can be a GIST lookup rather than a scan (§16.7).
+    // A registration's own `location` becomes an indexed geometry so
+    // federation matching can be a GIST lookup rather than a scan.
     let geo_id = "urn:ngsi-ld:ContextSourceRegistration:geo1";
     let geo_reg = serde_json::json!({
         "id": geo_id, "type": "ContextSourceRegistration",

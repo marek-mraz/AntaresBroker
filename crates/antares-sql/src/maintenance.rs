@@ -1,8 +1,8 @@
-//! Temporal maintenance (tasks.md C9/D4; §8.2): the broker's own scheduled
+//! Temporal maintenance: the broker's own scheduled
 //! job replaces TimescaleDB background workers in plain mode, and drives the
 //! retention knob in both modes.
 //!
-//! Single-winner rule (§3.1.6): the run is claimed via
+//! Single-winner rule: the run is claimed via
 //! `SELECT … FOR UPDATE SKIP LOCKED` on the `maintenance_jobs` row — N
 //! instances race, one wins, the rest skip. No coordinator.
 //!
@@ -16,8 +16,8 @@
 use sqlx::postgres::PgPool;
 use sqlx::{Acquire, Row};
 
-/// True when the timescaledb extension is CREATED in this database (D3 —
-/// per-database `pg_extension`, not "installed on the server").
+/// True when the timescaledb extension is CREATED in this database
+/// (per-database `pg_extension`, not "installed on the server").
 pub async fn timescale_present(pool: &PgPool) -> Result<bool, sqlx::Error> {
     let row = sqlx::query("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
         .fetch_optional(pool)
