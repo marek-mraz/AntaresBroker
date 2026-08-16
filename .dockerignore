@@ -6,3 +6,6 @@ etsi-cim-specs/
 ngsi-ld-test-suite/
 .git/
 *.log
+# Dockerfile.wasm needs only www/pkg + www/node-shim.mjs from www/
+www/node_modules/
+www/dist/

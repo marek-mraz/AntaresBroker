@@ -1,11 +1,13 @@
 name: etsi-matrix
 
-# Reusable (workflow_call only): ONE image build feeding SIX parallel cells
-# — memory, file, postgres, timescale (single broker, bus=local) plus
+# Reusable (workflow_call only): ONE image build feeding SEVEN parallel
+# cells — memory, file, postgres, timescale (single broker, bus=local),
 # postgres-nats and timescale-nats (the 5-role × 2-replica fleet behind the
 # LB, ANTARES_BUS=nats, CONTINUOUSLY rolling for the whole suite — backlog
-# 08-15b item 5). Each cell runs ALL 8 suites through the one pipeline,
-# folded into the per-cell summary tables + one bundle.
+# 08-15b item 5), plus wasm-file (the BROWSER artifact: five dockerized
+# node shims over the N4 file store — the same .wasm a page loads, MQTT
+# structurally excluded per N8). Each cell runs ALL 8 suites through the
+# one pipeline, folded into the per-cell summary tables + one bundle.
 # Callers: ci.yml (every commit) and full.yml (manual / v* tags).
 
 on:
@@ -73,6 +75,7 @@ jobs:
           - { cell: timescale, store: timescale }
           - { cell: postgres-nats, store: postgres, roles: "1" }
           - { cell: timescale-nats, store: timescale, roles: "1" }
+          - { cell: wasm-file, store: file, wasm: "1" }
     runs-on: ubuntu-latest
     # the rolling-fleet cells pay the restart wall-clock on top of the suites
     timeout-minutes: ${{ matrix.roles && 120 || 90 }}
@@ -88,17 +91,39 @@ jobs:
           git submodule update --init --depth 1
 
       - name: Load the image built once for all stores
+        if: ${{ !matrix.wasm }}
         uses: actions/download-artifact@v7
         with:
           name: antares-image
 
-      - run: docker load < antares-image.tgz
+      - if: ${{ !matrix.wasm }}
+        run: docker load < antares-image.tgz
+
+      # The wasm cell tests the BROWSER artifact, not the native image:
+      # build www/pkg here (rust-cache keeps it fast), then the pipeline
+      # runs the five shims as containers (Dockerfile.wasm, WASM_DOCKER=1).
+      - name: Rust with wasm32 target (wasm cell)
+        if: ${{ matrix.wasm }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - if: ${{ matrix.wasm }}
+        uses: Swatinem/rust-cache@v2
+      - name: Build the browser artifact + shim image (wasm cell)
+        if: ${{ matrix.wasm }}
+        run: |
+          ./dev/install-wasm-tools.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          ./dev/wasm-build.sh
+          docker build -f Dockerfile.wasm -t antares-wasm-local:latest .
 
       - name: Run every suite through the ONE pipeline
         env:
           STORE: ${{ matrix.store }}
           ROLES_SPLIT: ${{ matrix.roles || '0' }}
           ROLL_DURING_RUN: ${{ matrix.roles || '0' }}
+          WASM: ${{ matrix.wasm || '0' }}
+          WASM_DOCKER: ${{ matrix.wasm || '0' }}
           RESULTS_DIR: results/${{ matrix.cell }}
           SKIP_BUILD: "1"
           STOP_ON_ERROR: "0"
@@ -153,7 +178,7 @@ jobs:
         # Gate result captured, not enforced here — the bundle must upload
         # and the summary must render even when cells are red.
         env:
-          STORES: memory file postgres timescale postgres-nats timescale-nats
+          STORES: memory file postgres timescale postgres-nats timescale-nats wasm-file
         run: ./dev/etsi-matrix-summary.py cells || echo "RED_CELLS=$?" >> "$GITHUB_ENV"
 
       - name: Upload the ONE results bundle

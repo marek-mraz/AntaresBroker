@@ -60,11 +60,18 @@
 #                                    BROWSER artifact — five node shims
 #                                    (www/node-shim.mjs, the same .wasm a page
 #                                    loads) on 9090..9094 instead of the
-#                                    docker brokers. Forces STORE=memory
-#                                    semantics (the wasm build has no other
-#                                    backend), MQTT=0 (no MQTT sink in a
-#                                    browser build — documented N7c/N8), and
-#                                    refuses HA/ROLL (nothing to roll).
+#                                    docker brokers. STORE=memory|file only
+#                                    (file = N4 persistentWithHandle over
+#                                    node:fs — the same redb shadow OPFS
+#                                    backs in a browser), MQTT=0 (no MQTT
+#                                    sink in a browser build — documented
+#                                    N7c/N8), refuses HA/ROLL (nothing to
+#                                    roll).
+#   WASM_DOCKER=1                    (needs WASM=1) the five shims run as
+#                                    host-networked containers from
+#                                    Dockerfile.wasm — SAME www/pkg bytes,
+#                                    node:22 image — instead of bare node
+#                                    processes (the wasm-file matrix cell).
 #   BROWSER=1                        (needs WASM=1) N7b browser tier: ONE
 #                                    headless-Chromium page hosts the module
 #                                    (www/test/etsi-proxy.mjs forwards suite
@@ -79,7 +86,10 @@ cd "$(dirname "$0")/.."
 STORE="${STORE:-memory}"
 if [ "${WASM:-0}" = 1 ]; then
   [ "${HA:-0}" = 1 ] || [ "${ROLL_DURING_RUN:-0}" = 1 ] || [ "${ROLES_SPLIT:-0}" = 1 ] && { echo "WASM=1 has no HA/roll story"; exit 2; }
-  [ "$STORE" = memory ] || { echo "WASM=1 implies STORE=memory (the artifact's only backend here)"; exit 2; }
+  case "$STORE" in
+    memory | file) ;; # file = N4 persistentWithHandle over node:fs in the shim
+    *) echo "WASM=1 supports STORE=memory|file (the artifact's only backends)"; exit 2 ;;
+  esac
   export MQTT=0
 elif [ "${BROWSER:-0}" = 1 ]; then
   echo "BROWSER=1 needs WASM=1 (it is the browser tier of the wasm artifact)"; exit 2
@@ -209,9 +219,31 @@ if [ "${WASM:-0}" = 1 ]; then
   if [ "${BROWSER:-0}" = 1 ]; then
     node www/test/etsi-proxy.mjs > "$RESULTS/browser-proxy.log" 2>&1 &
     WASM_PIDS+=($!)
-  else
+  elif [ "${WASM_DOCKER:-0}" = 1 ]; then
+    # The SAME www/pkg bytes a page loads, wrapped in a node image
+    # (Dockerfile.wasm) — host-networked so the shims keep localhost
+    # reachability to the suite's mocks, exactly like the bare-node tier.
+    [ "${SKIP_BUILD:-}" = 1 ] || docker build -f Dockerfile.wasm -t antares-wasm-local:latest . \
+      || { echo "wasm shim image build failed — aborting"; exit 1; }
+    WASM_STORE_DIR="$(mktemp -d)"
     for port in 9090 9091 9092 9093 9094; do
-      node www/node-shim.mjs "$port" > "$RESULTS/shim-$port.log" 2>&1 &
+      docker run -d --name "antares-wasm-$port" --network host \
+        -e ANTARES_STORE="$STORE" -e ANTARES_FILE="/data/antares-$port.redb" \
+        -e ANTARES_SWEEP_SECS="${ANTARES_SWEEP_SECS:-2}" \
+        -e ANTARES_HOST_ALIAS="antares$((port - 9089))" \
+        -e ANTARES_PUBLIC_URL="http://localhost:$port" \
+        -v "$WASM_STORE_DIR:/data" \
+        antares-wasm-local:latest "$port" >/dev/null \
+        || { echo "shim container :$port failed to start"; exit 1; }
+    done
+  else
+    WASM_STORE_DIR="$(mktemp -d)"
+    for port in 9090 9091 9092 9093 9094; do
+      ANTARES_STORE="$STORE" ANTARES_FILE="$WASM_STORE_DIR/antares-$port.redb" \
+      ANTARES_SWEEP_SECS="${ANTARES_SWEEP_SECS:-2}" \
+      ANTARES_HOST_ALIAS="antares$((port - 9089))" \
+      ANTARES_PUBLIC_URL="http://localhost:$port" \
+        node www/node-shim.mjs "$port" > "$RESULTS/shim-$port.log" 2>&1 &
       WASM_PIDS+=($!)
     done
   fi
@@ -263,7 +295,18 @@ teardown() {
   git -C ngsi-ld-test-suite checkout -- resources/variables.py \
     resources/mqttUtils/MqttUtils.resource 2>/dev/null || true
   if [ "${WASM:-0}" = 1 ]; then
-    kill "${WASM_PIDS[@]}" 2>/dev/null || true
+    [ "${#WASM_PIDS[@]}" -gt 0 ] && kill "${WASM_PIDS[@]}" 2>/dev/null || true
+    if [ "${WASM_DOCKER:-0}" = 1 ]; then
+      for port in 9090 9091 9092 9093 9094; do
+        # crash forensics BEFORE rm — a mid-run shim death is invisible
+        # otherwise (2026-08-16: 9090 died in IOP, logs gone with the rm)
+        docker logs "antares-wasm-$port" > "$RESULTS/shim-$port.log" 2>&1 || true
+        docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} {{.State.Error}}' \
+          "antares-wasm-$port" >> "$RESULTS/shim-$port.log" 2>&1 || true
+        docker rm -f "antares-wasm-$port" >/dev/null 2>&1 || true
+      done
+    fi
+    [ -n "${WASM_STORE_DIR:-}" ] && rm -rf "$WASM_STORE_DIR"
   else
     [ "${KEEP_UP:-}" = 1 ] || "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
   fi
@@ -299,6 +342,16 @@ echo "IOP" > "$PHASE_FILE"
 if [ ! -x .venv/bin/robot ]; then
   python3 -m venv .venv
   (cd ngsi-ld-test-suite && ../.venv/bin/pip -q install -r requirements.txt)
+fi
+# Same HttpCtrl heal as etsi-run.sh: a stale editable path poisons every
+# mock-server keyword ("No keyword with name 'Start Server'", 2026-08-16).
+if ! .venv/bin/python -c "import HttpCtrl" >/dev/null 2>&1; then
+  echo "venv: vendored HttpCtrl not importable — reinstalling editable"
+  (cd ngsi-ld-test-suite && ../.venv/bin/pip -q install -r requirements.txt \
+    && ../.venv/bin/pip -q install --no-deps --force-reinstall \
+         -e ./libraries/robotframework-httpctrl)
+  .venv/bin/python -c "import HttpCtrl" \
+    || { echo "venv: HttpCtrl still broken — aborting"; exit 1; }
 fi
 ( cd ngsi-ld-test-suite/resources
   sed -i "s|^url = .*|url = 'http://localhost:9090/ngsi-ld/v1'|" variables.py

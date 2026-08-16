@@ -1,0 +1,17 @@
+# The wasm broker as a container: the SAME www/pkg bytes a browser page
+# loads (ONE artifact everywhere — browser, bare node, docker), fronted by
+# the N7a Node shim so the ETSI suite reaches it over TCP.
+#
+# Build www/pkg first: dev/wasm-build.sh. Store selection is the shim's:
+#   ANTARES_STORE=memory|file, ANTARES_FILE=<redb path> (mount /data).
+#
+#   docker build -f Dockerfile.wasm -t antares-wasm-local .
+#   docker run --network host -e ANTARES_STORE=file \
+#     -e ANTARES_FILE=/data/antares.redb -v wasmdata:/data \
+#     antares-wasm-local 9090
+FROM node:22-slim
+WORKDIR /app
+COPY www/pkg ./pkg
+COPY www/node-shim.mjs ./node-shim.mjs
+ENTRYPOINT ["node", "node-shim.mjs"]
+CMD ["9090"]

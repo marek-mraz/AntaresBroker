@@ -18,6 +18,7 @@ role-split fleet rolls continuously under the whole suite):
 [![timescale](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-timescale.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
 [![postgres-nats](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-postgres-nats.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
 [![timescale-nats](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-timescale-nats.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![wasm-file](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-wasm-file.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
 
 
 
@@ -207,15 +208,18 @@ STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # single suite/mode while 
 
 **Locally: one store mode — the one you are touching.** A dev box runs the
 cells serially, so every mode costs its own wall-clock for a signal CI
-already produces. **CI runs six cells in parallel per push**
+already produces. **CI runs seven cells in parallel per push**
 (`.github/workflows/ci.yml` → `etsi-matrix.yml`: memory, file, postgres,
-timescale single-broker, plus `postgres-nats`/`timescale-nats` — the
+timescale single-broker, `postgres-nats`/`timescale-nats` — the
 10-container role-split fleet rolling continuously under the whole suite —
-`fail-fast: false`, one image build feeding every cell) and is the
+plus `wasm-file`: the BROWSER artifact, five dockerized Node shims over
+the redb file store, serial suites + IOP with MQTT structurally excluded —
+`fail-fast: false`, one image build feeding every native cell) and is the
 authority; publication gates on every cell green. `STORE=all
 dev/etsi-local.sh` reproduces the store matrix locally when you actually
 need it; `STORE=postgres ROLES_SPLIT=1 ROLL_DURING_RUN=1 dev/etsi-pipeline.sh`
-reproduces a rolling-fleet cell.
+reproduces a rolling-fleet cell; `WASM=1 WASM_DOCKER=1 STORE=file
+dev/etsi-pipeline.sh` reproduces the wasm cell.
 
 The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
 is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same

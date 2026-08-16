@@ -25,10 +25,23 @@ check_suites_complete "$SUITE" || exit 1
 
 # venv with the suite's requirements (robotframework + vendored HttpCtrl).
 # pip runs FROM the suite dir: requirements.txt uses relative editable paths.
+# The bootstrap gate VERIFIES the vendored HttpCtrl actually imports — a venv
+# that predates a suite move keeps a working `robot` but a stale editable
+# path (easy-install.pth), and every mock-server keyword then fails with
+# "No keyword with name 'Start Server'" (seen 2026-08-16, two full runs
+# poisoned). Heal with a forced editable reinstall, not just presence checks.
 VENV="$PWD/.venv"
 if [ ! -x "$VENV/bin/robot" ]; then
   python3 -m venv "$VENV"
   (cd "$SUITE" && "$VENV/bin/pip" -q install -r requirements.txt)
+fi
+if ! "$VENV/bin/python" -c "import HttpCtrl" >/dev/null 2>&1; then
+  echo "venv: vendored HttpCtrl not importable — reinstalling editable"
+  (cd "$SUITE" && "$VENV/bin/pip" -q install -r requirements.txt \
+    && "$VENV/bin/pip" -q install --no-deps --force-reinstall \
+         -e ./libraries/robotframework-httpctrl)
+  "$VENV/bin/python" -c "import HttpCtrl" \
+    || { echo "venv: HttpCtrl still broken — aborting"; exit 1; }
 fi
 
 # Point the suite at this broker (same sed recipe as Scorpio's runner).
