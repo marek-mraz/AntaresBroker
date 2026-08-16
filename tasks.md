@@ -121,8 +121,11 @@ explicitly says "decide with the user".
 - [x] D2. examples/federation/: compose (2 brokers) + run.sh with a
       self-asserting federated query. Executed locally against a live
       broker pair: "OK: B's entity served by A". Evidence: this commit.
-- [ ] D3. `examples/subscriptions/` — HTTP callback + MQTT notification
-      variants with a tiny receiver.
+- [x] D3. examples/subscriptions/: receiver.py + run.sh (HTTP, executed
+      locally: "OK: notification received" with state=open) + mqtt-run.sh
+      and mqtt-compose.yml (MQTT execution delegated to the D6 CI job —
+      mosquitto is container-only here, same posture as the MQTT TPs).
+      Evidence: this commit.
 - [ ] D4. `examples/browser/` — the www/ demo promoted to a documented
       example: serve, create entities in-page, watch notifications.
 - [ ] D5. `examples/smart-city/` — small realistic dataset (Smart Data

@@ -1,0 +1,12 @@
+# MQTT variant: broker + mosquitto. Subscribe with an mqtt:// endpoint and
+# watch with mosquitto_sub — validated by the examples CI job (MQTT needs
+# the mosquitto container; the HTTP variant in run.sh is the local path).
+services:
+  broker:
+    image: ghcr.io/marek-mraz/antares-broker:dev
+    ports: ["9090:9090"]
+    environment: {ANTARES_EGRESS_ALLOW_PRIVATE: "true"}
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: mosquitto -c /mosquitto-no-auth.conf
+    ports: ["1883:1883"]
