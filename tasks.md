@@ -136,8 +136,13 @@ explicitly says "decide with the user".
       city questions. Executed locally: 13 free spots, 4 lights off,
       4 pm25>25, 3 containers >=70%, 16 within 500 m. Evidence: this
       commit.
-- [ ] D6. CI job `examples.yml`: every example's run script executes on
-      every release tag (gate) and weekly (drift catch).
+- [x] D6. .github/workflows/examples.yml: builds the image, runs
+      quickstart/federation/subscriptions-HTTP/subscriptions-MQTT/
+      smart-city + the browser shim (newest antares-www artifact; loud
+      warning-skip if none in retention — no silent cap). Triggers: v*
+      tags, weekly, dispatch. YAML validated; scripts themselves executed
+      locally in D1-D5. First live run happens on push (Mac-side).
+      Evidence: this commit.
 
 ## E. Versioning & release process
 

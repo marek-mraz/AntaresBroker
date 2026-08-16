@@ -1,0 +1,86 @@
+name: examples
+
+# D6: every example's run script executes against a freshly built image —
+# release gate on v* tags, weekly drift catch, and manual dispatch.
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "7 5 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples:
+    name: Run every example
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image under test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ghcr.io/marek-mraz/antares-broker:dev # the tag the examples reference
+          load: true
+          cache-from: type=gha
+
+      - name: quickstart
+        run: |
+          docker compose -f examples/quickstart/compose.yml up -d --wait
+          BROKER_URL=http://localhost:9090 examples/quickstart/seed.sh
+          docker compose -f examples/quickstart/compose.yml down
+
+      - name: federation
+        run: |
+          docker compose -f examples/federation/compose.yml up -d --wait
+          examples/federation/run.sh
+          docker compose -f examples/federation/compose.yml down
+
+      - name: subscriptions (HTTP callback)
+        # host networking so the broker can call back into the runner's receiver
+        run: |
+          docker run -d --rm --name sub-broker --network host \
+            -e ANTARES_EGRESS_ALLOW_PRIVATE=true \
+            ghcr.io/marek-mraz/antares-broker:dev
+          for i in $(seq 50); do curl -sf localhost:9090/q/health >/dev/null && break; sleep 0.2; done
+          (cd examples/subscriptions && BROKER_URL=http://localhost:9090 ./run.sh)
+          docker stop sub-broker
+
+      - name: subscriptions (MQTT)
+        run: |
+          sudo apt-get install -y -q mosquitto-clients
+          docker compose -f examples/subscriptions/mqtt-compose.yml up -d --wait
+          (cd examples/subscriptions && ./mqtt-run.sh)
+          docker compose -f examples/subscriptions/mqtt-compose.yml down
+
+      - name: smart-city
+        run: |
+          docker compose -f examples/quickstart/compose.yml up -d --wait
+          BROKER_URL=http://localhost:9090 examples/smart-city/seed.sh
+          docker compose -f examples/quickstart/compose.yml down
+
+      - name: browser (Node shim over the newest wasm artifact)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=antares-www&per_page=1" \
+               -q '.artifacts[0].id' 2>/dev/null || true)
+          if [ -z "$id" ] || [ "$id" = "null" ]; then
+            echo "::warning::browser example SKIPPED — no antares-www artifact in retention (dispatch wasm.yml to produce one)"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$id/zip" > www.zip
+          unzip -q -o www.zip -d www-artifact
+          cp -r www-artifact/pkg www/ 2>/dev/null || cp -r www-artifact/www/pkg www/
+          node www/node-shim.mjs 9090 & shim=$!
+          for i in $(seq 50); do curl -sf localhost:9090/q/health >/dev/null && break; sleep 0.2; done
+          curl -sf -o /dev/null -w 'wasm create: %{http_code}\n' -X POST \
+            localhost:9090/ngsi-ld/v1/entities -H 'Content-Type: application/ld+json' \
+            -d '{"id":"urn:ngsi-ld:Test:ci:1","type":"Test","@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+          kill $shim
