@@ -17,6 +17,11 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+/// Ceiling on tracked destinations and registrations. Both maps are keyed by
+/// client-supplied strings, so they need a bound: at the ceiling the least
+/// recently recorded entry is dropped, which costs at most a forgotten failure
+/// count for a destination nobody has touched in a while.
+const MAX_TRACKED: usize = 4096;
 /// Consecutive failures before a destination is tripped.
 const TRIP_AFTER: u32 = 5;
 /// How long a tripped destination stays open-circuit before one probe.
@@ -26,6 +31,23 @@ const COOLDOWN: Duration = Duration::from_secs(30);
 struct Breaker {
     failures: u32,
     tripped_at: Option<Instant>,
+    /// When this entry was last written — the eviction order at the ceiling.
+    touched_at: Option<Instant>,
+}
+
+/// Drop the least recently written entry once the map is at its ceiling, so a
+/// new key always has room. Called before inserting, never on lookup.
+fn evict_oldest<V>(map: &mut HashMap<String, V>, stamp: impl Fn(&V) -> Option<Instant>) {
+    while map.len() >= MAX_TRACKED {
+        let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, v)| stamp(v))
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        map.remove(&oldest);
+    }
 }
 
 /// Egress gate shared by the notification and federation paths.
@@ -71,6 +93,9 @@ impl Egress {
         if ok {
             m.remove(reg_id);
         } else {
+            if !m.contains_key(reg_id) {
+                evict_oldest(&mut m, |t: &Instant| Some(*t));
+            }
             m.insert(reg_id.to_owned(), Instant::now());
         }
     }
@@ -128,8 +153,13 @@ impl Egress {
 
     pub fn record_failure(&self, url: &str) {
         let mut map = self.breakers.lock().expect("breaker lock");
-        let b = map.entry(Self::key(url)).or_default();
+        let k = Self::key(url);
+        if !map.contains_key(&k) {
+            evict_oldest(&mut map, |b: &Breaker| b.touched_at);
+        }
+        let b = map.entry(k).or_default();
         b.failures += 1;
+        b.touched_at = Some(Instant::now());
         if b.failures >= TRIP_AFTER {
             b.tripped_at = Some(Instant::now());
         }
@@ -172,5 +202,33 @@ mod tests {
         assert!(!e.is_open("http://healthy.example:9090/notify"));
         e.record_success(url);
         assert!(!e.is_open(url), "success clears the breaker");
+    }
+
+    /// Both maps are keyed by client-supplied strings (notification endpoints,
+    /// registration ids), so neither may grow without a ceiling: a client that
+    /// points subscriptions at thousands of dead hosts must not be able to
+    /// spend the broker's memory one entry at a time.
+    #[test]
+    fn destination_maps_stay_bounded_under_distinct_keys() {
+        let e = Egress::default();
+        for i in 0..(MAX_TRACKED + 500) {
+            e.record_failure(&format!("http://dead-{i}.example:9090/notify"));
+            e.reg_record(&format!("urn:ngsi-ld:CSR:{i}"), false);
+        }
+        assert!(
+            e.breakers.lock().expect("breaker lock").len() <= MAX_TRACKED,
+            "breaker map grew past the ceiling"
+        );
+        assert!(
+            e.reg_failures.lock().expect("reg_failures lock").len() <= MAX_TRACKED,
+            "registration cooldown map grew past the ceiling"
+        );
+        // The ceiling must not cost correctness for a live destination: the
+        // most recently recorded failure is still tracked.
+        let live = format!("http://dead-{}.example:9090/notify", MAX_TRACKED + 499);
+        for _ in 0..TRIP_AFTER {
+            e.record_failure(&live);
+        }
+        assert!(e.is_open(&live), "recent destination still trips");
     }
 }
