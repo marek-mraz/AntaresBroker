@@ -60,8 +60,11 @@ explicitly says "decide with the user".
 - [x] B3. Store table prefaced with a which-mode-when guide + the two
       orthogonal switches (ANTARES_BUS local/nats, MQTT per subscription);
       links docs/operations.md. Evidence: this commit.
-- [ ] B4. Badges: CI (quick preset), full ETSI matrix (Pages), latest
-      release, license, Docker pulls. Every badge live, none aspirational.
+- [x] B4. Badges audit: ci/strict/roll-weekly + ETSI endpoint + per-cell +
+      coverage were already live; EUPL-1.2 license badge added. Deliberately
+      NOT added (would be aspirational/unsupported): release badge (no
+      release exists until E7 — add it in E7's commit) and Docker-pulls
+      (shields has no GHCR pull counter). Evidence: this commit.
 - [ ] B5. Honest comparison section vs Scorpio / Orion-LD / Stellio:
       conformance, RAM, startup, store backends, wasm. Facts only, each
       independently checkable — this section sells the broker to the
