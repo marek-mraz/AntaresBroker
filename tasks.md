@@ -34,9 +34,9 @@ explicitly says "decide with the user".
       Evidence: this commit.
 - [x] A3. `.gitignore`: ETSI-matrix-results*, results*/, .DS_Store, *.zip
       added. Evidence: this commit.
-- [ ] A4. Decide with the user: `demo/hfp-bento/` and `demo/hfp/map/`
-      (untracked, other sessions' work) — promote to `examples/` (D-section
-      quality bar applies) or move to /workspace.
+- [x] A4. demo/hfp-bento/ and demo/hfp/map/ moved to /workspace/hfp-demos/
+      (user decision 2026-08-16: keep the repo clean; examples/ is built
+      fresh per D1-D5). Evidence: this commit + clean git status.
 - [ ] A5. Root inventory check: repo root contains ONLY product files
       (Cargo.*, Dockerfile*, LICENSE, README, CHANGELOG, CONTRIBUTING,
       SECURITY, deny.toml, config dirs). `ls` screenshot in the PR/commit
