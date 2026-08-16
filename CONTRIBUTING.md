@@ -67,3 +67,10 @@ format version, Postgres migrations).
   images, binaries, wasm bundle, SBOM) publish only on a green gate.
   CHANGELOG.md follows Keep a Changelog: maintain `[Unreleased]` per
   merge; the release moves it under the version heading.
+
+## Sign-off (DCO)
+
+Contributions use the [Developer Certificate of Origin](https://developercertificate.org/):
+add `Signed-off-by: Your Name <email>` to each commit (`git commit -s`).
+No CLA — the DCO plus the EUPL-1.2 inbound=outbound rule is the whole
+agreement.

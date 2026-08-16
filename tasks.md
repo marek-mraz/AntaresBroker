@@ -195,9 +195,12 @@ explicitly says "decide with the user".
       with the canonical SPDX text (was BSD-3-Clause), Cargo.toml workspace
       license updated, deny.toml allowlists EUPL-1.2; `cargo deny check
       licenses` green. Evidence: this commit.
-- [ ] G2. CONTRIBUTING.md rewrite: how to run the suite locally (the
-      etsi-local recipe), clause-citation convention for normative code,
-      PR expectations (targeted tests + robot proof), DCO or CLA decision.
+- [x] G2. CONTRIBUTING already carried the suite recipe, clause-citation
+      convention and PR/test expectations; added in this goal run: the
+      versioning/release section (E1) and the DCO sign-off section (DCO
+      chosen over CLA — lightweight, standard for EUPL projects; flag to
+      the user if a CLA is ever wanted for relicensing power). Evidence:
+      this commit.
 - [x] G3. SECURITY.md already had the disclosure contact + posture/audit
       links; supported-versions table added (latest-release policy,
       pre-1.0 rule). Evidence: this commit.
