@@ -8,6 +8,12 @@ first tagged release will move the Unreleased section under its heading.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-16
+
+First tagged release: the ETSI-conformant broker with the full store
+ladder, NATS scale-out, federation, the wasm build — and the
+production-readiness pass (docs book, examples, gated release pipeline).
+
 ### Added
 - User documentation book (mdBook, rendered to the Pages site under
   `/docs/`): getting started, configuration reference (CI-checked against

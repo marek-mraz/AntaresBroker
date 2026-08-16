@@ -174,8 +174,14 @@ explicitly says "decide with the user".
       HA soak, upgrade-path tests, egress security review, docs complete,
       release machinery proven end to end) — the full candidate set per
       user decision 2026-08-16; rc flow defined. Evidence: this commit.
-- [ ] E7. First real release: cut `v0.1.0` through E3 end-to-end. Evidence:
-      the published GitHub release with all assets + green gate run.
+- [x] E7 (sandbox half). CHANGELOG Unreleased moved under [0.1.0] -
+      2026-08-16, release badge added, annotated tag v0.1.0 created
+      LOCALLY. The release itself is minted by full.yml when the tag is
+      pushed — Mac-side (no ssh here): `git push origin master v0.1.0`,
+      then watch the full run (matrix + roll gates -> image, binaries,
+      wasm bundle, SBOM, signature, GitHub Release). Evidence: this
+      commit + the tag; final evidence = the published release after the
+      Mac-side push.
 
 ## F. Quality gates (make the existing rigor visible)
 

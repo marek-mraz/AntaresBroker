@@ -8,6 +8,7 @@
 [![ETSI conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fcoverage-badge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/)
 [![license: EUPL-1.2](https://img.shields.io/badge/license-EUPL--1.2-blue)](LICENSE)
+[![release](https://img.shields.io/github/v/release/marek-mraz/AntaresBroker?include_prereleases)](https://github.com/marek-mraz/AntaresBroker/releases)
 
 Per-cell ETSI results, live from the latest matrix run on `master`
 (single-broker cells, plus the two `-nats` cells where the 10-container
