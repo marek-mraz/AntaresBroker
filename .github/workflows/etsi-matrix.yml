@@ -6,7 +6,7 @@ name: etsi-matrix
 #   full  — those PLUS memory, postgres-nats/timescale-nats (the 5-role ×
 #           2-replica fleet behind the LB, ANTARES_BUS=nats, CONTINUOUSLY
 #           rolling for the whole suite) and wasm-file (the BROWSER
-#           artifact: five dockerized node shims over the N4 file store —
+#           artifact: five dockerized node shims over the redb file store —
 #           the same .wasm a page loads, MQTT structurally excluded per
 #           N8). Runs every 3 days (etsi-full.yml), on v* tags (full.yml)
 #           and on manual dispatch.

@@ -1,9 +1,9 @@
-# Postgres primary + streaming replica with operator-managed failover (§10:
-# "Patroni or CloudNativePG"). Requires the CNPG operator installed:
+# Postgres primary + streaming replica with operator-managed failover
+# ("Patroni or CloudNativePG"). Requires the CNPG operator installed:
 #   kubectl apply --server-side -f \
 #     https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.24/releases/cnpg-1.24.1.yaml
 # The broker's ANTARES_DATABASE_URL points at the -rw Service CNPG creates
-# (antares-pg-rw.antares.svc); reads may use -ro (§15.3 read-replica lever).
+# (antares-pg-rw.antares.svc); reads may use -ro (read-replica lever).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -22,9 +22,9 @@ spec:
     size: 20Gi
   resources:
     requests: { memory: 2Gi, cpu: 500m }
-    limits: { memory: 4Gi } # §2.2-shaped; scale with the deployment
+    limits: { memory: 4Gi } # scale with the deployment
   postgresql:
     parameters:
       shared_buffers: 1GB
       work_mem: 16MB
-      # entity write path stays synchronous_commit=on (§10) — the default.
+      # entity write path stays synchronous_commit=on — the default.

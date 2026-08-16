@@ -1,4 +1,4 @@
-# Reference Kubernetes manifests (tasks.md K5, §10)
+# Reference Kubernetes manifests
 
 The deployable shapes of the K-section HA table, with the update strategy the
 store mode DICTATES baked in — not chosen per deployment:
@@ -6,8 +6,8 @@ store mode DICTATES baked in — not chosen per deployment:
 | File | What | Strategy | Why |
 |---|---|---|---|
 | `namespace.yaml` | the `antares` namespace | — | — |
-| `nats.yaml` | 3-node JetStream cluster (StatefulSet) | RollingUpdate | R3 stream replication survives one node (§10); brokers set `ANTARES_NATS_REPLICAS=3` |
-| `postgres-cnpg.yaml` | CloudNativePG `Cluster`, primary + streaming replica | operator-managed | §10: Patroni or CNPG for failover; requires the [CNPG operator](https://cloudnative-pg.io) installed first |
+| `nats.yaml` | 3-node JetStream cluster (StatefulSet) | RollingUpdate | R3 stream replication survives one node; brokers set `ANTARES_NATS_REPLICAS=3` |
+| `postgres-cnpg.yaml` | CloudNativePG `Cluster`, primary + streaming replica | operator-managed | Patroni or CNPG for failover; requires the [CNPG operator](https://cloudnative-pg.io) installed first |
 | `postgres-dev.yaml` | ONE plain PostGIS pod | Recreate | kind/CI smoke only — no HA, clearly labelled |
 | `broker-file.yaml` | `file`-mode broker, 1 replica + PVC | **Recreate, hard-coded** | redb takes an exclusive file lock (K10): a rolling update would deadlock on the volume — the second pod dies on `Database already open` |
 | `broker-postgres.yaml` | `postgres`-mode: 2× api + 2× worker (matcher,notifier,temporal) over NATS | **RollingUpdate** | stateless pods, shared store, shared durables — the K3-proven roll |
@@ -34,5 +34,5 @@ fail over.
 ## Not here on purpose
 
 Ingress/LB flavor, TLS termination, PEP/reverse-proxy policy: deployment
-territory (§16 posture — authn/rate limiting live in front of the broker,
+territory (authn/rate limiting live in front of the broker,
 not in it).

@@ -1,5 +1,5 @@
-# cargo-deny: licenses + advisories. TSL-licensed code must NEVER be linked
-# (TimescaleDB is talked to over SQL only — see docs/deep-analysis.md §9.5).
+# cargo-deny: licenses, advisories, bans, sources. TSL-licensed code must
+# NEVER be linked (TimescaleDB is talked to over SQL only).
 [licenses]
 allow = [
     "MIT",
@@ -27,7 +27,7 @@ ignore = [
     # rustls-webpki 0.102.x (no fixed 0.102 exists): rumqttc pins ^0.102.8
     # DIRECTLY on every release and on upstream main (verified 2026-08-07) —
     # a 0.25 bump does NOT remove it, and use-rustls on 0.25 additionally
-    # drags in aws-lc-sys (C/cmake, against §6.1 rustls+ring-only; a future
+    # drags in aws-lc-sys (C/cmake, against the rustls+ring-only rule; a future
     # bump must use use-rustls-no-provider + ring). Scope: mqtts notification
     # egress server-cert checks only; the CRL-parsing panic needs CRLs
     # configured (rumqttc configures none) and the name-constraint bypasses
@@ -38,3 +38,11 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
     { id = "RUSTSEC-2026-0104", reason = "rumqttc pins webpki 0.102 on all versions; mqtts egress only — see comment" },
 ]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

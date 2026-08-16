@@ -1,13 +1,14 @@
-# `postgres`-mode reference shape (§9/§10): stateless pods, RollingUpdate,
+# `postgres`-mode reference shape: stateless pods, RollingUpdate,
 # roles split — 2× api (HTTP, produces outbox + drains it) and 2× worker
 # (matcher,notifier,temporal — shared durables load-balance, interval
 # firings single-winner by row-lock claim). ANTARES_BUS=nats is what makes N
-# replicas ONE broker (F10); ANTARES_NATS_REPLICAS=3 puts the streams at R3
-# on the 3-node cluster (§10).
+# replicas ONE broker; ANTARES_NATS_REPLICAS=3 puts the streams at R3
+# on the 3-node cluster.
 #
-# ANTARES_DATABASE_URL points at CNPG's -rw service (postgres-cnpg.yaml); the
-# kind smoke overrides it to the postgres-dev service via kustomize-free env
-# (CI patches with sed — one line, no tooling).
+# The DSN lives in the antares-db Secret below and points at CNPG's -rw
+# service (postgres-cnpg.yaml); the kind smoke rewrites the host with sed —
+# one line, no tooling. Production replaces the Secret (or points at CNPG's
+# generated antares-pg-app credentials) instead of editing pod specs.
 apiVersion: v1
 kind: Service
 metadata:
@@ -17,6 +18,17 @@ spec:
   selector: { app: antares, role: api }
   ports:
     - { port: 9090 }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: antares-db
+  namespace: antares
+type: Opaque
+stringData:
+  # Dev-grade credentials for the kind smoke; production MUST replace this
+  # Secret with a real one (non-superuser role, see the RLS note below).
+  url: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,7 +51,7 @@ spec:
       # check. Belt at main.rs skips the injected shapes; this is braces.
       enableServiceLinks: false
       terminationGracePeriodSeconds: 30 # K1: > drain delay + deadline
-      # §16.5 runtime hardening: non-root (image is uid 65532), read-only
+      # Runtime hardening: non-root (image is uid 65532), read-only
       # rootfs (postgres mode writes nothing there; /tmp is a tmpfs), all caps
       # dropped, no privilege escalation.
       securityContext:
@@ -62,15 +74,16 @@ spec:
             - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
-            # §16.1 PRODUCTION: point this at a NON-superuser, non-BYPASSRLS role
+            # PRODUCTION: point the Secret at a NON-superuser, non-BYPASSRLS role
             # (e.g. antares_app) so the RLS tenant-isolation backstop is enforced,
             # and set ANTARES_REQUIRE_RLS=1 to refuse boot otherwise. Migrations
             # need a privileged role — run them as a separate bootstrap step, then
             # run the broker as antares_app (granted DML on the tenant tables).
-            # Left as the superuser DSN here only so the CI kind-smoke (superuser
-            # postgres-dev) boots; a real deployment MUST change both.
+            # The Secret above carries dev credentials only so the CI kind-smoke
+            # (superuser postgres-dev) boots; a real deployment MUST change both.
             - name: ANTARES_DATABASE_URL
-              value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+              valueFrom:
+                secretKeyRef: { name: antares-db, key: url }
             # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
@@ -87,7 +100,7 @@ spec:
             periodSeconds: 10
           resources:
             requests: { memory: 128Mi, cpu: 100m }
-            limits: { memory: 350Mi } # the CI RSS gate's ceiling (R1/R2)
+            limits: { memory: 350Mi } # the CI RSS gate's ceiling
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -129,10 +142,11 @@ spec:
             - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
-            # §16.1 PRODUCTION: use a non-superuser role + ANTARES_REQUIRE_RLS=1
+            # PRODUCTION: use a non-superuser role + ANTARES_REQUIRE_RLS=1
             # (see the api Deployment above).
             - name: ANTARES_DATABASE_URL
-              value: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
+              valueFrom:
+                secretKeyRef: { name: antares-db, key: url }
             # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }

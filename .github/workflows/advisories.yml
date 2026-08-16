@@ -1,6 +1,6 @@
 name: advisories
 
-# F4: weekly cargo-deny advisories sweep; a new advisory auto-files an
+# Weekly cargo-deny sweep; a new advisory auto-files an
 # issue instead of silently reddening a badge nobody watches.
 on:
   schedule:
@@ -24,7 +24,7 @@ jobs:
           mkdir -p "$HOME/.cargo/bin"
           curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
             | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
-          "$HOME/.cargo/bin/cargo-deny" --log-level warn check advisories 2>&1 | tee deny.log
+          "$HOME/.cargo/bin/cargo-deny" --log-level warn check all 2>&1 | tee deny.log
           exit "${PIPESTATUS[0]}"
       - name: File an issue on failure
         if: failure()

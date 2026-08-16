@@ -1,10 +1,10 @@
 name: full
 
 # The EVERYTHING pipeline — manual dispatch, or automatically on a v* tag:
-# workspace tests, the browser/wasm artifact + N7a Node tier, the reusable
+# workspace tests, the browser/wasm artifact + wasm Node tier, the reusable
 # cell matrix (FULL preset: all seven cells, each already serial-all-suites
 # against one stack — the former etsi-serial job duplicated this and was
-# removed 2026-08-16), K8 roll-under-suite and the k8s manifest smoke. A
+# removed 2026-08-16), the roll-under-suite drill and the k8s manifest smoke. A
 # green v* tag publishes the release image (:<version> + :latest); manual
 # dispatches publish nothing.
 
@@ -28,8 +28,8 @@ jobs:
     uses: ./.github/workflows/workspace.yml
 
   wasm:
-    # §N: the browser artifact. Build (size budget enforced by the script,
-    # N5), then prove it in BOTH runtimes (dev/wasm-test.sh, N6/N7a): the
+    # The browser artifact. Build (size budget enforced by the script),
+    # then prove it in BOTH runtimes (dev/wasm-test.sh): the
     # Node shim does a create + a real-HTTP notification; headless Chromium
     # runs the React playground — OPFS worker broker, entity, subscription,
     # in-page notification, second tab, federation. Same scripts as local
@@ -85,11 +85,11 @@ jobs:
       actions: write # the summary job deletes the merged per-cell artifacts
 
   k8s-manifests:
-    # K5: lint every reference manifest, then kind-deploy the self-contained
+    # Lint every reference manifest, then kind-deploy the self-contained
     # subset (nats + postgres-dev + both broker shapes) with the image the
     # build job produced. `rollout status` green == readiness probes
     # (/q/health) answered. The CNPG Cluster is lint-only here — the operator
-    # belongs to a real cluster (🖥, tasks.md K5/K11).
+    # belongs to a real cluster.
     name: K8s reference manifests
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -137,13 +137,13 @@ jobs:
   # between-suite reset, which is precisely what serial proved.
 
   etsi-wasm:
-    # N7a: the Node tier — the serial ETSI suites against the BROWSER
+    # The Node tier — the serial ETSI suites against the BROWSER
     # artifact: five node shims serving the same .wasm a page loads
     # (WASM=1 in the one pipeline). MQTT stays excluded (no MQTT sink in a
-    # browser build — N7c/N8 document it) and there is no RSS gate (N5's
-    # size budget is the artifact's own gate). Serial-tier cadence: tags,
+    # browser build) and there is no RSS gate (the wasm size budget is the
+    # artifact's own gate). Serial-tier cadence: tags,
     # nightly, manual.
-    name: N7a wasm Node tier (serial suites)
+    name: wasm Node tier (serial suites)
     needs: [workspace, wasm]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
@@ -192,15 +192,15 @@ jobs:
           [ "$gate" = PASS ]
 
   etsi-roll:
-    # K8: the ETSI-during-roll gate. The FULL suite runs through the K2
+    # The ETSI-during-roll gate. The FULL suite runs through the
     # haproxy while dev/rolling-update.sh rolls the two broker1 replicas
     # underneath it in a loop, postgres mode (shared state + bus=nats — the
-    # only rung where a roll is defined, see the K-table). The suite has no
+    # only rung where a roll is defined). The suite has no
     # retries and asserts exact single responses, which makes it a brutally
-    # strict drain client: ANY red TP here is a real K1 drain bug, never
+    # strict drain client: ANY red TP here is a real drain bug, never
     # flake. Runs with the serial tier (nightly / tags / dispatch) — it is
     # a full-suite wall-clock cost, not a per-commit one.
-    name: K8 roll-under-suite (postgres)
+    name: roll-under-suite (postgres)
     needs: [workspace, matrix]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -288,7 +288,7 @@ jobs:
   publish-release:
     # A version tag is the only thing that mints a production image, and it
     # needs ALL THREE gates: the store matrix, the serial all-suites run,
-    # and the K8 roll-under-suite drill.
+    # and the roll-under-suite drill.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()
     needs: [matrix, etsi-roll, build-arm]
@@ -325,7 +325,7 @@ jobs:
           echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (multi-arch amd64+arm64; amd64 = the tested bytes, matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"
 
   release-binaries:
-    # E3: static musl binaries per arch — release assets.
+    # Static musl binaries per arch — release assets.
     name: Release binary (${{ matrix.target }})
     if: startsWith(github.ref, 'refs/tags/v')
     needs: workspace
@@ -357,7 +357,7 @@ jobs:
           path: antares-*.tar.gz
 
   github-release:
-    # E3/E4: the GitHub Release — gated on the SAME green the image needed,
+    # The GitHub Release — gated on the SAME green the image needed,
     # with binaries, the wasm bundle, an SBOM, and a signed image.
     name: GitHub Release (assets + SBOM + signature)
     if: startsWith(github.ref, 'refs/tags/v') && success()

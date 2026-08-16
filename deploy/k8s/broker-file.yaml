@@ -1,5 +1,5 @@
 # `file`-mode broker: ONE replica, strategy Recreate — HARD-CODED, not a
-# preference (tasks.md K-table): redb takes an exclusive file lock per volume
+# preference: redb takes an exclusive file lock per volume
 # (K10 proved the refusal), so a RollingUpdate would spawn a second pod that
 # dies on "Database already open. Cannot acquire lock." forever. The restart
 # gap is the price of this rung and it is small: rebuild measured at 257k

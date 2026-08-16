@@ -38,7 +38,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U antares"
           --health-interval 5s --health-timeout 3s --health-retries 20
-      # D5: the store integration tests run against BOTH temporal modes —
+      # The store integration tests run against BOTH temporal modes —
       # this one carries the timescaledb extension (plus PostGIS).
       timescaledb:
         image: timescale/timescaledb-ha:pg17
@@ -71,7 +71,7 @@ jobs:
           printf 'allow_anonymous true\nlistener 1883\n' | sudo tee /etc/mosquitto/conf.d/antares-e2e.conf
           sudo systemctl restart mosquitto
           echo "ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883" >> "$GITHUB_ENV"
-      # Live NATS (JetStream) for the F9 bus tests + the 2-instance roles e2e.
+      # Live NATS (JetStream) for the bus tests + the 2-instance roles e2e.
       # A `docker run` step, not a service: services cannot pass the `-js`
       # command argument the JetStream engine needs.
       - name: Start NATS (JetStream) for the bus tests
@@ -81,11 +81,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # feature matrix (§9.5): no defaults + all features
+      # feature matrix: no defaults + all features
       - run: cargo test --workspace --no-default-features
       - run: cargo test --workspace --all-features
-      # D5: same store tests, timescale temporal mode (hypertable DDL branch,
-      # compression-vs-RLS ordering, D3 detection).
+      # Same store tests, timescale temporal mode (hypertable DDL branch,
+      # compression-vs-RLS ordering, backend detection).
       - name: Store tests against the timescale temporal mode
         env:
           ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15433/antares
@@ -95,7 +95,7 @@ jobs:
           PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
           cargo test -p antares-sql
-      # D4/§16.5: license gate (nothing links TSL — Timescale is talked to
+      # License gate (nothing links TSL — Timescale is talked to
       # over SQL only) + advisories. Not the cargo-deny-action: its docker
       # image ships an x86_64 binary — Exec format error on this arm runner.
       - name: cargo-deny (licenses + advisories)
@@ -104,27 +104,31 @@ jobs:
           curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
             | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
           cargo deny --log-level warn check licenses advisories
-      # E9g: the ETSI resource sampler + its sample↔TP join fail silently when
+      # The ETSI resource sampler + its sample↔TP join fail silently when
       # broken (an empty column reads as "nothing happened") — check them here.
       - name: ETSI sampling self-check
         run: python3 dev/etsi-selftest.py
-      # §0.3 ledger integrity: a clause file that stops parsing silently
+      # Ledger integrity: a clause file that stops parsing silently
       # drops out of every count — make that (and status typos, robot drift)
       # a red build instead.
       - name: conformance ledger check
         run: pip install --quiet pyyaml && python3 dev/spec.py check
 
-      - name: Env-var docs check (C3)
+      - name: Env-var docs check
         run: ./dev/check-env-docs.sh
-      # SQL-injection guard (§16.2): no string-built queries outside antares-sql
-      - name: no format! into SQL outside the compiler
+      # SQL-injection guard: dynamically assembled SQL (AssertSqlSafe) is
+      # allowed only inside the antares-sql store/compiler modules.
+      - name: no dynamic SQL outside the compiler
         run: |
-          ! grep -rn 'sqlx::query(&format!' crates/ --include='*.rs' \
+          # the pattern must exist where expected (guard self-test) …
+          grep -rqn 'AssertSqlSafe' crates/antares-sql/src/
+          # … and nowhere else
+          ! grep -rn 'AssertSqlSafe\|sqlx::query(&format!' crates/ --include='*.rs' \
             | grep -v 'crates/antares-sql/'
 
 
   msrv:
-    # F2: the declared rust-version stays PROVEN as stable moves on.
+    # The declared rust-version stays PROVEN as stable moves on.
     name: MSRV check (1.97)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30

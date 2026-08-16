@@ -1,19 +1,19 @@
 # Multi-stage: build on the target arch (arm64/amd64 both fine), run distroless
-# (non-root, read-only rootfs friendly — deep-analysis §16.5).
+# (non-root, read-only rootfs friendly).
 #
 # cargo-chef splits the build so the ~400 dependency crates compile in their
 # own layer, keyed by Cargo.lock via recipe.json — a source-only commit reuses
 # it and rebuilds just the antares-* crates. CI persists the layer with a
 # BuildKit gha cache (etsi-matrix.yml), cutting the image build ~10 min → ~3.
-FROM rust:1-slim AS chef
+FROM rust:1-slim@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS chef
 WORKDIR /src
-# jemalloc (§2.1 allocator) ships C sources that configure+make themselves;
+# jemalloc ships C sources that configure+make themselves;
 # rust:1-slim carries a linker but no make, so tikv-jemalloc-sys' build script
 # dies with a bare "No such file or directory". One package, not a toolchain.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make \
  && rm -rf /var/lib/apt/lists/*
-# §16.5: release binaries embed their dependency list (SBOM) via
+# Release binaries embed their dependency list (SBOM) via
 # cargo-auditable — `cargo audit bin /antares` can then verify a shipped
 # broker against advisories with no source tree at hand. Installed (with chef)
 # BEFORE any source COPY so the layer caches across source changes.
@@ -32,14 +32,14 @@ COPY --from=planner /src/recipe.json recipe.json
 # Cook scoped to the shipped package so feature unification matches the real
 # build below — a workspace-wide cook can resolve different features and
 # quietly recompile deps anyway.
-RUN cargo chef cook --release -p antares-broker --recipe-path recipe.json
+RUN cargo chef cook --release -p antares-broker --recipe-path recipe.json --locked
 COPY . .
-RUN cargo auditable build --release -p antares-broker \
+RUN cargo auditable build --release --locked -p antares-broker \
  && mkdir /data-init
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:adcd20c7b4c988b73cbfbddb26d2eee574571e6d7c9ffea29b3821e0690efb77
 COPY --from=build /src/target/release/antares /antares
-# §6.1 jemalloc decay tuning, measured (2026-08-07): without a background
+# jemalloc decay tuning, measured (2026-08-07): without a background
 # thread, freed pages only purge on ALLOCATION activity — an idle broker
 # after a burst parked ~48 MiB of dead pages forever; with it, RSS decays
 # back toward live×1.2 within seconds. Both env spellings: tikv-jemalloc
@@ -48,7 +48,7 @@ ENV MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_deca
     _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
 # Pre-create /data owned by nonroot (65532): a fresh named volume inherits the
 # mountpoint's ownership, so `file` mode can write without running as root —
-# distroless has no shell to chown at runtime (§16.5 posture).
+# distroless has no shell to chown at runtime.
 COPY --from=build --chown=65532:65532 /data-init /data
 EXPOSE 9090
 ENTRYPOINT ["/antares"]

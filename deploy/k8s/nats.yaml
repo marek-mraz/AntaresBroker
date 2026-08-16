@@ -1,4 +1,4 @@
-# 3-node JetStream cluster (§10): R3 stream replication set by the BROKER
+# 3-node JetStream cluster: R3 stream replication set by the BROKER
 # (ANTARES_NATS_REPLICAS=3 — stream replication is a client-side setting).
 # Memory-light by design (~100 MB/node at target scale); limits per R1/R2.
 apiVersion: v1

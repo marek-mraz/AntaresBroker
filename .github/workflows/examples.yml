@@ -1,6 +1,6 @@
 name: examples
 
-# D6: every example's run script executes against a freshly built image —
+# Every example's run script executes against a freshly built image —
 # release gate on v* tags, weekly drift catch, and manual dispatch.
 on:
   push:

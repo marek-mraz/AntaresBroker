@@ -8,7 +8,7 @@ name: etsi-full
 # 3 days + on demand. Its ETSI-matrix-results bundle is what the Pages
 # report + the seven README badges render (pages.yml listens to THIS
 # workflow, not ci) — so the public numbers always describe a full run.
-# The K1/K3 haproxy rolling-update drill stays in roll-weekly.yml; v* tags
+# The haproxy rolling-update drill stays in roll-weekly.yml; v* tags
 # run the same full preset via full.yml.
 
 on:

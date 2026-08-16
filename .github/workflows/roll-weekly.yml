@@ -1,8 +1,7 @@
 name: roll-weekly
 
-# The rolling-update proof on a CADENCE, not only on v* tags (tasks.md
-# backlog 08-14 item 5): the K8 roll-under-suite job — the FULL ETSI suite
-# through the K2 haproxy while dev/rolling-update.sh rolls the two broker1
+# The rolling-update proof on a CADENCE, not only on v* tags: the
+# roll-under-suite job — the FULL ETSI suite through the haproxy while dev/rolling-update.sh rolls the two broker1
 # replicas underneath it, postgres mode (shared state + bus=nats) — runs
 # weekly so the "zero-downtime rolling update" README claim is continuously
 # proven, and its badge goes red the week it stops being true. Same steps as
@@ -53,9 +52,9 @@ jobs:
           retention-days: 3
 
   etsi-roll:
-    # K8: identical to full.yml's etsi-roll — the suite has no retries and
-    # asserts exact single responses, so ANY red TP is a real K1 drain bug.
-    name: K8 roll-under-suite (postgres)
+    # Identical to full.yml's etsi-roll — the suite has no retries and
+    # asserts exact single responses, so ANY red TP is a real drain bug.
+    name: roll-under-suite (postgres)
     needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 90
