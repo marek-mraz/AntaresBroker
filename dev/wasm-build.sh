@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# N5: build the browser artifact — cargo (wasm-release profile) → wasm-bindgen
+# Build the browser artifact — cargo (wasm-release profile) → wasm-bindgen
 # (--target web: one ES module usable from a page, a module Service Worker,
 # and Node ≥18) → wasm-opt -Oz → size gate.
 #
-# Budgets (tasks.md N5): raw .wasm ≤ 8 MB, gzip -9 ≤ 3 MB. The script FAILS
+# Budgets: raw .wasm ≤ 8 MB, gzip -9 ≤ 3 MB. The script FAILS
 # when a budget is blown, and prints sizes for the CI summary either way.
 #
 # Tools: wasm-bindgen must match Cargo.lock's wasm-bindgen version; wasm-opt

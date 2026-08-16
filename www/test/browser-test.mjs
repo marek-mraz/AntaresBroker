@@ -189,7 +189,7 @@ try {
   console.log(`temporal chart renders (${bars} Δ bars)`);
 
   if (mode === "opfs-worker") {
-    // N4b: a second tab must get the exclusive-owner refusal and fall back —
+    // A second tab must get the exclusive-owner refusal and fall back —
     // never a second writer on the same file.
     const page2 = await ctx.newPage();
     page2.on("pageerror", (e) => console.log("[page2 pageerror]", e.message));

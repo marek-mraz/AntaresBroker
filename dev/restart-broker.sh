@@ -10,7 +10,7 @@ for p in $(ls /proc | grep -E '^[0-9]+$'); do
   esac
 done
 sleep 0.5
-LOG="${BROKER_LOG:-/tmp/claude-1001/-workspace/852fe699-c9d6-46e0-9cc3-8f73602b9cbc/scratchpad/broker.log}"
+LOG="${BROKER_LOG:-/tmp/broker.log}"
 nohup ./target/release/antares > "$LOG" 2>&1 &
 sleep 0.7
 curl -sf localhost:9090/q/health >/dev/null && echo "broker up"

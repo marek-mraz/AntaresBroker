@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# N6/N7a: prove the built wasm artifact in BOTH runtimes — the Node shim
+# Prove the built wasm artifact in BOTH runtimes — the Node shim
 # (health + entity round-trip + a real HTTP notification) and headless
 # Chromium (React playground: OPFS worker broker, demo board, in-page
 # notification, second tab, federation). Needs www/pkg (dev/wasm-build.sh),
 # npm deps in www/, a built www/dist, and a playwright chromium.
-# One script, local and CI (§E rule).
+# One script, local and CI (one-pipeline rule).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -39,7 +39,7 @@ done
 echo "node tier OK (create 201, notification sent over real HTTP)"
 kill $SHIM $RECV 2>/dev/null || true
 
-# --- File-store tier (N4 persistence outside the browser) -----------------
+# --- File-store tier (persistence outside the browser) --------------------
 # ANTARES_STORE=file: the SAME .wasm over an fs-backed sync-access handle
 # (the Node stand-in for OPFS). Proof is restart survival; the negative half
 # proves memory mode does NOT survive — otherwise this tier tests nothing.

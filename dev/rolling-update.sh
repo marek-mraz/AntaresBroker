@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Rolling update across the HA pair (tasks.md K3) — one instance at a time,
+# Rolling update across the HA pair — one instance at a time,
 # using whatever antares-local:latest currently is (i.e. the image the
-# pipeline just built). Same script locally and in CI (the §E one-pipeline
+# pipeline just built). Same script locally and in CI (the one-pipeline
 # rule).
 #
 # Precondition: the HA stack is up —
 #   docker compose -f compose-files/docker-compose-etsi.yml \
 #                  -f compose-files/docker-compose-ha.yml [--profile db] up -d
 #
-# ROLES_SPLIT=1 (backlog 08-15b item 3): roll the 10-pod role fleet
+# ROLES_SPLIT=1: roll the 10-pod role fleet
 # (docker-compose-roles.yml) instead of the HA pair, in role-group order —
 # api, matcher, notifier, temporal, registry. The invariant is per GROUP:
 # the peer of the same role must be healthy before its twin goes down, so no
 # role ever has 0 live pods. api pods are judged by /q/health + the LB rise
-# window (the K1 contract); workers serve ops endpoints only (P0-4) and are
+# window (the drain contract); workers serve ops endpoints only and are
 # judged by /q/ready.
 #
-# Per instance the sequence is exactly the K1 contract:
+# Per instance the sequence is exactly the drain contract:
 #   docker compose stop  -> SIGTERM -> broker flips /q/health to 503, haproxy
 #   ejects it within 400 ms, in-flight requests finish, process exits 0
 #   (stop_grace_period 30 s > drain delay + deadline, set in the overlay)
@@ -36,7 +36,7 @@ STORE="${STORE:-memory}"
 PROFILE=()
 case "$STORE" in
   postgres|timescale) PROFILE=(--profile db) ;;
-  file) echo "file mode cannot roll: redb allows ONE process per volume (K10). Use Recreate."; exit 1 ;;
+  file) echo "file mode cannot roll: redb allows ONE process per volume. Use Recreate."; exit 1 ;;
 esac
 
 if [ "${ROLES_SPLIT:-0}" = 1 ]; then
@@ -49,7 +49,7 @@ if [ "${ROLES_SPLIT:-0}" = 1 ]; then
 else
   OVERLAY=compose-files/docker-compose-ha.yml
   DEFAULT_SERVICES="antares1 antares1b"
-  # F10: `up -d` re-resolves the overlay's ${HA_BUS} — pin it to the mode's
+  # `up -d` re-resolves the overlay's ${HA_BUS} — pin it to the mode's
   # correct bus here, or a memory-mode roll would recreate brokers with
   # bus=nats and they would refuse to boot (per-process state).
   case "$STORE" in
@@ -81,7 +81,7 @@ group_of() {
 }
 
 # api pods carry the NGSI-LD surface -> /q/health; workers are ops-only
-# (P0-4) -> /q/ready (which also gates on store/bus, the stronger probe).
+# -> /q/ready (which also gates on store/bus, the stronger probe).
 probe_of() {
   case "$(group_of "$1")" in api) echo /q/health;; *) echo /q/ready;; esac
 }
@@ -115,7 +115,7 @@ roll_one() { # $1=service — its group peers must be healthy before it goes dow
   done
 
   t0=$SECONDS
-  "${COMPOSE[@]}" stop "$svc"          # SIGTERM -> K1 drain -> clean exit
+  "${COMPOSE[@]}" stop "$svc"          # SIGTERM -> drain -> clean exit
   "${COMPOSE[@]}" up -d "$svc"         # recreate on the current image
   wait_healthy "$svc" 60 || return 1
   # api only: haproxy needs `rise 2` consecutive passing checks (200 ms apart)

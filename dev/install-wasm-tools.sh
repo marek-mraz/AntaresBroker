@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# N5: fetch the wasm toolchain — wasm-bindgen-cli EXACTLY matching the
+# Fetch the wasm toolchain — wasm-bindgen-cli EXACTLY matching the
 # Cargo.lock wasm-bindgen version (the CLI refuses a mismatch at bindgen
 # time), plus binaryen's wasm-opt. Prebuilt binaries into ~/.local/bin.
-# Used by CI and this dev box identically (§E one-pipeline rule).
+# Used by CI and this dev box identically (one-pipeline rule).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

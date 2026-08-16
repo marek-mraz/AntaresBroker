@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== workspace tests ==="
-# -j 2: default parallelism OOM-kills the linker on dev boxes (claude.md §2)
+# -j 2: default parallelism OOM-kills the linker on dev boxes
 cargo test --workspace -j 2
 
 case "${STORE:-memory}" in

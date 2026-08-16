@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# K7 — SIGTERM drill (tasks.md): roll every HA instance while the K6
+# SIGTERM drill: roll every HA instance while the
 # continuity harness hammers the LB. Expected: ZERO failed requests, zero
-# lost writes, notifications at-least-once. This is the only real test of the
-# K1 drain — a drain bug shows up here and nowhere else.
+# lost writes, notifications at-least-once. This is the only real test of
+# the drain — a drain bug shows up here and nowhere else.
 #
 # Precondition: the HA stack is up (docker-compose-etsi.yml + docker-compose-ha.yml).
-#   STORE=memory|postgres|timescale   (file cannot roll — K10 lock; K3 refuses)
+#   STORE=memory|postgres|timescale   (file cannot roll — exclusive redb
+#                                      lock; rolling-update.sh refuses)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,4 +35,4 @@ sleep 3                      # traffic flowing before the chaos starts
 STORE="${STORE:-memory}" bash dev/rolling-update.sh
 
 wait "$K6_PID"               # k6 exits 1 on any violation
-echo "K7 drill PASS: rolled every instance under load with zero failures"
+echo "SIGTERM drill PASS: rolled every instance under load with zero failures"

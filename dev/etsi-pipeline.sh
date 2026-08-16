@@ -12,29 +12,29 @@
 #   KEEP_UP=1                        leave the stack running after the run
 #   MEM_LIMIT_MB=350                 per-broker peak-RSS gate (Scorpio's limit)
 #   CALLBACK_HOST=localhost          host the brokers POST notifications to
-#   MQTT=1                           include the 058_* MQTT TPs (G4); 0 skips
+#   MQTT=1                           include the 058_* MQTT TPs; 0 skips
 #                                    them on boxes where docker can't run
 #   SUITES=                          comma list filtering which suites run
-#                                    (E9a; substring match on the serial suite
+#                                    (substring match on the serial suite
 #                                    names, "IOP" selects the IOP step).
 #                                    Default: everything. Example:
 #                                    STORE=file SUITES=Consumption …
 #   RESULTS_DIR=results/$STORE       where this invocation writes its results
 #                                    (dev/etsi-local.sh gives each serial
 #                                    matrix cell its own dir)
-#   SAMPLE_INTERVAL=1                seconds between CPU/RSS samples (E9g)
-#   HA=1                             layer the K2 overlay: haproxy owns 9090,
+#   SAMPLE_INTERVAL=1                seconds between CPU/RSS samples
+#   HA=1                             layer the HA overlay: haproxy owns 9090,
 #                                    two broker1 replicas behind it — the
 #                                    suite talks to the LB and cannot tell
-#   ROLL_DURING_RUN=1                (needs HA=1 or ROLES_SPLIT=1) K8: roll
+#   ROLL_DURING_RUN=1                (needs HA=1 or ROLES_SPLIT=1) roll
 #                                    the replicas in a loop for the whole run
 #                                    via dev/rolling-update.sh. The suite has
 #                                    no retries and asserts exact single
-#                                    responses, so ANY failure is a real K1
+#                                    responses, so ANY failure is a real
 #                                    drain bug, not flake. postgres/timescale
 #                                    only (shared state makes replicas one
-#                                    broker; K10: file cannot roll)
-#   ROLES_SPLIT=1                    (backlog 08-15b item 4) layer the TRUE
+#                                    broker; file cannot roll — exclusive lock)
+#   ROLES_SPLIT=1                    layer the TRUE
 #                                    role-split overlay instead of the HA
 #                                    pair: 5 roles x 2 replicas = 10 broker
 #                                    containers behind the LB, bus=nats, one
@@ -56,30 +56,29 @@
 #   run-summary.md                  the human view incl. the top-10 spike
 #                                   tables (which test caused the peak)
 #   gate-status.txt                 PASS/FAIL — suites green AND RSS ≤ limit
-#   WASM=1                           N7a Node tier: the suite runs against the
+#   WASM=1                           Node tier: the suite runs against the
 #                                    BROWSER artifact — five node shims
 #                                    (www/node-shim.mjs, the same .wasm a page
 #                                    loads) on 9090..9094 instead of the
 #                                    docker brokers. STORE=memory|file only
-#                                    (file = N4 persistentWithHandle over
+#                                    (file = persistentWithHandle over
 #                                    node:fs — the same redb shadow OPFS
 #                                    backs in a browser), MQTT=0 (no MQTT
-#                                    sink in a browser build — documented
-#                                    N7c/N8), refuses HA/ROLL (nothing to
-#                                    roll).
+#                                    sink in a browser build), refuses
+#                                    HA/ROLL (nothing to roll).
 #   WASM_DOCKER=1                    (needs WASM=1) the five shims run as
 #                                    host-networked containers from
 #                                    Dockerfile.wasm — SAME www/pkg bytes,
 #                                    node:22 image — instead of bare node
 #                                    processes (the wasm-file matrix cell).
-#   BROWSER=1                        (needs WASM=1) N7b browser tier: ONE
+#   BROWSER=1                        (needs WASM=1) browser tier: ONE
 #                                    headless-Chromium page hosts the module
 #                                    (www/test/etsi-proxy.mjs forwards suite
 #                                    HTTP into it) instead of the node shims.
-#                                    Run with the N7b green set:
+#                                    Run with the browser-green set:
 #                                    SUITES=CommonBehaviours,Provision,Consumption,jsonldContext
 #                                    (Subscription/ContextSource/DO/IOP stay
-#                                    Node-tier-only — N7c).
+#                                    Node-tier-only).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -87,7 +86,7 @@ STORE="${STORE:-memory}"
 if [ "${WASM:-0}" = 1 ]; then
   [ "${HA:-0}" = 1 ] || [ "${ROLL_DURING_RUN:-0}" = 1 ] || [ "${ROLES_SPLIT:-0}" = 1 ] && { echo "WASM=1 has no HA/roll story"; exit 2; }
   case "$STORE" in
-    memory | file) ;; # file = N4 persistentWithHandle over node:fs in the shim
+    memory | file) ;; # file = persistentWithHandle over node:fs in the shim
     *) echo "WASM=1 supports STORE=memory|file (the artifact's only backends)"; exit 2 ;;
   esac
   export MQTT=0
@@ -103,17 +102,17 @@ case "$STORE" in
 esac
 
 # Honesty banner: which modes actually have a store backend TODAY. Update this
-# list as §B (file) and §C/§D (postgres/timescale) land — a green column for a
+# list as new store backends land — a green column for a
 # mode whose backend does not exist yet validates infrastructure, not storage.
 BACKED="memory file postgres timescale"
 case "$STORE" in file) SECTION="B" ;; postgres) SECTION="C" ;; timescale) SECTION="D" ;; *) SECTION="?" ;; esac
 case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
-  *) BACKED_NOTE="store backend for \`$STORE\` is NOT implemented yet (tasks.md §$SECTION) — this run validates the stack, not the storage" ;;
+  *) BACKED_NOTE="store backend for \`$STORE\` is NOT implemented yet — this run validates the stack, not the storage" ;;
 esac
 export BACKED_NOTE
 export STORE DB_IMAGE
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml)
-# K2/K8: the HA overlay moves antares1 behind an LB on 9090; with
+# The HA overlay moves antares1 behind an LB on 9090; with
 # ROLL_DURING_RUN the replicas roll continuously under the running suite.
 if [ "${ROLES_SPLIT:-0}" = 1 ]; then
   [ "${HA:-0}" = 1 ] && { echo "ROLES_SPLIT=1 and HA=1 are exclusive (both own the LB on 9090)"; exit 2; }
@@ -124,7 +123,7 @@ if [ "${ROLES_SPLIT:-0}" = 1 ]; then
   COMPOSE+=(-f compose-files/docker-compose-roles.yml)
 elif [ "${HA:-0}" = 1 ]; then
   COMPOSE+=(-f compose-files/docker-compose-ha.yml)
-  # F10: replicas of one broker talk over NATS (shared matcher durable,
+  # Replicas of one broker talk over NATS (shared matcher durable,
   # claimed interval firings). memory mode keeps bus=local — it exercises
   # only the LB/drain mechanics, and ANTARES_BUS=nats refuses per-process
   # state by design.
@@ -135,7 +134,7 @@ elif [ "${HA:-0}" = 1 ]; then
   if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
     case "$STORE" in
       postgres|timescale) ;;
-      *) echo "ROLL_DURING_RUN needs shared state: STORE=postgres|timescale (file: K10 lock; memory: replicas diverge)"; exit 2 ;;
+      *) echo "ROLL_DURING_RUN needs shared state: STORE=postgres|timescale (file: exclusive redb lock; memory: replicas diverge)"; exit 2 ;;
     esac
   fi
 elif [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
@@ -173,7 +172,7 @@ fi
 [ "${WASM:-0}" = 1 ] || docker network inspect compose-files_default >/dev/null 2>&1 \
   || docker network create --subnet 172.29.9.0/24 compose-files_default
 
-# MQTT prerequisites (G4). The suite launches its OWN mosquitto per 058 test
+# MQTT prerequisites. The suite launches its OWN mosquitto per 058 test
 # (MqttUtils.resource: `docker run --network compose-files_default
 # --name ngsi-ld-test-suite-mosquitto-container scorpio-test-mosquitto`).
 # Provide the image (built from the suite's own confs — the single source) and
@@ -184,15 +183,15 @@ if [ "${MQTT:-1}" = 1 ]; then
     ngsi-ld-test-suite/resources/mqttUtils/mosquitto
   grep -q ngsi-ld-test-suite-mosquitto-container /etc/hosts \
     || echo "172.29.9.2 ngsi-ld-test-suite-mosquitto-container" | sudo tee -a /etc/hosts >/dev/null
-  # Vendored overlay (error.md 2026-08-05): the suite's Start Mqtt Server has
+  # Vendored overlay: the suite's Start Mqtt Server has
   # no readiness wait after `docker run -d`, so the first connect races the
-  # mosquitto start and loses on a cold daemon. Same E7 pattern as
+  # mosquitto start and loses on a cold daemon. Same overlay pattern as
   # variables.py — applied for the run, restored in teardown.
   cp dev/MqttUtils.resource ngsi-ld-test-suite/resources/mqttUtils/MqttUtils.resource
 fi
 export MQTT="${MQTT:-1}"
 
-# E9a: which suites this invocation runs (default: all serial + IOP).
+# Which suites this invocation runs (default: all serial + IOP).
 . dev/etsi-suites.sh
 check_suites_complete ngsi-ld-test-suite || exit 2
 RUN_IOP=1
@@ -255,9 +254,9 @@ for port in 9090 9091 9092 9093 9094; do
   curl -sf "localhost:$port/q/health" >/dev/null || { echo "broker on :$port not healthy"; exit 1; }
 done
 
-# K8: roll the HA pair in a loop underneath the whole run. The suite is a
+# Roll the HA pair in a loop underneath the whole run. The suite is a
 # brutally strict drain client (no retries, exact single responses) — any red
-# TP here is a real K1 bug. The loop's log lands in the results dir.
+# TP here is a real drain bug. The loop's log lands in the results dir.
 ROLL_PID=""
 if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
   ( while :; do
@@ -267,9 +266,9 @@ if [ "${ROLL_DURING_RUN:-0}" = 1 ]; then
     done > "$RESULTS/roll-loop.log" 2>&1 ) &
   ROLL_PID=$!
   if [ "${ROLES_SPLIT:-0}" = 1 ]; then
-    echo "K8/roles: rolling the 10-pod role fleet continuously (pid $ROLL_PID)"
+    echo "roles: rolling the 10-pod role fleet continuously (pid $ROLL_PID)"
   else
-    echo "K8: rolling antares1/antares1b continuously (pid $ROLL_PID)"
+    echo "rolling antares1/antares1b continuously (pid $ROLL_PID)"
   fi
 fi
 
@@ -290,7 +289,7 @@ teardown() {
   kill "$MONITOR_PID" 2>/dev/null || true
   [ -n "$ROLL_PID" ] && { kill "$ROLL_PID" 2>/dev/null || true; }
   rm -f "$PHASE_FILE"
-  # Leave the suite submodule clean (E7) — the IOP step seds variables.py and
+  # Leave the suite submodule clean — the IOP step seds variables.py and
   # the MQTT step overlays MqttUtils.resource.
   git -C ngsi-ld-test-suite checkout -- resources/variables.py \
     resources/mqttUtils/MqttUtils.resource 2>/dev/null || true
@@ -330,7 +329,7 @@ if [ -n "${SERIAL_SUITES// /}" ]; then
 fi
 
 # 6. IOP suite against all five brokers of the same stack. Configure
-# variables.py HERE — etsi-run.sh restores it on exit (E7), so this step must
+# variables.py HERE — etsi-run.sh restores it on exit, so this step must
 # never rely on that sed surviving.
 if [ "$RUN_IOP" = 1 ]; then
 echo "IOP" > "$PHASE_FILE"

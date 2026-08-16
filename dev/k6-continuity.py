@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""K6 — the continuity harness every availability drill runs under (tasks.md).
+"""The continuity harness every availability drill runs under.
 
 One process does all three jobs:
   * writer   — POSTs monotonically numbered entities against BASE_URL at a
@@ -10,7 +10,8 @@ One process does all three jobs:
 
 Assertions (exit 1 on any violation):
   1. zero connection errors and zero 5xx on writes — the drill's promise is
-     "a roll is invisible"; a refused connection IS the bug K1 exists to fix;
+     "a roll is invisible"; a refused connection IS the bug the drain
+     contract exists to fix;
   2. zero lost writes — every acked id is retrievable afterwards;
   3. notifications at-least-once — every acked id was seen by the receiver
      (duplicates fine, losses not). Enabled with --expect-notifications once

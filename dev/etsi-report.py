@@ -227,8 +227,8 @@ peaks = {n: max(d["rss"], default=0) for n, d in per_container.items()}
 measurable = any(p > 0 for p in peaks.values())
 mem_ok = bool(peaks) and (not measurable or all(p <= LIMIT for p in peaks.values()))
 if os.environ.get("WASM") == "1":
-    # N7a/N7b: no docker brokers exist to sample — the artifact's memory
-    # gate is the N5 size budget enforced by dev/wasm-build.sh instead.
+    # wasm tiers: no docker brokers exist to sample — the artifact's memory
+    # gate is the size budget enforced by dev/wasm-build.sh instead.
     mem_ok = True
 gate = "PASS" if mem_ok and total_fail == 0 and total_pass > 0 else "FAIL"
 open(f"{RESULTS}/gate-status.txt", "w").write(gate + "\n")
