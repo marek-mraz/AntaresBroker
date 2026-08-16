@@ -1,7 +1,6 @@
 //! NGSI-LD data model (ETSI CIM 009 V1.9.1).
 //!
-//! Shapes and invariants only: no I/O, no clocks, no config
-//! (see docs/deep-analysis.md §9.3).
+//! Shapes and invariants only: no I/O, no clocks, no config.
 
 pub mod error;
 pub mod id;

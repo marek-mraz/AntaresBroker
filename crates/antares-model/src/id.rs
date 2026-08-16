@@ -1,5 +1,5 @@
 //! Validated id newtypes. Tenant scoping is threaded through the type system:
-//! store methods take `&TenantId` as their first parameter (§9.3).
+//! store methods take `&TenantId` as their first parameter.
 
 use crate::error::NgsiError;
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use std::fmt;
 
 /// Tenant identifier from the `NGSILD-Tenant` header.
 ///
-/// Token-safe by construction (also used as a NATS subject segment, §7):
+/// Token-safe by construction (also used as a NATS subject segment):
 /// `[A-Za-z0-9_-]{1,64}`. The default tenant is `"default"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

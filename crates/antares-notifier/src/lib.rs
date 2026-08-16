@@ -1,9 +1,9 @@
-//! Notification delivery (docs/deep-analysis.md §9.2/§9.3).
+//! Notification delivery.
 //!
 //! The pluggability seam is fixed in v0: sinks register by `endpoint.uri`
 //! scheme; a subscription naming an unregistered scheme is rejected at
-//! creation with OperationNotSupported (422). Sinks land in phase 2
-//! (http/reqwest, mqtt/rumqttc behind the `mqtt` feature, ws in `antares-ws`).
+//! creation with OperationNotSupported (422). Sinks: http/reqwest,
+//! mqtt/rumqttc behind the `mqtt` feature, ws in `antares-ws`.
 
 use antares_model::NgsiError;
 
@@ -16,7 +16,7 @@ pub trait NotificationSink: Send + Sync {
     fn schemes(&self) -> &'static [&'static str];
 }
 
-/// Scheme → sink registry; populated by the composition root (§9.2).
+/// Scheme → sink registry; populated by the composition root.
 #[derive(Default)]
 pub struct SinkRegistry {
     sinks: Vec<Box<dyn NotificationSink>>,

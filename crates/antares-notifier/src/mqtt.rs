@@ -168,8 +168,8 @@ impl Drop for Conn {
     }
 }
 
-/// MQTT delivery with a bounded per-endpoint connection pool (audit L5:
-/// bounded WITH eviction; U1: timeouts fixed at construction).
+/// MQTT delivery with a bounded per-endpoint connection pool (bounded
+/// WITH eviction; timeouts fixed at construction).
 pub struct MqttSink {
     pool: Mutex<HashMap<String, Conn>>,
     cap: usize,
@@ -269,7 +269,7 @@ impl MqttSink {
         let mut pool = self.pool.lock().expect("mqtt pool lock");
         pool.retain(|_, c| !c.pump.is_finished());
         pool.insert(key, conn);
-        // bounded with eviction (L5): drop the least-recently-used overflow.
+        // bounded with eviction: drop the least-recently-used overflow.
         while pool.len() > self.cap {
             if let Some(oldest) = pool
                 .iter()

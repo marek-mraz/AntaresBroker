@@ -1,5 +1,4 @@
-//! CSR store + distributed operations (docs/deep-analysis.md §9.3, §16.7) —
-//! lands in phase 3.
+//! CSR store + distributed operations.
 //!
 //! Contracts fixed now: candidate matching is SQL over csource_index (never a
 //! scan of a tenant's registrations); forwarded queries are narrowed to the

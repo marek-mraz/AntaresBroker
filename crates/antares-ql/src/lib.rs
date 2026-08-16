@@ -1,8 +1,8 @@
 //! NGSI-LD Query Language (CIM 009 clause 4.9) — parser seed.
 //!
 //! v0 grammar subset: comparisons over dotted attribute paths, `;` (AND) and
-//! `|` (OR), parentheses. This is the risk-#2 crate: it grows test-first
-//! against the CI/Cons TPs (docs/deep-analysis.md §12).
+//! `|` (OR), parentheses. This is a high-risk crate: it grows test-first
+//! against the CI/Cons TPs.
 
 use antares_model::NgsiError;
 
@@ -164,7 +164,7 @@ const MAX_Q_BYTES: usize = 4096;
 /// and far below the ~2 MiB tokio worker stack.
 const MAX_Q_DEPTH: usize = 64;
 
-/// AST size cap (§16.3) — checked after parsing, which is safe once depth and
+/// AST size cap — checked after parsing, which is safe once depth and
 /// length are bounded first.
 const MAX_Q_NODES: usize = 512;
 
@@ -630,7 +630,7 @@ mod complexity_tests {
 
     #[test]
     fn q_complexity_cap_is_403_class() {
-        // I2/§16.3: >512 nodes → TooComplexQuery, small trees untouched.
+        // >512 nodes → TooComplexQuery, small trees untouched.
         let ok = "a==1;b==2|c==3";
         assert!(parse_q(ok).is_ok());
         let huge = (0..600)
@@ -643,7 +643,7 @@ mod complexity_tests {
         }
     }
 
-    /// Security audit C1 (2026-08-04): the parser recursed once per `(` with
+    /// Regression: the parser once recursed per `(` with
     /// no depth counter. A Rust stack overflow is a guard-page ABORT, not a
     /// catchable panic — no tower layer can contain it — so ~4000 parens in a
     /// query string killed the whole broker process, and a percent-encoded

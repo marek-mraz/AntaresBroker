@@ -44,8 +44,8 @@ impl NgsiError {
             Self::BadRequestData(_) | Self::InvalidRequest(_) => 400,
             Self::InternalError(_) => 500,
             // 6.3.2 Table 6.3.2-1 (V1.9.1): LdContextNotAvailable → 504.
-            // The suite's V1.8-era 503 expectations are fork-fixed
-            // (testsuite-doubts #18).
+            // The suite's V1.8-era 503 expectations are fixed in the
+            // local suite fork.
             Self::LdContextNotAvailable(_) => 504,
             Self::NoMultiTenantSupport(_) => 501,
             Self::NonexistentTenant(_) | Self::ResourceNotFound(_) => 404,
