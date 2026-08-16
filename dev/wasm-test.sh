@@ -69,4 +69,8 @@ rm -rf "$FDIR"
 echo "file tier OK (store=file reported, restart survival held, memory negative held)"
 
 # --- Browser tier ---------------------------------------------------------
-node www/test/browser-test.mjs
+# BROWSER_TIER=0 skips it (ci's per-commit wasm publish gate: node + file
+# tiers only, no chromium; the full browser tier runs in wasm.yml/full.yml).
+if [ "${BROWSER_TIER:-1}" = 1 ]; then
+  node www/test/browser-test.mjs
+fi
