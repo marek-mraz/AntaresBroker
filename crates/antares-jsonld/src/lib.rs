@@ -19,5 +19,5 @@ pub use expand::{
 };
 pub use loader::{
     client_builder, http_interaction, io_deadline, with_timeouts, wrap_client, CtxUsage,
-    EgressPolicy, HttpClient, Loader, CORE_CONTEXT, MAX_REDIRECTS,
+    EgressPolicy, HttpClient, Loader, CORE_CONTEXT, INTERNAL_FETCH_HEADER, MAX_REDIRECTS,
 };

@@ -418,6 +418,12 @@ pub struct Loader {
     usage_bump: std::sync::RwLock<Option<UsageBump>>,
 }
 
+/// Request header marking a broker-internal @context fetch (this loader
+/// resolving a URL, possibly through the fleet's own LB). The serve endpoint
+/// skips its serve-hit bump for these — the resolving instance counts the
+/// use itself (5.13.3.5, one client use = one hit).
+pub const INTERNAL_FETCH_HEADER: &str = "x-antares-ctx-fetch";
+
 /// (url, parsed `@context` value) — called on every fresh remote fetch.
 pub type CacheWriter = Box<dyn Fn(&str, &Value) + Send + Sync>;
 /// url -> "the shared row still exists" (after bumping its hit counter).
@@ -604,6 +610,9 @@ impl Loader {
 
     async fn resolve_counted(&self, user: &Value, count: bool) -> Result<Arc<Context>, NgsiError> {
         let key = user.to_string();
+        // urls already counted on the merged-hit path — the fallthrough
+        // rebuild below must not bump them a second time.
+        let mut counted: Vec<String> = Vec::new();
         if let Some(hit) = self.merged.get(&key) {
             if count {
                 // cache hit: bump every URL this context resolution involves.
@@ -613,7 +622,11 @@ impl Loader {
                 let urls = self.merged_urls.get(&key);
                 let mut deleted_elsewhere = false;
                 for url in urls.iter().flat_map(|u| u.iter()) {
-                    deleted_elsewhere |= self.bump_url(url).await;
+                    if self.bump_url(url).await {
+                        deleted_elsewhere = true;
+                    } else {
+                        counted.push(url.clone());
+                    }
                 }
                 if !deleted_elsewhere {
                     return Ok(hit);
@@ -642,7 +655,18 @@ impl Loader {
         }
         if count {
             for url in &urls {
-                let _ = self.bump_url(url).await; // only after successful resolution
+                if counted.contains(url) {
+                    continue; // already bumped on the merged-hit path
+                }
+                // only after successful resolution. A bump that reports the
+                // shared row GONE (deleted through another instance) while
+                // the fetch above was served from this instance's warm doc
+                // cache means the write-through never ran — a counted use
+                // re-creates the entry (5.13.5.4): refetch (bump_url just
+                // evicted the warm copy) so the row exists, then count on it.
+                if self.bump_url(url).await && self.fetch(url).await.is_ok() {
+                    let _ = self.bump_url(url).await;
+                }
             }
         }
         // Core context last: its (protected) terms win — CIM 009 4.4.
@@ -769,6 +793,10 @@ impl Loader {
                 .http
                 .get(url)
                 .header("Accept", "application/ld+json, application/json")
+                // marks this as a broker-internal context resolution: the
+                // serving instance must not add a serve-hit on top of this
+                // instance's own bump_url (053_08 fleet double-count)
+                .header(INTERNAL_FETCH_HEADER, "1")
                 .send()
                 .await
                 .map_err(|e| err(format!("fetching {url}: {e}")))?;

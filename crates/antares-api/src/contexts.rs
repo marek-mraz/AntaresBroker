@@ -356,14 +356,18 @@ pub async fn serve_context(
             }
         };
         // a serve counts as a hit for Cached/ImplicitlyCreated entries, after
-        // the value shown in this response (053_06/053_08 arithmetic)
+        // the value shown in this response (053_06/053_08 arithmetic) —
+        // EXCEPT broker-internal fetches (a fleet peer resolving this
+        // @context through the LB): the resolving instance bumps the shared
+        // row itself, a serve-side bump would double-count (053_08 fleet).
+        let internal_fetch = headers.contains_key(antares_jsonld::INTERNAL_FETCH_HEADER);
         match &entry {
-            CtxEntry::Stored(doc) if doc["kind"] == "ImplicitlyCreated" => {
+            CtxEntry::Stored(doc) if !internal_fetch && doc["kind"] == "ImplicitlyCreated" => {
                 if let Some(u) = doc["url"].as_str() {
                     let _ = st.loader.bump_url(u).await;
                 }
             }
-            CtxEntry::Cached(u) => {
+            CtxEntry::Cached(u) if !internal_fetch => {
                 let _ = st.loader.bump_url(&u.url).await;
             }
             _ => {}
