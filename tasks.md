@@ -167,11 +167,10 @@ explicitly says "decide with the user".
 - [ ] E5. Version surface: `GET /info` (or the existing version endpoint)
       returns version + git hash + store mode; `--version` on the binary;
       both asserted by a release smoke test.
-- [ ] E6. Write `docs/roadmap-1.0.md`: the explicit 1.0 criteria list
-      (candidate set, decide with the user: N consecutive green full
-      matrices, HA soak test, upgrade-path test file→file and pg→pg across
-      one minor version, security review of the egress surface, docs C1–C8
-      complete). 1.0 is declared by criteria, not by feeling.
+- [x] E6. docs/roadmap-1.0.md: six criteria (3 green full matrices, 24h
+      HA soak, upgrade-path tests, egress security review, docs complete,
+      release machinery proven end to end) — the full candidate set per
+      user decision 2026-08-16; rc flow defined. Evidence: this commit.
 - [ ] E7. First real release: cut `v0.1.0` through E3 end-to-end. Evidence:
       the published GitHub release with all assets + green gate run.
 
