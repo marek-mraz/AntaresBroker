@@ -7,7 +7,7 @@ Date: 2026-08-12. Status: accepted, implemented.
 Three subsystems kept their bookkeeping in per-process `AppState` maps:
 snapshot metadata (5.16 / 5.2.41 documents), EntityMap API documents
 (5.14 / 5.2.39) and the distributed-subscription mappings 5.8.1.4 mandates
-("the mapping … shall be stored"). The §1 contract says HA = stateless
+("the mapping … shall be stored"). The HA contract says stateless
 broker pods; a per-process map is state a pod restart silently loses —
 after a restart, a remote broker's notifications 404 forever, snapshots
 vanish, and EntityMap references stop resolving.
@@ -35,7 +35,7 @@ vanish, and EntityMap references stop resolving.
 
 - pg/timescale (and file) brokers keep snapshots, EntityMaps and
   remote-subscription bookkeeping across restarts
-  (`crates/antares-api/tests/durable_state.rs`); the HA row of §1 no
+  (`crates/antares-api/tests/durable_state.rs`); the HA contract no
   longer has a named per-process exception.
 - Reserved tenant names are now persisted data — renaming the encoding
   later means a data migration, which is why this is an ADR.

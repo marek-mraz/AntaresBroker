@@ -21,7 +21,7 @@ critical-severity issues, best effort.
 
 ## Security posture (what is in scope)
 
-Antares draws a deliberate line (docs/deep-analysis.md §16): the broker
+Antares draws a deliberate line: the broker
 enforces **data-plane integrity** — strict input validation at every API
 boundary, tenant isolation (one shared schema + `tenant_id` on every row,
 Postgres Row-Level Security, `ANTARES_REQUIRE_RLS` production gate), an
@@ -37,7 +37,3 @@ Deployments MUST NOT expose an Antares port to untrusted callers directly.
 The NATS change stream carries every tenant's data: require auth on
 JetStream and network-isolate it (the broker logs a loud warning when it
 connects to an unauthenticated NATS).
-
-The full audit trail: [docs/security-audit-2026-08-04.md](docs/security-audit-2026-08-04.md)
-and the production-readiness audit + 2026-08-15 re-audit in
-[docs/production-readiness-audit-2026-08-09.md](docs/production-readiness-audit-2026-08-09.md).

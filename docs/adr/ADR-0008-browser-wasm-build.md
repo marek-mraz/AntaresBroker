@@ -1,6 +1,6 @@
 # ADR-0008 — The browser build: one crate, the same router, no fourth backend
 
-Date: 2026-08-06 · Status: accepted · Tasks: §N (tasks.md) · Refs: §9.2, §15.2
+Date: 2026-08-06 · Status: accepted
 
 ## Decision
 
@@ -11,7 +11,7 @@ Core crates gained **target sections and cfg fences, never behavioral
 forks** — the code above the executor is byte-for-byte the code the native
 binary runs.
 
-What the browser build IS: the memory store through the §A seam, `bus=local`
+What the browser build IS: the memory store through the store seam, `bus=local`
 semantics, HTTP notification delivery via the page's own `fetch`, plus a
 page sink (`onNotification`) for endpoints a page cannot host. What it is
 NOT: no NATS, no MQTT, no Postgres, no roles — those are deployment shapes,
@@ -28,9 +28,9 @@ not spec surface.
 | reqwest client + futures are Send | `!Send`, but axum demands Send everywhere | `send_wrapper` fences (`HttpClient`, `http_interaction`) — sound single-threaded, runtime-checked |
 | DNS-pinned egress resolver, redirect cap | no DNS, no redirect control in `fetch` | native-only; the browser's CORS sandbox IS the egress boundary in a page |
 | sqlx / sockets | none | `postgres` cargo feature on `antares-sql`/`antares-api`; filter types moved to the ungated `store::filter` |
-| TCP listener | no inbound sockets | Service Worker `fetch` interception (N3), Node `http` shim (N7a) |
+| TCP listener | no inbound sockets | Service Worker `fetch` interception, Node `http` shim |
 
-## Conformance scope (N7/N8)
+## Conformance scope
 
 - **Node tier** (`www/node-shim.mjs`): the same `.wasm` behind
   `http.createServer` — no CORS, unrestricted outbound fetch. Every serial
@@ -46,7 +46,7 @@ not spec surface.
 ## Alternatives rejected
 
 - A separate "browser broker" implementation — the whole point is that the
-  conformance surface is the SAME code (§14.6 drift lesson).
+  conformance surface is the SAME code; a second implementation drifts.
 - WASI/wasm32-wasi — no browser story; the Service Worker is the deployment
   target, not a server runtime.
 - Threads/atomics build — nothing needs it; single-threaded keeps the

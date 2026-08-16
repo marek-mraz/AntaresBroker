@@ -1,13 +1,13 @@
 # Granular Access Policies for Federated Digital Twins
 
-Status: Design documentation (consolidated 2026-08-14, AntaresBroker session)
+Status: design documentation, 2026-08-14
 Scope: the access-control layer in front of NGSI-LD Context Brokers —
 policy model, identity stack, pre-query discovery, enforcement wiring,
 and the open problems. Companion to the requirements document
 (R1–R43 + MIM-derived Part II) and its ADRs 001–011.
 
 Antares's role in this design is deliberately small: the broker stays
-policy-free (standing decision, 2026-08-04 security-audit amendment).
+policy-free (standing decision).
 Everything below lives in the gateway (APISIX PEP), the PDP (OPA), and
 the identity components — the broker only stores, serves, and notifies.
 
@@ -295,7 +295,7 @@ Anti-patterns to avoid: Keycloak Authorization Services (§1), APISIX
 Lua for the rewriter (Wasm is the direction and how the Rust parser is
 reused), permissions embedded in JWT claims (staleness + bloat).
 
-## 7. Unsolved (honest gap list, 2026-08-14)
+## 7. Unsolved
 
 ### Structural — no settled design
 
@@ -358,8 +358,3 @@ reused), permissions embedded in JWT claims (staleness + bloat).
 everything else safe to build), the notification egress question second
 (biggest hole), the R41/residual benchmarks third (they decide whether
 the architecture holds at target scale before more is built on it).
-
----
-
-*Session drawers in the palace (`antaresbroker/decisions`): IDM choice,
-policy-discovery design, industry survey, unsolved gaps.*

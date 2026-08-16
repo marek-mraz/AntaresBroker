@@ -4,12 +4,12 @@ Date: 2026-08-08. Status: accepted, implemented.
 
 ## Context
 
-Since C9/D landed, `attr_instances` carried the full §8.2 machinery
-(hypertable + compression in timescale mode, native range partitions +
-broker-run maintenance in plain mode) — but every temporal read (5.7.3,
-5.7.4, batch query) was served from `temporal_entities.doc`, the migration-
-0002 "cutover bridge" JSONB column. The 2026-08-08 store audit named the
-consequences: compression and retention acted on a table nothing queried;
+Since the attr_instances decomposition landed, the table carried the full
+temporal machinery (hypertable + compression in timescale mode, native
+range partitions + broker-run maintenance in plain mode) — but every
+temporal read (5.7.3, 5.7.4, batch query) was served from
+`temporal_entities.doc`, the migration-0002 "cutover bridge" JSONB column.
+The consequences: compression and retention acted on a table nothing queried;
 the authoritative doc kept 100 % of history forever; every temporal write
 did a DELETE + full re-INSERT of the entity's entire instance history
 (O(history) write amplification that also fought columnstore compression);

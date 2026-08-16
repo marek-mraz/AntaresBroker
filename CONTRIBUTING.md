@@ -12,16 +12,15 @@ Integration tests that need services are env-gated and skip loudly:
 `ANTARES_TEST_DATABASE_URL` (PostGIS), `ANTARES_TEST_NATS_URL` (JetStream),
 `ANTARES_TEST_MQTT_URL` (mosquitto).
 
-## The rules that are actually enforced
+## The rules that are enforced
 
 - **Spec-first.** Every normative behaviour is implemented from its ETSI
   CIM 009 V1.9.1 clause and the function carries a doc comment citing the
   clause number. The conformance ledger lives in `docs/spec/` (one file per
   clause; `python3 dev/spec.py check` gates format in CI).
-- **TEST-FIRST.** Write the clause's tests before the implementation; the
-  red run on the missing behaviour is the fallibility proof. Every test
-  carries at least one negative assertion (what must NOT be in the
-  response).
+- **Test-first.** Write the clause's tests before the implementation and
+  watch them fail on the missing behaviour. Every test carries at least
+  one negative assertion (what must NOT be in the response).
 - **One clause = one commit**, message prefixed with the clause number
   (`5.6.6: …`), committed on a green targeted run (`cargo test -p
   <touched-crate> <filter> -j 2`) plus the clause's Robot TPs green against
@@ -58,7 +57,7 @@ format version, Postgres migrations).
   formats bump MINOR and are called out in the changelog; PATCH is
   fixes/additions.
 - **1.0.0** is declared by the criteria in
-  [docs/roadmap-1.0.md](docs/roadmap-1.0.md), not by feeling.
+  [docs/roadmap-1.0.md](docs/roadmap-1.0.md).
 - **Store-format changes** always ship with a migration note (and for the
   file store, a format-version bump — the broker refuses mismatched files
   rather than guessing).

@@ -1,9 +1,8 @@
 # Road to 1.0.0
 
-1.0 is declared by criteria, not by feeling (CONTRIBUTING "Versioning &
-releases"). Criteria set fixed with the maintainer 2026-08-16 — the full
-candidate set. Each criterion is checked off only with evidence (run
-links / commit hashes), same discipline as tasks.md.
+1.0 is declared by the criteria below (see CONTRIBUTING "Versioning &
+releases"). Each criterion is checked off only with evidence: run links or
+commit hashes recorded next to it.
 
 - [ ] **R1 — Three consecutive green full matrices.** Three back-to-back
       `etsi-full` runs on master with every cell green (all seven,
@@ -20,12 +19,12 @@ links / commit hashes), same discipline as tasks.md.
       from 1.0-rc1 on.
 - [ ] **R4 — Security review of the egress surface.** External or
       structured self-review of the egress wall (SSRF guards, breakers,
-      TLS trust, notification/forward/@context paths) against the
-      security-audit checklist; findings fixed or accepted in writing.
+      TLS trust, notification/forward/@context paths); findings fixed or
+      accepted in writing.
 - [ ] **R5 — User docs complete.** The book covers getting started,
-      configuration, deployment, federation, wasm, operations,
-      conformance (tasks.md C1–C8 — done 2026-08-16) and tracks any
-      surface added before 1.0.
+      configuration, deployment, federation, wasm, operations and
+      conformance (done 2026-08-16) and tracks any surface added
+      before 1.0.
 - [ ] **R6 — Release machinery proven.** At least one 0.x release has
       shipped end to end through the gated pipeline (image + binaries +
       wasm bundle + SBOM + signature + notes) and the examples job is

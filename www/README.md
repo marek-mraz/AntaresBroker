@@ -14,8 +14,8 @@ is the product-shaped one.
    pipe tick whose write the broker accepted). Idle edges are static.
 2. **Every entity always shows its origin** — 🏠 local or 🌐 + the peer it
    came from. Today's origin source is the `local=true` diff heuristic; when
-   the broker implements `/entityMaps` (clause 5.14), `broker/api.js` is the
-   ONLY file that changes (see `docs/playground-ui-analysis.md` §1.1).
+   the UI adopts `/entityMaps` (clause 5.14), `broker/api.js` is the
+   ONLY file that changes.
 3. **The broker is the only truth** — the UI never fabricates state; every
    count/row/edge label is derived from API responses. Structure the user
    authored (spaces, pipelines) persists in `localStorage`; data never does.
@@ -144,8 +144,8 @@ npm run e2e          # build + headless-chromium smoke against dist/
 - `/entityMaps` lands in the broker → exact per-entity provenance: replace
   `api.originOf()` internals, everything downstream (chips, sheet origin
   column, edge counts) is already keyed on its output.
-- Scenario presets (§5 of the UI analysis) → additional `DEMO`-shaped
-  configs in `model.js`; the runner already takes the topology as data.
+- Scenario presets → additional `DEMO`-shaped configs in `model.js`; the
+  runner already takes the topology as data.
 - TS migration: `broker/`, `model.js` first; components last.
 - Deploy: `wasm.yml` gains a second artifact (this `dist/` under `/app/`)
   once the app stabilizes — same manual dispatch gate as the main page.

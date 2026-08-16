@@ -61,7 +61,7 @@ peer's under the non-spec member name `hostAlias` and never read it back.
    the `csource_index.host_alias` column keeps its name) into `FedReg.alias`,
    and `matching_regs` drops any registration whose alias is already in the
    inbound chain — at the one place every read and write path resolves
-   candidates, per the §4.1 single-yield-point rule.
+   candidates.
 
 5. **508 stays scoped** to 6.3.17's case: a single `exclusive`/`redirect`
    source looping back. Unchanged by this ADR, restated because the two rules
@@ -97,4 +97,5 @@ learns the tenant from the registration's `tenant` member and the
   chains. If that ever matters, the fix is a per-tenant alias override in
   config, not a change of format; nothing in the wire contract has to move.
 - ETSI `D018_01` still fails: it registers `mode=inclusive` and asserts 508.
-  That is a suite defect (error.md), not a consequence of this ADR.
+  That is a suite defect (docs/upstream/etsi-raises.md, issue 1), not a
+  consequence of this ADR.

@@ -79,16 +79,14 @@ No Docker? `cargo run -p antares-broker` serves the same API on :9090
 > green in every store mode ([the conformance report, per store, with each
 > run's Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
 > Docs index: [docs/README.md](docs/README.md) · operations runbook:
-> [docs/src/operations.md](docs/src/operations.md) · architecture:
-> [docs/deep-analysis.md](docs/deep-analysis.md) · remaining work and its
-> hardware/decision blockers: [tasks.md](tasks.md).
+> [docs/src/operations.md](docs/src/operations.md).
 
 ## Targets (the design contract)
 
-These are the DESIGN targets the architecture is sized for (claude.md §1) —
-what CI proves today is the ETSI conformance matrix, the resource gate and
-the rolling-update drill; the 100M-row load rigs are open hardware tasks
-(tasks.md J4/L1/L2).
+These are the DESIGN targets the architecture is sized for. What CI proves
+today is the ETSI conformance matrix, the resource gate and the
+rolling-update drill; load rigs at the 100M-entity scale need hardware the
+project does not have yet.
 
 | Dimension | Target |
 |---|---|
@@ -108,9 +106,8 @@ Postgres, decoupling via NATS JetStream (or `bus=local` for single-node: no
 infrastructure beyond Postgres). Durable state lives in Postgres only; change
 events fan out on the `ANTARES_CHANGES` stream; subscriptions mirror through a
 JetStream KV bucket — there is no instance-sync protocol to break. Business
-logic is Rust with parameterized DML (no PL/pgSQL, no ORM). Full rationale,
-Scorpio reference mapping, and the improvement catalogue:
-[docs/deep-analysis.md](docs/deep-analysis.md).
+logic is Rust with parameterized DML (no PL/pgSQL, no ORM). The rationale
+behind each irreversible choice is written down in [docs/adr/](docs/adr/).
 
 ## Store modes
 
@@ -140,7 +137,7 @@ version and the broker refuses to start on a mismatch or corruption rather
 than serve partial data. Measured cost on a dev box: ~3.1k fsynced writes/s,
 commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit
 once per entity write, and redb has a single writer, so this is a per-process
-ceiling (tasks.md B13).
+ceiling.
 
 ## Run with Docker
 
@@ -209,7 +206,7 @@ Idle RSS ≈ 9 MiB.
 ## Browser build (WebAssembly)
 
 The same broker compiles to `wasm32-unknown-unknown` and runs entirely in a
-web page — no server, no install (tasks.md §N, ADR-0008). A module Service
+web page — no server, no install (ADR-0008). A module Service
 Worker answers `/ngsi-ld/v1/*` in-tab; `www/index.html` is the demo (create
 entities, subscribe, watch notifications arrive in-page).
 
@@ -247,7 +244,7 @@ suffixes: `antares_http_requests_total` (method + status class),
 `_failed_total` (by sink scheme), `antares_change_lag_seconds` (bus=nats:
 publish → matcher processing), `antares_draining` (a rolling update is
 visible on a dashboard for its whole duration), plus jemalloc heap gauges and
-the I2 bounds-wall rejection counters.
+the bounds-wall rejection counters.
 
 Distributed traces export over OTLP/HTTP when `ANTARES_OTLP_ENDPOINT` is set
 (e.g. `http://collector:4318/v1/traces`); unset — the default — costs
@@ -302,7 +299,7 @@ crates/antares-bus        ChangeEvent bus: in-process ring or NATS JetStream
 crates/antares-api        HTTP binding (axum), thin handlers
 crates/antares-{matcher,notifier,registry}            domain crates
 crates/antares-broker     composition root -> the `antares` binary
-docs/                     deep analysis + ADRs
+docs/                     conformance ledger + ADRs + user book source
 dev/                      run/test scripts        compose-files/  local stack
 ```
 

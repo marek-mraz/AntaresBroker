@@ -4,8 +4,8 @@ Date: 2026-08-08. Status: accepted, implemented.
 
 ## Context
 
-§16.4 shipped the `EgressPolicy` (notifications, @context fetches,
-federation forwards) with deny-by-default for loopback/link-local/
+The `EgressPolicy` (notifications, @context fetches, federation forwards)
+shipped with deny-by-default for loopback/link-local/
 RFC 1918/metadata destinations and `ANTARES_EGRESS_ALLOW_PRIVATE=true` as
 the opt-out. Live testing of the `dev-47` image showed the practical
 consequence: on any dev box, compose stack, or cluster-internal deployment
@@ -25,7 +25,7 @@ client that checked its subscription.
    `allow_private: true`; `ANTARES_EGRESS_ALLOW_PRIVATE=false` (or `0`)
    turns the deny on. Internet-exposed deployments — the SSRF-relevant
    case, which always sit behind a deliberate deployment config anyway —
-   set one env var to get the §16.4 lockdown. The scheme allowlist,
+   set one env var to get the full lockdown. The scheme allowlist,
    redirect cap, DNS pinning, response-size caps and breakers are
    unconditional and unchanged.
 2. **Refusal is a delivery failure for bookkeeping.** When the deny is on,

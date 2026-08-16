@@ -1,16 +1,12 @@
-# Upstream raises — ready to file (backlog item 5, 2026-08-12)
+# Upstream raises — ready to file
 
-Issue texts prepared for filing; the filing itself happens outside this
-sandbox. Two targets:
+Issue texts prepared for filing. Two targets:
 
 - **Suite issues** → https://forge.etsi.org/rep/cim/ngsi-ld-test-suite
   (issues 1–3). Our fork already carries the fixes; each issue links the
   fork commit so the patch can be cherry-picked.
 - **Spec feedback** → ETSI ISG CIM issue tracker for GS CIM 009 V1.9.1
-  (issues 4–5).
-
-Full local evidence for every item lives in `error.md` (dated entries) and
-`ngsi-ld-test-suite/testsuite-doubts.md`.
+  (issues 4–6).
 
 ---
 
