@@ -1,0 +1,13 @@
+[book]
+title = "Antares — NGSI-LD Context Broker"
+authors = ["Marek Mráz"]
+language = "en"
+src = "docs/src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/marek-mraz/AntaresBroker"
+edit-url-template = "https://github.com/marek-mraz/AntaresBroker/edit/master/{path}"
+site-url = "/docs/"

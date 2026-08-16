@@ -33,3 +33,6 @@ ETSI-matrix-results*
 results*/
 .DS_Store
 *.zip
+
+# mdbook build output
+/book

@@ -72,11 +72,11 @@ explicitly says "decide with the user".
 
 ## C. Docs (docs/ becomes user-facing)
 
-- [ ] C1. Split `docs/` into `docs/` (user-facing product docs) and keep
-      internal analysis where it is but OUT of the rendered set
-      (`deep-analysis.md`, audits, `spec/` ledger stay; the docs index —
-      mdBook or plain README-per-dir, decide with the user — renders only
-      the user set).
+- [x] C1. mdBook (user decision): book.toml + docs/src/ is the rendered
+      user set (introduction + operations moved in); internal analysis
+      (deep-analysis, audits, spec/ ledger, adr/) stays unrendered in
+      docs/. pages.yml builds the book into site/docs on every deploy.
+      `mdbook build` green locally (v0.4.44). Evidence: this commit.
 - [ ] C2. Getting started: install (docker, binary, cargo), first entity,
       first subscription, first federation pair. Every snippet executed
       before commit.

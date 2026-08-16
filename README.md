@@ -77,7 +77,7 @@ No Docker? `cargo run -p antares-broker` serves the same API on :9090.
 > green in every store mode ([the conformance report, per store, with each
 > run's Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
 > Docs index: [docs/README.md](docs/README.md) · operations runbook:
-> [docs/operations.md](docs/operations.md) · architecture:
+> [docs/src/operations.md](docs/src/operations.md) · architecture:
 > [docs/deep-analysis.md](docs/deep-analysis.md) · remaining work and its
 > hardware/decision blockers: [tasks.md](tasks.md).
 
@@ -119,7 +119,7 @@ production, `timescale` when temporal queries dominate. Two orthogonal
 switches on top: `ANTARES_BUS` (`local` single-node default, `nats` for
 multi-pod scale-out and HA) and MQTT notifications (built in; enabled per
 subscription endpoint, `mqtt[s]://` URI). Operations detail:
-[docs/operations.md](docs/operations.md).
+[docs/src/operations.md](docs/src/operations.md).
 
 | Mode | Backend | Durability | Extra config | Backup |
 |---|---|---|---|---|

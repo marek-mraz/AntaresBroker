@@ -3,7 +3,7 @@
 | Document | What it holds |
 |---|---|
 | [deep-analysis.md](deep-analysis.md) | The architecture & design analysis: targets, capacity budgets, store ladder, bus design, federation, the §16 security wall, conventions, Scorpio reference mapping |
-| [operations.md](operations.md) | The operations runbook: deploy, backup per store mode, rolling updates, health/readiness/metrics, state-reset discipline |
+| [src/operations.md](src/operations.md) | The operations runbook: deploy, backup per store mode, rolling updates, health/readiness/metrics, state-reset discipline |
 | [spec/](spec/) + [spec/README.md](spec/README.md) | The conformance ledger — ETSI CIM 009 V1.9.1 full text, ONE file per clause with `status`/`evidence`/`notes` frontmatter; tooling: `python3 dev/spec.py status\|gaps\|check` |
 | [adr/](adr/) | Irreversible decisions, one file each (shared-schema tenancy, JetStream bus, store ladder, wasm build, …) |
 | [production-readiness-audit-2026-08-09.md](production-readiness-audit-2026-08-09.md) | The 8-agent production audit + the 2026-08-15 re-audit status table (every P0/P1 closed-with-evidence) |
