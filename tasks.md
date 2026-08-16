@@ -77,9 +77,13 @@ explicitly says "decide with the user".
       (deep-analysis, audits, spec/ ledger, adr/) stays unrendered in
       docs/. pages.yml builds the book into site/docs on every deploy.
       `mdbook build` green locally (v0.4.44). Evidence: this commit.
-- [ ] C2. Getting started: install (docker, binary, cargo), first entity,
-      first subscription, first federation pair. Every snippet executed
-      before commit.
+- [x] C2. Getting started page: install, first entity (201+query), first
+      subscription (201, PATCH 204 -> Notification value 42.0 received on a
+      local listener), federation pair (entity on B, CSR on A 201,
+      federated GET via A returns B's entity). Every snippet executed
+      against the locally built broker before commit; the 6.3.5
+      json-vs-ld+json @context rule documented from a live 400.
+      Evidence: this commit.
 - [ ] C3. Configuration reference: generate the full `ANTARES_*` env-var
       table from `state.rs` (name, default, effect, since-version). CI check
       that fails when a new env var lacks a docs row (grep-based is enough).

@@ -2,4 +2,5 @@
 
 [Introduction](introduction.md)
 
+- [Getting started](getting-started.md)
 - [Operations](operations.md)
