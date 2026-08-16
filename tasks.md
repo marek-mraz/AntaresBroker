@@ -185,9 +185,10 @@ explicitly says "decide with the user".
       pin), msrv job in workspace.yml keeps it proven as stable moves,
       README notes it. Also fixed the stale workspace repository URL
       (AntaresBroker org -> marek-mraz). Evidence: this commit.
-- [ ] F3. Public CI dashboard: the Pages conformance report linked from
-      README (B4) renders per-suite pass/fail + RSS trend — this exists;
-      task is linking + a short "how to read this" page.
+- [x] F3. The report page existed and was badge-linked; the
+      "how to read this" page is the book's conformance chapter (C8),
+      now linked from the README's ETSI section to its rendered URL.
+      Evidence: this commit.
 - [ ] F4. `cargo audit`/deny advisories: schedule weekly, auto-file an
       issue on new advisories.
 

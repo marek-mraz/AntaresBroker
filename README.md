@@ -258,7 +258,9 @@ nothing. For `tokio-console` in dev, build the broker with
 The latest per-store results are a click away — stats on the page, each
 suite linking Robot's own drill-down:
 **<https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/>** (rebuilt
-with every Pages deploy from the newest `etsi-matrix` bundle).
+with every Pages deploy from the newest `etsi-matrix` bundle). How to read
+the matrix — cells, the ledger methodology, caveats:
+[the conformance chapter](https://antares-ngsi-ld-demo.marek-mraz.com/docs/conformance.html).
 
 ```bash
 dev/etsi-local.sh                       # local gate: workspace tests + ONE store mode (default memory)
