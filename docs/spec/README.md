@@ -41,6 +41,6 @@ robot: []                 # GENERATED from the suite fork's [Tags] — do not ed
 - The **PDF stays the authority** — the extracted body is a working copy for
   reading and grep; when wording matters down to a comma, read the page range
   in the PDF (or `mempalace_get_pdf_pages`).
-- One clause per commit rule unchanged (tasks.md step 5): the code, its
+- One clause per commit: the code, its
   tests, and this file's `status`/`evidence` move together.
 - Never hand-edit `robot:` or the body; both are regenerated.
