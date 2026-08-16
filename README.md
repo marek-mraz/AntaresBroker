@@ -26,6 +26,25 @@ Antares is the brightest star in the Scorpius constellation — and a rust-red
 supergiant. It follows the NGSI-LD broker naming tradition (Orion, Scorpio,
 Stellio) and reimplements the broker in Rust with hard resource targets.
 
+## Why Antares
+
+Three properties, each backed by a number CI reproduces on every full run:
+
+1. **Footprint** — ~35 MiB average RSS (45–64 MiB peak) while running the
+   complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
+   where a JVM broker's heap alone would not.
+2. **Conformance** — 1713/1713 ETSI CIM 009 V1.9.1 test procedures green in
+   all six native store cells, including the two cells where a 10-container
+   role-split fleet rolls continuously under the suite
+   ([per-store report with Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
+   The methodology is a per-clause ledger over the whole spec text
+   (`docs/spec/`, 947 clause files), not just the official TP list.
+3. **The browser build** — the same broker compiles to a 3.99 MB wasm
+   artifact (1.52 MB gzipped) and serves `/ngsi-ld/v1/*` from a Service
+   Worker inside a web page: an NGSI-LD broker with zero installation, for
+   demos, edge devices and offline-first tooling. No other NGSI-LD broker
+   has this.
+
 > Status: the full store ladder (`memory → file → postgres → timescale`),
 > NATS JetStream scale-out with split roles, HTTP + MQTT notifications,
 > federation and the security wall are implemented, with the ETSI Robot suite

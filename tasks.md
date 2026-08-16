@@ -48,12 +48,10 @@ explicitly says "decide with the user".
 
 ## B. README (the front door)
 
-- [ ] B1. Rewrite README.md around the three real differentiators, each with
-      a number CI can back: (1) footprint — ~35 MiB RSS through the full
-      ETSI matrix vs JVM brokers; (2) conformance — 1713/1713 ETSI CIM 009
-      V1.9.1 TPs across 6 native store cells (link the Pages report);
-      (3) the wasm build — the same broker as a ≤4 MB browser artifact
-      (unique among NGSI-LD brokers). No adjectives a table can't prove.
+- [x] B1. "Why Antares" section added with the three CI-backed numbers:
+      35 MiB RSS avg / 9 MiB idle, 1713/1713 across six native cells
+      (report linked), 3.99 MB / 1.52 MB gzip wasm artifact. Numbers taken
+      from full #4 run summaries. Evidence: this commit.
 - [ ] B2. 60-second quickstart at the top: one `docker run` (memory store) +
       one curl create + one curl query, copy-paste verified against the
       published image.
