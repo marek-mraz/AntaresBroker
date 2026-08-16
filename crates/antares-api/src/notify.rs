@@ -1703,7 +1703,8 @@ async fn deliver_as(
     // window is the in-flight attempt itself, and the failure TPs wait for the
     // attempt to resolve before asserting.
     let mut prev_success: Option<Value> = None;
-    st.store
+    let booked = st
+        .store
         .mutate(tenant, kind, &sub_id, |doc| {
             if let Some(o) = doc.as_object_mut() {
                 o.remove("status");
@@ -1725,6 +1726,12 @@ async fn deliver_as(
             tracing::warn!("bookkeeping writeback failed: {e}");
             None
         });
+    // 5.8.6: notifications are sent for the subscriptions the broker holds.
+    // No row to book against means the subscription was deleted (or the
+    // store failed) between matching and delivery — nothing may be sent.
+    if booked.is_none() {
+        return;
+    }
     mirror_bookkeeping(st, tenant, kind, &sub_id);
     // The notification endpoint is an egress destination like any other
     // — policy check once, breaker consulted before the attempt.
@@ -1734,7 +1741,10 @@ async fn deliver_as(
     let refused = match st.egress.check_url(uri).await {
         Ok(()) => false,
         Err(e) => {
-            tracing::warn!("notification endpoint {uri} refused by egress policy: {e}");
+            tracing::warn!(
+                "notification endpoint {} refused by egress policy: {e}",
+                redact_userinfo(uri)
+            );
             true
         }
     };
@@ -1746,7 +1756,10 @@ async fn deliver_as(
     // responding host:port starves unrelated subscriptions sharing it.
     let (ok, timed_out) = if refused || breaker_open {
         if breaker_open {
-            tracing::debug!("notification to {uri} short-circuited (breaker open)");
+            tracing::debug!(
+                "notification to {} short-circuited (breaker open)",
+                redact_userinfo(uri)
+            );
         }
         (false, false)
     } else {
@@ -1837,6 +1850,20 @@ async fn deliver_as(
     }
 }
 
+/// Endpoint URIs may carry credentials in the authority's userinfo
+/// (mqtt[s]://username:password@host, clause 7.1) — strip everything
+/// between the `//` and the authority's `@` before the URI reaches a log.
+fn redact_userinfo(uri: &str) -> String {
+    if let Some(scheme_end) = uri.find("//") {
+        let rest = &uri[scheme_end + 2..];
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            return format!("{}{}", &uri[..scheme_end + 2], &rest[at + 1..]);
+        }
+    }
+    uri.to_owned()
+}
+
 /// The matcher reads subscriptions from the
 /// SubMirror, so every notification bookkeeping writeback must be applied
 /// there too — otherwise the mirror copy never gains
@@ -1857,6 +1884,66 @@ fn mirror_bookkeeping(st: &AppState, tenant: &TenantId, kind: Kind, sub_id: &str
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod deleted_subscription_delivery {
+    use super::*;
+
+    /// 5.8.6: notifications are sent for the subscriptions a Context Broker
+    /// holds — a subscription deleted between matching and delivery no
+    /// longer exists, so its endpoint must receive nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleted_subscription_receives_no_notification() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let st = AppState::new("antares-deleted-sub-test".into());
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = count.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let tenant = TenantId::new("default").expect("tenant");
+        let ctx = antares_jsonld::Loader::new().core();
+        // the sub doc is a snapshot whose row is NOT in the store — the
+        // deleted-concurrently case
+        let sub = json!({
+            "id": "urn:ngsi-ld:Subscription:ghost",
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {"uri": format!("http://{addr}/notify")}},
+        });
+        let data = vec![json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"})];
+        deliver_as(
+            &st,
+            &tenant,
+            Kind::Subscription,
+            &sub,
+            "Notification",
+            data,
+            &ctx,
+            None,
+        )
+        .await;
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a deleted subscription's endpoint must receive NO notification"
+        );
+    }
+}
+
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
@@ -1864,6 +1951,22 @@ mod endpoint_tests {
 
     fn ep(v: Value) -> serde_json::Map<String, Value> {
         v.as_object().expect("map").clone()
+    }
+
+    /// Endpoint URIs may carry credentials (mqtt[s]://user:pass@host, 7.1);
+    /// log lines must never leak them.
+    #[test]
+    fn log_redaction_strips_uri_userinfo() {
+        let red = redact_userinfo("mqtts://alice:s3cret@broker:8883/topic");
+        assert_eq!(red, "mqtts://broker:8883/topic");
+        assert!(!red.contains("s3cret"));
+        assert!(!red.contains("alice"));
+        assert_eq!(
+            redact_userinfo("http://host:9090/notify"),
+            "http://host:9090/notify"
+        );
+        // an '@' beyond the authority is path data, not userinfo
+        assert_eq!(redact_userinfo("http://h/p@x"), "http://h/p@x");
     }
 
     /// Table 5.2.15-1 `timeout`: honored, clamped, defaulted.

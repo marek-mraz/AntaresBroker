@@ -450,3 +450,66 @@ async fn aggregated_temporal_representation() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("InvalidRequest"), "{body}");
 }
+
+/// 4.11: aggrPeriodDuration is an ISO 8601 duration; a magnitude far beyond
+/// any representable time range violates the parameter's value space and
+/// answers 400 BadRequestData — it must never reach chrono duration
+/// arithmetic, which panics (a remote 500) on such values.
+#[tokio::test(flavor = "multi_thread")]
+async fn absurd_aggr_period_duration_is_400_not_a_panic() {
+    let mut st = AppState::new("test".into());
+    antares_api::notify::wire(&mut st);
+
+    let create = r#"{"id":"urn:ngsi-ld:Rec:7","type":"Rec",
+        "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},
+                 {"type":"Property","value":2,"observedAt":"2026-08-10T00:00:02Z"}]}"#;
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", create.len())
+            .body(Body::from(create))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    for period in ["PT99999999999999999S", "P99999999999W"] {
+        let (status, body) = send(
+            &st,
+            Request::builder()
+                .uri(format!(
+                    "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:7\
+                     ?options=aggregatedValues&aggrMethods=sum&attrs=speed\
+                     &timerel=after&timeAt=2026-08-10T00:00:00Z\
+                     &aggrPeriodDuration={period}"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{period}: {body}");
+        assert!(body.contains("BadRequestData"), "{period}: {body}");
+        assert!(
+            !body.contains("InternalError"),
+            "must not be a 500-class answer: {body}"
+        );
+    }
+
+    // a sane sub-range period still aggregates
+    let (status, body) = send(
+        &st,
+        Request::builder()
+            .uri(
+                "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Rec:7\
+                 ?options=aggregatedValues&aggrMethods=sum&attrs=speed\
+                 &timerel=after&timeAt=2026-08-10T00:00:00Z&aggrPeriodDuration=PT1H",
+            )
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

@@ -440,13 +440,29 @@ async fn metrics_endpoint(axum::extract::State(state): axum::extract::State<AppS
     }
 }
 
+/// Bounded method label for the request metrics: standard HTTP methods
+/// pass through, anything else (extension methods are minted by the
+/// client) collapses to "OTHER" so the label's cardinality stays bounded.
+fn metric_method(m: &str) -> &'static str {
+    match m {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PATCH" => "PATCH",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        "OPTIONS" => "OPTIONS",
+        "HEAD" => "HEAD",
+        _ => "OTHER",
+    }
+}
+
 /// Request counter + duration histogram, labelled by method and status
 /// class only (bounded cardinality).
 async fn http_metrics_layer(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let method = req.method().as_str().to_owned();
+    let method = metric_method(req.method().as_str());
     // Clock rule: std Instant panics on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
     let start = std::time::Instant::now();
@@ -460,7 +476,7 @@ async fn http_metrics_layer(
         400..=499 => "4xx",
         _ => "5xx",
     };
-    metrics::counter!("antares_http_requests_total", "method" => method.clone(), "status" => class)
+    metrics::counter!("antares_http_requests_total", "method" => method, "status" => class)
         .increment(1);
     metrics::histogram!("antares_http_request_duration_seconds", "method" => method)
         .record(start.elapsed().as_secs_f64());
@@ -651,6 +667,18 @@ mod tests {
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// The metrics method label is bounded: known HTTP methods pass
+    /// through, client-minted extension methods collapse to "OTHER" so
+    /// label cardinality cannot grow without bound.
+    #[test]
+    fn metric_method_label_is_bounded() {
+        assert_eq!(metric_method("GET"), "GET");
+        assert_eq!(metric_method("DELETE"), "DELETE");
+        assert_eq!(metric_method("BAZQUX"), "OTHER");
+        // methods are case-sensitive tokens (RFC 9110 9.1)
+        assert_eq!(metric_method("get"), "OTHER");
     }
 
     #[tokio::test]

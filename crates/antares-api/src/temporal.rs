@@ -1037,9 +1037,18 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
         ));
     }
     if let Some(d) = params.get("aggrPeriodDuration") {
-        r.aggr_period = parse_iso_duration(d).ok_or_else(|| {
+        let p = parse_iso_duration(d).ok_or_else(|| {
             NgsiError::BadRequestData(format!("invalid aggrPeriodDuration {d:?}"))
         })?;
+        // 4.11: the value space ends where duration arithmetic does —
+        // beyond ~100 years chrono::Duration::seconds is out of bounds
+        // (a panic, i.e. a remote 500), so such periods are rejected.
+        if matches!(p, AggrPeriod::Seconds(sc) if sc > 86_400 * 366 * 100) {
+            return Err(NgsiError::BadRequestData(format!(
+                "aggrPeriodDuration {d:?} is out of range"
+            )));
+        }
+        r.aggr_period = p;
     }
     Ok(r)
 }
@@ -1219,9 +1228,23 @@ fn render_aggregated(
                         (anchor, last + chrono::Duration::seconds(1))
                     }
                     AggrPeriod::Seconds(sc) => {
+                        // checked throughout: an offset no representable
+                        // date can hold puts the instant in one final
+                        // open-ended bucket instead of panicking
                         let idx = (t - anchor).num_seconds().div_euclid(sc);
-                        let start = anchor + chrono::Duration::seconds(idx * sc);
-                        (start, start + chrono::Duration::seconds(sc))
+                        let bucket = idx
+                            .checked_mul(sc)
+                            .and_then(chrono::Duration::try_seconds)
+                            .and_then(|off| anchor.checked_add_signed(off))
+                            .and_then(|start| {
+                                chrono::Duration::try_seconds(sc)
+                                    .and_then(|w| start.checked_add_signed(w))
+                                    .map(|end| (start, end))
+                            });
+                        match bucket {
+                            Some(b) => b,
+                            None => (anchor, chrono::DateTime::<chrono::Utc>::MAX_UTC.into()),
+                        }
                     }
                     AggrPeriod::Months(m) => {
                         let mut start = anchor;

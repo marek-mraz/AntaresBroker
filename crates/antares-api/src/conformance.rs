@@ -253,9 +253,32 @@ pub async fn prefer_version_layer(req: Request<Body>, next: Next) -> Response {
         return resp;
     }
     let (mut parts, body) = resp.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
-        return Response::from_parts(parts, Body::empty());
-    };
+    // Honouring the preference is optional (RFC 7240 section 2), so the
+    // buffer is bounded by the same cap the request wall advertises: a
+    // response bigger than MAX_BODY_BYTES passes through byte-identical,
+    // unamended and without Preference-Applied.
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match stream.next().await {
+            None => break,
+            Some(Err(_)) => return Response::from_parts(parts, Body::empty()),
+            Some(Ok(chunk)) => {
+                if buf.len() + chunk.len() > crate::bounds::MAX_BODY_BYTES {
+                    // stitch the already-read prefix back in front of the
+                    // untouched remainder of the stream
+                    let read = futures_util::stream::iter([
+                        Ok::<_, axum::Error>(axum::body::Bytes::from(buf)),
+                        Ok(chunk),
+                    ]);
+                    return Response::from_parts(parts, Body::from_stream(read.chain(stream)));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+        }
+    }
+    let bytes = axum::body::Bytes::from(buf);
     let conformant = if ver < NATIVE { ver } else { NATIVE };
     let mut altered = false;
     let bytes = match serde_json::from_slice::<Value>(&bytes) {
