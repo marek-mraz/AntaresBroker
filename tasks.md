@@ -101,11 +101,11 @@ explicitly says "decide with the user".
       store, structural limits stated plainly (inbound sockets, CL header,
       no MQTT/NATS/roles), Node tier as the conformance gate, build
       recipe + budgets (3.99/1.52 MB vs 8/3 MB). Evidence: this commit.
-- [ ] C7. Operations: monitoring endpoints, state reset discipline
-      (API-delete + truncate pairing), backup/restore (store files, pg
-      dumps), upgrade procedure (blue/green replay — references the
-      city-as-code plane, /workspace/docs/city-as-code-requirements.md
-      CC-50/51).
+- [x] C7. operations.md already covered deploy/health/backup/rolling/
+      state-reset/proof-table (moved into the book in C1); added the
+      missing Upgrades section (rolling for minors, blue/green replay for
+      majors, CC-50/51 reference, temporal-history caveat, file-format
+      refusal). Evidence: this commit.
 - [ ] C8. Conformance page: what 1713/1713 means, the seven-cell matrix,
       the ledger methodology (`docs/spec/`, 947 clause files), how to re-run
       the suite locally — this page is the procurement evidence artifact.

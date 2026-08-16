@@ -90,6 +90,20 @@ Federation/temporal state is only truly cleared by a volume-wiping teardown.
 After a reset, restart the broker before measured runs (in-VM subscription
 maps survive an external clean).
 
+## Upgrades
+
+Minor versions roll in place under the rolling-update contract above.
+Major upgrades go blue/green: deploy the new version EMPTY, replay
+declarative state (entities, subscriptions, registrations) through the
+standard NGSI-LD API from your configuration source of truth, verify with
+smoke queries, switch traffic. Because the broker is vanilla CIM 009, the
+replay needs no Antares-specific tooling — any GitOps/city-as-code plane
+that speaks the standard API can drive it (this is requirement CC-50/51 of
+the companion configuration-plane spec). Temporal history is NOT part of
+the replay — restore it from database backup (per-store recipes above).
+The `file` store carries a format version: a downgraded or corrupted file
+is refused at startup rather than partially served.
+
 ## Where the proofs run
 
 | Claim | Workflow |
