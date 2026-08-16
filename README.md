@@ -111,7 +111,14 @@ Scorpio reference mapping, and the improvement catalogue:
 
 ## Store modes
 
-One binary, one config value (`ANTARES_STORE`), same API in every mode:
+One binary, one config value (`ANTARES_STORE`), same API in every mode.
+Rule of thumb: `memory` for tests and demos, `file` for a durable single
+node without a database (edge boxes, small deployments), `postgres` for
+production, `timescale` when temporal queries dominate. Two orthogonal
+switches on top: `ANTARES_BUS` (`local` single-node default, `nats` for
+multi-pod scale-out and HA) and MQTT notifications (built in; enabled per
+subscription endpoint, `mqtt[s]://` URI). Operations detail:
+[docs/operations.md](docs/operations.md).
 
 | Mode | Backend | Durability | Extra config | Backup |
 |---|---|---|---|---|

@@ -57,8 +57,9 @@ explicitly says "decide with the user".
       binary (same bytes CI images ship): 201 Created + entity returned
       (host-docker pulls are out of sandbox scope per claude.md rule 1).
       Evidence: this commit; proof pasted in the commit message.
-- [ ] B3. Store-mode matrix table (memory / file / postgres / timescale ×
-      bus none / NATS × MQTT) with what each is for; link to deployment docs.
+- [x] B3. Store table prefaced with a which-mode-when guide + the two
+      orthogonal switches (ANTARES_BUS local/nats, MQTT per subscription);
+      links docs/operations.md. Evidence: this commit.
 - [ ] B4. Badges: CI (quick preset), full ETSI matrix (Pages), latest
       release, license, Docker pulls. Every badge live, none aspirational.
 - [ ] B5. Honest comparison section vs Scorpio / Orion-LD / Stellio:
