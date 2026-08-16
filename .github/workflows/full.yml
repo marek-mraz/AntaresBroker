@@ -2,9 +2,11 @@ name: full
 
 # The EVERYTHING pipeline — manual dispatch, or automatically on a v* tag:
 # workspace tests, the browser/wasm artifact + N7a Node tier, the reusable
-# cell matrix, the serial all-suites runs (the reset_state() oracle), K8
-# roll-under-suite and the k8s manifest smoke. A green v* tag publishes the
-# release image (:<version> + :latest); manual dispatches publish nothing.
+# cell matrix (FULL preset: all seven cells, each already serial-all-suites
+# against one stack — the former etsi-serial job duplicated this and was
+# removed 2026-08-16), K8 roll-under-suite and the k8s manifest smoke. A
+# green v* tag publishes the release image (:<version> + :latest); manual
+# dispatches publish nothing.
 
 on:
   push:
@@ -95,10 +97,15 @@ jobs:
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
           cargo test -p antares-sql
       # D4/§16.5: license gate (nothing links TSL — Timescale is talked to
-      # over SQL only) + advisories.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check licenses advisories
+      # over SQL only) + advisories. Not the cargo-deny-action: its docker
+      # image ships an x86_64 binary — Exec format error on this arm runner
+      # (full #1, 2026-08-16; same fix as ci.yml).
+      - name: cargo-deny (licenses + advisories)
+        run: |
+          V=0.20.2
+          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
+          cargo deny --log-level warn check licenses advisories
       # E9g: the ETSI resource sampler + its sample↔TP join fail silently when
       # broken (an empty column reads as "nothing happened") — check them here.
       - name: ETSI sampling self-check
@@ -145,8 +152,10 @@ jobs:
         run: ./dev/wasm-test.sh
 
   matrix:
-    # The reusable 3-store (file postgres timescale) all-suites matrix (build → cells → summary) —
-    # shared with full.yml so both pipelines test the same shape.
+    # The reusable cell matrix at the FULL preset (default): all seven cells
+    # — memory/file/postgres/timescale, both rolling -nats fleets, wasm-file
+    # — each running every suite serially against one stack with the
+    # between-suite reset.
     name: ETSI cell matrix
     uses: ./.github/workflows/etsi-matrix.yml
     permissions:
@@ -199,71 +208,11 @@ jobs:
           kubectl -n antares rollout status deploy/antares-file --timeout=300s
           kubectl -n antares get pods -o wide
 
-  etsi-serial:
-    # E9d: the authoritative run — every suite, IN ORDER, against ONE stack,
-    # so `reset_state()` (clean_db.sh + dev/reset-broker.sh) is exercised
-    # between suites. The matrix cells each get a fresh stack and therefore
-    # prove nothing about reset; a broker that leaks state across suites is
-    # green there and red here. Four store modes in parallel, one job each.
-    #
-    # Release tags, nightly, and manual only — a plain commit gets the matrix
-    # and nothing else.
-    name: serial ${{ matrix.store }} (all suites, one stack)
-    needs: [workspace, matrix]
-    strategy:
-      fail-fast: false
-      matrix:
-        store: [memory, file, postgres, timescale]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Fetch the ETSI test suite (submodule)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync
-          git submodule update --init --depth 1
-
-      - name: Load the image built once for all jobs
-        uses: actions/download-artifact@v7
-        with:
-          name: antares-image
-
-      - run: docker load < antares-image.tgz
-
-      - name: Run EVERY suite serially through the ONE pipeline
-        env:
-          STORE: ${{ matrix.store }}
-          SKIP_BUILD: "1"
-          STOP_ON_ERROR: "0"
-          CALLBACK_HOST: localhost
-          RESULTS_DIR: results/serial-${{ matrix.store }}
-        run: ./dev/etsi-pipeline.sh || true
-
-      - name: Upload serial results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ETSI-serial-${{ matrix.store }}
-          path: |
-            results/serial-${{ matrix.store }}/run-summary.md
-            results/serial-${{ matrix.store }}/gate-status.txt
-            results/serial-${{ matrix.store }}/failures.csv
-            results/serial-${{ matrix.store }}/resource-samples.csv
-            results/serial-${{ matrix.store }}/resource-by-test.csv
-            results/serial-${{ matrix.store }}/**/log.html
-            results/serial-${{ matrix.store }}/**/report.html
-          retention-days: 14
-
-      - name: Gate — the serial run is 100% green
-        run: |
-          gate=$(cat "results/serial-${{ matrix.store }}/gate-status.txt" 2>/dev/null || echo MISSING)
-          echo "serial gate(${{ matrix.store }}) = $gate"
-          cat "results/serial-${{ matrix.store }}/run-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          [ "$gate" = PASS ]
+  # etsi-serial was REMOVED 2026-08-16: it duplicated the matrix exactly.
+  # Its comment claimed the matrix cells got a fresh stack per suite — true
+  # in the 32-cell era, stale since the matrix became all-suites-per-cell:
+  # every cell now runs the suites IN ORDER against ONE stack with the
+  # between-suite reset, which is precisely what serial proved.
 
   etsi-wasm:
     # N7a: the Node tier — the serial ETSI suites against the BROWSER
@@ -420,7 +369,7 @@ jobs:
     # and the K8 roll-under-suite drill.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()
-    needs: [matrix, etsi-serial, etsi-roll, build-arm]
+    needs: [matrix, etsi-roll, build-arm]
     runs-on: ubuntu-latest
     permissions:
       packages: write

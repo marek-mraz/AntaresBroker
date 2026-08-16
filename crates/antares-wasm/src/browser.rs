@@ -167,9 +167,20 @@ impl AntaresBroker {
 
         let body = wasm_bindgen_futures::JsFuture::from(request.array_buffer()?).await?;
         let body = js_sys::Uint8Array::new(&body).to_vec();
-        let req = builder
+        let body_len = body.len();
+        let mut req = builder
             .body(body)
             .map_err(|e| JsValue::from_str(&format!("bad request: {e}")))?;
+        // 6.3.4 seam: Content-Length is a FORBIDDEN header in the browser —
+        // page JS and Service Workers can neither set nor read it, so the
+        // Request arrives here without it and the bounds layer would 411
+        // every write. This seam replaces the network stack (which stamps
+        // the true length on the wire), and the body is fully buffered
+        // above, so it stamps the same truth.
+        req.headers_mut().insert(
+            axum::http::header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from(body_len),
+        );
 
         let resp = self.inner.handle(req).await;
         let (parts, bytes) = resp.into_parts();
