@@ -164,6 +164,23 @@ if (storeMode === "file") {
 
 const server = createServer(async (req, res) => {
   try {
+    // 6.3.2/6.3.4: POST, PATCH or PUT without Content-Length → bare 411, no
+    // exemption for chunked. Natively hyper hands bounds.rs the wire headers
+    // untouched; the wasm seam (browser.rs fetch) must stamp content-length
+    // from the buffered body because a browser cannot carry the header — so
+    // the header's wire-absence is only observable here, and this shim
+    // enforces the precondition as part of the serialization layer it
+    // replaces (same posture as the 6.3.6 strip below). node:http is
+    // HTTP/1.x only, matching the bounds.rs version gate.
+    if (
+      ["POST", "PATCH", "PUT"].includes(req.method) &&
+      req.headers["content-length"] === undefined
+    ) {
+      req.resume();
+      res.writeHead(411);
+      res.end();
+      return;
+    }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
