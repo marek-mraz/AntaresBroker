@@ -8,3 +8,4 @@
 - [Federation](federation.md)
 - [Browser & WebAssembly](wasm.md)
 - [Operations](operations.md)
+- [Conformance](conformance.md)

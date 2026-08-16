@@ -106,9 +106,11 @@ explicitly says "decide with the user".
       missing Upgrades section (rolling for minors, blue/green replay for
       majors, CC-50/51 reference, temporal-history caveat, file-format
       refusal). Evidence: this commit.
-- [ ] C8. Conformance page: what 1713/1713 means, the seven-cell matrix,
-      the ledger methodology (`docs/spec/`, 947 clause files), how to re-run
-      the suite locally — this page is the procurement evidence artifact.
+- [x] C8. docs/src/conformance.md: the matrix explained cell by cell,
+      ledger methodology (947 clause files, extension TPs, upstream defect
+      policy), local reproduction recipes, caveats stated plainly (wasm
+      exclusions, arm64, the one deliberate 6.3.4 deviation). Evidence:
+      this commit.
 
 ## D. Examples (examples/ — every one executed before commit)
 
