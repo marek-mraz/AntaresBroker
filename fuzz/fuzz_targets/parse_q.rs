@@ -1,4 +1,4 @@
-//! 4.9 q= grammar: must never panic, whatever the bytes (§16.2).
+//! 4.9 q= grammar: must never panic, whatever the bytes.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

@@ -1,4 +1,4 @@
-//! N3: the browser bindings — the Service Worker glue and the in-page API.
+//! The browser bindings — the Service Worker glue and the in-page API.
 //!
 //! Both reduce to `Broker::handle`. The Service Worker intercepts `fetch` on
 //! a virtual `/ngsi-ld/v1/*` path so page JS talks to what looks like an
@@ -23,13 +23,13 @@ impl AntaresBroker {
     ///
     /// `allowPrivateEgress: true` is `ANTARES_EGRESS_ALLOW_PRIVATE` for a
     /// target with NO process environment (`std::env::var` always errs on
-    /// wasm32, so the env route cannot work). The Node tier (N7a) needs it:
+    /// wasm32, so the env route cannot work). The Node tier needs it:
     /// the ETSI suite's notification receivers live on 127.0.0.1, which the
-    /// I4 egress policy denies by default.
+    /// egress policy denies by default.
     /// `hostAlias` names THIS instance in `Via` chains (5.2.40). Every
     /// instance in a federation needs a distinct one, or loop detection
-    /// reads a peer's hop as its own and 508s every forward (N7a lesson —
-    /// five shims all called "antares-wasm" federate with nobody).
+    /// reads a peer's hop as its own and 508s every forward —
+    /// five shims all called "antares-wasm" federate with nobody.
     #[wasm_bindgen(constructor)]
     pub fn new(allow_private_egress: Option<bool>, host_alias: Option<String>) -> Self {
         console_error_panic_hook::set_once();
@@ -44,10 +44,10 @@ impl AntaresBroker {
     }
 
     /// `await AntaresBroker.persistent(file?, allowPrivateEgress?)` — the
-    /// N4 OPFS-backed broker: the same redb write-through shadow as native
+    /// OPFS-backed broker: the same redb write-through shadow as native
     /// `file` mode (commit-before-ack, format check, boot rebuild), storage
     /// supplied by an exclusive OPFS sync access handle. Dedicated workers
-    /// only; a second opener gets the N4b "another tab owns this store"
+    /// only; a second opener gets the "another tab owns this store"
     /// error instead of a torn file.
     #[wasm_bindgen]
     pub async fn persistent(
@@ -65,13 +65,13 @@ impl AntaresBroker {
     }
 
     /// `AntaresBroker.persistentWithHandle(handle, label?, allowPrivateEgress?,
-    /// hostAlias?)` — the same N4 redb write-through shadow over a
+    /// hostAlias?)` — the same redb write-through shadow over a
     /// CALLER-SUPPLIED sync-access handle: OPFS's
     /// `FileSystemSyncAccessHandle`, or any duck-typed object with the same
-    /// six sync methods. The Node tier (N7a) passes an fs-backed stand-in so
+    /// six sync methods. The Node tier passes an fs-backed stand-in so
     /// the browser artifact runs the native `file` mode outside a browser
     /// (STORE=file for the ETSI wasm cell). Exclusivity is the CALLER's
-    /// contract here — OPFS enforces it (N4b), an fs stand-in must lock or
+    /// contract here — OPFS enforces it, an fs stand-in must lock or
     /// own the file itself.
     #[wasm_bindgen(js_name = persistentWithHandle)]
     pub fn persistent_with_handle(
@@ -111,13 +111,13 @@ impl AntaresBroker {
 
     /// `broker.onNotification(prefix, callback)` — subscription endpoints
     /// whose URL starts with `prefix` are delivered to `callback(url,
-    /// bodyText)` instead of the network (a page has no inbound socket, N3).
+    /// bodyText)` instead of the network (a page has no inbound socket).
     /// One registration per module instance; endpoints outside the prefix
     /// still leave via fetch.
     #[wasm_bindgen(js_name = onNotification)]
     pub fn on_notification(&self, prefix: String, callback: js_sys::Function) {
         // send_wrapper: js_sys::Function is !Send; the module is
-        // single-threaded (same argument as HttpClient, N2).
+        // single-threaded (same argument as HttpClient).
         let cb = send_wrapper::SendWrapper::new(callback);
         antares_api::page_sink::set(
             prefix,
@@ -137,7 +137,7 @@ impl AntaresBroker {
     /// `Request`/`Response`, so a caller cannot tell this from a network
     /// broker. The Service Worker's `fetch` handler passes its event request
     /// straight through.
-    /// `&self` (not `&mut`): the loopback host (N9) re-enters this method
+    /// `&self` (not `&mut`): the loopback host re-enters this method
     /// while an outer call awaits a forward — shared borrows are re-entrant,
     /// a mutable one aborts with "recursive use of an object".
     #[wasm_bindgen]

@@ -1,4 +1,4 @@
-//! N4: OPFS persistence — redb's `StorageBackend` over a
+//! OPFS persistence — redb's `StorageBackend` over a
 //! `FileSystemSyncAccessHandle`. The six sync trait methods map 1:1 onto the
 //! handle (`getSize`/`read`/`truncate`/`flush`/`write`/`close`), which is the
 //! same shape SQLite-WASM's OPFS VFS uses.
@@ -7,9 +7,9 @@
 //! - Sync access handles exist ONLY in dedicated workers — never the main
 //!   thread, never a Service Worker. `acquire` fails with a clear error
 //!   elsewhere.
-//! - A sync access handle is EXCLUSIVE per file (N4b): the second opener gets
+//! - A sync access handle is EXCLUSIVE per file: the second opener gets
 //!   a clear "another tab/worker owns this store" error — exactly the native
-//!   file mode's lock refusal (K10), surfaced instead of corrupting.
+//!   file mode's lock refusal, surfaced instead of corrupting.
 //! - redb demands `Send + Sync` of the backend; JS handles are neither.
 //!   `send_wrapper` provides both soundly for this single-threaded target
 //!   (runtime-checked — a cross-thread touch panics instead of racing).
@@ -34,7 +34,7 @@ fn io_err(op: &str, e: JsValue) -> std::io::Error {
 
 impl OpfsBackend {
     /// Wrap an already-acquired handle — or any object exposing the same six
-    /// sync methods. The Node tier (N7a) enters here with an fs-backed
+    /// sync methods. The Node tier enters here with an fs-backed
     /// stand-in: `node:fs` sync calls are the same shape OPFS exposes, and
     /// every call below is a duck-typed JS method call at runtime.
     pub fn from_handle(handle: web_sys::FileSystemSyncAccessHandle) -> Self {
@@ -70,8 +70,8 @@ impl OpfsBackend {
                 .map_err(|_| {
                     format!(
                         "another tab or worker already owns the store file {name:?} — the sync \
-                         access handle is exclusive (N4b), exactly like the native file lock \
-                         (K10). Close the other tab, or run this one without persistence."
+                         access handle is exclusive, exactly like the native file lock. \
+                         Close the other tab, or run this one without persistence."
                     )
                 })?
                 .into();

@@ -1,13 +1,13 @@
-//! N1: the broker in a browser tab.
+//! The broker in a browser tab.
 //!
 //! Everything above the socket is unchanged — the same axum router, the same
-//! handlers, the same memory store through the §A seam. The ONE thing that
+//! handlers, the same memory store through the store seam. The ONE thing that
 //! cannot cross is the TCP listener (browsers have no inbound sockets), so a
-//! Service Worker feeds requests in instead (N3) and `handle` drives the
+//! Service Worker feeds requests in instead and `handle` drives the
 //! router directly with `tower::Service::call`, exactly as the native
 //! `main.rs` accept loop does per connection.
 //!
-//! What the browser build is NOT (N8): no NATS, no MQTT, no Postgres, no
+//! What the browser build is NOT: no NATS, no MQTT, no Postgres, no
 //! roles. `bus=local` and the memory store are the only shapes that exist
 //! here, which is why this crate turns `antares-api`'s default features off.
 
@@ -34,7 +34,7 @@ impl Broker {
     }
 
     /// The same wiring over an externally-constructed store — the OPFS-backed
-    /// store (N4) enters here; `mode` is what `/q/health` reports (A4).
+    /// store enters here; `mode` is what `/q/health` reports.
     pub fn with_store(store: antares_sql::store::Store, mode: &str) -> Self {
         Self::with_store_alias(store, mode, None)
     }
@@ -55,7 +55,7 @@ impl Broker {
             std::sync::Arc::new(store),
             mode,
         );
-        // Same in-process matcher/notifier path as bus=local (§9.2): the
+        // Same in-process matcher/notifier path as bus=local: the
         // store's change hook feeds it, no bus process exists to talk to.
         antares_api::notify::wire(&mut state);
         // 5.8.1.4: distributed subscriptions hand this URL to the remote
@@ -102,11 +102,11 @@ impl Broker {
     }
 
     /// Serve ONE request. The signature is the seam every front end reduces
-    /// to: the Service Worker (N3), the in-page API, and the Node shim (N7a)
+    /// to: the Service Worker, the in-page API, and the Node shim
     /// all funnel here.
     ///
     /// `&self` on purpose: a federation forward to the loopback host re-enters
-    /// this same instance WHILE an outer `handle` is suspended (N9) — `&mut`
+    /// this same instance WHILE an outer `handle` is suspended — `&mut`
     /// would make that a wasm-bindgen recursive-borrow error. Router clone is
     /// a cheap Arc bump and shares all state.
     pub async fn handle(&self, req: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {

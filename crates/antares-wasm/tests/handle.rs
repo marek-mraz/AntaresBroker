@@ -1,8 +1,8 @@
-//! N1: the `handle(request) -> response` seam is the whole broker. These run
+//! The `handle(request) -> response` seam is the whole broker. These run
 //! NATIVELY against the same target-independent code the browser loads — the
 //! wasm32 build differs only below this seam (executor, fetch, timers), so a
-//! round-trip here proves the router wiring the Service Worker (N3) and the
-//! Node shim (N7a) will drive.
+//! round-trip here proves the router wiring the Service Worker and the
+//! Node shim will drive.
 #![allow(clippy::unwrap_used)]
 
 use antares_wasm::Broker;
@@ -52,7 +52,7 @@ async fn create_then_retrieve_round_trips() {
     assert_eq!(doc["speed"]["value"], 42);
 }
 
-/// N9: cross-tenant federation inside ONE broker. Tenant `space-a` holds a
+/// Cross-tenant federation inside ONE broker. Tenant `space-a` holds a
 /// Context Source Registration whose endpoint is a real loopback listener
 /// feeding the SAME broker instance and whose `tenant` member (5.2.9) names
 /// `space-b` — the native stand-in for the browser loopback host. Queries in

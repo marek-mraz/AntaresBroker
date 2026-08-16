@@ -1,4 +1,4 @@
-//! JSON-LD expansion input path (§16.2): arbitrary JSON documents through
+//! JSON-LD expansion input path: arbitrary JSON documents through
 //! expand_entity with the core context — errors fine, panics never.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
