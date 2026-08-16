@@ -126,8 +126,11 @@ explicitly says "decide with the user".
       and mqtt-compose.yml (MQTT execution delegated to the D6 CI job —
       mosquitto is container-only here, same posture as the MQTT TPs).
       Evidence: this commit.
-- [ ] D4. `examples/browser/` — the www/ demo promoted to a documented
-      example: serve, create entities in-page, watch notifications.
+- [x] D4. examples/browser/: serve.sh (page + Service Worker path) +
+      Node-shim recipe. Executed: shim on :9394 from the same www/pkg
+      bytes — health UP + create 201. In-page flow is the hosted
+      playground, page-tested by dev/wasm-test.sh in CI. Evidence: this
+      commit.
 - [ ] D5. `examples/smart-city/` — small realistic dataset (Smart Data
       Models types, ~50 entities), the demo that sells the digital-twin
       story; reused by README screenshots.
