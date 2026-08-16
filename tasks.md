@@ -37,10 +37,14 @@ explicitly says "decide with the user".
 - [x] A4. demo/hfp-bento/ and demo/hfp/map/ moved to /workspace/hfp-demos/
       (user decision 2026-08-16: keep the repo clean; examples/ is built
       fresh per D1-D5). Evidence: this commit + clean git status.
-- [ ] A5. Root inventory check: repo root contains ONLY product files
-      (Cargo.*, Dockerfile*, LICENSE, README, CHANGELOG, CONTRIBUTING,
-      SECURITY, deny.toml, config dirs). `ls` screenshot in the PR/commit
-      message as evidence.
+- [x] A5. Root inventory verified 2026-08-16: only product files, tooling
+      config (.github, claude.md, mempalace.yaml) and gitignored noise
+      remain. OPEN NOTE for the public release: etsi-cim-specs/ PDFs are
+      tracked — ETSI documents carry redistribution restrictions; before
+      the repo goes public, replace with a download script (fetch from
+      etsi.org by URL) and gitignore the PDFs. Recorded here, not acted on
+      (the audit loop and MemPalace mining depend on the local copies).
+      Evidence: this commit message carries the ls output.
 
 ## B. README (the front door)
 
