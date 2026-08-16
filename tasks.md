@@ -27,11 +27,11 @@ explicitly says "decide with the user".
 - [x] A1. Move working notes out of the repo root (error.md,
       taskImplementation.md, old tasks.md → /workspace; firewall-docs corpus
       indexes → /workspace). Evidence: this commit.
-- [ ] A2. Slim `claude.md`: §6 "State handoff" is session-log material —
-      move the accumulated log to /workspace (keep only the CURRENT loop
-      position, ≤10 lines), so the agent contract reads as tooling config,
-      not a diary. References to `error.md`/`tasks.md` updated to their new
-      locations/roles.
+- [x] A2. Slim `claude.md`: §6 moved to
+      /workspace/antares-state-handoff-archive.md (32 KB of session log),
+      replaced by a ≤10-line current-position block; all `error.md`
+      references repointed to /workspace/error.md. claude.md 51 KB → 19 KB.
+      Evidence: this commit.
 - [ ] A3. `.gitignore`: add `ETSI-matrix-results*`, `results*/`, `.DS_Store`,
       `*.zip` so analysis downloads never show up as untracked noise again.
 - [ ] A4. Decide with the user: `demo/hfp-bento/` and `demo/hfp/map/`
