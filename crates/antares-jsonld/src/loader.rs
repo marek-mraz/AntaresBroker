@@ -111,6 +111,12 @@ impl EgressPolicy {
                     || v4.is_broadcast()
             }
             std::net::IpAddr::V6(v6) => {
+                // an IPv4-mapped address (::ffff:a.b.c.d) is the v4 target in
+                // v6 spelling — judge it as its v4 self, or ::ffff:127.0.0.1
+                // and ::ffff:169.254.169.254 slip past the v6 checks
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return Self::ip_is_private(std::net::IpAddr::V4(v4));
+                }
                 v6.is_loopback()
                     || v6.is_unspecified()
                     // fc00::/7 unique-local + fe80::/10 link-local
@@ -342,6 +348,11 @@ pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, ms: u32) 
     }
 }
 
+/// Ceiling on a header-supplied cache lifetime: one year. The values are
+/// remote input; unclamped, `Instant::now() + duration` overflows (and
+/// panics) on a hostile max-age or Expires.
+const MAX_CONTEXT_TTL: std::time::Duration = std::time::Duration::from_secs(31_536_000);
+
 /// 6.3.16: cache lifetime of a downloaded @context comes from its response
 /// headers. `None` = no explicit lifetime (cache until evicted/reloaded).
 fn ttl_from_headers(
@@ -363,7 +374,7 @@ fn ttl_from_headers(
                 .next()
             {
                 if let Ok(secs) = v.trim().parse::<u64>() {
-                    return Some(std::time::Duration::from_secs(secs));
+                    return Some(std::time::Duration::from_secs(secs).min(MAX_CONTEXT_TTL));
                 }
             }
         }
@@ -372,13 +383,27 @@ fn ttl_from_headers(
         // HTTP-date (RFC 7231); an unparsable or past Expires means "stale".
         let when = chrono::DateTime::parse_from_rfc2822(exp).ok()?;
         let delta = when.with_timezone(&chrono::Utc) - chrono::Utc::now();
-        return Some(delta.to_std().unwrap_or(std::time::Duration::ZERO));
+        return Some(
+            delta
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO)
+                .min(MAX_CONTEXT_TTL),
+        );
     }
     None
 }
 
 /// @context responses above this size are refused.
 const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
+
+/// Cap on usage-registry entries (client-supplied URLs); past it, adding a
+/// new URL evicts the least recently used entry.
+const MAX_USAGE_ENTRIES: usize = 4096;
+
+/// Fetch-count cap per @context resolution — a hostile context tree must
+/// not turn one request into an unbounded crawl. Checked BEFORE each
+/// fetch, so at most this many URLs are ever contacted.
+const MAX_CONTEXT_URLS: usize = 32;
 
 #[derive(Clone)]
 struct FetchedDoc {
@@ -399,8 +424,9 @@ pub struct Loader {
     /// Core context, pre-merged and PINNED outside the LRU (never evicted).
     core_only: Arc<Context>,
     /// URL → usage stats for every external @context referenced by requests
-    /// (5.13 Cached-entry bookkeeping; bounded — client-supplied URLs must
-    /// never grow state without limit).
+    /// (5.13 Cached-entry bookkeeping). Client-supplied URLs must never grow
+    /// state without limit: capped at `MAX_USAGE_ENTRIES`, and admitting a
+    /// new URL past the cap evicts the entry with the oldest lastUsage.
     usage: RwLock<HashMap<String, CtxUsage>>,
     /// merged-cache key → every URL that resolution touched (so cache hits
     /// still bump numberOfHits for nested references).
@@ -517,23 +543,38 @@ impl Loader {
         let now = Self::now();
         {
             let mut map = self.usage.write().await;
-            map.entry(url.to_owned())
-                .and_modify(|u| {
-                    u.hits += 1;
-                    u.last_usage = now.clone();
-                })
-                .or_insert_with(|| CtxUsage {
-                    url: url.to_owned(),
-                    // deterministic (uuid5 of the URL): the same identity names
-                    // this entry in the usage registry, the persisted Cached row
-                    // (write-through) and across restarts — an API delete can
-                    // therefore always find the row (5.13.5).
-                    local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
-                        .to_string(),
-                    created_at: now.clone(),
-                    last_usage: now,
-                    hits: 1,
-                });
+            if let Some(u) = map.get_mut(url) {
+                u.hits += 1;
+                u.last_usage = now;
+            } else {
+                // hold the size bound: admitting a new URL past the cap
+                // evicts the entry with the oldest lastUsage (RFC 3339
+                // strings order chronologically)
+                if map.len() >= MAX_USAGE_ENTRIES {
+                    if let Some(oldest) = map
+                        .values()
+                        .min_by(|a, b| a.last_usage.cmp(&b.last_usage))
+                        .map(|u| u.url.clone())
+                    {
+                        map.remove(&oldest);
+                    }
+                }
+                map.insert(
+                    url.to_owned(),
+                    CtxUsage {
+                        url: url.to_owned(),
+                        // deterministic (uuid5 of the URL): the same identity
+                        // names this entry in the usage registry, the persisted
+                        // Cached row (write-through) and across restarts — an
+                        // API delete can therefore always find the row (5.13.5).
+                        local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
+                            .to_string(),
+                        created_at: now.clone(),
+                        last_usage: now,
+                        hits: 1,
+                    },
+                );
+            }
         }
         let row_exists = match self.usage_bump.read().expect("bump lock").as_ref() {
             Some(f) => f(url),
@@ -645,14 +686,6 @@ impl Loader {
         let urls = std::sync::Mutex::new(Vec::new());
         self.merge_entry(&mut ctx, user, 0, &urls).await?;
         let urls = urls.into_inner().unwrap_or_default();
-        // Fetch-count cap per resolution — a hostile @context tree
-        // must not turn one request into an unbounded crawl.
-        if urls.len() > 32 {
-            return Err(NgsiError::LdContextNotAvailable(format!(
-                "@context resolution touched {} URLs (limit 32)",
-                urls.len()
-            )));
-        }
         if count {
             for url in &urls {
                 if counted.contains(url) {
@@ -731,6 +764,16 @@ impl Loader {
                         } else {
                             url.clone()
                         };
+                    // Cap enforced before the network is touched: once the
+                    // resolution has already fetched MAX_CONTEXT_URLS
+                    // documents, the next reference fails instead of
+                    // extending the crawl. Poisoned lock fails closed.
+                    let fetched_so_far = urls.lock().map(|u| u.len()).unwrap_or(usize::MAX);
+                    if fetched_so_far >= MAX_CONTEXT_URLS {
+                        return Err(NgsiError::LdContextNotAvailable(format!(
+                            "@context resolution exceeds {MAX_CONTEXT_URLS} referenced URLs"
+                        )));
+                    }
                     let doc = self.fetch(&resolved).await?;
                     if let Ok(mut u) = urls.lock() {
                         u.push(resolved.clone());
@@ -816,10 +859,34 @@ impl Loader {
             {
                 return Err(err(format!("{url}: @context document too large")));
             }
+            // A declared Content-Length is advisory only — a chunked body
+            // has none. Natively the body is accumulated chunk by chunk and
+            // refused the moment it would pass the cap, so an oversized
+            // response is never buffered in full first.
+            #[cfg(not(target_arch = "wasm32"))]
+            let bytes = {
+                let mut resp = resp;
+                let mut buf: Vec<u8> = Vec::new();
+                while let Some(chunk) = resp
+                    .chunk()
+                    .await
+                    .map_err(|e| err(format!("reading {url}: {e}")))?
+                {
+                    if buf.len() + chunk.len() > MAX_CONTEXT_BYTES {
+                        return Err(err(format!("{url}: @context document too large")));
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                buf
+            };
+            // wasm: the browser fetch hands over the body whole; the
+            // post-read size check below still applies.
+            #[cfg(target_arch = "wasm32")]
             let bytes = resp
                 .bytes()
                 .await
-                .map_err(|e| err(format!("reading {url}: {e}")))?;
+                .map_err(|e| err(format!("reading {url}: {e}")))?
+                .to_vec();
             Ok((ttl, bytes))
         };
         let (ttl, bytes) = http_interaction(async {
@@ -1173,6 +1240,19 @@ mod tests {
         );
         let future = ttl_from_headers(None, Some("Fri, 01 Jan 2100 00:00:00 GMT"));
         assert!(future.expect("parsed") > std::time::Duration::from_secs(3600));
+        // Header values are remote input; an unclamped lifetime overflows
+        // Instant arithmetic when added to now(). Both paths clamp to a year.
+        let year = std::time::Duration::from_secs(31_536_000);
+        assert_eq!(
+            ttl_from_headers(Some("max-age=18446744073709551615"), None),
+            Some(year),
+            "huge max-age clamps to one year"
+        );
+        assert_eq!(
+            ttl_from_headers(None, Some("Fri, 01 Jan 2100 00:00:00 GMT")),
+            Some(year),
+            "far-future Expires clamps to one year"
+        );
     }
 
     #[tokio::test]
@@ -1189,6 +1269,11 @@ mod tests {
             "localhost",
             "::1",
             "0.0.0.0",
+            // IPv4-mapped IPv6 forms of private targets must not slip
+            // past the v6 arm — same destinations, different spelling.
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.1.2.3",
         ] {
             assert!(
                 deny.check_host(host, 80).await.is_err(),
@@ -1198,6 +1283,10 @@ mod tests {
         assert!(
             deny.check_host("93.184.216.34", 443).await.is_ok(),
             "public IP allowed"
+        );
+        assert!(
+            deny.check_host("::ffff:8.8.8.8", 443).await.is_ok(),
+            "IPv4-mapped public IP allowed"
         );
         let allow = EgressPolicy {
             allow_private: true,
@@ -1283,6 +1372,140 @@ mod tests {
             .await
             .expect("resolve after reload");
         assert_eq!(ctx.expand_key("speed"), "https://b.example/speed");
+    }
+
+    /// The response-size cap must trip WHILE the body is being read, not
+    /// after the whole thing was buffered: a chunked response (no
+    /// Content-Length) that never terminates would otherwise be
+    /// accumulated in full before the check. The server here streams 8 MiB
+    /// and closes without the final 0-chunk — the resolve must fail with
+    /// the size error (cap hit mid-read), never with a read/decode error.
+    #[tokio::test]
+    async fn oversized_chunked_context_is_refused_at_the_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // drain the request head: closing a socket with unread data
+                // pending sends RST, which discards body bytes the client
+                // has not consumed yet and turns the test nondeterministic
+                let mut reqbuf = vec![0u8; 4096];
+                let _ = sock.read(&mut reqbuf).await;
+                if sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nTransfer-Encoding: chunked\r\n\r\n",
+                    )
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                let chunk = vec![b'x'; 64 * 1024];
+                let head = format!("{:x}\r\n", chunk.len());
+                for _ in 0..128 {
+                    // stop early once the client hangs up (cap tripped)
+                    if sock.write_all(head.as_bytes()).await.is_err()
+                        || sock.write_all(&chunk).await.is_err()
+                        || sock.write_all(b"\r\n").await.is_err()
+                    {
+                        break;
+                    }
+                }
+                // no terminating 0-chunk: the connection just closes
+            }
+        });
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let err = loader
+            .resolve(&Value::String(format!("http://{addr}/big.jsonld")))
+            .await
+            .expect_err("oversized chunked body must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("too large"),
+            "cap must fire during the read, got {msg}"
+        );
+    }
+
+    /// The per-resolution fetch cap must stop the crawl BEFORE the network
+    /// is hit past the limit — a hostile context listing many siblings
+    /// must not trigger them all and only then be rejected.
+    #[tokio::test]
+    async fn fetch_cap_stops_crawl_before_the_limit_is_passed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = if req.starts_with("GET /root") {
+                    let children: Vec<String> = (0..40)
+                        .map(|i| format!("\"http://{addr}/c{i}.jsonld\""))
+                        .collect();
+                    format!("{{\"@context\":[{}]}}", children.join(","))
+                } else {
+                    r#"{"@context":{"a":"https://example.org/a"}}"#.to_string()
+                };
+                // Connection: close → one request per connection, so the
+                // accept counter equals the number of fetches made.
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let err = loader
+            .resolve(&Value::String(format!("http://{addr}/root.jsonld")))
+            .await
+            .expect_err("a 40-URL crawl must be rejected");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "cap breach → LdContextNotAvailable, got {err:?}"
+        );
+        let n = hits.load(Ordering::SeqCst);
+        assert!(n <= 33, "crawl must stop at the cap, made {n} fetches");
+    }
+
+    /// The usage registry records client-supplied URLs — it must hold a
+    /// hard size bound, not grow by one entry per distinct URL forever.
+    #[tokio::test]
+    async fn usage_registry_is_bounded() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        for i in 0..4100 {
+            let _ = loader
+                .bump_url(&format!("https://ctx.example/{i}.jsonld"))
+                .await;
+        }
+        let list = loader.usage_list().await;
+        assert!(
+            list.len() <= 4096,
+            "usage registry must stay bounded, got {} entries",
+            list.len()
+        );
+        // eviction must sacrifice old entries, never the one just added
+        assert!(
+            list.iter().any(|u| u.url.ends_with("/4099.jsonld")),
+            "the most recently used entry must survive eviction"
+        );
     }
 
     #[tokio::test]
