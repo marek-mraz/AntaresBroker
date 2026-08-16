@@ -114,9 +114,10 @@ explicitly says "decide with the user".
 
 ## D. Examples (examples/ — every one executed before commit)
 
-- [ ] D1. `examples/quickstart/` — compose file (broker + nothing), seed
-      script with 3 entities, query walkthrough. Smoke-tested in CI
-      (a 2-minute job, not the full matrix).
+- [x] D1. examples/quickstart/: compose + seed.sh (batch create, q=,
+      geo query). Executed locally against the built broker: 3 seeded,
+      q=temperature>30 returned exactly sensor 3, near-2km returned
+      sensors 1+2. CI smoke lands in D6. Evidence: this commit.
 - [ ] D2. `examples/federation/` — two brokers + CSR registration script;
       shows a federated query resolving across both.
 - [ ] D3. `examples/subscriptions/` — HTTP callback + MQTT notification
