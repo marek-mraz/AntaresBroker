@@ -1,0 +1,28 @@
+name: Conformance deviation
+description: Behaviour that contradicts ETSI GS CIM 009 V1.9.1
+labels: [conformance]
+body:
+  - type: input
+    id: clause
+    attributes:
+      label: Spec clause
+      description: The CIM 009 clause number the behaviour violates (e.g. 5.6.6, 6.3.4). Required — conformance reports are argued from the spec text.
+      placeholder: "5.6.6"
+    validations: {required: true}
+  - type: textarea
+    id: spectext
+    attributes:
+      label: Normative text
+      description: Quote the SHALL being violated.
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      render: bash
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes:
+      label: Broker version + store mode
+    validations: {required: true}

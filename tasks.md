@@ -204,8 +204,10 @@ explicitly says "decide with the user".
 - [x] G3. SECURITY.md already had the disclosure contact + posture/audit
       links; supported-versions table added (latest-release policy,
       pre-1.0 rule). Evidence: this commit.
-- [ ] G4. Issue/PR templates: bug (broker version, store mode, repro
-      payload), conformance deviation (clause number required), feature.
+- [x] G4. Issue forms (bug with version/store/repro required;
+      conformance deviation with mandatory clause + quoted SHALL; feature)
+      + PR template with the proof checklist (targeted tests, Robot,
+      test-first, changelog, DCO). YAML validated. Evidence: this commit.
 - [ ] G5. Positioning page (docs or website): Antares within the FIWARE /
       NGSI-LD ecosystem — compliant peer, not a fork; the wasm/edge story;
       the city-as-code configuration plane as the companion project.
