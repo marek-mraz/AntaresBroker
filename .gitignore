@@ -27,3 +27,9 @@ __pycache__
 # npm deps (any package dir)
 node_modules
 # generated frontend artifacts live in www/.gitignore (pkg, dist, public sync)
+
+# analysis downloads / OS noise — never repo content
+ETSI-matrix-results*
+results*/
+.DS_Store
+*.zip

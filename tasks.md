@@ -32,8 +32,8 @@ explicitly says "decide with the user".
       replaced by a ≤10-line current-position block; all `error.md`
       references repointed to /workspace/error.md. claude.md 51 KB → 19 KB.
       Evidence: this commit.
-- [ ] A3. `.gitignore`: add `ETSI-matrix-results*`, `results*/`, `.DS_Store`,
-      `*.zip` so analysis downloads never show up as untracked noise again.
+- [x] A3. `.gitignore`: ETSI-matrix-results*, results*/, .DS_Store, *.zip
+      added. Evidence: this commit.
 - [ ] A4. Decide with the user: `demo/hfp-bento/` and `demo/hfp/map/`
       (untracked, other sessions' work) — promote to `examples/` (D-section
       quality bar applies) or move to /workspace.
