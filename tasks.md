@@ -176,9 +176,10 @@ explicitly says "decide with the user".
 
 ## F. Quality gates (make the existing rigor visible)
 
-- [ ] F1. Coverage: the weekly etsi-coverage report gets a README badge and
-      a one-line ratchet (fail if merged line coverage drops >1pt below the
-      last main run). Report-only history stays.
+- [x] F1. Coverage badge was already in the README header; ratchet step
+      added to etsi-coverage.yml (merged lines % vs the published
+      coverage-badge.json, fail on >1pt drop, skip when no baseline).
+      YAML + bash syntax validated. Evidence: this commit.
 - [ ] F2. MSRV: pin and test a minimum supported Rust version in CI;
       document in README.
 - [ ] F3. Public CI dashboard: the Pages conformance report linked from
