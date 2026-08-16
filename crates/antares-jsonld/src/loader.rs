@@ -1,4 +1,4 @@
-//! Remote @context loading + caching + pinned core contexts (§6.3).
+//! Remote @context loading + caching + pinned core contexts.
 
 use crate::context::Context;
 use antares_model::NgsiError;
@@ -6,13 +6,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-// N2 clock rule: std Instant panics on wasm32; web-time is the std re-export
+// std Instant panics on wasm32; web-time is the std re-export
 // natively and performance.now() in the browser.
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
-// N2: moka's clock panics on wasm32 (std Instant); the browser build swaps
+// moka's clock panics on wasm32 (std Instant); the browser build swaps
 // in the FIFO minicache behind the same call surface.
 #[cfg(target_arch = "wasm32")]
 use crate::minicache::Cache as BoundedCache;
@@ -66,12 +66,12 @@ pub struct CtxUsage {
     pub hits: u64,
 }
 
-/// §16.4 egress policy hook for @context fetches: scheme allowlist is
+/// Egress policy hook for @context fetches: scheme allowlist is
 /// enforced in `fetch`; this adds the private-range deny (loopback,
 /// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
-/// Private egress is ALLOWED by default (decision 2026-08-08: notifications
-/// must reach private nets out of the box — dev boxes, compose stacks and the
-/// ETSI/IOP mocks all live there); `ANTARES_EGRESS_ALLOW_PRIVATE=false`
+/// Private egress is ALLOWED by default (notifications must reach private
+/// nets out of the box — dev boxes, compose stacks and the ETSI/IOP mocks
+/// all live there); `ANTARES_EGRESS_ALLOW_PRIVATE=false`
 /// turns the deny on for internet-exposed deployments.
 /// The DNS-pinning resolver and redirect cap that enforce it on the wire
 /// are `PolicyResolver` / `client_builder` below.
@@ -80,7 +80,7 @@ pub struct EgressPolicy {
     pub allow_private: bool,
 }
 
-/// N: programmatic stand-in for `ANTARES_EGRESS_ALLOW_PRIVATE` — wasm32 has
+/// Programmatic stand-in for `ANTARES_EGRESS_ALLOW_PRIVATE` — wasm32 has
 /// NO process environment (`std::env::var` always errs there), so the
 /// browser/Node embedder sets this before constructing the broker.
 static ALLOW_PRIVATE_OVERRIDE: std::sync::atomic::AtomicBool =
@@ -120,7 +120,7 @@ impl EgressPolicy {
         }
     }
 
-    /// Deny-by-default for private destinations (§16.4). Resolves the host
+    /// Deny-by-default for private destinations. Resolves the host
     /// once; any private address in the answer denies the fetch.
     pub async fn check_host(&self, host: &str, port: u16) -> Result<(), String> {
         if self.allow_private {
@@ -149,15 +149,15 @@ impl EgressPolicy {
                 }
             }
         }
-        // wasm32 (§N): a page cannot resolve DNS — the browser does, and its
-        // same-origin/CORS machinery is the egress boundary there (N8).
+        // wasm32: a page cannot resolve DNS — the browser does, and its
+        // same-origin/CORS machinery is the egress boundary there.
         #[cfg(target_arch = "wasm32")]
         let _ = port;
         Ok(())
     }
 }
 
-/// N2: axum handlers require `Send` futures and axum state requires
+/// axum handlers require `Send` futures and axum state requires
 /// `Send + Sync`, but reqwest's wasm client and futures are neither — the
 /// browser build is single-threaded, so `send_wrapper` bridges the gap
 /// soundly (it still panics at runtime on any actual cross-thread use).
@@ -178,7 +178,7 @@ pub fn wrap_client(c: reqwest::Client) -> HttpClient {
     }
 }
 
-/// N2: run one whole HTTP interaction (build → send → read body) as a unit
+/// Run one whole HTTP interaction (build → send → read body) as a unit
 /// whose future is Send on every target. Native: the identity. The inputs
 /// must move INTO the future and only Send data may come out.
 #[cfg(not(target_arch = "wasm32"))]
@@ -193,15 +193,15 @@ pub fn http_interaction<F: std::future::Future>(fut: F) -> send_wrapper::SendWra
 /// The recursion box for `merge_entry` — Send on every target: the only
 /// un-Send piece (reqwest's wasm fetch) is already fenced inside
 /// `http_interaction`, so the box itself can stay Send and the axum handler
-/// futures above it keep their required Send bound (N2).
+/// futures above it keep their required Send bound.
 type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// §16.4 redirect cap: a fetch may not be bounced more than this many times.
+/// Redirect cap: a fetch may not be bounced more than this many times.
 /// Each hop is a fresh destination the policy has to clear, so the cap is what
 /// keeps an open redirector from walking us into a private range.
 pub const MAX_REDIRECTS: usize = 3;
 
-/// §16.4 DNS pinning. `check_host` resolves a name to decide whether egress is
+/// DNS pinning. `check_host` resolves a name to decide whether egress is
 /// allowed, but reqwest would resolve it *again* at connect time — a window in
 /// which the answer can change (DNS rebinding). Installing the policy as the
 /// client's resolver closes it: the addresses the connector dials are the ones
@@ -229,19 +229,19 @@ impl reqwest::dns::Resolve for PolicyResolver {
     }
 }
 
-/// The one outbound-client constructor (§16.4): every reqwest client in the
+/// The one outbound-client constructor: every reqwest client in the
 /// broker — @context fetches, notifications, federation forwards — is built
 /// from this, so the policy cannot be forgotten at a call site. Timeouts stay
 /// the caller's choice; the security-relevant settings do not.
 ///
 /// `ANTARES_EXTRA_CA_FILE`: optional PEM bundle of ADDITIONAL trust anchors
 /// (private CAs, corporate proxies — and servers that ship an incomplete
-/// chain, see error.md on forge.etsi.org). Verification itself is never
-/// disableable (§16.5); this only widens what it trusts, per deployment.
+/// chain, as forge.etsi.org does). Verification itself is never
+/// disableable; this only widens what it trusts, per deployment.
 /// Read once per builder call — the wiring constructs clients at startup.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
-    // §16.4 SSRF: `PolicyResolver` only fires for HOSTNAME targets — reqwest
+    // SSRF: `PolicyResolver` only fires for HOSTNAME targets — reqwest
     // dials IP-LITERAL URLs directly, so a `302 Location: http://169.254.169.254/`
     // would skip the egress check on every hop. The custom redirect policy
     // re-checks each hop's URL: an IP literal in a private range is refused,
@@ -288,16 +288,16 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
     b
 }
 
-/// wasm32 (§N): the browser owns TLS trust, redirects and name resolution —
+/// wasm32: the browser owns TLS trust, redirects and name resolution —
 /// reqwest's wasm `ClientBuilder` exposes none of those knobs, and the page's
-/// CORS sandbox is the egress boundary (N8). The policy still gates URLs via
+/// CORS sandbox is the egress boundary. The policy still gates URLs via
 /// `check_host` before any fetch.
 #[cfg(target_arch = "wasm32")]
 pub fn client_builder(_policy: EgressPolicy) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
 }
 
-/// Client timeouts are native knobs (§16.4 U1); the browser's fetch has no
+/// Client timeouts are native knobs; the browser's fetch has no
 /// client-level equivalent, so on wasm32 this is a no-op by design.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn with_timeouts(
@@ -318,13 +318,13 @@ pub fn with_timeouts(
 }
 
 /// Hard wall-clock bound for an outbound interaction. Native clients carry
-/// the U1 timeouts at construction, so this passes through; on wasm32 the
+/// their timeouts at construction, so this passes through; on wasm32 the
 /// browser fetch has no client-level timeout (and reqwest's AbortController
 /// timer does not arm inside a dedicated worker), so an unresolved fetch
 /// would pend FOREVER — and a pending context fetch holds its resolve
-/// permit, which eventually stalls ALL context resolution (N7b: robot froze
-/// over 1 h on a stopped context server, then every later fetch queued behind
-/// the leaked permits). `None` = deadline exceeded.
+/// permit, which eventually stalls ALL context resolution (a stopped context
+/// server once froze a whole Robot run for over an hour this way, every later
+/// fetch queued behind the leaked permits). `None` = deadline exceeded.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, _ms: u32) -> Option<T> {
     Some(fut.await)
@@ -377,7 +377,7 @@ fn ttl_from_headers(
     None
 }
 
-/// @context responses above this size are refused (§16.4 response-size cap).
+/// @context responses above this size are refused.
 const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -391,10 +391,10 @@ pub struct Loader {
     http: HttpClient,
     policy: EgressPolicy,
     /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
-    /// J2: bounded LRU — every cache has a max size (R4/L7 lesson).
+    /// Bounded LRU — every cache has a max size.
     fetched: BoundedCache<String, FetchedDoc>,
     /// cache key (serialized user context) → merged+frozen Context (the
-    /// parsed-context LRU of §6.3 — the centerpiece, size-capped at 256).
+    /// parsed-context LRU — the centerpiece, size-capped at 256).
     merged: BoundedCache<String, Arc<Context>>,
     /// Core context, pre-merged and PINNED outside the LRU (never evicted).
     core_only: Arc<Context>,
@@ -405,14 +405,14 @@ pub struct Loader {
     /// merged-cache key → every URL that resolution touched (so cache hits
     /// still bump numberOfHits for nested references).
     merged_urls: BoundedCache<String, Arc<Vec<String>>>,
-    /// J3: bounded concurrency on cold context resolution — a burst of
+    /// Bounded concurrency on cold context resolution — a burst of
     /// exotic-context requests can't blow the JSON working-set budget.
     resolve_permits: tokio::sync::Semaphore,
-    /// J2 write-through: freshly fetched remote contexts are handed to this
+    /// Write-through: freshly fetched remote contexts are handed to this
     /// hook (the broker persists them as kind='Cached' rows) so the cache
     /// survives a restart. Set once at wiring; None in tests.
     cache_writer: std::sync::RwLock<Option<CacheWriter>>,
-    /// Shared-store hit counter (K8): bump the persisted row on every counted
+    /// Shared-store hit counter: bump the persisted row on every counted
     /// use; a missing row reports a cross-instance delete. `None` in
     /// compositions without a store (bare loader tests).
     usage_bump: std::sync::RwLock<Option<UsageBump>>,
@@ -471,7 +471,7 @@ impl Loader {
         *self.cache_writer.write().expect("writer lock") = Some(w);
     }
 
-    /// Wire the shared-store usage bump (K8/5.13.3.5): called on every
+    /// Wire the shared-store usage bump (5.13.3.5): called on every
     /// counted use of a URL. Returns whether the shared row still exists —
     /// `false` means another instance deleted the @context, and this
     /// instance must drop its warm copies so the delete is honoured here.
@@ -479,7 +479,7 @@ impl Loader {
         *self.usage_bump.write().expect("bump lock") = Some(f);
     }
 
-    /// Boot preload (J2): re-seed a Cached entry persisted by the writer —
+    /// Boot preload: re-seed a Cached entry persisted by the writer —
     /// the parsed doc goes into the fetch cache, the bookkeeping identity
     /// (localId/createdAt) into the usage registry, so 5.13 listings look
     /// the same across a restart.
@@ -509,7 +509,7 @@ impl Loader {
 
     /// Bump usage stats (numberOfHits / lastUsage, 5.13.3.5) for one URL —
     /// in this instance's registry AND, via the usage_bump hook, in the
-    /// shared store row (K8: per-instance counters split-brain behind a
+    /// shared store row (per-instance counters split-brain behind a
     /// load balancer). Returns true when the hook reported the row GONE
     /// (deleted through another instance): local copies are evicted so the
     /// next resolution refetches and re-creates the entry.
@@ -526,7 +526,7 @@ impl Loader {
                     url: url.to_owned(),
                     // deterministic (uuid5 of the URL): the same identity names
                     // this entry in the usage registry, the persisted Cached row
-                    // (J2 write-through) and across restarts — an API delete can
+                    // (write-through) and across restarts — an API delete can
                     // therefore always find the row (5.13.5).
                     local_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
                         .to_string(),
@@ -635,7 +635,7 @@ impl Loader {
                 return Ok(hit);
             }
         }
-        // J3: cold resolution is the expensive path — bound its concurrency.
+        // Cold resolution is the expensive path — bound its concurrency.
         let _permit = self
             .resolve_permits
             .acquire()
@@ -645,7 +645,7 @@ impl Loader {
         let urls = std::sync::Mutex::new(Vec::new());
         self.merge_entry(&mut ctx, user, 0, &urls).await?;
         let urls = urls.into_inner().unwrap_or_default();
-        // I2/§16.3: fetch-count cap per resolution — a hostile @context tree
+        // Fetch-count cap per resolution — a hostile @context tree
         // must not turn one request into an unbounded crawl.
         if urls.len() > 32 {
             return Err(NgsiError::LdContextNotAvailable(format!(
@@ -695,7 +695,7 @@ impl Loader {
         entry: &'a Value,
         depth: usize,
         urls: &'a std::sync::Mutex<Vec<String>>,
-        // JSON-LD 1.1 §3.1: a relative context IRI inside a fetched context
+        // JSON-LD 1.1 (section 3.1): a relative context IRI inside a fetched context
         // document resolves against THAT document's URL. The ETSI compound
         // context references "ngsi-ld-test-suite.jsonld" relatively — without
         // this every request using it dies with LdContextNotAvailable.
@@ -778,7 +778,7 @@ impl Loader {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(err(format!("unsupported @context URL: {url}")));
         }
-        // §16.4 SSRF hook: deny private destinations unless configured.
+        // SSRF hook: deny private destinations unless configured.
         let parsed = reqwest::Url::parse(url).map_err(|e| err(format!("bad URL {url}: {e}")))?;
         let host = parsed.host_str().unwrap_or_default().to_owned();
         let port = parsed.port_or_known_default().unwrap_or(443);
@@ -786,7 +786,7 @@ impl Loader {
             .check_host(&host, port)
             .await
             .map_err(|e| err(format!("fetching {url}: {e}")))?;
-        // N2: the whole HTTP interaction is one Send unit (http_interaction);
+        // The whole HTTP interaction is one Send unit (http_interaction);
         // only Send data (ttl + bytes) crosses back out.
         let interact = async {
             let resp = self
@@ -809,7 +809,7 @@ impl Loader {
                     .and_then(|v| v.to_str().ok()),
                 resp.headers().get("expires").and_then(|v| v.to_str().ok()),
             );
-            // §16.4: bounded response size (504 LdContextNotAvailable on breach).
+            // Bounded response size (504 LdContextNotAvailable on breach).
             if resp
                 .content_length()
                 .is_some_and(|l| l as usize > MAX_CONTEXT_BYTES)
@@ -854,7 +854,7 @@ impl Loader {
                 stale_at: ttl.map(|d| Instant::now() + d),
             },
         );
-        // J2 write-through: persist what was just fetched.
+        // Write-through: persist what was just fetched.
         if let Ok(w) = self.cache_writer.read() {
             if let Some(w) = w.as_ref() {
                 w(url, &arc);
@@ -878,8 +878,8 @@ impl Loader {
     }
 
     /// Cache occupancy (entries per cache). Feeds /q/health today and the
-    /// K12 `antares_context_cache_entries` metric later; also what the I7
-    /// security regression asserts the R4-class size caps against.
+    /// `antares_context_cache_entries` metric later; also what the
+    /// security regression tests assert the cache size caps against.
     pub fn cache_stats(&self) -> serde_json::Value {
         self.fetched.run_pending_tasks();
         self.merged.run_pending_tasks();
@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(ctx.expand_key("speed"), "https://example.org/speed");
     }
 
-    /// I4/§16.4: the resolver is the enforcement point, so a name that
+    /// The resolver is the enforcement point, so a name that
     /// resolves into a private range must fail at DNS time — that is what
     /// makes a rebinding answer between check and connect harmless.
     #[tokio::test]
@@ -1073,7 +1073,7 @@ mod tests {
         );
     }
 
-    // §16.4 SSRF: a redirect to a private IP LITERAL is refused per hop even
+    // SSRF: a redirect to a private IP LITERAL is refused per hop even
     // though reqwest's DNS PolicyResolver never sees IP literals. With
     // allow_private=false the redirect target (127.0.0.1) must not be followed.
     #[tokio::test]

@@ -1,5 +1,5 @@
-//! JSON-LD context processing — the NGSI-LD-subset processor (§6.3, risk #1
-//! escape hatch taken: hand-rolled, no `json-ld` crate dependency).
+//! JSON-LD context processing — the NGSI-LD-subset processor (hand-rolled,
+//! no `json-ld` crate dependency).
 //!
 //! A [`Context`] is the merged, resolved term map for one request: user
 //! contexts (in order, later wins) with the core context merged last (core

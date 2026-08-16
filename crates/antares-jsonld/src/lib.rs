@@ -1,7 +1,6 @@
-//! JSON-LD layer (docs/deep-analysis.md §6.3) — hand-rolled NGSI-LD-subset
-//! processor (risk #1 escape hatch): context processing, expansion with
-//! structural validation, compaction, caching loader with pinned core
-//! contexts.
+//! JSON-LD layer — hand-rolled NGSI-LD-subset processor: context processing,
+//! expansion with structural validation, compaction, caching loader with
+//! pinned core contexts.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compact;

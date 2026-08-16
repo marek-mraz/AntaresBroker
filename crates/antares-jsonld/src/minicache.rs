@@ -1,8 +1,8 @@
-//! N2 (wasm32 only): a bounded map with moka's call surface. moka's clock
+//! wasm32 only: a bounded map with moka's call surface. moka's clock
 //! calls `std::time::Instant::now()` unconditionally, which panics on
 //! wasm32-unknown-unknown — so the browser build swaps in this FIFO-evicting
 //! cache behind the same six methods the loader uses. Bounded is the
-//! requirement (R4 rule: every cache has a max size); recency-optimal
+//! requirement (every cache has a max size); recency-optimal
 //! eviction is not — a browser tab's @context set is tiny.
 // FIFO eviction is deliberate; port moka's TinyLFU here only if a browser
 // workload ever shows cache thrash.

@@ -1,5 +1,5 @@
-//! NGSI-LD expansion + structural validation (the NGSIObject-equivalent pass,
-//! §4 point 2): compacted/concise input → internal expanded form.
+//! NGSI-LD expansion + structural validation (the NGSIObject-equivalent
+//! pass): compacted/concise input → internal expanded form.
 //!
 //! Internal (expanded) form:
 //! - `id` — string URI
@@ -2121,9 +2121,9 @@ mod tests {
 mod bench {
     use super::*;
 
-    /// J1 (risk #1): the phase-0 go/no-go was ≥5k expansions/s/core.
-    /// Antares hand-rolled its processor from day one (the fork-or-hand-roll
-    /// decision the box anticipated) — this measures it. Run with
+    /// The go/no-go threshold for a hand-rolled JSON-LD processor was
+    /// ≥5k expansions/s/core. Antares hand-rolled its processor from day one
+    /// rather than forking a `json-ld` crate — this measures it. Run with
     /// `cargo test -p antares-jsonld --release -- --ignored bench_expansion`.
     #[test]
     #[ignore = "benchmark — run explicitly in release"]

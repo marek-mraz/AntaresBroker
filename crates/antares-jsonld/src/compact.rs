@@ -1,5 +1,5 @@
 //! Compaction: internal expanded form → response document under the request
-//! @context. Never mutates its input (§14.4 — enforced by &input signature).
+//! @context. Never mutates its input (enforced by the &input signature).
 
 use crate::context::Context;
 use serde_json::{Map, Value};
