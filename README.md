@@ -302,6 +302,30 @@ docs/                     deep analysis + ADRs
 dev/                      run/test scripts        compose-files/  local stack
 ```
 
+## How Antares compares
+
+Architecture facts, each checkable in the respective project's docs; the
+Antares numbers are measured by this repo's CI (links above). Conformance
+claims for other brokers are theirs to make — check each project's own
+reporting.
+
+| | Antares | [Scorpio](https://github.com/ScorpioBroker/ScorpioBroker) | [Orion-LD](https://github.com/FIWARE/context.Orion-LD) | [Stellio](https://github.com/stellio-hub/stellio-context-broker) |
+|---|---|---|---|---|
+| Language / runtime | Rust, one native binary | Java (Quarkus, JVM) | C | Kotlin (Spring, JVM) |
+| Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS | MongoDB (+ PostgreSQL/TimescaleDB for temporal) | PostgreSQL + PostGIS + TimescaleDB |
+| Message bus | none (`local`) or NATS JetStream | Kafka (distributed mode) | none | Kafka |
+| Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka |
+| Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized |
+| Browser/wasm build | yes — 3.99 MB artifact, full API in a Service Worker | no | no | no |
+| Conformance evidence | [public per-store matrix, Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) | see project | see project | see project |
+
+All four speak the same ETSI CIM 009 API — that is the point of the
+standard. Antares is a compliant peer of the FIWARE-ecosystem brokers, not
+a fork of any of them; pick per deployment constraints and verify with the
+suite.
+
 ## License
 
-BSD-3-Clause (same family as Scorpio).
+[EUPL-1.2](LICENSE) — the European Union Public Licence: copyleft,
+EU-institution vetted, compatible with public-sector procurement across
+member states. Commercial licensing: contact@marek-mraz.com.

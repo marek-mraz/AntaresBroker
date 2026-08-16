@@ -65,10 +65,10 @@ explicitly says "decide with the user".
       NOT added (would be aspirational/unsupported): release badge (no
       release exists until E7 — add it in E7's commit) and Docker-pulls
       (shields has no GHCR pull counter). Evidence: this commit.
-- [ ] B5. Honest comparison section vs Scorpio / Orion-LD / Stellio:
-      conformance, RAM, startup, store backends, wasm. Facts only, each
-      independently checkable — this section sells the broker to the
-      procurement reader.
+- [x] B5. "How Antares compares" table added (language/runtime, storage,
+      bus, minimum footprint, measured RSS, wasm, conformance evidence);
+      other brokers' conformance left to their own reporting; License
+      section fixed BSD -> EUPL-1.2. Evidence: this commit.
 
 ## C. Docs (docs/ becomes user-facing)
 
