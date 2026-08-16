@@ -97,9 +97,10 @@ explicitly says "decide with the user".
       paging, tenancy rule (4.14), dev/run-five.sh as the worked example
       (the CI IOP stack — process-based, not compose). Evidence: this
       commit.
-- [ ] C6. Browser/wasm guide: what runs in a page (memory+file/OPFS, no
-      MQTT/NATS — the N8 structural limits stated plainly), Service Worker
-      mode, the Node shim tier, size budgets.
+- [x] C6. docs/src/wasm.md: Service Worker + in-page API, OPFS file
+      store, structural limits stated plainly (inbound sockets, CL header,
+      no MQTT/NATS/roles), Node tier as the conformance gate, build
+      recipe + budgets (3.99/1.52 MB vs 8/3 MB). Evidence: this commit.
 - [ ] C7. Operations: monitoring endpoints, state reset discipline
       (API-delete + truncate pairing), backup/restore (store files, pg
       dumps), upgrade procedure (blue/green replay — references the
