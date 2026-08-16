@@ -113,6 +113,9 @@ jobs:
       # a red build instead.
       - name: conformance ledger check
         run: pip install --quiet pyyaml && python3 dev/spec.py check
+
+      - name: Env-var docs check (C3)
+        run: ./dev/check-env-docs.sh
       # SQL-injection guard (§16.2): no string-built queries outside antares-sql
       - name: no format! into SQL outside the compiler
         run: |

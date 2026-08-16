@@ -84,9 +84,10 @@ explicitly says "decide with the user".
       against the locally built broker before commit; the 6.3.5
       json-vs-ld+json @context rule documented from a live 400.
       Evidence: this commit.
-- [ ] C3. Configuration reference: generate the full `ANTARES_*` env-var
-      table from `state.rs` (name, default, effect, since-version). CI check
-      that fails when a new env var lacks a docs row (grep-based is enough).
+- [x] C3. docs/src/configuration.md: 23 vars, defaults verified at their
+      parse sites (main.rs/state.rs/bounds.rs/shutdown.rs/loader.rs/
+      telemetry.rs/wiring.rs/nats.rs). dev/check-env-docs.sh green locally,
+      wired into workspace.yml next to spec.py check. Evidence: this commit.
 - [ ] C4. Deployment guide per mode: single node (memory/file), Postgres,
       TimescaleDB, HA (NATS + LB + stateless pods, `docker-compose-ha.yml`
       as the worked example), and resource sizing from the measured matrix
