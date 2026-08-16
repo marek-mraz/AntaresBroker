@@ -92,9 +92,11 @@ explicitly says "decide with the user".
       single-node/pg/HA/role-split shapes (each one a CI-exercised compose
       file), k8s manifests with their store-dictated strategies, upgrade
       contract. Evidence: this commit.
-- [ ] C5. Federation guide: CSRs, distributed operations, Via/loop
-      protection, EntityMap paging, the 5-broker compose stack as the worked
-      example.
+- [x] C5. docs/src/federation.md: CSR modes, distributed reads/writes,
+      Via/508 loops, distributed subscriptions + PUBLIC_URL, EntityMap
+      paging, tenancy rule (4.14), dev/run-five.sh as the worked example
+      (the CI IOP stack — process-based, not compose). Evidence: this
+      commit.
 - [ ] C6. Browser/wasm guide: what runs in a page (memory+file/OPFS, no
       MQTT/NATS — the N8 structural limits stated plainly), Service Worker
       mode, the Node shim tier, size budgets.
