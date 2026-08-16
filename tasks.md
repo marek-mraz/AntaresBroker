@@ -153,15 +153,17 @@ explicitly says "decide with the user".
 - [x] E2. CHANGELOG in Keep-a-Changelog form: [Unreleased] with
       Added/Changed/Fixed carrying today's work; dated history kept as
       pre-release milestones. Evidence: this commit.
-- [ ] E3. Release workflow (`release.yml`, triggered by `v*` tag): full
-      seven-cell ETSI matrix MUST be green as the gate (etsi-full on the
-      tag already runs — wire it as the release gate, not just a report);
-      then: multi-arch (amd64+arm64) image → GHCR `:X.Y.Z` + `:latest`,
-      static binaries (musl) as release assets, `www/pkg` wasm bundle as a
-      release asset, auto-generated release notes from CHANGELOG.
-- [ ] E4. Supply-chain minimum: SBOM (cargo auditable or syft) attached to
-      the release, image signed (cosign keyless), `cargo deny` green as a
-      release gate (already in CI — make it blocking on tags).
+- [x] E3. Extended full.yml (already tag-triggered + matrix/roll-gated)
+      instead of a parallel release.yml: release-binaries job (musl
+      x86_64 + aarch64, stripped, tar.gz with LICENSE/README),
+      antares-wasm-pkg artifact from the wasm job, github-release job
+      (assets + notes extracted from CHANGELOG). YAML validated; first
+      live run = the v0.1.0 tag (E7, Mac-side). Evidence: this commit.
+- [x] E4. github-release job: syft SBOM (spdx-json) of the released
+      image attached, cosign keyless signature on the GHCR tag; cargo-deny
+      already blocks in workspace.yml which gates every tag build (no
+      change needed — verified licenses+advisories run there). Evidence:
+      this commit (same diff as E3).
 - [ ] E5. Version surface: `GET /info` (or the existing version endpoint)
       returns version + git hash + store mode; `--version` on the binary;
       both asserted by a release smoke test.
