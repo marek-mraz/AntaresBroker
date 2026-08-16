@@ -639,7 +639,11 @@ impl Store {
         Some(result)
     }
 
-    // jsonldContexts (cross-tenant by design; key = context id, no tenant prefix)
+    // jsonldContexts: one keyspace for the whole process (key = context id, no
+    // tenant prefix) — Cached rows are copies of public documents shared by
+    // every tenant. Ownership of the tenant-authored kinds (Hosted,
+    // ImplicitlyCreated, 5.13.1) travels in the document's "owner" member and
+    // is enforced where the entries are served, listed and deleted (5.13).
     pub fn context_put(&self, id: &str, doc: Value) {
         on_blocking(|| {
             let mut inner = self.write_inner();

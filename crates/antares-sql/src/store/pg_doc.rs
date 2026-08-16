@@ -590,7 +590,11 @@ impl PgDocStore {
         })
     }
 
-    // jsonldContexts — the ONE cross-tenant table, no RLS by design.
+    // jsonldContexts — the ONE cross-tenant table, no RLS by design: Cached
+    // rows are copies of public documents every tenant shares. The
+    // tenant-authored kinds (Hosted, ImplicitlyCreated, 5.13.1) carry their
+    // owning tenant in the stored document's "owner" member, enforced where
+    // they are served, listed and deleted (5.13).
     pub fn context_put(&self, id: &str, doc: &Value, kind: &str) -> Result<(), sqlx::Error> {
         wait(async {
             sqlx::query(

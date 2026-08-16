@@ -291,3 +291,131 @@ async fn clause_5_13_5_delete_and_reload_errors() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// Request carrying an explicit NGSILD-Tenant (6.3.14).
+fn tenant_req(method: &str, uri: &str, tenant: &str, body: Option<Value>) -> Request<Body> {
+    let b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("NGSILD-Tenant", tenant);
+    match body {
+        None => b.body(Body::empty()).expect("request"),
+        Some(v) => {
+            let s = v.to_string();
+            b.header("Content-Type", "application/json")
+                .header("Content-Length", s.len())
+                .body(Body::from(s))
+                .expect("request")
+        }
+    }
+}
+
+/// Add a Hosted @context on behalf of `tenant`, returning its Location path.
+async fn add_hosted_as(st: &AppState, tenant: &str, term: &str) -> String {
+    let (status, headers, _) = send(
+        st,
+        tenant_req(
+            "POST",
+            "/ngsi-ld/v1/jsonldContexts",
+            tenant,
+            Some(json!({"@context": {term: format!("urn:ngsi-ld:attributes:{term}")}})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .expect("Location header")
+        .to_owned()
+}
+
+/// 5.13.2.4 stores the @context supplied by a requesting client and 5.13.4.4
+/// serves it back; the client is identified by its tenant (6.3.14), so a
+/// Hosted @context belongs to the tenant that added it. For any other tenant
+/// it must be exactly as absent as an @context that never existed: not
+/// served, not listed, not deletable. Cached @contexts are copies of public
+/// documents the broker fetched and stay visible to every tenant (5.13.1).
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_hosted_context_is_private_to_its_tenant() {
+    let st = state();
+    let loc_a = add_hosted_as(&st, "tenant-a", "A1").await;
+    let id_a = loc_a.rsplit('/').next().expect("id").to_owned();
+    let loc_b = add_hosted_as(&st, "tenant-b", "B1").await;
+    let id_b = loc_b.rsplit('/').next().expect("id").to_owned();
+
+    // 5.13.4.4: tenant B must NOT be served tenant A's term mappings
+    let (status, _, body) = send(&st, tenant_req("GET", &loc_a, "tenant-b", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+        "{body}"
+    );
+    assert!(!body.to_string().contains("A1"), "leaked mappings: {body}");
+    // ... not even the metadata (createdAt/URL/localId of another tenant)
+    let (status, _, body) = send(
+        &st,
+        tenant_req("GET", &format!("{loc_a}?details=true"), "tenant-b", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // 5.13.3.4: the details listing must NOT expose the other tenant's URLs
+    let (status, _, list) = send(
+        &st,
+        tenant_req(
+            "GET",
+            "/ngsi-ld/v1/jsonldContexts?details=true",
+            "tenant-b",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dump = list.to_string();
+    assert!(!dump.contains(&id_a), "tenant A entry listed to B: {list}");
+    assert!(dump.contains(&id_b), "tenant B's own entry missing: {list}");
+    // the simple (URL-only) listing leaks nothing either
+    let (_, _, list) = send(
+        &st,
+        tenant_req("GET", "/ngsi-ld/v1/jsonldContexts", "tenant-b", None),
+    )
+    .await;
+    assert!(!list.to_string().contains(&id_a), "{list}");
+
+    // 5.13.5.4: tenant B must NOT be able to delete tenant A's @context
+    let (status, _, body) = send(&st, tenant_req("DELETE", &loc_a, "tenant-b", None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _, body) = send(&st, tenant_req("GET", &loc_a, "tenant-a", None)).await;
+    assert_eq!(status, StatusCode::OK, "owner lost its @context: {body}");
+    assert_eq!(
+        body["@context"]["A1"], "urn:ngsi-ld:attributes:A1",
+        "{body}"
+    );
+
+    // the default tenant is just another tenant here
+    let (status, _, _) = get(&st, &loc_a).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, list) = get(&st, "/ngsi-ld/v1/jsonldContexts?kind=Hosted").await;
+    assert_eq!(list, json!([]), "{list}");
+
+    // 5.13.1: Cached @contexts are broker-fetched copies of public documents
+    // — the pinned core context stays visible to every tenant
+    let core = "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fv1%2Fngsi-ld-core-context-v1.8.jsonld";
+    let (status, _, meta) = send(
+        &st,
+        tenant_req(
+            "GET",
+            &format!("/ngsi-ld/v1/jsonldContexts/{core}?details=true"),
+            "tenant-b",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meta}");
+    assert_eq!(meta["kind"], "Cached", "{meta}");
+
+    // and the owner can still delete its own entry (5.13.5.4)
+    let (status, _, _) = send(&st, tenant_req("DELETE", &loc_b, "tenant-b", None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}

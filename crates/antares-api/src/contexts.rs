@@ -7,7 +7,7 @@
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::Loader;
-use antares_model::NgsiError;
+use antares_model::{NgsiError, TenantId};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -107,13 +107,24 @@ fn cached_from_row(doc: &Value) -> CtxEntry {
     CtxEntry::Cached(row_usage(doc))
 }
 
-async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
+/// Ownership of a stored row (5.13.1). Hosted and ImplicitlyCreated rows hold
+/// term mappings authored through one tenant's requests and are visible,
+/// servable and deletable only through that tenant; Cached rows are copies of
+/// public documents the broker fetched and belong to no tenant. Rows written
+/// before the owner member existed belong to the default tenant.
+fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
+    doc["kind"].as_str() == Some("Cached")
+        || doc["owner"].as_str().unwrap_or(TenantId::DEFAULT) == tenant.as_str()
+}
+
+async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> Option<CtxEntry> {
     if let Some(doc) = st.store.context_get(id).ok()? {
         // Cached rows are addressable by their deterministic localId too.
         if doc["kind"].as_str() == Some("Cached") {
             return Some(cached_from_row(&doc));
         }
-        return Some(CtxEntry::Stored(doc));
+        // another tenant's row is as absent as one that never existed
+        return row_visible(&doc, tenant).then_some(CtxEntry::Stored(doc));
     }
     // stored entries are also addressable by their full URL
     if id.contains("/ngsi-ld/v1/jsonldContexts/") {
@@ -122,7 +133,7 @@ async fn find_entry(st: &AppState, id: &str) -> Option<CtxEntry> {
             .context_list()
             .ok()?
             .into_iter()
-            .find(|c| c["url"].as_str() == Some(id))
+            .find(|c| c["url"].as_str() == Some(id) && row_visible(c, tenant))
         {
             return Some(CtxEntry::Stored(doc));
         }
@@ -190,6 +201,8 @@ pub async fn add_context(
             "localId": local_id,
             "kind": "Hosted",
             "createdAt": now_iso(),
+            // the adding tenant owns the entry (5.13.1 Hosted)
+            "owner": tenant.as_str(),
             "body": {"@context": ctx_val.clone()},
         });
         st.store.context_put(&local_id, doc)?;
@@ -241,7 +254,7 @@ pub async fn list_contexts(
         )> = Vec::new();
         for c in st.store.context_list()? {
             let kind = c["kind"].as_str().unwrap_or("Hosted").to_owned();
-            if !keep(&kind) {
+            if !keep(&kind) || !row_visible(&c, &tenant) {
                 continue;
             }
             let url = c["url"].as_str().unwrap_or_default().to_owned();
@@ -313,7 +326,7 @@ pub async fn serve_context(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["details", "local"])?;
         let details = details_param(&params)?;
-        let entry = find_entry(&st, &id)
+        let entry = find_entry(&st, &tenant, &id)
             .await
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("@context {id} not found")))?;
         let payload = match &entry {
@@ -400,7 +413,7 @@ pub async fn delete_context(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["reload", "local"])?;
         let reload = reload_param(&params)?;
-        let entry = find_entry(&st, &id).await;
+        let entry = find_entry(&st, &tenant, &id).await;
         if reload {
             // reload is only meaningful for Cached @contexts (5.13.5.4);
             // unknown ids and non-Cached kinds are 400 (051_04_01/05)

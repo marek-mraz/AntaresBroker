@@ -617,6 +617,8 @@ pub async fn create(
                         "localId": local_id,
                         "kind": "ImplicitlyCreated",
                         "createdAt": ts,
+                        // owned by the tenant whose subscription created it
+                        "owner": tenant.as_str(),
                         "body": {"@context": parsed.ctx.source.clone()},
                     }),
                 )?;
