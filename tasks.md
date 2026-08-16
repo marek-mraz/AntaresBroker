@@ -118,8 +118,9 @@ explicitly says "decide with the user".
       geo query). Executed locally against the built broker: 3 seeded,
       q=temperature>30 returned exactly sensor 3, near-2km returned
       sensors 1+2. CI smoke lands in D6. Evidence: this commit.
-- [ ] D2. `examples/federation/` — two brokers + CSR registration script;
-      shows a federated query resolving across both.
+- [x] D2. examples/federation/: compose (2 brokers) + run.sh with a
+      self-asserting federated query. Executed locally against a live
+      broker pair: "OK: B's entity served by A". Evidence: this commit.
 - [ ] D3. `examples/subscriptions/` — HTTP callback + MQTT notification
       variants with a tiny receiver.
 - [ ] D4. `examples/browser/` — the www/ demo promoted to a documented
