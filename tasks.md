@@ -189,8 +189,10 @@ explicitly says "decide with the user".
       "how to read this" page is the book's conformance chapter (C8),
       now linked from the README's ETSI section to its rendered URL.
       Evidence: this commit.
-- [ ] F4. `cargo audit`/deny advisories: schedule weekly, auto-file an
-      issue on new advisories.
+- [x] F4. advisories.yml: weekly cargo-deny advisories sweep (aarch64
+      binary, same recipe as workspace.yml), auto-files a deduped
+      security-labelled issue with the log tail on failure. YAML
+      validated. Evidence: this commit.
 
 ## G. License, community, positioning (decide with the user — company/OSS
       discussion of 2026-08-16)

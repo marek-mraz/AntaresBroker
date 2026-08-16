@@ -1,0 +1,37 @@
+name: advisories
+
+# F4: weekly cargo-deny advisories sweep; a new advisory auto-files an
+# issue instead of silently reddening a badge nobody watches.
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: cargo-deny (binary — the action image is x86_64-only)
+        run: |
+          V=$(curl -s https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/latest | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')
+          mkdir -p "$HOME/.cargo/bin"
+          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
+          "$HOME/.cargo/bin/cargo-deny" --log-level warn check advisories 2>&1 | tee deny.log
+          exit "${PIPESTATUS[0]}"
+      - name: File an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Security advisory sweep failed ($(date -u +%F))"
+          gh issue list --state open --search "\"Security advisory sweep failed\"" --json number -q '.[0].number' | /usr/bin/grep -q . && exit 0
+          gh issue create --title "$title" --label security \
+            --body "$(printf 'Weekly cargo-deny advisories run went red.\n\n```\n%s\n```\nRun: %s' "$(tail -40 deny.log)" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
