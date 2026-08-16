@@ -146,10 +146,10 @@ explicitly says "decide with the user".
 
 ## E. Versioning & release process
 
-- [ ] E1. Adopt semver with a written policy in CONTRIBUTING: pre-1.0 =
-      0.MINOR.PATCH, breaking changes bump MINOR; 1.0.0 criteria defined
-      (E6). API surface = the NGSI-LD API (spec-versioned) + env-var config
-      + store file formats; store-format changes require a migration note.
+- [x] E1. CONTRIBUTING "Versioning & releases": surfaces defined (API =
+      spec-pinned, env vars, store formats), pre-1.0 MINOR-for-breaking
+      rule, migration-note duty, tag-triggered gated releases, Keep a
+      Changelog discipline. Evidence: this commit.
 - [ ] E2. CHANGELOG.md → Keep-a-Changelog format, `[Unreleased]` section
       maintained per merge; release tag moves it under the version heading.
 - [ ] E3. Release workflow (`release.yml`, triggered by `v*` tag): full

@@ -45,3 +45,25 @@ Integration tests that need services are env-gated and skip loudly:
 ## Where things live
 
 See the README's repository-layout table and [docs/README.md](docs/README.md).
+
+## Versioning & releases
+
+Semantic versioning, with the version's meaning defined by these surfaces:
+the NGSI-LD API (pinned to ETSI CIM 009 V1.9.1 — spec-versioned, not
+ours to break), the `ANTARES_*` environment variables
+(docs/src/configuration.md), and the on-disk store formats (redb file
+format version, Postgres migrations).
+
+- **Pre-1.0**: `0.MINOR.PATCH` — breaking changes to env vars or store
+  formats bump MINOR and are called out in the changelog; PATCH is
+  fixes/additions.
+- **1.0.0** is declared by the criteria in
+  [docs/roadmap-1.0.md](docs/roadmap-1.0.md), not by feeling.
+- **Store-format changes** always ship with a migration note (and for the
+  file store, a format-version bump — the broker refuses mismatched files
+  rather than guessing).
+- **Releases** are `v*` tags. The tag triggers the full seven-cell ETSI
+  matrix as the release gate plus the examples job; artifacts (multi-arch
+  images, binaries, wasm bundle, SBOM) publish only on a green gate.
+  CHANGELOG.md follows Keep a Changelog: maintain `[Unreleased]` per
+  merge; the release moves it under the version heading.
