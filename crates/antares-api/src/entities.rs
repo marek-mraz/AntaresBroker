@@ -1353,16 +1353,11 @@ async fn query_entities_inner(
         }
         Vec::new()
     };
-    // Pushdown gates. Pagination: only when every filter the store cannot
-    // see is absent — no federation candidates, no idPattern, no orderBy (its
-    // 4.23 datatype comparison order is evaluator-owned), and a real limit
-    // (limit=0 is the count-only shape). Projection additionally excludes
+    // Pushdown gates: pagination per page_pushdown_allowed (no federation
+    // candidates, no idPattern, no orderBy). Projection additionally excludes
     // join (linked-entity walks read page docs) and GeoJSON output.
     let (p_offset, p_limit, _) = page_params(st, params)?;
-    let push_page = fed.is_empty()
-        && params.get("idPattern").is_none()
-        && params.get("orderBy").is_none()
-        && p_limit > 0;
+    let push_page = page_pushdown_allowed(fed.is_empty(), params);
     let push_proj = join.is_none() && accept != Accept::GeoJson;
     let filtered = filter_entities_paged(
         st,
@@ -1509,6 +1504,11 @@ pub struct Filtered {
     pub docs: Vec<Value>,
     pub paged: bool,
     pub total: Option<usize>,
+    /// How many documents the store returned, before the evaluator below
+    /// dropped any. With a pushed page that is the size of the SQL page —
+    /// which is what a chunked walk has to step over, since `docs` undercounts
+    /// it whenever idPattern (invisible to the store filter) removed rows.
+    pub rows: usize,
 }
 
 /// Whether the store may be asked to project members away. Only when its
@@ -1520,6 +1520,27 @@ pub struct Filtered {
 /// comparator nothing to compare and the client id order.
 fn proj_pushdown_allowed(fed_is_empty: bool, params: &HashMap<String, String>) -> bool {
     fed_is_empty && !params.contains_key("orderBy")
+}
+
+/// Whether the store may be asked to cut the page (ORDER BY id +
+/// LIMIT/OFFSET). Only when nothing outside it still narrows or reorders the
+/// match set:
+///
+/// * federated candidates are merged in afterwards, and 5.7.2.4 applies the
+///   query, geoquery, Scope query and Attribute filters only after that
+///   aggregation — so a SQL page would be cut from the wrong set;
+/// * `idPattern` is not part of the store filter, so it drops rows the SQL
+///   page already counted;
+/// * `orderBy` orders the whole match set by the value of the ordering member
+///   (4.23) before the page is cut, and that comparison order is the
+///   evaluator's.
+///
+/// `limit=0` — the count-only shape of 6.3.10, where `count=true` is
+/// mandatory — IS pushed: the store returns no rows and counts the match set,
+/// which is the same count the scan derives from a materialized one, without
+/// materializing 100 million documents to throw them away.
+fn page_pushdown_allowed(fed_is_empty: bool, params: &HashMap<String, String>) -> bool {
+    fed_is_empty && !params.contains_key("idPattern") && !params.contains_key("orderBy")
 }
 
 /// The full filtering path (5.7.2). `page` = (offset, limit) to push into the
@@ -1555,7 +1576,7 @@ pub fn filter_entities_paged(
                 return Err(NgsiError::BadRequestData(format!("invalid idPattern {p:?}")).into());
             }
             Some(
-                regex::Regex::new(p)
+                crate::regexcache::compile(p)
                     .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
             )
         }
@@ -1667,6 +1688,7 @@ pub fn filter_entities_paged(
     let decided = outcome.decided && fed.is_empty() && !geo_uncompiled;
     let paged = outcome.paged && fed.is_empty();
     let total = outcome.total.map(|t| t as usize);
+    let rows = outcome.rows.len();
     let all = crate::federation::merge_candidates(outcome.rows, fed);
     // the id list is client-sized (a POST query body carries an array with no
     // count of its own) and the candidate set is store-sized, so the two are
@@ -1735,6 +1757,7 @@ pub fn filter_entities_paged(
         docs: out,
         paged,
         total,
+        rows,
     })
 }
 
@@ -2024,6 +2047,32 @@ fn forwarded_purge_query(params: &HashMap<String, String>) -> Vec<(String, Strin
 /// applied in batches rather than materialized whole.
 const PURGE_CHUNK: usize = 500;
 
+/// Where the next Purge chunk starts, or None when the match set is
+/// exhausted. `rows` = documents the store returned for this chunk (not the
+/// subset that survived the evaluator: idPattern is applied after the store,
+/// so a full chunk can arrive narrowed or even empty and the walk must still
+/// go on — 5.6.21.4 deletes ALL matched Entities, not the first page of
+/// them). `left_the_set` = how many of those rows no longer match the purge
+/// query afterwards; the rows still in it have to be stepped over, or the
+/// walk re-reads them forever.
+///
+/// Termination: every round either removes rows from the match set or
+/// advances the offset by a full chunk, and both are bounded by the number of
+/// stored Entities.
+fn purge_next_offset(
+    offset: usize,
+    rows: usize,
+    left_the_set: usize,
+    paged: bool,
+    chunk: usize,
+) -> Option<usize> {
+    // an unpaged answer IS the whole match set, which this round just applied
+    if !paged || rows < chunk {
+        return None;
+    }
+    Some(offset + rows.saturating_sub(left_the_set))
+}
+
 /// 5.6.21.4 "And thereafter": with no Attribute-name list, delete every
 /// matched Entity found locally; with a restrictive list, delete those
 /// Attributes from them; with an exclusionary list, delete all but those.
@@ -2047,18 +2096,20 @@ fn purge_locally(
             Some((offset, PURGE_CHUNK)),
             None,
         )?;
+        let rows = batch.rows;
         let ids: Vec<String> = batch
             .docs
             .iter()
             .filter_map(|d| d["id"].as_str().map(str::to_owned))
             .collect();
-        if ids.is_empty() {
-            return Ok(());
-        }
-        if prune {
+        let left_the_set = if ids.is_empty() {
+            0
+        } else if prune {
+            let mut changed = 0usize;
             st.store.batch_mutate(tenant, &ids, |_, doc| {
                 let target = doc.as_object_mut().expect("entity object");
                 let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
+                let before = target.len();
                 for a in attrs {
                     let purge = match (keep, drop) {
                         (Some(keep), _) => !keep.contains(&a),
@@ -2069,11 +2120,22 @@ fn purge_locally(
                         target.remove(&a);
                     }
                 }
+                if target.len() != before {
+                    changed += 1;
+                }
                 Ok::<(), NgsiError>(())
             })?;
-            // a pruned Entity still matches the query, so the next page
-            // starts after the one just applied
-            offset += ids.len();
+            // A prune keeps the Entity, but it may have removed the very
+            // Attribute the query matched on (`attrs=speed&drop=speed`), which
+            // takes it out of the match set and shifts the rest down. Whether
+            // it did is only observable by reading the window again, so a round
+            // that changed something re-reads it; the re-read finds those
+            // Entities unchanged and steps over them.
+            if changed > 0 {
+                rows
+            } else {
+                0
+            }
         } else {
             let mut gone = 0usize;
             for (id, deleted) in ids.iter().zip(st.store.batch_delete(tenant, &ids)?) {
@@ -2082,16 +2144,11 @@ fn purge_locally(
                     mirror_delete_entity(st, tenant, id);
                 }
             }
-            // deletion shrinks the match set, so the next page is again the
-            // first one — unless nothing went, which would not terminate
-            if gone == 0 {
-                offset += ids.len();
-            }
-        }
-        // the store either paged (another page may follow) or answered with
-        // the whole match set, which this round has now applied
-        if !batch.paged || ids.len() < PURGE_CHUNK {
-            return Ok(());
+            gone
+        };
+        match purge_next_offset(offset, rows, left_the_set, batch.paged, PURGE_CHUNK) {
+            Some(next) => offset = next,
+            None => return Ok(()),
         }
     }
 }
@@ -4082,6 +4139,79 @@ mod forwarded_input_data {
             "the ordering member must survive to be compared"
         );
     }
+
+    /// 6.3.10 makes `limit=0` legal only with `count=true` — an answer that is
+    /// a count and no rows. That shape is pushed to the store; the filters the
+    /// store cannot see (idPattern, 4.23 ordering, federated candidates merged
+    /// per 5.7.2.4) still forfeit the page.
+    #[test]
+    fn the_count_only_page_is_pushed_down_but_store_blind_filters_are_not() {
+        assert!(
+            page_pushdown_allowed(
+                true,
+                &params(&[("type", "T"), ("limit", "0"), ("count", "true")])
+            ),
+            "a count is answered by counting, not by materializing the match set"
+        );
+        assert!(
+            page_pushdown_allowed(true, &params(&[("type", "T"), ("limit", "10")])),
+            "a plain local query keeps the pushdown"
+        );
+        assert!(
+            !page_pushdown_allowed(true, &params(&[("type", "T"), ("idPattern", "^urn:")])),
+            "idPattern is applied after the store, so it drops rows the SQL \
+             page already counted"
+        );
+        assert!(
+            !page_pushdown_allowed(true, &params(&[("type", "T"), ("orderBy", "speed")])),
+            "4.23 orders the whole match set before the page is cut"
+        );
+        assert!(
+            !page_pushdown_allowed(false, &params(&[("type", "T")])),
+            "federated candidates are merged after the store answered"
+        );
+    }
+
+    /// 6.3.10 count-only page (`limit=0&count=true`): the pushed shape — no
+    /// rows from the store plus its pre-LIMIT count — must be the same answer
+    /// the full scan builds from a materialized match set, page contents,
+    /// count and Links included.
+    #[test]
+    fn the_count_only_page_is_the_same_answer_pushed_or_scanned() {
+        let st = AppState::new("antares-test".into());
+        let matches: Vec<Value> = (0..7)
+            .map(|i| serde_json::json!({"id": format!("urn:ngsi-ld:T:{i}"), "type": "T"}))
+            .collect();
+        for extra in [vec![], vec![("offset", "3")]] {
+            let mut pairs = vec![("type", "T"), ("limit", "0"), ("count", "true")];
+            pairs.extend(extra.iter().copied());
+            let p = params(&pairs);
+            let scanned = paginate(&st, &p, matches.clone(), "/ngsi-ld/v1/entities").expect("scan");
+            let pushed = paginate_pre(
+                &st,
+                &p,
+                Vec::new(),
+                "/ngsi-ld/v1/entities",
+                // what the store's count(*) reports for the same query
+                matches.len(),
+            )
+            .expect("pushed");
+            assert_eq!(scanned.0, pushed.0, "page contents differ: {pairs:?}");
+            assert_eq!(scanned.1, pushed.1, "count differs: {pairs:?}");
+            assert_eq!(scanned.2, pushed.2, "Links differ: {pairs:?}");
+            assert!(
+                pushed.0.is_empty(),
+                "a count-only page carries no Entity: {:?}",
+                pushed.0
+            );
+            assert_eq!(pushed.1, Some(matches.len()), "the count is the match set");
+            assert!(
+                !pushed.2.iter().any(|l| l.contains("rel=\"next\"")),
+                "a page of zero has no next page: {:?}",
+                pushed.2
+            );
+        }
+    }
 }
 
 /// 5.6.1 Create Entity and 5.6.21 Purge Entities, end to end over the store.
@@ -4201,6 +4331,163 @@ mod clause_5_6_1_and_5_6_21 {
                 "every other attribute is gone: {doc}"
             );
         }
+    }
+
+    /// 5.6.21.4: "id matches the id pattern passed as a parameter" — the
+    /// pattern narrows the match set, and only that set is deleted.
+    #[tokio::test]
+    async fn purge_deletes_the_id_pattern_matches_and_nothing_else() {
+        let st = AppState::new("antares-test".into());
+        let tenant = TenantId::default();
+        seed(&st, &tenant, 30);
+        let resp = purge_inner(
+            &st,
+            &purge_params(&[("type", "Purge"), ("idPattern", "^urn:ngsi-ld:Purge:0000")]),
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("purge");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let left: Vec<String> = st
+            .store
+            .list(&tenant, Kind::Entity)
+            .expect("list")
+            .iter()
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            left.len(),
+            20,
+            "only the ten pattern matches went: {left:?}"
+        );
+        assert!(
+            !left
+                .iter()
+                .any(|id| id.starts_with("urn:ngsi-ld:Purge:0000")),
+            "a pattern match survived: {left:?}"
+        );
+        assert!(
+            left.contains(&"urn:ngsi-ld:Purge:00010".to_owned()),
+            "an Entity the pattern does not match must not be purged: {left:?}"
+        );
+    }
+
+    /// 5.6.21.4 deletes "all Entities that can be found locally using
+    /// retrieved list of Entity ids". The retrieval is chunked, and idPattern
+    /// is applied after the store — so a chunk can come back narrowed, or
+    /// empty, while matches still wait behind it. The walk continues on the
+    /// store's row count, never on the surviving subset.
+    #[test]
+    fn purge_walks_on_the_rows_the_store_returned_not_the_narrowed_subset() {
+        assert_eq!(
+            purge_next_offset(0, 500, 0, true, 500),
+            Some(500),
+            "a full chunk the pattern narrowed to nothing still has a successor"
+        );
+        assert_eq!(
+            purge_next_offset(500, 500, 120, true, 500),
+            Some(880),
+            "the 380 rows the round did not remove are stepped over"
+        );
+        assert_ne!(
+            purge_next_offset(0, 500, 0, true, 500),
+            None,
+            "stopping here leaves every match behind the first chunk alive"
+        );
+    }
+
+    /// 5.6.21.4 against a store that really pages (memory answers every query
+    /// with the whole match set, so it cannot exercise the walk): with an
+    /// idPattern spread across the match set, every chunk arrives narrowed —
+    /// and the purge still has to delete "all Entities that can be found
+    /// locally using retrieved list of Entity ids", not just the first chunk's
+    /// share. Skips without ANTARES_TEST_DATABASE_URL.
+    #[cfg(feature = "postgres")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn purge_over_a_paging_store_deletes_every_id_pattern_match() {
+        let url = match std::env::var("ANTARES_TEST_DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
+                return;
+            }
+        };
+        let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+        let tenant = TenantId::new("purgepaging").expect("tenant");
+        antares_sql::pg::ensure_tenant(&pool, &tenant)
+            .await
+            .expect("tenant row");
+        let st = AppState::with_store(
+            "antares-test".into(),
+            std::sync::Arc::new(antares_sql::store::any::AnyStore::Pg(
+                antares_sql::store::any::PgBackend::new(pool),
+            )),
+            antares_sql::StoreMode::Postgres,
+        );
+        for doc in st.store.list(&tenant, Kind::Entity).expect("list") {
+            if let Some(id) = doc["id"].as_str() {
+                st.store.delete(&tenant, Kind::Entity, id).expect("clean");
+            }
+        }
+        // more than two chunks, and the pattern matches every second id — so
+        // no chunk the store pages is full once the pattern filtered it
+        let n = PURGE_CHUNK * 2 + 200;
+        seed(&st, &tenant, n);
+        let resp = purge_inner(
+            &st,
+            &purge_params(&[("type", "Purge"), ("idPattern", "[02468]$")]),
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("purge");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let left: Vec<String> = st
+            .store
+            .list(&tenant, Kind::Entity)
+            .expect("list")
+            .iter()
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !left
+                .iter()
+                .any(|id| id.ends_with(['0', '2', '4', '6', '8'])),
+            "{} of {} pattern matches survived the chunked walk",
+            left.iter()
+                .filter(|id| id.ends_with(['0', '2', '4', '6', '8']))
+                .count(),
+            n / 2
+        );
+        assert_eq!(
+            left.len(),
+            n / 2,
+            "an Entity the pattern does not match must not be purged"
+        );
+        for id in &left {
+            st.store.delete(&tenant, Kind::Entity, id).expect("clean");
+        }
+    }
+
+    /// The same walk terminates: a chunk the store did not page IS the whole
+    /// match set, a short chunk is the last one, and a round that deleted its
+    /// whole chunk re-reads the window the deletions shifted down.
+    #[test]
+    fn purge_stops_when_the_match_set_is_exhausted() {
+        assert_eq!(
+            purge_next_offset(0, 500, 500, false, 500),
+            None,
+            "an unpaged answer is the whole match set"
+        );
+        assert_eq!(
+            purge_next_offset(0, 7, 7, true, 500),
+            None,
+            "a chunk shorter than the page size is the last one"
+        );
+        assert_eq!(
+            purge_next_offset(0, 500, 500, true, 500),
+            Some(0),
+            "everything deleted — the rest of the match set shifted to the front"
+        );
     }
 }
 
