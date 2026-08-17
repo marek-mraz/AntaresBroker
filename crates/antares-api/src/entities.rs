@@ -4433,10 +4433,15 @@ mod clause_5_6_1_and_5_6_21 {
         // no chunk the store pages is full once the pattern filtered it
         let n = PURGE_CHUNK * 2 + 200;
         seed(&st, &tenant, n);
+        // the purge must run AS the seeded tenant — with no NGSILD-Tenant
+        // header it correctly purges the default tenant's (empty) match set
+        // and every seeded row survives (5.5.10)
+        let mut headers = HeaderMap::new();
+        headers.insert("NGSILD-Tenant", "purgepaging".parse().expect("header"));
         let resp = purge_inner(
             &st,
             &purge_params(&[("type", "Purge"), ("idPattern", "[02468]$")]),
-            &HeaderMap::new(),
+            &headers,
         )
         .await
         .expect("purge");
