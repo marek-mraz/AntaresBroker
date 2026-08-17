@@ -289,16 +289,23 @@ fn literal(v: &QValue) -> Option<String> {
         QValue::Str(s) => jsonpath_string(s),
         QValue::Bool(b) => b.to_string(),
         QValue::Num(n) => {
-            if n.is_finite() {
-                // shortest round-trip form; jsonpath numbers are JSON numbers
-                let s = n.to_string();
-                if s.contains(['e', 'E']) {
-                    return None; // exponent forms differ across parsers
-                }
-                s
-            } else {
+            if !n.is_finite() {
                 return None;
             }
+            // 4.9 numbers are parsed to f64, but jsonb holds exact `numeric`:
+            // past 2^53 the f64 the query carries is no longer the integer the
+            // client wrote, so the compiled predicate would refuse rows
+            // `qeval` (which compares f64 to f64 on BOTH sides) keeps. Leave
+            // those to the evaluator rather than narrow wrongly.
+            if n.abs() >= 9_007_199_254_740_992.0 {
+                return None;
+            }
+            // shortest round-trip form; jsonpath numbers are JSON numbers
+            let s = n.to_string();
+            if s.contains(['e', 'E']) {
+                return None; // exponent forms differ across parsers
+            }
+            s
         }
         // composite values never render as one literal — cmp_filter unfolds
         // them (Eq) or declines (everything else) before reaching here
@@ -308,7 +315,7 @@ fn literal(v: &QValue) -> Option<String> {
 
 /// A jsonpath member name: always double-quoted, because attribute keys are
 /// expanded IRIs full of `:` `/` `#` `.` that would otherwise be syntax.
-fn quoted(s: &str) -> String {
+pub(crate) fn quoted(s: &str) -> String {
     jsonpath_string(s)
 }
 
@@ -374,6 +381,23 @@ mod tests {
             );
         }
         assert!(got.sql.contains(") AND ("));
+    }
+
+    /// jsonb holds `numeric`, the query holds an f64. Past 2^53 the two stop
+    /// agreeing, and the pushdown would drop rows the evaluator keeps — so an
+    /// integer that big compiles to nothing at all and the evaluator decides.
+    #[test]
+    fn an_integer_past_the_f64_grid_is_left_to_the_evaluator() {
+        assert!(
+            c("n==9007199254740993").is_none(),
+            "a value the f64 cannot hold must not narrow the match set"
+        );
+        assert!(c("n>9007199254740993").is_none());
+        assert!(c("n==-9007199254740993").is_none());
+        // the boundary itself is exact, and everything under it still compiles
+        assert!(c("n==9007199254740991").is_some());
+        assert!(c("n==0").is_some());
+        assert!(c("n>20.5").is_some());
     }
 
     #[test]

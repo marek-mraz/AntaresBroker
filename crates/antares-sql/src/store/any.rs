@@ -26,10 +26,17 @@ use super::{ChangeHook, Kind, Store};
 #[cfg(feature = "postgres")]
 fn db(e: sqlx::Error) -> NgsiError {
     // The store's own spec errors travel out through the same sqlx channel
-    // (the signature is fixed by the callers), so recover them before the
-    // generic mapping turns a 403 into a 500.
-    if let Some(n) = super::pg_entity::ngsi_error(&e) {
-        return NgsiError::TooManyResults(n.to_string());
+    // (the signature is fixed by the callers), so recover them — by VALUE, so
+    // the variant and therefore the status survive — before the generic
+    // mapping turns them all into a 500.
+    if let sqlx::Error::Configuration(b) = e {
+        return match b.downcast::<NgsiError>() {
+            Ok(n) => *n,
+            Err(b) => {
+                tracing::error!("database error: {b}");
+                NgsiError::InternalError("database error".into())
+            }
+        };
     }
     tracing::error!("database error: {e}");
     NgsiError::InternalError("database error".into())
@@ -76,8 +83,17 @@ impl PgBackend {
         }
     }
 
+    /// Poison recovery (`into_inner`) is deliberate, the same choice the
+    /// memory arm records: the hook runs real code over attacker-shaped JSON,
+    /// and a panic inside it must unwind one request, not poison this lock
+    /// and panic every later entity write until the process restarts.
     fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
-        if let Some(h) = self.hook.read().expect("hook lock").as_ref() {
+        if let Some(h) = self
+            .hook
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             h(tenant, before, after);
         }
     }
@@ -137,7 +153,11 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => s.set_change_hook(h),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => *p.hook.write().expect("hook lock") = Some(h),
+            AnyStore::Pg(p) => {
+                *p.hook
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h)
+            }
         }
     }
 
@@ -207,12 +227,7 @@ impl AnyStore {
                     Kind::Temporal => p.temporal.create(tenant, id, &doc).map_err(db)?,
                     _ => {
                         let dk = doc_kind(kind).expect("doc kind");
-                        if p.docs.get(tenant, dk, id).map_err(db)?.is_some() {
-                            false
-                        } else {
-                            p.docs.upsert(tenant, dk, id, &doc).map_err(db)?;
-                            true
-                        }
+                        p.docs.create(tenant, dk, id, &doc).map_err(db)?
                     }
                 };
                 if created && kind == Kind::Entity {
@@ -744,6 +759,8 @@ impl AnyStore {
 
 #[cfg(all(test, feature = "postgres"))]
 mod db_error_tests {
+    use antares_model::NgsiError;
+
     /// 5.5.6 InternalError: the RFC 7807 `detail` a client sees must be
     /// generic — driver internals (SQL text, row counts, connection
     /// strings) belong in the server log, never in the response body.
@@ -751,10 +768,32 @@ mod db_error_tests {
     fn db_error_detail_is_generic() {
         let pd = super::db(sqlx::Error::RowNotFound).to_problem_details();
         assert_eq!(pd.detail, "database error");
+        assert_eq!(pd.title, "InternalError");
         assert!(
             !pd.detail.contains("no rows"),
             "sqlx internals leaked into the client-visible detail: {}",
             pd.detail
         );
+        // a configuration error that is NOT one of ours stays generic too
+        let pd = super::db(sqlx::Error::Configuration("boom".into())).to_problem_details();
+        assert_eq!(pd.detail, "database error");
+        assert!(!pd.detail.contains("boom"), "{}", pd.detail);
+    }
+
+    /// A spec error the store raised itself travels out through the driver
+    /// error channel. Rebuilding it as a fixed variant forces every one of
+    /// them to that variant's status — a 400 BadRequestData would reach the
+    /// client as a 403.
+    #[test]
+    fn a_store_raised_spec_error_keeps_its_own_status() {
+        for (err, kind, status) in [
+            (NgsiError::BadRequestData("x".into()), "BadRequestData", 400),
+            (NgsiError::TooManyResults("x".into()), "TooManyResults", 403),
+            (NgsiError::AlreadyExists("x".into()), "AlreadyExists", 409),
+        ] {
+            let out = super::db(sqlx::Error::Configuration(Box::new(err)));
+            assert_eq!(out.kind(), kind);
+            assert_eq!(out.status(), status, "{kind} lost its status");
+        }
     }
 }

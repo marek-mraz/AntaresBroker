@@ -114,7 +114,7 @@ fn predicate(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<Compile
     }))
     .ok()?;
 
-    let mut geo_binds = vec![geojson];
+    let geo_binds = vec![geojson];
     let mut num_binds: Vec<f64> = Vec::new();
     // placeholder for the single geometry bind
     let g = format!("ST_SetSRID(ST_GeomFromGeoJSON(${first_bind}), 4326)");

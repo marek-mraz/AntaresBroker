@@ -61,11 +61,21 @@ async fn outbox_enqueue_is_transactional() {
         "a rolled-back write must take its outbox event down with it"
     );
 
-    // drain ack removes exactly the published row
+    // Drain ack removes EXACTLY the published row: acking one seq must delete
+    // one row. `>= 1` would also pass an over-deleting range ack, which is
+    // precisely the regression the sibling test above exists to catch.
+    let before = outbox::peek(&pool, 1000).expect("peek before ack").len();
     let acked = outbox::ack(&pool, &[seq]).expect("ack");
-    assert!(acked >= 1);
-    let page = outbox::peek(&pool, 100).expect("peek3");
+    assert_eq!(acked, 1, "acking one seq deleted {acked} rows");
+    let page = outbox::peek(&pool, 1000).expect("peek3");
     assert!(!page.iter().any(|(s, _, _)| *s == seq));
+    // sibling tests enqueue concurrently, so the page can only GROW past the
+    // one row we removed — it must never shrink by more than that
+    assert!(
+        page.len() + 1 >= before,
+        "the ack took {} extra rows with it",
+        before - page.len() - 1
+    );
 }
 
 /// entity_maps: per-row registration ids + TTL sweep.

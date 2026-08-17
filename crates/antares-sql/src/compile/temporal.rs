@@ -2,13 +2,18 @@
 //! per-instance SQL predicate over a jsonb instance object.
 //!
 //! Exactness by construction: `TemporalQ::instance_matches` (antares-api)
-//! compares the RAW timestamp strings byte-wise — so the SQL compares the
-//! same strings with `COLLATE "C"` (byte order, locale-proof) instead of
-//! casting to timestamptz (which would re-order mixed-offset forms and can
-//! raise on malformed values). The member must be string-typed, exactly as
-//! `Value::as_str` demands. The predicate is therefore the SAME function the
-//! in-memory arbiter applies — but the arbiter still runs afterwards, so even
-//! a drifting edge case only costs bytes, never a wrong answer.
+//! compares CANONICAL keys — the trailing `Z` dropped and the 4.6.3 seconds
+//! fraction (`.` or `,`) zero-padded — so that equal instants written in
+//! different fraction forms hit the bounds exactly. The SQL builds the same
+//! key with `dt_key_sql` and compares it with `COLLATE "C"` (byte order,
+//! locale-proof) instead of casting to timestamptz (which would re-order
+//! mixed-offset forms and can raise on malformed values). The member must be
+//! string-typed, exactly as `Value::as_str` demands.
+//!
+//! The store PRUNES on this predicate, so it may never be stricter than the
+//! arbiter: a raw byte compare made `…00.000Z` sort after `…00Z` ('.' is
+//! 0x2E, 'Z' is 0x5A) and silently dropped instances 4.11 requires to be
+//! returned.
 
 /// The 4.11 window, as the API layer parsed it. `timerel` ∈
 /// before|after|between|any ("any" = bare timeproperty: presence filter).
@@ -26,6 +31,31 @@ pub struct CompiledRange {
     pub binds: Vec<String>,
 }
 
+/// 4.6.3 DateTime → canonical lexicographic key, the SQL twin of the
+/// arbiter's `dt_key`: for a `Z`-terminated stamp of at least 19 characters,
+/// the `Z` is dropped and the optional seconds fraction (`.` or `,`
+/// separator) is zero-padded to six digits; anything else is compared as it
+/// stands. String order over the key is temporal order across spellings, so
+/// `…00Z`, `…00.000Z` and `…00,0Z` are one instant on both sides.
+///
+/// Total by construction — no cast, so a malformed stored stamp can never
+/// raise; the nested `CASE` is only reached for stamps long enough to slice.
+pub fn dt_key_sql(e: &str) -> String {
+    // the arbiter takes the fraction only after a '.'/',' and otherwise
+    // treats it as absent — junk between the seconds and the 'Z' is dropped
+    let frac = format!(
+        "(CASE WHEN substr({e},20,1) IN ('.', ',') \
+         THEN substr({e},21,length({e})-21) ELSE '' END)"
+    );
+    // zero-pad to six WITHOUT truncating: rpad would shorten a nanosecond
+    // fraction the arbiter keeps in full, which turns a near-tie into a tie
+    format!(
+        "(CASE WHEN right({e},1) = 'Z' AND length({e}) >= 20 \
+         THEN substr({e},1,19) || '.' || {frac} || repeat('0', greatest(0, 6 - length{frac})) \
+         ELSE {e} END) COLLATE \"C\""
+    )
+}
+
 /// `None` = a shape this compiler does not reproduce (unknown timerel, or
 /// between without an end) — the caller prunes nothing and the in-memory
 /// window stays the arbiter.
@@ -36,26 +66,29 @@ pub fn compile_instance_range(
 ) -> Option<CompiledRange> {
     let tp = format!("${first_bind}");
     let present = format!("jsonb_typeof({el} -> {tp}) = 'string'");
-    let ts = format!("({el} ->> {tp}) COLLATE \"C\"");
+    let ts = dt_key_sql(&format!("({el} ->> {tp})"));
+    // the bound is keyed too — keying one side only is what made the
+    // pushdown stricter than the arbiter
+    let at = |n: usize| dt_key_sql(&format!("${n}::text"));
     let mut binds = vec![r.timeproperty.to_owned()];
     let sql = match r.timerel {
         "any" => present,
         "before" => {
             binds.push(r.time_at.to_owned());
-            format!("{present} AND {ts} < ${}", first_bind + 1)
+            format!("{present} AND {ts} < {}", at(first_bind + 1))
         }
         "after" => {
             binds.push(r.time_at.to_owned());
-            format!("{present} AND {ts} >= ${}", first_bind + 1)
+            format!("{present} AND {ts} >= {}", at(first_bind + 1))
         }
         "between" => {
             let end = r.end_time_at?;
             binds.push(r.time_at.to_owned());
             binds.push(end.to_owned());
             format!(
-                "{present} AND {ts} >= ${} AND {ts} < ${}",
-                first_bind + 1,
-                first_bind + 2
+                "{present} AND {ts} >= {} AND {ts} < {}",
+                at(first_bind + 1),
+                at(first_bind + 2)
             )
         }
         _ => return None,
@@ -125,18 +158,21 @@ mod tests {
         // before: strict <   after: >=   between: [at, end)
         let c = compile_instance_range(&range("before", "2026-01-01T00:00:00Z", None), "el", 4)
             .expect("compiles");
-        assert!(c.sql.contains("< $5"), "sql: {}", c.sql);
+        assert!(c.sql.contains(" < (CASE"), "sql: {}", c.sql);
+        assert!(c.sql.contains("$5::text"), "sql: {}", c.sql);
         assert_eq!(c.binds, vec!["observedAt", "2026-01-01T00:00:00Z"]);
 
         let c = compile_instance_range(&range("after", "t0", None), "el", 1).expect("compiles");
-        assert!(c.sql.contains(">= $2"), "sql: {}", c.sql);
+        assert!(c.sql.contains(" >= (CASE"), "sql: {}", c.sql);
+        assert!(c.sql.contains("$2::text"), "sql: {}", c.sql);
 
         let c = compile_instance_range(&range("between", "t0", Some("t1")), "el", 1).expect("c");
         assert!(
-            c.sql.contains(">= $2") && c.sql.contains("< $3"),
+            c.sql.contains(" >= (CASE") && c.sql.contains(" < (CASE"),
             "{}",
             c.sql
         );
+        assert!(c.sql.contains("$2::text") && c.sql.contains("$3::text"));
         assert_eq!(c.binds.len(), 3);
     }
 
@@ -149,6 +185,31 @@ mod tests {
         let c = compile_instance_range(&range("after", "t0", None), "el", 1).expect("c");
         assert!(c.sql.contains("COLLATE \"C\""), "{}", c.sql);
         assert!(!c.sql.contains("timestamptz"), "{}", c.sql);
+    }
+
+    /// 4.11 bounds are inclusive/exclusive on the INSTANT, and 4.6.3 spells
+    /// one instant several ways (`…00Z`, `…00.000Z`, `…00,0Z`). The store
+    /// prunes on this predicate, so it must key BOTH operands the way the
+    /// arbiter's `dt_key` does — keying only the stored stamp made
+    /// `"…00.000Z" >= "…00Z"` false in bytes and dropped an instance that
+    /// `?timerel=after&timeAt=…00Z` must return.
+    #[test]
+    fn both_operands_are_canonically_keyed() {
+        let c = compile_instance_range(&range("after", "2017-12-13T14:20:00Z", None), "el", 1)
+            .expect("compiles");
+        // one key expression per operand, and the raw jsonb text is never
+        // compared directly against the bind
+        assert_eq!(c.sql.matches("repeat('0', greatest(0, 6 -").count(), 2);
+        assert!(
+            !c.sql.contains("(el ->> $1) COLLATE \"C\" >= $2"),
+            "raw byte compare survived: {}",
+            c.sql
+        );
+        // the fraction separator the arbiter accepts is accepted here too
+        let key = dt_key_sql("x");
+        assert!(key.contains("IN ('.', ',')"), "{key}");
+        // no cast: a malformed stored stamp must not be able to raise
+        assert!(!key.contains("::timestamp"), "{key}");
     }
 
     #[test]
@@ -173,11 +234,15 @@ mod tests {
         for needle in ["observedAt", "DROP", "TABLE", "--", "OR 1=1"] {
             assert!(!c.sql.contains(needle), "{needle:?} leaked: {}", c.sql);
         }
-        assert_eq!(
-            c.sql,
-            "jsonb_typeof(el -> $1) = 'string' AND (el ->> $1) COLLATE \"C\" >= $2 \
-             AND (el ->> $1) COLLATE \"C\" < $3"
-        );
+        assert!(c
+            .sql
+            .starts_with("jsonb_typeof(el -> $1) = 'string' AND (CASE"));
+        // every identifier in the statement is this module's own, and the
+        // only slots are $1..$3
+        for n in ["$1", "$2", "$3"] {
+            assert!(c.sql.contains(n), "{n} missing: {}", c.sql);
+        }
+        assert!(!c.sql.contains("$4"), "overshoot: {}", c.sql);
         assert_eq!(c.binds[0], hostile);
         // an unknown timeproperty has no column, so no identifier is ever
         // derived from client text

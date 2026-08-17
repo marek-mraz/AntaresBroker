@@ -131,29 +131,23 @@ fn leaf(
     let mut window = String::new();
     let mut win_exact = range.is_none();
     if let Some(r) = range {
-        match crate::compile::temporal::compile_instance_range(r, "qi.data", first + binds.len()) {
-            // byte-exact text predicate (the arbiter's own window semantics),
-            // plus the widened column bound REUSING its time binds so the
-            // (tenant, entity, attr, observed_at) btree still serves the range
-            Some(c) => {
-                let time_bind = first + binds.len() + 1;
-                window = format!(" AND {}", c.sql);
-                binds.extend(c.binds);
-                if let Some(cb) = column_range_bound(r, "qi", time_bind) {
-                    window.push_str(&format!(" AND {cb}"));
-                }
-                win_exact = true;
+        // The canonically-keyed text predicate (the arbiter's own window
+        // semantics), plus the widened column bound REUSING its time binds so
+        // the (tenant, entity, attr, observed_at) btree still serves the
+        // range. A shape the compiler refuses (unknown timerel, `between`
+        // without an end) is refused by `column_range_bound` too, so there is
+        // no widened bound to fall back on: the EXISTS then keeps the
+        // attribute predicate alone — unwindowed, which only widens.
+        if let Some(c) =
+            crate::compile::temporal::compile_instance_range(r, "qi.data", first + binds.len())
+        {
+            let time_bind = first + binds.len() + 1;
+            window = format!(" AND {}", c.sql);
+            binds.extend(c.binds);
+            if let Some(cb) = column_range_bound(r, "qi", time_bind) {
+                window.push_str(&format!(" AND {cb}"));
             }
-            // refused text shape: superset-only widened column bound
-            None => {
-                if let Some(cb) = column_range_bound(r, "qi", first + binds.len()) {
-                    binds.push(r.time_at.to_owned());
-                    if r.timerel == "between" {
-                        binds.push(r.end_time_at?.to_owned());
-                    }
-                    window = format!(" AND {cb}");
-                }
-            }
+            win_exact = true;
         }
     }
     let (inner, arm_exact) = instance_predicate(path, cmp, first, &mut binds)?;
@@ -187,18 +181,38 @@ fn instance_predicate(
     binds: &mut Vec<String>,
 ) -> Option<(String, bool)> {
     use super::q;
-    if path.bracket.is_some() {
+    if let Some(bracket) = &path.bracket {
         let filter = match cmp {
             Some((op, v)) => Some(q::lang_filter(op, v)?),
             None => None,
         };
-        let jp = match filter {
+        let jp = match &filter {
             Some(f) => format!("$.\"languageMap\".*{f}"),
             None => "$.\"languageMap\".*".to_owned(),
         };
         let n = first + binds.len();
         binds.push(jp);
-        return Some((format!("qi.data @? ${n}::jsonpath"), false));
+        let lang = format!("qi.data @? ${n}::jsonpath");
+        // `[*]` is only ever the language wildcard. A NAMED bracket is
+        // ambiguous by the 4.9 grammar — the same syntax addresses a
+        // languageMap tag or a member of a compound Property value
+        // (EXAMPLE 9/10/11) — and only the stored document decides which, so
+        // the prefilter has to admit BOTH readings or it narrows away the
+        // compound-value matches the evaluator would keep.
+        if bracket.first().map(String::as_str) == Some("*") {
+            return Some((lang, false));
+        }
+        let member: String = bracket
+            .iter()
+            .map(|s| format!(".{}", q::quoted(s)))
+            .collect();
+        let member_filter = match &filter {
+            Some(f) => format!("{member}{f}"),
+            None => member,
+        };
+        // value_or_filter numbers from `first + binds.len()` itself
+        let members = q::value_or_filter("$", Some(&member_filter), "qi.data", first, binds);
+        return Some((format!("({lang} OR {members})"), false));
     }
     if let Some((CmpOp::Ne, v)) = cmp {
         let f = q::eq_filter(v)?;
@@ -391,6 +405,39 @@ mod tests {
                 "{q} must stay inexact"
             );
         }
+    }
+
+    /// 4.9 `ValuePath = DottedPath *1([DottedPath])`: a NAMED trailing
+    /// bracket is either a languageMap tag or a member of a compound Property
+    /// value (EXAMPLE 9/10/11), and only the document decides which. Matching
+    /// the languageMap alone would narrow every compound-value match away —
+    /// the prefilter has to admit both readings.
+    #[test]
+    fn a_named_bracket_admits_the_compound_value_member_too() {
+        let c = pf(r#"brandName[brand]=="MB""#).expect("compiles");
+        assert!(
+            c.binds.iter().any(|b| b.starts_with("$.\"languageMap\".*")),
+            "the languageMap reading is gone: {:?}",
+            c.binds
+        );
+        assert!(
+            c.binds
+                .iter()
+                .any(|b| b.starts_with("$.\"value\".\"brand\"")),
+            "the compound-member reading is missing — matching entities are \
+             narrowed away: {:?}",
+            c.binds
+        );
+        assert_dense(&c, 3);
+        // `[*]` has no member reading in the grammar: it stays the pure
+        // languageMap wildcard, with no compound-value alternative bolted on.
+        let star = pf(r#"label[*]=="hi""#).expect("compiles");
+        assert!(
+            !star.binds.iter().any(|b| b.contains("\"*\"")),
+            "the wildcard was read as a member name: {:?}",
+            star.binds
+        );
+        assert_dense(&star, 3);
     }
 
     /// Superset arithmetic one level down. A disjunction that refuses is a

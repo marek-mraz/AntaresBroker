@@ -180,27 +180,10 @@ async fn enqueue_change(
 /// that carries no page (idPattern, federation, orderBy) has at all.
 pub const MAX_UNDECIDED_ROWS: i64 = 10_000;
 
-/// The LIMIT for a statement whose result the caller still has to filter.
-/// OFFSET cannot be pushed there — the evaluator drops rows the SQL kept —
-/// so the whole prefix up to the requested page has to come back, and
-/// `offset + limit + 1` is exactly enough: one row past the page, so a
-/// complete fetch also shows whether a further page exists (5.5.9.1). A
-/// request without a page, or one whose offset reaches past the ceiling,
-/// gets the ceiling.
-fn undecided_ceiling(_page: Option<&Page>) -> i64 {
-    // Deliberately NOT offset+limit+1. On this path the predicate was not
-    // pushed down, so the rows are candidates: the caller's evaluator still
-    // drops some of them. Fetching only one row past the requested page would
-    // refuse every geoquery over a tenant larger than the page, because the
-    // statement comes back full whenever candidates outnumber matches. The
-    // ceiling exists to bound memory, not to bound the answer.
-    MAX_UNDECIDED_ROWS
-}
-
 /// The statement, split out of `query` so its pagination shape is
 /// assertable without a database. Either LIMIT/OFFSET over an exactly
 /// decided set (`true`, `count(*) OVER ()` rides along for the pre-LIMIT
-/// total) or the safety LIMIT of `undecided_ceiling` — never no LIMIT.
+/// total) or the flat `MAX_UNDECIDED_ROWS` safety LIMIT — never no LIMIT.
 fn query_sql(
     select: &str,
     wheres: &[String],
@@ -224,7 +207,7 @@ fn query_sql(
             )
         }
         None => {
-            binds.push(Bind::Int(undecided_ceiling(page)));
+            binds.push(Bind::Int(MAX_UNDECIDED_ROWS));
             (
                 format!(
                     "SELECT {select} AS entity FROM entities WHERE {wheres} \
@@ -244,7 +227,7 @@ fn query_sql(
 /// potentially exhaust client or server resources … implementations shall
 /// raise an error of type TooManyResults." Serving the truncated prefix
 /// would under-report the answer instead.
-fn check_ceiling(paged: bool, rows: usize, ceiling: i64) -> Result<(), sqlx::Error> {
+pub(crate) fn check_ceiling(paged: bool, rows: usize, ceiling: i64) -> Result<(), sqlx::Error> {
     if paged || (rows as i64) < ceiling {
         return Ok(());
     }
@@ -284,6 +267,13 @@ impl PgEntityStore {
     }
 
     /// 5.6.1-shaped create: `false` when the id already exists (→ 409).
+    ///
+    /// 4.22: "expiresAt is defined as the system temporal Property at which a
+    /// certain Entity, Property or Relationship shall become invalid" — an
+    /// entity whose expiry has passed is already invalid, whatever the
+    /// reaping lag, so it must not 409 a create that reads (and GETs) as
+    /// absent. The conflict clause replaces such a row and reports CREATED;
+    /// a live row still takes the DO NOTHING path and `rows_affected() == 0`.
     pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
         let e = extract(doc);
         wait(async {
@@ -294,11 +284,18 @@ impl PgEntityStore {
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
                     location, location_ambiguous)
                  VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz,
-                         CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($9), 4326))
-                              THEN ST_SetSRID(ST_GeomFromGeoJSON($9), 4326) END,
+                         CASE WHEN ST_IsValid(try_geomfromgeojson($9))
+                              THEN try_geomfromgeojson($9) END,
                          $10 OR ($9 IS NOT NULL
-                                 AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($9), 4326))))
-                 ON CONFLICT (tenant_id, id) DO NOTHING",
+                                 AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($9)), false)))
+                 ON CONFLICT (tenant_id, id) DO UPDATE SET
+                   entity = EXCLUDED.entity, types = EXCLUDED.types,
+                   scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
+                   modified_at = EXCLUDED.modified_at, expires_at = EXCLUDED.expires_at,
+                   location = EXCLUDED.location,
+                   location_ambiguous = EXCLUDED.location_ambiguous,
+                   version = 1
+                 WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()",
             )
             .bind(tenant.as_str())
             .bind(id)
@@ -356,8 +353,12 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
+            // 4.22: an already-expired row is invalid, so deleting it is a
+            // 404 exactly as retrieving it is — never a 204 for an entity the
+            // API has stopped serving.
             let row = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
+                   AND (expires_at IS NULL OR expires_at > now())
                  RETURNING entity, types, version, created_at::text",
             )
             .bind(tenant.as_str())
@@ -399,7 +400,7 @@ impl PgEntityStore {
     /// concatenates is its own operators and `$n` placeholders.
     ///
     /// Every statement it builds is bounded: an exactly decided query by the
-    /// caller's page, everything else by `undecided_ceiling`. A set that
+    /// caller's page, everything else by `MAX_UNDECIDED_ROWS`. A set that
     /// reaches that ceiling is refused with TooManyResults (5.5.6) rather
     /// than returned as a prefix the caller would page over as if complete.
     pub fn query(
@@ -466,7 +467,7 @@ impl PgEntityStore {
             // the evaluator. Probing validity once here keeps the two modes
             // identical: invalid ⇒ no pushdown, evaluator decides. Stored
             // geometries can't be invalid — the write path NULLs those.
-            if self.geometry_is_valid(spec).unwrap_or(false) {
+            if self.geometry_is_valid(spec) {
                 if let Some(c) = crate::compile::geo::compile_geo(spec, "location", binds.len() + 1)
                 {
                     wheres.push(c.sql);
@@ -517,7 +518,7 @@ impl PgEntityStore {
         // the safety LIMIT — without one, a single undecided request (any
         // `scopeQ`, any `georel`, a `q=` shape the compiler declined)
         // materializes the whole tenant into the Vec below.
-        let ceiling = undecided_ceiling(f.page.as_ref());
+        let ceiling = MAX_UNDECIDED_ROWS;
         let (sql, paged) = query_sql(&select, &wheres, f.page.as_ref(), decided, &mut binds);
         wait(async {
             let mut tx = self.pool.begin().await?;
@@ -580,29 +581,33 @@ impl PgEntityStore {
         })
     }
 
-    /// Id-ordered snapshot for one tenant (the v0 `list` shape — still the
-    /// path for every non-entity kind and for callers with no filter).
-    /// One cheap probe: is the client's query geometry OGC-valid? An error
-    /// (unparseable GeoJSON) counts as invalid — same outcome, no pushdown.
-    fn geometry_is_valid(
-        &self,
-        spec: &crate::compile::geo::GeoSpec<'_>,
-    ) -> Result<bool, sqlx::Error> {
+    /// One cheap probe: is the client's query geometry OGC-valid? Unparseable
+    /// GeoJSON counts as invalid — same outcome, no pushdown — and reaches
+    /// that answer through `try_geomfromgeojson` (migration 0009), so the
+    /// probe itself can never raise.
+    fn geometry_is_valid(&self, spec: &crate::compile::geo::GeoSpec<'_>) -> bool {
         let geojson = serde_json::to_string(&serde_json::json!({
             "type": spec.geometry, "coordinates": spec.coordinates
         }))
         .unwrap_or_default();
         wait(async {
-            Ok(
-                sqlx::query_scalar::<_, bool>("SELECT ST_IsValid(ST_GeomFromGeoJSON($1))")
-                    .bind(&geojson)
-                    .fetch_one(&self.pool)
-                    .await
-                    .unwrap_or(false),
+            sqlx::query_scalar::<_, bool>(
+                "SELECT COALESCE(ST_IsValid(try_geomfromgeojson($1)), false)",
             )
+            .bind(&geojson)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(false)
         })
     }
 
+    /// Id-ordered snapshot for one tenant (the v0 `list` shape — still the
+    /// path for every non-entity kind and for callers with no filter).
+    ///
+    /// Bounded like every other read: the statement carries the same
+    /// `MAX_UNDECIDED_ROWS` safety LIMIT, and a tenant that reaches it is
+    /// refused with TooManyResults (5.5.6) rather than served a silent
+    /// prefix.
     pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
@@ -612,15 +617,18 @@ impl PgEntityStore {
                 use futures_util::TryStreamExt;
                 let mut stream = sqlx::query(
                     "SELECT entity FROM entities WHERE tenant_id = $1
-                           AND (expires_at IS NULL OR expires_at > now()) ORDER BY id",
+                           AND (expires_at IS NULL OR expires_at > now())
+                     ORDER BY id LIMIT $2",
                 )
                 .bind(tenant.as_str())
+                .bind(MAX_UNDECIDED_ROWS)
                 .fetch(&mut *tx);
                 while let Some(row) = stream.try_next().await? {
                     docs.push(row.get::<Value, _>(0));
                 }
             }
             tx.commit().await?;
+            check_ceiling(false, docs.len(), MAX_UNDECIDED_ROWS)?;
             Ok(docs)
         })
     }
@@ -637,8 +645,11 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
+            // 4.22: an expired row is invalid, so a patch of it is a 404 —
+            // the same answer the retrieve it would follow already gives.
             let row = sqlx::query(
-                "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+                "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
+                   AND (expires_at IS NULL OR expires_at > now()) FOR UPDATE",
             )
             .bind(tenant.as_str())
             .bind(id)
@@ -656,10 +667,10 @@ impl PgEntityStore {
                     let updated = sqlx::query(
                         "UPDATE entities SET entity = $3, types = $4, scopes = $5,
                            modified_at = $6::timestamptz, expires_at = $7::timestamptz,
-                           location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))
-                                           THEN ST_SetSRID(ST_GeomFromGeoJSON($8), 4326) END,
+                           location = CASE WHEN ST_IsValid(try_geomfromgeojson($8))
+                                           THEN try_geomfromgeojson($8) END,
                            location_ambiguous = $9 OR ($8 IS NOT NULL
-                               AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON($8), 4326))),
+                               AND NOT COALESCE(ST_IsValid(try_geomfromgeojson($8)), false)),
                            version = version + 1
                          WHERE tenant_id = $1 AND id = $2
                          RETURNING version, created_at::text",
@@ -736,11 +747,11 @@ impl PgEntityStore {
                              ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
                         (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
                         (e->>'expires')::timestamptz,
-                        CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
-                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                        CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                             THEN try_geomfromgeojson(e->>'location') END,
                         COALESCE((e->>'loc_ambiguous')::bool, false)
                           OR (e->>'location' IS NOT NULL
-                              AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326)))
+                              AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
                  FROM jsonb_array_elements($2::jsonb) AS e
                  ON CONFLICT (tenant_id, id) DO NOTHING
                  RETURNING id",
@@ -880,11 +891,11 @@ impl PgEntityStore {
                              ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
                         (e->>'created')::timestamptz, (e->>'modified')::timestamptz,
                         (e->>'expires')::timestamptz,
-                        CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
-                             THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                        CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                             THEN try_geomfromgeojson(e->>'location') END,
                         COALESCE((e->>'loc_ambiguous')::bool, false)
                           OR (e->>'location' IS NOT NULL
-                              AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326)))
+                              AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
                  FROM jsonb_array_elements($2::jsonb) AS e
                  ON CONFLICT (tenant_id, id) DO UPDATE SET
                         entity = EXCLUDED.entity, types = EXCLUDED.types,
@@ -1003,11 +1014,11 @@ impl PgEntityStore {
                                           ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
                             modified_at = (e->>'modified')::timestamptz,
                             expires_at = (e->>'expires')::timestamptz,
-                            location = CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
-                                            THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END,
+                            location = CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                                            THEN try_geomfromgeojson(e->>'location') END,
                             location_ambiguous = COALESCE((e->>'loc_ambiguous')::bool, false)
                               OR (e->>'location' IS NOT NULL
-                                  AND NOT ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))),
+                                  AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false)),
                             version = t.version + 1
                      FROM jsonb_array_elements($2::jsonb) AS e
                      WHERE t.tenant_id = $1 AND t.id = e->>'id'
@@ -1071,9 +1082,155 @@ impl PgEntityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn wheres() -> Vec<String> {
         vec!["tenant_id = $1".to_owned()]
+    }
+
+    /// `location_ambiguous` is the single bit that keeps geoquery pushdown
+    /// honest: `compile_geo` ORs it into every predicate so a row whose
+    /// default GeoProperty could not be reduced to ONE geometry still reaches
+    /// the evaluator. It must be true exactly when the doc CARRIES the
+    /// geoproperty and extraction refused — a row with no geoproperty at all
+    /// can never match a geoquery and is excluded in SQL, which is the whole
+    /// point of the column.
+    #[test]
+    fn location_ambiguous_is_carried_but_unextractable() {
+        let loc = crate::compile::geo::LOCATION_IRI;
+        let point = json!({"type": "Point", "coordinates": [2.29, 48.85]});
+
+        // one default GeoProperty instance with a geometry: extracted, exact
+        let e = extract(&json!({"id": "urn:x", loc: [{"value": point}]}));
+        assert!(e.location.is_some());
+        assert!(!e.location_ambiguous);
+
+        // multi-instance: no single geometry, so the evaluator arbitrates
+        let e = extract(&json!({"id": "urn:x", loc: [{"value": point}, {"value": point}]}));
+        assert!(e.location.is_none());
+        assert!(
+            e.location_ambiguous,
+            "a multi-instance location must reach the evaluator"
+        );
+
+        // a GeometryCollection and a non-GeoJSON value are the same case
+        for v in [
+            json!({"type": "GeometryCollection", "geometries": []}),
+            json!("somewhere"),
+            json!({"coordinates": [1, 2]}),
+        ] {
+            let e = extract(&json!({"id": "urn:x", loc: [{"value": v}]}));
+            assert!(e.location.is_none(), "{v} must not become a geometry");
+            assert!(e.location_ambiguous, "{v} must reach the evaluator");
+        }
+
+        // NO geoproperty: not ambiguous — the row is excluded in SQL
+        let e = extract(&json!({"id": "urn:x", "https://a/speed": [{"value": 1}]}));
+        assert!(e.location.is_none());
+        assert!(
+            !e.location_ambiguous,
+            "a row without a location must stay excludable in SQL"
+        );
+    }
+
+    /// The rest of `extract`: `type`/`scope` accept the string form and the
+    /// array form, an absent `scope` is SQL NULL (never an empty array, which
+    /// would mean "scoped to nothing"), and a missing system timestamp falls
+    /// back rather than failing the write.
+    #[test]
+    fn extract_reads_types_scopes_and_stamps() {
+        let e = extract(&json!({"id": "urn:x", "type": "T", "scope": "/a"}));
+        assert_eq!(e.types, ["T"]);
+        assert_eq!(e.scopes.as_deref(), Some(&["/a".to_owned()][..]));
+        let e = extract(&json!({"id": "urn:x", "type": ["T", "U"], "scope": ["/a", "/b"]}));
+        assert_eq!(e.types, ["T", "U"]);
+        assert_eq!(e.scopes.expect("scopes").len(), 2);
+        let e = extract(&json!({"id": "urn:x"}));
+        assert!(e.types.is_empty());
+        assert!(e.scopes.is_none(), "absent scope must be SQL NULL");
+        assert!(e.expires.is_none());
+        assert_eq!(e.created, "1970-01-01T00:00:00Z");
+        // a non-string, non-array scope is present but names nothing
+        let e = extract(&json!({"id": "urn:x", "scope": 7}));
+        assert_eq!(e.scopes.as_deref(), Some(&[][..]));
+    }
+
+    /// The outbox row IS the wire contract the drain deserializes, and the
+    /// drain DELETES any row it cannot decode — a renamed key loses the event
+    /// silently. Pin the key set and the operation vocabulary here, where the
+    /// producer lives.
+    #[test]
+    fn the_change_event_carries_exactly_the_wire_keys() {
+        let t = TenantId::default();
+        let doc = json!({"id": "urn:e", "https://a/speed": [{"value": 1}]});
+        let ev = change_event(
+            &t,
+            "create",
+            "urn:e",
+            &["T".to_owned()],
+            None,
+            Some(&doc),
+            1,
+            "inc",
+        );
+        let keys: Vec<&str> = ev
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "changed_attrs",
+                "entity_id",
+                "incarnation",
+                "op",
+                "payload",
+                "prev_payload",
+                "tenant",
+                "types",
+                "version",
+            ]
+        );
+        assert_eq!(ev["op"], "create");
+        assert_eq!(ev["tenant"], t.as_str());
+        assert!(ev["prev_payload"].is_null(), "a create has no before-image");
+        for op in ["create", "update", "delete"] {
+            assert_eq!(
+                change_event(&t, op, "urn:e", &[], None, None, 1, "inc")["op"],
+                op
+            );
+        }
+    }
+
+    /// `changed_attrs` names the top-level ATTRIBUTES that differ. A create
+    /// lists every attribute, a delete lists every prior one — and, the half
+    /// that actually bounds notification traffic, an attribute present in
+    /// both images with an EQUAL value is not listed, nor is any system
+    /// member that changed on every write.
+    #[test]
+    fn changed_attrs_lists_the_differences_and_nothing_else() {
+        let t = TenantId::default();
+        let ev = |prev: Option<&Value>, next: Option<&Value>| {
+            change_event(&t, "update", "urn:e", &[], prev, next, 1, "inc")["changed_attrs"].clone()
+        };
+        let a = json!({"id": "urn:e", "type": ["T"], "createdAt": "t0", "modifiedAt": "t0",
+                       "https://a/x": [{"value": 1}], "https://a/y": [{"value": 2}]});
+        let b = json!({"id": "urn:e", "type": ["T"], "createdAt": "t0", "modifiedAt": "t9",
+                       "https://a/x": [{"value": 1}], "https://a/y": [{"value": 3}]});
+        assert_eq!(ev(Some(&a), Some(&b)), json!(["https://a/y"]));
+        assert_eq!(ev(None, Some(&a)), json!(["https://a/x", "https://a/y"]));
+        assert_eq!(ev(Some(&a), None), json!(["https://a/x", "https://a/y"]));
+        // identical images change nothing at all
+        assert_eq!(ev(Some(&a), Some(&a)), json!([]));
+        // and no system member is ever named
+        let ids = json!({"id": "urn:other", "type": ["U"], "scope": "/s",
+                         "modifiedAt": "t1", "deletedAt": "t1", "expiresAt": "t1"});
+        assert_eq!(
+            ev(Some(&a), Some(&ids)),
+            json!(["https://a/x", "https://a/y"])
+        );
     }
 
     fn page(offset: i64, limit: i64) -> Page {
@@ -1125,19 +1282,6 @@ mod tests {
         let mut binds = vec![Bind::Text("t".to_owned())];
         let (sql, _) = query_sql("entity", &wheres(), None, true, &mut binds);
         assert!(sql.contains("LIMIT $2"), "{sql}");
-    }
-
-    /// Deep paging must not turn the bound into the unbounded read it
-    /// replaced: `offset + limit + 1` is capped, and an absurd offset cannot
-    /// overflow it into a negative LIMIT.
-    #[test]
-    fn the_ceiling_caps_a_deep_page() {
-        // The requested page never narrows the candidate fetch, however deep
-        // or shallow it is — only the memory ceiling applies.
-        for p in [page(0, 10), page(MAX_UNDECIDED_ROWS, 10), page(i64::MAX, i64::MAX), page(0, 0)] {
-            assert_eq!(undecided_ceiling(Some(&p)), MAX_UNDECIDED_ROWS);
-        }
-        assert_eq!(undecided_ceiling(None), MAX_UNDECIDED_ROWS);
     }
 
     /// 5.5.6 / Table 6.3.2-1: reaching the ceiling means the statement was

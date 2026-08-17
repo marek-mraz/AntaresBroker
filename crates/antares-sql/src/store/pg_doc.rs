@@ -12,7 +12,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::pg_entity::wait;
+use super::pg_entity::{check_ceiling, wait, MAX_UNDECIDED_ROWS};
 
 /// Which doc table a resource kind lives in.
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +127,12 @@ pub const OPERATIONS: &[&str] = &[
     "retrieveContextSourceIdentity",
 ];
 
+/// The bit position is stored data (`csource_index.ops` is a `bigint`), so
+/// appending a 64th operation would overflow the shift in `ops_mask` and
+/// write a mask no later migration could distinguish from a real one. Fail at
+/// compile time on the day it is appended, not on a corrupted row later.
+const _: () = assert!(OPERATIONS.len() < 64, "ops bitmask is i64");
+
 /// Table 4.20-2 named groups, expanded to their members before masking.
 fn group_members(name: &str) -> Option<&'static [&'static str]> {
     const FEDERATION: &[&str] = &[
@@ -187,6 +193,17 @@ fn group_members(name: &str) -> Option<&'static [&'static str]> {
         "retrieveEntity",
         "queryEntity",
         "purgeEntity",
+        "retrieveEntityTypes",
+        "retrieveEntityTypeDetails",
+        "retrieveEntityTypeInfo",
+        "retrieveAttrTypes",
+        "retrieveAttrTypeDetails",
+        "retrieveAttrTypeInfo",
+        "retrieveEntityMap",
+        "updateEntityMap",
+        "deleteEntityMap",
+        "createEntityMapQueryEntity",
+        "retrieveContextSourceIdentity",
     ];
     match name {
         "federationOps" => Some(FEDERATION),
@@ -307,20 +324,22 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
             _ => vec![None],
         };
         for ent in entities {
-            if rows.len() >= MAX_INDEX_ROWS {
-                tracing::warn!(
-                    "registration explodes past {MAX_INDEX_ROWS} index rows; truncating"
-                );
-                return rows;
-            }
-            if props.is_empty() && rels.is_empty() {
-                rows.push(common(ent, None, None));
-            }
-            for p in &props {
-                rows.push(common(ent, Some(p), None));
-            }
-            for r in &rels {
-                rows.push(common(ent, None, Some(r)));
+            // Checked per ROW, not per entity: one `information` element with
+            // one entity and a million propertyNames never reaches a
+            // per-entity check twice, so the vector grew unbounded — the OOM
+            // this ceiling exists to prevent.
+            for (p, r) in std::iter::once((None, None))
+                .filter(|_| props.is_empty() && rels.is_empty())
+                .chain(props.iter().map(|p| (Some(p.as_str()), None)))
+                .chain(rels.iter().map(|r| (None, Some(r.as_str()))))
+            {
+                if rows.len() >= MAX_INDEX_ROWS {
+                    tracing::warn!(
+                        "registration explodes past {MAX_INDEX_ROWS} index rows; truncating"
+                    );
+                    return rows;
+                }
+                rows.push(common(ent, p, r));
             }
         }
     }
@@ -328,6 +347,99 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
         rows.push(common(None, None, None));
     }
     rows
+}
+
+/// Rebuild one registration's `csource_index` rows (delete + multi-row
+/// insert) inside the CALLER's transaction, so the extracted match rows are
+/// never a version behind the document. Shared by `upsert` and `mutate` —
+/// the row lock lives in here, so no caller can do it atomically itself.
+///
+/// The geometry goes through `try_geomfromgeojson` (migration 0009): a
+/// location PostGIS cannot parse leaves the column NULL instead of aborting
+/// the write.
+async fn rebuild_csource_index(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantId,
+    id: &str,
+    doc: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM csource_index WHERE tenant_id = $1 AND registration_id = $2")
+        .bind(tenant.as_str())
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO csource_index
+           (tenant_id, registration_id, entity_id, id_pattern, entity_type,
+            property_name, relationship_name, scopes, expires_at, endpoint,
+            mode, ops, tenant_at_peer, headers, host_alias, location)
+         SELECT $1, $2, e->>'entity_id', e->>'id_pattern', e->>'entity_type',
+                e->>'property_name', e->>'relationship_name',
+                CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
+                     ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
+                (e->>'expires_at')::timestamptz, e->>'endpoint',
+                (e->>'mode')::smallint, (e->>'ops')::bigint,
+                e->>'tenant_at_peer', e->'headers', e->>'host_alias',
+                CASE WHEN ST_IsValid(try_geomfromgeojson(e->>'location'))
+                     THEN try_geomfromgeojson(e->>'location') END
+         FROM jsonb_array_elements($3::jsonb) AS e",
+    )
+    .bind(tenant.as_str())
+    .bind(id)
+    .bind(Value::Array(index_rows(doc)))
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+}
+
+/// The INSERT every doc write shares — same columns, same binds, differing
+/// only in the caller's `ON CONFLICT …` tail. `None` = the tail took a
+/// DO NOTHING path (the row was already there).
+async fn insert_doc(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantId,
+    kind: DocKind,
+    id: &str,
+    doc: &Value,
+    conflict: &str,
+) -> Result<Option<bool>, sqlx::Error> {
+    let table = kind.table();
+    let col = kind.doc_column();
+    let head = if kind.has_bookkeeping() {
+        format!(
+            "INSERT INTO {table} (tenant_id, id, {col}, context, expires_at, is_active,
+               times_sent, last_notification, last_success, last_failure)
+             VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7,
+               $8::timestamptz, $9::timestamptz, $10::timestamptz)"
+        )
+    } else {
+        format!("INSERT INTO {table} (tenant_id, id, {col}) VALUES ($1, $2, $3)")
+    };
+    // literals from `DocKind` plus the caller's literal tail, values bound
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(format!("{head}{conflict}")))
+        .bind(tenant.as_str())
+        .bind(id)
+        .bind(doc);
+    let bk;
+    if kind.has_bookkeeping() {
+        let context = doc
+            .get("@context")
+            .cloned()
+            .unwrap_or(Value::Object(Default::default()));
+        bk = (bookkeeping(doc), context);
+        let ((expires, active, sent, last_n, last_s, last_f), context) = &bk;
+        q = q
+            .bind(context)
+            .bind(expires)
+            .bind(*active)
+            .bind(*sent)
+            .bind(last_n)
+            .bind(last_s)
+            .bind(last_f);
+    }
+    Ok(q.fetch_optional(&mut **tx)
+        .await?
+        .map(|r| r.get::<bool, _>(0)))
 }
 
 pub struct PgDocStore {
@@ -343,8 +455,41 @@ impl PgDocStore {
         &self.pool
     }
 
+    /// Create one doc: `Ok(false)` when a document with that id already
+    /// exists. 5.8.1.4 (and 5.9.2.4 for registrations): "If the NGSI-LD
+    /// endpoint already knows about this Subscription, as there is an
+    /// existing Subscription whose id (URI) is equivalent, an error of type
+    /// AlreadyExists shall be raised."
+    ///
+    /// ONE statement, so the answer comes from the unique constraint itself:
+    /// a read-then-write would let two concurrent creates of the same
+    /// client-supplied id both report created, and the second would silently
+    /// overwrite the first.
+    pub fn create(
+        &self,
+        tenant: &TenantId,
+        kind: DocKind,
+        id: &str,
+        doc: &Value,
+    ) -> Result<bool, sqlx::Error> {
+        let conflict = " ON CONFLICT (tenant_id, id) DO NOTHING RETURNING true AS created";
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
+                .await?
+                .is_some();
+            // a losing INSERT must not rebuild the winner's index rows
+            if created && matches!(kind, DocKind::Registration) {
+                rebuild_csource_index(&mut tx, tenant, id, doc).await?;
+            }
+            tx.commit().await?;
+            Ok(created)
+        })
+    }
+
     /// Upsert one doc, refreshing the extracted columns. `Ok(true)` = it
-    /// existed before (create paths check existence via `create`).
+    /// existed before.
     pub fn upsert(
         &self,
         tenant: &TenantId,
@@ -352,20 +497,10 @@ impl PgDocStore {
         id: &str,
         doc: &Value,
     ) -> Result<bool, sqlx::Error> {
-        let context = doc
-            .get("@context")
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
-        let (expires, active, sent, last_n, last_s, last_f) = bookkeeping(doc);
-        let table = kind.table();
         let col = kind.doc_column();
-        let sql = if kind.has_bookkeeping() {
+        let conflict = if kind.has_bookkeeping() {
             format!(
-                "INSERT INTO {table} (tenant_id, id, {col}, context, expires_at, is_active,
-                   times_sent, last_notification, last_success, last_failure)
-                 VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7,
-                   $8::timestamptz, $9::timestamptz, $10::timestamptz)
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET {col} = EXCLUDED.{col},
+                " ON CONFLICT (tenant_id, id) DO UPDATE SET {col} = EXCLUDED.{col},
                    context = EXCLUDED.context, expires_at = EXCLUDED.expires_at,
                    is_active = EXCLUDED.is_active, times_sent = EXCLUDED.times_sent,
                    last_notification = EXCLUDED.last_notification,
@@ -374,61 +509,18 @@ impl PgDocStore {
             )
         } else {
             format!(
-                "INSERT INTO {table} (tenant_id, id, {col})
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (tenant_id, id) DO UPDATE SET {col} = EXCLUDED.{col}
+                " ON CONFLICT (tenant_id, id) DO UPDATE SET {col} = EXCLUDED.{col}
                  RETURNING (xmax <> 0) AS existed"
             )
         };
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .bind(tenant.as_str())
-                .bind(id)
-                .bind(doc);
-            if kind.has_bookkeeping() {
-                q = q
-                    .bind(&context)
-                    .bind(&expires)
-                    .bind(active)
-                    .bind(sent)
-                    .bind(&last_n)
-                    .bind(&last_s)
-                    .bind(&last_f);
-            }
-            let existed: bool = q.fetch_one(&mut *tx).await?.get("existed");
+            let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)
+                .await?
+                .expect("DO UPDATE always returns the row");
             if matches!(kind, DocKind::Registration) {
-                // Rebuild this registration's csource_index rows in the
-                // SAME transaction (delete + multi-row insert).
-                sqlx::query(
-                    "DELETE FROM csource_index WHERE tenant_id = $1 AND registration_id = $2",
-                )
-                .bind(tenant.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "INSERT INTO csource_index
-                       (tenant_id, registration_id, entity_id, id_pattern, entity_type,
-                        property_name, relationship_name, scopes, expires_at, endpoint,
-                        mode, ops, tenant_at_peer, headers, host_alias, location)
-                     SELECT $1, $2, e->>'entity_id', e->>'id_pattern', e->>'entity_type',
-                            e->>'property_name', e->>'relationship_name',
-                            CASE WHEN e->'scopes' = 'null'::jsonb THEN NULL
-                                 ELSE ARRAY(SELECT jsonb_array_elements_text(e->'scopes')) END,
-                            (e->>'expires_at')::timestamptz, e->>'endpoint',
-                            (e->>'mode')::smallint, (e->>'ops')::bigint,
-                            e->>'tenant_at_peer', e->'headers', e->>'host_alias',
-                            CASE WHEN ST_IsValid(ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326))
-                                 THEN ST_SetSRID(ST_GeomFromGeoJSON(e->>'location'), 4326) END
-                     FROM jsonb_array_elements($3::jsonb) AS e",
-                )
-                .bind(tenant.as_str())
-                .bind(id)
-                .bind(Value::Array(index_rows(doc)))
-                .execute(&mut *tx)
-                .await?;
+                rebuild_csource_index(&mut tx, tenant, id, doc).await?;
             }
             tx.commit().await?;
             Ok(existed)
@@ -520,6 +612,13 @@ impl PgDocStore {
                             .bind(&context);
                     }
                     q.execute(&mut *tx).await?;
+                    // 5.9.3 Update Registration: a patch may flip the mode,
+                    // rewrite `information` or move the endpoint, so the
+                    // extracted match rows have to be rebuilt with the doc —
+                    // in this transaction, under the same row lock.
+                    if matches!(kind, DocKind::Registration) {
+                        rebuild_csource_index(&mut tx, tenant, id, &doc).await?;
+                    }
                     tx.commit().await?;
                     Ok(Some(Ok(t)))
                 }
@@ -548,9 +647,16 @@ impl PgDocStore {
         })
     }
 
+    /// Every doc of one kind for one tenant, id-ordered.
+    ///
+    /// Bounded: without a LIMIT this statement materializes a whole tenant's
+    /// subscriptions/registrations into one `Vec`, which at the 100 000-per-
+    /// broker target is the broker's memory, not the database's. A tenant that
+    /// reaches the ceiling is refused with TooManyResults (5.5.6) rather than
+    /// served a silent prefix.
     pub fn list(&self, tenant: &TenantId, kind: DocKind) -> Result<Vec<Value>, sqlx::Error> {
         let sql = format!(
-            "SELECT {} FROM {} WHERE tenant_id = $1 ORDER BY id",
+            "SELECT {} FROM {} WHERE tenant_id = $1 ORDER BY id LIMIT $2",
             kind.doc_column(),
             kind.table()
         );
@@ -559,9 +665,11 @@ impl PgDocStore {
             crate::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
+                .bind(MAX_UNDECIDED_ROWS)
                 .fetch_all(&mut *tx)
                 .await?;
             tx.commit().await?;
+            check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
             Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
         })
     }
@@ -664,6 +772,80 @@ mod tests {
         assert_ne!(m & bit("queryEntity"), 0, "retrieveOps expands");
         assert_eq!(m & bit("deleteEntity"), 0);
         assert_eq!(ops_mask(&json!({"operations": ["notARealOp"]})), 0);
+    }
+
+    /// Table 4.20-2 defines `redirectionOps` as 23 operations — the provision
+    /// and retrieve set PLUS type/attribute introspection, the EntityMap
+    /// operations and `retrieveContextSourceIdentity`. A short group writes a
+    /// mask that stops those requests being redirected at all.
+    #[test]
+    fn redirection_ops_expands_to_the_whole_table_4_20_2_group() {
+        let m = ops_mask(&json!({"operations": ["redirectionOps"]}));
+        let bit = |op: &str| 1i64 << OPERATIONS.iter().position(|o| *o == op).expect(op);
+        for op in [
+            "createEntity",
+            "deleteEntity",
+            "purgeEntity",
+            "retrieveEntity",
+            "queryEntity",
+            "retrieveEntityTypes",
+            "retrieveEntityTypeDetails",
+            "retrieveEntityTypeInfo",
+            "retrieveAttrTypes",
+            "retrieveAttrTypeDetails",
+            "retrieveAttrTypeInfo",
+            "retrieveEntityMap",
+            "updateEntityMap",
+            "deleteEntityMap",
+            "createEntityMapQueryEntity",
+            "retrieveContextSourceIdentity",
+        ] {
+            assert_ne!(m & bit(op), 0, "redirectionOps is missing {op}");
+        }
+        assert_eq!(m.count_ones(), 23, "Table 4.20-2 lists 23 operations");
+        // and NOT the members the table leaves out
+        for op in [
+            "createSubscription",
+            "queryBatch",
+            "createBatch",
+            "retrieveTemporal",
+            "createEntityMapQueryTemporal",
+        ] {
+            assert_eq!(m & bit(op), 0, "{op} is not a redirectionOp");
+        }
+    }
+
+    /// The bit position IS stored data (`csource_index.ops` is a `bigint`), so
+    /// the list can only grow to 63 entries; at 64 the shift silently writes a
+    /// wrong mask no migration could tell from a real one.
+    #[test]
+    fn the_operation_list_still_fits_the_bitmask() {
+        assert!(OPERATIONS.len() < 64, "ops bitmask is i64");
+        // every name is unique: a duplicate would give one operation two bits
+        let mut seen = OPERATIONS.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), OPERATIONS.len(), "duplicate operation name");
+    }
+
+    /// The explosion ceiling has to bound the shape its own doc comment names
+    /// — a document written through a path with no cardinality validation (a
+    /// restored dump, an importer). ONE entity with a huge `propertyNames` is
+    /// exactly that shape, and a per-entity check never sees it twice.
+    #[test]
+    fn the_index_ceiling_bounds_one_entity_too() {
+        let names: Vec<String> = (0..MAX_INDEX_ROWS + 500).map(|i| format!("p{i}")).collect();
+        let reg = json!({
+            "endpoint": "http://cs.example:9090",
+            "information": [{"entities": [{"type": "T"}], "propertyNames": names}]
+        });
+        assert_eq!(index_rows(&reg).len(), MAX_INDEX_ROWS);
+        // and across many entities, where it already held
+        let many: Vec<Value> = (0..MAX_INDEX_ROWS + 500)
+            .map(|i| json!({"id": format!("urn:e:{i}")}))
+            .collect();
+        let reg = json!({"endpoint": "e", "information": [{"entities": many}]});
+        assert_eq!(index_rows(&reg).len(), MAX_INDEX_ROWS);
     }
 
     #[test]

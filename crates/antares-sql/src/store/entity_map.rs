@@ -28,10 +28,12 @@ const INSERT_SQL: &str =
      SELECT $1, $2, (e->>'pos')::bigint, $3, e->>'entity_id',
             e->>'remote_query', e->>'registration_id', now(), $4::timestamptz
      FROM jsonb_array_elements($5::jsonb) AS e";
-const TOUCH_SQL: &str =
-    "UPDATE entity_maps SET last_access = now() WHERE tenant_id = $1 AND map_id = $2";
+/// 5.5.14: "If an EntityMap has expired, or cannot be accessed, no inference
+/// can be made as to which entities are held within the Context Sources and a
+/// new one shall be created." The TTL sweep is a timer, so the expiry belongs
+/// in the read itself — never serve a page from a map past `expires_at`.
 const PAGE_SQL: &str = "SELECT entity_id, registration_id FROM entity_maps
-     WHERE tenant_id = $1 AND map_id = $2
+     WHERE tenant_id = $1 AND map_id = $2 AND expires_at > now()
      ORDER BY pos OFFSET $3 LIMIT $4";
 const SWEEP_SQL: &str = "DELETE FROM entity_maps WHERE tenant_id = $1 AND expires_at < now()";
 
@@ -87,7 +89,7 @@ impl EntityMapStore {
         })
     }
 
-    /// Page of a map in position order; bumps `last_access`.
+    /// Page of a map in position order, refusing a map past its TTL (5.5.14).
     pub fn page(
         &self,
         tenant: &TenantId,
@@ -98,11 +100,6 @@ impl EntityMapStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
-            sqlx::query(TOUCH_SQL)
-                .bind(tenant.as_str())
-                .bind(map_id)
-                .execute(&mut *tx)
-                .await?;
             let rows = sqlx::query(PAGE_SQL)
                 .bind(tenant.as_str())
                 .bind(map_id)
@@ -191,7 +188,7 @@ mod tests {
     /// policy — a read or a sweep must never reach another tenant's rows.
     #[test]
     fn every_statement_carries_the_tenant_predicate() {
-        for sql in [CLEAR_SQL, TOUCH_SQL, PAGE_SQL, SWEEP_SQL] {
+        for sql in [CLEAR_SQL, PAGE_SQL, SWEEP_SQL] {
             assert!(sql.contains("tenant_id = $1"), "untenanted: {sql}");
         }
         assert!(
@@ -209,6 +206,18 @@ mod tests {
             PAGE_SQL.contains("expires_at > now()"),
             "expired rows pageable: {PAGE_SQL}"
         );
+    }
+
+    /// Reading a page must not write: `last_access` was maintained by an
+    /// UPDATE of every row of the map before each page, which nothing ever
+    /// read and which serialized concurrent paging behind a row-level write
+    /// lock over the whole map.
+    #[test]
+    fn no_statement_writes_on_the_read_path() {
+        for sql in [CLEAR_SQL, INSERT_SQL, PAGE_SQL, SWEEP_SQL] {
+            assert!(!sql.contains("UPDATE"), "a read takes a write lock: {sql}");
+            assert!(!sql.contains("last_access = "), "dead column write: {sql}");
+        }
     }
 
     /// Paging is bound, not interpolated: OFFSET/LIMIT arrive as parameters.

@@ -106,6 +106,8 @@ mod tests {
 
     /// A pool that has never connected: any statement issued through it fails
     /// immediately, so a test that succeeds proves no statement was issued.
+    /// Constructing one spawns sqlx's idle reaper, so it needs a runtime in
+    /// scope — the caller enters one.
     fn unreachable_pool() -> PgPool {
         PgPoolOptions::new()
             .connect_lazy("postgres://nobody@127.0.0.1:1/antares_no_such_db")
@@ -116,6 +118,11 @@ mod tests {
     /// opens a transaction (and `seq = ANY('{}')` scans) on every idle tick.
     #[test]
     fn ack_of_nothing_issues_no_statement() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
         assert_eq!(ack(&unreachable_pool(), &[]).expect("noop ack"), 0);
     }
 

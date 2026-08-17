@@ -178,66 +178,24 @@ pub async fn temporal_maintenance(
                 }
             }
         }
-        if let Some(days) = retention_days {
-            // drop whole partitions strictly older than the horizon
-            let parts = sqlx::query(
-                "SELECT c.relname,
-                        pg_get_expr(c.relpartbound, c.oid) AS bound
-                 FROM pg_inherits i
-                 JOIN pg_class c ON c.oid = i.inhrelid
-                 JOIN pg_class p ON p.oid = i.inhparent
-                 WHERE p.relname = 'attr_instances'",
-            )
-            .fetch_all(&mut *tx)
-            .await?;
-            for r in parts {
-                let name: String = r.get("relname");
-                let bound: String = r.get::<Option<String>, _>("bound").unwrap_or_default();
-                // bound looks like: FOR VALUES FROM ('2026-07-27 ...') TO ('2026-08-03 ...')
-                let Some(hi) = bound
-                    .split("TO ('")
-                    .nth(1)
-                    .and_then(|s| s.split('\'').next())
-                else {
-                    continue; // DEFAULT partition — never dropped
-                };
-                let expired: bool = sqlx::query_scalar(
-                    "SELECT $1::timestamptz < now() - make_interval(days => $2::int)",
-                )
-                .bind(hi)
-                .bind(days)
-                .fetch_one(&mut *tx)
-                .await?;
-                if expired {
-                    sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
-                        .execute(&mut *tx)
-                        .await?;
-                    done.push(format!("dropped expired partition {name}"));
-                }
-            }
-            // The DEFAULT partition has no upper bound and is never dropped —
-            // reclaim its expired rows (historic backfill that landed there
-            // before its week partition existed) by DELETE, or they are
-            // retained forever.
-            let purged = sqlx::query(
-                "DELETE FROM attr_instances_default
-                 WHERE observed_at < now() - make_interval(days => $1::int)",
-            )
-            .bind(days)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if purged > 0 {
-                done.push(format!(
-                    "purged {purged} expired rows from DEFAULT partition"
-                ));
-            }
-        }
     }
     sqlx::query("UPDATE maintenance_jobs SET last_run = now() WHERE name = 'temporal_partitions'")
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Plain-mode retention runs AFTER the claim transaction commits, for the
+    // same reason as the 4.22 reaps: DROP TABLE needs ACCESS EXCLUSIVE on the
+    // parent and the DEFAULT purge grows with stored volume, so one lock
+    // contention or one statement timeout would otherwise roll back the
+    // partition pre-creation that keeps ingest writable.
+    if backend == TemporalBackend::Partitioned {
+        if let Some(days) = retention_days {
+            match plain_retention(pool, days).await {
+                Ok(lines) => done.extend(lines),
+                Err(e) => done.push(format!("retention skipped ({e})")),
+            }
+        }
+    }
     // 4.22 garbage collection, on both backends: reads already refuse expired
     // entities and instances, so these reaps only bound storage — the clause
     // itself sanctions deletion lagging expiresAt.
@@ -259,6 +217,68 @@ pub async fn temporal_maintenance(
         done.push("nothing to do".into());
     }
     Ok(done.join("; "))
+}
+
+/// Plain-mode retention, in its own transaction: drop every weekly partition
+/// whose whole range is older than the horizon, then purge the DEFAULT
+/// partition (which has no upper bound and is therefore never dropped) of the
+/// historic-backfill rows that landed there before their week existed.
+///
+/// Both statements are idempotent, so a run that loses a lock simply repeats
+/// on the next tick. Service role: retention is cross-tenant work.
+async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::Error> {
+    let mut done: Vec<String> = Vec::new();
+    let mut tx = pool.begin().await?;
+    crate::pg::set_service(&mut tx).await?;
+    let parts = sqlx::query(
+        "SELECT c.relname,
+                pg_get_expr(c.relpartbound, c.oid) AS bound
+         FROM pg_inherits i
+         JOIN pg_class c ON c.oid = i.inhrelid
+         JOIN pg_class p ON p.oid = i.inhparent
+         WHERE p.relname = 'attr_instances'",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for r in parts {
+        let name: String = r.get("relname");
+        let bound: String = r.get::<Option<String>, _>("bound").unwrap_or_default();
+        // bound looks like: FOR VALUES FROM ('2026-07-27 ...') TO ('2026-08-03 ...')
+        let Some(hi) = bound
+            .split("TO ('")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+        else {
+            continue; // DEFAULT partition — never dropped
+        };
+        let expired: bool =
+            sqlx::query_scalar("SELECT $1::timestamptz < now() - make_interval(days => $2::int)")
+                .bind(hi)
+                .bind(days)
+                .fetch_one(&mut *tx)
+                .await?;
+        if expired {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
+                .execute(&mut *tx)
+                .await?;
+            done.push(format!("dropped expired partition {name}"));
+        }
+    }
+    let purged = sqlx::query(
+        "DELETE FROM attr_instances_default
+         WHERE observed_at < now() - make_interval(days => $1::int)",
+    )
+    .bind(days)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if purged > 0 {
+        done.push(format!(
+            "purged {purged} expired rows from DEFAULT partition"
+        ));
+    }
+    Ok(done)
 }
 
 /// The 4.22 expired-entity DELETE, isolated so a reap that outruns
@@ -317,9 +337,11 @@ async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     crate::pg::set_service(&mut tx).await?;
     let n = sqlx::query(
+        // try_timestamptz (migration 0011), not a bare cast: `expiresAt` is
+        // jsonb TEXT and a stamp PostgreSQL cannot parse would abort this
+        // DELETE for the whole deployment, every tick, forever.
         "DELETE FROM attr_instances
-         WHERE data->>'expiresAt' IS NOT NULL
-           AND (data->>'expiresAt')::timestamptz < now()",
+         WHERE try_timestamptz(data->>'expiresAt') < now()",
     )
     .execute(&mut *tx)
     .await?

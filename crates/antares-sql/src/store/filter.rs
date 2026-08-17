@@ -131,17 +131,19 @@ impl Default for TemporalFilter<'_> {
 /// Parses both stamps to instants (so a non-UTC-Z offset expiresAt is judged
 /// correctly, matching the SQL `expires_at`/timestamptz path); byte compare is
 /// only the fallback when a stamp is unparseable.
+///
+/// 4.6.3 also allows a comma as the seconds-fraction separator, which RFC 3339
+/// does not; a comma cannot appear anywhere else in such a stamp, so the first
+/// one is rewritten to a point before parsing. Without that the comma form
+/// always fell into the byte fallback, where ',' (0x2C) sorts before both '.'
+/// and 'Z' and a live instance reads as expired.
 pub fn expired_at(v: &Value, now: &str) -> bool {
     let Some(e) = v.get("expiresAt").and_then(Value::as_str) else {
         return false;
     };
-    // Compare instants so a non-UTC-Z offset expiresAt is judged correctly;
-    // fall back to the byte compare only if either stamp is unparseable.
-    match (
-        chrono::DateTime::parse_from_rfc3339(e),
-        chrono::DateTime::parse_from_rfc3339(now),
-    ) {
-        (Ok(exp), Ok(n)) => exp < n,
+    let instant = |s: &str| chrono::DateTime::parse_from_rfc3339(&s.replacen(',', ".", 1)).ok();
+    match (instant(e), instant(now)) {
+        (Some(exp), Some(n)) => exp < n,
         _ => e < now,
     }
 }

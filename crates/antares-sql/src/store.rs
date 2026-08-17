@@ -103,6 +103,12 @@ fn prune_expired_instances(doc: &mut Value, now: &str) -> bool {
     changed
 }
 
+/// The 4.22 "now" the write paths judge `expiresAt` against — the same UTC-Z
+/// millisecond form the read boundary uses.
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 fn table_for(kind: Kind) -> TableDefinition<'static, &'static [u8], &'static [u8]> {
     match kind {
         Kind::Entity => T_ENTITIES,
@@ -151,7 +157,7 @@ fn split_key(key: &[u8]) -> Option<(String, String)> {
 /// a per-commit fsync must never stall an async worker. Outside a
 /// runtime (unit tests, startup) it just runs inline.
 fn on_blocking<T>(f: impl FnOnce() -> T) -> T {
-    // wasm32 (§N): single-threaded, no tokio runtime — always inline.
+    // wasm32: single-threaded, no tokio runtime — always inline.
     #[cfg(not(target_arch = "wasm32"))]
     if let Ok(h) = tokio::runtime::Handle::try_current() {
         if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
@@ -420,7 +426,16 @@ impl Store {
     /// but without physical removal a long-running store (the browser's OPFS
     /// file under ticking sensors) grows without bound. `file` mode persists
     /// each removal. Returns how many docs were reaped or pruned.
+    ///
+    /// Runs through `on_blocking` like every other mutating path: it holds
+    /// the write-critical section for a full scan and issues one
+    /// `Durability::Immediate` (fsync) commit per reaped doc, which must
+    /// never happen on an async worker thread.
     pub fn sweep_expired(&self, now: &str) -> usize {
+        on_blocking(|| self.sweep_expired_locked(now))
+    }
+
+    fn sweep_expired_locked(&self, now: &str) -> usize {
         let mut inner = self.write_inner();
         let mut reaped = 0usize;
         let mut dead: Vec<(String, String)> = Vec::new();
@@ -520,14 +535,30 @@ impl Store {
         }
     }
 
+    /// 4.22: "expiresAt is defined as the system temporal Property at which a
+    /// certain Entity, Property or Relationship shall become invalid." An
+    /// entity past its expiry is invalid the moment the stamp passes, ahead
+    /// of the sweep that physically reaps it, so every write path treats it
+    /// as absent — otherwise the same id 404s on retrieve and 409s on create
+    /// for a whole sweep interval. Only entities carry the entity-level
+    /// stamp; subscriptions and registrations have their own expiry rules.
+    fn is_expired(&self, inner: &Inner, kind: Kind, tenant: &str, id: &str) -> bool {
+        kind == Kind::Entity
+            && Self::map(inner, kind)
+                .get(tenant)
+                .and_then(|m| m.get(id))
+                .is_some_and(|d| filter::expired_at(d, &now_stamp()))
+    }
+
     /// Insert a new resource; `false` if the id already exists.
     pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
         let created = on_blocking(|| {
             let mut inner = self.write_inner();
+            let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
             let m = Self::map_mut(&mut inner, kind)
                 .entry(tenant.as_str().to_owned())
                 .or_default();
-            if m.contains_key(id) {
+            if m.contains_key(id) && !expired {
                 false
             } else {
                 m.insert(id.to_owned(), doc.clone());
@@ -541,18 +572,22 @@ impl Store {
         created
     }
 
-    /// Insert or replace; returns `true` if it existed before.
+    /// Insert or replace; returns `true` if it existed before. An expired
+    /// entity did not (4.22), so the upsert reports CREATED and the caller
+    /// answers 201 with a Location header instead of a silent 204.
     pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
-        let prev = on_blocking(|| {
+        let (prev, expired) = on_blocking(|| {
             let mut inner = self.write_inner();
+            let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
             let prev = Self::map_mut(&mut inner, kind)
                 .entry(tenant.as_str().to_owned())
                 .or_default()
                 .insert(id.to_owned(), doc.clone());
             self.persist(table_for(kind), &key_bytes(tenant.as_str(), id), Some(&doc));
-            prev
+            (prev, expired)
         });
-        let existed = prev.is_some();
+        let existed = prev.is_some() && !expired;
+        let prev = if expired { None } else { prev };
         if kind == Kind::Entity {
             self.emit(tenant, prev, Some(doc));
         }
@@ -570,9 +605,19 @@ impl Store {
             .cloned()
     }
 
+    /// An expired entity is already invalid (4.22): deleting it is a 404,
+    /// the same answer retrieving it gives, not a 204 for something the API
+    /// stopped serving. The row itself still goes — the sweep would take it
+    /// anyway, and leaving it would resurrect the 409.
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
         let removed = on_blocking(|| {
             let mut inner = self.write_inner();
+            // an expired doc is left in place for the sweep to reap: removing
+            // it here without persisting the removal would resurrect it on
+            // the next boot of a `file`-mode store
+            if self.is_expired(&inner, kind, tenant.as_str(), id) {
+                return None;
+            }
             let removed = Self::map_mut(&mut inner, kind)
                 .get_mut(tenant.as_str())
                 .and_then(|m| m.remove(id));
@@ -613,6 +658,9 @@ impl Store {
     ) -> Option<Result<T, E>> {
         let (result, change) = on_blocking(|| {
             let mut inner = self.write_inner();
+            if self.is_expired(&inner, kind, tenant.as_str(), id) {
+                return None; // 4.22: invalid, so absent
+            }
             let doc = Self::map_mut(&mut inner, kind)
                 .get_mut(tenant.as_str())
                 .and_then(|m| m.get_mut(id))?;
@@ -796,6 +844,163 @@ mod tests {
         };
         assert!(err.contains("format 999"), "err: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that HOLDS rows but carries no format marker was written by a
+    /// binary whose key/value shape this one cannot vouch for. Refusing is
+    /// the whole point of the marker — serving it would answer requests from
+    /// data that may be misread. An empty file, by contrast, is just a fresh
+    /// one and gets the marker stamped.
+    #[test]
+    fn file_mode_refuses_data_without_a_format_marker() {
+        let dir = tempdir("nomarker");
+        {
+            let db = Database::create(dir.join("antares.redb")).expect("db");
+            let mut tx = db.begin_write().expect("tx");
+            tx.set_durability(Durability::Immediate).expect("dur");
+            {
+                let mut t = tx.open_table(T_ENTITIES).expect("entities");
+                let mut k = b"plain".to_vec();
+                k.push(0);
+                k.extend_from_slice(b"urn:e:1");
+                let bytes = serde_json::to_vec(&json!({"id": "urn:e:1"})).expect("serialize");
+                t.insert(k.as_slice(), bytes.as_slice()).expect("insert");
+            }
+            // deliberately NO meta table
+            tx.commit().expect("commit");
+        }
+        let err = match Store::open_file(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("must refuse data with no format marker"),
+        };
+        assert!(err.contains("no format marker"), "err: {err}");
+        assert!(err.contains("antares.redb"), "the file is named: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // an EMPTY unmarked file is a fresh store, not a refusal
+        let fresh = tempdir("nomarker-empty");
+        {
+            let db = Database::create(fresh.join("antares.redb")).expect("db");
+            let tx = db.begin_write().expect("tx");
+            tx.commit().expect("commit");
+        }
+        Store::open_file(&fresh).expect("an empty file is a fresh store");
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// 4.22: "expiresAt is defined as the system temporal Property at which a
+    /// certain Entity, Property or Relationship shall become invalid." The
+    /// clause sanctions the DELETION lagging, not the invalidity — so the
+    /// write paths must agree with the read boundary the instant the stamp
+    /// passes. Before this, the same id was simultaneously a 404 on retrieve,
+    /// a 409 on create and a 204 on delete for a whole sweep interval.
+    #[test]
+    fn an_expired_entity_is_absent_to_writes_too() {
+        let s = Store::default();
+        let t = TenantId::default();
+        let dead = json!({"id": "urn:e", "type": ["T"], "expiresAt": "2000-01-01T00:00:00Z"});
+        let live = json!({"id": "urn:l", "type": ["T"], "expiresAt": "2999-01-01T00:00:00Z"});
+        assert!(s.create(&t, Kind::Entity, "urn:e", dead.clone()));
+        assert!(s.create(&t, Kind::Entity, "urn:l", live.clone()));
+
+        // patching or deleting something already invalid is a 404, not a 204
+        assert!(s
+            .mutate(&t, Kind::Entity, "urn:e", |_d| Ok::<(), ()>(()))
+            .is_none());
+        assert!(
+            !s.delete(&t, Kind::Entity, "urn:e"),
+            "expired delete is 404"
+        );
+        // …and creating over it succeeds instead of raising AlreadyExists
+        assert!(
+            s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1})),
+            "an expired id must not 409 a create"
+        );
+        assert_eq!(
+            s.get(&t, Kind::Entity, "urn:e").expect("recreated")["n"],
+            1,
+            "the create must have replaced the expired document"
+        );
+
+        // an UNEXPIRED entity keeps every one of those answers
+        assert!(!s.create(&t, Kind::Entity, "urn:l", live.clone()), "409");
+        assert!(s
+            .mutate(&t, Kind::Entity, "urn:l", |_d| Ok::<(), ()>(()))
+            .is_some());
+        assert!(s.delete(&t, Kind::Entity, "urn:l"));
+
+        // upsert over an expired id reports CREATED (201 + Location), not
+        // updated
+        s.create(&t, Kind::Entity, "urn:x", dead.clone());
+        assert!(
+            !s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x"})),
+            "an expired id must upsert as created"
+        );
+        assert!(
+            s.upsert(&t, Kind::Entity, "urn:x", json!({"id": "urn:x", "n": 2})),
+            "and the live one that replaced it as updated"
+        );
+
+        // 4.22 is an ENTITY stamp: other kinds keep their own expiry rules
+        assert!(s.create(&t, Kind::Subscription, "urn:s", dead.clone()));
+        assert!(
+            !s.create(&t, Kind::Subscription, "urn:s", dead),
+            "a subscription id still 409s"
+        );
+        assert!(s.delete(&t, Kind::Subscription, "urn:s"));
+    }
+
+    /// The change hook drives every notification and all temporal
+    /// auto-recording, so its contract is: create emits (None, Some), delete
+    /// emits (Some, None), a real mutate emits both images — and, just as
+    /// load-bearing, a NON-entity write and a no-op mutate emit NOTHING. A
+    /// subscription leaking into the hook would be mirrored into temporal
+    /// storage; a no-op emitting would re-notify every subscriber on every
+    /// idempotent PATCH.
+    #[test]
+    fn the_change_hook_fires_for_entity_changes_only() {
+        use std::sync::{Arc, Mutex};
+        type Images = (Option<Value>, Option<Value>);
+        let seen: Arc<Mutex<Vec<Images>>> = Arc::default();
+        let s = Store::default();
+        let t = TenantId::default();
+        let rec = Arc::clone(&seen);
+        s.set_change_hook(Box::new(move |_t, before, after| {
+            rec.lock().expect("record").push((before, after));
+        }));
+
+        s.create(&t, Kind::Entity, "urn:e", json!({"id": "urn:e", "n": 1}));
+        // a write on another kind must not reach the hook at all
+        s.create(&t, Kind::Subscription, "urn:s", json!({"id": "urn:s"}));
+        s.upsert(
+            &t,
+            Kind::Subscription,
+            "urn:s",
+            json!({"id": "urn:s", "n": 9}),
+        );
+        s.delete(&t, Kind::Subscription, "urn:s");
+        // a mutate that changes nothing is not a change
+        let _ = s.mutate(&t, Kind::Entity, "urn:e", |_d| Ok::<(), ()>(()));
+        // a real one is
+        let _ = s.mutate(&t, Kind::Entity, "urn:e", |d| {
+            d["n"] = json!(2);
+            Ok::<(), ()>(())
+        });
+        // an aborted mutate writes nothing and emits nothing
+        let _ = s.mutate(&t, Kind::Entity, "urn:e", |d| {
+            d["n"] = json!(3);
+            Err::<(), &str>("no")
+        });
+        s.delete(&t, Kind::Entity, "urn:e");
+
+        let seen = seen.lock().expect("read");
+        assert_eq!(seen.len(), 3, "emitted: {seen:?}");
+        assert!(seen[0].0.is_none() && seen[0].1.is_some(), "create");
+        assert_eq!(seen[1].0.as_ref().expect("before")["n"], 1);
+        assert_eq!(seen[1].1.as_ref().expect("after")["n"], 2);
+        assert!(seen[2].0.is_some() && seen[2].1.is_none(), "delete");
+        // the aborted mutate left the document alone
+        assert!(s.get(&t, Kind::Entity, "urn:e").is_none());
     }
 
     /// The supported backup route is stop-copy — close the broker, copy

@@ -49,13 +49,20 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Er
     // on a large attr_instances legitimately runs longer than a query ever
     // should. The lock timeout stays — a migration blocked on a lock must
     // fail rather than hold the boot path.
+    //
+    // `SET` is session-scoped and the pool has no release hook, so the
+    // connection is DETACHED first: it never goes back into the pool, and no
+    // request is ever served by a connection with the runaway-query wall
+    // switched off. The pool opens a fresh one (running `after_connect`) on
+    // demand.
     if migrate_enabled(std::env::var("ANTARES_MIGRATE").ok().as_deref()) {
-        use sqlx::Executor;
-        let mut migrate_conn = pool.acquire().await?;
+        use sqlx::{Connection, Executor};
+        let mut migrate_conn = pool.acquire().await?.detach();
         migrate_conn
             .execute(sqlx::raw_sql("SET statement_timeout = 0"))
             .await?;
-        MIGRATOR.run(&mut *migrate_conn).await?;
+        MIGRATOR.run(&mut migrate_conn).await?;
+        migrate_conn.close().await?;
     }
     Ok(pool)
 }

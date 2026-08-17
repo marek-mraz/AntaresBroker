@@ -21,6 +21,20 @@ pub struct PgTemporalStore {
     pool: PgPool,
 }
 
+/// 4.22: "expiresAt is defined as the system temporal Property at which a
+/// certain Entity, Property or Relationship shall become invalid" — an
+/// expired temporal entity is absent from every read, ahead of the retention
+/// sweep. One shared literal so `query`, its count fallback and `get_range`
+/// can never disagree.
+///
+/// The stamp is jsonb TEXT, so it goes through `try_timestamptz` (migration
+/// 0011): a bare cast RAISES on anything it cannot parse, and these reads are
+/// tenant-wide — one bad stamp would take down the whole tenant's temporal
+/// API rather than hide one entity. An unusable stamp reads as no expiry, the
+/// same direction the memory arm takes in `filter::expired_at`.
+const NOT_EXPIRED: &str =
+    "(try_timestamptz(m.meta->>'expiresAt') IS NULL OR try_timestamptz(m.meta->>'expiresAt') > now())";
+
 fn extract(doc: &Value) -> (Vec<String>, Option<Vec<String>>, String, String) {
     let as_vec = |v: &Value| -> Vec<String> {
         match v {
@@ -184,11 +198,16 @@ fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String
         Some(n) => {
             let n_bind = first_bind + binds.len();
             binds.push(n.to_string());
+            // 4.11 lastN keeps the N most recent INSTANTS, so the rank orders
+            // on the same canonical key the window compares on — raw bytes
+            // put "…00.000Z" after "…00Z" and kept the wrong N.
+            let order_key =
+                crate::compile::temporal::dt_key_sql(&format!("(ai.data ->> ${tp})"));
             format!(
                 "COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (\
                    SELECT s.attr_id, jsonb_agg(s.data ORDER BY s.created_at, s.observed_at, s.instance_id) AS insts \
                    FROM (SELECT ai.*, rank() OVER (PARTITION BY ai.attr_id, ai.data ->> 'datasetId' \
-                             ORDER BY (ai.data ->> ${tp}) COLLATE \"C\" DESC NULLS LAST) AS rk \
+                             ORDER BY {order_key} DESC NULLS LAST) AS rk \
                          FROM attr_instances ai \
                          WHERE ai.tenant_id = m.tenant_id AND ai.entity_id = m.id{range_and}) s \
                    WHERE s.rk <= ${n_bind}::bigint GROUP BY s.attr_id) g), '{{}}'::jsonb)"
@@ -338,11 +357,7 @@ impl PgTemporalStore {
         // in SQL (no bind) so paging/totals stay exact. Expired instances are
         // stripped at the read boundary (any.rs). Literal, applies to the
         // fallback count query too.
-        let mut wheres = vec![
-            "m.tenant_id = $1".to_owned(),
-            "(m.meta->>'expiresAt' IS NULL OR (m.meta->>'expiresAt')::timestamptz > now())"
-                .to_owned(),
-        ];
+        let mut wheres = vec!["m.tenant_id = $1".to_owned(), NOT_EXPIRED.to_owned()];
         if let Some(ids) = f.ids {
             binds.push(B::Arr(ids.iter().map(|s| s.to_string()).collect()));
             wheres.push(format!("m.id = ANY(${})", binds.len()));
@@ -471,6 +486,13 @@ impl PgTemporalStore {
             tail.push_str(&format!(" LIMIT ${}", binds.len()));
             binds.push(B::Num(page.offset));
             tail.push_str(&format!(" OFFSET ${}", binds.len()));
+        } else {
+            // No page pushed down: the caller still has to filter, so the only
+            // bound on this statement is the safety ceiling — without it a
+            // bare `?timerel=…` reconstructs every temporal entity of the
+            // tenant into one Vec.
+            binds.push(B::Num(super::pg_entity::MAX_UNDECIDED_ROWS));
+            tail.push_str(&format!(" LIMIT ${}", binds.len()));
         }
         let sql = format!(
             "SELECT m.meta || {attr_expr}{select_total} FROM temporal_entities m \
@@ -512,6 +534,11 @@ impl PgTemporalStore {
                 total = Some(cq.fetch_one(&mut *tx).await?);
             }
             tx.commit().await?;
+            super::pg_entity::check_ceiling(
+                paged,
+                rows.len(),
+                super::pg_entity::MAX_UNDECIDED_ROWS,
+            )?;
             Ok(TemporalOutcome {
                 rows: rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
                 paged,
@@ -536,8 +563,7 @@ impl PgTemporalStore {
         // 4.22: an expired entity is invalid → None (404), same as get().
         let sql = format!(
             "SELECT m.meta || {attr_expr} FROM temporal_entities m \
-             WHERE m.tenant_id = $1 AND m.id = $2 \
-             AND (m.meta->>'expiresAt' IS NULL OR (m.meta->>'expiresAt')::timestamptz > now())"
+             WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
