@@ -14,8 +14,8 @@ use crate::negotiate::CleanParams;
 
 /// Deployment knob (ANTARES_DISCOVERY_SCAN_MAX): entities one discovery fold
 /// may read. 5.7.5-5.7.10 give /types and /attributes no pagination, so the
-/// fold is over the whole tenant — this caps the work a single request can
-/// buy. Read once at first use.
+/// list folds are over the whole tenant — this caps the work a single request
+/// can buy. Read once at first use.
 static SCAN_MAX: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
     std::env::var("ANTARES_DISCOVERY_SCAN_MAX")
         .ok()
@@ -24,24 +24,75 @@ static SCAN_MAX: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
         .unwrap_or(100_000)
 });
 
-/// At most `max` of the tenant's entities, plus whether more exist. The page
-/// is pushed into the datastore where the backend takes it, so the ceiling
-/// bounds the rows materialized, not merely the rows folded. Asking for one
-/// row past `max` is what makes the overflow visible.
+/// Which of the tenant's entities a fold needs. 5.7.5/5.7.8 describe the
+/// types and attributes "for which entity instances exist within the NGSI-LD
+/// system", so those two fold the whole tenant; 5.7.7 asks about ONE entity
+/// type and 5.7.10 about ONE attribute, and an entity carrying neither can
+/// contribute nothing to either answer.
+#[derive(Clone, Copy)]
+enum Narrow<'a> {
+    Tenant,
+    Type(&'a str),
+    Attr(&'a str),
+}
+
+impl Narrow<'_> {
+    /// The same predicate the datastore compiles, re-applied when the backend
+    /// reports it did not (`decided == false`): that arm returns the tenant's
+    /// rows unfiltered, and cutting THOSE at the ceiling would answer 5.7.7
+    /// with ResourceNotFound for a type whose entities merely sort past it.
+    fn matches(self, doc: &Value) -> bool {
+        match self {
+            Narrow::Tenant => true,
+            // `types @> ARRAY[t]`
+            Narrow::Type(t) => doc["type"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(t))),
+            // `entity ?| ARRAY[a]`
+            Narrow::Attr(a) => doc.get(a).is_some(),
+        }
+    }
+}
+
+/// At most `max` of the entities the fold needs, plus whether more exist. The
+/// narrowing and the page are pushed into the datastore, so on a backend that
+/// takes them the ceiling bounds the rows MATERIALIZED and it bounds them over
+/// the narrowed set — a 5.7.7 request about one type reads that type, not the
+/// tenant. A backend that ignores them (`decided == false`) hands back its own
+/// row set, and the predicate above plus the truncation here reproduce the
+/// same answer. Asking for one row past `max` is what makes the overflow
+/// visible; `total`, when the backend reports it, is the exact pre-page count.
 fn scan(
     st: &AppState,
     tenant: &antares_model::TenantId,
     max: usize,
+    only: Narrow<'_>,
 ) -> Result<(Vec<Value>, bool), NgsiError> {
+    let groups: Vec<Vec<String>> = match only {
+        Narrow::Type(t) => vec![vec![t.to_owned()]],
+        _ => Vec::new(),
+    };
+    let attrs: Vec<String> = match only {
+        Narrow::Attr(a) => vec![a.to_owned()],
+        _ => Vec::new(),
+    };
     let f = EntityFilter {
+        types: (!groups.is_empty()).then_some(&groups[..]),
+        attrs: (!attrs.is_empty()).then_some(&attrs[..]),
         page: Some(Page {
             offset: 0,
             limit: max.saturating_add(1).min(i64::MAX as usize) as i64,
         }),
         ..Default::default()
     };
-    let mut rows = st.store.query_entities(tenant, &f)?.rows;
-    let more = rows.len() > max;
+    let out = st.store.query_entities(tenant, &f)?;
+    let mut rows = out.rows;
+    if !out.decided {
+        rows.retain(|d| only.matches(d));
+    }
+    let more = out.total.map_or(rows.len() > max, |t| {
+        t > i64::try_from(max).unwrap_or(i64::MAX)
+    });
     rows.truncate(max);
     Ok((rows, more))
 }
@@ -81,9 +132,10 @@ fn type_stats(
     st: &AppState,
     tenant: &antares_model::TenantId,
     max: usize,
+    only: Narrow<'_>,
 ) -> Result<(TypeStats, bool), NgsiError> {
     let mut map: TypeStats = BTreeMap::new();
-    let (rows, partial) = scan(st, tenant, max)?;
+    let (rows, partial) = scan(st, tenant, max, only)?;
     for doc in rows {
         let mut attrs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if let Some(o) = doc.as_object() {
@@ -126,9 +178,10 @@ fn attr_stats(
     st: &AppState,
     tenant: &antares_model::TenantId,
     max: usize,
+    only: Narrow<'_>,
 ) -> Result<(AttrStats, bool), NgsiError> {
     let mut map: AttrStats = BTreeMap::new();
-    let (rows, partial) = scan(st, tenant, max)?;
+    let (rows, partial) = scan(st, tenant, max, only)?;
     for doc in rows {
         let etypes: Vec<String> = doc["type"]
             .as_array()
@@ -179,7 +232,7 @@ pub async fn entity_types(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX)?;
+        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
         let payload = if details {
             Value::Array(
@@ -228,7 +281,11 @@ pub async fn entity_type_info(
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let iri = ctx.expand_key(&type_name);
-        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX)?;
+        // Only instances of this type carry its entityCount and its
+        // attributeDetails (5.2.26), so the fold asks the datastore for those
+        // and the ceiling applies to them — a tenant of 100M entities with 50
+        // Buildings answers exactly, instead of from the tenant's first page.
+        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX, Narrow::Type(&iri))?;
         let Some((count, attrs)) = stats.get(&iri) else {
             let mut resp = ApiError::from(NgsiError::ResourceNotFound(format!(
                 "no entities of type {type_name}"
@@ -279,7 +336,7 @@ pub async fn attributes(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX)?;
+        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
         let payload = if details {
             Value::Array(
@@ -327,7 +384,10 @@ pub async fn attribute_info(
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let iri = ctx.expand_key(&attr);
-        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX)?;
+        // attributeCount, attributeTypes and typeNames (5.2.28) are all
+        // properties of the entities that CARRY this attribute; the rest of
+        // the tenant is not read.
+        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX, Narrow::Attr(&iri))?;
         let Some((count, attr_types, etypes)) = stats.get(&iri) else {
             let mut resp = ApiError::from(NgsiError::ResourceNotFound(format!(
                 "attribute {attr} not found"
@@ -436,7 +496,7 @@ mod discovery_folds {
                 V: [{"type": "GeoProperty", "value": {"type": "Point", "coordinates": [0, 0]}}],
             }),
         );
-        let (stats, partial) = type_stats(&st, &tid("ta"), ALL).expect("stats");
+        let (stats, partial) = type_stats(&st, &tid("ta"), ALL, Narrow::Tenant).expect("stats");
         assert!(!partial, "two entities are under any sane ceiling");
         let (count, attrs) = stats.get(BUILDING).expect("Building");
         assert_eq!(*count, 2, "two entities carry the Building type");
@@ -470,15 +530,21 @@ mod discovery_folds {
         for other in ["tb", TenantId::DEFAULT] {
             let t = tid(other);
             assert!(
-                type_stats(&st, &t, ALL).expect("stats").0.is_empty(),
+                type_stats(&st, &t, ALL, Narrow::Tenant)
+                    .expect("stats")
+                    .0
+                    .is_empty(),
                 "{other} must not see another tenant's types"
             );
             assert!(
-                attr_stats(&st, &t, ALL).expect("stats").0.is_empty(),
+                attr_stats(&st, &t, ALL, Narrow::Tenant)
+                    .expect("stats")
+                    .0
+                    .is_empty(),
                 "{other} must not see another tenant's attributes"
             );
         }
-        assert!(type_stats(&st, &tid("ta"), ALL)
+        assert!(type_stats(&st, &tid("ta"), ALL, Narrow::Tenant)
             .expect("stats")
             .0
             .contains_key(BUILDING));
@@ -515,7 +581,7 @@ mod discovery_folds {
                 V: [{"type": "Property", "value": 3}],
             }),
         );
-        let (stats, _) = attr_stats(&st, &tid("ta"), ALL).expect("stats");
+        let (stats, _) = attr_stats(&st, &tid("ta"), ALL, Narrow::Tenant).expect("stats");
         let (count, atypes, etypes) = stats.get(V).expect("v");
         assert_eq!(*count, 3, "two instances on B:1 plus one on B:2");
         assert!(atypes.contains("Property"));
@@ -554,7 +620,7 @@ mod discovery_folds {
                 R: [{"type": "Relationship", "object": "urn:ngsi-ld:B:1"}],
             }),
         );
-        let (stats, _) = type_stats(&st, &tid("ta"), ALL).expect("stats");
+        let (stats, _) = type_stats(&st, &tid("ta"), ALL, Narrow::Tenant).expect("stats");
         assert!(
             !stats.contains_key(BUILDING),
             "the expired entity must not appear in the type list"
@@ -566,7 +632,7 @@ mod discovery_folds {
             "the expired attribute instance must not appear"
         );
         assert!(attrs.contains_key(R));
-        assert!(!attr_stats(&st, &tid("ta"), ALL)
+        assert!(!attr_stats(&st, &tid("ta"), ALL, Narrow::Tenant)
             .expect("stats")
             .0
             .contains_key(V));
@@ -578,11 +644,11 @@ mod discovery_folds {
     fn empty_tenant_folds_to_nothing() {
         let st = AppState::new("test".into());
         for t in ["ta", TenantId::DEFAULT] {
-            let (types, partial) = type_stats(&st, &tid(t), ALL).expect("stats");
+            let (types, partial) = type_stats(&st, &tid(t), ALL, Narrow::Tenant).expect("stats");
             assert!(types.is_empty() && !partial);
-            let (attrs, partial) = attr_stats(&st, &tid(t), ALL).expect("stats");
+            let (attrs, partial) = attr_stats(&st, &tid(t), ALL, Narrow::Tenant).expect("stats");
             assert!(attrs.is_empty() && !partial);
-            let (rows, partial) = scan(&st, &tid(t), ALL).expect("scan");
+            let (rows, partial) = scan(&st, &tid(t), ALL, Narrow::Tenant).expect("scan");
             assert!(rows.is_empty() && !partial);
         }
     }
@@ -601,19 +667,19 @@ mod discovery_folds {
             seed(&st, "ta", &id, Value::Object(doc));
         }
         for (max, want) in [(1, 1), (4, 4), (5, 5), (6, 5)] {
-            let (rows, partial) = scan(&st, &tid("ta"), max).expect("scan");
+            let (rows, partial) = scan(&st, &tid("ta"), max, Narrow::Tenant).expect("scan");
             assert_eq!(rows.len(), want, "max {max}");
             assert_eq!(partial, max < 5, "max {max} incompleteness");
         }
         // the folds inherit the bound: one entity read, one type, one attr
-        let (types, partial) = type_stats(&st, &tid("ta"), 1).expect("stats");
+        let (types, partial) = type_stats(&st, &tid("ta"), 1, Narrow::Tenant).expect("stats");
         assert_eq!(types.len(), 1, "the fold read past its ceiling");
         assert!(partial, "a truncated type fold must report itself");
-        let (attrs, partial) = attr_stats(&st, &tid("ta"), 1).expect("stats");
+        let (attrs, partial) = attr_stats(&st, &tid("ta"), 1, Narrow::Tenant).expect("stats");
         assert_eq!(attrs.len(), 1, "the fold read past its ceiling");
         assert!(partial, "a truncated attribute fold must report itself");
         // at the exact size the answer is complete, so nothing is flagged
-        let (types, partial) = type_stats(&st, &tid("ta"), 5).expect("stats");
+        let (types, partial) = type_stats(&st, &tid("ta"), 5, Narrow::Tenant).expect("stats");
         assert_eq!(types.len(), 5);
         assert!(!partial);
     }
@@ -631,5 +697,189 @@ mod discovery_folds {
         let v = vals[0].to_str().expect("ascii");
         assert!(v.starts_with("199 broker-a \"") && v.ends_with('"'), "{v}");
         assert!(v.contains("incomplete"), "{v}");
+    }
+
+    /// The narrowing predicate selects exactly what the datastore's
+    /// `types @> ARRAY[t]` / `entity ?| ARRAY[a]` select, and nothing else.
+    #[test]
+    fn narrow_selects_only_its_own_entities() {
+        let doc = json!({
+            "id": "urn:ngsi-ld:B:1",
+            "type": [BUILDING],
+            V: [{"type": "Property", "value": 1}],
+        });
+        assert!(Narrow::Tenant.matches(&doc));
+        assert!(Narrow::Tenant.matches(&json!({})));
+        assert!(Narrow::Type(BUILDING).matches(&doc));
+        assert!(Narrow::Attr(V).matches(&doc));
+        // the negatives: a type this entity does not carry, an attribute it
+        // does not carry, a prefix of either, and a typeless document
+        assert!(!Narrow::Type(SENSOR).matches(&doc));
+        assert!(!Narrow::Attr(R).matches(&doc));
+        assert!(!Narrow::Type("https://uri.etsi.org/ngsi-ld/default-context/Build").matches(&doc));
+        assert!(!Narrow::Type(BUILDING).matches(&json!({"id": "urn:ngsi-ld:B:2"})));
+        assert!(!Narrow::Attr(V).matches(&json!({"type": [BUILDING]})));
+    }
+
+    /// 5.7.7/5.7.10 name ONE type / ONE attribute, so the ceiling applies to
+    /// the entities that carry it: a type sitting past the ceiling in the
+    /// tenant's row order is still found, with an exact entityCount and no
+    /// incompleteness warning. Under the tenant-wide fold the same ceiling
+    /// hides it — that is the difference the narrowing buys.
+    #[test]
+    fn narrowed_folds_reach_past_the_tenant_wide_ceiling() {
+        let st = AppState::new("test".into());
+        for i in 0..5 {
+            let id = format!("urn:ngsi-ld:B:{i}");
+            let mut doc = serde_json::Map::new();
+            doc.insert("id".into(), Value::String(id.clone()));
+            doc.insert("type".into(), json!([format!("{BUILDING}{i}")]));
+            doc.insert(format!("{V}{i}"), json!([{"type": "Property", "value": i}]));
+            seed(&st, "ta", &id, Value::Object(doc));
+        }
+        let last_type = format!("{BUILDING}4");
+        let last_attr = format!("{V}4");
+
+        // tenant-wide, ceiling 1: the last entity is not read at all
+        let (wide, partial) = type_stats(&st, &tid("ta"), 1, Narrow::Tenant).expect("stats");
+        assert!(!wide.contains_key(&last_type), "the ceiling hid the type");
+        assert!(partial);
+
+        // narrowed to that type, same ceiling: found, exact, complete
+        let (stats, partial) =
+            type_stats(&st, &tid("ta"), 1, Narrow::Type(&last_type)).expect("stats");
+        let (count, attrs) = stats.get(&last_type).expect("the narrowed type");
+        assert_eq!(*count, 1, "one instance carries it");
+        assert!(!partial, "the narrowed set fits under the ceiling");
+        assert!(attrs.contains_key(&last_attr));
+        for i in 0..4 {
+            assert!(
+                !stats.contains_key(&format!("{BUILDING}{i}")),
+                "no other type may be folded into a 5.7.7 answer"
+            );
+        }
+
+        // and the same for one attribute (5.7.10)
+        let (wide, partial) = attr_stats(&st, &tid("ta"), 1, Narrow::Tenant).expect("stats");
+        assert!(!wide.contains_key(&last_attr), "the ceiling hid the attr");
+        assert!(partial);
+        let (stats, partial) =
+            attr_stats(&st, &tid("ta"), 1, Narrow::Attr(&last_attr)).expect("stats");
+        let (count, atypes, etypes) = stats.get(&last_attr).expect("the narrowed attr");
+        assert_eq!(*count, 1);
+        assert!(!partial);
+        assert!(atypes.contains("Property"));
+        assert_eq!(etypes.iter().cloned().collect::<Vec<_>>(), vec![last_type]);
+        for i in 0..4 {
+            assert!(
+                !stats.contains_key(&format!("{V}{i}")),
+                "no other attribute may be folded into a 5.7.10 answer"
+            );
+        }
+
+        // a narrowing that matches nothing is an empty fold, not a prefix of
+        // the tenant — this is what makes 5.7.7 answer ResourceNotFound
+        let (stats, partial) = type_stats(&st, &tid("ta"), 1, Narrow::Type(SENSOR)).expect("stats");
+        assert!(stats.is_empty() && !partial);
+        let (stats, partial) = attr_stats(&st, &tid("ta"), 1, Narrow::Attr(R)).expect("stats");
+        assert!(stats.is_empty() && !partial);
+    }
+
+    /// A narrowed fold is tenant-scoped like the tenant-wide one (4.15): the
+    /// type exists, but only for the tenant that created its instances.
+    #[test]
+    fn narrowed_folds_are_tenant_scoped() {
+        let st = AppState::new("test".into());
+        seed(
+            &st,
+            "ta",
+            "urn:ngsi-ld:B:1",
+            json!({
+                "id": "urn:ngsi-ld:B:1",
+                "type": [BUILDING],
+                V: [{"type": "Property", "value": 1}],
+            }),
+        );
+        for other in ["tb", TenantId::DEFAULT] {
+            let t = tid(other);
+            assert!(
+                type_stats(&st, &t, ALL, Narrow::Type(BUILDING))
+                    .expect("stats")
+                    .0
+                    .is_empty(),
+                "{other} must not see another tenant's type"
+            );
+            assert!(
+                attr_stats(&st, &t, ALL, Narrow::Attr(V))
+                    .expect("stats")
+                    .0
+                    .is_empty(),
+                "{other} must not see another tenant's attribute"
+            );
+        }
+        assert_eq!(
+            type_stats(&st, &tid("ta"), ALL, Narrow::Type(BUILDING))
+                .expect("stats")
+                .0
+                .get(BUILDING)
+                .expect("Building")
+                .0,
+            1
+        );
+    }
+
+    /// 5.7.5.4: the answer lists the types "for which entity instances exist
+    /// within the NGSI-LD system" — the entity written a moment ago included.
+    /// No fold result may be carried over a write.
+    #[test]
+    fn a_freshly_created_type_is_in_the_very_next_fold() {
+        let st = AppState::new("test".into());
+        let t = tid("ta");
+        assert!(type_stats(&st, &t, ALL, Narrow::Tenant)
+            .expect("stats")
+            .0
+            .is_empty());
+        seed(
+            &st,
+            "ta",
+            "urn:ngsi-ld:B:1",
+            json!({"id": "urn:ngsi-ld:B:1", "type": [BUILDING],
+                   V: [{"type": "Property", "value": 1}]}),
+        );
+        let (stats, _) = type_stats(&st, &t, ALL, Narrow::Tenant).expect("stats");
+        assert!(stats.contains_key(BUILDING), "the new type must be visible");
+        assert!(!stats.contains_key(SENSOR));
+        assert!(attr_stats(&st, &t, ALL, Narrow::Tenant)
+            .expect("stats")
+            .0
+            .contains_key(V));
+        // a second type on a second write, and a narrowed fold sees it too
+        seed(
+            &st,
+            "ta",
+            "urn:ngsi-ld:B:2",
+            json!({"id": "urn:ngsi-ld:B:2", "type": [SENSOR],
+                   R: [{"type": "Relationship", "object": "urn:ngsi-ld:B:1"}]}),
+        );
+        let (stats, _) = type_stats(&st, &t, ALL, Narrow::Tenant).expect("stats");
+        assert!(stats.contains_key(BUILDING) && stats.contains_key(SENSOR));
+        assert!(type_stats(&st, &t, ALL, Narrow::Type(SENSOR))
+            .expect("stats")
+            .0
+            .contains_key(SENSOR));
+        assert!(attr_stats(&st, &t, ALL, Narrow::Attr(R))
+            .expect("stats")
+            .0
+            .contains_key(R));
+        // and a deleted type disappears from the next fold just as fast
+        assert!(st
+            .store
+            .delete(&t, Kind::Entity, "urn:ngsi-ld:B:2")
+            .expect("delete"));
+        let (stats, _) = type_stats(&st, &t, ALL, Narrow::Tenant).expect("stats");
+        assert!(
+            !stats.contains_key(SENSOR),
+            "a type with no instances left must not be listed"
+        );
     }
 }
