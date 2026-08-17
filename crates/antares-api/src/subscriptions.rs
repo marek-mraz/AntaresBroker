@@ -387,7 +387,9 @@ pub fn normalize_subscription(
                     .as_str()
                     .filter(|s| parse_datetime(s))
                     .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
-                if s < now_iso().as_str() {
+                // 4.6.3 admits several spellings of one instant, so whether a
+                // DateTime has passed cannot be read off the raw strings.
+                if crate::temporal::dt_key(s) < crate::temporal::dt_key(&now_iso()) {
                     return Err(bad("expiresAt is in the past (5.8.1)".into()));
                 }
                 out.insert("expiresAt".into(), v.clone());

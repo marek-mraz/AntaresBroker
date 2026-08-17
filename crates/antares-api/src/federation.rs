@@ -1621,9 +1621,10 @@ pub async fn fed_retrieve(
 /// Federated query: internal docs matching a type query, per registration.
 /// The `CsrSpec` a Query Entities request matches registrations against.
 fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource::CsrSpec {
-    let types: Option<Vec<String>> = params
-        .get("type")
-        .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
+    // 4.17: the parameter is ONE Entity Type Selection, so it travels whole —
+    // splitting it on commas turned a conjunction like (A;B) into two terms
+    // that match nothing, and no registration was consulted for it.
+    let types: Option<Vec<String>> = params.get("type").cloned().map(|s| vec![s]);
     let ids: Option<Vec<String>> = params
         .get("id")
         .map(|s| s.split(',').map(str::to_owned).collect());
@@ -2434,6 +2435,22 @@ mod tests {
             h.insert("via", v.parse().expect("via"));
         }
         h
+    }
+
+    /// 4.17: `type` is one Entity Type Selection. Splitting it on commas
+    /// destroys a conjunction, and the shared evaluator (which csource tests
+    /// against real registrations) never sees the expression the client sent.
+    #[test]
+    fn the_type_selection_reaches_registration_matching_whole() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let mut params = HashMap::new();
+        params.insert("type".to_owned(), "(Home;Vehicle),Building".to_owned());
+        let spec = query_spec(&ctx, &params);
+        assert_eq!(
+            spec.types,
+            Some(vec!["(Home;Vehicle),Building".to_owned()]),
+            "the selection travels as one expression"
+        );
     }
 
     /// RFC 3986 clause 3.3: `#`, `?` and `/` end a path segment, so a client
