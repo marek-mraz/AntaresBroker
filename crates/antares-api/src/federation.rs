@@ -1711,6 +1711,32 @@ pub fn would_federate(
         .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some())
 }
 
+/// May a fan-out response contribute the entity `id` under registration
+/// `reg`, for a request whose id selection is `spec`?
+///
+/// A source only speaks for what its registration covers — an id outside
+/// that scope is dropped rather than merged, or a peer could overwrite
+/// unrelated local attributes on recency (4.5.5.3). But 5.12's matching is
+/// deliberately over-broad for patterns: condition 5 forwards when "both a
+/// specified id pattern and an idPattern in the Entity Info are present
+/// (since in the general case it is not easily feasible to determine if
+/// there can be identifiers matching both patterns)". The same
+/// undecidability applies to the ANSWER: an id the CLIENT's own selection
+/// admits cannot be refused on the registration's pattern. A peer therefore
+/// contributes only ids inside its registration scope or inside what the
+/// client itself asked to see — never a third thing.
+fn admits_import(reg: &FedReg, spec: &crate::csource::CsrSpec, id: &str) -> bool {
+    reg.can_match_id(id)
+        || spec
+            .ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|i| i == id))
+        || spec
+            .id_pattern
+            .as_deref()
+            .is_some_and(|p| crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some()))
+}
+
 pub async fn fed_query(
     st: &AppState,
     tenant: &TenantId,
@@ -1894,13 +1920,11 @@ pub async fn fed_query(
             continue;
         }
         if let Value::Array(a) = &body {
-            // A source only speaks for the entities its registration covers:
-            // an id outside that scope is dropped rather than merged, or a
-            // peer could overwrite unrelated local attributes on recency.
+            // Scope gate — see admits_import.
             for c in a.iter().filter(|c| {
                 c.get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|i| reg.can_match_id(i))
+                    .is_some_and(|i| admits_import(&reg, &spec, i))
             }) {
                 match import_entity(c, &reg, ctx) {
                     Some(doc) => out.push((reg.mode == "auxiliary", doc)),
@@ -2085,7 +2109,7 @@ pub async fn fed_query_temporal(
             for c in a.iter().filter(|c| {
                 c.get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|i| reg.can_match_id(i))
+                    .is_some_and(|i| admits_import(&reg, &spec, i))
             }) {
                 match import_temporal(c, &reg, ctx) {
                     Some(doc) => out.push((reg.mode == "auxiliary", doc)),
@@ -2574,6 +2598,40 @@ mod tests {
             timeout_ms: None,
             cooldown_ms: None,
         }
+    }
+
+    /// 5.12 condition 5, response side: a query idPattern was forwarded to a
+    /// pattern-scoped registration BECAUSE the two patterns cannot be
+    /// compared — so the answer cannot be refused on the registration's
+    /// pattern when the CLIENT's own selection admits the id. An id outside
+    /// BOTH scopes stays refused (a peer must not inject unrelated entities
+    /// that would win on recency).
+    #[test]
+    fn a_response_id_the_query_selects_survives_the_registration_pattern() {
+        let mut r = reg("inclusive");
+        r.ent_patterns = vec!["^urn:ngsi-ld:V:sk_bb:.*$".into()];
+        let mut spec = crate::csource::CsrSpec::default();
+        spec.id_pattern = Some("^urn:ngsi-ld:V:sk_zvolen:.*$".into());
+        assert!(
+            admits_import(&r, &spec, "urn:ngsi-ld:V:sk_zvolen:7"),
+            "the client's own pattern admits the id the peer answered with"
+        );
+        assert!(
+            admits_import(&r, &spec, "urn:ngsi-ld:V:sk_bb:1"),
+            "the registration's own scope still admits"
+        );
+        assert!(
+            !admits_import(&r, &spec, "urn:ngsi-ld:V:sk_presov:9"),
+            "an id outside both the registration and the query is refused"
+        );
+        // no query selection at all: only the registration scope admits
+        let none = crate::csource::CsrSpec::default();
+        assert!(!admits_import(&r, &none, "urn:ngsi-ld:V:sk_zvolen:7"));
+        // exact query ids admit exactly themselves
+        let mut exact = crate::csource::CsrSpec::default();
+        exact.ids = Some(vec!["urn:ngsi-ld:V:sk_zvolen:7".into()]);
+        assert!(admits_import(&r, &exact, "urn:ngsi-ld:V:sk_zvolen:7"));
+        assert!(!admits_import(&r, &exact, "urn:ngsi-ld:V:sk_zvolen:8"));
     }
 
     /// 4.3.6.1/5.12: an idPattern-scoped registration gates payload items
