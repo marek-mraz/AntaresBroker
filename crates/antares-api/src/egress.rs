@@ -23,7 +23,7 @@ use web_time::Instant;
 /// count for a destination nobody has touched in a while.
 const MAX_TRACKED: usize = 4096;
 /// Consecutive failures before a destination is tripped.
-const TRIP_AFTER: u32 = 5;
+pub(crate) const TRIP_AFTER: u32 = 5;
 /// How long a tripped destination stays open-circuit before one probe.
 const COOLDOWN: Duration = Duration::from_secs(30);
 

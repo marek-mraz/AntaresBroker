@@ -37,7 +37,20 @@ pub fn task_panics() -> u64 {
     TASK_PANICS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-const ENTITY_META: &[&str] = &["id", "type", "scope", "createdAt", "modifiedAt", "@context"];
+/// Entity-level members that are NOT Attributes. Table 5.2.12-1 scopes
+/// watchedAttributes to "Properties or Relationships", so the entity's own
+/// system members (including 4.22 `expiresAt` and `deletedAt`) must never be
+/// diffed as attribute-level changes.
+const ENTITY_META: &[&str] = &[
+    "id",
+    "type",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "expiresAt",
+    "@context",
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ChangeClass {
@@ -376,7 +389,11 @@ where
     // Send + 'static of the step, and the interval step holds state that is
     // not Sync. Unwinding in place absorbs the panic just as well and keeps
     // the step running on this task, so delivery stays exactly as serial.
-    if std::panic::AssertUnwindSafe(fut).catch_unwind().await.is_err() {
+    if std::panic::AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .is_err()
+    {
         TASK_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         metrics::counter!("antares_notification_task_panics_total").increment(1);
         tracing::error!("notification pipeline task panicked; this change is lost");
@@ -1034,6 +1051,33 @@ fn build_data(
     data
 }
 
+/// The notification triggers of one subscription, in the form the matcher
+/// compares against (Table 5.2.12-1): absent means the default combination
+/// `"attributeCreated"` + `"attributeUpdated"`, and `"entityUpdated"` "is
+/// equivalent to the combination `"attributeCreated"`, `"attributeUpdated"`
+/// and `"attributeDeleted"`" — so it is expanded here, at the single point
+/// the list is read, rather than at each comparison.
+fn triggers_of(sub: &Value) -> Vec<String> {
+    let mut triggers: Vec<String> = sub
+        .get("notificationTrigger")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| DEFAULT_TRIGGERS.iter().map(|s| s.to_string()).collect());
+    if triggers.iter().any(|t| t == "entityUpdated") {
+        for t in DEFAULT_TRIGGERS.iter().copied().chain(["attributeDeleted"]) {
+            if !triggers.iter().any(|s| s == t) {
+                triggers.push(t.to_owned());
+            }
+        }
+    }
+    triggers
+}
+
 pub async fn process_change(
     st: &AppState,
     tenant_str: &str,
@@ -1067,16 +1111,7 @@ pub async fn process_change(
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
         }
-        let triggers: Vec<String> = sub
-            .get("notificationTrigger")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_else(|| DEFAULT_TRIGGERS.iter().map(|s| s.to_string()).collect());
+        let triggers = triggers_of(&sub);
         // which attribute-level changes this sub cares about
         let watched: Option<Vec<&str>> = sub
             .get("watchedAttributes")
@@ -1627,6 +1662,19 @@ async fn deliver_as(
         tracing::debug!("subscription {sub_id} in cooldown; notification suppressed (5.2.15)");
         return;
     }
+    // An open circuit is the same class of self-inflicted suppression: no
+    // request leaves the process, so Table 5.2.14.2-1 timesSent ("number of
+    // times that the notification has been sent") and lastNotification ("the
+    // instant when the last notification has been sent") must not move
+    // either. `is_open` returning false IS the half-open probe, so the
+    // check stays exactly once per attempt.
+    if st.egress.is_open(uri) {
+        tracing::debug!(
+            "notification to {} short-circuited (breaker open)",
+            redact_userinfo(uri)
+        );
+        return;
+    }
     let accept = ep
         .get("accept")
         .and_then(Value::as_str)
@@ -1838,19 +1886,12 @@ async fn deliver_as(
             true
         }
     };
-    let breaker_open = !refused && st.egress.is_open(uri);
     // (delivered, timed_out): only a TIMEOUT-class failure feeds the breaker
     // — that protects against peers that eat the deadline. An endpoint
     // that ANSWERS (any status) is alive, costs only its own response time,
     // and 6.3.8 says the notification shall be sent — suppressing sends to a
     // responding host:port starves unrelated subscriptions sharing it.
-    let (ok, timed_out) = if refused || breaker_open {
-        if breaker_open {
-            tracing::debug!(
-                "notification to {} short-circuited (breaker open)",
-                redact_userinfo(uri)
-            );
-        }
+    let (ok, timed_out) = if refused {
         (false, false)
     } else {
         match outbound {
@@ -1864,7 +1905,7 @@ async fn deliver_as(
                 if page_handled {
                     (true, false)
                 } else {
-                    // V-17: endpoint.timeout (Table 5.2.15-1), clamped
+                    // endpoint.timeout (Table 5.2.15-1), clamped
                     match antares_jsonld::io_deadline(
                         req.body(bytes).send(),
                         endpoint_timeout_ms(ep),
@@ -1890,7 +1931,7 @@ async fn deliver_as(
             }
         }
     };
-    if !refused && !breaker_open {
+    if !refused {
         if ok {
             st.egress.record_success(uri);
         } else if timed_out {
@@ -1928,6 +1969,12 @@ async fn deliver_as(
                         None => n.remove("lastSuccess"),
                     };
                     n.insert("lastFailure".into(), Value::String(ts.clone()));
+                    // Table 5.2.14.2-1 timesFailed: "Number of times an
+                    // unsuccessful response (or timeout) has been received
+                    // when delivering the notification" — an output-only
+                    // member implementations shall generate.
+                    let failed = n.get("timesFailed").and_then(Value::as_i64).unwrap_or(0);
+                    n.insert("timesFailed".into(), json!(failed + 1));
                     n.insert("status".into(), Value::String("failed".into()));
                 }
                 Ok::<(), antares_model::NgsiError>(())
@@ -2373,5 +2420,596 @@ mod change_pipeline {
             before,
             changes_dropped()
         );
+    }
+
+    /// Table 5.2.12-1: "\"entityUpdated\" is equivalent to the combination
+    /// \"attributeCreated\", \"attributeUpdated\" and \"attributeDeleted\"",
+    /// so such a subscription notifies on a creation exactly like the
+    /// spelled-out list does — while "entityDeleted" alone does not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entity_updated_trigger_notifies_on_entity_creation() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, hits) = counting_endpoint().await;
+        let (quiet_uri, quiet_hits) = counting_endpoint().await;
+        let mut st = AppState::new("antares-trigger-equivalence".into());
+        wire(&mut st);
+        let sub = |id: &str, trigger: &str, uri: &str| {
+            json!({
+                "id": format!("urn:ngsi-ld:Subscription:{id}"),
+                "type": "Subscription",
+                "entities": [{"type": "Vehicle"}],
+                "notificationTrigger": [trigger],
+                "notification": {"endpoint": {"uri": uri, "timeout": 2_000}},
+            })
+        };
+        for body in [
+            sub("eu", "entityUpdated", &uri),
+            sub("ed", "entityDeleted", &quiet_uri),
+        ] {
+            assert_eq!(post(&st, "/ngsi-ld/v1/subscriptions", body).await, 201);
+        }
+        assert_eq!(create_vehicle(&st, 7).await, 201);
+        for _ in 0..50 {
+            if hits.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "entityUpdated implies attributeCreated, so a creation notifies"
+        );
+        assert_eq!(
+            quiet_hits.load(Ordering::SeqCst),
+            0,
+            "entityDeleted carries no equivalence and must not fire on a creation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_2_12_triggers {
+    use super::*;
+    use serde_json::json;
+
+    /// Table 5.2.12-1 notificationTrigger: "If not present, the default is
+    /// the combination \"attributeCreated\" and \"attributeUpdated\".
+    /// \"entityUpdated\" is equivalent to the combination
+    /// \"attributeCreated\", \"attributeUpdated\" and \"attributeDeleted\"."
+    #[test]
+    fn entity_updated_expands_to_its_equivalent_attribute_triggers() {
+        let has = |v: &[String], t: &str| v.iter().any(|s| s == t);
+
+        let default = triggers_of(&json!({}));
+        assert_eq!(default, vec!["attributeCreated", "attributeUpdated"]);
+        assert!(
+            !has(&default, "attributeDeleted"),
+            "the default combination is two triggers, not three"
+        );
+
+        let expanded = triggers_of(&json!({"notificationTrigger": ["entityUpdated"]}));
+        for t in ["attributeCreated", "attributeUpdated", "attributeDeleted"] {
+            assert!(has(&expanded, t), "entityUpdated must imply {t}");
+        }
+        assert!(
+            has(&expanded, "entityUpdated"),
+            "the declared trigger itself survives the expansion"
+        );
+
+        // Only entityUpdated carries the equivalence: the other two entity
+        // triggers must NOT gain attribute triggers.
+        for t in ["entityCreated", "entityDeleted"] {
+            let only = triggers_of(&json!({ "notificationTrigger": [t] }));
+            assert_eq!(only, vec![t.to_owned()], "{t} is not an equivalence");
+        }
+
+        // Idempotent: an explicit list that already spells the combination
+        // out gains nothing, and the equivalent forms agree.
+        let literal = triggers_of(&json!({"notificationTrigger":
+            ["entityUpdated", "attributeCreated", "attributeUpdated", "attributeDeleted"]}));
+        assert_eq!(literal.len(), 4, "no duplicates are appended");
+        let mut a = expanded.clone();
+        let mut b = literal.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "[\"entityUpdated\"] == the spelled-out combination");
+    }
+
+    /// Table 5.2.12-1 scopes watchedAttributes to "Watched Attributes
+    /// (Properties or Relationships)", so a write that only moves the
+    /// entity's own system members is no attribute-level change and must
+    /// raise no attributeCreated/attributeUpdated trigger.
+    #[test]
+    fn entity_system_members_are_not_attribute_changes() {
+        let before = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": ["Vehicle"],
+            "expiresAt": "2030-01-01T00:00:00Z",
+        });
+        let after = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": ["Vehicle"],
+            "expiresAt": "2031-01-01T00:00:00Z",
+            "deletedAt": "2031-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-01T00:00:00Z",
+            "scope": "/a",
+        });
+        assert!(
+            diff(Some(&before), Some(&after)).is_empty(),
+            "entity-level system members are not Attributes"
+        );
+        // Positive control: a real Property change is still reported.
+        let mut with_attr = after.clone();
+        with_attr["speed"] = json!([{"type": "Property", "value": 1}]);
+        assert_eq!(
+            diff(Some(&before), Some(&with_attr)),
+            vec![("speed".to_owned(), ChangeClass::Created)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_8_6_deletion_payload {
+    use super::*;
+    use serde_json::json;
+
+    const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context";
+
+    fn ctx() -> Arc<Context> {
+        antares_jsonld::Loader::new().core()
+    }
+
+    /// Instances of one attribute in a notification data entry, whether the
+    /// representation collapsed a single instance to an object or kept an
+    /// array.
+    fn insts<'a>(entry: &'a Value, name: &str) -> Vec<&'a Value> {
+        match entry.get(name) {
+            Some(Value::Array(a)) => a.iter().collect(),
+            Some(v) => vec![v],
+            None => Vec::new(),
+        }
+    }
+
+    fn build(
+        sub: &Value,
+        before: &Value,
+        after: Option<&Value>,
+        deleted: &[String],
+        entity_deleted: bool,
+    ) -> Value {
+        let st = AppState::new("antares-tombstone-test".into());
+        let tenant = TenantId::new("default").expect("tenant");
+        let ctx = ctx();
+        let data = build_data(
+            &st,
+            &tenant,
+            sub,
+            &ctx,
+            Some(before),
+            after,
+            deleted,
+            entity_deleted,
+            "2026-01-01T00:00:00Z",
+        );
+        assert_eq!(data.len(), 1, "one changed entity ⇒ one data entry");
+        data.into_iter().next().expect("entry")
+    }
+
+    /// 5.8.6: a deleted Attribute is notified as the NGSI-LD null value of
+    /// its own type — `object` for a Relationship, the `{"@none": …}`
+    /// languageMap form for a LanguageProperty, `json`, `vocab`, `value`.
+    #[test]
+    fn typed_null_member_per_attribute_type() {
+        let cases = [
+            ("Property", "value", json!("urn:ngsi-ld:null")),
+            ("Relationship", "object", json!("urn:ngsi-ld:null")),
+            (
+                "LanguageProperty",
+                "languageMap",
+                json!({"@none": "urn:ngsi-ld:null"}),
+            ),
+            ("JsonProperty", "json", json!("urn:ngsi-ld:null")),
+            ("VocabProperty", "vocab", json!("urn:ngsi-ld:null")),
+        ];
+        for (atype, member, null_value) in cases {
+            let before = json!({
+                "id": "urn:ngsi-ld:Vehicle:tomb",
+                "type": [format!("{DC}/Vehicle")],
+                format!("{DC}/gone"): [{"type": atype, member: json!("previous")}],
+            });
+            let after = json!({
+                "id": "urn:ngsi-ld:Vehicle:tomb",
+                "type": [format!("{DC}/Vehicle")],
+            });
+            let entry = build(
+                &json!({"notification": {}}),
+                &before,
+                Some(&after),
+                &[format!("{DC}/gone")],
+                false,
+            );
+            let got = insts(&entry, "gone");
+            assert_eq!(got.len(), 1, "{atype}: one tombstone");
+            assert_eq!(got[0].get("type"), Some(&json!(atype)));
+            assert_eq!(
+                got[0].get(member),
+                Some(&null_value),
+                "{atype} tombstones through its own {member} member"
+            );
+            // showChanges false and sysAttrs false ⇒ neither stamp appears
+            assert!(
+                got[0].get("deletedAt").is_none(),
+                "{atype}: no deletedAt without sysAttrs"
+            );
+            assert!(
+                got[0]
+                    .as_object()
+                    .is_some_and(|o| !o.keys().any(|k| k.starts_with("previous"))),
+                "{atype}: no previous* member without showChanges"
+            );
+        }
+    }
+
+    /// 5.8.6: a whole Attribute deleted at once is ONE tombstone with no
+    /// datasetId, while losing individual instances tombstones each lost
+    /// datasetId and leaves the survivors untouched.
+    #[test]
+    fn whole_attribute_versus_per_instance_deletion() {
+        let three = json!([
+            {"type": "Property", "value": 1},
+            {"type": "Property", "value": 2, "datasetId": "urn:ds:a"},
+            {"type": "Property", "value": 3, "datasetId": "urn:ds:b"},
+        ]);
+        let before = json!({
+            "id": "urn:ngsi-ld:Vehicle:multi",
+            "type": [format!("{DC}/Vehicle")],
+            format!("{DC}/speed"): three,
+        });
+        let attr = vec![format!("{DC}/speed")];
+
+        // whole attribute gone
+        let after = json!({
+            "id": "urn:ngsi-ld:Vehicle:multi",
+            "type": [format!("{DC}/Vehicle")],
+        });
+        let entry = build(
+            &json!({"notification": {}}),
+            &before,
+            Some(&after),
+            &attr,
+            false,
+        );
+        let got = insts(&entry, "speed");
+        assert_eq!(got.len(), 1, "a whole-attribute deletion is one tombstone");
+        assert!(
+            got[0].get("datasetId").is_none(),
+            "the single tombstone carries no datasetId"
+        );
+
+        // one instance gone, two survive
+        let after = json!({
+            "id": "urn:ngsi-ld:Vehicle:multi",
+            "type": [format!("{DC}/Vehicle")],
+            format!("{DC}/speed"): [
+                {"type": "Property", "value": 1},
+                {"type": "Property", "value": 3, "datasetId": "urn:ds:b"},
+            ],
+        });
+        let entry = build(
+            &json!({"notification": {}}),
+            &before,
+            Some(&after),
+            &attr,
+            false,
+        );
+        let got = insts(&entry, "speed");
+        assert_eq!(got.len(), 3, "two survivors plus one tombstone");
+        let tombs: Vec<&&Value> = got
+            .iter()
+            .filter(|i| i.get("value") == Some(&json!("urn:ngsi-ld:null")))
+            .collect();
+        assert_eq!(tombs.len(), 1, "exactly the lost instance is tombstoned");
+        assert_eq!(tombs[0].get("datasetId"), Some(&json!("urn:ds:a")));
+        for surviving in got
+            .iter()
+            .filter(|i| i.get("value") != Some(&json!("urn:ngsi-ld:null")))
+        {
+            assert!(
+                surviving.get("deletedAt").is_none(),
+                "a surviving instance is not marked deleted"
+            );
+        }
+    }
+
+    /// 5.8.6 with sysAttrs and showChanges: the tombstone carries deletedAt
+    /// and the previous value of its own typed member.
+    #[test]
+    fn sys_attrs_and_show_changes_stamp_the_tombstone() {
+        let before = json!({
+            "id": "urn:ngsi-ld:Vehicle:stamp",
+            "type": [format!("{DC}/Vehicle")],
+            format!("{DC}/where"): [{"type": "Relationship", "object": "urn:ngsi-ld:P:1",
+                                     "createdAt": "2025-01-01T00:00:00Z"}],
+        });
+        let after = json!({
+            "id": "urn:ngsi-ld:Vehicle:stamp",
+            "type": [format!("{DC}/Vehicle")],
+        });
+        let sub = json!({"notification": {"sysAttrs": true, "showChanges": true}});
+        let entry = build(&sub, &before, Some(&after), &[format!("{DC}/where")], false);
+        let got = insts(&entry, "where");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].get("object"), Some(&json!("urn:ngsi-ld:null")));
+        assert_eq!(
+            got[0].get("deletedAt"),
+            Some(&json!("2026-01-01T00:00:00Z"))
+        );
+        assert_eq!(
+            got[0].get("previousObject"),
+            Some(&json!("urn:ngsi-ld:P:1")),
+            "showChanges reports the previous object, not previousValue"
+        );
+        assert!(
+            got[0].get("previousValue").is_none(),
+            "a Relationship never reports previousValue"
+        );
+    }
+}
+
+#[cfg(test)]
+mod candidate_index {
+    use super::*;
+    use serde_json::json;
+
+    const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context";
+
+    /// The index may over-select, never under-select: every subscription
+    /// `selector_match` accepts for a change must come back from
+    /// `candidates()` for that change's types and changed attributes —
+    /// otherwise it silently stops firing (5.8.6).
+    #[test]
+    fn candidates_never_under_select_for_any_selector_shape() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let doc = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": [format!("{DC}/Vehicle")],
+            format!("{DC}/speed"): [{"type": "Property", "value": 1}],
+        });
+        let shapes: Vec<(&str, Value)> = vec![
+            (
+                "plain type",
+                json!({"entities": [{"type": format!("{DC}/Vehicle")}]}),
+            ),
+            (
+                "multiple types",
+                json!({"entities": [{"type": format!("{DC}/Vehicle")},
+                                    {"type": format!("{DC}/Building")}]}),
+            ),
+            (
+                "id only",
+                json!({"entities": [{"id": "urn:ngsi-ld:Vehicle:1"}]}),
+            ),
+            (
+                "idPattern only",
+                json!({"entities": [{"idPattern": "^urn:ngsi-ld:Vehicle:"}]}),
+            ),
+            (
+                "type selection expression",
+                json!({"entities": [{"type": format!("{DC}/Vehicle|{DC}/Building")}]}),
+            ),
+            (
+                "watchedAttributes only",
+                json!({"watchedAttributes": [format!("{DC}/speed")]}),
+            ),
+            (
+                "watchedAttributes with entities",
+                json!({"entities": [{"type": format!("{DC}/Vehicle")}],
+                       "watchedAttributes": [format!("{DC}/speed")]}),
+            ),
+            (
+                "type with idPattern",
+                json!({"entities": [{"type": format!("{DC}/Vehicle"),
+                                     "idPattern": "^urn:ngsi-ld:Vehicle:"}]}),
+            ),
+        ];
+        let mirror = SubMirror::default();
+        for (i, (_, doc)) in shapes.iter().enumerate() {
+            let mut sub = doc.clone();
+            sub["id"] = json!(format!("urn:ngsi-ld:Subscription:{i}"));
+            mirror.apply(
+                "default",
+                &format!("urn:ngsi-ld:Subscription:{i}"),
+                Some(sub),
+            );
+        }
+        let types = [format!("{DC}/Vehicle")];
+        let changed = [format!("{DC}/speed")];
+        let got = mirror.candidates(
+            "default",
+            &types.iter().map(String::as_str).collect::<Vec<_>>(),
+            &changed.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        for (i, (name, shape)) in shapes.iter().enumerate() {
+            if !selector_match(shape, &doc, &ctx) {
+                continue;
+            }
+            let id = format!("urn:ngsi-ld:Subscription:{i}");
+            assert!(
+                got.iter()
+                    .any(|c| c.get("id").and_then(Value::as_str) == Some(id.as_str())),
+                "{name}: selector_match accepts it, so candidates() must return it"
+            );
+        }
+        // A change touching neither the type nor the watched attribute still
+        // yields the shapes the index cannot classify — over-selection is
+        // allowed — but never the exactly-classified plain-type subscription.
+        let other = mirror.candidates("default", &[&format!("{DC}/Device")], &[]);
+        assert!(
+            !other
+                .iter()
+                .any(|c| c.get("id").and_then(Value::as_str) == Some("urn:ngsi-ld:Subscription:0")),
+            "an exactly classified type subscription is not evaluated for other types"
+        );
+    }
+
+    /// The two classification sites must stay in the superset relation:
+    /// every character `selector_match` reads as a 4.17 type-selection
+    /// expression has to send the subscription to the broad bucket, or the
+    /// index would under-select.
+    #[test]
+    fn type_selection_expressions_are_always_broad() {
+        for c in ['|', ',', ';', '('] {
+            let sub = json!({"entities": [{"type": format!("{DC}/A{c}{DC}/B")}]});
+            assert!(
+                matches!(index_keys(&sub), Keys::Broad),
+                "a type containing {c:?} is a selection expression for selector_match, \
+                 so the index must not classify it as a plain type"
+            );
+        }
+        assert!(matches!(
+            index_keys(&json!({"entities": [{"type": format!("{DC}/Vehicle")}]})),
+            Keys::Types(_)
+        ));
+    }
+}
+
+/// Table 5.2.14.2-1 bookkeeping around a delivery that fails or is never
+/// attempted at all.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod clause_5_2_14_2_bookkeeping {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SUB_ID: &str = "urn:ngsi-ld:Subscription:book";
+
+    /// An endpoint answering `status`, counting the requests that reach it.
+    async fn endpoint(status: axum::http::StatusCode) -> (String, Arc<AtomicUsize>) {
+        let hits: Arc<AtomicUsize> = Arc::default();
+        let seen = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    status
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (format!("http://{addr}/notify"), hits)
+    }
+
+    fn stored_notification(st: &AppState, tenant: &TenantId) -> Value {
+        st.store
+            .get(tenant, Kind::Subscription, SUB_ID)
+            .expect("store read")
+            .expect("subscription row")
+            .get("notification")
+            .cloned()
+            .expect("notification member")
+    }
+
+    async fn send(st: &AppState, tenant: &TenantId, sub: &Value) {
+        let ctx = antares_jsonld::Loader::new().core();
+        deliver_as(
+            st,
+            tenant,
+            Kind::Subscription,
+            sub,
+            "Notification",
+            vec![json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"})],
+            &ctx,
+            None,
+        )
+        .await;
+    }
+
+    fn subscribe(st: &AppState, tenant: &TenantId, uri: &str) -> Value {
+        let sub = json!({
+            "id": SUB_ID,
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {"uri": uri}},
+        });
+        st.store
+            .create(tenant, Kind::Subscription, SUB_ID, sub.clone())
+            .expect("subscription row");
+        sub
+    }
+
+    /// Table 5.2.14.2-1 timesFailed: "Number of times an unsuccessful
+    /// response (or timeout) has been received when delivering the
+    /// notification" — an output-only member implementations shall generate.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_delivery_generates_and_increments_times_failed() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, hits) = endpoint(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let st = AppState::new("antares-times-failed".into());
+        let tenant = TenantId::new("default").expect("tenant");
+        let sub = subscribe(&st, &tenant, &uri);
+
+        send(&st, &tenant, &sub).await;
+        let n = stored_notification(&st, &tenant);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the endpoint was tried");
+        assert_eq!(n.get("timesFailed"), Some(&json!(1)));
+        assert_eq!(n.get("timesSent"), Some(&json!(1)), "the attempt was sent");
+        assert_eq!(n.get("status"), Some(&json!("failed")));
+        assert!(
+            n.get("lastSuccess").is_none(),
+            "a failure rolls the optimistic lastSuccess back"
+        );
+
+        send(&st, &tenant, &sub).await;
+        let n = stored_notification(&st, &tenant);
+        assert_eq!(
+            n.get("timesFailed"),
+            Some(&json!(2)),
+            "timesFailed counts every unsuccessful response"
+        );
+    }
+
+    /// Table 5.2.14.2-1 timesSent = "Number of times that the notification
+    /// has been sent" and lastNotification = "the instant when the last
+    /// notification has been sent": a change suppressed by the open circuit
+    /// never reaches the wire, so neither member may move.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn breaker_suppressed_delivery_does_not_move_times_sent() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, hits) = endpoint(axum::http::StatusCode::OK).await;
+        let st = AppState::new("antares-breaker-bookkeeping".into());
+        let tenant = TenantId::new("default").expect("tenant");
+        let sub = subscribe(&st, &tenant, &uri);
+        for _ in 0..crate::egress::TRIP_AFTER {
+            st.egress.record_failure(&uri);
+        }
+        assert!(st.egress.is_open(&uri), "the destination is open-circuit");
+
+        send(&st, &tenant, &sub).await;
+        let n = stored_notification(&st, &tenant);
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing left the process");
+        assert!(
+            n.get("timesSent").is_none(),
+            "a suppressed notification was never sent"
+        );
+        assert!(
+            n.get("lastNotification").is_none(),
+            "lastNotification is the instant a notification was sent"
+        );
+
+        // Positive control: with the circuit closed the same call delivers,
+        // so the assertions above cannot pass vacuously.
+        st.egress.record_success(&uri);
+        send(&st, &tenant, &sub).await;
+        let n = stored_notification(&st, &tenant);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(n.get("timesSent"), Some(&json!(1)));
+        assert!(n.get("lastNotification").is_some());
     }
 }
