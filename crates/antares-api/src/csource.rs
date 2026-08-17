@@ -214,7 +214,9 @@ pub fn normalize_registration(
                     .as_str()
                     .filter(|s| parse_datetime(s))
                     .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
-                if s < now_iso().as_str() {
+                // the instant decides, not the spelling: now_iso always
+                // carries 3 fraction digits, a client's expiresAt 0 to 6
+                if crate::temporal::dt_key(s) < crate::temporal::dt_key(&now_iso()) {
                     return Err(bad("expiresAt is in the past".into()));
                 }
                 out.insert("expiresAt".into(), v.clone());
@@ -539,29 +541,60 @@ fn check_entity_conflict(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let all = st
-        .store
-        .list(tenant, Kind::Entity)
-        .map_err(|_| NgsiError::InternalError("entity lookup failed".into()))?;
     for info in infos {
-        let attrs: Vec<&str> = ["propertyNames", "relationshipNames"]
+        let attrs: Vec<String> = ["propertyNames", "relationshipNames"]
             .iter()
             .flat_map(|k| info.get(*k).and_then(Value::as_array).into_iter().flatten())
             .filter_map(Value::as_str)
+            .map(str::to_owned)
             .collect();
         let ents = info
             .get("entities")
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        if ents.is_empty() {
+            continue;
+        }
+        // 5.9.2.4 asks whether an Entity already exists for the registered
+        // scope — a narrowed read, not a fold of the tenant (this runs under
+        // the registration write lock). The loop below stays the arbiter, as
+        // query_entities' contract requires, so a predicate is offered only
+        // where it cannot hide a candidate: ids when every EntityInfo names
+        // one and none carries an idPattern, types when every EntityInfo
+        // names one, and the registered Attributes only in exclusive mode,
+        // where an Entity carrying none of them cannot conflict.
+        let ids: Vec<&str> = ents
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str))
+            .collect();
+        let ids_narrow =
+            ids.len() == ents.len() && ents.iter().all(|e| e.get("idPattern").is_none());
+        let type_groups: Vec<Vec<String>> = ents
+            .iter()
+            .flat_map(ei_types)
+            .map(|t| vec![t.to_owned()])
+            .collect();
+        let types_narrow = ents.iter().all(|e| !ei_types(e).is_empty());
+        let filter = antares_sql::store::filter::EntityFilter {
+            ids: ids_narrow.then_some(ids.as_slice()),
+            types: types_narrow.then_some(type_groups.as_slice()),
+            attrs: (mode == "exclusive" && !attrs.is_empty()).then_some(attrs.as_slice()),
+            ..Default::default()
+        };
+        let candidates = st
+            .store
+            .query_entities(tenant, &filter)
+            .map_err(|_| NgsiError::InternalError("entity lookup failed".into()))?;
         for e in ents {
             let want_id = e.get("id").and_then(Value::as_str);
-            let want_type = e.get("type").and_then(Value::as_str);
+            // 5.2.8: an EntityInfo type is a String or a String[]
+            let want_types = ei_types(e);
             let pattern = e
                 .get("idPattern")
                 .and_then(Value::as_str)
                 .and_then(|p| regex::Regex::new(p).ok());
-            for existing in &all {
+            for existing in &candidates.rows {
                 let eid = existing.get("id").and_then(Value::as_str).unwrap_or("");
                 let id_hit = match (want_id, &pattern) {
                     (Some(w), _) => w == eid,
@@ -571,11 +604,16 @@ fn check_entity_conflict(
                 if !id_hit {
                     continue;
                 }
-                if let Some(t) = want_type {
-                    let matches_type = existing
-                        .get("type")
-                        .and_then(Value::as_array)
-                        .is_some_and(|ts| ts.iter().any(|x| x.as_str() == Some(t)));
+                if !want_types.is_empty() {
+                    let matches_type =
+                        existing
+                            .get("type")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ts| {
+                                ts.iter()
+                                    .filter_map(Value::as_str)
+                                    .any(|x| want_types.contains(&x))
+                            });
                     if !matches_type {
                         continue;
                     }
@@ -583,7 +621,7 @@ fn check_entity_conflict(
                 let conflict = match mode {
                     // exclusive names concrete Attributes (4.3.6.3) — only
                     // an entity already carrying one of them conflicts
-                    "exclusive" => attrs.iter().any(|a| existing.get(*a).is_some()),
+                    "exclusive" => attrs.iter().any(|a| existing.get(a).is_some()),
                     // redirect: any matching entity conflicts
                     _ => true,
                 };
@@ -979,9 +1017,11 @@ pub async fn query_registrations(
                     .map_err(|_| bad(format!("invalid idPattern {p:?}")))
             })
             .transpose()?;
-        spec.types = params
-            .get("type")
-            .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
+        // Table 6.8.3.2-1: `type` is a "Selection of Entity Types as per
+        // clause 4.17", i.e. ONE expression — splitting it on ',' and
+        // expanding the fragments mangles every selector that uses ';' or
+        // parentheses. entity_info_matches evaluates it whole.
+        spec.types = params.get("type").cloned().map(|s| vec![s]);
         let mut attrs: Vec<String> = params
             .get("attrs")
             .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect())
@@ -1171,23 +1211,18 @@ fn ei_types(ei: &Value) -> Vec<&str> {
     }
 }
 
-fn type_matches(sel: &str, info_type: &str, ctx: &Context) -> bool {
-    if sel.contains(['|', ',', ';', '(']) {
-        crate::entities::type_selection_matches(sel, &[info_type], ctx)
-    } else {
-        sel == info_type
-    }
-}
-
 /// 5.12: does an EntityInfo element match the entity specification?
 fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
     if let Some(types) = &spec.types {
         let its = ei_types(ei);
-        // EntityInfo without a type restricts only by id/idPattern
+        // EntityInfo without a type restricts only by id/idPattern. Each spec
+        // entry is a 4.17 Entity Type Selection over the WHOLE declared type
+        // list (a conjunction needs every named type present); a plain
+        // expanded IRI is the one-term case of the same evaluation.
         if !its.is_empty()
-            && !types
-                .iter()
-                .any(|t| its.iter().any(|it| type_matches(t, it, ctx)))
+            && !types.iter().any(|t| {
+                its.contains(&t.as_str()) || crate::entities::type_selection_matches(t, &its, ctx)
+            })
         {
             return false;
         }
@@ -1778,7 +1813,243 @@ mod csi_tests {
         assert!(check_proxied_overlap(&st, &tenant, &r3, None, &ctx).is_ok());
     }
 
-    /// 4.3.6.6 (audit V-29): the four processed contextSourceInfo keys have
+    /// 5.2.8 Table 5.2.8-1 — an EntityInfo `type` is "String or String[]" —
+    /// applied to the 5.9.2.4 redirect rule: only an entity that matches the
+    /// registered Entity type conflicts, whichever spelling was registered.
+    #[test]
+    fn clause_5_9_2_4_redirect_conflict_honours_the_array_form_entity_type() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let mut building = Map::new();
+        building.insert("id".into(), json!("urn:ngsi-ld:Building:b1"));
+        building.insert("type".into(), json!([ctx.expand_key("Building")]));
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Building:b1",
+                Value::Object(building),
+            )
+            .expect("seed building");
+        let reg = |ty: Value| {
+            let doc = json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:red1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "mode": "redirect",
+                "information": [{"entities": [{"type": ty}]}]
+            });
+            normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid")
+        };
+        let err = |ty: Value| match check_entity_conflict(&st, &tenant, &reg(ty)) {
+            Err(NgsiError::Conflict(m)) => Some(m),
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(()) => None,
+        };
+        assert_eq!(
+            err(json!(["Vehicle"])),
+            None,
+            "a redirect for Vehicle must not conflict with a Building"
+        );
+        assert_eq!(err(json!("Vehicle")), None, "same, in the string spelling");
+        let hit = err(json!(["Building"])).expect("the Building conflicts");
+        assert!(
+            hit.contains("urn:ngsi-ld:Building:b1"),
+            "the conflict names the existing entity: {hit}"
+        );
+        assert!(err(json!("Building")).is_some(), "same, string spelling");
+    }
+
+    /// 5.9.2.4: an exclusive registration conflicts with an existing Entity
+    /// only when "the existing Entity contains any of the Attributes defined
+    /// in the registration".
+    #[test]
+    fn clause_5_9_2_4_exclusive_conflict_needs_a_registered_attribute() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let mut vehicle = Map::new();
+        vehicle.insert("id".into(), json!("urn:ngsi-ld:Vehicle:v1"));
+        vehicle.insert("type".into(), json!([ctx.expand_key("Vehicle")]));
+        vehicle.insert(ctx.expand_key("color"), json!([{"type": "Property"}]));
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Vehicle:v1",
+                Value::Object(vehicle),
+            )
+            .expect("seed vehicle");
+        let reg = |attr: &str, id: &str| {
+            let doc = json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:exc1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "mode": "exclusive",
+                "information": [{
+                    "entities": [{"id": id, "type": "Vehicle"}],
+                    "propertyNames": [attr]
+                }]
+            });
+            normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid")
+        };
+        assert!(
+            check_entity_conflict(&st, &tenant, &reg("speed", "urn:ngsi-ld:Vehicle:v1")).is_ok(),
+            "the entity carries no speed Attribute"
+        );
+        assert!(
+            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v2")).is_ok(),
+            "another entity id is not this entity"
+        );
+        assert!(
+            check_entity_conflict(&st, &tenant, &reg("color", "urn:ngsi-ld:Vehicle:v1")).is_err(),
+            "the entity carries the registered color Attribute"
+        );
+    }
+
+    /// 6.8.3.2 Table 6.8.3.2-1: the `type` parameter of Query Context Source
+    /// Registrations is "Selection of Entity Types as per clause 4.17" — a
+    /// selection expression, not a comma-separated list of terms.
+    #[tokio::test]
+    async fn clause_4_17_type_selection_queries_registrations() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let seed = |id: &str, ty: Value| {
+            let doc = json!({
+                "id": id,
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": ty}]}]
+            });
+            let norm =
+                normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("ok");
+            st.store
+                .create(&tenant, Kind::Registration, id, Value::Object(norm))
+                .expect("seed");
+        };
+        seed(
+            "urn:ngsi-ld:ContextSourceRegistration:both",
+            json!(["Home", "Vehicle"]),
+        );
+        seed("urn:ngsi-ld:ContextSourceRegistration:home", json!("Home"));
+        let ids = |sel: &str| {
+            let st = st.clone();
+            let sel = sel.to_owned();
+            async move {
+                let params = HashMap::from([("type".to_owned(), sel)]);
+                let resp =
+                    query_registrations(State(st), CleanParams(params), HeaderMap::new()).await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                let body: Value = serde_json::from_slice(&bytes).expect("json list");
+                body.as_array()
+                    .expect("array")
+                    .iter()
+                    .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .collect::<Vec<String>>()
+            }
+        };
+        let conj = ids("(Home;Vehicle)").await;
+        assert!(
+            conj.contains(&"urn:ngsi-ld:ContextSourceRegistration:both".to_owned()),
+            "a registration declaring both types matches the conjunction: {conj:?}"
+        );
+        assert!(
+            !conj.contains(&"urn:ngsi-ld:ContextSourceRegistration:home".to_owned()),
+            "a registration declaring only Home must not match: {conj:?}"
+        );
+        let alt = ids("Vehicle,Home").await;
+        assert_eq!(alt.len(), 2, "a comma list is a disjunction: {alt:?}");
+        let none = ids("Parking").await;
+        assert!(
+            none.is_empty(),
+            "no registration declares Parking: {none:?}"
+        );
+    }
+
+    /// 5.9.2.4: "If expiresAt is a date and time in the past, an error of
+    /// type BadRequestData shall be raised" — the comparison is over the
+    /// instant, not over the spelling, so an expiresAt written with fewer
+    /// sub-second digits than the server's own timestamp is still past.
+    #[test]
+    fn clause_5_9_2_4_past_expires_at_whatever_the_fraction_spelling() {
+        let ctx = Loader::new().core();
+        for _ in 0..8 {
+            let now = now_iso();
+            if now.len() < 24 || &now[20..23] == "000" {
+                continue; // no sub-second gap to compare against
+            }
+            let past = format!("{}Z", &now[..19]); // same second, no fraction
+            let doc = json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:exp1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "expiresAt": past,
+                "information": [{"entities": [{"type": "Vehicle"}]}]
+            });
+            assert!(
+                normalize_registration(doc.as_object().expect("object"), &ctx, false).is_err(),
+                "expiresAt {past} is in the past of {now}"
+            );
+        }
+    }
+
+    /// The registration body's cardinality caps are the only bound on the
+    /// index rows one create materialises: the last accepted size and the
+    /// first rejected one both have to hold.
+    #[test]
+    fn registration_cardinality_caps_hold_at_the_edge() {
+        let ctx = Loader::new().core();
+        let info = |n: usize| {
+            json!({"entities": [{"type": "Vehicle"}], "propertyNames":
+            (0..n).map(|i| Value::String(format!("p{i}"))).collect::<Vec<_>>()})
+        };
+        let mk = |information: Value| {
+            let doc = json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:cap1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": information
+            });
+            normalize_registration(doc.as_object().expect("object"), &ctx, false)
+        };
+        let many = |n: usize| Value::Array((0..n).map(|_| info(1)).collect());
+        assert!(mk(many(MAX_INFORMATION)).is_ok(), "the cap itself is legal");
+        assert!(matches!(
+            mk(many(MAX_INFORMATION + 1)),
+            Err(NgsiError::TooComplexQuery(_))
+        ));
+        assert!(mk(json!([info(MAX_INFO_MEMBERS)])).is_ok());
+        assert!(matches!(
+            mk(json!([info(MAX_INFO_MEMBERS + 1)])),
+            Err(NgsiError::TooComplexQuery(_))
+        ));
+        let entities = |n: usize| {
+            json!([{"entities": (0..n)
+                .map(|i| json!({"id": format!("urn:ngsi-ld:Vehicle:v{i}"), "type": "Vehicle"}))
+                .collect::<Vec<_>>()}])
+        };
+        assert!(mk(entities(MAX_INFO_MEMBERS)).is_ok());
+        assert!(matches!(
+            mk(entities(MAX_INFO_MEMBERS + 1)),
+            Err(NgsiError::TooComplexQuery(_))
+        ));
+        let rels = |n: usize| {
+            json!([{"entities": [{"type": "Vehicle"}], "relationshipNames":
+                (0..n).map(|i| Value::String(format!("r{i}"))).collect::<Vec<_>>()}])
+        };
+        assert!(mk(rels(MAX_INFO_MEMBERS)).is_ok());
+        assert!(matches!(
+            mk(rels(MAX_INFO_MEMBERS + 1)),
+            Err(NgsiError::TooComplexQuery(_))
+        ));
+    }
+
+    /// 4.3.6.6: the four processed contextSourceInfo keys have
     /// constrained value spaces, checked at registration time.
     #[test]
     fn context_source_info_reserved_keys_are_validated() {

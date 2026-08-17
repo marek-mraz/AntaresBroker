@@ -131,7 +131,7 @@ impl AppState {
         {
             let store = store.clone();
             loader.set_cache_writer(Box::new(move |url, ctx_value| {
-                if url.contains("/ngsi-ld/v1/jsonldContexts/") {
+                if hosted_row_id(&store, url).is_some() {
                     return; // broker-local (Hosted/Implicit) URLs are not Cached entries
                 }
                 let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
@@ -174,12 +174,9 @@ impl AppState {
                 if Loader::is_pinned_core(url) {
                     return true;
                 }
-                let id = match url.find("/ngsi-ld/v1/jsonldContexts/") {
-                    Some(pos) => url[pos + "/ngsi-ld/v1/jsonldContexts/".len()..].to_string(),
-                    None => {
-                        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
-                    }
-                };
+                let id = hosted_row_id(&store, url).unwrap_or_else(|| {
+                    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
+                });
                 match store.context_get(&id) {
                     Ok(Some(mut doc)) => {
                         let hits = doc["numberOfHits"].as_u64().unwrap_or(0) + 1;
@@ -291,7 +288,132 @@ fn outbound_client(
     antares_jsonld::wrap_client(b.build().expect("http client"))
 }
 
+/// 5.13.1: an @context this broker HOSTS (Hosted or ImplicitlyCreated) is
+/// identified by its stored row, never by the URL's shape — a peer broker or
+/// an attacker can serve a document under the same resource path, and such a
+/// URL is external to us (a Cached entry). Returns the local row id when the
+/// trailing path segment names a stored @context.
+fn hosted_row_id(store: &AnyStore, url: &str) -> Option<String> {
+    let (_, seg) = url.rsplit_once("/ngsi-ld/v1/jsonldContexts/")?;
+    let seg = seg.split(['?', '#']).next().unwrap_or(seg);
+    if seg.is_empty() || seg.contains('/') {
+        return None;
+    }
+    store
+        .context_get(seg)
+        .ok()
+        .flatten()
+        .map(|_| seg.to_owned())
+}
+
 /// Server-managed timestamp, ISO 8601 UTC with milliseconds.
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod jsonld_context_locality_5_13 {
+    use super::*;
+
+    /// Serve one @context document under `path` on a loopback port, counting
+    /// fetches (the negative half: a warm copy must NOT be refetched).
+    fn context_server(path: &str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = fetches.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = r#"{"@context":{"peerTemp":"http://example.org/peerTemp"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}{path}"), fetches)
+    }
+
+    fn fetch_count(c: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        c.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 5.13.1: a Cached @context is one this broker fetched from elsewhere.
+    /// Which URLs this broker HOSTS is a property of the stored rows, not of
+    /// the URL path, so a peer's @context served under the same resource path
+    /// is persisted as Cached and never mistaken for a row deleted through
+    /// another instance (5.13.5.4).
+    #[tokio::test]
+    async fn a_peer_context_url_under_the_local_path_is_cached() {
+        let st = AppState::new("me".into());
+        let (url, fetches) = context_server("/ngsi-ld/v1/jsonldContexts/peer-ctx");
+        let user = serde_json::json!(url);
+        st.loader.resolve(&user).await.expect("resolve");
+        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string();
+        let row = st
+            .store
+            .context_get(&id)
+            .expect("store")
+            .expect("the fetched @context is persisted as a Cached row");
+        assert_eq!(row["kind"], "Cached");
+        assert_eq!(row["url"], serde_json::json!(url));
+        st.loader.resolve(&user).await.expect("resolve again");
+        assert_eq!(
+            fetch_count(&fetches),
+            1,
+            "a warm, still-existing @context must not be refetched"
+        );
+        assert_eq!(
+            st.store.context_get(&id).expect("store").expect("row")["numberOfHits"],
+            serde_json::json!(2),
+            "both counted uses land on the shared row (5.13.3.5)"
+        );
+    }
+
+    /// 5.13.3.5 counts uses of an @context this broker hosts on its own
+    /// stored row — no second, Cached copy of the same document.
+    #[tokio::test]
+    async fn a_hosted_context_is_counted_on_its_own_row() {
+        let st = AppState::new("me".into());
+        let (url, fetches) = context_server("/ngsi-ld/v1/jsonldContexts/local-1");
+        st.store
+            .context_put(
+                "local-1",
+                serde_json::json!({
+                    "url": url,
+                    "localId": "local-1",
+                    "kind": "Hosted",
+                    "createdAt": now_iso(),
+                    "body": {"@context": {"peerTemp": "http://example.org/peerTemp"}},
+                }),
+            )
+            .expect("seed hosted row");
+        let user = serde_json::json!(url);
+        st.loader.resolve(&user).await.expect("resolve");
+        st.loader.resolve(&user).await.expect("resolve again");
+        let cached = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string();
+        assert!(
+            st.store.context_get(&cached).expect("store").is_none(),
+            "a hosted @context must not be duplicated as a Cached row"
+        );
+        assert_eq!(
+            st.store
+                .context_get("local-1")
+                .expect("store")
+                .expect("row")["numberOfHits"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            fetch_count(&fetches),
+            1,
+            "the hosted row exists, so nothing is evicted or refetched"
+        );
+    }
 }
