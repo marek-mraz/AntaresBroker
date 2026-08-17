@@ -253,7 +253,7 @@ mod tests {
     }
 
     /// A collector endpoint is a URL and may carry `user:password@` userinfo
-    /// (RFC 3986 §3.2.1). It is logged at startup, so the credential must be
+    /// (RFC 3986 clause 3.2.1). It is logged at startup, so the credential must be
     /// stripped before it reaches the log.
     #[test]
     fn otlp_endpoint_userinfo_never_reaches_the_log() {
