@@ -419,3 +419,88 @@ async fn clause_5_13_hosted_context_is_private_to_its_tenant() {
     let (status, _, _) = send(&st, tenant_req("DELETE", &loc_b, "tenant-b", None)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
+
+/// 5.5.10: "If a Tenant is specified for an NGSI-LD operation, the operation
+/// shall only be applied to information related to the specified Tenant." A
+/// Hosted @context is stored by one Tenant (5.13.1), so another Tenant naming
+/// its URL in a Link header must not have its payload expanded by those
+/// mappings — the serve endpoint being Tenant-gated is not enough on its own,
+/// since resolution is what decides how the request body is read.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_10_hosted_context_does_not_resolve_for_another_tenant() {
+    let st = state();
+    let loc = add_hosted_as(&st, "alpha", "A1").await;
+    let (_, _, meta) = send(
+        &st,
+        tenant_req("GET", &format!("{loc}?details=true"), "alpha", None),
+    )
+    .await;
+    let url = meta["URL"]
+        .as_str()
+        .expect("stored @context URL")
+        .to_owned();
+    let link = format!(
+        "<{url}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
+    );
+
+    let entity = json!({
+        "id": "urn:ngsi-ld:Device:ctx-tenant",
+        "type": "Device",
+        "A1": {"type": "Property", "value": 1},
+    });
+    let post = |tenant: &str| {
+        let body = entity.to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("NGSILD-Tenant", tenant)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .header("Link", &link)
+            .body(Body::from(body))
+            .expect("request")
+    };
+
+    // the owner resolves its own @context: the term expands to the mapping
+    let (status, _, body) = send(&st, post("alpha")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, _, stored) = send(
+        &st,
+        tenant_req(
+            "GET",
+            "/ngsi-ld/v1/entities/urn:ngsi-ld:Device:ctx-tenant",
+            "alpha",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert!(
+        stored.get("urn:ngsi-ld:attributes:A1").is_some(),
+        "the owner's term must have expanded through its own @context: {stored}"
+    );
+
+    // another Tenant naming the same URL: 5.5.6 — the @context is not
+    // available to it, and nothing is stored under its Tenant
+    let (status, _, body) = send(&st, post("beta")).await;
+    assert_eq!(
+        status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "another Tenant must not resolve a Hosted @context it does not own: {body}"
+    );
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable",
+        "{body}"
+    );
+    let (status, _, body) = send(
+        &st,
+        tenant_req(
+            "GET",
+            "/ngsi-ld/v1/entities/urn:ngsi-ld:Device:ctx-tenant",
+            "beta",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nothing was stored: {body}");
+}

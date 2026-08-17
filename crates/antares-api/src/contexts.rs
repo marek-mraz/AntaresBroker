@@ -224,7 +224,10 @@ pub async fn add_context(
             "body": {"@context": ctx_val.clone()},
         });
         st.store.context_put(&local_id, doc)?;
-        st.loader.put_local(url.clone(), ctx_val).await;
+        // stored FOR the adding Tenant (5.13.1 Hosted): 5.5.10 confines the
+        // mappings to that Tenant's operations, so resolution is scoped the
+        // same way the serve/list/delete paths above are
+        st.loader.put_local_for(&tenant, url.clone(), ctx_val).await;
         let mut resp = (
             StatusCode::CREATED,
             [(
@@ -544,6 +547,64 @@ mod tests {
             .await
             .expect("store")
             .is_none());
+    }
+
+    /// 5.13.2.4 stores the @context "supplied by the client" under a locally
+    /// unique URI; 5.13.1 makes that Hosted entry the adding Tenant's own
+    /// resource and 5.5.10 makes the Tenant the boundary an operation applies
+    /// within. So the mappings expand the adding Tenant's payloads only —
+    /// another Tenant handing the broker the same URL resolves nothing.
+    #[tokio::test]
+    async fn clause_5_13_1_added_context_expands_only_the_adding_tenant() {
+        let st = AppState::new("antares-ctx-tenant".into());
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        let mut headers = HeaderMap::new();
+        // a dead address: the published URL cannot be fetched back over the
+        // network, so a resolution that succeeds came from the stored entry
+        headers.insert(header::HOST, "127.0.0.1:9".parse().expect("host"));
+        headers.insert("NGSILD-Tenant", "alpha".parse().expect("tenant header"));
+        let resp = add_context(
+            State(st.clone()),
+            CleanParams(HashMap::new()),
+            headers.clone(),
+            Bytes::from(r#"{"@context":{"secret":"https://alpha.example/secret"}}"#),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let local_id = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| l.rsplit('/').next())
+            .expect("Location names the new @context")
+            .to_owned();
+        let url = Value::String(format!("{}/{local_id}", base_url(&headers)));
+
+        let ctx = st
+            .loader
+            .resolve_for(&alpha, &url)
+            .await
+            .expect("the adding Tenant resolves its own @context");
+        assert_eq!(ctx.expand_key("secret"), "https://alpha.example/secret");
+
+        let err = st
+            .loader
+            .resolve_for(&beta, &url)
+            .await
+            .expect_err("another Tenant must not resolve this @context");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "a foreign Hosted @context is not available, got {err:?}"
+        );
+        // and the entry is invisible to the other Tenant through the API too
+        assert!(
+            find_entry(&st, &beta, &local_id)
+                .await
+                .expect("store")
+                .is_none(),
+            "another Tenant's Hosted @context is as absent as one that never existed"
+        );
     }
 
     /// Table 6.29.3.2-1: List @contexts defines `details` and `kind` only —

@@ -673,7 +673,7 @@ pub async fn create(
                     }),
                 )?;
                 st.loader
-                    .put_local(url.clone(), parsed.ctx.source.clone())
+                    .put_local_for(&tenant, url.clone(), parsed.ctx.source.clone())
                     .await;
                 norm.insert("jsonldContext".into(), Value::String(url));
             }

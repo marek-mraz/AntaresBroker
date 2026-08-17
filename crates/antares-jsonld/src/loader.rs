@@ -1,7 +1,7 @@
 //! Remote @context loading + caching + pinned core contexts.
 
 use crate::context::Context;
-use antares_model::NgsiError;
+use antares_model::{NgsiError, TenantId};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -513,12 +513,38 @@ struct FetchedDoc {
     value: Arc<Value>,
     /// 6.3.16 expiry deadline; `None` = cache until evicted.
     stale_at: Option<Instant>,
+    /// The Tenant this document belongs to, for the locally stored kinds
+    /// (5.13.1 "Hosted": "@contexts that are explicitly added by users";
+    /// "ImplicitlyCreated": created "as a result of a user request"). 5.5.10:
+    /// "If a Tenant is specified for an NGSI-LD operation, the operation
+    /// shall only be applied to information related to the specified
+    /// Tenant" — so those mappings expand that Tenant's payloads only.
+    /// `None` = a "Cached" copy of a document the broker downloaded from a
+    /// public URL, which belongs to no Tenant and is shared by all of them.
+    owner: Option<TenantId>,
+}
+
+impl FetchedDoc {
+    /// Does this document resolve for `tenant`? A resolution with no Tenant
+    /// in scope (a broker-internal one) sees every entry.
+    fn serves(&self, tenant: Option<&TenantId>) -> bool {
+        match (&self.owner, tenant) {
+            (None, _) | (Some(_), None) => true,
+            (Some(owner), Some(t)) => owner == t,
+        }
+    }
+
+    /// 6.3.16 lifetime reached.
+    fn is_stale(&self) -> bool {
+        self.stale_at.is_some_and(|t| Instant::now() >= t)
+    }
 }
 
 pub struct Loader {
     http: HttpClient,
     policy: EgressPolicy,
-    /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL).
+    /// URL → parsed `@context` member of the fetched document (+ 6.3.16 TTL
+    /// and, for locally stored @contexts, the owning Tenant).
     /// Bounded LRU — every cache has a max size.
     fetched: BoundedCache<String, FetchedDoc>,
     /// cache key (serialized user context) → merged+frozen Context (the
@@ -619,6 +645,8 @@ impl Loader {
             FetchedDoc {
                 value: Arc::new(ctx_value),
                 stale_at: None,
+                // 5.13.1 "Cached": a copy of a public document, no Tenant
+                owner: None,
             },
         );
         self.usage.write().await.insert(
@@ -717,11 +745,10 @@ impl Loader {
     pub async fn refetch(&self, url: &str) -> Result<(), NgsiError> {
         let old = self.fetched.get(url);
         self.fetched.invalidate(url); // force a network fetch
-        match self.fetch(url).await {
+        match self.fetch(url, None).await {
             Ok(_) => {
                 // merged contexts built on the old copy are stale
-                self.merged.invalidate_all();
-                self.merged_urls.invalidate_all();
+                self.invalidate_merged_using(url);
                 Ok(())
             }
             Err(e) => {
@@ -742,18 +769,45 @@ impl Loader {
     }
 
     /// Resolve a user-supplied `@context` value (string URL, object, or array)
-    /// into a merged Context with the core context merged last.
+    /// into a merged Context with the core context merged last. No Tenant in
+    /// scope: locally stored @contexts of every Tenant resolve, so a
+    /// resolution serving a request must use `resolve_for` instead (5.5.10).
     pub async fn resolve(&self, user: &Value) -> Result<Arc<Context>, NgsiError> {
-        self.resolve_counted(user, true).await
+        self.resolve_counted(None, user, true).await
     }
 
     /// Resolve WITHOUT counting usage hits — for broker-internal resolutions
     /// (notification building), which are not client @context usage (053_08).
     pub async fn resolve_quiet(&self, user: &Value) -> Result<Arc<Context>, NgsiError> {
-        self.resolve_counted(user, false).await
+        self.resolve_counted(None, user, false).await
     }
 
-    async fn resolve_counted(&self, user: &Value, count: bool) -> Result<Arc<Context>, NgsiError> {
+    /// 5.5.10: resolve within one Tenant — "the operation shall only be
+    /// applied to information related to the specified Tenant", so an
+    /// @context another Tenant stored locally (5.13.1) does not resolve here.
+    pub async fn resolve_for(
+        &self,
+        tenant: &TenantId,
+        user: &Value,
+    ) -> Result<Arc<Context>, NgsiError> {
+        self.resolve_counted(Some(tenant), user, true).await
+    }
+
+    /// `resolve_for` without counting usage hits.
+    pub async fn resolve_quiet_for(
+        &self,
+        tenant: &TenantId,
+        user: &Value,
+    ) -> Result<Arc<Context>, NgsiError> {
+        self.resolve_counted(Some(tenant), user, false).await
+    }
+
+    async fn resolve_counted(
+        &self,
+        tenant: Option<&TenantId>,
+        user: &Value,
+        count: bool,
+    ) -> Result<Arc<Context>, NgsiError> {
         let key = user.to_string();
         // urls already counted on the merged-hit path — the fallthrough
         // rebuild below must not bump them a second time.
@@ -761,7 +815,7 @@ impl Loader {
         if let Some(hit) = self
             .merged
             .get(&key)
-            .filter(|_| !self.merged_hit_is_stale(&key))
+            .filter(|_| self.merged_hit_is_usable(&key, tenant))
         {
             if count {
                 // cache hit: bump every URL this context resolution involves.
@@ -786,7 +840,8 @@ impl Loader {
         }
         let mut ctx = Context::default();
         let urls = std::sync::Mutex::new(Vec::new());
-        self.merge_entry(&mut ctx, user, 0, &urls).await?;
+        self.merge_entry(&mut ctx, user, 0, &urls, None, tenant)
+            .await?;
         let urls = urls.into_inner().unwrap_or_default();
         if count {
             for url in &urls {
@@ -799,7 +854,7 @@ impl Loader {
                 // cache means the write-through never ran — a counted use
                 // re-creates the entry (5.13.5.4): refetch (bump_url just
                 // evicted the warm copy) so the row exists, then count on it.
-                if self.bump_url(url).await && self.fetch(url).await.is_ok() {
+                if self.bump_url(url).await && self.fetch(url, tenant).await.is_ok() {
                     let _ = self.bump_url(url).await;
                 }
             }
@@ -816,33 +871,28 @@ impl Loader {
         Ok(arc)
     }
 
-    /// 6.3.16: "implementations shall periodically invalidate the "Cached"
-    /// @contexts according to the headers mentioned above." A merged context
-    /// is only as fresh as the documents it was built from, so a hit whose
-    /// sources are past their deadline must be rebuilt rather than served.
-    fn merged_hit_is_stale(&self, key: &str) -> bool {
-        self.merged_urls
-            .get(key)
-            .iter()
-            .flat_map(|u| u.iter())
-            .any(|url| {
-                self.fetched
-                    .get(url)
-                    .is_some_and(|d| d.stale_at.is_some_and(|t| Instant::now() >= t))
-            })
+    /// A merged-context cache hit is usable only while every document it was
+    /// built from is still fresh (6.3.16: "implementations shall periodically
+    /// invalidate the "Cached" @contexts according to the headers mentioned
+    /// above" — a merged context is only as fresh as its sources) and still
+    /// resolves for this Tenant (5.5.10): the cache is keyed by the user
+    /// @context alone, which two Tenants can send verbatim, so a merge built
+    /// from one Tenant's locally stored @context must not be handed to
+    /// another.
+    fn merged_hit_is_usable(&self, key: &str, tenant: Option<&TenantId>) -> bool {
+        match self.merged_urls.get(key) {
+            // the documents behind this entry are unknown: it can be shown
+            // neither fresh nor in-Tenant, so it is rebuilt
+            None => false,
+            Some(urls) => urls.iter().all(|url| match self.fetched.get(url) {
+                Some(doc) => doc.serves(tenant) && !doc.is_stale(),
+                // dropped from the document cache: nothing marks it stale
+                None => true,
+            }),
+        }
     }
 
     fn merge_entry<'a>(
-        &'a self,
-        ctx: &'a mut Context,
-        entry: &'a Value,
-        depth: usize,
-        urls: &'a std::sync::Mutex<Vec<String>>,
-    ) -> BoxFut<'a, Result<(), NgsiError>> {
-        self.merge_entry_based(ctx, entry, depth, urls, None)
-    }
-
-    fn merge_entry_based<'a>(
         &'a self,
         ctx: &'a mut Context,
         entry: &'a Value,
@@ -853,6 +903,7 @@ impl Loader {
         // context references "ngsi-ld-test-suite.jsonld" relatively — without
         // this every request using it dies with LdContextNotAvailable.
         base: Option<std::sync::Arc<String>>,
+        tenant: Option<&'a TenantId>,
     ) -> BoxFut<'a, Result<(), NgsiError>> {
         Box::pin(async move {
             // 5.5.6: an @context that "is invalid" is BadRequestData; 504
@@ -868,7 +919,7 @@ impl Loader {
             match entry {
                 Value::Array(items) => {
                     for item in items {
-                        self.merge_entry_based(ctx, item, depth + 1, urls, base.clone())
+                        self.merge_entry(ctx, item, depth + 1, urls, base.clone(), tenant)
                             .await?;
                     }
                     Ok(())
@@ -899,16 +950,17 @@ impl Loader {
                             "@context resolution exceeds {MAX_CONTEXT_URLS} referenced URLs"
                         )));
                     }
-                    let doc = self.fetch(&resolved).await?;
+                    let doc = self.fetch(&resolved, tenant).await?;
                     if let Ok(mut u) = urls.lock() {
                         u.push(resolved.clone());
                     }
-                    self.merge_entry_based(
+                    self.merge_entry(
                         ctx,
                         &doc,
                         depth + 1,
                         urls,
                         Some(std::sync::Arc::new(resolved)),
+                        tenant,
                     )
                     .await
                 }
@@ -929,20 +981,26 @@ impl Loader {
     /// expiration indications — cache hits honour the 6.3.16 lifetime, stale
     /// entries are re-fetched, and a changed body invalidates the
     /// merged-context cache.
-    async fn fetch(&self, url: &str) -> Result<Arc<Value>, NgsiError> {
+    async fn fetch(&self, url: &str, tenant: Option<&TenantId>) -> Result<Arc<Value>, NgsiError> {
         if let Some(v) = pinned(url) {
             return Ok(Arc::new(v));
         }
+        let err = |m: String| NgsiError::LdContextNotAvailable(m);
         let mut stale_value: Option<Arc<Value>> = None;
         if let Some(hit) = self.fetched.get(url) {
-            match hit.stale_at {
-                Some(deadline) if Instant::now() >= deadline => {
-                    stale_value = Some(Arc::clone(&hit.value));
-                }
-                _ => return Ok(hit.value),
+            if !hit.serves(tenant) {
+                // 5.5.10 + 5.13.1: this URL names an @context another Tenant
+                // stored locally, so for this Tenant it does not exist — and
+                // fetching it would only reach the same entry back through
+                // the broker's own (Tenant-gated) serve endpoint.
+                return Err(err(format!("@context {url} is not available")));
+            }
+            if hit.is_stale() {
+                stale_value = Some(Arc::clone(&hit.value));
+            } else {
+                return Ok(hit.value);
             }
         }
-        let err = |m: String| NgsiError::LdContextNotAvailable(m);
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(err(format!("unsupported @context URL: {url}")));
         }
@@ -1046,14 +1104,15 @@ impl Loader {
         if stale_value.is_some_and(|old| *old != *arc) {
             // Refreshed content differs: merged contexts built on the old
             // copy are invalid.
-            self.merged.invalidate_all();
-            self.merged_urls.invalidate_all();
+            self.invalidate_merged_using(url);
         }
         self.fetched.insert(
             url.to_owned(),
             FetchedDoc {
                 value: Arc::clone(&arc),
                 stale_at: ttl.map(|d| Instant::now() + d),
+                // 5.13.1 "Cached": downloaded from a public URL, no Tenant
+                owner: None,
             },
         );
         // Write-through: persist what was just fetched.
@@ -1066,17 +1125,50 @@ impl Loader {
     }
 
     /// Insert a locally-hosted context (jsonldContexts API) so later
-    /// resolutions of `url` need no network round-trip.
+    /// resolutions of `url` need no network round-trip. Bound to no Tenant:
+    /// every resolution sees it.
     pub async fn put_local(&self, url: String, context_value: Value) {
+        self.insert_local(None, url, context_value)
+    }
+
+    /// The same for an @context a client stored THROUGH a Tenant (5.13.1
+    /// "Hosted"/"ImplicitlyCreated"): per 5.5.10 those mappings apply to that
+    /// Tenant's operations only, so another Tenant naming the same URL
+    /// resolves nothing.
+    pub async fn put_local_for(&self, tenant: &TenantId, url: String, context_value: Value) {
+        self.insert_local(Some(tenant.clone()), url, context_value)
+    }
+
+    fn insert_local(&self, owner: Option<TenantId>, url: String, context_value: Value) {
         self.fetched.insert(
-            url,
+            url.clone(),
             FetchedDoc {
                 value: Arc::new(context_value),
                 stale_at: None, // hosted locally: no 6.3.16 lifetime
+                owner,
             },
         );
-        self.merged.invalidate_all();
-        self.merged_urls.invalidate_all();
+        self.invalidate_merged_using(&url);
+    }
+
+    /// Drop the merged contexts built from `url` — and only those. One added,
+    /// reloaded or deleted @context must not throw away every Tenant's
+    /// parsed contexts and make them all re-fetch the world; a merge whose
+    /// sources are unknown is dropped, since it cannot be shown unaffected.
+    fn invalidate_merged_using(&self, url: &str) {
+        let stale: Vec<String> = self
+            .merged
+            .iter()
+            .filter(|(key, _)| match self.merged_urls.get(key.as_str()) {
+                Some(urls) => urls.iter().any(|u| u == url),
+                None => true,
+            })
+            .map(|(key, _)| (*key).clone())
+            .collect();
+        for key in stale {
+            self.merged.invalidate(&key);
+            self.merged_urls.invalidate(&key);
+        }
     }
 
     /// Cache occupancy (entries per cache). Feeds /q/health today and the
@@ -1095,8 +1187,7 @@ impl Loader {
 
     pub async fn evict(&self, url: &str) {
         self.fetched.invalidate(url);
-        self.merged.invalidate_all();
-        self.merged_urls.invalidate_all();
+        self.invalidate_merged_using(url);
     }
 }
 
@@ -1878,6 +1969,140 @@ mod tests {
             EgressPolicy::allow_private_from(None),
             "unset means allowed"
         );
+    }
+
+    /// A locally hosted @context is stored "for the Tenant" that added it
+    /// (5.13.1, 5.13.2.4) and 5.5.10 makes the Tenant the boundary an
+    /// operation applies within: another Tenant naming the same URL must not
+    /// have its payload expanded by those mappings. The URL is on a dead
+    /// port, so a resolution that succeeds can only have come from the local
+    /// entry — and for a foreign Tenant the @context is simply not available
+    /// (5.5.6).
+    #[tokio::test]
+    async fn clause_5_13_1_hosted_context_is_private_to_its_tenant() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        let url = Value::String(
+            "http://127.0.0.1:9/ngsi-ld/v1/jsonldContexts/2f2e1a00-0000-4000-8000-000000000001"
+                .to_owned(),
+        );
+        loader
+            .put_local_for(
+                &alpha,
+                url.as_str().expect("url").to_owned(),
+                serde_json::json!({"secret": "https://alpha.example/secret"}),
+            )
+            .await;
+
+        let ctx = loader
+            .resolve_for(&alpha, &url)
+            .await
+            .expect("the owning Tenant resolves its own @context");
+        assert_eq!(ctx.expand_key("secret"), "https://alpha.example/secret");
+
+        let err = loader
+            .resolve_for(&beta, &url)
+            .await
+            .expect_err("another Tenant must not resolve a @context it does not own");
+        assert!(
+            matches!(err, NgsiError::LdContextNotAvailable(_)),
+            "a foreign Hosted @context is not available, got {err:?}"
+        );
+        // and nothing of the owner's mappings reaches the other Tenant by way
+        // of the merged-context cache either
+        let ctx = loader
+            .resolve_for(
+                &beta,
+                &serde_json::json!({"other": "https://beta.example/other"}),
+            )
+            .await
+            .expect("resolve");
+        assert_eq!(
+            ctx.expand_key("secret"),
+            "https://uri.etsi.org/ngsi-ld/default-context/secret",
+            "the owner's term mapping must not expand another Tenant's payload"
+        );
+    }
+
+    /// Adding one @context must not throw away every Tenant's merged
+    /// contexts: the merged entries built FROM the written document are
+    /// dropped (a rewritten @context is never served stale) and the rest —
+    /// another Tenant's warm context included — stay.
+    #[tokio::test]
+    async fn hosted_context_write_keeps_unrelated_merged_contexts() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        let base = "http://127.0.0.1:9/ngsi-ld/v1/jsonldContexts";
+        let a_url = format!("{base}/aaaa1111-0000-4000-8000-000000000001");
+        let b_url = format!("{base}/bbbb2222-0000-4000-8000-000000000002");
+        loader
+            .put_local_for(
+                &alpha,
+                a_url.clone(),
+                serde_json::json!({"speed": "https://a.example/v1"}),
+            )
+            .await;
+        loader
+            .put_local_for(
+                &beta,
+                b_url.clone(),
+                serde_json::json!({"level": "https://b.example/level"}),
+            )
+            .await;
+        loader
+            .resolve_for(&alpha, &Value::String(a_url.clone()))
+            .await
+            .expect("alpha resolves its own @context");
+        loader
+            .resolve_for(&beta, &Value::String(b_url.clone()))
+            .await
+            .expect("beta resolves its own @context");
+        assert_eq!(loader.cache_stats()["merged"].as_u64(), Some(2));
+
+        // alpha adds an UNRELATED @context: no merged context was built from
+        // it, so nothing may be discarded
+        loader
+            .put_local_for(
+                &alpha,
+                format!("{base}/cccc3333-0000-4000-8000-000000000003"),
+                serde_json::json!({"other": "https://a.example/other"}),
+            )
+            .await;
+        assert_eq!(
+            loader.cache_stats()["merged"].as_u64(),
+            Some(2),
+            "one Tenant's @context write must not flush another Tenant's merged context"
+        );
+
+        // correctness first: rewriting a document a merged context WAS built
+        // from drops that entry, so the new mappings are the ones served
+        loader
+            .put_local_for(
+                &alpha,
+                a_url.clone(),
+                serde_json::json!({"speed": "https://a.example/v2"}),
+            )
+            .await;
+        let ctx = loader
+            .resolve_for(&alpha, &Value::String(a_url))
+            .await
+            .expect("resolve after rewrite");
+        assert_eq!(
+            ctx.expand_key("speed"),
+            "https://a.example/v2",
+            "a rewritten @context must never be served from the merged cache"
+        );
+        let ctx = loader
+            .resolve_for(&beta, &Value::String(b_url))
+            .await
+            .expect("beta's merged context survived");
+        assert_eq!(ctx.expand_key("level"), "https://b.example/level");
     }
 
     #[tokio::test]

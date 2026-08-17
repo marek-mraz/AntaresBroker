@@ -391,7 +391,9 @@ pub async fn parse_body(
                 "application/ld+json request must carry an @context member (6.3.5)".into(),
             )
         })?;
-        loader.resolve(&user_ctx).await?
+        loader
+            .resolve_for(&tenant_from(headers)?, &user_ctx)
+            .await?
     } else {
         if body_has_context(&value) {
             return Err(NgsiError::BadRequestData(
@@ -400,7 +402,11 @@ pub async fn parse_body(
             .into());
         }
         match link {
-            Some(url) => loader.resolve(&Value::String(url)).await?,
+            Some(url) => {
+                loader
+                    .resolve_for(&tenant_from(headers)?, &Value::String(url))
+                    .await?
+            }
             // 5.5.5 Default @context assignment: input with no @context gets
             // at minimum the Core @context (no default user @context is
             // configured; core terms always take precedence).
@@ -427,7 +433,12 @@ fn body_context_member(v: &Value) -> Option<Value> {
 /// no-@context fallback to the Core @context is 5.5.5).
 pub async fn request_context(loader: &Loader, headers: &HeaderMap) -> ApiResult<Arc<Context>> {
     match link_context(headers) {
-        Some(url) => Ok(loader.resolve(&Value::String(url)).await?),
+        // 5.5.10: the Tenant bounds what the operation may see, and a locally
+        // stored @context (5.13.1) is information related to the Tenant that
+        // stored it — so the URL resolves only for that Tenant.
+        Some(url) => Ok(loader
+            .resolve_for(&tenant_from(headers)?, &Value::String(url))
+            .await?),
         None => Ok(loader.core()),
     }
 }
@@ -1212,8 +1223,8 @@ mod negotiation {
             .expect("infallible");
         assert_eq!(m.get("q").map(String::as_str), Some("a==1"));
         assert_eq!(m.get("name").map(String::as_str), Some("a b"));
-        assert!(m.get("datasetId").is_none(), "empty value means absent");
-        assert!(m.get("flag").is_none(), "valueless key means absent");
+        assert!(!m.contains_key("datasetId"), "empty value means absent");
+        assert!(!m.contains_key("flag"), "valueless key means absent");
         assert_eq!(m.get("raw").map(String::as_str), Some("\u{fffd}"));
         assert_eq!(m.get("half").map(String::as_str), Some("%4"));
     }

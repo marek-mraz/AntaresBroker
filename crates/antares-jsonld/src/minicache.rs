@@ -82,6 +82,17 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         g.1.clear();
     }
 
+    /// Snapshot of the resident entries, in moka's `iter()` item shape — the
+    /// lock is released before the caller walks them, so a callback may touch
+    /// this cache again.
+    pub fn iter(&self) -> std::vec::IntoIter<(std::sync::Arc<K>, V)> {
+        let g = self.lock();
+        g.0.iter()
+            .map(|(k, v)| (std::sync::Arc::new(k.clone()), v.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
     pub fn run_pending_tasks(&self) {}
 
     pub fn entry_count(&self) -> u64 {
@@ -209,6 +220,33 @@ mod tests {
         for i in 10..14 {
             assert_eq!(c.get(&i), Some(i));
         }
+    }
+
+    /// `iter` yields every resident entry exactly once — it is what the
+    /// caller filters to invalidate a subset, so a missed entry would leave a
+    /// stale one behind. Evicted keys must not appear.
+    #[test]
+    fn iter_yields_every_resident_entry() {
+        let c = filled(4, 6);
+        let mut seen: Vec<u32> = c
+            .iter()
+            .map(|(k, v)| {
+                assert_eq!(*k, v, "key and value must belong to the same entry");
+                *k
+            })
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![2, 3, 4, 5],
+            "the evicted keys must not be listed"
+        );
+        c.invalidate(&3);
+        let mut seen: Vec<u32> = c.iter().map(|(k, _)| *k).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![2, 4, 5]);
+        c.invalidate_all();
+        assert_eq!(c.iter().count(), 0);
     }
 
     /// `run_pending_tasks` exists only to match moka's call surface; it must
