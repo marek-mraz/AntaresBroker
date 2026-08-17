@@ -135,13 +135,25 @@ pub async fn upsert_temporal(
             }
             return Ok(crate::federation::combine(
                 parts,
-                created(format!("/ngsi-ld/v1/temporal/entities/{id}"), &tenant),
+                created(
+                    format!(
+                        "/ngsi-ld/v1/temporal/entities/{}",
+                        crate::federation::path_segment(&id)
+                    ),
+                    &tenant,
+                ),
                 &tenant,
             ));
         }
         let status = upsert_temporal_local(&st, &tenant, &id, expanded)?;
         Ok::<_, ApiError>(if status == StatusCode::CREATED {
-            created(format!("/ngsi-ld/v1/temporal/entities/{id}"), &tenant)
+            created(
+                format!(
+                    "/ngsi-ld/v1/temporal/entities/{}",
+                    crate::federation::path_segment(&id)
+                ),
+                &tenant,
+            )
         } else {
             no_content(&tenant)
         })
@@ -406,7 +418,7 @@ pub(crate) fn dt_key(s: &str) -> String {
     let Some(body) = s.strip_suffix('Z') else {
         return s.to_owned();
     };
-    if body.len() < 19 {
+    if !body.is_char_boundary(19) {
         return s.to_owned();
     }
     let (base, frac) = body.split_at(19);
@@ -903,13 +915,16 @@ struct TRepr {
     aggr_period: AggrPeriod,
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum AggrPeriod {
     /// PT0S / absent: one bucket over the whole range
     #[default]
     Whole,
     Seconds(i64),
-    Months(u32),
+    /// 4.5.19.1: a period may mix date and time elements
+    /// ("P3Y6M4DT12H30M5S"), so a month step carries the leftover seconds —
+    /// months are not a fixed number of seconds and cannot be folded in.
+    Months(u32, i64),
 }
 
 fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
@@ -957,9 +972,8 @@ fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
     }
     Some(match (months, secs) {
         (0, 0) => AggrPeriod::Whole,
-        (m, 0) => AggrPeriod::Months(m),
         (0, sc) => AggrPeriod::Seconds(sc),
-        _ => return None,
+        (m, sc) => AggrPeriod::Months(m, sc),
     })
 }
 
@@ -1082,12 +1096,14 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
         // 4.11: the value space ends where duration arithmetic does —
         // beyond ~100 years chrono::Duration::seconds is out of bounds
         // (a panic, i.e. a remote 500), so such periods are rejected.
-        // A month period steps one bucket at a time from the window anchor, so
-        // an absurd count is a CPU amplifier even though chrono itself refuses
-        // to overflow; both arms are bounded at ~100 years.
-        if matches!(p, AggrPeriod::Seconds(sc) if sc > 86_400 * 366 * 100)
-            || matches!(p, AggrPeriod::Months(m) if m > 1200)
-        {
+        // Both components are bounded at ~100 years, the months in their own
+        // unit since a month is not a fixed number of seconds.
+        let (months, secs) = match p {
+            AggrPeriod::Whole => (0, 0),
+            AggrPeriod::Seconds(sc) => (0, sc),
+            AggrPeriod::Months(m, sc) => (m, sc),
+        };
+        if months > 1200 || secs > 86_400 * 366 * 100 {
             return Err(NgsiError::BadRequestData(format!(
                 "aggrPeriodDuration {d:?} is out of range"
             )));
@@ -1222,7 +1238,7 @@ fn render_aggregated(
     ctx: &Context,
     timeprop: &str,
 ) -> Result<Map<String, Value>, NgsiError> {
-    use chrono::{DateTime, FixedOffset};
+    use chrono::{DateTime, Datelike, FixedOffset};
     let fmt = |d: DateTime<FixedOffset>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut out = Map::new();
     for (k, instances) in &w.attrs {
@@ -1290,20 +1306,48 @@ fn render_aggregated(
                             None => (anchor, chrono::DateTime::<chrono::Utc>::MAX_UTC.into()),
                         }
                     }
-                    AggrPeriod::Months(m) => {
-                        let mut start = anchor;
-                        loop {
-                            // saturate instead of panic: a huge month period or
-                            // far-future timeAt overflows chrono's range — treat
-                            // the remainder as one open-ended bucket
-                            let Some(next) = start.checked_add_months(chrono::Months::new(m))
-                            else {
-                                break (start, chrono::DateTime::<chrono::Utc>::MAX_UTC.into());
+                    AggrPeriod::Months(m, sc) => {
+                        // start of the k-th period, O(1) in k. Negative k are
+                        // the periods BEFORE the anchor, which is what a
+                        // `before` query is made of.
+                        let step = |k: i64| -> Option<DateTime<FixedOffset>> {
+                            let n = k.unsigned_abs().checked_mul(u64::from(m))?;
+                            let n = chrono::Months::new(u32::try_from(n).ok()?);
+                            let base = if k < 0 {
+                                anchor.checked_sub_months(n)?
+                            } else {
+                                anchor.checked_add_months(n)?
                             };
-                            if next > t {
-                                break (start, next);
+                            let off = chrono::Duration::try_seconds(k.checked_mul(sc)?)?;
+                            base.checked_add_signed(off)
+                        };
+                        // The whole-month distance ignores the day and the time
+                        // of day, and one period is at least one month, so it
+                        // brackets the exact index within one step: binary-search
+                        // between it and the anchor instead of walking there,
+                        // which is O(log) however far the instant is.
+                        let approx = (i64::from(t.year() - anchor.year()) * 12
+                            + i64::from(t.month())
+                            - i64::from(anchor.month()))
+                        .div_euclid(i64::from(m));
+                        let (mut lo, mut hi) = (approx.min(0) - 1, approx.max(0) + 1);
+                        while hi - lo > 1 {
+                            let mid = lo + (hi - lo) / 2;
+                            if step(mid).is_some_and(|s| s <= t) {
+                                lo = mid;
+                            } else {
+                                hi = mid;
                             }
-                            start = next;
+                        }
+                        // saturate instead of panic: a huge month period or a
+                        // far-future timeAt overflows chrono's range — treat the
+                        // remainder as one open-ended bucket
+                        match (step(lo), step(hi)) {
+                            (Some(start), Some(end)) if start <= t => (start, end),
+                            (Some(start), None) if start <= t => {
+                                (start, chrono::DateTime::<chrono::Utc>::MAX_UTC.into())
+                            }
+                            _ => (anchor, chrono::DateTime::<chrono::Utc>::MAX_UTC.into()),
                         }
                     }
                 }
@@ -1312,12 +1356,11 @@ fn render_aggregated(
         let mut buckets: Vec<(Bucket, Vec<&Value>)> = Vec::new();
         for (t, v) in &times {
             let b = bucket_of(*t);
-            match buckets.iter_mut().find(|(bb, _)| bb.0 == b.0) {
-                Some((_, vals)) => vals.push(v),
-                None => buckets.push((b, vec![v])),
+            match buckets.last_mut() {
+                Some((bb, vals)) if bb.0 == b.0 => vals.push(v),
+                _ => buckets.push((b, vec![v])),
             }
         }
-        buckets.sort_by_key(|((s, _), _)| *s);
         let mut attr_out = Map::new();
         // 4.5.19.0: the member is labelled "Property" for Properties and
         // "Relationship" for Relationships.
@@ -1359,17 +1402,14 @@ fn aggregate_bucket(method: &str, class: AggrClass, vals: &[&Value]) -> Value {
         "distinctCount" => {
             // Relationship: "count of distinct relationship TARGETS" — an
             // object may be a URI or an array of URIs, so flatten first.
-            let mut seen: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for v in vals {
                 let items: Vec<&Value> = match (class, v) {
                     (AggrClass::Relationship, Value::Array(a)) => a.iter().collect(),
                     _ => vec![*v],
                 };
                 for it in items {
-                    let key = it.to_string();
-                    if !seen.contains(&key) {
-                        seen.push(key);
-                    }
+                    seen.insert(it.to_string());
                 }
             }
             serde_json::json!(seen.len())
@@ -2503,7 +2543,11 @@ pub async fn add_temporal_attrs(
                     crate::federation::forward_part(
                         &st,
                         reqwest::Method::POST,
-                        format!("{}/ngsi-ld/v1/temporal/entities/{id}/attrs", reg.endpoint),
+                        format!(
+                            "{}/ngsi-ld/v1/temporal/entities/{}/attrs",
+                            reg.endpoint,
+                            crate::federation::path_segment(&id)
+                        ),
                         &[],
                         &headers,
                         &tenant,
@@ -2632,7 +2676,7 @@ pub async fn delete_temporal_attr(
             &id,
             "deleteAttrsTemporal",
             reqwest::Method::DELETE,
-            &format!("/attrs/{attr}"),
+            &format!("/attrs/{}", crate::federation::path_segment(&attr)),
             None,
             local_part,
         )
@@ -2658,6 +2702,8 @@ pub async fn delete_temporal_attr(
 /// operation's support are an error of type Conflict and are never
 /// contacted; supporting registrations receive the forwarded request. None
 /// = no matching registrations (the operation stays purely local).
+/// `path_suffix` arrives with its client-controlled segments already
+/// percent-encoded (RFC 3986 clause 3.3); the entity id is encoded here.
 #[allow(clippy::too_many_arguments)]
 async fn temporal_attr_fed(
     st: &AppState,
@@ -2702,8 +2748,9 @@ async fn temporal_attr_fed(
                 st,
                 method.clone(),
                 format!(
-                    "{}/ngsi-ld/v1/temporal/entities/{id}{path_suffix}",
-                    reg.endpoint
+                    "{}/ngsi-ld/v1/temporal/entities/{}{path_suffix}",
+                    reg.endpoint,
+                    crate::federation::path_segment(id)
                 ),
                 &[],
                 headers,
@@ -2813,7 +2860,11 @@ pub async fn modify_temporal_instance(
             &id,
             "updateAttrInstanceTemporal",
             reqwest::Method::PATCH,
-            &format!("/attrs/{attr}/{instance_id}"),
+            &format!(
+                "/attrs/{}/{}",
+                crate::federation::path_segment(&attr),
+                crate::federation::path_segment(&instance_id)
+            ),
             Some(parsed.value.clone()),
             local_part,
         )
@@ -2892,7 +2943,11 @@ pub async fn delete_temporal_instance(
             &id,
             "deleteAttrInstanceTemporal",
             reqwest::Method::DELETE,
-            &format!("/attrs/{attr}/{instance_id}"),
+            &format!(
+                "/attrs/{}/{}",
+                crate::federation::path_segment(&attr),
+                crate::federation::path_segment(&instance_id)
+            ),
             None,
             local_part,
         )
@@ -2992,6 +3047,36 @@ mod clause_4_11 {
             .collect();
         assert_eq!(default_slot.len(), 1);
         assert_eq!(default_slot[0]["value"], 11, "newer modifiedAt wins");
+    }
+
+    /// 4.3.6.2: "An auxiliary Context Source Registration never overrides
+    /// data held directly within a Context Broker. […] Context data from
+    /// auxiliary context sources is only included if it is supplementary to
+    /// the context data otherwise available to the Context Broker." On a
+    /// Temporal Evolution the unit is the instance, so an auxiliary instance
+    /// enters only where no other source supplied that timeproperty value.
+    #[test]
+    fn an_auxiliary_instance_supplements_but_never_overrides() {
+        let mut base = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-05-01T00:00:00Z"},
+        ]});
+        let add = json!({"id": "urn:e", "type": "T", "speed": [
+            // same slot as the local instance, and newer — still refused
+            {"type": "Property", "value": 99, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-07-01T00:00:00Z"},
+            // a timestamp nobody else supplied: supplementary, so included
+            {"type": "Property", "value": 20, "observedAt": "2026-05-02T00:00:00Z"},
+        ]});
+        merge_temporal_docs(&mut base, &add, true, "observedAt");
+        let speed = base["speed"].as_array().expect("array");
+        assert_eq!(speed.len(), 2, "{speed:?}");
+        assert!(
+            !Value::Array(speed.clone()).to_string().contains("99"),
+            "an auxiliary instance may not override an occupied slot: {speed:?}"
+        );
+        assert_eq!(speed[0]["value"], 10);
+        assert_eq!(speed[1]["value"], 20);
     }
 
     fn tq(timerel: &str, time_at: &str, end: Option<&str>) -> TemporalQ {
@@ -3260,5 +3345,419 @@ mod clause_6_3_10 {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod forwarded_path_encoding {
+    use crate::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+
+    /// An entity id is a URI (4.6.2), and `#` is legal in one. It also ends a
+    /// path in RFC 3986 clause 3.3, so the id has to be percent-encoded
+    /// wherever it becomes a path segment.
+    const ENTITY: &str = "urn:ngsi-ld:Vehicle:temporal-enc#frag";
+    const ENCODED: &str = "urn:ngsi-ld:Vehicle:temporal-enc%23frag";
+
+    /// A Context Source answering 204 to everything, recording request lines.
+    fn mock_source() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap_or(0);
+                if let Some(line) = String::from_utf8_lossy(&buf[..n]).lines().next() {
+                    log.lock().expect("lock").push(line.to_owned());
+                }
+                let _ = s.write_all(
+                    b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+        (port, seen)
+    }
+
+    fn state() -> AppState {
+        // the mock source is loopback, denied by the egress policy by default
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        AppState::new("antares-temporal-enc".into())
+    }
+
+    async fn send(st: &AppState, req: Request<Body>) -> axum::http::Response<Body> {
+        crate::router(st.clone())
+            .oneshot(req)
+            .await
+            .expect("response")
+    }
+
+    async fn post(st: &AppState, uri: &str, body: String) -> axum::http::Response<Body> {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        send(st, req).await
+    }
+
+    async fn register(st: &AppState, port: u16, id: &str, entity: &str) {
+        let doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:{id}"),
+            "type": "ContextSourceRegistration",
+            "mode": "redirect",
+            "operations": ["deleteAttrsTemporal", "deleteAttrInstanceTemporal"],
+            "information": [{"entities": [{"type": "Vehicle", "id": entity}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        assert_eq!(
+            post(st, "/ngsi-ld/v1/csourceRegistrations", doc.to_string())
+                .await
+                .status(),
+            StatusCode::CREATED,
+            "registration create"
+        );
+    }
+
+    /// 5.6.13.4/5.6.15.4: the operation is forwarded to the registration
+    /// endpoint with the target resource named in the request path. The id,
+    /// the Attribute name and the instanceId arrive percent-decoded from this
+    /// broker's own path, so splicing them raw would let a `#` end the
+    /// forwarded path (RFC 3986 clause 3.3) and turn Delete Attribute into
+    /// Delete Temporal Evolution of an Entity (5.6.16) on the peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hash_in_the_id_reaches_the_peer_encoded_not_truncated() {
+        let st = state();
+        let (port, seen) = mock_source();
+        register(&st, port, "csr-temporal-enc", ENTITY).await;
+
+        // each suffix is already in its encoded spelling, so the forwarded
+        // path must repeat it verbatim
+        for suffix in ["/attrs/speed", "/attrs/speed/urn:ngsi-ld:Instance:1%23x"] {
+            let req = Request::builder()
+                .method("DELETE")
+                .uri(format!("/ngsi-ld/v1/temporal/entities/{ENCODED}{suffix}"))
+                .body(Body::empty())
+                .expect("request");
+            let status = send(&st, req).await.status();
+            assert_ne!(status, StatusCode::BAD_REQUEST, "{suffix}");
+            let lines = seen.lock().expect("lock").clone();
+            let last = lines.last().cloned().unwrap_or_default();
+            assert!(
+                last.contains(&format!("/ngsi-ld/v1/temporal/entities/{ENCODED}{suffix}")),
+                "forwarded request line {last:?} for suffix {suffix}"
+            );
+            // the negative assertion: the peer must never see a path that
+            // stops at the entity resource
+            assert!(
+                !last.contains("temporal-enc HTTP/"),
+                "forwarded path truncated at the `#`: {last:?}"
+            );
+        }
+    }
+
+    /// 5.6.13.4: "If the target Attribute name is not a valid name, then an
+    /// error of type BadRequestData shall be raised." A name begins with a
+    /// letter (4.6.2), so no valid name is a relative-path dot segment (RFC
+    /// 3986 clause 5.2.4) — and such a name in a forwarded path would address
+    /// the peer's Temporal Evolution resource instead of its Attribute, so it
+    /// is refused before anything leaves this broker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dot_segment_attribute_name_is_refused_and_never_forwarded() {
+        const TARGET: &str = "urn:ngsi-ld:Vehicle:temporal-dots";
+        let st = state();
+        let (port, seen) = mock_source();
+        register(&st, port, "csr-temporal-dots", TARGET).await;
+        // raw, decoded once by this broker, and decoded once more by the peer
+        for attr in ["..", "%2e%2e", "%252e%252e", "."] {
+            for suffix in ["", "/urn:ngsi-ld:Instance:1"] {
+                let req = Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/ngsi-ld/v1/temporal/entities/{TARGET}/attrs/{attr}{suffix}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request");
+                assert_eq!(
+                    send(&st, req).await.status(),
+                    StatusCode::BAD_REQUEST,
+                    "attribute name {attr:?} with suffix {suffix:?}"
+                );
+            }
+        }
+        assert!(
+            seen.lock().expect("lock").is_empty(),
+            "a rejected attribute name must never reach a registration endpoint"
+        );
+    }
+
+    /// 5.6.11.4: on creation the response carries a Location header holding
+    /// the resource URI of the created Temporal Representation. A URI has its
+    /// reserved characters percent-encoded (RFC 3986 clause 3.3), so a `#` in
+    /// the id may not be spliced raw — there it would read as the start of a
+    /// fragment identifier and address the entity collection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_location_header_percent_encodes_the_id() {
+        let st = state();
+        let doc = serde_json::json!({
+            "id": ENTITY, "type": "Vehicle",
+            "speed": [{"type": "Property", "value": 1,
+                       "observedAt": "2026-03-01T12:05:00Z"}],
+        });
+        let res = post(&st, "/ngsi-ld/v1/temporal/entities", doc.to_string()).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(
+            res.headers()
+                .get("Location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default(),
+            format!("/ngsi-ld/v1/temporal/entities/{ENCODED}")
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_5_19 {
+    use super::*;
+    use serde_json::json;
+
+    /// 4.5.19.1: "The duration shall be a string in the format
+    /// `P[n]Y[n]M[n]DT[n]H[n]M[n]S` or `P[n]W` … For example,
+    /// `"P3Y6M4DT12H30M5S"` represents a duration of "three years, six
+    /// months, four days, twelve hours, thirty minutes, and five seconds"."
+    /// A period mixing date and time elements is therefore valid, and
+    /// "PT0S" spans the whole time range of the query.
+    #[test]
+    fn a_mixed_date_and_time_duration_is_a_valid_period() {
+        const DAY: i64 = 86_400;
+        assert_eq!(
+            parse_iso_duration("P3Y6M4DT12H30M5S"),
+            Some(AggrPeriod::Months(42, 4 * DAY + 12 * 3600 + 30 * 60 + 5))
+        );
+        assert_eq!(
+            parse_iso_duration("P1Y1D"),
+            Some(AggrPeriod::Months(12, DAY))
+        );
+        assert_eq!(
+            parse_iso_duration("P1MT1H"),
+            Some(AggrPeriod::Months(1, 3600))
+        );
+        // the pure forms are unchanged
+        assert_eq!(parse_iso_duration("PT0S"), Some(AggrPeriod::Whole));
+        assert_eq!(parse_iso_duration("P0D"), Some(AggrPeriod::Whole));
+        assert_eq!(parse_iso_duration("P1M"), Some(AggrPeriod::Months(1, 0)));
+        assert_eq!(parse_iso_duration("PT90M"), Some(AggrPeriod::Seconds(5400)));
+        assert_eq!(
+            parse_iso_duration("P1W"),
+            Some(AggrPeriod::Seconds(7 * DAY))
+        );
+        // and the grammar still rejects what is not a duration
+        assert_eq!(parse_iso_duration("P1X"), None);
+        assert_eq!(parse_iso_duration("1Y"), None);
+        assert_eq!(parse_iso_duration("P1"), None);
+    }
+
+    fn windowed(times: &[&str]) -> Windowed {
+        let instances: Vec<Value> = times
+            .iter()
+            .map(|t| json!({"type": "Property", "value": 1, "observedAt": t}))
+            .collect();
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("speed".to_owned(), instances);
+        Windowed {
+            attrs,
+            max_per_attr: times.len(),
+            ts_min: times.first().map(|s| (*s).to_owned()),
+            ts_max: times.last().map(|s| (*s).to_owned()),
+            truncated: false,
+        }
+    }
+
+    fn repr(duration: &str) -> TRepr {
+        TRepr {
+            aggregated: true,
+            aggr_methods: vec!["totalCount".to_owned()],
+            aggr_period: parse_iso_duration(duration).expect("duration"),
+            ..Default::default()
+        }
+    }
+
+    /// The periods of an aggregated response are the periods "in the time
+    /// range of the query" (4.5.19.0), so with `timerel=before` they run
+    /// backwards from `timeAt` and every returned period contains the
+    /// instances aggregated into it.
+    #[test]
+    fn month_periods_before_the_anchor_contain_their_instances() {
+        let w = windowed(&[
+            "2020-01-15T00:00:00Z",
+            "2020-02-15T00:00:00Z",
+            "2020-03-15T00:00:00Z",
+        ]);
+        let tq = TemporalQ {
+            timerel: "before".to_owned(),
+            time_at: "2020-04-01T00:00:00Z".to_owned(),
+            end_time_at: None,
+            timeproperty: "observedAt".to_owned(),
+        };
+        let out = render_aggregated(
+            &w,
+            Some(&tq),
+            &repr("P1M"),
+            &antares_jsonld::Context::default(),
+            "observedAt",
+        )
+        .expect("aggregated");
+        let rows = out["speed"]["totalCount"].as_array().expect("rows").clone();
+        assert_eq!(
+            rows,
+            vec![
+                json!([1, "2020-01-01T00:00:00Z", "2020-02-01T00:00:00Z"]),
+                json!([1, "2020-02-01T00:00:00Z", "2020-03-01T00:00:00Z"]),
+                json!([1, "2020-03-01T00:00:00Z", "2020-04-01T00:00:00Z"]),
+            ]
+        );
+        // the negative assertion: no period may start at the anchor, since
+        // such a period holds none of the instances of a `before` query
+        assert!(
+            !Value::Array(rows)
+                .to_string()
+                .contains("2020-04-01T00:00:00Z\",\""),
+            "a period starting at timeAt contains no instance of a before query"
+        );
+    }
+
+    /// A mixed period steps by its months AND its seconds: "P1MT12H" from
+    /// the anchor ends one month and twelve hours later (4.5.19.1).
+    #[test]
+    fn a_mixed_period_steps_by_both_components() {
+        let w = windowed(&["2020-01-01T06:00:00Z", "2020-02-02T06:00:00Z"]);
+        let tq = TemporalQ {
+            timerel: "after".to_owned(),
+            time_at: "2020-01-01T00:00:00Z".to_owned(),
+            end_time_at: None,
+            timeproperty: "observedAt".to_owned(),
+        };
+        let out = render_aggregated(
+            &w,
+            Some(&tq),
+            &repr("P1MT12H"),
+            &antares_jsonld::Context::default(),
+            "observedAt",
+        )
+        .expect("aggregated");
+        assert_eq!(
+            out["speed"]["totalCount"],
+            json!([
+                [1, "2020-01-01T00:00:00Z", "2020-02-01T12:00:00Z"],
+                [1, "2020-02-01T12:00:00Z", "2020-03-02T00:00:00Z"],
+            ])
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_6_3 {
+    use super::dt_key;
+
+    /// 4.6.3 DateTime: only a DateTime has a canonical key — anything else
+    /// is returned unchanged, including a multi-byte string that ends in
+    /// `Z` and is long enough to reach the seconds position in bytes.
+    #[test]
+    fn non_datetime_input_is_returned_unchanged() {
+        for s in ["", "Z", "not-a-date", "ααααααααααZ", "urn:ngsi-ld:nullZ"] {
+            assert_eq!(dt_key(s), s, "{s:?}");
+        }
+        // a real DateTime still normalizes to its comparison key
+        assert_eq!(dt_key("2026-05-01T00:00:00Z"), "2026-05-01T00:00:00.000000");
+        assert_eq!(
+            dt_key("2026-05-01T00:00:00,5Z"),
+            "2026-05-01T00:00:00.500000"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_6_3_10_gaps {
+    use super::*;
+    use serde_json::json;
+
+    fn windowed(a: &[&str], b: &[&str]) -> Windowed {
+        let mut attrs = std::collections::BTreeMap::new();
+        for (name, times) in [("a", a), ("b", b)] {
+            attrs.insert(
+                name.to_owned(),
+                times
+                    .iter()
+                    .map(|t| json!({"type": "Property", "value": 1, "observedAt": t}))
+                    .collect::<Vec<Value>>(),
+            );
+        }
+        Windowed {
+            attrs,
+            max_per_attr: a.len().max(b.len()),
+            ts_min: Some("2020-01-01T00:00:00Z".to_owned()),
+            ts_max: Some("2020-01-01T10:02:00Z".to_owned()),
+            truncated: true,
+        }
+    }
+
+    const EARLY: [&str; 2] = ["2020-01-01T00:00:00Z", "2020-01-01T00:02:00Z"];
+    const LATE: [&str; 2] = ["2020-01-01T10:00:00Z", "2020-01-01T10:02:00Z"];
+
+    /// 6.3.10: partial content must BE the representation the Content-Range
+    /// describes. When two Attributes hold disjoint time ranges under
+    /// truncation, the one first in the query direction is served and the
+    /// other is emptied — and the advertised range then covers only the
+    /// instances actually returned.
+    #[test]
+    fn a_disjoint_attribute_is_emptied_and_leaves_the_range() {
+        // ascending (no lastN): the earlier range is the one served
+        let mut w = windowed(&EARLY, &LATE);
+        gap_cut(&mut w, "observedAt", false);
+        assert_eq!(w.attrs["a"].len(), 2);
+        assert!(w.attrs["b"].is_empty(), "the later attribute is emptied");
+        let cr = content_range(
+            w.truncated,
+            w.ts_min.as_deref(),
+            w.ts_max.as_deref(),
+            None,
+            None,
+        )
+        .expect("content-range");
+        assert_eq!(cr, "date-time 2020-01-01T00:00:00Z-2020-01-01T00:02:00Z/*");
+        assert!(
+            !cr.contains("10:0"),
+            "an emptied attribute's instants must not be advertised: {cr}"
+        );
+
+        // descending (lastN): the direction reverses, so the later range wins
+        let mut w = windowed(&EARLY, &LATE);
+        gap_cut(&mut w, "observedAt", true);
+        assert!(w.attrs["a"].is_empty(), "the earlier attribute is emptied");
+        assert_eq!(w.attrs["b"].len(), 2);
+        assert_eq!(w.ts_min.as_deref(), Some("2020-01-01T10:00:00Z"));
+        assert_eq!(w.ts_max.as_deref(), Some("2020-01-01T10:02:00Z"));
+    }
+
+    /// The cut is conditional on truncation and on a real gap: overlapping
+    /// ranges, or a complete (200) result, keep every instance.
+    #[test]
+    fn overlapping_ranges_and_complete_results_are_untouched() {
+        let mut w = windowed(&EARLY, &["2020-01-01T00:01:00Z", "2020-01-01T10:00:00Z"]);
+        gap_cut(&mut w, "observedAt", false);
+        assert_eq!(w.attrs["b"].len(), 2, "overlapping ranges are not cut");
+
+        let mut w = windowed(&EARLY, &LATE);
+        w.truncated = false;
+        gap_cut(&mut w, "observedAt", false);
+        assert_eq!(w.attrs["b"].len(), 2, "a complete result is not cut");
     }
 }
