@@ -50,31 +50,23 @@ pub fn stamp_new(doc: &mut Value, ts: &str) {
         obj.insert("modifiedAt".into(), Value::String(ts.to_owned()));
         for (k, v) in obj.iter_mut() {
             if !is_meta(k) {
-                stamp_instances(v, ts, true);
+                stamp_instances(v, ts);
             }
         }
     }
 }
 
-fn stamp_instances(v: &mut Value, ts: &str, created: bool) {
+/// 5.2.2: createdAt/modifiedAt are server-generated on every Attribute
+/// instance and its sub-Attributes; a client-provided value is ignored.
+fn stamp_instances(v: &mut Value, ts: &str) {
     if let Some(arr) = v.as_array_mut() {
         for inst in arr {
             if let Some(o) = inst.as_object_mut() {
-                if created {
-                    o.insert("createdAt".into(), Value::String(ts.to_owned()));
-                }
-                o.entry("createdAt".to_owned())
-                    .or_insert_with(|| Value::String(ts.to_owned()));
+                o.insert("createdAt".into(), Value::String(ts.to_owned()));
                 o.insert("modifiedAt".into(), Value::String(ts.to_owned()));
-                let subs: Vec<String> = o
-                    .keys()
-                    .filter(|k| crate::repr_reserved(k))
-                    .cloned()
-                    .collect();
-                let _ = subs;
                 for (k, sub) in o.iter_mut() {
                     if sub.is_array() && !crate::repr_reserved(k) {
-                        stamp_instances(sub, ts, created);
+                        stamp_instances(sub, ts);
                     }
                 }
             }
@@ -211,6 +203,31 @@ pub fn mirror_delete_attr(
 
 // ---------- POST /entities/ (5.6.1) ----------
 
+/// 5.6.1.5: the output of a successful Create Entity is "the URI of the
+/// created Entity" — the resource URL carried in the Location header. The id
+/// is one path segment (RFC 3986 clause 3.3), so it is percent-encoded:
+/// spliced raw, a `#` in the id turns the rest of it into a fragment and the
+/// client is handed a URL addressing a different resource.
+fn entity_location(id: &str) -> String {
+    format!(
+        "/ngsi-ld/v1/entities/{}",
+        crate::federation::path_segment(id)
+    )
+}
+
+/// The selector of Entity types is input data of Delete (5.6.6.3), Merge
+/// (5.6.17.3) and Replace Entity (5.6.18.3), and each of those clauses
+/// forwards "matching input data ... to the Registration endpoint". A
+/// registration may cover several Entity types, so a forward that drops the
+/// selector lets the peer act on an entity the client's selector excluded.
+fn type_selector_query(params: &HashMap<String, String>) -> Vec<(String, String)> {
+    params
+        .get("type")
+        .map(|v| ("type".to_owned(), v.clone()))
+        .into_iter()
+        .collect()
+}
+
 pub async fn create_entity(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
@@ -325,7 +342,7 @@ async fn create_entity_inner(
         }
         return Ok(crate::federation::combine(
             parts,
-            created(format!("/ngsi-ld/v1/entities/{id}"), &tenant),
+            created(entity_location(&id), &tenant),
             &tenant,
         ));
     }
@@ -337,7 +354,7 @@ async fn create_entity_inner(
     {
         return Err(NgsiError::AlreadyExists(format!("entity {id} already exists")).into());
     }
-    Ok(created(format!("/ngsi-ld/v1/entities/{id}"), &tenant))
+    Ok(created(entity_location(&id), &tenant))
 }
 
 // ---------- GET /entities/{id} (5.7.1) ----------
@@ -542,11 +559,13 @@ async fn retrieve_entity_inner(
     }
     let mut payload = compact_for(&repr, &shaped, &ctx);
     if let Some((mode, level)) = &join {
+        let held = contained_by(params);
         let complete = match mode.as_str() {
-            "inline" => inline_join(st, &tenant, &ctx, &repr, &mut payload, *level),
+            "inline" => inline_join_beyond(st, &tenant, &ctx, &repr, &mut payload, *level, &held),
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
-                let complete = collect_flat(st, &tenant, &repr, &doc, *level, &mut linked);
+                let complete =
+                    collect_flat_beyond(st, &tenant, &repr, &doc, *level, &mut linked, &held);
                 if !linked.is_empty() {
                     let mut arr = vec![payload];
                     for (_, (ldoc, lrepr)) in linked {
@@ -700,9 +719,10 @@ struct JoinWalk {
 
 impl JoinWalk {
     /// The Linking Entity is already part of the response, so it counts as
-    /// resolved before the walk starts.
-    fn rooted(root: Option<&str>) -> Self {
-        let mut seen = std::collections::BTreeSet::new();
+    /// resolved before the walk starts — and so does every id the client
+    /// passed in `containedBy`.
+    fn rooted(root: Option<&str>, contained_by: &[String]) -> Self {
+        let mut seen: std::collections::BTreeSet<String> = contained_by.iter().cloned().collect();
         if let Some(id) = root {
             seen.insert(id.to_owned());
         }
@@ -712,6 +732,24 @@ impl JoinWalk {
             complete: true,
         }
     }
+}
+
+/// Table 6.4.3.2-1 `containedBy`: "List of entity ids which have previously
+/// been encountered whilst retrieving the Entity Graph. Only applicable if
+/// joinLevel is present." They are already in the graph the client is
+/// assembling, so 4.5.23.1's "avoid ... duplicates or loops" counts them as
+/// resolved and the walk does not follow them again.
+pub fn contained_by(params: &HashMap<String, String>) -> Vec<String> {
+    params
+        .get("containedBy")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Linked Entity Retrieval, inline form (4.5.23.2): embed each relationship
@@ -726,7 +764,22 @@ pub fn inline_join(
     compacted: &mut Value,
     level: usize,
 ) -> bool {
-    let mut walk = JoinWalk::rooted(compacted.get("id").and_then(Value::as_str));
+    inline_join_beyond(st, tenant, ctx, repr, compacted, level, &[])
+}
+
+/// Same, continuing an Entity Graph the client is already holding: the
+/// `containedBy` ids count as encountered (Table 6.4.3.2-1).
+#[allow(clippy::too_many_arguments)]
+pub fn inline_join_beyond(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    compacted: &mut Value,
+    level: usize,
+    contained_by: &[String],
+) -> bool {
+    let mut walk = JoinWalk::rooted(compacted.get("id").and_then(Value::as_str), contained_by);
     inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk);
     walk.complete
 }
@@ -876,7 +929,22 @@ pub fn collect_flat(
     level: usize,
     out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
 ) -> bool {
-    let mut walk = JoinWalk::rooted(internal_doc.get("id").and_then(Value::as_str));
+    collect_flat_beyond(st, tenant, repr, internal_doc, level, out, &[])
+}
+
+/// Same, continuing an Entity Graph the client is already holding: the
+/// `containedBy` ids count as encountered (Table 6.4.3.2-1).
+#[allow(clippy::too_many_arguments)]
+pub fn collect_flat_beyond(
+    st: &AppState,
+    tenant: &TenantId,
+    repr: &crate::repr::Repr,
+    internal_doc: &Value,
+    level: usize,
+    out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+    contained_by: &[String],
+) -> bool {
+    let mut walk = JoinWalk::rooted(internal_doc.get("id").and_then(Value::as_str), contained_by);
     walk.seen.extend(out.keys().cloned());
     collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk);
     walk.complete
@@ -979,6 +1047,18 @@ async fn query_entities_outer(
         return query_entities_inner(st, &params, headers).await;
     };
     let tenant = tenant_from(headers)?;
+    // 5.7.2.4: an unknown parameter and a too-wide query are BadRequestData
+    // for this request, whether or not it carries an EntityMap reference —
+    // and the paged fetch below walks the whole map, locally and forwarded,
+    // before the inner call would reach these same two checks.
+    check_params(&params, QUERY_PARAMS)?;
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    if !qualifies_non_wide(&params, q_ast.as_ref()) {
+        return Err(NgsiError::BadRequestData(
+            "query needs at least one of type, attrs, q, georel (5.7.2)".into(),
+        )
+        .into());
+    }
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
     let Some(mut map) = crate::entity_maps::map_get(st, &tenant, &map_id) else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
@@ -1317,16 +1397,18 @@ async fn query_entities_inner(
         .collect();
     if let Some((mode, level)) = &join {
         let mut complete = true;
+        let held = contained_by(params);
         match mode.as_str() {
             "inline" => {
                 for p in &mut payload {
-                    complete &= inline_join(st, &tenant, &ctx, &repr, p, *level);
+                    complete &= inline_join_beyond(st, &tenant, &ctx, &repr, p, *level, &held);
                 }
             }
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 for doc in &page {
-                    complete &= collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
+                    complete &=
+                        collect_flat_beyond(st, &tenant, &repr, doc, *level, &mut linked, &held);
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
@@ -1429,6 +1511,17 @@ pub struct Filtered {
     pub total: Option<usize>,
 }
 
+/// Whether the store may be asked to project members away. Only when its
+/// answer is the final answer: 5.7.2.4 applies the query, geoquery, Scope
+/// query and Attribute filters after remote parts have been aggregated, so
+/// with federated candidates present those filters still run over documents
+/// the store would have stripped; and 4.23 orders Entities by the value of
+/// the ordering member, which a projection may have removed — leaving the
+/// comparator nothing to compare and the client id order.
+fn proj_pushdown_allowed(fed_is_empty: bool, params: &HashMap<String, String>) -> bool {
+    fed_is_empty && !params.contains_key("orderBy")
+}
+
 /// The full filtering path (5.7.2). `page` = (offset, limit) to push into the
 /// store — pass it ONLY when every filter the store cannot see is absent
 /// (idPattern, federation, orderBy); the store still refuses unless its own
@@ -1447,6 +1540,9 @@ pub fn filter_entities_paged(
     // a pushed page over local rows cannot be merged with federated
     // candidates — refuse here so no caller can create that page
     let page = if fed.is_empty() { page } else { None };
+    // and neither can a pushed projection: the store's answer is only the
+    // final answer when nothing downstream still needs the stripped members
+    let proj = proj.filter(|_| proj_pushdown_allowed(fed.is_empty(), params));
     let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
     if let Some(ids) = &ids {
         for id in ids {
@@ -1514,6 +1610,7 @@ pub fn filter_entities_paged(
     // every pushdown up front and mask `decided` after.
     let geo_uncompiled = geo.is_some() && geo_spec.is_none();
     let page = if geo_uncompiled { None } else { page };
+    let proj = proj.filter(|_| !geo_uncompiled);
     // pick (or attrs) heads to keep / whole-attr omit heads to drop; core
     // members are never SQL-dropped (only `://` IRIs qualify) — repr::apply
     // stays the decider for those.
@@ -1563,27 +1660,24 @@ pub fn filter_entities_paged(
                 offset: offset as i64,
                 limit: limit as i64,
             }),
-            keep_attrs: if geo_uncompiled || split_agg {
-                None
-            } else {
-                keep_attrs.as_deref()
-            },
-            drop_attrs: if geo_uncompiled || split_agg {
-                None
-            } else {
-                drop_attrs.as_deref()
-            },
+            keep_attrs: keep_attrs.as_deref(),
+            drop_attrs: drop_attrs.as_deref(),
         },
     )?;
     let decided = outcome.decided && fed.is_empty() && !geo_uncompiled;
     let paged = outcome.paged && fed.is_empty();
     let total = outcome.total.map(|t| t as usize);
     let all = crate::federation::merge_candidates(outcome.rows, fed);
+    // the id list is client-sized (a POST query body carries an array with no
+    // count of its own) and the candidate set is store-sized, so the two are
+    // never multiplied together
+    let id_set: Option<std::collections::HashSet<&str>> =
+        ids.as_ref().map(|v| v.iter().copied().collect());
     let mut out = Vec::new();
     for doc in all {
         let id = doc["id"].as_str().unwrap_or("");
-        if let Some(ids) = &ids {
-            if !decided && !ids.contains(&id) {
+        if let Some(ids) = &id_set {
+            if !decided && !ids.contains(id) {
                 continue;
             }
         }
@@ -1846,6 +1940,8 @@ pub async fn delete_entity(
                 }
             }
             let ctx_url = crate::federation::ctx_link_url(&headers, &ctx.source);
+            let seg = crate::federation::path_segment(&id);
+            let fwd_q = type_selector_query(&params);
             for reg in &regs {
                 // 5.6.6.4: proxy modes not supporting Delete Entity are an
                 // error of type Conflict; inclusive ones are not forwarded.
@@ -1859,8 +1955,8 @@ pub async fn delete_entity(
                     crate::federation::forward_part(
                         &st,
                         reqwest::Method::DELETE,
-                        format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
-                        &[],
+                        format!("{}/ngsi-ld/v1/entities/{seg}", reg.endpoint),
+                        &fwd_q,
                         &headers,
                         &tenant,
                         reg,
@@ -1889,6 +1985,116 @@ pub async fn delete_entity(
 }
 
 // ---------- DELETE /entities/ — Purge (5.6.21) ----------
+
+/// 5.6.21.3 Input data of a Purge: the Entity type selector, the identifier
+/// list and id pattern, the restrictive and exclusionary Attribute-name
+/// lists, the NGSI-LD Query, the GeoQuery, the Scope query and the context
+/// source filter. 5.6.21.4 forwards "matching input data ... to the
+/// Registration endpoint", so every one of them travels: a forward that
+/// carries fewer restrictions than the client issued makes the peer execute
+/// a strictly wider purge than the one requested. `local` is absent by
+/// design — it selects local scope, which is what stops the forward
+/// happening at all (5.5.13).
+const PURGE_FORWARD_PARAMS: &[&str] = &[
+    "type",
+    "id",
+    "idPattern",
+    "attrs",
+    "q",
+    "georel",
+    "geometry",
+    "coordinates",
+    "geoproperty",
+    "scopeQ",
+    "csf",
+    "keep",
+    "drop",
+];
+
+fn forwarded_purge_query(params: &HashMap<String, String>) -> Vec<(String, String)> {
+    PURGE_FORWARD_PARAMS
+        .iter()
+        .filter_map(|k| params.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+        .collect()
+}
+
+/// How many matched Entities one round of a Purge fetches and applies. The
+/// match set of 5.6.21.4 is deliberately unbounded — `DELETE /entities?type=T`
+/// matches every Entity of that type — so it is walked page by page and
+/// applied in batches rather than materialized whole.
+const PURGE_CHUNK: usize = 500;
+
+/// 5.6.21.4 "And thereafter": with no Attribute-name list, delete every
+/// matched Entity found locally; with a restrictive list, delete those
+/// Attributes from them; with an exclusionary list, delete all but those.
+fn purge_locally(
+    st: &AppState,
+    tenant: &TenantId,
+    params: &HashMap<String, String>,
+    ctx: &antares_jsonld::Context,
+    keep: &Option<Vec<String>>,
+    drop: &Option<Vec<String>>,
+) -> ApiResult<()> {
+    let prune = keep.is_some() || drop.is_some();
+    let mut offset = 0usize;
+    loop {
+        let batch = filter_entities_paged(
+            st,
+            tenant,
+            params,
+            ctx,
+            Vec::new(),
+            Some((offset, PURGE_CHUNK)),
+            None,
+        )?;
+        let ids: Vec<String> = batch
+            .docs
+            .iter()
+            .filter_map(|d| d["id"].as_str().map(str::to_owned))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        if prune {
+            st.store.batch_mutate(tenant, &ids, |_, doc| {
+                let target = doc.as_object_mut().expect("entity object");
+                let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
+                for a in attrs {
+                    let purge = match (keep, drop) {
+                        (Some(keep), _) => !keep.contains(&a),
+                        (_, Some(drop)) => drop.contains(&a),
+                        _ => true,
+                    };
+                    if purge {
+                        target.remove(&a);
+                    }
+                }
+                Ok::<(), NgsiError>(())
+            })?;
+            // a pruned Entity still matches the query, so the next page
+            // starts after the one just applied
+            offset += ids.len();
+        } else {
+            let mut gone = 0usize;
+            for (id, deleted) in ids.iter().zip(st.store.batch_delete(tenant, &ids)?) {
+                if deleted {
+                    gone += 1;
+                    mirror_delete_entity(st, tenant, id);
+                }
+            }
+            // deletion shrinks the match set, so the next page is again the
+            // first one — unless nothing went, which would not terminate
+            if gone == 0 {
+                offset += ids.len();
+            }
+        }
+        // the store either paged (another page may follow) or answered with
+        // the whole match set, which this round has now applied
+        if !batch.paged || ids.len() < PURGE_CHUNK {
+            return Ok(());
+        }
+    }
+}
 
 /// 5.6.21 Purge Entities: delete (or keep=/drop=-prune) all entities matched
 /// by the query; output data is none — 204 (5.6.21.5). Too-wide queries,
@@ -1995,39 +2201,13 @@ async fn purge_inner(
         )
         .into());
     }
-    let matches = filter_entities(st, &tenant, params, &ctx)?;
     let keep: Option<Vec<String>> = params
         .get("keep")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
     let drop: Option<Vec<String>> = params
         .get("drop")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
-    for doc in &matches {
-        let Some(id) = doc["id"].as_str() else {
-            continue;
-        };
-        if keep.is_none() && drop.is_none() {
-            st.store.delete(&tenant, Kind::Entity, id)?;
-            mirror_delete_entity(st, &tenant, id);
-            continue;
-        }
-        // keep=/drop= prune attributes; the entity itself survives (5.6.21)
-        st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            let target = doc.as_object_mut().expect("entity object");
-            let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
-            for a in attrs {
-                let purge = match (&keep, &drop) {
-                    (Some(keep), _) => !keep.contains(&a),
-                    (_, Some(drop)) => drop.contains(&a),
-                    _ => true,
-                };
-                if purge {
-                    target.remove(&a);
-                }
-            }
-            Ok::<(), NgsiError>(())
-        })?;
-    }
+    purge_locally(st, &tenant, params, &ctx, &keep, &drop)?;
 
     // distributed purge (5.6.21 / 6.4.3.3)
     let spec = crate::csource::CsrSpec {
@@ -2057,10 +2237,7 @@ async fn purge_inner(
             detail: "purged locally".into(),
         }];
         let ctx_url = crate::federation::ctx_link_url(headers, &ctx.source);
-        let query: Vec<(String, String)> = ["type", "id", "idPattern", "q", "attrs"]
-            .iter()
-            .filter_map(|k| params.get(*k).map(|v| (k.to_string(), v.clone())))
-            .collect();
+        let query = forwarded_purge_query(params);
         for reg in &regs {
             // 5.6.21.4: matching input data is forwarded only when the
             // registration supports Purge Entity; an unsupported matched
@@ -2132,7 +2309,7 @@ async fn merge_entity_inner(
             return Err(NgsiError::BadRequestData("fragment id mismatch".into()).into());
         }
     }
-    let fragment = expand_entity(
+    let mut fragment = expand_entity(
         obj,
         &parsed.ctx,
         ExpandOpts {
@@ -2143,6 +2320,18 @@ async fn merge_entity_inner(
             ..Default::default()
         },
     )?;
+    // 5.6.17.3: a common observedAt timestamp to use across merged
+    // Attributes, and a common language tag for merged LanguageMaps.
+    let observed_at = params.get("observedAt").map(String::as_str);
+    if let Some(t) = observed_at {
+        if !antares_jsonld::parse_datetime(t) {
+            return Err(
+                NgsiError::BadRequestData("observedAt must be a DateTime (4.8)".into()).into(),
+            );
+        }
+    }
+    let lang = params.get("lang").map(String::as_str);
+    apply_common_observed_at(&mut fragment, observed_at);
     let ts = now_iso();
 
     let spec = crate::csource::CsrSpec {
@@ -2163,9 +2352,15 @@ async fn merge_entity_inner(
             regs.iter().filter(|r| r.is_proxy()).collect();
         let mut parts = Vec::new();
         let (rest, has_attrs) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
-        let local_exists = st.store.get(&tenant, Kind::Entity, id)?.is_some();
+        // 5.6.17.4: the target is "an existing Entity whose id (URI), and
+        // where specified type, is equivalent held locally" — the ?type
+        // selector narrows it on this path exactly as on the local-only one.
+        let local_exists = st
+            .store
+            .get(&tenant, Kind::Entity, id)?
+            .is_some_and(|d| crate::attrs::matches_type_param(&d, params, &parsed.ctx));
         if (local_exists || proxies.is_empty()) && has_attrs {
-            let local_frag = expand_entity(
+            let mut local_frag = expand_entity(
                 &rest,
                 &parsed.ctx,
                 ExpandOpts {
@@ -2176,8 +2371,16 @@ async fn merge_entity_inner(
                     ..Default::default()
                 },
             )?;
+            apply_common_observed_at(&mut local_frag, observed_at);
             let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-                merge_into(doc, &local_frag, &ts);
+                if !crate::attrs::matches_type_param(doc, params, &parsed.ctx) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    )));
+                }
+                let mut frag = local_frag.clone();
+                apply_common_lang(doc, &mut frag, lang);
+                merge_into(doc, &frag, &ts);
                 Ok::<(), NgsiError>(())
             })?;
             parts.push(match res {
@@ -2192,6 +2395,8 @@ async fn merge_entity_inner(
             });
         }
         let ctx_url = crate::federation::ctx_link_url(headers, &parsed.ctx.source);
+        let seg = crate::federation::path_segment(id);
+        let fwd_q = type_selector_query(params);
         for reg in &regs {
             // 5.6.17.4: proxy modes without Merge Entity support are an
             // error of type Conflict; inclusive ones are not forwarded.
@@ -2208,8 +2413,8 @@ async fn merge_entity_inner(
                 crate::federation::forward_part(
                     st,
                     reqwest::Method::PATCH,
-                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
-                    &[],
+                    format!("{}/ngsi-ld/v1/entities/{seg}", reg.endpoint),
+                    &fwd_q,
                     headers,
                     &tenant,
                     reg,
@@ -2233,13 +2438,85 @@ async fn merge_entity_inner(
                 "entity {id} does not match the type selector"
             )));
         }
-        merge_into(doc, &fragment, &ts);
+        let mut frag = fragment.clone();
+        apply_common_lang(doc, &mut frag, lang);
+        merge_into(doc, &frag, &ts);
         Ok::<(), NgsiError>(())
     })?;
     match res {
         None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
         Some(Err(e)) => Err(e.into()),
         Some(Ok(())) => Ok(no_content(&tenant)),
+    }
+}
+
+/// 5.6.17.3: "An optional parameter indicating a common observedAt timestamp
+/// to use across merged Attributes." It applies to the Attribute instances of
+/// the Fragment that do not carry an observedAt of their own; a deletion
+/// instance (5.5.12 NGSI-LD Null) removes the Attribute and takes none.
+fn apply_common_observed_at(fragment: &mut Value, observed_at: Option<&str>) {
+    let (Some(ts), Some(obj)) = (observed_at, fragment.as_object_mut()) else {
+        return;
+    };
+    for (k, v) in obj.iter_mut() {
+        if is_meta(k) {
+            continue;
+        }
+        let Some(instances) = v.as_array_mut() else {
+            continue;
+        };
+        for inst in instances {
+            if antares_jsonld::is_deletion_instance(inst) {
+                continue;
+            }
+            if let Some(o) = inst.as_object_mut() {
+                o.entry("observedAt".to_owned())
+                    .or_insert_with(|| Value::String(ts.to_owned()));
+            }
+        }
+    }
+}
+
+/// 5.6.17.4: "If a common language tag is defined and a LanguageProperty
+/// Attribute to be merged is represented as a string, the pre-existing
+/// languageMap JSON object shall be preserved. The string value shall only
+/// replace the value associated to the language tag key found within the
+/// languageMap." The string instance is rewritten into a one-key languageMap
+/// patch, which 5.5.12 then merges into the stored map key by key.
+fn apply_common_lang(target: &Value, fragment: &mut Value, lang: Option<&str>) {
+    let (Some(lang), Some(frag)) = (lang, fragment.as_object_mut()) else {
+        return;
+    };
+    for (k, v) in frag.iter_mut() {
+        if is_meta(k) {
+            continue;
+        }
+        let pre_existing_langmap = target
+            .get(k)
+            .and_then(Value::as_array)
+            .is_some_and(|insts| insts.iter().any(|i| i.get("languageMap").is_some()));
+        if !pre_existing_langmap {
+            continue;
+        }
+        let Some(instances) = v.as_array_mut() else {
+            continue;
+        };
+        for inst in instances {
+            if antares_jsonld::is_deletion_instance(inst) {
+                continue;
+            }
+            let Some(o) = inst.as_object_mut() else {
+                continue;
+            };
+            let Some(s) = o.get("value").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            o.remove("value");
+            o.insert("type".into(), Value::String("LanguageProperty".into()));
+            let mut map = Map::new();
+            map.insert(lang.to_owned(), Value::String(s));
+            o.insert("languageMap".into(), Value::Object(map));
+        }
     }
 }
 
@@ -2423,7 +2700,7 @@ pub async fn replace_entity(
             .value
             .as_object()
             .ok_or_else(|| NgsiError::BadRequestData("entity must be a JSON object".into()))?;
-        let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
+        let expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
         if expanded["id"].as_str() != Some(id.as_str()) {
             return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());
         }
@@ -2457,6 +2734,8 @@ pub async fn replace_entity(
             }
         }
         let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);
+        let seg = crate::federation::path_segment(&id);
+        let fwd_q = type_selector_query(&params);
         for reg in &regs {
             // 5.6.18.4: proxy modes without Replace Entity support are an
             // error of type Conflict; inclusive ones are not forwarded.
@@ -2473,8 +2752,8 @@ pub async fn replace_entity(
                 crate::federation::forward_part(
                     &st,
                     reqwest::Method::PUT,
-                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
-                    &[],
+                    format!("{}/ngsi-ld/v1/entities/{seg}", reg.endpoint),
+                    &fwd_q,
                     &headers,
                     &tenant,
                     reg,
@@ -2484,7 +2763,6 @@ pub async fn replace_entity(
                 .await,
             );
         }
-        let _ = expanded.take();
         Ok(crate::federation::combine(
             parts,
             no_content(&tenant),
@@ -3413,13 +3691,23 @@ mod clause_4_23 {
         assert_eq!(ids(&docs), vec!["urn:far", "urn:mid", "urn:near"]);
         // dist without orderFrom is a violation
         assert!(order_entities(&mut docs, "location;dist-asc", &params(&[]), &ctx).is_err());
-        // non-GeoProperty entities sort after the geo-ranked ones
+        // 4.23.2: under a distance ordering the GeoProperties rank first by
+        // distance, and the non-GeoProperties after them BY VALUE — so the
+        // ordering member has to be the same (core) one the geo entities use,
+        // and there have to be two of them for their own order to mean
+        // anything.
+        let plain = |id: &str, v: &str| {
+            json!({"id": id, "type": ["T"],
+                "https://uri.etsi.org/ngsi-ld/location": [
+                    {"type": "Property", "value": v}]})
+        };
         let mut mixed = vec![
-            ent("urn:plain", "location", json!("not-geo")),
+            plain("urn:plain-z", "zzz"),
+            plain("urn:plain-a", "aaa"),
             geo("urn:g", 8.0, 40.0),
         ];
         order_entities(&mut mixed, "location;dist-asc", &p, &ctx).expect("order");
-        assert_eq!(ids(&mixed), vec!["urn:g", "urn:plain"]);
+        assert_eq!(ids(&mixed), vec!["urn:g", "urn:plain-a", "urn:plain-z"]);
     }
 
     /// 4.23.3 EXAMPLE 4: a trailing [path] addresses a compound-value
@@ -3679,5 +3967,438 @@ mod clause_4_5_23_bounds {
             MAX_JOIN_LOOKUPS,
             "no more Linked Entities than the budget are resolved"
         );
+    }
+}
+
+/// 5.6.6.4 / 5.6.17.4 / 5.6.18.4 / 5.6.21.4: "matching input data is
+/// forwarded to the Registration endpoint" — the forward may narrow what the
+/// peer does, never widen it.
+#[cfg(test)]
+mod forwarded_input_data {
+    use super::*;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 5.6.21.3 lists the type selector, the id list, the id pattern, the
+    /// restrictive and exclusionary Attribute-name lists, the query, the
+    /// geoquery, the Scope query and the context source filter as Purge
+    /// input data. Every one of them restricts the purge, so every one of
+    /// them travels.
+    #[test]
+    fn purge_forward_carries_every_restriction_the_client_issued() {
+        let p = params(&[
+            ("type", "Vehicle"),
+            ("id", "urn:ngsi-ld:Vehicle:A1"),
+            ("idPattern", "^urn:ngsi-ld:Vehicle:"),
+            ("attrs", "speed"),
+            ("q", "speed>5"),
+            ("georel", "near;maxDistance==100"),
+            ("geometry", "Point"),
+            ("coordinates", "[0,0]"),
+            ("geoproperty", "location"),
+            ("scopeQ", "/x"),
+            ("csf", "name==p"),
+            ("keep", "name"),
+            ("local", "false"),
+        ]);
+        let q = forwarded_purge_query(&p);
+        for k in [
+            "type",
+            "id",
+            "idPattern",
+            "attrs",
+            "q",
+            "georel",
+            "geometry",
+            "coordinates",
+            "geoproperty",
+            "scopeQ",
+            "csf",
+            "keep",
+        ] {
+            assert!(
+                q.iter().any(|(a, _)| a == k),
+                "{k} was dropped, so the peer executes a wider purge than the \
+                 client issued: {q:?}"
+            );
+        }
+        assert!(
+            !q.iter().any(|(k, _)| k == "local"),
+            "local scope is the reason a forward happens at all — it is not \
+             itself forwarded (5.5.13): {q:?}"
+        );
+        assert_eq!(q.len(), 12, "nothing else is invented: {q:?}");
+    }
+
+    /// The exclusionary list travels on its own too — `drop=` alone must not
+    /// reach the peer as a bare, entity-deleting purge.
+    #[test]
+    fn purge_forward_carries_drop_and_omits_absent_members() {
+        let q = forwarded_purge_query(&params(&[("type", "Vehicle"), ("drop", "speed")]));
+        assert!(
+            q.contains(&("drop".to_owned(), "speed".to_owned())),
+            "{q:?}"
+        );
+        assert_eq!(q.len(), 2, "absent parameters are not forwarded: {q:?}");
+    }
+
+    /// 5.6.6.3 / 5.6.17.3 / 5.6.18.3: the selector of Entity types is input
+    /// data of Delete, Merge and Replace Entity. A registration may cover
+    /// several types, so the peer needs the selector to reach the same
+    /// verdict this broker reached locally.
+    #[test]
+    fn write_forwards_carry_the_type_selector() {
+        assert_eq!(
+            type_selector_query(&params(&[("type", "Vehicle"), ("local", "false")])),
+            vec![("type".to_owned(), "Vehicle".to_owned())]
+        );
+        assert!(
+            type_selector_query(&params(&[("local", "false")])).is_empty(),
+            "no selector, nothing to forward"
+        );
+    }
+
+    /// 5.7.2.4 applies q/geoquery/Scope query/Attributes only after remote
+    /// parts have been aggregated, and 4.23 orders by the value of a member —
+    /// neither survives a store-side projection of that member.
+    #[test]
+    fn projection_is_pushed_down_only_when_the_store_answer_is_final() {
+        let plain = params(&[("type", "T"), ("pick", "name")]);
+        assert!(
+            proj_pushdown_allowed(true, &plain),
+            "a purely local query keeps the pushdown"
+        );
+        assert!(
+            !proj_pushdown_allowed(false, &plain),
+            "federated candidates mean the filters run again after the merge"
+        );
+        assert!(
+            !proj_pushdown_allowed(true, &params(&[("attrs", "name"), ("orderBy", "age")])),
+            "the ordering member must survive to be compared"
+        );
+    }
+}
+
+/// 5.6.1 Create Entity and 5.6.21 Purge Entities, end to end over the store.
+#[cfg(test)]
+mod clause_5_6_1_and_5_6_21 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    /// 5.6.1.5: the output is "the URI of the created Entity", returned in
+    /// the Location header. An id is one path segment (RFC 3986 clause 3.3),
+    /// so a `#` in it must not be able to end the segment.
+    #[tokio::test]
+    async fn location_header_percent_encodes_the_entity_id() {
+        let app = crate::router(AppState::new("antares-test".into()));
+        let id = "urn:ngsi-ld:Vehicle:A#4567";
+        let payload = json!({"id": id, "type": "Vehicle"}).to_string();
+        let resp = app
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", payload.len().to_string())
+                    .body(Body::from(payload))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let loc = resp
+            .headers()
+            .get("Location")
+            .expect("Location header")
+            .to_str()
+            .expect("ascii");
+        assert_eq!(loc, "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:A%234567");
+        assert!(
+            !loc.contains('#'),
+            "a raw # truncates the URL at the fragment and addresses another \
+             resource: {loc}"
+        );
+    }
+
+    fn seed(st: &AppState, tenant: &TenantId, n: usize) {
+        for i in 0..n {
+            let id = format!("urn:ngsi-ld:Purge:{i:05}");
+            let doc = json!({"id": &id,
+                "type": ["https://uri.etsi.org/ngsi-ld/default-context/Purge"],
+                "https://uri.etsi.org/ngsi-ld/default-context/name":
+                    [{"type": "Property", "value": "n"}],
+                "https://uri.etsi.org/ngsi-ld/default-context/speed":
+                    [{"type": "Property", "value": 1}]});
+            st.store
+                .upsert(tenant, Kind::Entity, &id, doc)
+                .expect("seed");
+        }
+    }
+
+    fn purge_params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 5.6.21.4: the implementation "shall delete all Entities that can be
+    /// found locally using retrieved list of Entity ids" — all of them, not
+    /// one page of them, however many rounds that takes.
+    #[tokio::test]
+    async fn purge_deletes_every_match_across_page_boundaries() {
+        let st = AppState::new("antares-test".into());
+        let tenant = TenantId::default();
+        let n = PURGE_CHUNK * 2 + 7;
+        seed(&st, &tenant, n);
+        let resp = purge_inner(&st, &purge_params(&[("type", "Purge")]), &HeaderMap::new())
+            .await
+            .expect("purge");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(
+            st.store
+                .list(&tenant, Kind::Entity)
+                .expect("list")
+                .is_empty(),
+            "entities survived the purge"
+        );
+    }
+
+    /// 5.6.21.4: with an exclusionary list the implementation "shall delete
+    /// all but the given set of Attributes" — the Entities themselves
+    /// survive, again for the whole match set and not just its first page.
+    #[tokio::test]
+    async fn purge_with_keep_prunes_every_match_and_deletes_no_entity() {
+        let st = AppState::new("antares-test".into());
+        let tenant = TenantId::default();
+        let n = PURGE_CHUNK * 2 + 7;
+        seed(&st, &tenant, n);
+        let resp = purge_inner(
+            &st,
+            &purge_params(&[("type", "Purge"), ("keep", "name")]),
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("purge");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let left = st.store.list(&tenant, Kind::Entity).expect("list");
+        assert_eq!(left.len(), n, "keep= prunes attributes, not entities");
+        for doc in &left {
+            assert!(
+                doc.get("https://uri.etsi.org/ngsi-ld/default-context/name")
+                    .is_some(),
+                "the kept attribute is still there: {doc}"
+            );
+            assert!(
+                doc.get("https://uri.etsi.org/ngsi-ld/default-context/speed")
+                    .is_none(),
+                "every other attribute is gone: {doc}"
+            );
+        }
+    }
+}
+
+/// 5.6.17 Merge Entity and the Linked Entity Retrieval parameters of
+/// Table 6.4.3.2-1, over the HTTP surface.
+#[cfg(test)]
+mod clause_5_6_17_and_6_4_3_2 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn app() -> axum::Router {
+        crate::router(AppState::new("antares-test".into()))
+    }
+
+    async fn create(app: &axum::Router, body: Value) {
+        let payload = body.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", payload.len().to_string())
+                    .body(Body::from(payload))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED, "create failed");
+    }
+
+    async fn patch(app: &axum::Router, uri: &str, body: Value) -> StatusCode {
+        let payload = body.to_string();
+        app.clone()
+            .oneshot(
+                Request::patch(uri)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", payload.len().to_string())
+                    .body(Body::from(payload))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp")
+            .status()
+    }
+
+    async fn get(app: &axum::Router, uri: &str) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// 5.6.17.3: "An optional parameter indicating a common observedAt
+    /// timestamp to use across merged Attributes." It is the timestamp of
+    /// every Attribute this merge touches; an Attribute the Fragment gives an
+    /// observedAt of its own keeps that one, and an Attribute the Fragment
+    /// does not mention is not a merged Attribute and is left alone.
+    #[tokio::test]
+    async fn merge_applies_the_common_observed_at() {
+        let app = app();
+        let id = "urn:ngsi-ld:Obs:1";
+        create(
+            &app,
+            json!({"id": id, "type": "T",
+                   "a": {"type": "Property", "value": 1},
+                   "b": {"type": "Property", "value": 1},
+                   "untouched": {"type": "Property", "value": 1,
+                                 "observedAt": "2020-01-01T00:00:00Z"}}),
+        )
+        .await;
+        let uri = format!("/ngsi-ld/v1/entities/{id}?observedAt=2026-08-17T10:00:00Z");
+        assert_eq!(
+            patch(
+                &app,
+                &uri,
+                json!({"a": {"value": 2},
+                       "b": {"value": 2, "observedAt": "2021-01-01T00:00:00Z"}}),
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let body = get(&app, &format!("/ngsi-ld/v1/entities/{id}")).await;
+        assert_eq!(
+            body["a"]["observedAt"], "2026-08-17T10:00:00Z",
+            "the merged Attribute takes the common timestamp: {body}"
+        );
+        assert_eq!(
+            body["b"]["observedAt"], "2021-01-01T00:00:00Z",
+            "a Fragment instance carrying its own observedAt keeps it: {body}"
+        );
+        assert_eq!(
+            body["untouched"]["observedAt"], "2020-01-01T00:00:00Z",
+            "an Attribute this merge does not touch is not restamped: {body}"
+        );
+    }
+
+    /// 4.8 makes observedAt a DateTime, so a value that is not one cannot be
+    /// stamped across the merged Attributes.
+    #[tokio::test]
+    async fn merge_rejects_an_observed_at_that_is_not_a_datetime() {
+        let app = app();
+        let id = "urn:ngsi-ld:Obs:2";
+        create(&app, json!({"id": id, "type": "T"})).await;
+        assert_eq!(
+            patch(
+                &app,
+                &format!("/ngsi-ld/v1/entities/{id}?observedAt=yesterday"),
+                json!({"a": {"type": "Property", "value": 1}}),
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// 5.6.17.4: "If a common language tag is defined and a LanguageProperty
+    /// Attribute to be merged is represented as a string, the pre-existing
+    /// languageMap JSON object shall be preserved. The string value shall
+    /// only replace the value associated to the language tag key found
+    /// within the languageMap."
+    #[tokio::test]
+    async fn merge_with_a_common_lang_replaces_only_that_language_key() {
+        let app = app();
+        let id = "urn:ngsi-ld:Lang:1";
+        create(
+            &app,
+            json!({"id": id, "type": "T",
+                   "greeting": {"type": "LanguageProperty",
+                                "languageMap": {"en": "hello", "es": "adios"}}}),
+        )
+        .await;
+        assert_eq!(
+            patch(
+                &app,
+                &format!("/ngsi-ld/v1/entities/{id}?lang=es"),
+                json!({"greeting": "hola"}),
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let body = get(&app, &format!("/ngsi-ld/v1/entities/{id}")).await;
+        assert_eq!(
+            body["greeting"]["languageMap"],
+            json!({"en": "hello", "es": "hola"}),
+            "the pre-existing languageMap survives, only the tagged key moves: {body}"
+        );
+        assert!(
+            body["greeting"].get("value").is_none(),
+            "the string never lands as a plain Property value: {body}"
+        );
+        assert_eq!(body["greeting"]["type"], "LanguageProperty", "{body}");
+    }
+
+    /// Table 6.4.3.2-1 containedBy: "List of entity ids which have previously
+    /// been encountered whilst retrieving the Entity Graph" — 4.5.23.1 keeps
+    /// the walk from retrieving them a second time.
+    #[tokio::test]
+    async fn contained_by_ids_are_not_retrieved_again() {
+        let app = app();
+        let (root, held, fresh) = (
+            "urn:ngsi-ld:Graph:root",
+            "urn:ngsi-ld:Graph:held",
+            "urn:ngsi-ld:Graph:fresh",
+        );
+        create(&app, json!({"id": held, "type": "G"})).await;
+        create(&app, json!({"id": fresh, "type": "G"})).await;
+        create(
+            &app,
+            json!({"id": root, "type": "G",
+                   "toHeld": {"type": "Relationship", "object": held},
+                   "toFresh": {"type": "Relationship", "object": fresh}}),
+        )
+        .await;
+
+        let body = get(
+            &app,
+            &format!("/ngsi-ld/v1/entities/{root}?join=flat&joinLevel=2&containedBy={held}"),
+        )
+        .await;
+        let arr = match body {
+            Value::Array(a) => a,
+            other => vec![other],
+        };
+        let ids: Vec<&str> = arr.iter().filter_map(|e| e["id"].as_str()).collect();
+        assert!(
+            !ids.contains(&held),
+            "an id the client already holds is not retrieved again: {ids:?}"
+        );
+        assert!(
+            ids.contains(&fresh),
+            "the Linked Entity it does not hold is still returned: {ids:?}"
+        );
+        assert!(ids.contains(&root), "the Linking Entity is there: {ids:?}");
     }
 }
