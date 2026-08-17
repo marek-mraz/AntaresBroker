@@ -97,6 +97,18 @@ impl ChangeEvent {
                 version: self.version.saturating_sub(1),
             });
         }
+        // The ENVELOPE must fit too, or the publish is refused by the bus and
+        // the outbox drain retries the same row forever. changed_attrs is the
+        // one member that scales with the entity's width, and no consumer
+        // reads it off the wire (process_change re-derives the diff from the
+        // payloads); types stay — the publish subject is built from them.
+        if serde_json::to_vec(&self)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX)
+            > limit
+        {
+            self.changed_attrs = Vec::new();
+        }
         self
     }
 }
@@ -189,6 +201,37 @@ mod tests {
         assert_eq!(back.version, 7);
         assert_eq!(back.op, ChangeOp::Create);
         assert_eq!(back.incarnation, "2026-08-05T00:00:00Z");
+    }
+
+    #[test]
+    fn claim_check_bounds_the_envelope_not_only_the_bodies() {
+        let mut e = event(9);
+        e.payload = Some(serde_json::json!({"small": true}));
+        // the envelope itself outgrows the limit: thousands of attribute
+        // IRIs from one wide entity, with both bodies tiny
+        e.changed_attrs = (0..20_000)
+            .map(|i| format!("https://example.org/ngsi-ld/attributes/generated/a{i:05}"))
+            .collect();
+        let limit = 256 * 1024;
+        let checked = e.claim_check(limit);
+        let wire = serde_json::to_vec(&checked).expect("serialize");
+        assert!(
+            wire.len() <= limit,
+            "the published message must fit the bus limit, got {} bytes",
+            wire.len()
+        );
+        assert!(
+            checked.payload.is_some(),
+            "a small body is not the thing to strip for an oversized envelope"
+        );
+        assert!(
+            checked.changed_attrs.is_empty(),
+            "changed_attrs is re-derived by the consumer from the payloads, so it goes first"
+        );
+        assert!(
+            !checked.types.is_empty(),
+            "types must survive — the publish subject is built from them"
+        );
     }
 
     #[test]
