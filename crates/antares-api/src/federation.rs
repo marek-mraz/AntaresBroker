@@ -10,6 +10,7 @@ use crate::negotiate::*;
 use crate::state::AppState;
 use antares_jsonld::Context;
 use antares_model::TenantId;
+#[cfg(test)]
 use antares_sql::store::Kind;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -220,7 +221,7 @@ impl FedReg {
             || self
                 .ent_patterns
                 .iter()
-                .any(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()))
+                .any(|p| crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some()))
     }
     /// Does this registration cover the given expanded attribute IRI?
     pub fn covers_attr(&self, iri: &str) -> bool {
@@ -521,14 +522,39 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 }
 
 /// The registration documents of one tenant: the ONE compiled mirror when
-/// wired (bus=nats), the store otherwise.
-fn reg_docs(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+/// wired (bus=nats), the store otherwise — narrowed there by the ids and
+/// Entity Types this operation names, so a broker holding a large
+/// registration set does not read all of it per distributed request.
+///
+/// The narrowing may only ever drop registrations [`reg_candidate`] would
+/// reject anyway; it is a prefilter, never the decision. So the type
+/// dimension is dropped whenever a member is a 4.17 Entity Type Selection
+/// (`A|B`, `(A;B)`, `*`) rather than a single type: the index compares types
+/// by equality and cannot evaluate a selection, and a narrowing that
+/// mis-decides would silently lose a Context Source. A plain term is
+/// expanded first — the spec carries the parameter as the client wrote it
+/// (`Vehicle`), the index stores what [`reg_candidate`] compares: the IRI.
+fn reg_docs(
+    st: &AppState,
+    tenant: &TenantId,
+    spec: &crate::csource::CsrSpec,
+    ctx: &Context,
+) -> Vec<Value> {
     match &st.reg_mirror {
         Some(m) => m.docs(tenant.as_str()),
-        None => st
-            .store
-            .list(tenant, Kind::Registration)
-            .unwrap_or_default(),
+        None => {
+            let types: Option<Vec<String>> = spec
+                .types
+                .as_ref()
+                .filter(|ts| {
+                    !ts.iter()
+                        .any(|t| t.contains([',', ';', '|', '(', ')', '*']))
+                })
+                .map(|ts| ts.iter().map(|t| ctx.expand_key(t)).collect());
+            st.store
+                .matching_registrations(tenant, spec.ids.as_deref(), types.as_deref())
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -625,7 +651,7 @@ pub fn matching_regs(
         return Vec::new();
     }
     let seen = via_tokens(headers);
-    reg_docs(st, tenant)
+    reg_docs(st, tenant, spec, ctx)
         .iter()
         .filter_map(|doc| {
             let infos = reg_candidate(doc, spec, ctx, &seen)?;
@@ -1677,7 +1703,7 @@ pub fn would_federate(
     // the verdict only — no forwarding set is compiled for it
     let spec = query_spec(ctx, params);
     let seen = via_tokens(headers);
-    reg_docs(st, tenant)
+    reg_docs(st, tenant, &spec, ctx)
         .iter()
         .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some())
 }

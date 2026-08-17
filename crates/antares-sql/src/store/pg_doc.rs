@@ -674,6 +674,84 @@ impl PgDocStore {
         })
     }
 
+    /// 5.12: the registrations that may take part in an operation on these
+    /// entity ids / types, read through the `csource_index` rows every
+    /// registration write maintains — the alternative is listing every
+    /// registration document of the tenant and scanning it in Rust, which at
+    /// the 100 000-registrations target is a full table read per federated
+    /// request.
+    ///
+    /// The narrowing is one-directional, exactly like the entity pushdown: SQL
+    /// may only REMOVE rows the caller's matcher would reject anyway, and the
+    /// matcher stays the arbiter of every other 5.12 condition (csf, geo,
+    /// intervals, datasetId, the Via chain, the idPattern regex). Hence an
+    /// index dimension left NULL is unconstrained and always survives, and an
+    /// `idPattern` row survives every id query. `None` means "do not narrow on
+    /// that dimension". A registration whose explosion hit `MAX_INDEX_ROWS`
+    /// carries only the rows that fit — the same truncation the index write
+    /// already accepts.
+    ///
+    /// `types` must be EXPANDED plain type IRIs, because that is what the
+    /// registration write stored (each EntityInfo `type` goes through
+    /// `expand_key` before the index row is built). A term, or a 4.17 Entity
+    /// Type Selection expression, matches no stored value and would narrow away
+    /// registrations that do match — a caller holding either passes `None`.
+    ///
+    /// Bounded like every other read (5.5.6): a tenant whose candidate set
+    /// reaches the ceiling is refused rather than served a silent prefix.
+    pub fn matching_registrations(
+        &self,
+        tenant: &TenantId,
+        ids: Option<&[String]>,
+        types: Option<&[String]>,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        // An absent dimension is OMITTED from the statement rather than bound
+        // as NULL and escaped in SQL: `$2 IS NULL OR …` is unfoldable in a
+        // GENERIC plan, and Postgres switches a repeatedly executed prepared
+        // statement to one — measured as a sequential scan of csource_index,
+        // exactly the read this function exists to avoid.
+        let mut wheres = String::new();
+        let mut n = 1; // $1 = tenant_id
+        if types.is_some() {
+            n += 1;
+            wheres.push_str(&format!(
+                " AND (x.entity_type IS NULL OR x.entity_type = ANY(${n}))"
+            ));
+        }
+        if ids.is_some() {
+            n += 1;
+            wheres.push_str(&format!(
+                " AND (x.entity_id IS NULL OR x.id_pattern IS NOT NULL \
+                   OR x.entity_id = ANY(${n}))"
+            ));
+        }
+        // literals from this function plus `$n` placeholders — no caller text
+        let sql = format!(
+            "SELECT DISTINCT r.id, r.registration
+               FROM csource_registrations r
+               JOIN csource_index x
+                 ON x.tenant_id = r.tenant_id AND x.registration_id = r.id
+              WHERE r.tenant_id = $1{wheres}
+              ORDER BY r.id LIMIT ${}",
+            n + 1
+        );
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::pg::set_tenant(&mut tx, tenant).await?;
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(tenant.as_str());
+            if let Some(types) = types {
+                q = q.bind(types);
+            }
+            if let Some(ids) = ids {
+                q = q.bind(ids);
+            }
+            let rows = q.bind(MAX_UNDECIDED_ROWS).fetch_all(&mut *tx).await?;
+            tx.commit().await?;
+            check_ceiling(false, rows.len(), MAX_UNDECIDED_ROWS)?;
+            Ok(rows.into_iter().map(|r| r.get::<Value, _>(1)).collect())
+        })
+    }
+
     /// Bookkeeping columns straight from the row (test hook: rows are truth).
     pub fn status_row(
         &self,
@@ -703,18 +781,40 @@ impl PgDocStore {
     // tenant-authored kinds (Hosted, ImplicitlyCreated, 5.13.1) carry their
     // owning tenant in the stored document's "owner" member, enforced where
     // they are served, listed and deleted (5.13).
+    ///
+    /// 5.13.1: "Implementations shall periodically invalidate the 'Cached'
+    /// @contexts." A Cached row is written per distinct external URL a request
+    /// references — client-controlled input — and the broker warms every
+    /// stored row at startup, so an insert that pushes the cache past its
+    /// ceiling evicts the oldest Cached rows. `Hosted` and
+    /// `ImplicitlyCreated` rows are resources the broker serves on demand
+    /// (5.13.2, 5.13.4), not cache, and are never evicted.
     pub fn context_put(&self, id: &str, doc: &Value, kind: &str) -> Result<(), sqlx::Error> {
         wait(async {
-            sqlx::query(
+            // `xmax` is zero on a fresh row and the locking transaction's id
+            // on the conflict path: the eviction then runs only when the table
+            // actually grew, never on a usage bump rewriting a row in place.
+            let inserted: bool = sqlx::query_scalar(
                 "INSERT INTO jsonld_contexts (id, body, kind) VALUES ($1, $2, $3)
-                 ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, kind = EXCLUDED.kind",
+                 ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, kind = EXCLUDED.kind
+                 RETURNING xmax::text = '0'",
             )
             .bind(id)
             .bind(doc)
             .bind(kind)
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
+            .fetch_one(&self.pool)
+            .await?;
+            if inserted && kind == "Cached" {
+                sqlx::query(
+                    "DELETE FROM jsonld_contexts WHERE id IN (
+                       SELECT id FROM jsonld_contexts WHERE kind = 'Cached'
+                        ORDER BY created_at DESC, id DESC OFFSET $1)",
+                )
+                .bind(crate::store::MAX_CACHED_CONTEXTS as i64)
+                .execute(&self.pool)
+                .await?;
+            }
+            Ok(())
         })
     }
 

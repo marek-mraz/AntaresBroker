@@ -378,3 +378,103 @@ async fn query_pushdown_narrows_without_dropping_matches() {
         ["urn:ngsi-ld:Room:2"]
     );
 }
+
+/// 5.5.6: "When a query operation is producing so many results that can
+/// potentially exhaust client or server resources, or it can be just
+/// impractical to be managed, implementations shall raise an error of type
+/// TooManyResults. The threshold conditions used as criteria to raise such
+/// error is up to each implementation."
+///
+/// A `q=` shape the compiler declines leaves the request undecided, so no
+/// caller page can be pushed and the statement is bounded by the store's own
+/// safety LIMIT. Reaching it means the answer was cut at a bound nobody
+/// chose: refused, never served as a silent prefix. The same oversized match
+/// set stays perfectly pageable through a decided query — the ceiling bounds
+/// what one statement materializes, it does not cap the tenant.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let t = TenantId::new("pgceiling").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let clean = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("DELETE FROM entities WHERE tenant_id = 'pgceiling'")
+                .execute(&pool)
+                .await
+                .expect("clean");
+        }
+    };
+    clean().await;
+    let ceiling = antares_sql::store::pg_entity::MAX_UNDECIDED_ROWS;
+    // One statement, ceiling+1 rows: one more than the safety LIMIT can ever
+    // return, so the cut is provable rather than incidental.
+    sqlx::query(
+        "INSERT INTO entities (tenant_id, id, entity, types, created_at, modified_at)
+         SELECT 'pgceiling', 'urn:ngsi-ld:Ceil:' || g,
+                jsonb_build_object('id', 'urn:ngsi-ld:Ceil:' || g, 'type', $1::text),
+                ARRAY[$1::text], now(), now()
+           FROM generate_series(1, $2::bigint) g",
+    )
+    .bind(ex("Ceil"))
+    .bind(ceiling + 1)
+    .execute(&pool)
+    .await
+    .expect("seed");
+
+    let s = PgEntityStore::new(pool.clone());
+    // a dotted path is one of the shapes compile_q declines (see the pushdown
+    // test above) — the request is undecided and therefore unpaged
+    let ast = antares_ql::parse_q("address.city==\"Bonn\"").expect("parse");
+    let err = match s.query(
+        &t,
+        &antares_sql::store::pg_entity::EntityFilter {
+            q: Some(&ast),
+            expand: &ex,
+            ..Default::default()
+        },
+    ) {
+        Ok(out) => panic!(
+            "a cut result set must be refused, got {} rows (decided={}, paged={})",
+            out.rows.len(),
+            out.decided,
+            out.paged
+        ),
+        Err(e) => e,
+    };
+    let ngsi =
+        antares_sql::store::pg_entity::ngsi_error(&err).expect("a spec error, not a driver error");
+    assert_eq!(ngsi.kind(), "TooManyResults");
+    assert_eq!(
+        ngsi.status(),
+        403,
+        "Table 6.3.2-1 status for TooManyResults"
+    );
+
+    // and the negative: the same oversized set answers a DECIDED paged query
+    // exactly — the ceiling refuses statements, not tenants
+    let groups = vec![vec![ex("Ceil")]];
+    let out = s
+        .query(
+            &t,
+            &antares_sql::store::pg_entity::EntityFilter {
+                types: Some(&groups),
+                page: Some(antares_sql::store::pg_entity::Page {
+                    offset: 0,
+                    limit: 5,
+                }),
+                expand: &ex,
+                ..Default::default()
+            },
+        )
+        .expect("a paged query over the same set is answerable");
+    assert_eq!(out.rows.len(), 5, "exactly the requested page");
+    assert!(out.paged && out.decided);
+    assert_eq!(
+        out.total,
+        Some(ceiling + 1),
+        "pre-LIMIT total, past the ceiling"
+    );
+    clean().await;
+}

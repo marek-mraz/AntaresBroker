@@ -74,9 +74,17 @@ async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
     s.delete(&t, DocKind::Subscription, id).expect("cleanup");
 }
 
+/// `jsonld_contexts` is ONE cross-tenant keyspace and the Cached ceiling
+/// evicts across the whole table, so the two tests that write rows there
+/// cannot run concurrently: the capping test would evict the roundtrip test's
+/// row out from under it.
+static CONTEXT_ROWS: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 #[tokio::test(flavor = "multi_thread")]
 async fn jsonld_contexts_cross_tenant_roundtrip() {
     let url = require_db!();
+    let _rows = CONTEXT_ROWS.lock().await;
     let pool = pg::connect(&url, 5).await.expect("connect");
     let s = PgDocStore::new(pool);
     let id = "https://example.org/ctx/test.jsonld";
@@ -145,6 +153,224 @@ async fn mutate_never_resurrects_a_deleted_row() {
             .is_none(),
         "row must be gone after mutate+delete in any interleaving"
     );
+}
+
+/// 5.13.1: "@contexts implicitly and automatically fetched by the broker from
+/// external URLs during normal NGSI-LD operations are flagged as 'Cached' …
+/// Implementations shall periodically invalidate the 'Cached' @contexts."
+/// One row is written per distinct URL a client references, so without a
+/// ceiling a loop over fresh URLs grows the table forever — and the broker
+/// warms every stored row at startup. Eviction is oldest-first and applies to
+/// Cached rows ONLY: "Hosted" entries are the ones users explicitly added
+/// (5.13.2/5.13.3) and losing one would delete client-owned data.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
+    let url = require_db!();
+    let _rows = CONTEXT_ROWS.lock().await;
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgDocStore::new(pool.clone());
+    let cap = antares_sql::store::MAX_CACHED_CONTEXTS as i64;
+    // the ceiling counts the whole (cross-tenant) table — start from empty so
+    // the counts below are about this test's rows only
+    sqlx::query("DELETE FROM jsonld_contexts")
+        .execute(&pool)
+        .await
+        .expect("clean");
+    // exactly `cap` Cached rows, ascending age: g = 1 is the oldest
+    sqlx::query(
+        "INSERT INTO jsonld_contexts (id, body, kind, created_at)
+         SELECT 'ctxcap:' || g, '{}'::jsonb, 'Cached',
+                now() - make_interval(secs => (100000 - g)::int)
+           FROM generate_series(1, $1::bigint) g",
+    )
+    .bind(cap)
+    .execute(&pool)
+    .await
+    .expect("seed cached");
+    // …and one Hosted row OLDER than every Cached one: age alone must not
+    // decide, the kind does
+    sqlx::query(
+        "INSERT INTO jsonld_contexts (id, body, kind, created_at)
+         VALUES ('ctxcap:hosted', '{}'::jsonb, 'Hosted', now() - interval '200000 seconds')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed hosted");
+
+    s.context_put("ctxcap:new", &json!({"@context": {}}), "Cached")
+        .expect("put one over the ceiling");
+    let count = |kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jsonld_contexts WHERE kind = $1")
+                .bind(kind)
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+        }
+    };
+    assert_eq!(
+        count("Cached").await,
+        cap,
+        "the ceiling holds after the put"
+    );
+    assert!(
+        s.context_get("ctxcap:new").expect("get").is_some(),
+        "the new entry is the one kept"
+    );
+    assert!(
+        s.context_get("ctxcap:1").expect("get").is_none(),
+        "the oldest Cached entry is the one evicted"
+    );
+    assert!(
+        s.context_get("ctxcap:2").expect("get").is_some(),
+        "eviction stops at the ceiling — the second-oldest stays"
+    );
+    assert!(
+        s.context_get("ctxcap:hosted").expect("get").is_some(),
+        "a Hosted entry is tenant-authored and must never be evicted"
+    );
+
+    // and a Hosted put never triggers eviction of anything
+    s.context_put("ctxcap:hosted2", &json!({"@context": {}}), "Hosted")
+        .expect("put hosted");
+    assert_eq!(count("Hosted").await, 2, "both Hosted entries stay");
+    assert_eq!(count("Cached").await, cap, "a Hosted put evicts nothing");
+
+    sqlx::query("DELETE FROM jsonld_contexts")
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// 5.12 registration matching: the store narrows the candidate set with the
+/// `csource_index` rows the registration writes, instead of listing every
+/// registration document for the tenant. The narrowing is one-directional —
+/// only rows the Rust matcher would reject anyway are removed, so an index
+/// dimension left NULL (unconstrained) always survives, and an `idPattern`
+/// row survives every id query because only the matcher owns the regex.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_12_matching_registrations_narrows_by_type_and_id() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgcsmatch").expect("tenant");
+    let other = TenantId::new("pgcsmatch_other").expect("tenant");
+    for t in [&t, &other] {
+        pg::ensure_tenant(&pool, t).await.expect("tenant row");
+    }
+    let s = PgDocStore::new(pool.clone());
+    let reg = |id: &str, info: serde_json::Value| {
+        json!({"id": id, "type": "ContextSourceRegistration",
+               "endpoint": "http://cs:9090", "information": [info]})
+    };
+    let seed = [
+        // type only
+        (
+            "urn:csr:m:vehicle",
+            json!({"entities": [{"type": "Vehicle"}]}),
+        ),
+        // explicit id + type
+        (
+            "urn:csr:m:room1",
+            json!({"entities": [{"id": "urn:e:room1", "type": "Room"}]}),
+        ),
+        // another explicit id, same type as the first
+        (
+            "urn:csr:m:vehicle9",
+            json!({"entities": [{"id": "urn:e:v9", "type": "Vehicle"}]}),
+        ),
+        // idPattern, no type
+        (
+            "urn:csr:m:pattern",
+            json!({"entities": [{"idPattern": "urn:e:.*"}]}),
+        ),
+        // attributes only: no entity dimension at all
+        ("urn:csr:m:attrs", json!({"propertyNames": ["speed"]})),
+    ];
+    for (id, info) in &seed {
+        let _ = s.delete(&t, DocKind::Registration, id);
+        s.upsert(&t, DocKind::Registration, id, &reg(id, info.clone()))
+            .expect("seed");
+    }
+    // a same-shaped registration in a DIFFERENT tenant must never surface
+    let foreign = "urn:csr:m:foreign";
+    let _ = s.delete(&other, DocKind::Registration, foreign);
+    s.upsert(
+        &other,
+        DocKind::Registration,
+        foreign,
+        &reg(foreign, json!({"entities": [{"type": "Vehicle"}]})),
+    )
+    .expect("seed foreign");
+
+    let ids_of = |ids: Option<Vec<String>>, types: Option<Vec<String>>| {
+        let mut got: Vec<String> = s
+            .matching_registrations(&t, ids.as_deref(), types.as_deref())
+            .expect("matching")
+            .iter()
+            .map(|d| d["id"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        got.sort();
+        got
+    };
+    let ty = |t: &str| Some(vec![t.to_owned()]);
+
+    // no narrowing at all: every registration of this tenant, and nothing else
+    assert_eq!(
+        ids_of(None, None),
+        [
+            "urn:csr:m:attrs",
+            "urn:csr:m:pattern",
+            "urn:csr:m:room1",
+            "urn:csr:m:vehicle",
+            "urn:csr:m:vehicle9"
+        ]
+    );
+
+    // by type: the Room registration drops out; the unconstrained ones stay
+    assert_eq!(
+        ids_of(None, ty("Vehicle")),
+        [
+            "urn:csr:m:attrs",
+            "urn:csr:m:pattern",
+            "urn:csr:m:vehicle",
+            "urn:csr:m:vehicle9"
+        ]
+    );
+    // a type nobody registered for keeps only the type-less registrations
+    assert_eq!(
+        ids_of(None, ty("Bridge")),
+        ["urn:csr:m:attrs", "urn:csr:m:pattern"]
+    );
+
+    // by id: a registration bound to a DIFFERENT explicit id drops out,
+    // the idPattern row survives (the regex is the matcher's business)
+    assert_eq!(
+        ids_of(Some(vec!["urn:e:room1".into()]), None),
+        [
+            "urn:csr:m:attrs",
+            "urn:csr:m:pattern",
+            "urn:csr:m:room1",
+            "urn:csr:m:vehicle"
+        ]
+    );
+
+    // both dimensions compose
+    assert_eq!(
+        ids_of(Some(vec!["urn:e:v9".into()]), ty("Vehicle")),
+        [
+            "urn:csr:m:attrs",
+            "urn:csr:m:pattern",
+            "urn:csr:m:vehicle",
+            "urn:csr:m:vehicle9"
+        ]
+    );
+
+    for (id, _) in &seed {
+        s.delete(&t, DocKind::Registration, id).expect("cleanup");
+    }
+    s.delete(&other, DocKind::Registration, foreign)
+        .expect("cleanup");
 }
 
 /// Registration writes rebuild csource_index in the same transaction;

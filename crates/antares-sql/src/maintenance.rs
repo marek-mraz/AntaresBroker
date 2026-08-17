@@ -15,11 +15,26 @@
 //! recovered rather than skipped: the rows are moved out of DEFAULT into a
 //! standalone table, which is then ATTACHed as the partition.
 //!
-//! The recovery belongs here and NOT at ingest: clamping or rejecting an
-//! `observedAt` outside a horizon would let the `observed_at` column disagree
-//! with the raw timestamp string in `data`, and
+//! The recovery belongs here and NOT at ingest, for two reasons. The first is
+//! internal: clamping an `observedAt` outside a horizon would let the
+//! `observed_at` column disagree with the raw timestamp string in `data`, and
 //! `compile::temporal::column_range_bound` may prune on that column only
-//! because it is a superset of the byte-exact text window (4.11).
+//! because it is a superset of the byte-exact text window (4.11). The second
+//! is normative: 4.8 defines `observedAt` as "the temporal Property at which a
+//! certain Property or Relationship became valid or was observed" and requires
+//! only that it be a 4.6.3 DateTime — there is no horizon and no error type
+//! for one, and a forecast Property legitimately becomes valid in the future.
+//! A well-formed future `observedAt` is therefore valid input the broker
+//! stores, not input it may refuse.
+//!
+//! Residual, deliberate: rows whose `observed_at` lies beyond the pre-created
+//! window stay in DEFAULT until their week enters it, and rows dated far
+//! enough ahead stay there indefinitely — retention only purges DEFAULT rows
+//! that are already OLD. Auto-adopting arbitrary future weeks is not the fix
+//! either: one row per week over a century would trade an oversized DEFAULT
+//! for thousands of partitions. The condition is reported instead (see
+//! `default_partition_load`), so an operator sees it rather than discovering
+//! it as a query slowdown.
 
 use sqlx::postgres::PgPool;
 use sqlx::{Acquire, Row};
@@ -195,6 +210,9 @@ pub async fn temporal_maintenance(
                 Err(e) => done.push(format!("retention skipped ({e})")),
             }
         }
+        if let Ok(Some(line)) = default_partition_load(pool).await {
+            done.push(line);
+        }
     }
     // 4.22 garbage collection, on both backends: reads already refuse expired
     // entities and instances, so these reaps only bound storage — the clause
@@ -279,6 +297,34 @@ async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::
         ));
     }
     Ok(done)
+}
+
+/// Rows the DEFAULT partition holds, and a warning once it stops being
+/// incidental. Every row there is one no weekly partition covers — historic
+/// backfill, or an `observedAt` dated beyond the pre-created window — so the
+/// count is what makes an unpartitioned pile visible before it shows up as a
+/// query that stopped pruning. `reltuples` is the planner's estimate, so this
+/// costs a catalog lookup rather than a scan of the pile it is measuring;
+/// `-1` means "never analysed", which is reported as nothing.
+const DEFAULT_PARTITION_WARN_ROWS: i64 = 100_000;
+
+async fn default_partition_load(pool: &PgPool) -> Result<Option<String>, sqlx::Error> {
+    let rows: Option<f32> = sqlx::query_scalar(
+        "SELECT reltuples FROM pg_class
+         WHERE relname = 'attr_instances_default' AND relnamespace = 'public'::regnamespace",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let est = rows.unwrap_or(-1.0) as i64;
+    if est < DEFAULT_PARTITION_WARN_ROWS {
+        return Ok(None);
+    }
+    tracing::warn!(
+        "attr_instances_default holds ~{est} rows: instances are being written outside the \
+         maintained partition window (historic backfill, or an observedAt far in the future); \
+         queries over those ranges cannot prune"
+    );
+    Ok(Some(format!("default partition ~{est} rows")))
 }
 
 /// The 4.22 expired-entity DELETE, isolated so a reap that outruns

@@ -49,6 +49,22 @@ async fn maintenance_winning(
     panic!("never won the maintenance claim in 50 tries");
 }
 
+/// The current-state row an auto-recorded append hangs off. Written raw: the
+/// entity store is a sibling slice, and what the append needs to see is the
+/// ROW, not the write path that produced it.
+async fn ensure_entity(pool: &sqlx::PgPool, tenant: &TenantId, id: &str) {
+    sqlx::query(
+        "INSERT INTO entities (tenant_id, id, entity, types, created_at, modified_at)
+         VALUES ($1, $2, jsonb_build_object('id', $2::text), ARRAY['T'], now(), now())
+         ON CONFLICT (tenant_id, id) DO NOTHING",
+    )
+    .bind(tenant.as_str())
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("entity row");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_doc_roundtrip_and_instance_append() {
     let url = require_db!();
@@ -324,6 +340,7 @@ async fn append_refreshes_types_after_first_touch() {
     pg::ensure_tenant(&pool, &t).await.expect("tenant row");
     let id = "urn:ngsi-ld:Vehicle:retype";
     let _ = s.delete(&t, id);
+    ensure_entity(&pool, &t, id).await;
     let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
     let shell1 = json!({"id": id, "type": "Vehicle",
         "createdAt": "2026-08-15T09:00:00Z", "modifiedAt": "2026-08-15T09:00:00Z"});
@@ -346,4 +363,76 @@ async fn append_refreshes_types_after_first_touch() {
         got["type"]
     );
     let _ = s.delete(&t, id);
+    sqlx::query("DELETE FROM entities WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// 5.6.6 Delete Entity removes the entity, and with it the temporal evolution
+/// recorded for it (5.6.11 auto-recording). Those are two transactions, so an
+/// auto-recording append that started before the delete can commit after it —
+/// and the history it writes then belongs to an entity that no longer exists,
+/// with no later delete to clean it. The append is conditional on the entity
+/// row for exactly that reason, and it takes a KEY SHARE lock on it so a
+/// delete cannot slip between the check and the insert.
+#[tokio::test(flavor = "multi_thread")]
+async fn append_for_a_deleted_entity_does_not_resurrect_its_history() {
+    let url = require_db!();
+    // the appended instances are stamped "now", so they land in the current
+    // week's partition — the one the maintenance tests drop and re-create
+    let _ddl = PARTITION_DDL.lock().await;
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let s = PgTemporalStore::new(pool.clone());
+    let t = TenantId::new("pgtempghost").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Vehicle:ghost";
+    let _ = s.delete(&t, id);
+    let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let shell = json!({"id": id, "type": "Vehicle",
+        "createdAt": "2026-08-17T09:00:00Z", "modifiedAt": "2026-08-17T09:00:00Z"});
+    let adds = |n: i64, inst: &str| {
+        json!({attr: [{"type": "Property", "value": n,
+                       "observedAt": "2026-08-17T09:00:00Z",
+                       "instanceId": inst}]})
+    };
+    let instances = |pool: sqlx::PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM attr_instances
+             WHERE tenant_id = 'pgtempghost' AND entity_id = 'urn:ngsi-ld:Vehicle:ghost'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count")
+    };
+
+    // control: with the entity present the append records normally
+    ensure_entity(&pool, &t, id).await;
+    s.append(&t, id, &shell, &adds(1, "urn:ngsi-ld:Instance:live"))
+        .expect("append while the entity lives");
+    assert!(s.get(&t, id).expect("get").is_some(), "history recorded");
+    assert_eq!(instances(pool.clone()).await, 1);
+
+    // the delete, as the API does it: the entity row, then its evolution
+    sqlx::query("DELETE FROM entities WHERE tenant_id = $1 AND id = $2")
+        .bind(t.as_str())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("delete entity");
+    assert!(s.delete(&t, id).expect("delete temporal"));
+
+    // the late hook: an append for an entity that is gone records NOTHING
+    s.append(&t, id, &shell, &adds(2, "urn:ngsi-ld:Instance:ghost"))
+        .expect("a late append is a no-op, not an error");
+    assert!(
+        s.get(&t, id).expect("get").is_none(),
+        "no temporal evolution may exist for a deleted entity"
+    );
+    assert_eq!(
+        instances(pool.clone()).await,
+        0,
+        "and no instance rows either"
+    );
 }

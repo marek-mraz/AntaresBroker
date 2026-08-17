@@ -424,6 +424,30 @@ impl AnyStore {
         Ok(rows)
     }
 
+    /// 5.12 registration candidates for these entity ids / types. The Pg arm
+    /// reads the `csource_index` rows (an indexed narrowing); `memory`/`file`
+    /// have nothing to push into and return the same snapshot `list` does.
+    /// Either way the result is a SUPERSET — the caller's matcher decides
+    /// every 5.12 condition, this only avoids reading registrations that
+    /// cannot match on id or type. `types` must be expanded plain type IRIs
+    /// (what the registration write stored); a caller holding terms or a 4.17
+    /// selection expression passes `None` and narrows on ids alone.
+    pub fn matching_registrations(
+        &self,
+        tenant: &TenantId,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] ids: Option<&[String]>,
+        #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] types: Option<&[String]>,
+    ) -> Result<Vec<Value>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.list(tenant, Kind::Registration)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => p
+                .docs
+                .matching_registrations(tenant, ids, types)
+                .map_err(db),
+        }
+    }
+
     /// Query Entities with the filter pushed down where the backend
     /// can take it. `memory`/`file` have nothing to push into — their
     /// entities are already in RAM — so they return the same snapshot `list`
@@ -490,6 +514,11 @@ impl AnyStore {
     /// the create-or-extend the mirror always did, under the store lock.
     /// `shell` carries the meta members; `additions` maps attr IRI →
     /// instance array (instanceIds already stamped by the caller).
+    ///
+    /// Both arms record only for an entity that still exists: 5.6.6 deletes
+    /// the entity and then the temporal evolution recorded for it, so an
+    /// append overlapping the delete must not recreate history nothing will
+    /// ever clean again.
     pub fn temporal_append(
         &self,
         tenant: &TenantId,
@@ -499,6 +528,9 @@ impl AnyStore {
     ) -> Result<(), NgsiError> {
         match self {
             AnyStore::Mem(s) => {
+                if s.get(tenant, Kind::Entity, id).is_none() {
+                    return Ok(());
+                }
                 if s.get(tenant, Kind::Temporal, id).is_none() {
                     // loser of a concurrent create race just extends below
                     let _ = s.create(tenant, Kind::Temporal, id, shell.clone());

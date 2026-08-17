@@ -56,6 +56,99 @@ async fn q_predicate_uses_the_gin_jsonb_path_ops_index() {
     );
 }
 
+/// 5.12 registration matching must be index-shaped: the whole point of
+/// narrowing candidates through `csource_index` is to stop reading every
+/// registration of the tenant per federated request. The type dimension has to
+/// resolve through `i_csource_index_type` on BOTH arms — the named types and
+/// the "unconstrained" `entity_type IS NULL` one, which is a second index probe
+/// and not a filter over the table. Rows are seeded (and ANALYZEd) because on
+/// an empty table the choice between two `(tenant_id, …)` indexes is a coin
+/// flip that proves nothing.
+#[tokio::test]
+async fn registration_matching_uses_the_csource_index() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let seed = async {
+        let mut tx = pool.begin().await.expect("tx");
+        sqlx::query("DELETE FROM csource_registrations WHERE tenant_id = 'pgexplain'")
+            .execute(&mut *tx)
+            .await
+            .expect("clean");
+        sqlx::query(
+            "INSERT INTO csource_registrations (tenant_id, id, registration)
+             SELECT 'pgexplain', 'urn:csr:x'||g, jsonb_build_object('id', 'urn:csr:x'||g)
+               FROM generate_series(1, 2000) g",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("seed regs");
+        sqlx::query(
+            "INSERT INTO csource_index
+               (tenant_id, registration_id, entity_type, endpoint, mode, ops)
+             SELECT 'pgexplain', 'urn:csr:x'||g, 'T'||(g % 200), 'http://cs:9090', 1, 0
+               FROM generate_series(1, 2000) g",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("seed index");
+        sqlx::query("ANALYZE csource_index")
+            .execute(&mut *tx)
+            .await
+            .expect("analyze");
+        tx.commit().await.expect("commit");
+    };
+    seed.await;
+
+    let plan = plan_of(
+        &pool,
+        r#"SELECT DISTINCT r.id, r.registration
+             FROM csource_registrations r
+             JOIN csource_index x
+               ON x.tenant_id = r.tenant_id AND x.registration_id = r.id
+            WHERE r.tenant_id = 'pgexplain'
+              AND (x.entity_type IS NULL OR x.entity_type = ANY(ARRAY['T7']))
+            ORDER BY r.id LIMIT 10000"#,
+    )
+    .await;
+    assert!(
+        plan.contains("i_csource_index_type"),
+        "type narrowing no longer routes through its index — plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on csource_index"),
+        "the candidate set must never be a full read of csource_index — plan:\n{plan}"
+    );
+
+    // The id dimension can only narrow by tenant: `idPattern` rows must survive
+    // every id query (only the matcher owns the regex), so the disjunct stays a
+    // recheck on top of the index — but a full read of the table is still out.
+    let plan = plan_of(
+        &pool,
+        r#"SELECT DISTINCT r.id, r.registration
+             FROM csource_registrations r
+             JOIN csource_index x
+               ON x.tenant_id = r.tenant_id AND x.registration_id = r.id
+            WHERE r.tenant_id = 'pgexplain'
+              AND (x.entity_id IS NULL OR x.id_pattern IS NOT NULL
+                   OR x.entity_id = ANY(ARRAY['urn:e:1']))
+            ORDER BY r.id LIMIT 10000"#,
+    )
+    .await;
+    assert!(
+        plan.contains("i_csource_index"),
+        "id narrowing no longer routes through an index — plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on csource_index"),
+        "id narrowing degenerated into a full read — plan:\n{plan}"
+    );
+
+    sqlx::query("DELETE FROM csource_registrations WHERE tenant_id = 'pgexplain'")
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test]
 async fn geo_predicate_bitmap_ors_gist_and_ambiguous_indexes() {
     let url = require_db!();

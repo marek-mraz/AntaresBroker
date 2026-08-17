@@ -265,6 +265,14 @@ impl PgTemporalStore {
     /// Append-only fast path (auto-recording, 5.6.12 adds): NO reconstruction,
     /// no history read — a shell meta insert (first touch) plus one multi-row
     /// instance upsert. This is the write the old full-resync made O(history).
+    ///
+    /// Conditional on the entity still existing. 5.6.6 Delete Entity removes
+    /// the entity and the temporal evolution recorded for it, in that order and
+    /// in two transactions; an auto-recording append that overlaps the delete
+    /// would otherwise commit history for an entity that is gone, and no later
+    /// delete would ever clean it. The `FOR KEY SHARE` lock is what makes the
+    /// check hold: it lets concurrent updates of the same entity through and
+    /// makes a concurrent DELETE wait until this append has committed.
     pub fn append(
         &self,
         tenant: &TenantId,
@@ -278,6 +286,17 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::pg::set_tenant(&mut tx, tenant).await?;
+            let live = sqlx::query(
+                "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
+            )
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if live.is_none() {
+                tx.commit().await?;
+                return Ok(());
+            }
             // DO NOTHING froze types/scopes at first touch — an
             // entity gaining a type stayed invisible to type-filtered
             // temporal queries forever. The shell carries the CURRENT

@@ -59,6 +59,38 @@ const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 /// or newer file refuses to load rather than being misread as valid data.
 const FORMAT_VERSION: &str = "1";
 
+/// How many `Cached` @context entries the broker keeps (5.13.1). The bound is
+/// on the CACHE only: it exists because one entry is stored per distinct
+/// external @context URL a request references, which is client-controlled,
+/// while the working set of real @contexts a deployment uses is small. Every
+/// entry holds a whole @context body, so the count is the memory bound too.
+pub const MAX_CACHED_CONTEXTS: usize = 1_000;
+
+/// The `Cached` entry ids to drop so at most `MAX_CACHED_CONTEXTS` remain,
+/// oldest `createdAt` first (5.13.1 stamps every stored entry with one; an
+/// entry without a stamp sorts oldest and goes first). Other kinds are never
+/// candidates.
+fn oldest_cached(contexts: &BTreeMap<String, Value>) -> Vec<String> {
+    let mut cached: Vec<(&str, &str)> = contexts
+        .iter()
+        .filter(|(_, d)| d.get("kind").and_then(Value::as_str) == Some("Cached"))
+        .map(|(id, d)| {
+            (
+                id.as_str(),
+                d.get("createdAt").and_then(Value::as_str).unwrap_or(""),
+            )
+        })
+        .collect();
+    if cached.len() <= MAX_CACHED_CONTEXTS {
+        return Vec::new();
+    }
+    cached.sort_unstable_by(|(a_id, a_ts), (b_id, b_ts)| (a_ts, a_id).cmp(&(b_ts, b_id)));
+    cached[..cached.len() - MAX_CACHED_CONTEXTS]
+        .iter()
+        .map(|(id, _)| (*id).to_owned())
+        .collect()
+}
+
 /// Drop attribute instances whose `expiresAt` passed (4.22) from an internal
 /// entity or temporal doc; an attribute whose last instance expired is
 /// removed entirely. Returns whether the doc changed.
@@ -698,7 +730,22 @@ impl Store {
         on_blocking(|| {
             let mut inner = self.write_inner();
             self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), Some(&doc));
+            let cached = doc.get("kind").and_then(Value::as_str) == Some("Cached");
             inner.contexts.insert(id.to_owned(), doc);
+            // 5.13.1: "Implementations shall periodically invalidate the
+            // 'Cached' @contexts." One entry is stored per distinct external
+            // URL a request references, so without a ceiling a client that
+            // references fresh URLs grows this keyspace (and, in `file` mode,
+            // the store on disk) forever. Oldest-first, and only for the
+            // Cached kind — Hosted/ImplicitlyCreated entries are resources
+            // the broker serves on demand, never a cache.
+            if cached && inner.contexts.len() > MAX_CACHED_CONTEXTS {
+                let dead = oldest_cached(&inner.contexts);
+                for id in dead {
+                    self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), None);
+                    inner.contexts.remove(&id);
+                }
+            }
         });
     }
 
@@ -1127,6 +1174,53 @@ mod tests {
             .collect();
         assert_eq!(vals, [2, 3], "expired pruned, no-expiry instance kept");
         assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 0, "idempotent");
+    }
+
+    /// 5.13.1: "Implementations shall periodically invalidate the 'Cached'
+    /// @contexts." The memory/file arm holds one entry per distinct external
+    /// URL a request referenced — client-controlled — so the same ceiling and
+    /// oldest-first eviction the Pg arm applies holds here, and it applies to
+    /// the Cached kind ONLY: a Hosted entry is client-owned data (5.13.2).
+    #[test]
+    fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
+        let s = Store::default();
+        let entry = |kind: &str, created: &str| json!({"kind": kind, "createdAt": created, "body": {"@context": {}}});
+        // a Hosted entry older than every Cached one: age must not decide
+        s.context_put("hosted", entry("Hosted", "2000-01-01T00:00:00Z"));
+        for i in 0..MAX_CACHED_CONTEXTS {
+            s.context_put(
+                &format!("cached-{i:05}"),
+                entry("Cached", &format!("2026-01-01T00:00:{:02}Z", i % 60)),
+            );
+        }
+        let cached = |s: &Store| {
+            s.context_list()
+                .iter()
+                .filter(|d| d["kind"] == "Cached")
+                .count()
+        };
+        assert_eq!(
+            cached(&s),
+            MAX_CACHED_CONTEXTS,
+            "at the ceiling, nothing lost"
+        );
+
+        // one more Cached entry evicts exactly one — the oldest
+        s.context_put("cached-new", entry("Cached", "2026-06-01T00:00:00Z"));
+        assert_eq!(cached(&s), MAX_CACHED_CONTEXTS, "the ceiling holds");
+        assert!(s.context_get("cached-new").is_some(), "the new entry stays");
+        assert!(
+            s.context_get("cached-00000").is_none(),
+            "the oldest Cached entry is the one evicted"
+        );
+        assert!(
+            s.context_get("cached-00001").is_some(),
+            "eviction stops at the ceiling"
+        );
+        assert!(
+            s.context_get("hosted").is_some(),
+            "a Hosted entry is never a candidate, however old"
+        );
     }
 
     #[test]
