@@ -406,6 +406,9 @@ fn warn_if_not_mount_point(dir: &std::path::Path) {
 #[cfg(not(unix))]
 fn warn_if_not_mount_point(_dir: &std::path::Path) {}
 
+// Every parameter is one config value `main` parsed fatally before the
+// runtime started; a struct would only rename the same ten values.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     port: u16,
     host_alias: String,
@@ -608,6 +611,11 @@ async fn run(
     // Count open connections so the drain can wait for them. Incremented
     // before the task is spawned — incrementing inside the task would race the
     // drain's first check and let a just-accepted connection be missed.
+    // This counts CONNECTIONS, not requests, and stays that way on purpose:
+    // hyper's graceful_shutdown below draws the distinction already (an idle
+    // keep-alive closes at once, an active request finishes first), so a
+    // request-layer counter would add a middleware without changing what the
+    // drain waits for.
     let inflight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // The drain signal each connection listens for. On drain,
     // hyper's graceful_shutdown closes IDLE keep-alive connections immediately

@@ -179,6 +179,52 @@ fn describe() {
     );
 }
 
+/// The 5 s gauge sampler: process-level state that has no natural
+/// increment site. Spawned once per process from `run`. With the switch
+/// off there is no recorder to feed — no task is spawned at all.
+pub fn spawn_sampler(state: antares_api::AppState) {
+    if !enabled() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            metrics::gauge!("antares_uptime_seconds").set(state.started.elapsed().as_secs_f64());
+            metrics::gauge!("antares_draining").set(f64::from(u8::from(
+                state.draining.load(std::sync::atomic::Ordering::Relaxed),
+            )));
+            if let Some(mem) = &state.mem_stats {
+                let m = mem();
+                if let Some(a) = m.get("allocatedBytes").and_then(serde_json::Value::as_u64) {
+                    metrics::gauge!("antares_memory_allocated_bytes").set(a as f64);
+                }
+                if let Some(r) = m.get("residentBytes").and_then(serde_json::Value::as_u64) {
+                    metrics::gauge!("antares_memory_resident_bytes").set(r as f64);
+                }
+            }
+            if let Some((depth, _peak)) = state.store.commit_queue() {
+                metrics::gauge!("antares_commit_queue_depth").set(depth as f64);
+            }
+            // Limit counters live in LimitStats (incremented at rejection
+            // sites); exported here so the wall is observable BEFORE users
+            // hit it.
+            if let Some(map) = state.limits.snapshot().as_object() {
+                for (key, n) in map {
+                    if let Some(limit) = key.strip_prefix("rejected") {
+                        if let Some(n) = n.as_u64() {
+                            metrics::gauge!(
+                                "antares_limit_rejections_total",
+                                "limit" => limit.to_owned()
+                            )
+                            .set(n as f64);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,51 +303,4 @@ mod tests {
             );
         }
     }
-}
-
-/// The 5 s gauge sampler: process-level state that has no natural
-/// increment site. Spawned once per process from `run`. With the switch
-/// off there is no recorder to feed — no task is spawned at all.
-pub fn spawn_sampler(state: antares_api::AppState) {
-    if !enabled() {
-        return;
-    }
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            tick.tick().await;
-            metrics::gauge!("antares_uptime_seconds").set(state.started.elapsed().as_secs_f64());
-            metrics::gauge!("antares_draining").set(f64::from(u8::from(
-                state.draining.load(std::sync::atomic::Ordering::Relaxed),
-            )));
-            if let Some(mem) = &state.mem_stats {
-                let m = mem();
-                if let Some(a) = m.get("allocatedBytes").and_then(serde_json::Value::as_u64) {
-                    metrics::gauge!("antares_memory_allocated_bytes").set(a as f64);
-                }
-                if let Some(r) = m.get("residentBytes").and_then(serde_json::Value::as_u64) {
-                    metrics::gauge!("antares_memory_resident_bytes").set(r as f64);
-                }
-            }
-            if let Some((depth, _peak)) = state.store.commit_queue() {
-                metrics::gauge!("antares_commit_queue_depth").set(depth as f64);
-            }
-            // Limit counters live in LimitStats (incremented at rejection
-            // sites); exported here so the wall is observable BEFORE users
-            // hit it.
-            if let Some(map) = state.limits.snapshot().as_object() {
-                for (key, n) in map {
-                    if let Some(limit) = key.strip_prefix("rejected") {
-                        if let Some(n) = n.as_u64() {
-                            metrics::gauge!(
-                                "antares_limit_rejections_total",
-                                "limit" => limit.to_owned()
-                            )
-                            .set(n as f64);
-                        }
-                    }
-                }
-            }
-        }
-    });
 }

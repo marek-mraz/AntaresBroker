@@ -12,25 +12,36 @@
 //!    update into a burst of connection-refused
 //! 3. stop accepting
 //! 4. wait for in-flight connections, bounded by `ANTARES_DRAIN_DEADLINE_SECS`
-//! 5. flush the outbox (see the note in `drain`)
+//! 5. wait for the outbox to empty — same deadline, whatever step 4 left of it
+//!    (see the note in `drain`)
 //! 6. close the pools
+//!
+//! The two numbers are for different jobs and are easy to confuse: the delay
+//! is the LB's notice window in MILLIseconds (default 2000), the deadline is
+//! the ceiling on in-flight work in SECONDS (default 20). Steps 4 and 5 share
+//! that one deadline.
 //!
 //! Operational contract: the container `stopGracePeriod` (compose
 //! `stop_grace_period`, K8s `terminationGracePeriodSeconds`) MUST exceed
 //! delay + deadline, or the orchestrator turns a drain into a kill. The
-//! defaults below (0.5 s + 20 s) fit inside Docker's 10 s default only if the
-//! in-flight work is short; the reference manifests set both explicitly.
+//! defaults below (2 s + 20 s) overrun Docker's 10 s default as soon as the
+//! in-flight work is not short; the reference manifests set both explicitly.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The LB's notice window: how long to keep serving AFTER going unhealthy.
+/// The LB's notice window (default 2 s): how long to keep serving AFTER going
+/// unhealthy, sized so a load balancer's health poll actually observes the 503
+/// before the socket goes. It is NOT the in-flight ceiling — that is
+/// `drain_deadline`, and it is 10× longer.
 pub fn drain_delay() -> Result<Duration, String> {
-    env_num("ANTARES_DRAIN_DELAY_MS", 500).map(Duration::from_millis)
+    env_num("ANTARES_DRAIN_DELAY_MS", 2000).map(Duration::from_millis)
 }
 
-/// Ceiling on waiting for in-flight requests once the listener is closed.
+/// The real shutdown deadline (default 20 s): the ceiling on waiting for
+/// in-flight work — connections, then the outbox — once the listener is
+/// closed. Both share it; it does not extend the notice window above.
 pub fn drain_deadline() -> Result<Duration, String> {
     env_num("ANTARES_DRAIN_DEADLINE_SECS", 20).map(Duration::from_secs)
 }
@@ -102,6 +113,14 @@ pub async fn drain(
     // so a rolling update does not leave events sitting in the table until
     // another pod's fallback poll finds them. Stores without an outbox
     // (memory, file) answer an empty page and fall straight through.
+    //
+    // Two residuals, stated rather than papered over. The table is shared, so
+    // this waits for rows OTHER pods are still producing too, and under
+    // sustained write load it therefore runs to the deadline; and the deadline
+    // is the same one step 4 just spent, so a slow in-flight wait can leave
+    // the flush no time at all. Either way the rows stay committed — the
+    // fallback poll on a surviving pod publishes them — so the ceiling costs
+    // latency, never an event.
     if flush_outbox {
         loop {
             match store.outbox_peek(1) {
@@ -141,17 +160,24 @@ mod tests {
     ///
     /// Contract: absent = the documented default; present-but-unparsable is
     /// FATAL, never a silent default — a misread timeout is exactly the class
-    /// of misconfiguration the unknown-key policy exists to catch.
+    /// of misconfiguration the unknown-key policy exists to catch. The two
+    /// defaults are different numbers for different jobs: 2000 MILLIseconds of
+    /// LB notice, 20 SECONDS of in-flight ceiling.
     #[test]
     fn drain_knobs_default_when_absent_and_refuse_garbage() {
         std::env::remove_var("ANTARES_DRAIN_DELAY_MS");
         std::env::remove_var("ANTARES_DRAIN_DEADLINE_SECS");
-        assert_eq!(drain_delay().expect("absent"), Duration::from_millis(500));
+        assert_eq!(drain_delay().expect("absent"), Duration::from_millis(2000));
         assert_eq!(drain_deadline().expect("absent"), Duration::from_secs(20));
+        assert_ne!(
+            drain_delay().expect("absent"),
+            drain_deadline().expect("absent"),
+            "the notice window and the in-flight ceiling are not the same number"
+        );
 
-        std::env::set_var("ANTARES_DRAIN_DELAY_MS", "2000");
+        std::env::set_var("ANTARES_DRAIN_DELAY_MS", "750");
         std::env::set_var("ANTARES_DRAIN_DEADLINE_SECS", "10");
-        assert_eq!(drain_delay().expect("set"), Duration::from_millis(2000));
+        assert_eq!(drain_delay().expect("set"), Duration::from_millis(750));
         assert_eq!(drain_deadline().expect("set"), Duration::from_secs(10));
 
         // Zero is a real choice on both knobs (no notice window / close at
@@ -178,7 +204,7 @@ mod tests {
                 "the error must name the key: {err}"
             );
         }
-        std::env::set_var("ANTARES_DRAIN_DELAY_MS", "500");
+        std::env::set_var("ANTARES_DRAIN_DELAY_MS", "2000");
         for bad in ["soon", "", "-1", "20.0"] {
             std::env::set_var("ANTARES_DRAIN_DEADLINE_SECS", bad);
             let err = drain_deadline().expect_err(&format!(
@@ -233,6 +259,105 @@ mod tests {
         assert!(
             waited < Duration::from_secs(3),
             "the drain must give up AT the deadline, not later: {waited:?}"
+        );
+    }
+
+    /// The outbox flush must WAIT while rows are still pending, and only when
+    /// it is asked to: a pod whose own drain is off publishes nothing, so
+    /// waiting there would only burn the deadline. Needs a live database —
+    /// the outbox table exists on the Pg arm alone, so the memory store can
+    /// never exercise the wait (it answers an empty page and falls through).
+    #[test]
+    #[ignore = "needs a live database (ANTARES_TEST_DATABASE_URL)"]
+    fn outbox_flush_waits_for_pending_rows_and_only_when_asked() {
+        use antares_sql::store::any::{AnyStore, PgBackend};
+        use antares_sql::store::Kind;
+        let url = std::env::var("ANTARES_TEST_DATABASE_URL")
+            .expect("ANTARES_TEST_DATABASE_URL: this test is asked for by name where a DB exists");
+        // Multi-thread: the store's sync-over-async bridge uses
+        // block_in_place, which a current-thread runtime cannot host.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let connect = || {
+            AnyStore::Pg(PgBackend::new(
+                rt.block_on(antares_sql::pg::connect(&url, 5))
+                    .expect("connect+migrate"),
+            ))
+        };
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let tenant = antares_model::TenantId::new(&format!("drain{run}")).expect("tenant");
+        let id = format!("urn:ngsi-ld:DrainProbe:{run}");
+        let inflight = Arc::new(AtomicUsize::new(0));
+
+        // One committed-but-unpublished row: outbox on, then a write. Nothing
+        // publishes it here — a unit test wires no bus drain task.
+        let store = connect();
+        store.set_outbox(true);
+        store
+            .create(
+                &tenant,
+                Kind::Entity,
+                &id,
+                serde_json::json!({"id": id.as_str(), "type": "DrainProbe"}),
+            )
+            .expect("write");
+        let mine: Vec<i64> = store
+            .outbox_peek(500)
+            .expect("peek")
+            .into_iter()
+            .filter(|(_, t, _)| t == tenant.as_str())
+            .map(|(seq, ..)| seq)
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "the write enqueued no outbox row — the rest of this test would prove nothing"
+        );
+
+        // Not asked to flush: the pending row may not delay the close at all.
+        let t0 = Instant::now();
+        rt.block_on(drain(&inflight, &store, Duration::from_millis(400), false));
+        let closed = t0.elapsed();
+        assert!(
+            closed < Duration::from_millis(250),
+            "flush_outbox=false waited {closed:?} on a row it never intended to publish"
+        );
+
+        // Asked to flush: the rows stay pending, so the flush must hold the
+        // process to its deadline rather than exit on top of them.
+        let store = connect();
+        let t0 = Instant::now();
+        rt.block_on(drain(&inflight, &store, Duration::from_millis(400), true));
+        let waited = t0.elapsed();
+        assert!(
+            waited >= Duration::from_millis(400),
+            "the flush returned after {waited:?} with rows still pending"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the flush must give up AT the deadline, not later: {waited:?}"
+        );
+
+        // Leave the shared table as it was found: ack only our own seqs (a
+        // blanket ack would delete another test's pending rows) and drop the
+        // probe entity with the outbox off, so the delete enqueues nothing.
+        let store = connect();
+        store
+            .delete(&tenant, Kind::Entity, &id)
+            .expect("probe cleanup");
+        store.outbox_ack(&mine).expect("outbox cleanup");
+        assert!(
+            store
+                .outbox_peek(500)
+                .expect("peek")
+                .into_iter()
+                .all(|(_, t, _)| t != tenant.as_str()),
+            "the test left its own rows in the shared outbox"
         );
     }
 
