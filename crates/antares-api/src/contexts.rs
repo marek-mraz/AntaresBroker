@@ -17,12 +17,28 @@ use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
 
+/// Base URL under which this broker publishes its own @context entries
+/// (5.13.2.4 locally unique URI, 5.13.3.5 `URL`). The address is the
+/// broker's, so it comes from ITS configuration — ANTARES_PUBLIC_URL, the
+/// same value peers are handed as the 5.8.1.4 notification endpoint. The
+/// request's `Host` header is client input and only the fallback for a
+/// deployment that configures nothing.
 pub(crate) fn base_url(headers: &HeaderMap) -> String {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:9090");
-    format!("http://{host}/ngsi-ld/v1/jsonldContexts")
+    context_base(std::env::var("ANTARES_PUBLIC_URL").ok().as_deref(), headers)
+}
+
+fn context_base(configured: Option<&str>, headers: &HeaderMap) -> String {
+    let base = match configured.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => url.trim_end_matches('/').to_owned(),
+        None => {
+            let host = headers
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("localhost:9090");
+            format!("http://{host}")
+        }
+    };
+    format!("{base}/ngsi-ld/v1/jsonldContexts")
 }
 
 /// Validate the `details` query param: absent | true | false (053_05 sends
@@ -456,4 +472,42 @@ pub async fn delete_context(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn forged_host() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, "attacker.example".parse().expect("host"));
+        h
+    }
+
+    /// 5.13.2.4/5.13.3.5: the URI published for a broker-served @context
+    /// names the BROKER. It is taken from configuration, so a forged `Host`
+    /// header cannot make the broker advertise someone else's address, and a
+    /// TLS deployment is not stuck advertising `http`.
+    #[test]
+    fn published_context_url_comes_from_configuration_not_the_host_header() {
+        assert_eq!(
+            context_base(Some("https://broker.example"), &forged_host()),
+            "https://broker.example/ngsi-ld/v1/jsonldContexts"
+        );
+        // a configured value with a trailing slash must not double it
+        assert_eq!(
+            context_base(Some("https://broker.example/"), &forged_host()),
+            "https://broker.example/ngsi-ld/v1/jsonldContexts"
+        );
+        // nothing configured: today's Host-derived URL stays the fallback
+        assert_eq!(
+            context_base(None, &forged_host()),
+            "http://attacker.example/ngsi-ld/v1/jsonldContexts"
+        );
+        assert_eq!(
+            context_base(Some(""), &forged_host()),
+            "http://attacker.example/ngsi-ld/v1/jsonldContexts",
+            "an empty setting is no setting"
+        );
+    }
 }

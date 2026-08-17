@@ -165,7 +165,7 @@ impl NatsBus {
     pub async fn publish(&self, ev: &ChangeEvent) -> Result<(), BusError> {
         let ev = ev.clone().claim_check(crate::CLAIM_CHECK_BYTES);
         let subject = subjects::change_subject(
-            ev.tenant.as_str(),
+            &ev.tenant,
             ev.types.first().map(String::as_str).unwrap_or(""),
             ev.entity_id.as_str(),
         );
@@ -187,14 +187,16 @@ impl NatsBus {
 
     /// Publish a registration CUD delta: the full registration document
     /// (or a `{"deleted": id}` tombstone) on the tenant's registry subject.
+    /// The tenant is re-validated here because it becomes a subject token.
     pub async fn publish_registry(
         &self,
         tenant: &str,
         delta: &serde_json::Value,
     ) -> Result<(), BusError> {
+        let tenant = antares_model::TenantId::new(tenant).map_err(err)?;
         let bytes = serde_json::to_vec(delta).map_err(err)?;
         self.js
-            .publish(subjects::registry_subject(tenant), bytes.into())
+            .publish(subjects::registry_subject(&tenant), bytes.into())
             .await
             .map_err(err)?
             .await
@@ -367,5 +369,38 @@ mod tests {
             subject_tenant_agrees("registry.other", &ev),
             "non-changes subjects carry tenant in the body only"
         );
+    }
+
+    /// The check compares whole tokens: a subject whose tenant segment only
+    /// starts with, contains or is missing the event's tenant must not pass.
+    #[test]
+    fn tenant_agreement_is_not_fooled_by_partial_tokens() {
+        let ev = ChangeEvent {
+            tenant: TenantId::new("acme").expect("tenant"),
+            entity_id: EntityId::new("urn:x:1").expect("id"),
+            types: vec![],
+            op: ChangeOp::Delete,
+            changed_attrs: vec![],
+            payload: None,
+            prev_payload: None,
+            version: 1,
+            incarnation: String::new(),
+            seq: 1,
+            payload_ref: None,
+            prev_payload_ref: None,
+        };
+        for subject in [
+            "changes.acmeX.aa.bb", // longer token
+            "changes.acm.aa.bb",   // prefix of the tenant
+            "changes..aa.bb",      // empty tenant segment
+            "changes.aa.acme.bb",  // tenant present, wrong position
+            "changes",             // no tenant segment at all
+            "changes.",
+        ] {
+            assert!(
+                !subject_tenant_agrees(subject, &ev),
+                "must not accept {subject:?}"
+            );
+        }
     }
 }

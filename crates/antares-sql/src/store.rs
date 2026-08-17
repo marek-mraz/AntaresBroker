@@ -128,10 +128,12 @@ const ALL_KINDS: [Kind; 8] = [
 ];
 
 /// Key = `tenant \0 id`. Unambiguous: TenantId is `[A-Za-z0-9_-]{1,64}`
-/// by construction, so it can never contain the separator.
-fn key_bytes(tenant: &TenantId, id: &str) -> Vec<u8> {
-    let mut k = Vec::with_capacity(tenant.as_str().len() + 1 + id.len());
-    k.extend_from_slice(tenant.as_str().as_bytes());
+/// by construction, so it can never contain the separator. Takes the tenant
+/// as the plain string the maps are keyed by, so a persisted removal can
+/// never be skipped for want of a re-parse.
+fn key_bytes(tenant: &str, id: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(tenant.len() + 1 + id.len());
+    k.extend_from_slice(tenant.as_bytes());
     k.push(0);
     k.extend_from_slice(id.as_bytes());
     k
@@ -434,10 +436,8 @@ impl Store {
             }
         }
         for (tenant, id) in dead {
-            if let Ok(t) = TenantId::new(&tenant) {
-                self.persist(T_ENTITIES, &key_bytes(&t, &id), None);
-            }
             if let Some(docs) = inner.entities.get_mut(&tenant) {
+                self.persist(T_ENTITIES, &key_bytes(&tenant, &id), None);
                 docs.remove(&id);
                 reaped += 1;
             }
@@ -456,9 +456,7 @@ impl Store {
                 for (id, doc) in docs.iter_mut() {
                     if prune_expired_instances(doc, now) {
                         reaped += 1;
-                        if let Ok(t) = TenantId::new(tenant) {
-                            self.persist(table, &key_bytes(&t, id), Some(doc));
-                        }
+                        self.persist(table, &key_bytes(tenant, id), Some(doc));
                     }
                 }
             }
@@ -533,7 +531,7 @@ impl Store {
                 false
             } else {
                 m.insert(id.to_owned(), doc.clone());
-                self.persist(table_for(kind), &key_bytes(tenant, id), Some(&doc));
+                self.persist(table_for(kind), &key_bytes(tenant.as_str(), id), Some(&doc));
                 true
             }
         });
@@ -551,7 +549,7 @@ impl Store {
                 .entry(tenant.as_str().to_owned())
                 .or_default()
                 .insert(id.to_owned(), doc.clone());
-            self.persist(table_for(kind), &key_bytes(tenant, id), Some(&doc));
+            self.persist(table_for(kind), &key_bytes(tenant.as_str(), id), Some(&doc));
             prev
         });
         let existed = prev.is_some();
@@ -579,7 +577,7 @@ impl Store {
                 .get_mut(tenant.as_str())
                 .and_then(|m| m.remove(id));
             if removed.is_some() {
-                self.persist(table_for(kind), &key_bytes(tenant, id), None);
+                self.persist(table_for(kind), &key_bytes(tenant.as_str(), id), None);
             }
             removed
         });
@@ -623,7 +621,11 @@ impl Store {
             Some(match f(&mut candidate) {
                 Ok(t) => {
                     if candidate != before {
-                        self.persist(table_for(kind), &key_bytes(tenant, id), Some(&candidate));
+                        self.persist(
+                            table_for(kind),
+                            &key_bytes(tenant.as_str(), id),
+                            Some(&candidate),
+                        );
                     }
                     let change = (kind == Kind::Entity && candidate != before)
                         .then(|| (before, candidate.clone()));
@@ -812,6 +814,71 @@ mod tests {
         assert_eq!(s.get(&t, Kind::Entity, "urn:b").expect("restored")["v"], 42);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&restore);
+    }
+
+    /// 4.22: reaping an expired entity is a state change like any other, so
+    /// it must be durable — after a sweep the doc stays gone across a reopen,
+    /// whatever the tenant key on disk looks like, while a doc that has not
+    /// expired survives both.
+    #[test]
+    fn file_mode_sweep_removals_persist() {
+        let dir = tempdir("sweep-persist");
+        // Seed the file directly: one tenant key the boot rebuild accepts but
+        // `TenantId::new` rejects, alongside an ordinary one.
+        {
+            let db = Database::create(dir.join("antares.redb")).expect("db");
+            let mut tx = db.begin_write().expect("tx");
+            tx.set_durability(Durability::Immediate).expect("dur");
+            {
+                let mut m = tx.open_table(T_META).expect("meta");
+                m.insert("format", FORMAT_VERSION).expect("insert");
+            }
+            {
+                let mut t = tx.open_table(T_ENTITIES).expect("entities");
+                for (tenant, id, expires) in [
+                    ("odd.tenant", "urn:e:1", "2000-01-01T00:00:00Z"),
+                    ("odd.tenant", "urn:e:2", "2999-01-01T00:00:00Z"),
+                    ("plain", "urn:e:3", "2000-01-01T00:00:00Z"),
+                ] {
+                    let mut k = tenant.as_bytes().to_vec();
+                    k.push(0);
+                    k.extend_from_slice(id.as_bytes());
+                    let doc = json!({"id": id, "type": ["T"], "expiresAt": expires});
+                    let bytes = serde_json::to_vec(&doc).expect("serialize");
+                    t.insert(k.as_slice(), bytes.as_slice()).expect("insert");
+                }
+            }
+            tx.commit().expect("commit");
+        }
+        {
+            let s = Store::open_file(&dir).expect("open");
+            assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 2, "both expired");
+        }
+        let s = Store::open_file(&dir).expect("reopen");
+        let inner = s.inner.read().expect("lock");
+        assert!(
+            !inner
+                .entities
+                .get("odd.tenant")
+                .is_some_and(|d| d.contains_key("urn:e:1")),
+            "swept entity resurrected on reopen"
+        );
+        assert!(
+            inner
+                .entities
+                .get("odd.tenant")
+                .is_some_and(|d| d.contains_key("urn:e:2")),
+            "unexpired entity must outlive the sweep"
+        );
+        assert!(
+            !inner
+                .entities
+                .get("plain")
+                .is_some_and(|d| d.contains_key("urn:e:3")),
+            "swept entity resurrected on reopen"
+        );
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -669,4 +669,109 @@ mod complexity_tests {
         let long = format!("a=={}", "x".repeat(MAX_Q_BYTES));
         assert!(matches!(parse_q(&long), Err(NgsiError::TooComplexQuery(_))));
     }
+
+    /// The depth ceiling is exact and counts open parentheses, not the
+    /// parentheses seen: sibling groups close what they open, so a query may
+    /// carry any number of them.
+    #[test]
+    fn depth_cap_is_exact_and_counts_only_open_parens() {
+        let at_cap = format!("{}a==1{}", "(".repeat(MAX_Q_DEPTH), ")".repeat(MAX_Q_DEPTH));
+        assert!(parse_q(&at_cap).is_ok(), "{MAX_Q_DEPTH} nested must parse");
+        let over = format!(
+            "{}a==1{}",
+            "(".repeat(MAX_Q_DEPTH + 1),
+            ")".repeat(MAX_Q_DEPTH + 1)
+        );
+        assert!(matches!(parse_q(&over), Err(NgsiError::TooComplexQuery(_))));
+        let siblings = (0..200)
+            .map(|i| format!("(a{i}==1)"))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(siblings.len() < MAX_Q_BYTES);
+        assert!(parse_q(&siblings).is_ok(), "siblings are not cumulative");
+    }
+
+    /// The parser is a fuzz target: on any input it returns, and the error it
+    /// returns is safe to hand back — the input is echoed Debug-escaped, so a
+    /// rejected `q` cannot carry a raw CR/LF into a response or a log line.
+    #[test]
+    fn hostile_input_is_total_and_its_error_is_escaped() {
+        for hostile in [
+            "",
+            " ",
+            "\"",
+            "\"\"",
+            "a==\"",
+            "..",
+            "a==..",
+            "a==1..",
+            "a==..1",
+            "a.",
+            "a[",
+            "a[]",
+            "a{",
+            "a{}",
+            "a{b",
+            "a{,:b}",
+            ";",
+            "|",
+            "()",
+            "(((",
+            ")))",
+            "!",
+            "!!a",
+            "a==1,",
+            "a==,1",
+            "~=",
+            "a~=",
+            "a!~=",
+            "a==1)b",
+            "\u{202e}==1",
+            "ä==1",
+            "a==\"ä",
+            "温度.値>=1",
+            "a\u{2028}==1",
+            "a=={}",
+            "a==1e999",
+            "a==-0",
+            "a==NaN..1",
+            "a{b:c}{d:e}.f[g].h==1",
+            &"{".repeat(64),
+            &"[".repeat(64),
+            &"a{".repeat(64),
+            &".".repeat(64),
+            &"!".repeat(64),
+            &",".repeat(64),
+        ] {
+            match parse_q(hostile) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        !msg.chars().any(char::is_control),
+                        "error text must stay escaped for {hostile:?}: {msg:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `!` is the existence-check prefix only (4.9): pairing it with a
+    /// comparison is a grammar violation, not a silently ignored negation.
+    #[test]
+    fn negated_comparison_is_a_grammar_violation() {
+        assert!(matches!(
+            parse_q("!a==1"),
+            Err(NgsiError::BadRequestData(_))
+        ));
+        assert!(matches!(
+            parse_q("!a"),
+            Ok(QNode::Exists { negated: true, .. })
+        ));
+        // `!=` after a path is the operator, not a negation prefix
+        assert!(matches!(
+            parse_q("a!=1"),
+            Ok(QNode::Cmp { op: CmpOp::Ne, .. })
+        ));
+    }
 }

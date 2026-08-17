@@ -542,13 +542,11 @@ async fn retrieve_entity_inner(
     }
     let mut payload = compact_for(&repr, &shaped, &ctx);
     if let Some((mode, level)) = &join {
-        match mode.as_str() {
-            "inline" => {
-                inline_join(st, &tenant, &ctx, &repr, &mut payload, *level);
-            }
+        let complete = match mode.as_str() {
+            "inline" => inline_join(st, &tenant, &ctx, &repr, &mut payload, *level),
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
-                collect_flat(st, &tenant, &repr, &doc, *level, &mut linked);
+                let complete = collect_flat(st, &tenant, &repr, &doc, *level, &mut linked);
                 if !linked.is_empty() {
                     let mut arr = vec![payload];
                     for (_, (ldoc, lrepr)) in linked {
@@ -556,8 +554,16 @@ async fn retrieve_entity_inner(
                     }
                     payload = Value::Array(arr);
                 }
+                complete
             }
-            _ => {}
+            _ => true,
+        };
+        if !complete {
+            warnings.push(crate::federation::warning(
+                199,
+                &crate::federation::alias_for(&st.host_alias, &tenant),
+                "the linked entity retrieval was truncated",
+            ));
         }
     }
     let payload = if accept == Accept::GeoJson {
@@ -675,9 +681,43 @@ fn joined_repr(parent: &crate::repr::Repr, key_compact: &str, key_iri: &str) -> 
     r
 }
 
+/// 4.5.23.1: "When retrieving Linked Entities, it is necessary to limit
+/// retrieval to avoid cascades of an excessive length, duplicates or loops."
+/// joinLevel bounds the DEPTH of the walk; this bounds its WIDTH — the total
+/// number of Linked Entity reads a single request may buy, so that a densely
+/// linked graph cannot turn one retrieval into an unbounded store scan.
+const MAX_JOIN_LOOKUPS: usize = 1_000;
+
+/// State of one Linked Entity Retrieval walk (4.5.23.1): the entity ids
+/// already resolved — a loop or a duplicate is never walked a second time —
+/// and the remaining lookup budget. `complete` goes false as soon as the walk
+/// left something out, which the caller reports as an NGSILD-Warning.
+struct JoinWalk {
+    seen: std::collections::BTreeSet<String>,
+    budget: usize,
+    complete: bool,
+}
+
+impl JoinWalk {
+    /// The Linking Entity is already part of the response, so it counts as
+    /// resolved before the walk starts.
+    fn rooted(root: Option<&str>) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(id) = root {
+            seen.insert(id.to_owned());
+        }
+        JoinWalk {
+            seen,
+            budget: MAX_JOIN_LOOKUPS,
+            complete: true,
+        }
+    }
+}
+
 /// Linked Entity Retrieval, inline form (4.5.23.2): embed each relationship
 /// target under an "entity" member (normalized) or replace the object URI by
 /// the linked entity representation (simplified). Operates on COMPACTED docs.
+/// Returns false when 4.5.23.1 truncated the walk (loop, duplicate, budget).
 pub fn inline_join(
     st: &AppState,
     tenant: &TenantId,
@@ -685,6 +725,20 @@ pub fn inline_join(
     repr: &crate::repr::Repr,
     compacted: &mut Value,
     level: usize,
+) -> bool {
+    let mut walk = JoinWalk::rooted(compacted.get("id").and_then(Value::as_str));
+    inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk);
+    walk.complete
+}
+
+fn inline_join_walk(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    compacted: &mut Value,
+    level: usize,
+    walk: &mut JoinWalk,
 ) {
     let Some(obj) = compacted.as_object_mut() else {
         return;
@@ -695,7 +749,7 @@ pub fn inline_join(
             continue;
         }
         let child = joined_repr(repr, k, &ctx.expand_key(k));
-        inline_join_value(st, tenant, ctx, repr, &child, v, level);
+        inline_join_value(st, tenant, ctx, repr, &child, v, level, walk);
     }
 }
 
@@ -706,16 +760,29 @@ fn lookup_joined(
     child: &crate::repr::Repr,
     id: &str,
     level: usize,
+    walk: &mut JoinWalk,
 ) -> Option<Value> {
+    if walk.budget == 0 {
+        walk.complete = false;
+        return None;
+    }
+    walk.budget -= 1;
     let target = st.store.get(tenant, Kind::Entity, id).ok().flatten()?;
     let shaped = apply(&target, child);
     let mut c = compact_for(child, &shaped, ctx);
     if level > 1 {
-        inline_join(st, tenant, ctx, child, &mut c, level - 1);
+        if walk.seen.insert(id.to_owned()) {
+            inline_join_walk(st, tenant, ctx, child, &mut c, level - 1, walk);
+        } else {
+            // 4.5.23.1: an already-resolved target is a loop or a duplicate —
+            // it is still embedded, but its own links are not walked again.
+            walk.complete = false;
+        }
     }
     Some(c)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inline_join_value(
     st: &AppState,
     tenant: &TenantId,
@@ -724,11 +791,12 @@ fn inline_join_value(
     child: &crate::repr::Repr,
     v: &mut Value,
     level: usize,
+    walk: &mut JoinWalk,
 ) {
     match v {
         Value::Array(items) => {
             for i in items {
-                inline_join_value(st, tenant, ctx, repr, child, i, level);
+                inline_join_value(st, tenant, ctx, repr, child, i, level, walk);
             }
         }
         Value::Object(inst) => {
@@ -749,10 +817,12 @@ fn inline_join_value(
                         _ => None,
                     })
                     .collect();
-                let joined: Vec<Value> = targets
-                    .iter()
-                    .filter_map(|id| lookup_joined(st, tenant, ctx, child, id, level))
-                    .collect();
+                let mut joined: Vec<Value> = Vec::new();
+                for id in &targets {
+                    if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                        joined.push(j);
+                    }
+                }
                 if !joined.is_empty() {
                     inst.insert("entityList".into(), Value::Array(joined));
                 }
@@ -767,10 +837,12 @@ fn inline_join_value(
                     .collect(),
                 _ => return,
             };
-            let mut joined: Vec<Value> = targets
-                .iter()
-                .filter_map(|id| lookup_joined(st, tenant, ctx, child, id, level))
-                .collect();
+            let mut joined: Vec<Value> = Vec::new();
+            for id in &targets {
+                if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                    joined.push(j);
+                }
+            }
             if joined.is_empty() {
                 return;
             }
@@ -783,7 +855,7 @@ fn inline_join_value(
         }
         // simplified: relationship value is the object URI string
         Value::String(id) if repr.key_values => {
-            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level) {
+            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
                 *v = joined;
             }
         }
@@ -792,7 +864,10 @@ fn inline_join_value(
 }
 
 /// Linked Entity Retrieval, flattened form (4.5.23.3): collect targets with
-/// the child representation that applies to each.
+/// the child representation that applies to each. The Linking Entity is
+/// already in the flattened array, so 4.5.23.1 ("avoid ... duplicates or
+/// loops") keeps it out of `out` even when a Relationship points back at it.
+/// Returns false when the walk was truncated by the lookup budget.
 pub fn collect_flat(
     st: &AppState,
     tenant: &TenantId,
@@ -800,6 +875,22 @@ pub fn collect_flat(
     internal_doc: &Value,
     level: usize,
     out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+) -> bool {
+    let mut walk = JoinWalk::rooted(internal_doc.get("id").and_then(Value::as_str));
+    walk.seen.extend(out.keys().cloned());
+    collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk);
+    walk.complete
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_flat_walk(
+    st: &AppState,
+    tenant: &TenantId,
+    repr: &crate::repr::Repr,
+    internal_doc: &Value,
+    level: usize,
+    out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+    walk: &mut JoinWalk,
 ) {
     let Some(obj) = internal_doc.as_object() else {
         return;
@@ -837,13 +928,19 @@ pub fn collect_flat(
                 _ => continue,
             };
             for id in targets {
-                if out.contains_key(id) {
+                if walk.seen.contains(id) {
                     continue;
                 }
+                if walk.budget == 0 {
+                    walk.complete = false;
+                    return;
+                }
+                walk.budget -= 1;
                 if let Some(target) = st.store.get(tenant, Kind::Entity, id).ok().flatten() {
+                    walk.seen.insert(id.to_owned());
                     out.insert(id.to_owned(), (target.clone(), child.clone()));
                     if level > 1 {
-                        collect_flat(st, tenant, &child, &target, level - 1, out);
+                        collect_flat_walk(st, tenant, &child, &target, level - 1, out, walk);
                     }
                 }
             }
@@ -1151,8 +1248,7 @@ async fn query_entities_inner(
             }
         }
     }
-    // 5.7.2.4: a syntactically invalid context source filter is 400. Named
-    // gap: csf is validated but not applied to Context Source matching.
+    // 5.7.2.4: a syntactically invalid context source filter is 400.
     if let Some(csf) = params.get("csf") {
         parse_q(csf)?;
     }
@@ -1220,16 +1316,17 @@ async fn query_entities_inner(
         })
         .collect();
     if let Some((mode, level)) = &join {
+        let mut complete = true;
         match mode.as_str() {
             "inline" => {
                 for p in &mut payload {
-                    inline_join(st, &tenant, &ctx, &repr, p, *level);
+                    complete &= inline_join(st, &tenant, &ctx, &repr, p, *level);
                 }
             }
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 for doc in &page {
-                    collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
+                    complete &= collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
@@ -1239,6 +1336,13 @@ async fn query_entities_inner(
                 }
             }
             _ => {}
+        }
+        if !complete {
+            warnings.push(crate::federation::warning(
+                199,
+                &crate::federation::alias_for(&st.host_alias, &tenant),
+                "the linked entity retrieval was truncated",
+            ));
         }
     }
     let mut resp = if accept == Accept::GeoJson {
@@ -1824,7 +1928,6 @@ async fn purge_inner(
             "keep",
             "drop",
             "local",
-            "limit",
         ],
     )?;
     let ctx = request_context(&st.loader, headers).await?;
@@ -1869,8 +1972,7 @@ async fn purge_inner(
         .into());
     }
     // 5.6.21.4: a syntactically invalid context source filter is
-    // BadRequestData. Known gap: csf is validated here but not yet applied
-    // to Context Source matching (broker-wide).
+    // BadRequestData.
     if let Some(csf) = params.get("csf") {
         parse_q(csf)?;
     }
@@ -2434,7 +2536,7 @@ fn build_collator(tag: &str) -> Result<icu_collator::CollatorBorrowed<'static>, 
         });
     }
     icu_collator::Collator::try_new((&locale).into(), opts)
-        .map_err(|e| bad(format!("unsupported collation {tag:?}: {e} (4.23.3)")))
+        .map_err(|_| bad(format!("unsupported collation {tag:?} (4.23.3)")))
 }
 
 pub fn order_entities(
@@ -3407,5 +3509,175 @@ mod clause_5_2_2 {
         assert!(sys["https://uri.etsi.org/ngsi-ld/default-context/p"][0]
             .get("modifiedAt")
             .is_some());
+    }
+}
+
+/// 4.5.23.1: "When retrieving Linked Entities, it is necessary to limit
+/// retrieval to avoid cascades of an excessive length, duplicates or loops."
+#[cfg(test)]
+mod clause_4_5_23_bounds {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn app() -> axum::Router {
+        crate::router(AppState::new("antares-test".into()))
+    }
+
+    async fn create(app: &axum::Router, body: Value) {
+        let payload = body.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", payload.len().to_string())
+                    .body(Body::from(payload))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED, "create failed");
+    }
+
+    async fn get(app: &axum::Router, uri: &str) -> (axum::http::response::Parts, Value) {
+        let resp = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        let (parts, body) = resp.into_parts();
+        let bytes = body.collect().await.expect("body").to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).expect("json");
+        (parts, json)
+    }
+
+    /// 4.5.23.1/4.5.23.3: the flattened array carries the Linking Entity and
+    /// its Linked Entities — a Relationship pointing back at the root is a
+    /// loop, so the root shall appear exactly ONCE, not once as the Linking
+    /// Entity and again as its own Linked Entity.
+    #[tokio::test]
+    async fn flat_join_never_repeats_the_root_entity() {
+        let app = app();
+        let root = "urn:ngsi-ld:Loop:root";
+        let leaf = "urn:ngsi-ld:Loop:leaf";
+        create(&app, json!({"id": leaf, "type": "Loop"})).await;
+        create(
+            &app,
+            json!({"id": root, "type": "Loop",
+                   "self": {"type": "Relationship", "object": root},
+                   "other": {"type": "Relationship", "object": leaf}}),
+        )
+        .await;
+
+        let (_, body) = get(
+            &app,
+            &format!("/ngsi-ld/v1/entities/{root}?join=flat&joinLevel=3"),
+        )
+        .await;
+        let arr = match body {
+            Value::Array(a) => a,
+            other => vec![other],
+        };
+        let (mut roots, mut leaves) = (0usize, 0usize);
+        for e in &arr {
+            match e["id"].as_str() {
+                Some(id) if id == root => roots += 1,
+                Some(id) if id == leaf => leaves += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            roots, 1,
+            "the root must appear exactly once in the flattened array: {arr:?}"
+        );
+        assert_eq!(
+            leaves, 1,
+            "the genuine Linked Entity is still there once: {arr:?}"
+        );
+        assert_eq!(arr.len(), 2, "no other entity is in the array: {arr:?}");
+    }
+
+    /// 4.5.23.1: a cyclic graph at a high joinLevel shall not cascade — the
+    /// walk stops at entities it already resolved and says so with an
+    /// NGSILD-Warning (6.3.17) instead of expanding fan-out^joinLevel.
+    #[tokio::test]
+    async fn cyclic_inline_join_stops_instead_of_cascading() {
+        let app = app();
+        let ids = [
+            "urn:ngsi-ld:Cyc:a",
+            "urn:ngsi-ld:Cyc:b",
+            "urn:ngsi-ld:Cyc:c",
+        ];
+        // complete graph: every entity links to every entity, itself included
+        for id in ids {
+            create(
+                &app,
+                json!({"id": id, "type": "Cyc",
+                       "toA": {"type": "Relationship", "object": ids[0]},
+                       "toB": {"type": "Relationship", "object": ids[1]},
+                       "toC": {"type": "Relationship", "object": ids[2]}}),
+            )
+            .await;
+        }
+
+        let (parts, body) = get(
+            &app,
+            &format!("/ngsi-ld/v1/entities/{}?join=inline&joinLevel=9", ids[0]),
+        )
+        .await;
+        assert_eq!(parts.status, StatusCode::OK);
+        // 3^9 embeddings if the walk is unbounded; a handful if it is not
+        let embedded = body.to_string().matches("urn:ngsi-ld:Cyc:").count();
+        assert!(
+            embedded < 64,
+            "the cyclic walk cascaded: {embedded} entity references embedded"
+        );
+        assert!(
+            parts.headers.get("NGSILD-Warning").is_some(),
+            "a truncated Linked Entity Retrieval must be reported (6.3.17)"
+        );
+    }
+
+    /// 4.5.23.1: joinLevel bounds the depth, not the width — one retrieval
+    /// may only buy MAX_JOIN_LOOKUPS Linked Entity reads, and the truncation
+    /// is reported back to the caller.
+    #[test]
+    fn wide_inline_join_stops_at_the_lookup_budget() {
+        let st = AppState::new("antares-test".into());
+        let tenant = TenantId::default();
+        let ctx = antares_jsonld::Loader::new().core();
+        let mut targets: Vec<Value> = Vec::new();
+        for n in 0..MAX_JOIN_LOOKUPS + 100 {
+            let id = format!("urn:ngsi-ld:Wide:{n}");
+            let doc = json!({"id": &id, "type":
+                ["https://uri.etsi.org/ngsi-ld/default-context/Wide"]});
+            st.store
+                .upsert(&tenant, Kind::Entity, &id, doc)
+                .expect("seed");
+            targets.push(Value::String(id));
+        }
+        let mut compacted = json!({"id": "urn:ngsi-ld:Wide:root", "type": "Wide",
+            "links": {"type": "Relationship", "object": Value::Array(targets)}});
+        let complete = inline_join(
+            &st,
+            &tenant,
+            &ctx,
+            &crate::repr::Repr::default(),
+            &mut compacted,
+            1,
+        );
+        assert!(!complete, "the budget was hit, so the walk is incomplete");
+        assert_eq!(
+            compacted["links"]["entity"]
+                .as_array()
+                .expect("entity array")
+                .len(),
+            MAX_JOIN_LOOKUPS,
+            "no more Linked Entities than the budget are resolved"
+        );
     }
 }

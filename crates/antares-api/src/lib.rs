@@ -315,15 +315,23 @@ pub fn router(state: AppState) -> Router {
         // info (6.33)
         .route("/info/sourceIdentity", get(source_identity));
 
+    // 5.8.1.4 consumer half: where forwarded subscription copies point their
+    // notifications; remapped to the original subscriber. It sits outside the
+    // API nest, so it carries the bounds wall and the body limit itself — a
+    // peer-facing write path must not be the one route where the documented
+    // caps do not apply.
+    let remote_notify = Router::new()
+        .route("/ngsi-ld/ex/remote-notify", post(distsub::remote_notify))
+        .layer(axum::extract::DefaultBodyLimit::max(bounds::MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bounds::bounds_layer,
+        ));
+
     Router::new()
         .route("/q/health", get(health))
         .route("/q/ready", get(ready))
-        // 5.8.1.4 consumer half: where forwarded subscription copies point
-        // their notifications; remapped to the original subscriber.
-        .route(
-            "/ngsi-ld/ex/remote-notify",
-            post(distsub::remote_notify).with_state(state.clone()),
-        )
+        .merge(remote_notify)
         // Prometheus text format. 404 until the broker installs the
         // renderer — the api crate never depends on an exporter.
         .route("/q/metrics", get(metrics_endpoint))
@@ -370,6 +378,18 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Tenants the broker mints for its own bookkeeping: the snapshot module's
+/// internal and per-snapshot tenants share a prefix, the distributed
+/// subscription inbound index is a single fixed name. A client-supplied
+/// tenant may not name any of them — it would put request-shaped writes in
+/// the same keyspace the broker keeps its own state in.
+const INTERNAL_TENANT_PREFIX: &str = "snap-";
+const INTERNAL_TENANTS: &[&str] = &["distsub-index"];
+
+fn reserved_tenant(raw: &str) -> bool {
+    raw.starts_with(INTERNAL_TENANT_PREFIX) || INTERNAL_TENANTS.contains(&raw)
+}
+
 /// 5.5.10 Multi-Tenant Behaviour: Tenants are created implicitly by create
 /// operations (Create Entity 5.6.1, Batch Create/Upsert 5.6.7/5.6.8, Create
 /// Temporal 5.6.11, Create Subscription 5.8.1, Register Context Source
@@ -382,6 +402,24 @@ async fn tenant_exists_layer(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
+    // 6.3.14: the tenant namespace the broker mints for itself is not a
+    // legal client tenant. Snapshots run on internal tenants named
+    // "snap-index" (the synthetic-tenant reverse index) and "snap-<uuid>"
+    // (one per snapshot); a client naming one would read and delete another
+    // tenant's snapshot bookkeeping. Rejected here, ahead of the snapshot
+    // layer that legitimately rewrites the header to such a tenant.
+    if let Some(raw) = req
+        .headers()
+        .get("NGSILD-Tenant")
+        .and_then(|v| v.to_str().ok())
+    {
+        if reserved_tenant(raw) {
+            return crate::negotiate::ApiError::from(NgsiError::BadRequestData(format!(
+                "invalid NGSILD-Tenant value: {raw:?}"
+            )))
+            .into_response();
+        }
+    }
     let path = req.uri().path().trim_start_matches(API_ROOT);
     let implicit_create = req.method() == axum::http::Method::POST
         && matches!(
@@ -2066,6 +2104,122 @@ mod tests {
                 .get("NGSILD-Tenant")
                 .map(|v| v.to_str().expect("ascii")),
             Some("city-01")
+        );
+    }
+
+    /// 5.5.10 / 6.3.14: the `snap-` tenant namespace is the broker's own —
+    /// the snapshot code mints `snap-index` (the synth-tenant reverse index)
+    /// and `snap-<uuid>` (one per snapshot). A client NGSILD-Tenant inside
+    /// that namespace would let the caller read and delete other tenants'
+    /// snapshot bookkeeping, so it is an invalid tenant value: 400
+    /// BadRequestData, and nothing reaches the store.
+    #[tokio::test]
+    async fn internal_tenant_namespace_is_reserved() {
+        let state = AppState::new("antares-test".into());
+        let app = router(state.clone());
+        let idx = antares_model::TenantId::new("snap-index").expect("tenant");
+
+        // create (implicit tenant creation) must not mint the internal tenant
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:si", "type": "Building"});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .header("NGSILD-Tenant", "snap-index")
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(resp).await["type"],
+            "https://uri.etsi.org/ngsi-ld/errors/BadRequestData"
+        );
+        assert!(
+            !state.store.tenant_exists(&idx).expect("store"),
+            "refused request must not create the internal tenant"
+        );
+        assert!(state
+            .store
+            .list(&idx, antares_sql::store::Kind::Entity)
+            .expect("store")
+            .is_empty());
+
+        // reads of the index are refused too, whatever the resource
+        for path in [
+            "/ngsi-ld/v1/entities?type=Building",
+            "/ngsi-ld/v1/subscriptions",
+            "/ngsi-ld/v1/snapshots",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(path)
+                        .header("NGSILD-Tenant", "snap-index")
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+        // a per-snapshot synthetic tenant is equally off-limits, and so is the
+        // distributed-subscription inbound index, whose own record claims it
+        // is reserved while nothing enforced it
+        for tenant in ["snap-0123456789abcdef", "distsub-index"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get("/ngsi-ld/v1/entities?type=Building")
+                        .header("NGSILD-Tenant", tenant)
+                        .body(Body::empty())
+                        .expect("req"),
+                )
+                .await
+                .expect("resp");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{tenant}");
+        }
+    }
+
+    /// The reserved namespace is the `snap-` prefix only: a tenant that
+    /// merely contains "snap" is an ordinary 5.5.10 tenant.
+    #[tokio::test]
+    async fn tenant_containing_snap_is_not_reserved() {
+        let app = app();
+        let entity = serde_json::json!({"id": "urn:ngsi-ld:B:st", "type": "Building"});
+        let body = entity.to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .header("NGSILD-Tenant", "snapshots-team")
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building")
+                    .header("NGSILD-Tenant", "snapshots-team")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("NGSILD-Tenant")
+                .map(|v| v.to_str().expect("ascii")),
+            Some("snapshots-team")
         );
     }
 

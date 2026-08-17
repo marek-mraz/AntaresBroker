@@ -79,6 +79,21 @@ impl Roles {
     }
 }
 
+/// ANTARES_OUTBOX_DRAIN: `on` (the default) or `off`, and nothing else. A
+/// typo'd `of` read as "on" under the old permissive parse, quietly defeating
+/// the dedicated-drainer split and the crash drill it exists for.
+pub fn outbox_drain_enabled() -> Result<bool, String> {
+    match std::env::var("ANTARES_OUTBOX_DRAIN") {
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        Err(e) => Err(format!("ANTARES_OUTBOX_DRAIN is unreadable: {e}")),
+        Ok(v) => match v.as_str() {
+            "on" => Ok(true),
+            "off" => Ok(false),
+            other => Err(format!("ANTARES_OUTBOX_DRAIN must be on|off, got {other:?}")),
+        },
+    }
+}
+
 /// KV key for one subscription: tenant verbatim (token-safe by construction),
 /// id hashed (URNs carry `:` — illegal in KV keys). The VALUE carries the
 /// real tenant/id, so the key only needs uniqueness.
@@ -232,9 +247,7 @@ pub async fn wire_nats(
         // absorbed by Nats-Msg-Id dedup within the duplicate window.
         // ANTARES_OUTBOX_DRAIN=off leaves the rows for another pod's drain —
         // the crash-drill lever and the dedicated-drainer split.
-        let drain_on = std::env::var("ANTARES_OUTBOX_DRAIN")
-            .map(|v| v != "off")
-            .unwrap_or(true);
+        let drain_on = outbox_drain_enabled()?;
         if !drain_on {
             tracing::warn!("outbox drain OFF on this pod (ANTARES_OUTBOX_DRAIN=off)");
         }
@@ -398,6 +411,14 @@ fn apply_delta(mirror: &dyn antares_api::notify::Mirror, delta: &serde_json::Val
     ) else {
         return;
     };
+    // Hydration validates the tenant before it touches the mirror; the delta
+    // path must agree. A tenant name no request could carry (the header is
+    // validated to the same character set) can only add entries that no
+    // lookup will ever hit, so an unvalidated one is unbounded growth keyed
+    // by whatever reached the bus.
+    if TenantId::new(tenant).is_err() {
+        return;
+    }
     let doc = delta.get("doc").filter(|d| !d.is_null()).cloned();
     mirror.apply(tenant, id, doc);
 }
@@ -424,4 +445,212 @@ fn resolve_payloads(
         .clone()
         .or_else(|| ev.payload_ref.as_ref().and_then(&fetch));
     (before, after)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use antares_api::notify::DocMirror;
+    use antares_bus::{ChangeOp, PayloadRef};
+    use antares_model::EntityId;
+    use serde_json::json;
+
+    #[test]
+    fn roles_parse_accepts_the_role_set_and_refuses_anything_else() {
+        assert!(Roles::parse("all").expect("all").all());
+        let r = Roles::parse("api").expect("api");
+        assert!(r.api && !r.matcher && !r.notifier && !r.temporal && !r.registry);
+        assert!(!r.all(), "a single role must never claim to be the full set");
+        let r = Roles::parse(" matcher , notifier ").expect("padded list");
+        assert!(r.matcher && r.notifier && !r.api);
+        // The enumerated full set is the same thing as "all" — a role split
+        // that happens to name every role must still pass the bus=local gate.
+        assert!(Roles::parse("api,matcher,notifier,temporal,registry")
+            .expect("full list")
+            .all());
+
+        for bad in ["", "api,", "ALL", "apis", "api;matcher", "worker", " "] {
+            let err = Roles::parse(bad).expect_err(&format!("ANTARES_ROLES={bad:?} must be fatal"));
+            assert!(err.starts_with("unknown role"), "{bad:?}: {err}");
+        }
+    }
+
+    /// The KV key must be legal for a NATS KV bucket (`:` from a URN is not),
+    /// stable across calls, and collision-free per id.
+    #[test]
+    fn kv_key_is_bucket_legal_and_stable() {
+        let k = kv_key("default", "urn:ngsi-ld:Subscription:1");
+        assert_eq!(k, kv_key("default", "urn:ngsi-ld:Subscription:1"), "stable");
+        assert!(
+            k.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-'),
+            "illegal KV key character in {k:?}"
+        );
+        assert!(k.starts_with("default."), "tenant scoping lost: {k}");
+        assert_ne!(
+            kv_key("default", "urn:ngsi-ld:Subscription:1"),
+            kv_key("default", "urn:ngsi-ld:Subscription:2")
+        );
+        assert_ne!(
+            kv_key("t1", "urn:ngsi-ld:Subscription:1"),
+            kv_key("t2", "urn:ngsi-ld:Subscription:1")
+        );
+    }
+
+    /// The KV/registry mirrors are fed from the bus. A malformed or hostile
+    /// delta must be dropped — never panic a consumer task, and never grow
+    /// the mirror under a key no request can ever address (the tenant is
+    /// validated on every request, so an unvalidated one is pure ballast).
+    #[test]
+    fn apply_delta_ignores_malformed_and_hostile_deltas() {
+        let m = DocMirror::default();
+        apply_delta(&m, &json!({"tenant": "default", "id": "urn:x:1", "doc": {"id": "urn:x:1"}}));
+        assert_eq!(m.docs("default").len(), 1, "a good delta must apply");
+
+        // tombstone
+        apply_delta(&m, &json!({"tenant": "default", "id": "urn:x:1", "doc": null}));
+        assert!(m.docs("default").is_empty(), "null doc must delete");
+        assert!(m.tenants().is_empty(), "an emptied tenant must not linger");
+
+        // Shapes that must be ignored without panicking.
+        for junk in [
+            json!({}),
+            json!(null),
+            json!(42),
+            json!("scalar"),
+            json!([1, 2, 3]),
+            json!({"tenant": "default"}),
+            json!({"id": "urn:x:1"}),
+            json!({"tenant": 7, "id": "urn:x:1", "doc": {}}),
+            json!({"tenant": "default", "id": null, "doc": {}}),
+            json!({"cooldownReg": "urn:reg:1", "ok": false}),
+        ] {
+            apply_delta(&m, &junk);
+        }
+        assert!(m.tenants().is_empty(), "junk deltas grew the mirror");
+
+        // Hostile tenants: not addressable by any request (the header is
+        // validated to [A-Za-z0-9_-]{1,64}), so they may not take memory.
+        for hostile in ["a".repeat(4096), "../../etc".into(), "a b".into(), "".into()] {
+            apply_delta(&m, &json!({"tenant": hostile, "id": "urn:x:1", "doc": {"id": "urn:x:1"}}));
+        }
+        assert!(
+            m.tenants().is_empty(),
+            "an unaddressable tenant grew the mirror without bound: {:?}",
+            m.tenants()
+        );
+    }
+
+    fn state_with(entity: Option<serde_json::Value>) -> AppState {
+        let st = AppState::new("antares".into());
+        if let Some(doc) = entity {
+            let id = doc["id"].as_str().expect("id").to_owned();
+            st.store
+                .create(&TenantId::default(), Kind::Entity, &id, doc)
+                .expect("seed");
+        }
+        st
+    }
+
+    fn event(payload: Option<serde_json::Value>, r#ref: Option<PayloadRef>) -> ChangeEvent {
+        ChangeEvent {
+            tenant: TenantId::default(),
+            entity_id: EntityId::new("urn:ngsi-ld:T:1").expect("id"),
+            types: vec!["T".into()],
+            op: ChangeOp::Update,
+            changed_attrs: vec![],
+            payload,
+            prev_payload: None,
+            version: 1,
+            incarnation: String::new(),
+            seq: 0,
+            payload_ref: r#ref,
+            prev_payload_ref: None,
+        }
+    }
+
+    /// Claim-check resolution: inline wins, a reference is fetched, and a
+    /// reference to a row that is gone resolves to None instead of panicking
+    /// the matcher task.
+    #[test]
+    fn resolve_payloads_prefers_inline_and_tolerates_a_dangling_reference() {
+        // AppState builds outbound HTTP clients; give it a runtime context.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let doc = json!({"id": "urn:ngsi-ld:T:1", "type": "T"});
+        let st = state_with(Some(doc.clone()));
+
+        let (before, after) = resolve_payloads(&st, &event(Some(json!({"inline": true})), None));
+        assert_eq!(after, Some(json!({"inline": true})), "inline payload wins");
+        assert_eq!(before, None);
+
+        let r = PayloadRef {
+            entity_id: EntityId::new("urn:ngsi-ld:T:1").expect("id"),
+            version: 1,
+        };
+        let (_, after) = resolve_payloads(&st, &event(None, Some(r.clone())));
+        assert_eq!(
+            after.as_ref().and_then(|a| a["id"].as_str()),
+            Some("urn:ngsi-ld:T:1"),
+            "a claim-check reference must be fetched from the store"
+        );
+
+        // The row was deleted between publish and consumption.
+        let gone = state_with(None);
+        let (before, after) = resolve_payloads(&gone, &event(None, Some(r)));
+        assert_eq!(after, None, "a dangling reference must resolve to None");
+        assert_eq!(before, None);
+
+        let (before, after) = resolve_payloads(&st, &event(None, None));
+        assert!(before.is_none() && after.is_none(), "no payload, no fetch");
+    }
+
+    /// A claim-check fetch is scoped to the EVENT's tenant: a reference must
+    /// never resolve against another tenant's row of the same id.
+    #[test]
+    fn resolve_payloads_never_crosses_a_tenant_boundary() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let st = state_with(Some(json!({"id": "urn:ngsi-ld:T:1", "type": "T"})));
+        let mut ev = event(
+            None,
+            Some(PayloadRef {
+                entity_id: EntityId::new("urn:ngsi-ld:T:1").expect("id"),
+                version: 1,
+            }),
+        );
+        ev.tenant = TenantId::new("other").expect("tenant");
+        let (_, after) = resolve_payloads(&st, &ev);
+        assert_eq!(
+            after, None,
+            "a reference resolved another tenant's entity: {after:?}"
+        );
+    }
+
+    /// The outbox-drain switch is a config value like any other: the two
+    /// documented spellings decide, anything else is fatal instead of
+    /// silently leaving the drain on (a typo'd `ANTARES_OUTBOX_DRAIN=of`
+    /// would otherwise read as "on" and quietly defeat the crash drill).
+    #[test]
+    fn outbox_drain_switch_is_total() {
+        std::env::remove_var("ANTARES_OUTBOX_DRAIN");
+        assert!(outbox_drain_enabled().expect("default"), "default is on");
+        std::env::set_var("ANTARES_OUTBOX_DRAIN", "off");
+        assert!(!outbox_drain_enabled().expect("off"));
+        std::env::set_var("ANTARES_OUTBOX_DRAIN", "on");
+        assert!(outbox_drain_enabled().expect("on"));
+        for bad in ["", "of", "false", "0", "OFF", "no"] {
+            std::env::set_var("ANTARES_OUTBOX_DRAIN", bad);
+            let err = outbox_drain_enabled()
+                .expect_err(&format!("ANTARES_OUTBOX_DRAIN={bad:?} must be fatal"));
+            assert!(err.contains("ANTARES_OUTBOX_DRAIN"), "{err}");
+        }
+        std::env::remove_var("ANTARES_OUTBOX_DRAIN");
+    }
 }

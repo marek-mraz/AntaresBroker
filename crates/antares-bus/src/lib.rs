@@ -92,7 +92,9 @@ impl ChangeEvent {
             self.prev_payload = None;
             self.prev_payload_ref = Some(PayloadRef {
                 entity_id: self.entity_id.clone(),
-                version: self.version - 1,
+                // saturating: a decoded event's version is whatever the wire
+                // said, and wrapping would reference the wrong document
+                version: self.version.saturating_sub(1),
             });
         }
         self
@@ -202,5 +204,38 @@ mod tests {
             checked.prev_payload.is_some() && checked.prev_payload_ref.is_none(),
             "under-limit body inline"
         );
+    }
+
+    /// A decoded event carries whatever `version` the wire said. The claim
+    /// check derives the previous version from it, and that arithmetic must
+    /// not overflow — an overflow is a panic in debug builds and a wrap in
+    /// release, i.e. a reference to the wrong document.
+    #[test]
+    fn claim_check_does_not_underflow_on_an_extreme_version() {
+        let mut e = event(i64::MIN);
+        e.prev_payload = Some(serde_json::Value::String("x".repeat(1024)));
+        let checked = e.claim_check(512);
+        assert_eq!(
+            checked.prev_payload_ref.expect("ref set").version,
+            i64::MIN,
+            "must saturate, never wrap to i64::MAX"
+        );
+    }
+
+    /// The ring is bounded: a consumer that stops reading costs a fixed
+    /// amount of memory and is told it lagged, rather than growing the
+    /// buffer without limit.
+    #[tokio::test]
+    async fn a_lagging_consumer_is_dropped_not_buffered() {
+        let bus = LocalBus::new(2);
+        let mut rx = bus.subscribe();
+        for v in 1..=5 {
+            bus.publish(event(v));
+        }
+        assert!(
+            matches!(rx.recv().await, Err(broadcast::error::RecvError::Lagged(3))),
+            "the oldest events must be dropped, not queued"
+        );
+        assert_eq!(rx.recv().await.expect("recv").version, 4);
     }
 }

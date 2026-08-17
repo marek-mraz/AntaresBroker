@@ -666,3 +666,127 @@ fn idle_keepalive_connection_does_not_stall_the_drain() {
     drop(idle);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Spawn the broker with `env` and expect it to refuse the config on its own.
+/// Bounded on purpose: a broker that STAYS UP fails the assertion instead of
+/// hanging the suite forever (which is what `output()` would do).
+fn fatal_stderr(env: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_antares"));
+    cmd.stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut broker = Broker(cmd.spawn().expect("spawn antares"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = broker.try_wait().expect("try_wait") {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the broker stayed up on a config that must be fatal: {env:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(!status.success(), "must exit non-zero: {status:?} {env:?}");
+    let mut err = String::new();
+    broker
+        .0
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut err)
+        .expect("read stderr");
+    err
+}
+
+/// Every config value the composition root parses is fatal when it is
+/// garbage — a misread port, cadence or drain window must never silently run
+/// at the default, which is the same policy as an unknown key. The error
+/// names the variable, so an operator sees which one.
+#[test]
+fn garbage_config_values_are_fatal_and_name_their_key() {
+    for (key, value) in [
+        ("ANTARES_HTTP_PORT", "http"),
+        ("ANTARES_HTTP_PORT", "70000"),
+        ("ANTARES_SWEEP_SECS", "2s"),
+        ("ANTARES_SWEEP_SECS", "0"),
+        ("ANTARES_DRAIN_DELAY_MS", "soon"),
+        ("ANTARES_DRAIN_DEADLINE_SECS", "20.0"),
+        ("ANTARES_HEADER_READ_TIMEOUT_MS", "ten"),
+        ("ANTARES_MAX_CONNECTIONS", "-1"),
+        ("ANTARES_OUTBOX_DRAIN", "of"),
+        ("ANTARES_ROLES", "worker"),
+        ("ANTARES_BUS", "kafka"),
+        ("ANTARES_HOST_ALIAS", "a~b"),
+        ("ANTARES_HOST_ALIAS", ""),
+        // `file` mode never invents a data directory inside the image
+        ("ANTARES_STORE", "file"),
+    ] {
+        let port = free_port().to_string();
+        let env: Vec<(&str, &str)> = if key == "ANTARES_HTTP_PORT" {
+            vec![(key, value)]
+        } else {
+            vec![("ANTARES_HTTP_PORT", &port), (key, value)]
+        };
+        let err = fatal_stderr(&env);
+        assert!(
+            err.contains(key),
+            "{key}={value:?} was refused without naming the key: {err}"
+        );
+    }
+}
+
+/// A role split needs a shared bus: with bus=local every role lives in one
+/// process, so ANTARES_ROLES=api alone would silently drop matching and
+/// notification on the floor. Refused at startup.
+#[test]
+fn role_split_without_a_shared_bus_is_fatal() {
+    for roles in ["api", "matcher", "matcher,notifier", "temporal"] {
+        let port = free_port().to_string();
+        let err = fatal_stderr(&[("ANTARES_HTTP_PORT", &port), ("ANTARES_ROLES", roles)]);
+        assert!(
+            err.contains("ANTARES_BUS=nats"),
+            "ANTARES_ROLES={roles} on the local bus must point at the nats bus: {err}"
+        );
+    }
+    // The enumerated full set is not a split — it must start.
+    let port = free_port();
+    let dir = tempdir("rolesall");
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("ANTARES_ROLES", "api,matcher,notifier,temporal,registry")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    wait_healthy(port);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The process environment and argv are NOT guaranteed to be UTF-8. A
+/// container image, an init system or a hostile parent can pass either as
+/// arbitrary bytes, and scanning them must not kill the broker: a foreign
+/// variable is ignored, a stray argument is ignored, and the process serves.
+#[test]
+fn non_utf8_environment_and_argv_do_not_kill_the_process() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let port = free_port();
+    let dir = tempdir("nonutf8");
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("LC_JUNK", OsString::from_vec(vec![0xff, 0xfe, 0x80]))
+            .arg(OsString::from_vec(vec![0xff, 0xfe]))
+            .spawn()
+            .expect("spawn antares"),
+    );
+    let health = wait_healthy(port);
+    assert!(health.contains(r#""status":"UP""#), "health: {health}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -25,9 +25,18 @@ pub struct CompiledScope {
     pub binds: Vec<String>,
 }
 
+/// Longest `scopeQ` compiled. One pattern is one bind and the whole thing is
+/// unbounded upstream (a POST query body carries it too), so past this ceiling
+/// the statement could ask for more placeholders than the wire protocol has —
+/// and a refusal only means the matcher does the work.
+const MAX_SCOPE_Q_BYTES: usize = 4096;
+
 /// Compile `scope_q` into a predicate over `col` (a `text[]`).
 /// `None` = outside the exact subset; the caller filters in memory.
 pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<CompiledScope> {
+    if scope_q.len() > MAX_SCOPE_Q_BYTES {
+        return None;
+    }
     let mut binds = Vec::new();
     let mut or_parts = Vec::new();
     // 4.19: orOp = `|` / `,`; a conjunction is parenthesized — the parens
@@ -167,6 +176,57 @@ mod tests {
     fn regex_metacharacters_in_a_segment_are_escaped_not_syntax() {
         let c = compile_scope_q("/a.b+c", "scopes", 1).expect("compiles");
         assert_eq!(c.binds[0], "^/*a\\.b\\+c/*$");
+    }
+
+    /// A scope level is `unicodeLetter *(unicodeNumber / unicodeLetter / "_")`
+    /// (4.19 ABNF), but nothing upstream enforces that grammar — so anything a
+    /// client sends must land in a bind, escaped, and never in the statement.
+    #[test]
+    fn client_text_never_reaches_the_statement() {
+        let c = compile_scope_q("/a' OR 1=1 --", "scopes", 1).expect("compiles");
+        for needle in ["OR 1=1", "--", "'"] {
+            assert!(!c.sql.contains(needle), "{needle:?} leaked: {}", c.sql);
+        }
+        assert_eq!(
+            c.sql,
+            "((EXISTS (SELECT 1 FROM unnest(scopes) AS s WHERE s ~ $1)))"
+        );
+        assert_eq!(c.binds, vec!["^/*a' OR 1=1 --/*$"]);
+        // a regex-level injection is escaped in the bind, not passed through
+        let c = compile_scope_q("/(a).*", "scopes", 1).expect("compiles");
+        assert_eq!(c.binds, vec!["^/*\\(a\\)\\.\\*/*$"]);
+    }
+
+    /// Every degenerate group must widen. `^.*$` matches any stored scope, so
+    /// an empty pattern can only ADD rows for the matcher to reject — the one
+    /// direction this compiler is allowed to be wrong in.
+    #[test]
+    fn degenerate_groups_widen_instead_of_narrowing() {
+        for q in ["", "/", "/A,", ";/A"] {
+            let c = compile_scope_q(q, "scopes", 1).unwrap_or_else(|| panic!("{q} compiles"));
+            assert!(
+                c.binds.iter().any(|b| b == "^.*$"),
+                "{q} must widen, not narrow: {:?}",
+                c.binds
+            );
+        }
+    }
+
+    /// `scopeQ` has no length ceiling upstream, and one pattern is one bind —
+    /// a POST-body scopeQ can otherwise ask for more placeholders than the
+    /// wire protocol has. Past the ceiling the matcher does the work.
+    #[test]
+    fn an_oversized_scope_query_is_left_to_the_matcher() {
+        let huge = vec!["/A"; 40_000].join(",");
+        assert!(compile_scope_q(&huge, "scopes", 1).is_none());
+        let ok = vec!["/A"; 100].join(",");
+        assert_eq!(
+            compile_scope_q(&ok, "scopes", 1)
+                .expect("compiles")
+                .binds
+                .len(),
+            100
+        );
     }
 
     /// Doubled slashes: the matcher drops empty segments, so `/A//B` IS a

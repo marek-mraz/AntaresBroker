@@ -4,8 +4,9 @@
 //! IOP_EXT_TMP_03_04: pg/timescale returned 3 for limit=2; memory/file
 //! never pre-page, which is why only SQL cells failed).
 //!
-//! Needs a live PostGIS; skips loudly without ANTARES_TEST_DATABASE_URL
-//! (container recipe in antares-sql/tests/pg.rs).
+//! Needs a live PostGIS (container recipe in antares-sql/tests/pg.rs), so
+//! it is ignored by default: a run without a database reports it as
+//! `ignored` instead of passing vacuously.
 
 use antares_api::state::AppState;
 use antares_sql::store::any::{AnyStore, PgBackend};
@@ -15,18 +16,6 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use tower::ServiceExt;
-
-macro_rules! require_db {
-    () => {
-        match std::env::var("ANTARES_TEST_DATABASE_URL") {
-            Ok(url) => url,
-            Err(_) => {
-                eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
-                return;
-            }
-        }
-    };
-}
 
 /// One-shot HTTP mock: replies `reply` to every request on its own thread.
 fn mock_replying(reply: String) -> u16 {
@@ -58,8 +47,10 @@ async fn body_json(res: axum::http::Response<Body>) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live PostGIS in ANTARES_TEST_DATABASE_URL: cargo test -p antares-api --test temporal_fed_paging_5_7_4 -- --ignored"]
 async fn clause_5_7_4_pages_partition_the_federated_union_on_pg() {
-    let url = require_db!();
+    let url = std::env::var("ANTARES_TEST_DATABASE_URL")
+        .expect("ANTARES_TEST_DATABASE_URL must point at a live PostGIS");
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
     let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
     antares_sql::pg::ensure_tenant(&pool, &antares_model::TenantId::default())

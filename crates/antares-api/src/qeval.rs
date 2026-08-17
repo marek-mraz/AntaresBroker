@@ -23,9 +23,20 @@ pub fn eval_q(node: &QNode, entity: &Value, ctx: &Context, lookup: EntityLookup)
         // ListRelationship, the combination of such target element with any
         // operator different than equal or unequal shall result in not
         // matching."
-        QNode::Cmp { path, op, value } => resolve_qpath(entity, path, ctx, lookup, 0)
-            .iter()
-            .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value)),
+        QNode::Cmp { path, op, value } => {
+            // The pattern of `~=` / `!~=` belongs to the Query Term, not to
+            // the target: compile it once per term instead of once per
+            // candidate value. A pattern that does not compile has no L(R),
+            // so neither operator matches (4.9 p.92) — that is what the
+            // `None` below means downstream.
+            let re = match (op, value) {
+                (CmpOp::Pattern | CmpOp::NotPattern, QValue::Str(s)) => regex::Regex::new(s).ok(),
+                _ => None,
+            };
+            resolve_qpath(entity, path, ctx, lookup, 0)
+                .iter()
+                .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value, re.as_ref()))
+        }
     }
 }
 
@@ -295,7 +306,9 @@ fn same_datatype(target: &Value, want: &QValue) -> bool {
     }
 }
 
-fn compare(target: &Value, op: CmpOp, want: &QValue) -> bool {
+/// `re` is the pre-compiled pattern of the enclosing Query Term, `None`
+/// when the operator is not a pattern operator or the pattern is invalid.
+fn compare(target: &Value, op: CmpOp, want: &QValue, re: Option<&regex::Regex>) -> bool {
     // 4.9 ValueList — Equal p.90: "identical or equivalent to ANY of the list
     // values"; Unequal p.91: "neither identical nor equivalent to any of the
     // list values" / "does not include ANY of the list values" — i.e. every
@@ -303,8 +316,8 @@ fn compare(target: &Value, op: CmpOp, want: &QValue) -> bool {
     // rules apply per list element.
     if let QValue::List(vals) = want {
         return match op {
-            CmpOp::Eq => vals.iter().any(|v| compare(target, op, v)),
-            CmpOp::Ne => vals.iter().all(|v| compare(target, op, v)),
+            CmpOp::Eq => vals.iter().any(|v| compare(target, op, v, re)),
+            CmpOp::Ne => vals.iter().all(|v| compare(target, op, v, re)),
             _ => false, // grammar-unreachable (parser rejects), stay safe
         };
     }
@@ -316,8 +329,8 @@ fn compare(target: &Value, op: CmpOp, want: &QValue) -> bool {
         // be in L(R)" — one matching element would be in it). `.any()` is
         // right for the rest.
         return match op {
-            CmpOp::Ne | CmpOp::NotPattern => items.iter().all(|i| compare(i, op, want)),
-            _ => items.iter().any(|i| compare(i, op, want)),
+            CmpOp::Ne | CmpOp::NotPattern => items.iter().all(|i| compare(i, op, want, re)),
+            _ => items.iter().any(|i| compare(i, op, want, re)),
         };
     }
     // 4.9 Unequal, p.92: "If the data type of the target value and the data
@@ -363,10 +376,10 @@ fn compare(target: &Value, op: CmpOp, want: &QValue) -> bool {
                 CmpOp::Ge => t >= s.as_str(),
                 CmpOp::Lt => t < s.as_str(),
                 CmpOp::Le => t <= s.as_str(),
-                CmpOp::Pattern => regex::Regex::new(s).is_ok_and(|re| re.is_match(t)),
+                CmpOp::Pattern => re.is_some_and(|re| re.is_match(t)),
                 // p.92: target "shall not be in the L(R)" — an invalid regex
                 // has no L(R), treat as not matching (same posture as ~=)
-                CmpOp::NotPattern => regex::Regex::new(s).is_ok_and(|re| !re.is_match(t)),
+                CmpOp::NotPattern => re.is_some_and(|re| !re.is_match(t)),
             }
         }
         QValue::List(_) | QValue::Range(..) => unreachable!("handled above"),
@@ -564,6 +577,178 @@ mod clause_4_9_extensions {
         // no resolver → no match, never an error
         let ast = parse_q("sensor{humidity}==40").expect("parse");
         assert!(!eval_q(&ast, &station, &ctx(), &|_| None));
+    }
+}
+
+#[cfg(test)]
+mod bounds_and_patterns {
+    use super::*;
+    use antares_jsonld::Loader;
+    use antares_ql::parse_q;
+    use serde_json::json;
+    use std::cell::Cell;
+
+    const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+
+    fn ctx() -> std::sync::Arc<Context> {
+        Loader::new().core()
+    }
+
+    fn with_value(attr: &str, v: Value) -> Value {
+        json!({
+            "id": "urn:ngsi-ld:Vehicle:9",
+            "type": [format!("{DC}Vehicle")],
+            format!("{DC}{attr}"): [{"type": "Property", "value": v}],
+        })
+    }
+
+    /// 4.9 patternOp/notPatternOp: the pattern is compiled once per Query
+    /// Term now, so pin the outcomes it has to keep — including the invalid
+    /// pattern, which has no L(R) and therefore matches nothing.
+    #[test]
+    fn pattern_operators_keep_their_outcomes() {
+        let ctx = ctx();
+        for (q, target, want) in [
+            (r#"brandName~="^Merc""#, json!("Mercedes"), true),
+            (r#"brandName~="^Merc""#, json!("Volvo"), false),
+            // one matching element is enough for ~=, none may match for !~=
+            (r#"brandName~="^Merc""#, json!(["Volvo", "Mercedes"]), true),
+            (r#"brandName!~="^Merc""#, json!(["Volvo", "Skoda"]), true),
+            // non-string target: 4.9 p.92 "considered as not matching"
+            (r#"brandName~="^Merc""#, json!(7), false),
+            (r#"brandName!~="^Merc""#, json!(7), false),
+            // an invalid pattern compiles to no language at all
+            (r#"brandName~="[""#, json!("Mercedes"), false),
+            (r#"brandName!~="[""#, json!("Mercedes"), false),
+            // …and an empty array has no element inside that (empty) language
+            (r#"brandName!~="[""#, json!([]), true),
+            (r#"brandName~="[""#, json!([]), false),
+        ] {
+            let ast = parse_q(q).expect(q);
+            assert_eq!(
+                eval_q(
+                    &ast,
+                    &with_value("brandName", target.clone()),
+                    &ctx,
+                    &|_| None
+                ),
+                want,
+                "q={q} target={target}"
+            );
+        }
+    }
+
+    /// A hostile `~=` pattern costs compile time, not match time (the regex
+    /// engine is linear in the input). The crate's compiled-size limit turns
+    /// an exploding pattern into a compile error, which 4.9 p.92 treats as
+    /// not matching — so the term is rejected instead of consuming memory.
+    #[test]
+    fn hostile_pattern_cannot_blow_the_compile_budget() {
+        let ctx = ctx();
+        let e = with_value("brandName", json!("Mercedes"));
+        let bombs = [
+            "((((a{1000}){1000}){1000}){1000})".to_owned(),
+            format!("(?:{})", "a{255}".repeat(64)),
+            format!("{}a", "(".repeat(200)) + &")".repeat(200),
+        ];
+        let started = std::time::Instant::now();
+        for p in bombs {
+            let q = format!(r#"brandName~="{p}""#);
+            // an unparseable q is an equally acceptable outcome — what must
+            // not happen is an accepted term that compiles the bomb
+            if let Ok(ast) = parse_q(&q) {
+                assert!(!eval_q(&ast, &e, &ctx, &|_| None), "matched: {q}");
+            }
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "pattern compilation is not bounded"
+        );
+    }
+
+    /// 4.9 LinkedEntityRelation: every hop consumes one `attr{…}` level, and
+    /// the parser caps those at 8 — so a Relationship cycle is walked a
+    /// bounded number of times and the resolver always terminates.
+    #[test]
+    fn linked_walk_terminates_on_a_cycle_within_the_hop_cap() {
+        let ctx = ctx();
+        // urn:A points at itself twice: the walk can only end by running out
+        // of hops, never by running out of entities
+        let a = json!({
+            "id": "urn:A",
+            "type": [format!("{DC}Node")],
+            format!("{DC}r"): [
+                {"type": "Relationship", "object": "urn:A"},
+                {"type": "Relationship", "object": "urn:A", "datasetId": "urn:d:2"},
+            ],
+            format!("{DC}v"): [{"type": "Property", "value": 1}],
+        });
+        let calls = Cell::new(0usize);
+        let lookup = |id: &str| {
+            calls.set(calls.get() + 1);
+            (id == "urn:A").then(|| a.clone())
+        };
+        let q = format!("{}v{}==1", "r{".repeat(8), "}".repeat(8));
+        let ast = parse_q(&q).expect(&q);
+        assert_eq!(ast.max_link_depth(), 8);
+        assert!(eval_q(&ast, &a, &ctx, &lookup), "the cycle resolves");
+        // 2 objects per hop over 8 hops: 2 + 4 + … + 2^8. Bounded, but
+        // exponential in the fan-out — the hop cap is the only limit.
+        assert_eq!(calls.get(), 510, "resolver lookups per query term");
+
+        // one hop deeper is refused before any entity is touched
+        let deep = format!("{}v{}==1", "r{".repeat(9), "}".repeat(9));
+        assert!(
+            matches!(
+                parse_q(&deep),
+                Err(antares_model::NgsiError::TooComplexQuery(_))
+            ),
+            "the 9th hop must be rejected"
+        );
+    }
+
+    /// The evaluator is fed whatever the store and the notification path
+    /// hold: shapes that are not entities, and paths that navigate into a
+    /// scalar, must return "no match" rather than panic.
+    #[test]
+    fn non_entity_shapes_never_panic() {
+        let ctx = ctx();
+        let ast = parse_q("speed>10").expect("q");
+        for doc in [json!(null), json!(7), json!("text"), json!([]), json!({})] {
+            assert!(!eval_q(&ast, &doc, &ctx, &|_| None), "doc={doc}");
+        }
+        // a MemberExpression into a scalar value resolves to nothing
+        let e = with_value("speed", json!(80));
+        for q in ["speed[unit]==80", "speed.unit.deep==80", "speed[a.b]"] {
+            let ast = parse_q(q).expect(q);
+            assert!(!eval_q(&ast, &e, &ctx, &|_| None), "q={q}");
+        }
+        // an instance carrying no value-defining member is not a target
+        let bare = json!({
+            "id": "urn:ngsi-ld:Vehicle:9",
+            "type": [format!("{DC}Vehicle")],
+            format!("{DC}speed"): [{"type": "Property", "unitCode": "KMH"}],
+        });
+        assert!(!eval_q(&parse_q("speed").expect("q"), &bare, &ctx, &|_| {
+            None
+        }));
+    }
+
+    /// 4.9 logical operators: `|` is OR, `;` is AND, `!` negates existence.
+    #[test]
+    fn or_and_negated_existence() {
+        let ctx = ctx();
+        let e = with_value("speed", json!(80));
+        for (q, want) in [
+            ("speed==80|speed==90", true),
+            ("speed==70|speed==90", false),
+            ("speed==80;!color", true),
+            ("speed==80;color", false),
+            ("(speed==70|speed==80);!color", true),
+        ] {
+            let ast = parse_q(q).expect(q);
+            assert_eq!(eval_q(&ast, &e, &ctx, &|_| None), want, "q={q}");
+        }
     }
 }
 

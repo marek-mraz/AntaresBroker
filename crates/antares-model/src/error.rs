@@ -119,6 +119,65 @@ mod tests {
         assert_eq!(NgsiError::Conflict(String::new()).status(), 409);
     }
 
+    /// 5.5.2 Table 5.5.2-1 — the error names are the wire contract: clients
+    /// branch on the type URI, so every variant's name is pinned here, not
+    /// just the one the round-trip test happens to use.
+    #[test]
+    fn every_error_type_uri_matches_table_5_5_2_1() {
+        for (e, name) in [
+            (NgsiError::AlreadyExists(String::new()), "AlreadyExists"),
+            (NgsiError::BadRequestData(String::new()), "BadRequestData"),
+            (NgsiError::Conflict(String::new()), "Conflict"),
+            (NgsiError::InternalError(String::new()), "InternalError"),
+            (NgsiError::InvalidRequest(String::new()), "InvalidRequest"),
+            (
+                NgsiError::LdContextNotAvailable(String::new()),
+                "LdContextNotAvailable",
+            ),
+            (
+                NgsiError::NoMultiTenantSupport(String::new()),
+                "NoMultiTenantSupport",
+            ),
+            (
+                NgsiError::NonexistentTenant(String::new()),
+                "NonexistentTenant",
+            ),
+            (
+                NgsiError::OperationNotSupported(String::new()),
+                "OperationNotSupported",
+            ),
+            (
+                NgsiError::ResourceNotFound(String::new()),
+                "ResourceNotFound",
+            ),
+            (NgsiError::TooComplexQuery(String::new()), "TooComplexQuery"),
+            (NgsiError::TooManyResults(String::new()), "TooManyResults"),
+        ] {
+            assert_eq!(e.kind(), name);
+            let pd = e.to_problem_details();
+            assert_eq!(pd.r#type, format!("{ERROR_TYPE_BASE}{name}"));
+            assert_eq!(pd.title, name);
+            assert!(
+                !pd.r#type.starts_with("http://"),
+                "the V1.9.1 base is https"
+            );
+        }
+    }
+
+    /// 6.3.6 / RFC 7807: the member names are `type`, `title`, `status` and
+    /// `detail` — the Rust raw identifier must not leak as `r#type`.
+    #[test]
+    fn problem_details_serializes_rfc_7807_member_names() {
+        let body =
+            serde_json::to_value(NgsiError::TooManyResults("too many".into()).to_problem_details())
+                .expect("serialize");
+        let obj = body.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["detail", "status", "title", "type"]);
+        assert_eq!(obj["status"], 403);
+    }
+
     #[test]
     fn problem_details_uses_https_base() {
         let pd = NgsiError::ResourceNotFound("nope".into()).to_problem_details();

@@ -73,6 +73,47 @@ fn ds_remotes(doc: &Value) -> Vec<(String, (String, String))> {
         .unwrap_or_default()
 }
 
+/// Insert or remove ONE `remotes` entry under the store's own lock, and
+/// only if the document still exists. A targeted mutate, never a
+/// read-modify-write of the whole document: the per-registration branches of
+/// 5.8.1.4 interleave at their forward `await`s, so a full-document write
+/// would drop a sibling registration's mapping, and a Delete Subscription
+/// (5.8.5.4) that lands mid-forward would be undone by a write that
+/// resurrects the deleted document. `false` = the Subscription's mapping
+/// document is gone.
+fn ds_set_remote(
+    st: &AppState,
+    tenant: &TenantId,
+    own_id: &str,
+    reg_id: &str,
+    entry: Option<Value>,
+) -> bool {
+    st.store
+        .mutate(tenant, Kind::DistSub, own_id, |d| {
+            if let Some(o) = d.as_object_mut() {
+                match &entry {
+                    Some(v) => {
+                        if !o.get("remotes").is_some_and(Value::is_object) {
+                            o.insert("remotes".into(), json!({}));
+                        }
+                        if let Some(m) = o.get_mut("remotes").and_then(Value::as_object_mut) {
+                            m.insert(reg_id.to_owned(), v.clone());
+                        }
+                    }
+                    None => {
+                        if let Some(m) = o.get_mut("remotes").and_then(Value::as_object_mut) {
+                            m.remove(reg_id);
+                        }
+                    }
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 fn inbound_put(st: &AppState, remote_id: &str, tenant: &TenantId, own_id: &str) {
     if let Some(idx) = ds_index_tenant() {
         let _ = st.store.create(
@@ -320,9 +361,18 @@ pub(crate) async fn on_csource_notification(
                 // (the ETSI 5814_01_01 pg race). A failed forward rolls the
                 // mapping back below.
                 inbound_put(st, &remote_id, tenant, own_id);
-                let mut doc = ds_get(st, tenant, own_id);
-                doc["remotes"][reg_id] = json!([endpoint.clone(), remote_id]);
-                ds_put(st, tenant, own_id, doc);
+                if !ds_set_remote(
+                    st,
+                    tenant,
+                    own_id,
+                    reg_id,
+                    Some(json!([endpoint.clone(), remote_id])),
+                ) {
+                    // the Subscription was deleted while this notification
+                    // was in flight — no remote copy is created for it
+                    inbound_delete(st, &remote_id);
+                    continue;
+                }
                 let (status, _) = forward_sub(
                     st,
                     tenant,
@@ -335,14 +385,7 @@ pub(crate) async fn on_csource_notification(
                 .await;
                 if !(200..300).contains(&status) {
                     inbound_delete(st, &remote_id);
-                    // targeted mutate, never ds_put: a concurrent delete may
-                    // have removed the whole doc — do not resurrect it
-                    let _ = st.store.mutate(tenant, Kind::DistSub, own_id, |d| {
-                        if let Some(m) = d.get_mut("remotes").and_then(Value::as_object_mut) {
-                            m.remove(reg_id);
-                        }
-                        Ok::<_, std::convert::Infallible>(())
-                    });
+                    ds_set_remote(st, tenant, own_id, reg_id, None);
                 }
             }
             ("updated", Some((_, remote_id)))
@@ -374,11 +417,7 @@ pub(crate) async fn on_csource_notification(
                     None,
                 )
                 .await;
-                let mut doc = ds_get(st, tenant, own_id);
-                if let Some(m) = doc.get_mut("remotes").and_then(Value::as_object_mut) {
-                    m.remove(reg_id);
-                }
-                ds_put(st, tenant, own_id, doc);
+                ds_set_remote(st, tenant, own_id, reg_id, None);
                 inbound_delete(st, &remote_id);
             }
             _ => {}
@@ -598,6 +637,21 @@ pub async fn remote_notify(State(st): State<AppState>, body: Bytes) -> Response 
 async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> {
     let v: Value = serde_json::from_slice(body)
         .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
+    // Peer-facing entry point: the Entity count is capped before any store
+    // touch or per-Entity work, under the same ceiling a client batch gets
+    // (ANTARES_MAX_BATCH_ITEMS). One notification drives one local retrieve
+    // and one federated fan-out per Entity in the 5.8.6 merge, so an
+    // uncapped data array is an amplification lever.
+    let cap = *crate::bounds::MAX_BATCH_ITEMS;
+    if v.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.len() > cap)
+    {
+        return Err(NgsiError::BadRequestData(format!(
+            "notification data carries more than {cap} Entities"
+        ))
+        .into());
+    }
     let sid = v
         .get("subscriptionId")
         .and_then(Value::as_str)
@@ -615,8 +669,13 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
         .ok()
         .flatten()
     else {
+        // the subscriber is gone: prune the mapping on touch so a remote
+        // that keeps notifying cannot pin a dead index entry forever, and
+        // answer about the peer's own id — the local Subscription id is not
+        // the peer's to learn
+        inbound_delete(st, sid);
         return Err(ApiError::from(NgsiError::ResourceNotFound(format!(
-            "subscription {own_id} is gone"
+            "no distributed subscription maps {sid}"
         ))));
     };
     // the origin of this notification is the registration its remote
@@ -691,4 +750,315 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
         crate::notify::deliver(&st2, &t2, &sub2, data, &ctx).await;
     });
     Ok(StatusCode::OK.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg_doc() -> Value {
+        json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:r1",
+            "endpoint": "http://source.example.org",
+            "operations": ["createSubscription", "updateSubscription", "deleteSubscription"],
+            "information": [{
+                "entities": [{"type": ["Vehicle"], "id": "urn:ngsi-ld:Vehicle:1"}],
+                "propertyNames": ["speed"],
+            }],
+        })
+    }
+
+    fn sub_doc() -> Value {
+        json!({
+            "id": "urn:ngsi-ld:Subscription:own",
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}, {"type": "Device"}],
+            "watchedAttributes": ["speed", "brand"],
+            "q": "speed>10",
+            "geoQ": {"georel": "near;maxDistance==1000"},
+            "scopeQ": "/A",
+            "localOnly": false,
+            "status": "active",
+            "timesSent": 7,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-02T00:00:00Z",
+            "__context": "http://example.org/ctx.jsonld",
+            "notification": {
+                "attributes": ["speed"],
+                "pick": ["speed"],
+                "omit": ["brand"],
+                "endpoint": {"uri": "http://subscriber.example.org/cb"},
+            },
+        })
+    }
+
+    /// 5.8.1.4: "a copy of the original Subscription shall be reduced to
+    /// what is matched by the registration information … Also from the
+    /// notification member, the attributes, pick and omit members are to be
+    /// removed. The copied Subscription is then forwarded to the Context
+    /// Source as a new Subscription where the notification endpoint is set
+    /// to that of the local Broker." Nothing outside the registration's
+    /// scope, and no local bookkeeping, may travel with the copy.
+    #[test]
+    fn clause_5_8_1_reduced_copy_carries_only_the_registration_scope() {
+        let st = AppState::new("antares-ds-reduce".into());
+        let copy = reduced_copy(
+            &st,
+            &sub_doc(),
+            &reg_doc(),
+            "urn:ngsi-ld:Subscription:remote1",
+        );
+        assert_eq!(copy["id"], json!("urn:ngsi-ld:Subscription:remote1"));
+        assert_ne!(
+            copy["id"],
+            json!("urn:ngsi-ld:Subscription:own"),
+            "the remote must be told the broker-generated id, not the local one"
+        );
+        let ents = copy["entities"].as_array().expect("entities");
+        assert_eq!(ents.len(), 1, "{copy}");
+        assert_eq!(ents[0]["type"], json!("Vehicle"));
+        assert!(
+            !copy.to_string().contains("Device"),
+            "a selector the registration does not cover must NOT be forwarded: {copy}"
+        );
+        assert_eq!(
+            copy["watchedAttributes"],
+            json!(["speed"]),
+            "watchedAttributes are intersected with the registered names"
+        );
+        // local-only bookkeeping never leaves the broker
+        for k in [
+            "status",
+            "timesSent",
+            "lastNotification",
+            "lastSuccess",
+            "lastFailure",
+            "createdAt",
+            "modifiedAt",
+            "__context",
+            "localOnly",
+        ] {
+            assert!(copy.get(k).is_none(), "{k} must not be forwarded: {copy}");
+        }
+        let n = &copy["notification"];
+        for k in ["attributes", "pick", "omit"] {
+            assert!(
+                n.get(k).is_none(),
+                "notification.{k} must be removed: {copy}"
+            );
+        }
+        let uri = n["endpoint"]["uri"].as_str().expect("endpoint uri");
+        assert!(uri.ends_with("/ngsi-ld/ex/remote-notify"), "{uri}");
+        assert_ne!(
+            uri, "http://subscriber.example.org/cb",
+            "the source must never learn the original subscriber's endpoint"
+        );
+        // splitEntities is absent here, so the filters stay on the copy
+        assert_eq!(copy["q"], json!("speed>10"));
+    }
+
+    /// 5.8.1.4: "If the splitEntities member is explicitly set to true …
+    /// the members q, geoQ and scopeQ shall be removed from the created
+    /// copy"; and a Subscription with no watchedAttributes is still reduced
+    /// to the registered names, so an unregistered Attribute change cannot
+    /// notify through the chain.
+    #[test]
+    fn clause_5_8_1_reduced_copy_split_and_watch_everything() {
+        let st = AppState::new("antares-ds-split".into());
+        let mut sub = sub_doc();
+        sub["splitEntities"] = json!(true);
+        let copy = reduced_copy(&st, &sub, &reg_doc(), "urn:ngsi-ld:Subscription:remote2");
+        for k in ["q", "geoQ", "scopeQ"] {
+            assert!(
+                copy.get(k).is_none(),
+                "{k} is evaluated locally after the 5.8.6 merge: {copy}"
+            );
+        }
+        let mut watch_all = sub_doc();
+        watch_all
+            .as_object_mut()
+            .expect("object")
+            .remove("watchedAttributes");
+        let copy = reduced_copy(
+            &st,
+            &watch_all,
+            &reg_doc(),
+            "urn:ngsi-ld:Subscription:remote3",
+        );
+        assert_eq!(
+            copy["watchedAttributes"],
+            json!(["speed"]),
+            "a watch-everything Subscription still only watches the \
+             registered names at the source"
+        );
+    }
+
+    /// 5.8.1.4 stores three mappings; every store touch takes the tenant
+    /// first (4.14: "an NGSI-LD system shall behave as if the tenants were
+    /// separate systems"). The inbound index is keyed by the
+    /// broker-generated remote subscriptionId under its own reserved
+    /// tenant, so it never collides with a tenant's own mapping documents.
+    #[test]
+    fn clause_5_8_1_mappings_are_tenant_scoped() {
+        let st = AppState::new("antares-ds-tenant".into());
+        let a = TenantId::new("alpha").expect("tenant");
+        let b = TenantId::new("beta").expect("tenant");
+        let own = "urn:ngsi-ld:Subscription:own";
+        ds_put(
+            &st,
+            &a,
+            own,
+            json!({"csr_sub": "urn:csr:1",
+                   "remotes": {"urn:reg:1": ["http://s", "urn:remote:1"]}}),
+        );
+        assert_eq!(ds_remotes(&ds_get(&st, &a, own)).len(), 1);
+        assert!(
+            ds_remotes(&ds_get(&st, &b, own)).is_empty(),
+            "another tenant must not read the remote mapping"
+        );
+        assert!(ds_get(&st, &b, own).get("csr_sub").is_none());
+        inbound_put(&st, "urn:remote:1", &a, own);
+        assert_eq!(
+            inbound_get(&st, "urn:remote:1"),
+            Some(("alpha".to_owned(), own.to_owned()))
+        );
+        assert!(
+            st.store
+                .get(&a, Kind::DistSub, "urn:remote:1")
+                .ok()
+                .flatten()
+                .is_none(),
+            "the index entry must not land in the subscriber's own namespace"
+        );
+        inbound_delete(&st, "urn:remote:1");
+        assert!(inbound_get(&st, "urn:remote:1").is_none());
+    }
+
+    /// The remotes index is read back from storage, so every malformed
+    /// shape is dropped rather than indexed or unwrapped.
+    #[test]
+    fn clause_5_8_1_remotes_index_drops_malformed_entries() {
+        let doc = json!({"remotes": {
+            "urn:reg:ok": ["http://s", "urn:remote:1"],
+            "urn:reg:short": ["http://s"],
+            "urn:reg:nonstring": [1, 2],
+            "urn:reg:notarray": "http://s",
+            "urn:reg:empty": [],
+        }});
+        let got = ds_remotes(&doc);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "urn:reg:ok");
+        assert_eq!(got[0].1 .1, "urn:remote:1");
+        assert!(ds_remotes(&json!({"remotes": "nope"})).is_empty());
+        assert!(ds_remotes(&json!({})).is_empty());
+    }
+
+    /// 5.8.1.4 / 5.8.5.4: the per-registration branches interleave at their
+    /// forward, so one registration's mapping write must not drop another's,
+    /// and a mapping document deleted by Delete Subscription must stay
+    /// deleted — an in-flight branch may not write it back.
+    #[test]
+    fn clause_5_8_5_mapping_writes_never_resurrect_a_deleted_subscription() {
+        let st = AppState::new("antares-ds-resurrect".into());
+        let t = TenantId::default();
+        let own = "urn:ngsi-ld:Subscription:own";
+        ds_put(&st, &t, own, json!({"csr_sub": "urn:csr:1"}));
+        assert!(ds_set_remote(
+            &st,
+            &t,
+            own,
+            "urn:reg:1",
+            Some(json!(["http://s1", "urn:remote:1"]))
+        ));
+        assert!(ds_set_remote(
+            &st,
+            &t,
+            own,
+            "urn:reg:2",
+            Some(json!(["http://s2", "urn:remote:2"]))
+        ));
+        assert_eq!(
+            ds_remotes(&ds_get(&st, &t, own)).len(),
+            2,
+            "a second registration's write must not drop the first"
+        );
+        assert!(ds_set_remote(&st, &t, own, "urn:reg:1", None));
+        assert_eq!(ds_remotes(&ds_get(&st, &t, own)).len(), 1);
+        let _ = st.store.delete(&t, Kind::DistSub, own);
+        assert!(
+            !ds_set_remote(
+                &st,
+                &t,
+                own,
+                "urn:reg:3",
+                Some(json!(["http://s3", "urn:remote:3"]))
+            ),
+            "there is no mapping document left to write to"
+        );
+        assert!(
+            st.store
+                .get(&t, Kind::DistSub, own)
+                .ok()
+                .flatten()
+                .is_none(),
+            "a deleted mapping document must stay deleted"
+        );
+    }
+
+    /// The inbound notification endpoint is peer-facing: the Entity count is
+    /// capped before any store touch, because the 5.8.6 merge runs one local
+    /// retrieve and one federated fan-out per notified Entity.
+    #[tokio::test]
+    async fn clause_5_8_6_inbound_notification_entity_count_is_capped() {
+        let st = AppState::new("antares-ds-cap".into());
+        let cap = *crate::bounds::MAX_BATCH_ITEMS;
+        let body = |n: usize| {
+            json!({
+                "type": "Notification",
+                "subscriptionId": "urn:ngsi-ld:Subscription:remote1",
+                "data": vec![json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"}); n],
+            })
+            .to_string()
+        };
+        let over = remote_notify(State(st.clone()), Bytes::from(body(cap + 1))).await;
+        assert_eq!(
+            over.status(),
+            StatusCode::BAD_REQUEST,
+            "an over-cap notification is rejected before the mapping lookup"
+        );
+        let at_cap = remote_notify(State(st.clone()), Bytes::from(body(cap))).await;
+        assert_eq!(
+            at_cap.status(),
+            StatusCode::NOT_FOUND,
+            "the ceiling itself is accepted — the unknown mapping is what stops it"
+        );
+    }
+
+    /// 5.8.1.4 stores the mapping "to enable forwarding received
+    /// notifications to the original subscriber": once that subscriber is
+    /// gone the mapping is dead weight, so it is pruned on touch, and the
+    /// peer is answered about its own id — never told the local one.
+    #[tokio::test]
+    async fn clause_5_8_1_mapping_to_a_deleted_subscription_is_pruned() {
+        let st = AppState::new("antares-ds-prune".into());
+        let t = TenantId::new("alpha").expect("tenant");
+        let remote = "urn:ngsi-ld:Subscription:remote9";
+        inbound_put(&st, remote, &t, "urn:ngsi-ld:Subscription:gone");
+        let body =
+            json!({"type": "Notification", "subscriptionId": remote, "data": []}).to_string();
+        let resp = remote_notify(State(st.clone()), Bytes::from(body)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(
+            inbound_get(&st, remote).is_none(),
+            "the dead mapping must not survive the touch"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains("urn:ngsi-ld:Subscription:gone"),
+            "the local Subscription id must not leak to the peer: {text}"
+        );
+    }
 }

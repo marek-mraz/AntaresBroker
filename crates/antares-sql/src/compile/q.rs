@@ -123,6 +123,10 @@ fn join(
     expand: &dyn Fn(&str) -> String,
     binds: &mut Vec<String>,
 ) -> Option<String> {
+    if items.is_empty() {
+        return None; // `()` is not a predicate; the parser cannot build one,
+                     // but this entry point is public
+    }
     let mut parts = Vec::with_capacity(items.len());
     for it in items {
         parts.push(emit(it, col, first, expand, binds)?);
@@ -204,7 +208,11 @@ fn path_expr(path: &[String], expand: &dyn Fn(&str) -> String) -> Option<String>
     if path.len() != 1 {
         return None;
     }
-    Some(format!("$.{}[*]", quoted(&expand(path.first()?))))
+    let key = expand(path.first()?);
+    if key.contains('\0') {
+        return None; // see `literal`
+    }
+    Some(format!("$.{}[*]", quoted(&key)))
 }
 
 fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
@@ -273,6 +281,11 @@ fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
 
 fn literal(v: &QValue) -> Option<String> {
     Some(match v {
+        // a jsonpath value is NUL-terminated text in the database, so a NUL
+        // has no representation inside a string literal: the path would fail
+        // to parse instead of filtering. Refuse, like any other shape outside
+        // the subset, and let the evaluator compare it.
+        QValue::Str(s) if s.contains('\0') => return None,
         QValue::Str(s) => jsonpath_string(s),
         QValue::Bool(b) => b.to_string(),
         QValue::Num(n) => {
@@ -320,7 +333,7 @@ fn jsonpath_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antares_ql::parse_q;
+    use antares_ql::{parse_q, QPath};
 
     /// the expander the API hands in, stubbed: term → default-context IRI
     fn ex(t: &str) -> String {
@@ -398,6 +411,109 @@ mod tests {
         // ... but equality on strings is collation-free, so it compiles
         assert!(c("name==\"m\"").is_some());
         assert!(c("n>=3").is_some(), "numeric ordering is unambiguous");
+    }
+
+    /// A refused member must refuse the WHOLE expression. Emitting only the
+    /// members that compiled would turn `a AND b` into `a` (still a superset,
+    /// but the caller would page on it) and `a OR b` into `a` — a predicate
+    /// that is plausible and wrong.
+    #[test]
+    fn one_refused_member_refuses_the_whole_expression() {
+        assert!(
+            c(r#"a==1;b~="x""#).is_none(),
+            "AND must not drop a conjunct"
+        );
+        assert!(c(r#"a==1|b~="x""#).is_none(), "OR must not drop a branch");
+        assert!(c(r#"b~="x"|a==1"#).is_none(), "…in either position");
+        assert!(c(r#"(a==1|b!=2);c==3"#).is_none(), "…nor when nested");
+        // and the members that DID compile leave no trace behind them
+        assert!(c(r#"a==1;a==2;b~="x""#).is_none());
+        // an empty junction has no predicate either — `()` would be a syntax
+        // error, and this entry point is public
+        assert!(compile_q(&QNode::And(Vec::new()), "entity", 1, &ex).is_none());
+        assert!(compile_q(&QNode::Or(Vec::new()), "entity", 1, &ex).is_none());
+    }
+
+    /// Everything a client typed — the term, the value, and any SQL syntax
+    /// hidden in either — reaches the statement as `$n` and nothing else.
+    #[test]
+    fn client_text_never_reaches_the_statement() {
+        let hostile = r#"'; DROP TABLE entities; --"#;
+        let node = QNode::Cmp {
+            path: QPath::dotted(vec![hostile.to_owned()]),
+            op: CmpOp::Eq,
+            value: QValue::Str(format!("{hostile}\\\"$1")),
+        };
+        let got = compile_q(&node, "entity", 1, &|t| t.to_owned()).expect("compiles");
+        for needle in ["DROP", "TABLE", "--", "'", "entities"] {
+            assert!(
+                !got.sql.contains(needle),
+                "{needle:?} leaked into the sql: {}",
+                got.sql
+            );
+        }
+        // the sql is placeholders and compiler constants only
+        let skeleton: Vec<String> = (1..=VALUE_KEYS.len())
+            .map(|n| format!("entity @? ${n}::jsonpath"))
+            .collect();
+        assert_eq!(got.sql, format!("({})", skeleton.join(" OR ")));
+        // …and the bind escapes what would otherwise end the jsonpath string
+        assert!(got.binds[0].contains("\\\\\\\"$1"), "{}", got.binds[0]);
+    }
+
+    /// A NUL has no representation inside a jsonpath string literal, so the
+    /// path would fail to parse in the database instead of filtering. Refuse
+    /// it like any other shape outside the subset.
+    #[test]
+    fn a_nul_in_a_term_or_a_value_is_left_to_the_evaluator() {
+        let leaf = |t: &str, v: &str| QNode::Cmp {
+            path: QPath::dotted(vec![t.to_owned()]),
+            op: CmpOp::Eq,
+            value: QValue::Str(v.to_owned()),
+        };
+        let id = |t: &str| t.to_owned();
+        assert!(compile_q(&leaf("a\0b", "x"), "entity", 1, &id).is_none());
+        assert!(compile_q(&leaf("a", "x\0y"), "entity", 1, &id).is_none());
+        assert!(compile_q(&leaf("a", "x"), "entity", 1, &id).is_some());
+    }
+
+    /// The temporal per-instance leaf: same operator table, rooted at the
+    /// instance object rather than at `$."IRI"[*]`.
+    #[test]
+    fn instance_leaf_roots_at_the_instance_and_numbers_from_first() {
+        let want = QValue::Num(25.0);
+        let got = compile_instance_leaf(Some((CmpOp::Gt, &want)), "qi.data", 7).expect("compiles");
+        assert_eq!(got.binds.len(), VALUE_KEYS.len());
+        assert_eq!(got.binds[0], "$.\"value\" ? (@ > 25)");
+        assert!(
+            got.sql.starts_with("(qi.data @? $7::jsonpath"),
+            "{}",
+            got.sql
+        );
+        assert!(got.sql.contains(&format!("${}", 7 + VALUE_KEYS.len() - 1)));
+        assert!(!got.sql.contains(&format!("${}", 7 + VALUE_KEYS.len())));
+        // existence form
+        assert_eq!(
+            compile_instance_leaf(None, "qi.data", 1)
+                .expect("exists")
+                .binds[0],
+            "$.\"value\""
+        );
+        // and the same refusals
+        assert!(compile_instance_leaf(Some((CmpOp::Ne, &want)), "qi.data", 1).is_none());
+        let s = QValue::Str("m".to_owned());
+        assert!(compile_instance_leaf(Some((CmpOp::Lt, &s)), "qi.data", 1).is_none());
+        assert!(compile_instance_leaf(Some((CmpOp::Pattern, &s)), "qi.data", 1).is_none());
+    }
+
+    /// A number that cannot round-trip as a JSON literal is not compiled to
+    /// one — `literal` is the last gate before the jsonpath text.
+    #[test]
+    fn non_finite_numbers_never_become_a_jsonpath_literal() {
+        assert!(literal(&QValue::Num(f64::NAN)).is_none());
+        assert!(literal(&QValue::Num(f64::INFINITY)).is_none());
+        assert!(literal(&QValue::Num(f64::NEG_INFINITY)).is_none());
+        assert_eq!(literal(&QValue::Num(-0.5)).expect("finite"), "-0.5");
     }
 
     #[test]

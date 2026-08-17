@@ -17,10 +17,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // → bare 413 (6.3.4)
 pub const MAX_URI_BYTES: usize = 8 * 1024; // → bare 414
 pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData
-                                      // → 400 BadRequestData. Deployment knob (ANTARES_MAX_BATCH_ITEMS): the
-                                      // spec sets no batch ceiling — 1000 is this broker's DoS-bounds default,
-                                      // raised where a trusted producer legitimately batches larger (e.g. a
-                                      // full-fleet upsert). Read once at first use.
+/// → 400 BadRequestData. Maximum coordinate positions in a QUERY geometry
+/// (4.10 geoQ, 4.23 ordering reference). The spec sets no ceiling, and the
+/// geometry is not bounded by the URI length on the POST query path — the
+/// body carries it. Every position is an edge the DE-9IM relate walks once
+/// per candidate entity, so the work a single request can buy is capped
+/// here: 1024 positions describe an administrative boundary at street
+/// resolution, and are already more than the 8 KiB URI ceiling can carry.
+pub const MAX_GEO_VERTICES: usize = 1024;
+/// → 400 BadRequestData. Deployment knob (ANTARES_MAX_BATCH_ITEMS): the
+/// spec sets no batch ceiling — 1000 is this broker's DoS-bounds default,
+/// raised where a trusted producer legitimately batches larger (e.g. a
+/// full-fleet upsert). Read once at first use.
 pub static MAX_BATCH_ITEMS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
     std::env::var("ANTARES_MAX_BATCH_ITEMS")
         .ok()
@@ -68,6 +76,7 @@ impl LimitStats {
             "maxBodyBytes": MAX_BODY_BYTES,
             "maxUriBytes": MAX_URI_BYTES,
             "maxJsonDepth": MAX_JSON_DEPTH,
+            "maxGeoVertices": MAX_GEO_VERTICES,
             "maxBatchItems": *MAX_BATCH_ITEMS,
             "maxFedResponseBytes": *MAX_FED_RESPONSE_BYTES,
             "maxFedFanout": *MAX_FED_FANOUT,
@@ -172,6 +181,74 @@ pub async fn bounds_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scan is a bound, not a parser: unbalanced closers must not
+    /// underflow, and the value it reports is the one the middleware compares
+    /// against MAX_JSON_DEPTH, so the accept/reject boundary is exact.
+    #[test]
+    fn depth_scan_survives_unbalanced_and_boundary_input() {
+        assert_eq!(json_depth(b"]]]]"), 0, "stray closers must not underflow");
+        assert_eq!(json_depth(b"}}}{"), 1);
+        assert_eq!(json_depth(b""), 0);
+        assert_eq!(
+            json_depth(br#""{{{{""#),
+            0,
+            "a bare string carries no depth"
+        );
+        assert_eq!(
+            json_depth(br#"{"a": "\\"}"#),
+            1,
+            "an escaped backslash ends the escape"
+        );
+        let at_cap = "[".repeat(MAX_JSON_DEPTH) + &"]".repeat(MAX_JSON_DEPTH);
+        assert_eq!(json_depth(at_cap.as_bytes()), MAX_JSON_DEPTH);
+        assert!(
+            json_depth(at_cap.as_bytes()) <= MAX_JSON_DEPTH,
+            "exactly at the cap is accepted"
+        );
+        let over = "[".repeat(MAX_JSON_DEPTH + 1) + &"]".repeat(MAX_JSON_DEPTH + 1);
+        assert!(
+            json_depth(over.as_bytes()) > MAX_JSON_DEPTH,
+            "one over is rejected"
+        );
+    }
+
+    /// /q/health publishes the caps and the rejection counters — and nothing
+    /// else: no configuration paths, no environment variable values, no
+    /// internal error text.
+    #[test]
+    fn health_snapshot_reports_the_caps_and_nothing_internal() {
+        let stats = LimitStats::default();
+        stats.uri_too_long.fetch_add(3, Ordering::Relaxed);
+        let snap = stats.snapshot();
+        let obj = snap.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "maxBatchItems",
+                "maxBodyBytes",
+                "maxContextFetches",
+                "maxFedFanout",
+                "maxFedResponseBytes",
+                "maxGeoVertices",
+                "maxJoinLevel",
+                "maxJsonDepth",
+                "maxQNodes",
+                "maxUriBytes",
+                "rejectedBodyTooDeep",
+                "rejectedBodyTooLarge",
+                "rejectedUriTooLong",
+            ],
+            "no member beyond the caps and the counters"
+        );
+        assert_eq!(snap["rejectedUriTooLong"], 3);
+        assert!(
+            obj.values().all(|v| v.is_number()),
+            "every member is a number — no strings to leak paths through"
+        );
+    }
 
     #[test]
     fn depth_scan_is_string_aware() {

@@ -74,11 +74,39 @@ fn validate_rings(gtype: &str, coords: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 4.23: reference geometry for distance ordering (orderFrom/orderGeometry).
+/// Coordinate positions in a GeoJSON `coordinates` value — the leaves of its
+/// nested arrays, at whatever depth the geometry type nests them.
+fn count_positions(v: &Value) -> usize {
+    match v.as_array() {
+        Some(a) if a.first().is_some_and(Value::is_array) => a.iter().map(count_positions).sum(),
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
+/// Every position of a geometry a REQUEST carries in is an edge walked once
+/// per candidate entity (`relate`, `min_distance_m`), so the count is bounded
+/// by `bounds::MAX_GEO_VERTICES` before the geometry is built. Geometries
+/// already stored as entity attributes are not capped — they are the targets,
+/// evaluated once each.
+fn check_vertex_budget(coords: &Value) -> Result<(), String> {
+    let n = count_positions(coords);
+    if n > crate::bounds::MAX_GEO_VERTICES {
+        return Err(format!(
+            "geometry has {n} coordinate positions (maximum {})",
+            crate::bounds::MAX_GEO_VERTICES
+        ));
+    }
+    Ok(())
+}
+
+/// 4.23: reference geometry for distance ordering (orderFrom/orderGeometry),
+/// also the 4.7 well-formedness check for a registration's geometries.
 pub(crate) fn parse_ref_geometry(
     gtype: &str,
     coords: &Value,
 ) -> Result<geo_types::Geometry<f64>, String> {
+    check_vertex_budget(coords)?;
     parse_geometry(gtype, coords)
 }
 
@@ -152,8 +180,9 @@ impl GeoQuery {
             let n = v
                 .parse::<f64>()
                 .map_err(|_| bad(format!("invalid {name} {v:?}")))?;
-            // NaN parses as a valid f64 — Greater-only comparison rejects it too
-            if n.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            // NaN and the infinities parse as valid f64 but are not RFC 8259
+            // Numbers; the Greater-only comparison rejects NaN as well.
+            if !n.is_finite() || n.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                 return Err(bad(format!("{name} must be a positive non-zero number")));
             }
             Ok(n)
@@ -211,6 +240,7 @@ impl GeoQuery {
         if !coordinates.is_array() {
             return Err(bad("coordinates must be a JSON array".into()));
         }
+        check_vertex_budget(&coordinates).map_err(bad)?;
         let query_geom = parse_geometry(&geometry, &coordinates).map_err(bad)?;
         Ok(Some(Self {
             rel,
@@ -463,6 +493,235 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("georel".to_owned(), "nearish".to_owned());
         assert!(GeoQuery::from_params(&params).is_err());
+    }
+
+    /// 4.10 leaves the size of the reference geometry open, and a POST query
+    /// carries its coordinates in the body, not the URI. Every position is an
+    /// edge `relate` walks once per candidate entity, so an over-cap geometry
+    /// is BadRequestData and NO entity is evaluated.
+    #[test]
+    fn oversized_query_geometry_is_rejected_before_any_entity_is_scanned() {
+        let cap = crate::bounds::MAX_GEO_VERTICES;
+        // a closed ring of n positions on the unit circle
+        let ring = |n: usize| {
+            let pts: Vec<String> = (0..n - 1)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / (n - 1) as f64;
+                    format!("[{},{}]", a.cos(), a.sin())
+                })
+                .collect();
+            format!("[[{},{}]]", pts.join(","), pts[0])
+        };
+        let ctx = Loader::new().core();
+        let corpus: Vec<Value> = (0..8)
+            .map(|i| {
+                json!({"https://uri.etsi.org/ngsi-ld/location": [
+                    {"type": "GeoProperty",
+                     "value": {"type": "Point", "coordinates": [i as f64 / 1e3, 0.0]}}
+                ]})
+            })
+            .collect();
+        // counts the entities the query actually touches — it can only run
+        // once a geometry was accepted
+        let scanned = std::cell::Cell::new(0usize);
+        let scan = |params: &HashMap<String, String>| -> Result<(), NgsiError> {
+            let g = GeoQuery::from_params(params)?.expect("georel present");
+            for doc in &corpus {
+                scanned.set(scanned.get() + 1);
+                let _ = g.matches(doc, &ctx);
+            }
+            Ok(())
+        };
+        let mut params = HashMap::new();
+        params.insert("georel".to_owned(), "within".to_owned());
+        params.insert("geometry".to_owned(), "Polygon".to_owned());
+        params.insert("coordinates".to_owned(), ring(cap + 1));
+        assert!(
+            matches!(scan(&params), Err(NgsiError::BadRequestData(_))),
+            "over the cap must be rejected as BadRequestData"
+        );
+        assert_eq!(
+            scanned.get(),
+            0,
+            "the rejection lands before any entity is evaluated"
+        );
+        // …and the ceiling itself still parses — which also proves the
+        // counter above is not vacuous
+        params.insert("coordinates".to_owned(), ring(cap));
+        assert!(scan(&params).is_ok(), "exactly at the cap is accepted");
+        assert_eq!(scanned.get(), corpus.len());
+        // a MultiPoint spends the same budget across its members
+        params.insert("georel".to_owned(), "intersects".to_owned());
+        params.insert("geometry".to_owned(), "MultiPoint".to_owned());
+        let pts: Vec<String> = (0..=cap)
+            .map(|i| format!("[{},0]", i as f64 / 1e6))
+            .collect();
+        params.insert("coordinates".to_owned(), format!("[{}]", pts.join(",")));
+        assert!(
+            GeoQuery::from_params(&params).is_err(),
+            "the cap counts leaves, not rings"
+        );
+    }
+
+    /// A MultiPolygon nests its positions three levels down, so a length
+    /// check on the top-level array sees a couple of hundred members and
+    /// passes while the geometry spends more than the whole budget. The cap
+    /// counts leaves, at whatever depth the geometry type puts them.
+    #[test]
+    fn nested_multipolygon_cannot_smuggle_vertices_past_the_cap() {
+        let cap = crate::bounds::MAX_GEO_VERTICES;
+        let square = |i: usize| {
+            let x = i as f64;
+            json!([[[x, 0.0], [x + 0.5, 0.0], [x + 0.5, 0.5], [x, 0.5], [x, 0.0]]])
+        };
+        let members = cap / 5 + 1; // 5 positions per member => one over the cap
+        let coords: Vec<Value> = (0..members).map(square).collect();
+        assert!(
+            members <= cap,
+            "a top-level length check would see {members} members and pass"
+        );
+        let mut params = HashMap::new();
+        params.insert("georel".to_owned(), "intersects".to_owned());
+        params.insert("geometry".to_owned(), "MultiPolygon".to_owned());
+        params.insert("coordinates".to_owned(), json!(coords).to_string());
+        assert!(
+            matches!(
+                GeoQuery::from_params(&params),
+                Err(NgsiError::BadRequestData(_))
+            ),
+            "nested positions count against the same budget"
+        );
+        // one member fewer is inside the budget and still parses
+        params.insert(
+            "coordinates".to_owned(),
+            json!(coords[..members - 1]).to_string(),
+        );
+        assert!(GeoQuery::from_params(&params).is_ok());
+    }
+
+    /// 4.23 ordering: the reference geometry is measured against every result
+    /// row, so it carries the same vertex ceiling as a geoquery geometry.
+    #[test]
+    fn ordering_reference_geometry_carries_the_same_vertex_cap() {
+        let n = crate::bounds::MAX_GEO_VERTICES + 1;
+        let pts: Vec<Value> = (0..n).map(|i| json!([i as f64 / 1e6, 0.0])).collect();
+        assert!(
+            parse_ref_geometry("MultiPoint", &json!(pts)).is_err(),
+            "an oversized ordering reference must be rejected"
+        );
+        assert!(parse_ref_geometry("Point", &json!([1.0, 2.0])).is_ok());
+    }
+
+    /// 4.10 PositiveNumber is an RFC 8259 Number — "inf"/"Infinity" and an
+    /// overflowing literal are not numbers, however happily f64 parses them.
+    #[test]
+    fn a_non_finite_distance_is_not_a_positive_number() {
+        for rel in [
+            "near;maxDistance==inf",
+            "near;maxDistance==infinity",
+            "near;minDistance==inf",
+            "near;maxDistance==1e400",
+            "near;maxDistance==NaN",
+        ] {
+            let mut params = HashMap::new();
+            params.insert("georel".to_owned(), rel.to_owned());
+            params.insert("geometry".to_owned(), "Point".to_owned());
+            params.insert("coordinates".to_owned(), "[8,40]".to_owned());
+            assert!(
+                GeoQuery::from_params(&params).is_err(),
+                "{rel} must be rejected"
+            );
+        }
+    }
+
+    /// Degenerate but well-formed GeoJSON (empty rings, empty coordinate
+    /// arrays) reaches the predicates from both sides — a query 400s or
+    /// evaluates, a stored target is a non-match. Neither may panic.
+    #[test]
+    fn degenerate_geometries_never_panic() {
+        for gtype in [
+            "Point",
+            "LineString",
+            "Polygon",
+            "MultiPoint",
+            "MultiPolygon",
+        ] {
+            let mut params = HashMap::new();
+            params.insert("georel".to_owned(), "intersects".to_owned());
+            params.insert("geometry".to_owned(), gtype.to_owned());
+            params.insert("coordinates".to_owned(), "[]".to_owned());
+            if let Ok(Some(g)) = GeoQuery::from_params(&params) {
+                let _ = g.matches_geometry(&geoval("Point", json!([1, 1])));
+                let _ = g.matches_geometry(&geoval("Polygon", json!([])));
+            }
+        }
+        // degenerate TARGETS against an ordinary query
+        let g = q("within", "Polygon", "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]");
+        for target in [
+            geoval("Polygon", json!([])),
+            geoval("LineString", json!([])),
+            geoval("MultiPoint", json!([])),
+            geoval("Point", json!([])),
+            json!({"type": "Point"}),
+            json!("not a geometry"),
+        ] {
+            let _ = g.matches_geometry(&target);
+        }
+    }
+
+    /// 4.23: distance ordering skips rows whose ordering value is not a
+    /// geometry rather than failing the query.
+    #[test]
+    fn order_distance_is_none_for_a_non_geometry() {
+        let refg = parse_ref_geometry("Point", &json!([0.0, 0.0])).expect("ref");
+        assert!(order_distance_m(&refg, &json!({"type": "Point"})).is_none());
+        assert!(order_distance_m(&refg, &json!({"coordinates": [1, 1]})).is_none());
+        assert!(order_distance_m(&refg, &json!(42)).is_none());
+        assert!(
+            order_distance_m(&refg, &geoval("Polygon", json!([[[0, 0], [1, 0]]]))).is_none(),
+            "a malformed ring is not a distance"
+        );
+        let d = order_distance_m(&refg, &geoval("Point", json!([0.0, 1.0]))).expect("distance");
+        assert!((d - DEG_M).abs() < 1.0, "one degree of latitude, got {d}");
+    }
+
+    /// The PostGIS push-down only owns the DEFAULT GeoProperty column: a
+    /// geoquery on any other geoproperty must NOT produce a SQL spec (it is
+    /// evaluated in memory instead), while the per-instance spec carries the
+    /// expanded IRI for every geoproperty.
+    #[test]
+    fn only_the_default_geoproperty_is_pushed_down_to_sql() {
+        let ctx = Loader::new().core();
+        let mut params = HashMap::new();
+        params.insert("georel".to_owned(), "within".to_owned());
+        params.insert("geometry".to_owned(), "Polygon".to_owned());
+        params.insert(
+            "coordinates".to_owned(),
+            "[[[0,0],[4,0],[4,4],[0,4],[0,0]]]".to_owned(),
+        );
+        let g = GeoQuery::from_params(&params)
+            .expect("parse")
+            .expect("some");
+        assert!(
+            g.to_sql_spec(&ctx).is_some(),
+            "default location pushes down"
+        );
+        assert_eq!(g.to_instance_spec(&ctx).1, LOCATION_IRI);
+
+        params.insert("geoproperty".to_owned(), "operationSpace".to_owned());
+        let g = GeoQuery::from_params(&params)
+            .expect("parse")
+            .expect("some");
+        assert!(
+            g.to_sql_spec(&ctx).is_none(),
+            "a non-default geoproperty has no extracted column — no push-down"
+        );
+        let (_, iri) = g.to_instance_spec(&ctx);
+        assert_ne!(iri, LOCATION_IRI);
+        assert!(
+            iri.starts_with("https://uri.etsi.org/ngsi-ld/"),
+            "expanded, got {iri}"
+        );
     }
 }
 

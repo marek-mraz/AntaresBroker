@@ -157,6 +157,33 @@ mod tests {
         assert!(compile_instance_range(&range("between", "t0", None), "el", 1).is_none());
     }
 
+    /// `timeproperty` and the stamps are client strings: the first is a bind,
+    /// the stamps are binds, and the only identifiers in the statement are the
+    /// caller's own alias and this module's fixed column table.
+    #[test]
+    fn client_text_never_reaches_the_statement() {
+        let hostile = "observedAt' OR 1=1 --";
+        let r = InstanceRange {
+            timerel: "between",
+            time_at: "2026-01-01T00:00:00Z'; DROP TABLE attr_instances; --",
+            end_time_at: Some("2026-02-01T00:00:00Z"),
+            timeproperty: hostile,
+        };
+        let c = compile_instance_range(&r, "el", 1).expect("compiles");
+        for needle in ["observedAt", "DROP", "TABLE", "--", "OR 1=1"] {
+            assert!(!c.sql.contains(needle), "{needle:?} leaked: {}", c.sql);
+        }
+        assert_eq!(
+            c.sql,
+            "jsonb_typeof(el -> $1) = 'string' AND (el ->> $1) COLLATE \"C\" >= $2 \
+             AND (el ->> $1) COLLATE \"C\" < $3"
+        );
+        assert_eq!(c.binds[0], hostile);
+        // an unknown timeproperty has no column, so no identifier is ever
+        // derived from client text
+        assert!(column_range_bound(&r, "ai", 1).is_none());
+    }
+
     #[test]
     fn column_bound_reuses_binds_and_widens_outward() {
         // after: lower bound moves DOWN, before: upper bound moves UP —

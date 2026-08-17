@@ -263,7 +263,7 @@ pub fn expand_entity(
         if key.is_empty() {
             return Err(bad("empty attribute name"));
         }
-        let iri = ctx.expand_key(key);
+        let iri = expand_attr_name(key, ctx)?;
         // 4.5.1: core non-reified terms shall not be used as Attribute names.
         if iri
             .strip_prefix(crate::context::NGSI_LD_BASE)
@@ -324,6 +324,71 @@ pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
         }
         _ => Err(bad("entity type must be a non-empty string or array")),
     }
+}
+
+/// 4.5.1/5.5.4: an Attribute or sub-Attribute name shall expand to an
+/// absolute IRI. A user @context is merged before the Core one (4.4), so a
+/// term defined as `{"@id": "id"}` stays RELATIVE and would otherwise land
+/// on a reserved member (`id`, `value`, `datasetId`, `observedAt`, …) and
+/// overwrite it — skipping that member's own validation. Same rule
+/// expand_types applies to Entity Type names.
+fn expand_attr_name(name: &str, ctx: &Context) -> Result<String, NgsiError> {
+    let iri = ctx.expand_key(name);
+    if crate::context::is_absolute_iri(&iri) {
+        Ok(iri)
+    } else {
+        Err(NgsiError::BadRequestData(format!(
+            "attribute name {name:?} does not expand to an absolute IRI"
+        )))
+    }
+}
+
+/// 4.5.5.1: a datasetId is a URI string; "datasetId": "@none" designates the
+/// default Attribute instance, which never carries one — normalized to
+/// absent (`Ok(None)`) so storage, matching and responses treat it as such.
+/// 5.5.8/5.5.12: "A datasetId cannot be deleted by setting it to the value
+/// urn:ngsi-ld:null" — rejected on every input.
+fn dataset_id_member(d: &Value) -> Result<Option<Value>, NgsiError> {
+    let bad = |m: &str| NgsiError::BadRequestData(m.to_owned());
+    let s = d.as_str().ok_or_else(|| bad("datasetId must be a URI"))?;
+    if s == "urn:ngsi-ld:null" {
+        return Err(bad(
+            "a datasetId cannot be set or deleted via \"urn:ngsi-ld:null\" (5.5.8)",
+        ));
+    }
+    if s == "@none" {
+        return Ok(None);
+    }
+    antares_model::EntityId::new(s).map_err(|_| bad("datasetId must be a URI"))?;
+    Ok(Some(d.clone()))
+}
+
+/// 5.2.1: "In all other cases, implementations shall raise an error of type
+/// BadRequestData if an NGSI-LD Null value is encountered"; 5.5.4 bans it as
+/// the value of a key-value pair inside a Property's compound value except
+/// in merge fragments. The concise forms hand the client's JSON back as the
+/// Property value unchanged, so they carry the same two checks as the
+/// normalized path.
+fn check_value_nulls(name: &str, val: &Value, opts: ExpandOpts) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let nullish = match val {
+        Value::String(s) => s == "urn:ngsi-ld:null",
+        Value::Array(a) => a.iter().any(is_ngsi_null),
+        _ => false,
+    };
+    if !opts.allow_null && nullish {
+        return Err(bad(format!(
+            "attribute {name}: the NGSI-LD Null is only allowed in \
+             partial update or merge inputs (5.2.1)"
+        )));
+    }
+    if !opts.merge && has_object_member_null(val) {
+        return Err(bad(format!(
+            "attribute {name}: \"urn:ngsi-ld:null\" inside a compound value \
+             is only allowed in merge fragments (5.5.4)"
+        )));
+    }
+    Ok(())
 }
 
 /// The NGSI-LD null sentinel — ONLY the string form (a plain JSON null is
@@ -470,6 +535,7 @@ fn expand_instance(
         Value::Object(o) => o,
         // concise: primitive / array value ⇒ Property
         prim => {
+            check_value_nulls(name, prim, opts)?;
             return Ok(json!({"type": "Property", "value": prim.clone()}));
         }
     };
@@ -479,6 +545,7 @@ fn expand_instance(
         Some(t) if ATTR_TYPES.contains(&t) => t,
         Some(t) if GEO_TYPES.contains(&t) && obj.contains_key("coordinates") => {
             // concise GeoProperty: bare GeoJSON object as the value
+            check_value_nulls(name, v, opts)?;
             return Ok(json!({"type": "GeoProperty", "value": v.clone()}));
         }
         Some(t) => {
@@ -518,6 +585,7 @@ fn expand_instance(
                 }
             } else {
                 // whole object is a Property value (4.5.2.3)
+                check_value_nulls(name, v, opts)?;
                 return Ok(json!({"type": "Property", "value": v.clone()}));
             }
         }
@@ -806,24 +874,8 @@ fn expand_instance(
 
     // optional standard members
     if let Some(d) = obj.get("datasetId") {
-        let s = d
-            .as_str()
-            .ok_or_else(|| bad(format!("attribute {name}: datasetId must be a URI")))?;
-        // 5.5.8/5.5.12: "A datasetId cannot be deleted by setting it to the
-        // value urn:ngsi-ld:null" — reject the attempt on every input.
-        if s == "urn:ngsi-ld:null" {
-            return Err(bad(format!(
-                "attribute {name}: a datasetId cannot be set or deleted via \
-                 \"urn:ngsi-ld:null\" (5.5.8)"
-            )));
-        }
-        // 4.5.5.1: "datasetId": "@none" designates the default Attribute
-        // instance, which never carries a datasetId — normalize by dropping it
-        // so storage, matching and responses treat it as absent.
-        if s != "@none" {
-            antares_model::EntityId::new(s)
-                .map_err(|_| bad(format!("attribute {name}: datasetId must be a URI")))?;
-            out.insert("datasetId".into(), d.clone());
+        if let Some(d) = dataset_id_member(d).map_err(|e| bad(format!("attribute {name}: {e}")))? {
+            out.insert("datasetId".into(), d);
         }
     }
     if let Some(o) = obj.get("observedAt") {
@@ -906,7 +958,7 @@ fn expand_instance(
         if k.is_empty() {
             return Err(bad(format!("attribute {name}: empty sub-attribute name")));
         }
-        let iri = ctx.expand_key(k);
+        let iri = expand_attr_name(k, ctx)?;
         let instances = expand_attribute(k, sub, ctx, opts, depth + 1)?;
         out.insert(iri, Value::Array(instances));
     }
@@ -991,17 +1043,20 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
                 }
                 out.insert("value".into(), v.clone());
             }
-            // 5.5.8: a datasetId cannot be deleted via the NGSI-LD Null
-            "datasetId" if v.as_str() == Some("urn:ngsi-ld:null") => {
-                return Err(bad("a datasetId cannot be set or deleted via \
-                     \"urn:ngsi-ld:null\" (5.5.8)"
-                    .into()));
+            // 4.5.5.1/5.5.8: the fragment's datasetId selects the instance to
+            // patch and is copied onto it — it obeys the same URI-string rule
+            // as a full instance, or the patched instance stops answering to
+            // the datasetId lookups that keep one default instance per name.
+            "datasetId" => {
+                if let Some(d) = dataset_id_member(v)? {
+                    out.insert("datasetId".into(), d);
+                }
             }
             _ if RESERVED_MEMBERS.contains(&k.as_str()) => {
                 out.insert(k.clone(), v.clone());
             }
             _ => {
-                let iri = ctx.expand_key(k);
+                let iri = expand_attr_name(k, ctx)?;
                 let instances = expand_attribute(
                     k,
                     v,
@@ -2856,5 +2911,143 @@ mod clause_5_2_7 {
             "value": {"type": "LineString",
                       "coordinates": [[8, 40], [9, 41]]}})))
         .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod reserved_member_guards {
+    use super::*;
+    use crate::loader::Loader;
+    use serde_json::json;
+
+    /// 4.5.1: an Attribute name is expanded against the @context, and the
+    /// user @context is merged BEFORE the core one — so a term whose "@id"
+    /// is a bare word stays a RELATIVE IRI. Expanding an attribute onto
+    /// "id" must not be allowed to replace the Entity id (5.5.4
+    /// BadRequestData), the same rule expand_types applies to type names.
+    #[tokio::test]
+    async fn attribute_name_must_expand_to_an_absolute_iri() {
+        let ctx = Loader::new()
+            .resolve_quiet(&json!({"hostile": {"@id": "id"}}))
+            .await
+            .expect("inline @context");
+        assert_eq!(ctx.expand_key("hostile"), "id", "term maps to a bare word");
+
+        let doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "T",
+            "hostile": {"type": "Property", "value": 1}});
+        let out = expand_entity(doc.as_object().expect("obj"), &ctx, ExpandOpts::default());
+        assert!(
+            out.is_err(),
+            "an attribute name that does not expand to an absolute IRI is BadRequestData, got {out:?}"
+        );
+        // negative: the Entity id must still be its own URI string — never
+        // the attribute's instance array.
+        if let Ok(v) = &out {
+            assert_eq!(v["id"], "urn:ngsi-ld:Vehicle:1");
+        }
+    }
+
+    /// 4.5.1/5.5.4: the same at sub-attribute level — a term expanding onto
+    /// "observedAt" would replace the validated DateTime with an instance
+    /// array, bypassing the 4.6.3 DateTime check.
+    #[tokio::test]
+    async fn sub_attribute_name_must_not_overwrite_observed_at() {
+        let ctx = Loader::new()
+            .resolve_quiet(&json!({"hostile": {"@id": "observedAt"}}))
+            .await
+            .expect("inline @context");
+        assert_eq!(ctx.expand_key("hostile"), "observedAt");
+
+        let doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                      "observedAt": "2026-01-01T00:00:00Z",
+                      "hostile": {"type": "Property", "value": "x"}}});
+        let out = expand_entity(doc.as_object().expect("obj"), &ctx, ExpandOpts::default());
+        assert!(out.is_err(), "expected BadRequestData, got {out:?}");
+
+        // negative: with a well-behaved @context the sub-attribute lands on
+        // its own IRI and observedAt still holds the DateTime string.
+        let ctx = Loader::new()
+            .resolve_quiet(&json!({"hostile": {"@id": "https://example.org/hostile"}}))
+            .await
+            .expect("inline @context");
+        let out = expand_entity(doc.as_object().expect("obj"), &ctx, ExpandOpts::default())
+            .expect("absolute IRI is fine");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/speed"][0];
+        assert_eq!(inst["observedAt"], "2026-01-01T00:00:00Z");
+        assert!(inst["https://example.org/hostile"].is_array());
+    }
+
+    /// 4.5.5.1/5.5.8: "datasetId" is a URI string in a partial-update
+    /// fragment exactly as in a full instance — a non-string one is copied
+    /// onto the target instance and hides its default slot from every
+    /// datasetId-absent lookup.
+    #[test]
+    fn fragment_dataset_id_must_be_a_uri_string() {
+        for bad in [
+            json!(42),
+            json!(["urn:ngsi-ld:Dataset:a"]),
+            json!({"object": "urn:ngsi-ld:Dataset:a"}),
+            json!(true),
+            json!("not a uri"),
+        ] {
+            let frag = json!({"type": "Property", "value": 1, "datasetId": bad});
+            let out = expand_attr_fragment(frag.as_object().expect("obj"), &core());
+            assert!(out.is_err(), "datasetId {bad} must be rejected, got {out:?}");
+            // negative: no non-string datasetId ever reaches the output.
+            if let Ok(Value::Object(m)) = &out {
+                assert!(m.get("datasetId").is_none_or(Value::is_string));
+            }
+        }
+        let frag = json!({"type": "Property", "value": 1, "datasetId": "urn:ngsi-ld:Dataset:a"});
+        let out = expand_attr_fragment(frag.as_object().expect("obj"), &core())
+            .expect("a URI datasetId is valid");
+        assert_eq!(out["datasetId"], "urn:ngsi-ld:Dataset:a");
+    }
+
+    /// 5.2.1: "In all other cases, implementations shall raise an error of
+    /// type BadRequestData if an NGSI-LD Null value is encountered" — the
+    /// concise forms (a bare value, a bare object value) must not be a way
+    /// around it, or a plain append deletes the instance it targets.
+    #[test]
+    fn concise_values_do_not_smuggle_the_ngsi_null() {
+        let create = |attr: serde_json::Value| -> Result<Value, NgsiError> {
+            let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T", "a": attr});
+            expand_entity(doc.as_object().expect("obj"), &core(), ExpandOpts::default())
+        };
+        for attr in [
+            json!(["urn:ngsi-ld:null"]),
+            json!({"foo": "urn:ngsi-ld:null"}),
+            json!({"type": "Property", "value": "urn:ngsi-ld:null"}),
+            json!({"value": ["urn:ngsi-ld:null"]}),
+        ] {
+            let out = create(attr.clone());
+            assert!(out.is_err(), "{attr} must be BadRequestData, got {out:?}");
+        }
+        // negative: the same documents stay legal on a merge fragment
+        // (5.5.12), and a create with no sentinel keeps its value intact.
+        let doc = json!({"a": {"foo": "urn:ngsi-ld:null"}});
+        assert!(expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                merge: true,
+                ..Default::default()
+            }
+        )
+        .is_ok());
+        let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T", "a": {"foo": "bar"}});
+        let out = expand_entity(doc.as_object().expect("obj"), &core(), ExpandOpts::default())
+            .expect("plain compound value");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/a"][0]["value"]["foo"],
+            "bar"
+        );
+    }
+
+    fn core() -> std::sync::Arc<Context> {
+        Loader::new().core()
     }
 }

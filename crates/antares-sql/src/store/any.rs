@@ -25,6 +25,12 @@ use super::{ChangeHook, Kind, Store};
 /// the server log only.
 #[cfg(feature = "postgres")]
 fn db(e: sqlx::Error) -> NgsiError {
+    // The store's own spec errors travel out through the same sqlx channel
+    // (the signature is fixed by the callers), so recover them before the
+    // generic mapping turns a 403 into a 500.
+    if let Some(n) = super::pg_entity::ngsi_error(&e) {
+        return NgsiError::TooManyResults(n.to_string());
+    }
     tracing::error!("database error: {e}");
     NgsiError::InternalError("database error".into())
 }

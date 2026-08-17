@@ -236,8 +236,8 @@ async fn occupied_range_is_skipped_without_poisoning_the_pass() {
         .await
         .expect("maintenance must survive an occupied range");
     assert!(
-        msg.contains("left in default"),
-        "occupied range reported: {msg}"
+        msg.contains("adopted from default"),
+        "an occupied range must be recovered, not abandoned: {msg}"
     );
     assert!(
         msg.contains(": ok"),

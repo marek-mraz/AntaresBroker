@@ -36,6 +36,16 @@ fn bad(m: String) -> NgsiError {
     NgsiError::BadRequestData(m)
 }
 
+/// 5.5.6: an unexpected failure while filling a snapshot surfaces as
+/// InternalError. Its detail reaches the client twice — in
+/// snapshotQueriesDetails.problemDetails (5.2.41) and in the 5.3.4
+/// SnapshotNotification body — so the internal error text stays in the
+/// server log and the client-visible detail is generic.
+fn opaque(what: &str, e: &dyn std::fmt::Debug) -> NgsiError {
+    tracing::error!("snapshot {what} failed: {e:?}");
+    NgsiError::InternalError(format!("{what} failed"))
+}
+
 /// 5.2.41: expiresAt from the suggested snapshotLifetime, bounded by the
 /// system limit (5.16.1.4 "applying the configured limit").
 fn expires_at(meta: &Map<String, Value>) -> Result<String, NgsiError> {
@@ -66,13 +76,20 @@ fn snap_index_tenant() -> Option<TenantId> {
     TenantId::new("snap-index").ok()
 }
 
+/// 5.2.41: a Snapshot's type is fixed to "Snapshot". The reverse-index
+/// marker docs share Kind::Snapshot storage but are not Snapshots, so every
+/// place that reads a document as one filters on this — a listing that does
+/// not would count and select the markers as snapshots.
+fn is_snapshot(meta: &Value) -> bool {
+    meta.get("type").and_then(Value::as_str) == Some("Snapshot")
+}
+
 /// Registry access with lazy expiry (an expired snapshot is gone; its data
 /// purge runs in the background). Snapshot docs live in the store
 /// (Kind::Snapshot) so restarts keep them on persistent store modes.
 pub(crate) fn snap_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
     let meta = st.store.get(tenant, Kind::Snapshot, id).ok().flatten()?;
-    // the snap-index marker docs are not Snapshots
-    if meta.get("type").and_then(Value::as_str) != Some("Snapshot") {
+    if !is_snapshot(&meta) {
         return None;
     }
     if expired(&meta) {
@@ -346,7 +363,13 @@ fn snap_exists(st: &AppState, tenant: &TenantId, id: &str) -> bool {
 /// encoding.
 fn evict_over_cap(st: &AppState, tenant: &TenantId, keep: &str) {
     let victims: Vec<Value> = {
-        let mut metas = st.store.list(tenant, Kind::Snapshot).unwrap_or_default();
+        let mut metas: Vec<Value> = st
+            .store
+            .list(tenant, Kind::Snapshot)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(is_snapshot)
+            .collect();
         if metas.len() <= st.snapshot_cap {
             return;
         }
@@ -506,7 +529,7 @@ async fn run_query(
     let docs =
         crate::entities::filter_entities_fed(st, tenant, &vp, ctx, fed).map_err(|e| match e {
             ApiError::Ngsi(n) => n,
-            other => bad(format!("query execution failed: {other:?}")),
+            other => opaque("query execution", &other),
         })?;
     let n = docs.len();
     for doc in docs {
@@ -548,11 +571,11 @@ async fn run_temporal_query(
             .await
             .map_err(|e| match e {
                 ApiError::Ngsi(n) => n,
-                other => bad(format!("temporal query execution failed: {other:?}")),
+                other => opaque("temporal query execution", &other),
             })?;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .map_err(|e| NgsiError::InternalError(format!("temporal result read: {e}")))?;
+            .map_err(|e| opaque("temporal result read", &e))?;
         let arr: Vec<Value> = serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|v| v.as_array().cloned())
@@ -715,7 +738,7 @@ pub async fn purge_snapshots(
             .list(&tenant, Kind::Snapshot)
             .unwrap_or_default()
             .into_iter()
-            .filter(|meta| crate::csource::csf_matches(&ast, meta, &ctx))
+            .filter(|meta| is_snapshot(meta) && crate::csource::csf_matches(&ast, meta, &ctx))
             .collect();
         for meta in victims {
             if let Some(id) = meta.get("id").and_then(Value::as_str) {
@@ -865,6 +888,10 @@ pub async fn clone_snapshot(
         }
         let (new_id, meta) = new_meta(o, &st, &tenant)?;
         snap_put(&st, &tenant, meta);
+        // a clone is a new snapshot: 5.5.15 resource pressure applies to it
+        // exactly as it does to a create, so cloning cannot grow the
+        // registry past the cap
+        evict_over_cap(&st, &tenant, &new_id);
         let (st2, t2, sid, nid) = (st.clone(), tenant.clone(), id.clone(), new_id.clone());
         crate::spawn(async move {
             clone_fill(&st2, &t2, &sid, &nid).await;
@@ -973,4 +1000,25 @@ pub async fn snapshot_layer(
         }
     }
     resp
+}
+
+#[cfg(test)]
+mod clause_5_5_6 {
+    use super::*;
+
+    /// 5.5.6 InternalError: the client-visible `detail` — served in
+    /// snapshotQueriesDetails.problemDetails and copied into the 5.3.4
+    /// SnapshotNotification body — must be generic. The Debug/IO text of
+    /// the underlying failure belongs in the server log only.
+    #[test]
+    fn snapshot_fill_error_detail_is_generic() {
+        let inner = ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let pd = crate::negotiate::problem_value(&opaque("query execution", &inner));
+        let detail = pd["detail"].as_str().unwrap_or_default();
+        assert_eq!(detail, "query execution failed");
+        assert!(
+            !detail.contains("Bare") && !detail.contains("Unsupported"),
+            "internal error text leaked into the client-visible detail: {detail}"
+        );
+    }
 }

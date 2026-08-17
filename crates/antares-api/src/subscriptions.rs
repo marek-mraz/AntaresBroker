@@ -413,13 +413,56 @@ pub fn normalize_subscription(
                 crate::temporal::TemporalQ::from_params(&p, true)?;
                 out.insert(k.clone(), v.clone());
             }
+            // Table 5.2.12-1: "Valid notification triggers are entityCreated,
+            // entityUpdated, entityDeleted, attributeCreated, attributeUpdated,
+            // attributeDeleted." A trigger outside that set is accepted and
+            // then matches nothing, leaving a subscription that never fires.
+            "notificationTrigger" => {
+                const TRIGGERS: [&str; 6] = [
+                    "entityCreated",
+                    "entityUpdated",
+                    "entityDeleted",
+                    "attributeCreated",
+                    "attributeUpdated",
+                    "attributeDeleted",
+                ];
+                let list = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+                    bad("notificationTrigger must be a non-empty array of strings (5.2.12)".into())
+                })?;
+                for t in list {
+                    let t = t.as_str().ok_or_else(|| {
+                        bad("notificationTrigger entries must be strings (5.2.12)".into())
+                    })?;
+                    if !TRIGGERS.contains(&t) {
+                        return Err(bad(format!(
+                            "{t} is not a valid notification trigger (5.2.12)"
+                        )));
+                    }
+                }
+                out.insert(k.clone(), v.clone());
+            }
+            // Table 5.2.12-1: csf is "A valid query string as per clause 4.9".
+            // Unparsed here it is stored and only fails at Context Source
+            // Registration matching (5.11.2.4), where it silently matches
+            // nothing instead of telling the subscriber the filter is broken.
+            "csf" => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| bad("csf must be a query string (5.2.12)".into()))?;
+                antares_ql::parse_q(s)?;
+                out.insert(k.clone(), v.clone());
+            }
+            // 5.8.6: the @context governing a subscription's notifications is
+            // the @context of the creating request, held in a broker-internal
+            // member. This function only ever sees client input — a create
+            // body or a patch fragment — so dropping the member here stops a
+            // subscriber both from seeding it and from replacing it later.
+            "__context" => continue,
             "scopeQ"
             | "lang"
             | "subscriptionName"
             | "name"
             | "description"
-            | "notificationTrigger"
-            | "csf"
             | "jsonldContext"
             | "ngsildConformance"
             | "datasetId" => {
@@ -1002,5 +1045,546 @@ mod tests {
                 "empty notification.{key} must be rejected"
             );
         }
+    }
+
+    // ---------- shared fixtures ----------
+
+    /// The minimal valid 5.2.12 Subscription, with `extra` merged over it.
+    fn sub(extra: Value) -> Value {
+        let mut base = json!({
+            "type": "Subscription",
+            "entities": [{"type": "Building"}],
+            "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}}
+        });
+        let obj = base.as_object_mut().expect("object");
+        for (k, v) in extra.as_object().expect("object") {
+            obj.insert(k.clone(), v.clone());
+        }
+        base
+    }
+
+    fn norm(doc: &Value) -> Result<Map<String, Value>, NgsiError> {
+        normalize_subscription(
+            doc.as_object().expect("object"),
+            &Loader::new().core(),
+            false,
+        )
+    }
+
+    fn frag(doc: &Value) -> Result<Map<String, Value>, NgsiError> {
+        normalize_subscription(
+            doc.as_object().expect("object"),
+            &Loader::new().core(),
+            true,
+        )
+    }
+
+    // ---------- 5.2.12 read-only and internal members ----------
+
+    /// 5.8.6: the @context governing a Subscription's notifications is the
+    /// @context of the creating request, kept in a broker-internal member.
+    /// A Context Subscriber can neither set it (create) nor replace it
+    /// (update), and it appears in no served representation — 5.8.3 and
+    /// 5.8.4 serve the 5.2.12 data type, which has no such member.
+    #[test]
+    fn clause_5_8_6_internal_context_member_is_client_proof() {
+        let hostile = json!({"__context": "http://attacker.invalid/ctx.jsonld"});
+        let created = norm(&sub(hostile.clone())).expect("valid subscription");
+        assert!(
+            !created.contains_key("__context"),
+            "a client-supplied __context must not reach storage: {created:?}"
+        );
+        let patched = frag(&hostile).expect("valid fragment");
+        assert!(
+            !patched.contains_key("__context"),
+            "a patch fragment must not replace the notification @context: {patched:?}"
+        );
+        let ctx = Loader::new().core();
+        let stored = json!({
+            "id": "urn:ngsi-ld:Subscription:ctx",
+            "type": "Subscription",
+            "entities": [{"type": "Building"}],
+            "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}},
+            "__context": "https://example.org/private-ctx.jsonld",
+        });
+        for csource in [false, true] {
+            for sys in [false, true] {
+                let out = present_subscription(&stored, &ctx, sys, csource);
+                assert!(
+                    !out.to_string().contains("__context"),
+                    "served representation leaked the internal @context member: {out}"
+                );
+                assert!(
+                    !out.to_string().contains("private-ctx"),
+                    "served representation leaked the internal @context value: {out}"
+                );
+            }
+        }
+    }
+
+    /// Table 5.2.12-2 and 5.2.14.2: read-only members "shall not be provided
+    /// by Context Subscribers. In the event that they are provided (in
+    /// update or create operations) NGSI-LD implementations shall ignore
+    /// them."
+    #[test]
+    fn clause_5_2_12_read_only_members_are_ignored() {
+        let doc = sub(json!({
+            "status": "active",
+            "createdAt": "2020-01-01T00:00:00Z",
+            "modifiedAt": "2020-01-01T00:00:00Z",
+            "notification": {
+                "endpoint": {"uri": "http://localhost:1111/notify"},
+                "timesSent": 42,
+                "lastNotification": "2020-01-01T00:00:00Z",
+                "lastSuccess": "2020-01-01T00:00:00Z",
+                "lastFailure": "2020-01-01T00:00:00Z",
+            }
+        }));
+        for is_patch in [false, true] {
+            let n = normalize_subscription(
+                doc.as_object().expect("object"),
+                &Loader::new().core(),
+                is_patch,
+            )
+            .expect("valid");
+            for k in ["status", "createdAt", "modifiedAt"] {
+                assert!(
+                    !n.contains_key(k),
+                    "{k} must not persist (patch={is_patch})"
+                );
+            }
+            let notif = n["notification"].as_object().expect("notification");
+            for k in [
+                "timesSent",
+                "lastNotification",
+                "lastSuccess",
+                "lastFailure",
+            ] {
+                assert!(
+                    !notif.contains_key(k),
+                    "notification.{k} must not persist (patch={is_patch})"
+                );
+            }
+        }
+    }
+
+    // ---------- 5.2.12 value spaces ----------
+
+    /// Table 5.2.12-1: "Valid notification triggers are entityCreated,
+    /// entityUpdated, entityDeleted, attributeCreated, attributeUpdated,
+    /// attributeDeleted". A trigger outside that set would leave a
+    /// subscription that silently never fires.
+    #[test]
+    fn clause_5_2_12_notification_trigger_value_space() {
+        for good in [
+            json!(["entityCreated"]),
+            json!(["entityUpdated", "entityDeleted"]),
+            json!(["attributeCreated", "attributeUpdated", "attributeDeleted"]),
+        ] {
+            assert!(
+                norm(&sub(json!({ "notificationTrigger": good }))).is_ok(),
+                "{good} must be accepted"
+            );
+        }
+        for bad in [
+            json!(["entityChanged"]),
+            json!(["attributeCreated", "nope"]),
+            json!("entityCreated"),
+            json!([1]),
+            json!({}),
+        ] {
+            assert!(
+                norm(&sub(json!({ "notificationTrigger": bad }))).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    /// Table 5.2.12-1: csf is "A valid query string as per clause 4.9". An
+    /// unparseable filter is otherwise stored and only fails at Context
+    /// Source Registration matching time (5.11.2.4), where it silently
+    /// matches nothing.
+    #[test]
+    fn clause_5_2_12_csf_must_be_a_valid_query() {
+        assert!(norm(&sub(json!({"csf": "endpoint==\"http://a/x\""}))).is_ok());
+        for bad in [json!("(("), json!("a==(("), json!(5), json!(["a==1"])] {
+            assert!(
+                norm(&sub(json!({ "csf": bad }))).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    /// Table 5.2.12-1: throttling and timeInterval are Numbers "Greater
+    /// than 0"; throttling allows fractional values, and neither accepts a
+    /// stringified number.
+    #[test]
+    fn clause_5_2_12_throttling_and_time_interval_value_space() {
+        assert!(norm(&sub(json!({"throttling": 0.5}))).is_ok());
+        assert!(norm(&sub(json!({"timeInterval": 5}))).is_ok());
+        for bad in [json!(0), json!(-1), json!("5"), json!(true), json!(null)] {
+            assert!(
+                norm(&sub(json!({ "throttling": bad }))).is_err(),
+                "throttling {bad} must be rejected"
+            );
+            assert!(
+                norm(&sub(json!({ "timeInterval": bad }))).is_err(),
+                "timeInterval {bad} must be rejected"
+            );
+        }
+    }
+
+    /// Table 5.2.12-1: expiresAt is a 4.6.3 DateTime, and 5.8.1.4/5.8.2.4
+    /// reject one "referring to a DateTime in the past". 4.6.3 admits both
+    /// fraction separators, so the past/future decision must be taken on the
+    /// instant, not on the raw string.
+    #[test]
+    fn clause_5_2_12_expires_at_boundary() {
+        assert!(norm(&sub(json!({"expiresAt": "2099-01-01T00:00:00Z"}))).is_ok());
+        // comma is the other legal fraction separator (4.6.3); comparing the
+        // raw strings would place ',' before now_iso()'s '.' and reject it
+        assert!(
+            norm(&sub(json!({"expiresAt": "2099-01-01T00:00:00,500Z"}))).is_ok(),
+            "a comma fraction separator is legal (4.6.3)"
+        );
+        let soon = (chrono::Utc::now() + chrono::Duration::seconds(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(
+            norm(&sub(json!({ "expiresAt": soon }))).is_ok(),
+            "a whole-second DateTime 30s ahead is in the future: {soon}"
+        );
+        for bad in [
+            json!("2020-01-01T00:00:00Z"),
+            json!("tomorrow"),
+            json!("2099-01-01"),
+            json!("2099-01-01T00:00:00+05:00"),
+            json!(1234),
+        ] {
+            assert!(
+                norm(&sub(json!({ "expiresAt": bad }))).is_err(),
+                "expiresAt {bad} must be rejected"
+            );
+        }
+    }
+
+    /// Table 5.2.12-1: watchedAttributes is a String[] of Attribute names,
+    /// "Empty array (0 length) is not allowed"; names expand per 5.5.7.
+    #[test]
+    fn clause_5_2_12_watched_attributes_contract() {
+        let n = norm(&sub(json!({"watchedAttributes": ["temperature"]}))).expect("valid");
+        assert_eq!(
+            n["watchedAttributes"][0],
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature"
+        );
+        for bad in [json!([]), json!("temperature"), json!([1]), json!([""])] {
+            assert!(
+                norm(&sub(json!({ "watchedAttributes": bad }))).is_err(),
+                "watchedAttributes {bad} must be rejected"
+            );
+        }
+    }
+
+    /// Table 5.2.12-1: q is "A valid query string as per clause 4.9". The
+    /// matcher percent-decodes before parsing (4.9), so the DECODED form is
+    /// what must be validated here — otherwise an encoded paren bomb passes
+    /// creation and only unfolds inside the notification task.
+    #[test]
+    fn clause_5_2_12_q_is_validated_in_its_decoded_form() {
+        assert!(norm(&sub(json!({"q": "temperature>20"}))).is_ok());
+        assert!(norm(&sub(json!({"q": "(("}))).is_err());
+        assert!(
+            norm(&sub(json!({"q": "%28%28%28"}))).is_err(),
+            "a percent-encoded unbalanced expression must be rejected at creation"
+        );
+        assert!(norm(&sub(json!({"q": 5}))).is_err());
+    }
+
+    /// Table 5.2.12-1: "At least one of (a) entities or (b)
+    /// watchedAttributes shall be present, unless the member localOnly is
+    /// set to true"; timeInterval excludes watchedAttributes and throttling.
+    #[test]
+    fn clause_5_2_12_mutual_exclusions_and_local_only() {
+        let bare = json!({
+            "type": "Subscription",
+            "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}}
+        });
+        assert!(
+            norm(&bare).is_err(),
+            "neither entities nor watchedAttributes"
+        );
+        let mut local = bare.clone();
+        local["localOnly"] = json!(true);
+        assert!(
+            norm(&local).is_ok(),
+            "localOnly=true waives the rule (5.5.13)"
+        );
+        assert!(norm(&sub(json!({
+            "timeInterval": 5,
+            "watchedAttributes": ["temperature"]
+        })))
+        .is_err());
+        assert!(norm(&sub(json!({"timeInterval": 5, "throttling": 5}))).is_err());
+        // a fragment carries no mandatory members of its own (5.8.2.4)
+        assert!(frag(&json!({"isActive": false})).is_ok());
+    }
+
+    /// Table 5.2.33-1 EntitySelector: type is required, id is "String or
+    /// String[]" of valid URIs, idPattern is a regular expression; 4.17
+    /// type-selection expressions stay unexpanded.
+    #[test]
+    fn clause_5_2_33_entity_selector_contract() {
+        let n = norm(&sub(json!({"entities": [{"type": "Building|Room"}]}))).expect("valid");
+        assert_eq!(
+            n["entities"][0]["type"], "Building|Room",
+            "a 4.17 type-selection expression is evaluated at match time"
+        );
+        let n = norm(&sub(json!({
+            "entities": [{"type": "Building", "id": ["urn:ngsi-ld:B:1", "urn:ngsi-ld:B:2"]}]
+        })))
+        .expect("valid");
+        assert_eq!(n["entities"][0]["id"][1], "urn:ngsi-ld:B:2");
+        for bad in [
+            json!([]),
+            json!("Building"),
+            json!([{"id": "urn:ngsi-ld:B:1"}]),
+            json!([{"type": ""}]),
+            json!([{"type": "Building", "id": "not a uri"}]),
+            json!([{"type": "Building", "id": ["urn:ngsi-ld:B:1", 7]}]),
+            json!([{"type": "Building", "idPattern": "["}]),
+            json!([{"type": "Building", "idPattern": 7}]),
+            json!(["Building"]),
+        ] {
+            assert!(
+                norm(&sub(json!({ "entities": bad }))).is_err(),
+                "entities {bad} must be rejected"
+            );
+        }
+    }
+
+    // ---------- 5.2.14 / 5.2.15 notification parameters ----------
+
+    /// Table 5.2.15-1 Endpoint: uri is mandatory and a valid URI; a scheme
+    /// with no registered notification binding is OperationNotSupported
+    /// (422 per Table 6.3.2-1), NOT BadRequestData; cooldown and timeout are
+    /// Numbers "Greater than 0"; accept is one of the three media types.
+    #[test]
+    fn clause_5_2_15_endpoint_contract() {
+        let mk = |ep: Value| sub(json!({"notification": {"endpoint": ep}}));
+        assert!(
+            norm(&sub(json!({"notification": {}}))).is_err(),
+            "endpoint required"
+        );
+        assert!(norm(&mk(json!({}))).is_err(), "endpoint.uri required");
+        assert!(norm(&mk(json!({"uri": "no-scheme"}))).is_err());
+        assert!(norm(&mk(json!({"uri": "http://a/x\r\nX: y"}))).is_err());
+        match norm(&mk(json!({"uri": "ftp://a/x"}))) {
+            Err(NgsiError::OperationNotSupported(_)) => {}
+            other => panic!("unsupported endpoint scheme must be OperationNotSupported: {other:?}"),
+        }
+        for key in ["cooldown", "timeout"] {
+            for bad in [json!(0), json!(-1), json!("5")] {
+                assert!(
+                    norm(&mk(json!({"uri": "http://a/x", key: bad}))).is_err(),
+                    "endpoint.{key} {bad} must be rejected"
+                );
+            }
+            assert!(norm(&mk(json!({"uri": "http://a/x", key: 1.5}))).is_ok());
+        }
+        for key in ["receiverInfo", "notifierInfo"] {
+            for bad in [
+                json!({}),
+                json!([{"key": "k"}]),
+                json!([{"key": 1, "value": "v"}]),
+            ] {
+                assert!(
+                    norm(&mk(json!({"uri": "http://a/x", key: bad}))).is_err(),
+                    "endpoint.{key} {bad} must be rejected"
+                );
+            }
+            assert!(norm(&mk(
+                json!({"uri": "http://a/x", key: [{"key": "k", "value": "v"}]})
+            ))
+            .is_ok());
+        }
+        assert!(norm(&mk(json!({"uri": "http://a/x", "accept": "text/html"}))).is_err());
+        assert!(norm(&mk(
+            json!({"uri": "http://a/x", "accept": "application/geo+json"})
+        ))
+        .is_ok());
+    }
+
+    /// Table 5.2.14.1-1 NotificationParams: format value space, join /
+    /// joinLevel, boolean sysAttrs/showChanges, and the pick/omit/attributes
+    /// exclusivity — "A synonym for pick, except that id, type, scope are
+    /// not allowed."
+    #[test]
+    fn clause_5_2_14_notification_params_contract() {
+        let mk = |extra: Value| {
+            let mut n = json!({"endpoint": {"uri": "http://localhost:1111/notify"}});
+            let o = n.as_object_mut().expect("object");
+            for (k, v) in extra.as_object().expect("object") {
+                o.insert(k.clone(), v.clone());
+            }
+            sub(json!({ "notification": n }))
+        };
+        assert!(
+            norm(&sub(json!({"notification": []}))).is_err(),
+            "not an object"
+        );
+        assert!(norm(&mk(json!({"format": "verbose"}))).is_err());
+        for f in ["normalized", "keyValues", "simplified", "concise"] {
+            assert!(norm(&mk(json!({ "format": f }))).is_ok(), "{f}");
+        }
+        for bad in [json!("nested"), json!(1), json!("")] {
+            assert!(norm(&mk(json!({ "join": bad }))).is_err(), "join {bad}");
+        }
+        for good in ["flat", "inline", "@none"] {
+            assert!(norm(&mk(json!({ "join": good }))).is_ok(), "{good}");
+        }
+        for bad in [json!(0), json!(-1), json!("2"), json!(1.5)] {
+            assert!(
+                norm(&mk(json!({ "joinLevel": bad }))).is_err(),
+                "joinLevel {bad}"
+            );
+        }
+        assert!(norm(&mk(json!({"joinLevel": 1}))).is_ok());
+        for key in ["sysAttrs", "showChanges"] {
+            assert!(
+                norm(&mk(json!({ key: "true" }))).is_err(),
+                "{key} must be a boolean"
+            );
+            assert!(norm(&mk(json!({ key: true }))).is_ok());
+        }
+        for name in ["id", "type", "scope"] {
+            assert!(
+                norm(&mk(json!({"attributes": [name]}))).is_err(),
+                "notification.attributes may not name {name}"
+            );
+        }
+        assert!(norm(&mk(json!({"attributes": [1]}))).is_err());
+        assert!(norm(&mk(json!({"attributes": ["a"], "pick": ["b"]}))).is_err());
+        assert!(norm(&mk(json!({"attributes": ["a"], "omit": ["b"]}))).is_err());
+        assert!(norm(&mk(json!({"pick": ["a"], "omit": ["a"]}))).is_err());
+        assert!(norm(&mk(json!({"pick": ["a"], "omit": ["b"]}))).is_ok());
+        // attribute names expand per 5.5.7
+        let n = norm(&mk(json!({"attributes": ["temperature"]}))).expect("valid");
+        assert_eq!(
+            n["notification"]["attributes"][0],
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature"
+        );
+    }
+
+    /// Table 5.2.13-1 GeoQuery: georel is mandatory and the geoproperty
+    /// name expands per 5.5.7.
+    #[test]
+    fn clause_5_2_13_geo_q_contract() {
+        let ok = json!({
+            "georel": "near;maxDistance==2000",
+            "geometry": "Point",
+            "coordinates": [-8.5, 41.2],
+            "geoproperty": "location"
+        });
+        let n = norm(&sub(json!({ "geoQ": ok }))).expect("valid");
+        assert_eq!(
+            n["geoQ"]["geoproperty"],
+            "https://uri.etsi.org/ngsi-ld/location"
+        );
+        for bad in [
+            json!("near"),
+            json!({"geometry": "Point", "coordinates": [1, 2]}),
+            json!({"georel": "sideways", "geometry": "Point", "coordinates": [1, 2]}),
+        ] {
+            assert!(
+                norm(&sub(json!({ "geoQ": bad }))).is_err(),
+                "geoQ {bad} must be rejected"
+            );
+        }
+    }
+
+    /// 5.2.21 TemporalQuery, used by Context Source Registration
+    /// Subscriptions (5.11): timerel and timeAt are cardinality 1.
+    #[test]
+    fn clause_5_2_21_temporal_q_contract() {
+        assert!(norm(&sub(json!({
+            "temporalQ": {"timerel": "after", "timeAt": "2020-01-01T00:00:00Z"}
+        })))
+        .is_ok());
+        for bad in [
+            json!("after"),
+            json!({"timerel": "after"}),
+            json!({"timerel": "sideways", "timeAt": "2020-01-01T00:00:00Z"}),
+            json!({"timerel": "after", "timeAt": "yesterday"}),
+        ] {
+            assert!(
+                norm(&sub(json!({ "temporalQ": bad }))).is_err(),
+                "temporalQ {bad} must be rejected"
+            );
+        }
+    }
+
+    // ---------- 5.8.3 / 5.8.4 presentation ----------
+
+    /// 5.2.12 Table 5.2.12-2: status is "Provided by the system"; 5.8.2.4
+    /// fixes its value space to active | paused | expired. The default
+    /// notificationTrigger is surfaced for entity Subscriptions only, and
+    /// createdAt/modifiedAt stay behind the sysAttrs gate.
+    #[test]
+    fn clause_5_8_3_presented_subscription_shape() {
+        let ctx = Loader::new().core();
+        let base = json!({
+            "id": "urn:ngsi-ld:Subscription:p1",
+            "type": "Subscription",
+            "entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Building"}],
+            "watchedAttributes": ["https://uri.etsi.org/ngsi-ld/default-context/temperature"],
+            "notification": {
+                "endpoint": {"uri": "http://localhost:1111/notify"},
+                "attributes": ["https://uri.etsi.org/ngsi-ld/default-context/temperature"]
+            },
+            "geoQ": {"georel": "near;maxDistance==1", "geoproperty": "https://uri.etsi.org/ngsi-ld/location"},
+            "createdAt": "2020-01-01T00:00:00Z",
+            "modifiedAt": "2020-01-01T00:00:00Z",
+        });
+        let out = present_subscription(&base, &ctx, false, false);
+        assert_eq!(out["status"], "active");
+        assert_eq!(out["entities"][0]["type"], "Building");
+        assert_eq!(out["watchedAttributes"][0], "temperature");
+        assert_eq!(out["notification"]["attributes"][0], "temperature");
+        assert_eq!(out["geoQ"]["geoproperty"], "location");
+        assert!(
+            out.get("createdAt").is_none() && out.get("modifiedAt").is_none(),
+            "sysAttrs are gated (6.3.11): {out}"
+        );
+        assert_eq!(
+            out["notificationTrigger"],
+            json!(["attributeCreated", "attributeUpdated"])
+        );
+        let sys = present_subscription(&base, &ctx, true, false);
+        assert_eq!(sys["createdAt"], "2020-01-01T00:00:00Z");
+        // a Context Source Registration Subscription has no such default
+        let cs = present_subscription(&base, &ctx, false, true);
+        assert!(cs.get("notificationTrigger").is_none(), "{cs}");
+
+        let mut paused = base.clone();
+        paused["isActive"] = json!(false);
+        assert_eq!(
+            present_subscription(&paused, &ctx, false, false)["status"],
+            "paused"
+        );
+        let mut expired = base.clone();
+        expired["expiresAt"] = json!("2020-01-01T00:00:00Z");
+        expired["isActive"] = json!(false);
+        assert_eq!(
+            present_subscription(&expired, &ctx, false, false)["status"],
+            "expired",
+            "expiry wins over paused (5.8.2.4)"
+        );
+        let mut periodic = base.clone();
+        periodic["timeInterval"] = json!(30);
+        assert!(
+            present_subscription(&periodic, &ctx, false, false)
+                .get("notificationTrigger")
+                .is_none(),
+            "a periodic subscription has no attribute triggers"
+        );
     }
 }

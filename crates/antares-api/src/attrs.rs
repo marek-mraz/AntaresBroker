@@ -20,7 +20,8 @@ pub(crate) fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
     let ok = !attr.is_empty()
         && attr
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+".contains(c));
+            .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+".contains(c))
+        && !has_dot_segment(attr);
     if ok {
         Ok(())
     } else {
@@ -28,6 +29,20 @@ pub(crate) fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
             "invalid attribute name {attr:?}"
         )))
     }
+}
+
+/// A 4.6.2 name begins with a letter, so no valid Attribute name is a relative
+/// path dot-segment (RFC 3986 clause 5.2.4). The name is interpolated into the
+/// request URLs of forwarded operations, where a `.`/`..` segment addresses a
+/// different resource of the registration endpoint — `/entities/{id}/attrs/..`
+/// is that endpoint's Entity resource. Percent triplets are folded once first,
+/// because the endpoint decodes the path it is given.
+fn has_dot_segment(attr: &str) -> bool {
+    attr.to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .split('/')
+        .any(|seg| seg == "." || seg == "..")
 }
 
 /// Outcome of a multi-attribute write: 204 when everything applied, else 207
@@ -100,7 +115,7 @@ async fn append_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (mut regs, local_covered) =
+    let (mut regs, all_attr_iris) =
         attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
     if let Some(r) = crate::federation::handle_via_loop(
         headers,
@@ -110,7 +125,7 @@ async fn append_attrs_inner(
     ) {
         return Ok(r);
     }
-    let all_attr_iris = attr_iris_of(&fragment);
+    let local_covered = proxies_cover_all(&regs, &all_attr_iris);
     let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
     let local_iris = attr_iris_of(&fragment);
     let ts = now_iso();
@@ -202,7 +217,10 @@ async fn append_attrs_inner(
         })
     };
     if regs.is_empty() {
-        return local_resp.expect("local path always runs without registrations");
+        // the local half is skipped only while registrations cover the
+        // attributes, so an empty list always leaves a local response
+        return local_resp
+            .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
     let mut query = Vec::new();
@@ -234,8 +252,8 @@ async fn append_attrs_inner(
     ))
 }
 
-/// Shared federation plan for attribute writes: matching non-aux
-/// registrations + whether proxies cover every touched attribute.
+/// Shared federation plan for attribute writes: the matching non-aux
+/// registrations, plus the touched attribute IRIs they were matched on.
 fn attr_fed_plan(
     st: &AppState,
     tenant: &antares_model::TenantId,
@@ -244,45 +262,40 @@ fn attr_fed_plan(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> (Vec<crate::federation::FedReg>, bool) {
-    let attr_iris: Vec<String> = fragment
-        .as_object()
-        .map(|o| {
-            o.keys()
-                .filter(|k| {
-                    !matches!(
-                        k.as_str(),
-                        "id" | "type" | "scope" | "createdAt" | "modifiedAt"
-                    )
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    attr_fed_plan_iris(st, tenant, id, attr_iris, ctx, params, headers)
+) -> (Vec<crate::federation::FedReg>, Vec<String>) {
+    let attr_iris = attr_iris_of(fragment);
+    let regs = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers);
+    (regs, attr_iris)
 }
 
 fn attr_fed_plan_iris(
     st: &AppState,
     tenant: &antares_model::TenantId,
     id: &str,
-    attr_iris: Vec<String>,
+    attr_iris: &[String],
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> (Vec<crate::federation::FedReg>, bool) {
+) -> Vec<crate::federation::FedReg> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
-        attrs: (!attr_iris.is_empty()).then(|| attr_iris.clone()),
+        attrs: (!attr_iris.is_empty()).then(|| attr_iris.to_vec()),
         ..Default::default()
     };
-    let regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers);
-    let covered = !regs.is_empty()
+    crate::federation::write_regs(st, tenant, &spec, ctx, params, headers)
+}
+
+/// The local half of a distributed attribute write is skipped only when every
+/// touched attribute is held by an exclusive/redirect registration (5.6.2.4
+/// and siblings). The decision is taken AFTER 6.3.18 loop handling: a `Via`
+/// chain naming this broker removes registrations from matching (Table
+/// 6.3.18-2), and the operation then has to be served locally.
+fn proxies_cover_all(regs: &[crate::federation::FedReg], attr_iris: &[String]) -> bool {
+    !regs.is_empty()
         && !attr_iris.is_empty()
         && attr_iris
             .iter()
-            .all(|a| regs.iter().any(|r| r.is_proxy() && r.covers_attr(a)));
-    (regs, covered)
+            .all(|a| regs.iter().any(|r| r.is_proxy() && r.covers_attr(a)))
 }
 
 /// 5.6.2.4 (and sibling attribute operations): with a `?type` selector the
@@ -560,7 +573,7 @@ async fn update_attrs_inner(
             ..Default::default()
         },
     )?;
-    let (mut regs, local_covered) =
+    let (mut regs, all_attr_iris) =
         attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
     if let Some(r) = crate::federation::handle_via_loop(
         headers,
@@ -570,7 +583,7 @@ async fn update_attrs_inner(
     ) {
         return Ok(r);
     }
-    let all_attr_iris = attr_iris_of(&fragment);
+    let local_covered = proxies_cover_all(&regs, &all_attr_iris);
     let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
     let local_iris = attr_iris_of(&fragment);
     let ts = now_iso();
@@ -661,7 +674,10 @@ async fn update_attrs_inner(
         })
     };
     if regs.is_empty() {
-        return local_resp.expect("local path always runs without registrations");
+        // the local half is skipped only while registrations cover the
+        // attributes, so an empty list always leaves a local response
+        return local_resp
+            .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
     let mut query = Vec::new();
@@ -735,11 +751,11 @@ async fn partial_update_inner(
         )
         .into());
     }
-    let (mut regs, local_covered) = attr_fed_plan_iris(
+    let mut regs = attr_fed_plan_iris(
         st,
         &tenant,
         id,
-        vec![attr_iri.clone()],
+        std::slice::from_ref(&attr_iri),
         &parsed.ctx,
         params,
         headers,
@@ -752,6 +768,7 @@ async fn partial_update_inner(
     ) {
         return Ok(r);
     }
+    let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
     let want_ds = frag_inst
         .get("datasetId")
         .and_then(Value::as_str)
@@ -823,7 +840,10 @@ async fn partial_update_inner(
         })
     };
     if regs.is_empty() {
-        return local_resp.expect("local path always runs without registrations");
+        // the local half is skipped only while registrations cover the
+        // attributes, so an empty list always leaves a local response
+        return local_resp
+            .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
     let all_attr_iris = vec![attr_iri.clone()];
@@ -921,11 +941,11 @@ pub async fn replace_attr(
             .get("datasetId")
             .and_then(Value::as_str)
             .map(String::from);
-        let (mut regs, local_covered) = attr_fed_plan_iris(
+        let mut regs = attr_fed_plan_iris(
             &st,
             &tenant,
             &id,
-            vec![attr_iri.clone()],
+            std::slice::from_ref(&attr_iri),
             &parsed.ctx,
             &params,
             &headers,
@@ -938,6 +958,7 @@ pub async fn replace_attr(
         ) {
             return Ok(r);
         }
+        let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
         let ts = now_iso();
         let mut found = false;
         let local_resp: Option<ApiResult<Response>> = if local_covered {
@@ -986,7 +1007,10 @@ pub async fn replace_attr(
             })
         };
         if regs.is_empty() {
-            return local_resp.expect("local path always runs without registrations");
+            // the local half is skipped only while registrations cover the
+            // attributes, so an empty list always leaves a local response
+            return local_resp
+                .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
         }
         let local_outcome = classify_local(&local_resp);
         let all_attr_iris = vec![attr_iri.clone()];
@@ -1060,11 +1084,11 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let (mut regs, local_covered) = attr_fed_plan_iris(
+    let mut regs = attr_fed_plan_iris(
         st,
         &tenant,
         id,
-        vec![attr_iri.clone()],
+        std::slice::from_ref(&attr_iri),
         &ctx,
         params,
         headers,
@@ -1077,6 +1101,7 @@ async fn delete_attr_inner(
     ) {
         return Ok(r);
     }
+    let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
     let ts = now_iso();
     let mut found = false;
     let local_resp: Option<ApiResult<Response>> = if local_covered {
@@ -1141,7 +1166,10 @@ async fn delete_attr_inner(
         })
     };
     if regs.is_empty() {
-        return local_resp.expect("local path always runs without registrations");
+        // the local half is skipped only while registrations cover the
+        // attributes, so an empty list always leaves a local response
+        return local_resp
+            .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
     let all_attr_iris = vec![attr_iri.clone()];
@@ -1182,6 +1210,193 @@ async fn delete_attr_inner(
         &regs,
         &fed_parts,
     ))
+}
+
+#[cfg(test)]
+mod attr_name_and_via_paths {
+    use crate::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const ALIAS: &str = "antares1";
+
+    /// A Context Source answering 204 to everything, counting the hits.
+    fn mock_source() -> (u16, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let hits: Arc<AtomicUsize> = Arc::default();
+        let seen = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                seen.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+        (port, hits)
+    }
+
+    fn state() -> AppState {
+        // the mock source is loopback, denied by the egress policy by default
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        AppState::new(ALIAS.into())
+    }
+
+    async fn send(st: &AppState, req: Request<Body>) -> axum::http::Response<Body> {
+        crate::router(st.clone()).oneshot(req).await.expect("response")
+    }
+
+    async fn post(st: &AppState, uri: &str, body: String) -> StatusCode {
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request");
+        send(st, req).await.status()
+    }
+
+    /// One registration for `entity` covering every attribute. The store is
+    /// process-wide, so every test uses its own ids. `mode` is a parameter
+    /// because 5.9.2 forbids two proxied (exclusive or redirect)
+    /// registrations from overlapping — a test that needs two matching
+    /// registrations has to register them inclusive.
+    async fn register(st: &AppState, port: u16, id: &str, entity: &str, mode: &str) {
+        let doc = serde_json::json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:{id}"),
+            "type": "ContextSourceRegistration",
+            "mode": mode,
+            "operations": ["updateAttrs", "replaceAttrs", "deleteAttrs", "appendAttrs"],
+            "information": [{"entities": [{"type": "Vehicle", "id": entity}]}],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        assert_eq!(
+            post(st, "/ngsi-ld/v1/csourceRegistrations", doc.to_string()).await,
+            StatusCode::CREATED,
+            "registration create"
+        );
+    }
+
+    async fn create_entity(st: &AppState, entity: &str) {
+        let doc = serde_json::json!({
+            "id": entity, "type": "Vehicle",
+            "speed": {"type": "Property", "value": 1},
+        });
+        assert_eq!(
+            post(st, "/ngsi-ld/v1/entities", doc.to_string()).await,
+            StatusCode::CREATED,
+            "entity create"
+        );
+    }
+
+    /// 4.6.2: a name starts with a letter, so no valid Attribute name is a
+    /// relative-path dot segment (RFC 3986 clause 5.2.4). Such a name reaching
+    /// a forwarded request URL re-targets the registration endpoint —
+    /// `DELETE /entities/{id}/attrs/..` becomes a Delete Entity on the peer —
+    /// so it is refused with BadRequestData before anything is forwarded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dot_segment_attribute_name_is_refused_and_never_forwarded() {
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-traversal";
+        let st = state();
+        let (port, hits) = mock_source();
+        register(&st, port, "csr-traversal", ENTITY, "redirect").await;
+        let frag = r#"{"type":"Property","value":1}"#;
+        // raw, decoded once by this broker, and decoded once more by the peer
+        for attr in ["..", "%2e%2e", "%252e%252e", "."] {
+            for (method, body) in [("DELETE", None), ("PATCH", Some(frag)), ("PUT", Some(frag))] {
+                let mut req = Request::builder()
+                    .method(method)
+                    .uri(format!("/ngsi-ld/v1/entities/{ENTITY}/attrs/{attr}"));
+                if let Some(b) = body {
+                    req = req
+                        .header("Content-Type", "application/json")
+                        .header("Content-Length", b.len());
+                }
+                let req = req
+                    .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+                    .expect("request");
+                assert_eq!(
+                    send(&st, req).await.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{method} attribute name {attr:?}"
+                );
+            }
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "a rejected attribute name must never reach a registration endpoint"
+        );
+        // an absolute IRI carries '/' and '.' legitimately: it passes the check
+        // and is forwarded, so the guard rejects the shape, not the characters
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/ngsi-ld/v1/entities/{ENTITY}/attrs/https%3A%2F%2Fexample.org%2Fv1.0%2Fspeed"
+            ))
+            .body(Body::empty())
+            .expect("request");
+        assert_ne!(
+            send(&st, req).await.status(),
+            StatusCode::BAD_REQUEST,
+            "an absolute IRI is a valid attribute name"
+        );
+        assert!(
+            hits.load(Ordering::SeqCst) >= 1,
+            "a valid attribute name is still forwarded"
+        );
+    }
+
+    /// 6.3.17/6.3.18 (Table 6.3.18-2): a Via chain naming this broker leaves
+    /// the matching registrations out of the operation, which then runs
+    /// locally. 508 is reserved for a SINGLE exclusive/redirect source, so two
+    /// registrations must produce an answer — never a 500.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_via_with_two_registrations_answers_locally() {
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-via";
+        let st = state();
+        create_entity(&st, ENTITY).await;
+        let (port, hits) = mock_source();
+        register(&st, port, "csr-via-a", ENTITY, "inclusive").await;
+        register(&st, port, "csr-via-b", ENTITY, "inclusive").await;
+        let via = format!("1.1 {ALIAS}");
+
+        // 5.6.2 Update Attributes — the multi-attribute fragment plan
+        let body = r#"{"speed":{"type":"Property","value":9}}"#;
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(format!("/ngsi-ld/v1/entities/{ENTITY}/attrs"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .header("Via", via.as_str())
+            .body(Body::from(body))
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::NO_CONTENT);
+
+        // 5.6.5 Delete Attribute — the single-attribute plan
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/ngsi-ld/v1/entities/{ENTITY}/attrs/speed"))
+            .header("Via", via.as_str())
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "registrations dropped by the Via chain must not be contacted"
+        );
+    }
 }
 
 #[cfg(test)]

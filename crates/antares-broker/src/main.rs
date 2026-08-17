@@ -111,6 +111,22 @@ fn unknown_config_key(key: &str) -> bool {
     !injected
 }
 
+/// ANTARES_SWEEP_SECS paces the 4.22 expiry sweep in every store mode. Absent
+/// is the 15 min default; anything that is not a positive integer is fatal,
+/// because a garbage cadence silently becoming the default one is exactly the
+/// misconfiguration the unknown-key policy exists to catch.
+fn parse_sweep_secs(raw: Option<&str>) -> Result<u64, String> {
+    let Some(v) = raw else {
+        return Ok(15 * 60);
+    };
+    match v.parse::<u64>() {
+        Ok(0) | Err(_) => Err(format!(
+            "ANTARES_SWEEP_SECS must be a positive integer number of seconds, got {v:?}"
+        )),
+        Ok(n) => Ok(n),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --version answers without starting anything (a bare `antares
     // --version` used to boot a server).
@@ -138,9 +154,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let port: u16 = std::env::var("ANTARES_HTTP_PORT")
-        .unwrap_or_else(|_| "9090".into())
-        .parse()?;
+    let port_raw = std::env::var("ANTARES_HTTP_PORT").unwrap_or_else(|_| "9090".into());
+    let port: u16 = port_raw
+        .parse()
+        .map_err(|e| format!("ANTARES_HTTP_PORT must be a port number 0-65535, got {port_raw:?} ({e})"))?;
+    // Every remaining config value is parsed HERE, before the runtime starts,
+    // so a garbage window, cadence or switch fails the process instead of
+    // silently running at its default.
+    let sweep_secs = parse_sweep_secs(std::env::var("ANTARES_SWEEP_SECS").ok().as_deref())?;
+    let drain_delay = shutdown::drain_delay()?;
+    let drain_deadline = shutdown::drain_deadline()?;
+    // Validated here so a typo fails startup; the value itself is read again
+    // where the drain task is wired, which is the only place it is used.
+    wiring::outbox_drain_enabled()?;
     let host_alias = std::env::var("ANTARES_HOST_ALIAS").unwrap_or_else(|_| "antares".into());
     // 6.3.18 sends this as the Via pseudonym — an RFC 7230 token. `~` is
     // reserved as the tenant separator (federation::alias_for), so allowing
@@ -199,6 +225,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode,
                 backend,
                 metrics_render,
+                sweep_secs,
+                drain_delay,
+                drain_deadline,
             )
             .await
         })
@@ -354,9 +383,12 @@ async fn run(
     store_mode: antares_sql::StoreMode,
     temporal_backend: Option<antares_sql::maintenance::TemporalBackend>,
     metrics_render: Option<telemetry::MetricsRender>,
+    sweep_secs: u64,
+    drain_delay: std::time::Duration,
+    drain_deadline: std::time::Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
-    let roles = wiring::Roles::parse(&roles)?;
+    let roles = wiring::Roles::parse(&roles).map_err(|e| format!("ANTARES_ROLES: {e}"))?;
     // Bus seam: local (default) or nats. An unknown value is fatal.
     let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());
     match bus_mode.as_str() {
@@ -439,12 +471,7 @@ async fn run(
     // ANTARES_SWEEP_SECS paces 4.22 GC identically across ALL store modes —
     // the Mem/file sweep loop and the Pg/Timescale maintenance job below both
     // tick on it (the ETSI stack runs at 2 s so transient TPs observe GC, not
-    // just the read filter); default matches the old fixed 15 min.
-    let sweep_secs = std::env::var("ANTARES_SWEEP_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|s| *s > 0)
-        .unwrap_or(15 * 60);
+    // just the read filter); parsed at startup, default 15 min.
     if matches!(
         state.store.as_ref(),
         antares_sql::store::any::AnyStore::Mem(_)
@@ -563,6 +590,9 @@ async fn run(
     // before their creation). Under health-check polling that window is hit
     // constantly, which is exactly how the drain test caught it.
     let mut sigterm = std::pin::pin!(shutdown::signal());
+    // A pod whose drain is switched off publishes nothing, so waiting for the
+    // outbox to empty there would only burn the deadline.
+    let flush_outbox = wiring::outbox_drain_enabled()?;
     // Manual serve loop: the ETSI suite reads response headers case-sensitively
     // ("Location"), so HTTP/1 responses are written with title-case headers.
     loop {
@@ -572,8 +602,8 @@ async fn run(
                 // 1+2: unhealthy FIRST, then keep serving for the LB's notice
                 // window — still inside this select, so connections arriving
                 // during it are accepted normally.
-                shutdown::begin(&draining);
-                let until = tokio::time::Instant::now() + shutdown::drain_delay();
+                shutdown::begin(&draining, drain_delay);
+                let until = tokio::time::Instant::now() + drain_delay;
                 loop {
                     tokio::select! {
                         r = listener.accept() => {
@@ -588,7 +618,7 @@ async fn run(
                 // requests finish), in-flight drained, pools closed.
                 drop(listener);
                 let _ = drain_tx.send(true);
-                shutdown::drain(&inflight, &store_for_drain).await;
+                shutdown::drain(&inflight, &store_for_drain, drain_deadline, flush_outbox).await;
                 tracing::info!("shutting down");
                 return Ok(());
             }
@@ -707,6 +737,44 @@ mod config_key_tests {
             "a typo'd *_PORT var is NOT a service link"
         );
         assert!(unknown_config_key("ANTARES_BOGUS_FLAG"));
+    }
+
+    /// The exemption is narrow on purpose: only the exact kubelet shapes for
+    /// the Services this repo ships. Near-misses stay fatal, and a non-ANTARES
+    /// variable is never our business.
+    #[test]
+    fn the_service_link_exemption_does_not_over_reach() {
+        for k in [
+            "ANTARES_",
+            "ANTARES_PORTAL",
+            "ANTARES_SERVICEHOST",
+            "ANTARES_DB_PORT",
+            "ANTARES_WORKER_PROT",
+        ] {
+            assert!(unknown_config_key(k), "{k} must stay a fatal typo");
+        }
+        for k in ["PATH", "HOME", "antares_store", "ANTARE_STORE", ""] {
+            assert!(!unknown_config_key(k), "{k} is not broker config");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sweep_secs_tests {
+    use super::parse_sweep_secs;
+
+    /// ANTARES_SWEEP_SECS paces the 4.22 GC in every store mode: absent is
+    /// the 15 min default, and a value that is not a positive integer is
+    /// fatal — a garbage cadence must never silently become the default one.
+    #[test]
+    fn sweep_secs_defaults_and_rejects() {
+        assert_eq!(parse_sweep_secs(None).expect("default"), 900);
+        assert_eq!(parse_sweep_secs(Some("2")).expect("explicit"), 2);
+        for bad in ["0", "-1", "", "2s", "abc", "1.5", "99999999999999999999999"] {
+            let err =
+                parse_sweep_secs(Some(bad)).expect_err(&format!("SWEEP_SECS={bad:?} is fatal"));
+            assert!(err.contains("ANTARES_SWEEP_SECS"), "{err}");
+        }
     }
 }
 

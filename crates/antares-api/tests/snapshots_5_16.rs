@@ -856,3 +856,137 @@ async fn clause_6_3_22_unknown_snapshot_is_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+/// How many snap-index reverse-lookup markers point at `sid`. The markers
+/// share Kind::Snapshot storage with the snapshot documents themselves.
+fn index_markers(st: &AppState, sid: &str) -> usize {
+    let idx = antares_model::TenantId::new("snap-index").expect("tenant");
+    st.store
+        .list(&idx, antares_sql::store::Kind::Snapshot)
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d["snapshot"] == sid)
+        .count()
+}
+
+async fn make_snapshot(st: &AppState, tenant: &[(&str, &str)], prio: i64) -> String {
+    let snap = json!({"type": "Snapshot", "snapshotPriority": prio,
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
+    .to_string();
+    let (status, h, b) = send_h(st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), tenant).await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+    h.get("Location").unwrap().to_str().unwrap().to_owned()
+}
+
+/// 5.5.15 resource-pressure eviction is about Snapshots — 5.2.41 fixes
+/// their type. The reverse-lookup markers share Kind::Snapshot storage but
+/// are not Snapshots: counting them doubles the apparent registry size, and
+/// since they carry no snapshotPriority (default 5) and no expiresAt they
+/// take victim slots, so snapshots still inside the cap get deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_15_eviction_counts_snapshots_only() {
+    let mut st = state();
+    st.snapshot_cap = 2;
+    // priorities below the markers' default 5 so an unguarded sort puts the
+    // snapshots ahead of the markers in the victim order. The markers live
+    // under the broker's own snap-index tenant whoever owns the snapshot, and
+    // 6.3.14 refuses that tenant to clients, so this drives the default one —
+    // a named tenant would have to be created first (5.5.10 answers
+    // NonexistentTenant on every non-create operation).
+    let t: &[(&str, &str)] = &[];
+    let lo = make_snapshot(&st, t, 2).await;
+    let mid = make_snapshot(&st, t, 3).await;
+
+    // two snapshots against a cap of two: nothing is over the cap
+    for loc in [&lo, &mid] {
+        let (status, _, body) = send_h(&st, "GET", loc, None, t).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "5.5.15: only Snapshots count towards the cap: {body}"
+        );
+    }
+    // and the marker itself is not a victim either
+    let (_, _, meta) = send_h(&st, "GET", &lo, None, t).await;
+    let sid = meta["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        index_markers(&st, &sid),
+        1,
+        "the reverse index survives the eviction pass"
+    );
+}
+
+/// 5.16.7.4: a purge deletes the Snapshots matching the q. The snap-index
+/// markers are not Snapshots (5.2.41 type), so a q that only they can
+/// satisfy purges nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_7_purge_spares_the_snapshot_index() {
+    let st = state();
+    let loc = make_snapshot(&st, &[], 5).await;
+    let ready = wait_ready(&st, &loc).await;
+    let sid = ready["id"].as_str().expect("id").to_owned();
+    assert_eq!(index_markers(&st, &sid), 1, "marker written at creation");
+
+    // Every snapshot carries snapshotPriority (defaulted at creation), so only
+    // the markers satisfy this q. The purge runs on the owner tenant because
+    // 6.3.14 refuses the broker's own snap- namespace to clients; the markers
+    // are out of reach of any purge a client can actually issue.
+    let (status, _, body) = send_h(
+        &st,
+        "DELETE",
+        "/ngsi-ld/v1/snapshots?q=%21snapshotPriority",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+    assert_eq!(
+        index_markers(&st, &sid),
+        1,
+        "5.16.7.4: the reverse index is not purgeable as a snapshot"
+    );
+    let (status, _) = send(&st, "GET", &loc, None).await;
+    assert_eq!(status, StatusCode::OK, "nothing purged on the owner tenant");
+}
+
+/// 5.5.15: the resource-pressure cap applies to every new snapshot, so a
+/// clone (5.16.2) cannot be used to grow the registry past it — the
+/// lowest-snapshotPriority snapshot is evicted exactly as on a create.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_15_clone_respects_the_cap() {
+    let mut st = state();
+    st.snapshot_cap = 2;
+    let mk = |prio: i64| {
+        json!({"type": "Snapshot", "snapshotPriority": prio,
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
+        .to_string()
+    };
+    let (_, h_hi, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(mk(8)), &[]).await;
+    let hi = h_hi.get("Location").unwrap().to_str().unwrap().to_owned();
+    let (_, h_lo, _) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(mk(2)), &[]).await;
+    let lo = h_lo.get("Location").unwrap().to_str().unwrap().to_owned();
+    wait_ready(&st, &hi).await;
+    wait_ready(&st, &lo).await;
+
+    let (status, ch, body) = send_h(
+        &st,
+        "POST",
+        &format!("{hi}/clone"),
+        Some(json!({"type": "Snapshot"}).to_string()),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let cloc = ch.get("Location").unwrap().to_str().unwrap().to_owned();
+
+    let (status, _) = send(&st, "GET", &lo, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "5.5.15: the clone is over the cap, priority 2 is evicted"
+    );
+    let (status, _) = send(&st, "GET", &hi, None).await;
+    assert_eq!(status, StatusCode::OK, "priority 8 must survive");
+    let (status, _) = send(&st, "GET", &cloc, None).await;
+    assert_eq!(status, StatusCode::OK, "the clone is never its own victim");
+}

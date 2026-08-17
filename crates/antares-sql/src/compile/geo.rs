@@ -124,6 +124,12 @@ fn predicate(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<Compile
             if *geometry != "Point" {
                 return None; // see module docs, point 3
             }
+            // 4.10 PositiveNumber is an RFC 8259 Number, but `inf` and `NaN`
+            // both parse as `f64`: inflating one gives a bound that EXCLUDES
+            // every row rather than widening. Refuse instead of narrowing.
+            if [max, min].into_iter().flatten().any(|d| !d.is_finite()) {
+                return None;
+            }
             let mut parts = Vec::new();
             // Numeric binds are numbered after ALL geo binds; there is exactly
             // one geo bind here, hence the +1 base.
@@ -155,7 +161,6 @@ fn predicate(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<Compile
         Rel::Overlaps => format!("ST_Overlaps({col}, {g})"),
         Rel::Equals => format!("ST_Equals({col}, {g})"),
     };
-    geo_binds.shrink_to_fit();
     Some(CompiledGeo {
         sql: pred,
         geo_binds,
@@ -176,17 +181,17 @@ pub fn extract_location(doc: &Value) -> Option<String> {
     };
     let value = inst.get("value").or_else(|| inst.get("object"))?;
     // must look like a GeoJSON geometry; anything else is not indexable and
-    // must not silently become a NULL that looks like "no location"
+    // must not silently become a NULL that looks like "no location".
+    // GeometryCollection is deliberately absent: the PostGIS relate
+    // predicates refuse one, so an extracted collection turns every later
+    // geoquery into a database error — and it can never match anyway, since
+    // `GeoQuery::matches_geometry` reads a geometry's `coordinates` and a
+    // collection has none. It is flagged ambiguous instead and judged by the
+    // evaluator like any other unextractable geoproperty.
     let t = value.get("type")?.as_str()?;
     if !matches!(
         t,
-        "Point"
-            | "MultiPoint"
-            | "LineString"
-            | "MultiLineString"
-            | "Polygon"
-            | "MultiPolygon"
-            | "GeometryCollection"
+        "Point" | "MultiPoint" | "LineString" | "MultiLineString" | "Polygon" | "MultiPolygon"
     ) {
         return None;
     }
@@ -306,6 +311,86 @@ mod tests {
         );
     }
 
+    /// Both `near` bounds in one predicate: the geometry keeps the offset and
+    /// the two distances take the next two placeholders, in the order the
+    /// caller appends them (geo binds first, then the numbers).
+    #[test]
+    fn both_near_bounds_take_distinct_placeholders_after_the_geometry() {
+        let c = compile_geo(
+            &spec(
+                Rel::Near {
+                    max: Some(2000.0),
+                    min: Some(500.0),
+                },
+                "Point",
+                &coords(),
+                "",
+            ),
+            "location",
+            1,
+        )
+        .expect("compiles");
+        assert_eq!(c.geo_binds.len(), 1);
+        assert_eq!(c.num_binds.len(), 2);
+        assert!(c.sql.contains("ST_GeomFromGeoJSON($1)"), "{}", c.sql);
+        assert!(c.sql.contains("$2)"), "maxDistance placeholder: {}", c.sql);
+        assert!(
+            c.sql.contains(">= $3"),
+            "minDistance placeholder: {}",
+            c.sql
+        );
+        assert!(!c.sql.contains("$4"), "overshoot: {}", c.sql);
+    }
+
+    /// `maxDistance`/`minDistance` reach this compiler as `f64`, and `inf`
+    /// parses as one. A non-finite bound would compile to a comparison that
+    /// EXCLUDES every row rather than widening — refuse it instead.
+    #[test]
+    fn a_non_finite_distance_is_left_to_the_evaluator() {
+        for (max, min) in [
+            (Some(f64::INFINITY), None),
+            (None, Some(f64::INFINITY)),
+            (Some(f64::NAN), None),
+            (None, Some(f64::NAN)),
+            (Some(2000.0), Some(f64::INFINITY)),
+        ] {
+            assert!(
+                compile_geo(
+                    &spec(Rel::Near { max, min }, "Point", &coords(), ""),
+                    "location",
+                    1
+                )
+                .is_none(),
+                "non-finite bound must not compile: {max:?}/{min:?}"
+            );
+        }
+    }
+
+    /// `geometry` is a client string. It is a JSON member of the bound
+    /// document, never a fragment of the statement.
+    #[test]
+    fn the_query_geometry_type_travels_in_the_bound_geojson() {
+        let c = compile_geo(
+            &spec(
+                Rel::Within,
+                "Polygon'); DROP TABLE entities; --",
+                &coords(),
+                "",
+            ),
+            "location",
+            1,
+        )
+        .expect("compiles");
+        for needle in ["DROP", "TABLE", "--", "'"] {
+            assert!(!c.sql.contains(needle), "{needle:?} leaked: {}", c.sql);
+        }
+        assert_eq!(
+            c.sql,
+            "((ST_Within(location, ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))) OR location_ambiguous)"
+        );
+        assert!(c.geo_binds[0].contains("DROP"), "{}", c.geo_binds[0]);
+    }
+
     #[test]
     fn refusals_leave_it_to_the_evaluator() {
         // near from an extended geometry: evaluator measures the first vertex,
@@ -411,5 +496,18 @@ mod tests {
         let bogus = json!({ LOCATION_IRI: [{"type": "Property", "value": "somewhere"}] });
         assert!(extract_location(&bogus).is_none());
         assert!(extract_location(&json!({"id": "urn:x"})).is_none());
+
+        // a collection is a GeoJSON geometry, but the relate predicates
+        // refuse one — it stays unextracted so the row is flagged ambiguous
+        let collection = json!({
+            LOCATION_IRI: [{"type": "GeoProperty", "value": {
+                "type": "GeometryCollection",
+                "geometries": [{"type": "Point", "coordinates": [1, 2]}]
+            }}]
+        });
+        assert!(
+            extract_location(&collection).is_none(),
+            "a GeometryCollection must not reach a PostGIS relate predicate"
+        );
     }
 }

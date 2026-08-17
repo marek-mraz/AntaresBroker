@@ -423,12 +423,44 @@ struct Windowed {
     max_per_attr: usize,
     ts_min: Option<String>,
     ts_max: Option<String>,
+    truncated: bool,
 }
 
-/// NGSI-LD 6.3.10 only paginates ("206") when an attribute has "too many"
-/// instances. The ETSI suite triggers 206 at 20 instances and expects 200 at
-/// <=5 — any limit in (5,20) is spec-valid; 9 keeps margin (Scorpio parity).
+/// NGSI-LD 6.3.10: the most instances of one Attribute the broker serves in
+/// one response — beyond it the representation is cut and answered "206" with
+/// a Content-Range. The ETSI suite triggers 206 at 20 instances and expects
+/// 200 at <=5, so any limit in (5,20) is spec-valid; 9 keeps margin.
 const TEMPORAL_INSTANCE_LIMIT: usize = 9;
+
+/// 6.3.10: the ceiling is a CUT, not a label. An Attribute holding more
+/// instances than the broker serves at once is truncated to the ceiling in
+/// the query direction, and the 206 + Content-Range then describes the
+/// instances actually returned. This is what caps a lastN above the ceiling
+/// and what caps a request naming no temporal window at all. Aggregated
+/// representations (5.7.4.4) are computed over the whole evolution and are
+/// complete by construction, so they are never cut.
+fn truncate(w: &mut Windowed, timeprop: &str) {
+    if w.max_per_attr <= TEMPORAL_INSTANCE_LIMIT {
+        return;
+    }
+    w.truncated = true;
+    w.max_per_attr = TEMPORAL_INSTANCE_LIMIT;
+    let (mut ts_min, mut ts_max) = (None::<String>, None::<String>);
+    for instances in w.attrs.values_mut() {
+        instances.truncate(TEMPORAL_INSTANCE_LIMIT);
+        for inst in instances.iter() {
+            if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
+                if ts_min.as_deref().is_none_or(|m| t < m) {
+                    ts_min = Some(t.to_owned());
+                }
+                if ts_max.as_deref().is_none_or(|m| t > m) {
+                    ts_max = Some(t.to_owned());
+                }
+            }
+        }
+    }
+    (w.ts_min, w.ts_max) = (ts_min, ts_max);
+}
 
 /// 5.7.4.4 S4/S7: does a scope VALUE (string or array of strings) match the
 /// 4.19 Scope query? The 4.5.7 deletion sentinel never matches.
@@ -494,6 +526,7 @@ fn window(
         max_per_attr: 0,
         ts_min: None,
         ts_max: None,
+        truncated: false,
     };
     let Some(obj) = doc.as_object() else { return w };
     for (k, v) in obj {
@@ -553,9 +586,12 @@ fn window(
             }
         }
         instances.sort_by(|a, b| {
+            // Canonicalize before comparing: '.' sorts before 'Z', so a raw
+            // string compare puts "…00.5Z" ahead of "…00Z" and lastN keeps the
+            // wrong instant. 4.6.3 allows both fraction spellings.
             let ta = a.get(timeprop).and_then(Value::as_str).unwrap_or("");
             let tb = b.get(timeprop).and_then(Value::as_str).unwrap_or("");
-            ta.cmp(tb)
+            dt_key(ta).cmp(&dt_key(tb))
         });
         if let Some(n) = last_n {
             if instances.len() > n {
@@ -587,7 +623,7 @@ fn window(
 /// attributes occupy disjoint time ranges, keep the attribute whose range is
 /// first in the query direction and empty the ones entirely beyond it.
 fn gap_cut(w: &mut Windowed, timeprop: &str, descending: bool) {
-    if w.max_per_attr <= TEMPORAL_INSTANCE_LIMIT || w.attrs.len() < 2 {
+    if !w.truncated || w.attrs.len() < 2 {
         return;
     }
     let mut ranges: Vec<(String, String, String)> = Vec::new(); // (attr, min, max)
@@ -649,13 +685,13 @@ fn gap_cut(w: &mut Windowed, timeprop: &str, descending: bool) {
 
 /// Content-Range: date-time <start>-<end>/<size> (Scorpio-parity semantics).
 fn content_range(
-    max_per_attr: usize,
+    truncated: bool,
     ts_min: Option<&str>,
     ts_max: Option<&str>,
     tq: Option<&TemporalQ>,
     last_n: Option<usize>,
 ) -> Option<String> {
-    if max_per_attr <= TEMPORAL_INSTANCE_LIMIT {
+    if !truncated {
         return None;
     }
     let (data_min, data_max) = (ts_min?, ts_max?);
@@ -678,6 +714,9 @@ fn content_range(
         };
         (start, data_min.to_owned())
     };
+    // start/end bound the instances actually returned; the size is the length
+    // of the complete representation the client asked for — the requested
+    // lastN, or "*" when the window leaves it unknown.
     let size = last_n.map_or_else(|| "*".to_owned(), |n| n.to_string());
     Some(format!("date-time {start}-{end}/{size}"))
 }
@@ -1043,7 +1082,12 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
         // 4.11: the value space ends where duration arithmetic does —
         // beyond ~100 years chrono::Duration::seconds is out of bounds
         // (a panic, i.e. a remote 500), so such periods are rejected.
-        if matches!(p, AggrPeriod::Seconds(sc) if sc > 86_400 * 366 * 100) {
+        // A month period steps one bucket at a time from the window anchor, so
+        // an absurd count is a CPU amplifier even though chrono itself refuses
+        // to overflow; both arms are bounded at ~100 years.
+        if matches!(p, AggrPeriod::Seconds(sc) if sc > 86_400 * 366 * 100)
+            || matches!(p, AggrPeriod::Months(m) if m > 1200)
+        {
             return Err(NgsiError::BadRequestData(format!(
                 "aggrPeriodDuration {d:?} is out of range"
             )));
@@ -1432,7 +1476,7 @@ async fn query_temporal_outer(
         let resp = query_temporal_inner(st, &eff, headers).await?;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .map_err(|e| NgsiError::InternalError(format!("entityMap recheck read: {e}")))?;
+            .map_err(|_| NgsiError::InternalError("entityMap recheck read".into()))?;
         serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|v| v.as_array().cloned())
@@ -1889,9 +1933,9 @@ pub(crate) async fn query_temporal_inner(
     };
     let core_only_pick = attrs_filter.as_ref().is_some_and(Vec::is_empty);
     let mut payload: Vec<Value> = Vec::new();
-    let (mut g_max, mut g_min, mut g_maxts) = (0usize, None::<String>, None::<String>);
+    let (mut g_trunc, mut g_min, mut g_maxts) = (false, None::<String>, None::<String>);
     for d in &page {
-        let w = window(
+        let mut w = window(
             d,
             tq.as_ref(),
             last_n,
@@ -1900,7 +1944,10 @@ pub(crate) async fn query_temporal_inner(
             trepr.dataset_id.as_ref(),
             &timeprop,
         );
-        g_max = g_max.max(w.max_per_attr);
+        if !trepr.aggregated {
+            truncate(&mut w, &timeprop);
+        }
+        g_trunc |= w.truncated;
         if let Some(m) = &w.ts_min {
             if g_min.as_deref().is_none_or(|c| m.as_str() < c) {
                 g_min = Some(m.clone());
@@ -1928,7 +1975,7 @@ pub(crate) async fn query_temporal_inner(
         None
     } else {
         content_range(
-            g_max,
+            g_trunc,
             g_min.as_deref(),
             g_maxts.as_deref(),
             tq.as_ref(),
@@ -2191,12 +2238,15 @@ async fn retrieve_temporal_inner(
             trepr.dataset_id.as_ref(),
             &timeprop,
         );
+        if !trepr.aggregated {
+            truncate(&mut w, &timeprop);
+        }
         gap_cut(&mut w, &timeprop, last_n.is_some());
         let cr = if trepr.aggregated {
             None
         } else {
             content_range(
-                w.max_per_attr,
+                w.truncated,
                 w.ts_min.as_deref(),
                 w.ts_max.as_deref(),
                 tq.as_ref(),
@@ -2275,10 +2325,16 @@ fn merge_temporal_docs(base: &mut Value, add: &Value, aux: bool, timeprop: &str)
                     // default) AND the same timeproperty value is a
                     // CONFLICTING instance of one slot — resolve to one, the
                     // most recent modifiedAt winning.
-                    let slot = cur.iter_mut().find(|ci| {
-                        ci.get(timeprop).and_then(Value::as_str)
-                            == ni.get(timeprop).and_then(Value::as_str)
-                            && ci.get("datasetId") == ni.get("datasetId")
+                    // Two instances only share a slot when they carry the SAME
+                    // timeproperty value. Without the is_some() guard a pair of
+                    // instances that both lack it would compare None == None,
+                    // letting a remote instance replace unrelated local history.
+                    let ni_ts = ni.get(timeprop).and_then(Value::as_str);
+                    let slot = ni_ts.and_then(|ts| {
+                        cur.iter_mut().find(|ci| {
+                            ci.get(timeprop).and_then(Value::as_str) == Some(ts)
+                                && ci.get("datasetId") == ni.get("datasetId")
+                        })
                     });
                     if let Some(existing) = slot {
                         let newer = ni.get("modifiedAt").and_then(Value::as_str).unwrap_or("")
@@ -2513,15 +2569,12 @@ pub async fn delete_temporal_attr(
     let go = async {
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
-        if attr.is_empty()
-            || !attr
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+@".contains(c))
-        {
-            return Err(
-                NgsiError::BadRequestData(format!("invalid attribute name {attr:?}")).into(),
-            );
-        }
+        // 5.6.13.4: "If the target Attribute name is not a valid name, then an
+        // error of type BadRequestData shall be raised." The shared guard is
+        // the one that also refuses dot segments — the name is interpolated
+        // into the forwarded request path, where `..` addresses the peer's
+        // Temporal Evolution resource instead of its attribute.
+        crate::attrs::check_attr_name(&attr)?;
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
         let attr_iri = ctx.expand_key(&attr);
@@ -3046,6 +3099,166 @@ mod clause_4_11 {
         assert!(
             mk(&[("timeAt", "2020-01-01T00:00:00Z")]).is_err(),
             "timeAt without timerel"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_6_3_10 {
+    use super::*;
+    use serde_json::json;
+
+    /// One attribute with `n` instances, one per minute from 00:00.
+    fn evolution(n: usize) -> Value {
+        let speed: Vec<Value> = (0..n)
+            .map(|i| json!({"type": "Property", "value": i, "observedAt": at(i)}))
+            .collect();
+        json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle", "speed": speed})
+    }
+
+    fn at(i: usize) -> String {
+        format!("2020-01-01T00:{i:02}:00Z")
+    }
+
+    fn tq(timerel: &str, time_at: &str) -> TemporalQ {
+        let mut p = HashMap::new();
+        p.insert("timerel".to_owned(), timerel.to_owned());
+        p.insert("timeAt".to_owned(), time_at.to_owned());
+        TemporalQ::from_params(&p, true).unwrap().unwrap()
+    }
+
+    fn windowed(doc: &Value, tq: Option<&TemporalQ>, last_n: Option<usize>) -> Windowed {
+        let mut w = window(doc, tq, last_n, None, None, None, "observedAt");
+        truncate(&mut w, "observedAt");
+        w
+    }
+
+    fn observed(w: &Windowed) -> Vec<&str> {
+        w.attrs["speed"]
+            .iter()
+            .map(|i| i["observedAt"].as_str().unwrap())
+            .collect()
+    }
+
+    /// 6.3.10: a temporal retrieval the broker cannot serve in full is
+    /// answered with 206 and a Content-Range. The body must then BE the
+    /// partial representation the header describes — a window wide enough to
+    /// select more instances than the broker serves at once is cut to the
+    /// ceiling, oldest first, and the advertised range ends at the last
+    /// instance returned.
+    #[test]
+    fn wide_window_is_cut_to_the_ceiling_and_the_range_matches_the_body() {
+        let doc = evolution(20);
+        let q = tq("after", "2019-01-01T00:00:00Z");
+        let w = windowed(&doc, Some(&q), None);
+        assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert!(w.truncated);
+        let got = observed(&w);
+        assert_eq!(got[0], at(0));
+        assert_eq!(
+            got[TEMPORAL_INSTANCE_LIMIT - 1],
+            at(TEMPORAL_INSTANCE_LIMIT - 1)
+        );
+        assert!(
+            !got.contains(&at(19).as_str()),
+            "instances beyond the ceiling must not be served: {got:?}"
+        );
+        // 5.7.3.4 + 6.3.10: start is the requested lower bound, end the last
+        // instance in the body, so the header cannot promise more than it sent
+        assert_eq!(
+            content_range(
+                w.truncated,
+                w.ts_min.as_deref(),
+                w.ts_max.as_deref(),
+                Some(&q),
+                None
+            ),
+            Some(format!(
+                "date-time 2019-01-01T00:00:00Z-{}/*",
+                at(TEMPORAL_INSTANCE_LIMIT - 1)
+            ))
+        );
+    }
+
+    /// 5.7.3.4/5.7.4.4 lastN "shall be limited to the specified number of
+    /// instances" — an upper limit, not an entitlement: a lastN above the
+    /// broker ceiling is served up to the ceiling (newest first) and the
+    /// answer is the partial one. The Content-Range size stays the requested
+    /// lastN, its start-end pair the instants actually returned.
+    #[test]
+    fn last_n_above_the_ceiling_is_clamped_to_it() {
+        let doc = evolution(20);
+        let w = windowed(&doc, None, Some(20));
+        assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert!(w.truncated);
+        let got = observed(&w);
+        assert_eq!(got[0], at(19), "lastN delivers newest first");
+        assert_eq!(
+            got[TEMPORAL_INSTANCE_LIMIT - 1],
+            at(20 - TEMPORAL_INSTANCE_LIMIT)
+        );
+        assert_eq!(
+            content_range(
+                w.truncated,
+                w.ts_min.as_deref(),
+                w.ts_max.as_deref(),
+                None,
+                Some(20)
+            ),
+            Some(format!(
+                "date-time {}-{}/20",
+                at(19),
+                at(20 - TEMPORAL_INSTANCE_LIMIT)
+            ))
+        );
+    }
+
+    /// 5.7.3.4: temporalQ is optional on retrieval, so a request naming no
+    /// window at all asks for the whole Temporal Evolution. It is still
+    /// bounded by the same ceiling, and still answered as partial.
+    #[test]
+    fn a_request_with_no_window_is_capped_by_default() {
+        let doc = evolution(20);
+        let w = windowed(&doc, None, None);
+        assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert!(w.truncated);
+        assert_eq!(
+            w.ts_max.as_deref(),
+            Some(at(TEMPORAL_INSTANCE_LIMIT - 1).as_str())
+        );
+        assert_eq!(
+            content_range(
+                w.truncated,
+                w.ts_min.as_deref(),
+                w.ts_max.as_deref(),
+                None,
+                None
+            ),
+            Some(format!(
+                "date-time {}-{}/*",
+                at(0),
+                at(TEMPORAL_INSTANCE_LIMIT - 1)
+            ))
+        );
+    }
+
+    /// 6.3.10: partial content is conditional on truncation — a result the
+    /// broker serves in full is a plain 200 with no Content-Range.
+    #[test]
+    fn a_complete_result_is_not_partial_content() {
+        let doc = evolution(TEMPORAL_INSTANCE_LIMIT);
+        let w = windowed(&doc, None, None);
+        assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert!(!w.truncated);
+        assert_eq!(
+            content_range(
+                w.truncated,
+                w.ts_min.as_deref(),
+                w.ts_max.as_deref(),
+                None,
+                None
+            ),
+            None
         );
     }
 }

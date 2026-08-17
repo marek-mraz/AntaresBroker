@@ -328,4 +328,341 @@ mod tests {
             "https://uri.etsi.org/ngsi-ld/default-context/speed"
         );
     }
+
+    // ---- merge_object -------------------------------------------------
+
+    /// 4.4: the Core @context is merged last, so its definitions win over a
+    /// user redefinition of the same term. The user's own new terms survive.
+    #[test]
+    fn later_merge_wins_so_core_terms_cannot_be_redefined() {
+        let mut c = Context::default();
+        c.merge_object(
+            json!({"observedAt": "https://evil.example/observedAt",
+                   "speed": "https://example.org/speed"})
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+        c.merge_object(
+            json!({"observedAt": "https://uri.etsi.org/ngsi-ld/observedAt"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        c.freeze();
+        assert_eq!(
+            c.expand_key("observedAt"),
+            "https://uri.etsi.org/ngsi-ld/observedAt"
+        );
+        assert_ne!(c.expand_key("observedAt"), "https://evil.example/observedAt");
+        // the user's unrelated term is untouched by the core merge
+        assert_eq!(c.expand_key("speed"), "https://example.org/speed");
+    }
+
+    /// A null term definition removes the term; the removed term must fall
+    /// back to the vocabulary rather than keep its old IRI.
+    #[test]
+    fn null_definition_removes_term() {
+        let mut c = Context::default();
+        c.merge_object(json!({"speed": "https://example.org/speed"}).as_object().unwrap())
+            .unwrap();
+        c.merge_object(json!({"speed": null}).as_object().unwrap())
+            .unwrap();
+        c.freeze();
+        assert_ne!(c.expand_key("speed"), "https://example.org/speed");
+        assert_eq!(
+            c.expand_key("speed"),
+            "https://uri.etsi.org/ngsi-ld/default-context/speed"
+        );
+        // freeze() rebuilds the inverse map: the dropped IRI no longer compacts
+        assert_eq!(
+            c.compact_iri("https://example.org/speed"),
+            "https://example.org/speed"
+        );
+    }
+
+    /// Keywords and definition values that are neither string, object nor null
+    /// are ignored — a hostile @context of numbers/booleans/arrays must not
+    /// panic and must not create terms.
+    #[test]
+    fn keyword_and_non_string_definitions_ignored() {
+        let c = ctx(json!({
+            "@protected": true,
+            "@base": "https://base.example/",
+            "n": 1,
+            "b": false,
+            "a": [1, 2, 3],
+            "empty": {},
+            "keep": "https://example.org/keep"
+        }));
+        assert!(c.term("n").is_none());
+        assert!(c.term("b").is_none());
+        assert!(c.term("a").is_none());
+        // an object definition with neither @id, @type nor @container is skipped
+        assert!(c.term("empty").is_none());
+        assert_eq!(c.expand_key("keep"), "https://example.org/keep");
+        // unknown terms must not vanish — they expand into the vocabulary
+        assert_eq!(
+            c.expand_key("n"),
+            "https://uri.etsi.org/ngsi-ld/default-context/n"
+        );
+    }
+
+    /// Expanded term-definition forms: @type/@container flags and a term
+    /// aliased to a JSON-LD keyword (which must stay the keyword, not expand
+    /// into the vocabulary).
+    #[test]
+    fn expanded_definition_forms() {
+        let c = ctx(json!({
+            "ex": "https://example.org/",
+            "rel": {"@id": "ex:rel", "@type": "@id"},
+            "kind": {"@id": "ex:kind", "@type": "@vocab"},
+            "items": {"@id": "ex:items", "@container": "@list"},
+            "alias": {"@id": "@type"},
+            "implicit": {"@type": "@id"}
+        }));
+        let rel = c.term("rel").unwrap();
+        assert!(rel.type_is_id && !rel.type_is_vocab && !rel.container_list);
+        assert_eq!(rel.iri, "https://example.org/rel");
+        assert!(c.term("kind").unwrap().type_is_vocab);
+        assert!(c.term("items").unwrap().container_list);
+        assert_eq!(c.term("alias").unwrap().iri, "@type");
+        // no @id but @type present: the term maps into the vocabulary
+        assert_eq!(
+            c.term("implicit").unwrap().iri,
+            "https://uri.etsi.org/ngsi-ld/default-context/implicit"
+        );
+        // an expanded definition is not prefix-capable unless @prefix says so
+        assert!(!rel.prefix_ok);
+        assert_eq!(c.expand_key("rel:x"), "https://example.org/rel:x");
+    }
+
+    /// The @context is attacker-supplied. Prefix chaining ("t1" defined
+    /// through "t0", "t2" through "t1", …) makes each definition carry the
+    /// whole chain, so N such terms expand to O(N²) bytes — a few megabytes of
+    /// request body would otherwise become gigabytes of term map. The merge
+    /// must stop with BadRequestData instead.
+    #[test]
+    fn prefix_chain_cannot_amplify_unbounded() {
+        let suffix = "a".repeat(32);
+        let mut obj = Map::new();
+        obj.insert(
+            "t000000".into(),
+            Value::String(format!("https://ex.example/{suffix}")),
+        );
+        for i in 1..2000u32 {
+            obj.insert(
+                format!("t{i:06}"),
+                Value::String(format!("t{:06}:{suffix}", i - 1)),
+            );
+        }
+        let mut c = Context::default();
+        let err = c
+            .merge_object(&obj)
+            .expect_err("an amplifying @context must be rejected");
+        assert!(
+            matches!(err, NgsiError::BadRequestData(_)),
+            "BadRequestData, got {err:?}"
+        );
+    }
+
+    /// The bound must not reject an ordinary large vocabulary: 20 000 plain
+    /// term mappings expand to roughly their own size and are accepted.
+    #[test]
+    fn large_plain_context_still_accepted() {
+        let mut obj = Map::new();
+        for i in 0..20_000u32 {
+            obj.insert(
+                format!("term{i}"),
+                Value::String(format!("https://ex.example/vocab#term{i}")),
+            );
+        }
+        let mut c = Context::default();
+        c.merge_object(&obj).expect("plain context accepted");
+        c.freeze();
+        assert_eq!(c.expand_key("term19999"), "https://ex.example/vocab#term19999");
+    }
+
+    /// Self-referential and mutually-referential prefixes must terminate:
+    /// term-definition IRI expansion resolves one level against the terms
+    /// already merged, it never follows a chain recursively.
+    #[test]
+    fn self_referential_prefixes_terminate() {
+        let c = ctx(json!({"a": "a:x"}));
+        assert!(!c.term("a").unwrap().iri.is_empty());
+        let c = ctx(json!({"a": "b:x", "b": "a:y"}));
+        // both resolved to something finite; neither hung nor recursed
+        assert!(c.term("a").unwrap().iri.len() < 64);
+        assert!(c.term("b").unwrap().iri.len() < 64);
+    }
+
+    // ---- freeze -------------------------------------------------------
+
+    /// Several terms bound to one IRI: compaction picks the shortest, ties
+    /// broken lexicographically, and the choice is stable across freezes.
+    #[test]
+    fn freeze_inverse_is_deterministic() {
+        let c = ctx(json!({
+            "aaa": "https://example.org/x",
+            "bb": "https://example.org/x",
+            "cc": "https://example.org/x"
+        }));
+        assert_eq!(c.compact_iri("https://example.org/x"), "bb");
+        for _ in 0..5 {
+            let c2 = ctx(json!({
+                "cc": "https://example.org/x",
+                "bb": "https://example.org/x",
+                "aaa": "https://example.org/x"
+            }));
+            assert_eq!(c2.compact_iri("https://example.org/x"), "bb");
+        }
+    }
+
+    // ---- expand_key ---------------------------------------------------
+
+    /// Adversarial keys: empty, lone/leading/trailing colons, "://", huge
+    /// prefixes and multi-byte UTF-8 — expansion slices on ':' and must never
+    /// panic on a character boundary.
+    #[test]
+    fn expand_key_adversarial_strings_do_not_panic() {
+        let c = ctx(json!({"ex": "https://example.org/", "": "https://empty.example/"}));
+        let vocab = "https://uri.etsi.org/ngsi-ld/default-context/";
+        assert_eq!(c.expand_key(""), "https://empty.example/");
+        assert_eq!(c.expand_key(":"), "https://empty.example/");
+        assert_eq!(c.expand_key("://"), format!("{vocab}://"));
+        assert_eq!(c.expand_key(":x"), "https://empty.example/x");
+        assert_eq!(c.expand_key("ex:"), "https://example.org/");
+        assert_eq!(c.expand_key("é"), format!("{vocab}é"));
+        assert_eq!(c.expand_key("ex:°C"), "https://example.org/°C");
+        assert_eq!(c.expand_key("日本:語"), format!("{vocab}日本:語"));
+        assert_eq!(c.expand_key("\u{feff}:x"), format!("{vocab}\u{feff}:x"));
+        let huge = "x".repeat(100_000);
+        assert_eq!(c.expand_key(&huge), format!("{vocab}{huge}"));
+        assert_eq!(
+            c.expand_key(&format!("ex:{huge}")),
+            format!("https://example.org/{huge}")
+        );
+    }
+
+    /// A term definition wins over reading the same key as prefix:suffix.
+    #[test]
+    fn term_lookup_precedes_prefix_split() {
+        let c = ctx(json!({"ex": "https://example.org/", "ex:a": "https://direct.example/a"}));
+        assert_eq!(c.expand_key("ex:a"), "https://direct.example/a");
+        assert_ne!(c.expand_key("ex:a"), "https://example.org/a");
+    }
+
+    /// An absolute IRI used as a key stays itself; a non-prefix-capable term
+    /// before the colon must not be applied.
+    #[test]
+    fn absolute_iri_keys_pass_through() {
+        let c = ctx(json!({"ex": {"@id": "https://example.org/"}}));
+        assert_eq!(c.expand_key("https://other.example/a"), "https://other.example/a");
+        assert_eq!(c.expand_key("urn:ngsi-ld:X"), "urn:ngsi-ld:X");
+        // @id-form definitions are not prefixes (JSON-LD 1.1 simple-term rule)
+        assert_eq!(c.expand_key("ex:a"), "ex:a");
+    }
+
+    // ---- compact_iri --------------------------------------------------
+
+    /// Compaction must not leave an expanded IRI in the document when the
+    /// context defines a term for it.
+    #[test]
+    fn defined_terms_never_stay_expanded() {
+        let c = ctx(json!({"ex": "https://example.org/", "name": "https://example.org/name"}));
+        assert_eq!(c.compact_iri("https://example.org/name"), "name");
+        assert_ne!(
+            c.compact_iri("https://example.org/name"),
+            "https://example.org/name"
+        );
+        // no exact term: longest prefix-capable term wins
+        assert_eq!(c.compact_iri("https://example.org/other"), "ex:other");
+    }
+
+    /// Vocab-relative shortening only when the bare term round-trips: if the
+    /// context binds that term to a DIFFERENT IRI the full IRI is kept.
+    #[test]
+    fn vocab_shortening_requires_round_trip() {
+        let c = ctx(json!({"@vocab": "https://voc.example/",
+                           "speed": "https://other.example/speed"}));
+        assert_eq!(
+            c.compact_iri("https://voc.example/speed"),
+            "https://voc.example/speed"
+        );
+        assert_ne!(c.compact_iri("https://voc.example/speed"), "speed");
+        // a vocab-relative remainder containing ':' is not a usable term
+        assert_eq!(
+            c.compact_iri("https://voc.example/a:b"),
+            "https://voc.example/a:b"
+        );
+        // the vocab IRI itself has an empty remainder
+        assert_eq!(c.compact_iri("https://voc.example/"), "https://voc.example/");
+    }
+
+    /// Longest matching prefix wins, and a term whose IRI is empty is never
+    /// used as a prefix (it would match everything).
+    #[test]
+    fn prefix_compaction_picks_longest_and_skips_empty() {
+        let c = ctx(json!({"ex": "https://example.org/",
+                           "sub": "https://example.org/sub/",
+                           "nil": {"@id": "", "@prefix": true}}));
+        assert_eq!(c.compact_iri("https://example.org/sub/x"), "sub:x");
+        assert_eq!(c.compact_iri("https://example.org/y"), "ex:y");
+        assert!(!c.compact_iri("https://elsewhere.example/z").starts_with("nil:"));
+    }
+
+    /// Compaction must be reproducible across processes: when several
+    /// prefix-capable terms share one IRI the winner may not depend on hash
+    /// map iteration order, which is randomly seeded per map.
+    #[test]
+    fn prefix_compaction_tie_break_is_stable() {
+        let defs = json!({
+            "h": "https://example.org/", "g": "https://example.org/",
+            "f": "https://example.org/", "e": "https://example.org/",
+            "d": "https://example.org/", "c": "https://example.org/",
+            "b": "https://example.org/", "a": "https://example.org/"
+        });
+        for _ in 0..50 {
+            assert_eq!(ctx(defs.clone()).compact_iri("https://example.org/z"), "a:z");
+        }
+    }
+
+    // ---- is_absolute_iri ----------------------------------------------
+
+    /// RFC 3986 scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ), and the
+    /// hierarchical part must not be empty. The edge set below is what a
+    /// hostile @context or entity key can carry.
+    #[test]
+    fn is_absolute_iri_edge_set() {
+        for s in [
+            "https://example.org/x",
+            "urn:ngsi-ld:X",
+            "a:b",
+            "a+b-c.d:x",
+            "A:x",
+            "a::b",
+            "x:日本",
+            "http://x",
+        ] {
+            assert!(is_absolute_iri(s), "expected absolute: {s:?}");
+        }
+        for s in [
+            "",
+            ":",
+            "://",
+            ":x",
+            "a:",
+            "1a:x",
+            "3D:x",
+            "a b:x",
+            "日本:x",
+            "no-colon",
+            "+x:y",
+            "-x:y",
+            ".x:y",
+            "\u{feff}:x",
+        ] {
+            assert!(!is_absolute_iri(s), "expected NOT absolute: {s:?}");
+        }
+    }
 }

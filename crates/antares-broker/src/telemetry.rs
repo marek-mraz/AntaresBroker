@@ -33,6 +33,23 @@ pub fn enabled() -> bool {
     )
 }
 
+/// Strip `user:password@` userinfo (RFC 3986 clause 3.2.1) out of a URL before
+/// it is logged. A string without an authority component — no scheme, or an
+/// `@` that belongs to the path — comes back byte-identical.
+fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{path}"),
+        None => url.to_owned(),
+    }
+}
+
 /// Install the tracing subscriber stack and (ANTARES_TELEMETRY=1) the
 /// Prometheus recorder. Call once, before the runtime spins up anything
 /// measurable. Returns the /q/metrics render closure, or None when the
@@ -45,6 +62,9 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let fmt = tracing_subscriber::fmt::layer();
 
+    // The collector endpoint is a URL and may carry `user:password@` userinfo
+    // (RFC 3986 clause 3.2.1); it is logged at startup, so the credential is
+    // stripped first.
     // Env-gated OTLP span pipeline — needs the switch AND an endpoint.
     let otlp = match std::env::var("ANTARES_OTLP_ENDPOINT") {
         Ok(endpoint) if enabled() => {
@@ -63,7 +83,7 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
                 )
                 .build();
             let tracer = provider.tracer("antares");
-            tracing::info!(endpoint, "OTLP span export enabled");
+            tracing::info!(endpoint = redact_url(&endpoint), "OTLP span export enabled");
             Some(tracing_opentelemetry::layer().with_tracer(tracer))
         }
         _ => None,
@@ -147,6 +167,85 @@ fn describe() {
         Unit::Count,
         "bounds-wall rejections, by limit"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The switch is the whole stack's gate, and the environment is
+    /// process-global — every spelling is asserted in ONE test.
+    /// Only the documented truthy spellings arm it; everything else leaves
+    /// the process with no recorder, no sampler and a 404 on /q/metrics.
+    #[test]
+    fn telemetry_switch_arms_only_on_the_documented_spellings() {
+        std::env::remove_var("ANTARES_TELEMETRY");
+        assert!(!enabled(), "the default must allocate nothing");
+        for on in ["1", "true", "on"] {
+            std::env::set_var("ANTARES_TELEMETRY", on);
+            assert!(enabled(), "ANTARES_TELEMETRY={on} must arm the stack");
+        }
+        for off in ["0", "false", "off", "", "TRUE", "On", "yes", "1 ", " 1"] {
+            std::env::set_var("ANTARES_TELEMETRY", off);
+            assert!(
+                !enabled(),
+                "ANTARES_TELEMETRY={off:?} must NOT arm the stack"
+            );
+        }
+        std::env::remove_var("ANTARES_TELEMETRY");
+    }
+
+    /// A collector endpoint is a URL and may carry `user:password@` userinfo
+    /// (RFC 3986 §3.2.1). It is logged at startup, so the credential must be
+    /// stripped before it reaches the log.
+    #[test]
+    fn otlp_endpoint_userinfo_never_reaches_the_log() {
+        let redacted = redact_url("http://otel:s3cr3t@collector.internal:4318/v1/traces");
+        assert!(
+            !redacted.contains("s3cr3t") && !redacted.contains("otel:"),
+            "userinfo leaked into the log line: {redacted}"
+        );
+        assert!(
+            redacted.contains("collector.internal:4318/v1/traces"),
+            "the useful part of the endpoint must survive: {redacted}"
+        );
+        // No userinfo: byte-identical, including an '@' that belongs to the
+        // path rather than the authority.
+        for plain in [
+            "http://collector:4318/v1/traces",
+            "https://collector:4318/v1/@traces",
+            "collector:4318",
+            "",
+        ] {
+            assert_eq!(redact_url(plain), plain, "rewrote a credential-free URL");
+        }
+    }
+
+    /// Metric label cardinality: the only labelled instrument this module
+    /// feeds is the limit-rejection gauge, whose label comes from a fixed key
+    /// set in the bounds snapshot — never from a client-controlled string
+    /// (a tenant, a URI or a header would blow up the time-series count).
+    #[test]
+    fn limit_rejection_labels_are_a_closed_identifier_set() {
+        let snapshot = antares_api::bounds::LimitStats::default().snapshot();
+        let labels: Vec<String> = snapshot
+            .as_object()
+            .expect("snapshot is an object")
+            .keys()
+            .filter_map(|k| k.strip_prefix("rejected").map(str::to_owned))
+            .collect();
+        assert_eq!(
+            labels.len(),
+            3,
+            "the rejection label set changed — keep it closed and bounded: {labels:?}"
+        );
+        for l in &labels {
+            assert!(
+                l.chars().all(|c| c.is_ascii_alphanumeric()),
+                "label value {l:?} is not a fixed identifier"
+            );
+        }
+    }
 }
 
 /// The 5 s gauge sampler: process-level state that has no natural

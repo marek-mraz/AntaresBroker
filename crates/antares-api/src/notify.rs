@@ -22,6 +22,21 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 const DEFAULT_TRIGGERS: &[&str] = &["attributeCreated", "attributeUpdated"];
+/// Depth of the change→matcher queue, the same ring size the local bus uses.
+const CHANGE_QUEUE: usize = 1024;
+static CHANGES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TASK_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Changes dropped because the matcher queue was full, since process start.
+pub fn changes_dropped() -> u64 {
+    CHANGES_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Panics absorbed at the notification-task boundary, since process start.
+pub fn task_panics() -> u64 {
+    TASK_PANICS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 const ENTITY_META: &[&str] = &["id", "type", "scope", "createdAt", "modifiedAt", "@context"];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -302,8 +317,12 @@ pub fn wire(state: &mut AppState) {
         m.apply(tenant.as_str(), id, doc.cloned());
     }));
 
+    // The queue carries whole before+after payloads and is drained one
+    // inline delivery at a time, so behind one slow subscriber an unbounded
+    // queue grows until the process dies. Bounded instead: a full queue drops
+    // the change and counts it.
     let (tx, mut rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, Option<Value>, Option<Value>)>();
+        tokio::sync::mpsc::channel::<(String, Option<Value>, Option<Value>)>(CHANGE_QUEUE);
     // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
     // the ETSI suite queries history immediately after a write); the matcher
     // work is handed to the async task below. One choke point for every write.
@@ -312,12 +331,19 @@ pub fn wire(state: &mut AppState) {
         .store
         .set_change_hook(Box::new(move |tenant, before, after| {
             record_temporal_change(&st_rec, tenant, before.as_ref(), after.as_ref());
-            let _ = tx.send((tenant.as_str().to_owned(), before, after));
+            if tx
+                .try_send((tenant.as_str().to_owned(), before, after))
+                .is_err()
+            {
+                CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics::counter!("antares_notification_changes_dropped_total").increment(1);
+            }
         }));
     let st = state.clone();
     crate::spawn(async move {
         while let Some((tenant, before, after)) = rx.recv().await {
-            process_change(&st, &tenant, before, after).await;
+            let st = st.clone();
+            guarded(async move { process_change(&st, &tenant, before, after).await }).await;
         }
     });
     let st = state.clone();
@@ -329,9 +355,42 @@ pub fn wire(state: &mut AppState) {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             #[cfg(target_arch = "wasm32")]
             gloo_timers::future::TimeoutFuture::new(500).await;
-            interval_tick(&st).await;
+            let st = st.clone();
+            guarded(async move { interval_tick(&st).await }).await;
         }
     });
+}
+
+/// Run one pipeline step on its own task so a panic inside it cannot end
+/// notification delivery for the whole process: the task boundary absorbs
+/// the panic, it is counted and logged, and the caller keeps consuming — a
+/// later matching change still notifies (5.8.6). The step is awaited, so
+/// delivery stays as serial as it was.
+#[cfg(not(target_arch = "wasm32"))]
+async fn guarded<F>(fut: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    use futures_util::FutureExt as _;
+    // Caught here rather than on a spawned task: a task boundary would demand
+    // Send + 'static of the step, and the interval step holds state that is
+    // not Sync. Unwinding in place absorbs the panic just as well and keeps
+    // the step running on this task, so delivery stays exactly as serial.
+    if std::panic::AssertUnwindSafe(fut).catch_unwind().await.is_err() {
+        TASK_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics::counter!("antares_notification_task_panics_total").increment(1);
+        tracing::error!("notification pipeline task panicked; this change is lost");
+    }
+}
+
+/// Wasm32 has no task boundary to catch with (single-threaded executor, and
+/// the browser profile aborts on panic); the step runs inline.
+#[cfg(target_arch = "wasm32")]
+async fn guarded<F>(fut: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    fut.await;
 }
 
 /// Strip volatile members before comparing attribute instance arrays.
@@ -1128,11 +1187,16 @@ pub async fn interval_tick(st: &AppState) {
         let Ok(tenant) = TenantId::new(&tenant_str) else {
             continue;
         };
-        for sub in st
-            .store
-            .list(&tenant, Kind::Subscription)
-            .unwrap_or_default()
-        {
+        // Same source the matcher reads: the indexed mirror, with the store
+        // list only as the never-wired fallback.
+        let subs = match &st.sub_mirror {
+            Some(m) => m.docs(tenant.as_str()),
+            None => st
+                .store
+                .list(&tenant, Kind::Subscription)
+                .unwrap_or_default(),
+        };
+        for sub in subs {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
                 continue;
             };
@@ -1159,10 +1223,31 @@ pub async fn interval_tick(st: &AppState) {
             }
             let ctx = sub_context(st, &sub).await;
             let now = now_iso();
-            let matching: Vec<Value> = st
-                .store
-                .list(&tenant, Kind::Entity)
-                .unwrap_or_default()
+            // Read only the entity types this subscription can select, where
+            // the index proves the selector exact; the full
+            // selector/q/geo/scope check below stays the truth (5.8.6).
+            let type_groups: Vec<Vec<String>> = match index_keys(&sub) {
+                Keys::Types(ts) => ts.into_iter().map(|t| vec![t]).collect(),
+                _ => Vec::new(),
+            };
+            // The filter borrows a term expander that is not Sync, so it lives
+            // and dies inside this block: held across the delivery await it
+            // would make the whole interval task non-Send.
+            let rows = {
+                let filter = antares_sql::store::filter::EntityFilter {
+                    types: if type_groups.is_empty() {
+                        None
+                    } else {
+                        Some(type_groups.as_slice())
+                    },
+                    ..Default::default()
+                };
+                st.store
+                    .query_entities(&tenant, &filter)
+                    .map(|o| o.rows)
+                    .unwrap_or_default()
+            };
+            let matching: Vec<Value> = rows
                 .into_iter()
                 .filter(|d| {
                     selector_match(&sub, d, &ctx) && conditions_match(st, &tenant, &sub, d, &ctx)
@@ -1663,8 +1748,13 @@ async fn deliver_as(
                     let msg = build_message(&body, accept, Some(&link), &ri);
                     Outbound::Mqtt(endpoint, params, crate::negotiate::ordered_vec(&msg))
                 }
-                Err(e) => {
-                    tracing::warn!("mqtt endpoint of subscription {sub_id} unusable: {e}");
+                Err(_) => {
+                    // The parse error embeds the endpoint URI, which can carry
+                    // credentials in its userinfo.
+                    tracing::warn!(
+                        "mqtt endpoint of subscription {sub_id} unusable: {}",
+                        redact_userinfo(uri)
+                    );
                     return;
                 }
             }
@@ -2135,6 +2225,153 @@ mod clause_5_2_33 {
         assert!(
             !selector_match(&sub(json!({"type": "T", "id": ["urn:x:B"]})), &doc, &ctx),
             "an id array not containing the entity id must not match"
+        );
+    }
+}
+
+/// Availability of the change→notification pipeline itself: the consumer
+/// task must survive a panic, and its queue must stay bounded.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod change_pipeline {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    async fn post(st: &AppState, uri: &str, body: Value) -> u16 {
+        let body = body.to_string();
+        crate::router(st.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status()
+            .as_u16()
+    }
+
+    /// An endpoint that answers 200 and counts the notifications it got.
+    async fn counting_endpoint() -> (String, Arc<AtomicUsize>) {
+        let hits: Arc<AtomicUsize> = Arc::default();
+        let seen = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (format!("http://{addr}/notify"), hits)
+    }
+
+    async fn subscribe(st: &AppState, id: &str, uri: &str, timeout_ms: u32) {
+        let status = post(
+            st,
+            "/ngsi-ld/v1/subscriptions",
+            json!({
+                "id": format!("urn:ngsi-ld:Subscription:{id}"),
+                "type": "Subscription",
+                "entities": [{"type": "Vehicle"}],
+                "notification": {"endpoint": {"uri": uri, "timeout": timeout_ms}},
+            }),
+        )
+        .await;
+        assert_eq!(status, 201, "subscription created");
+    }
+
+    async fn create_vehicle(st: &AppState, n: usize) -> u16 {
+        post(
+            st,
+            "/ngsi-ld/v1/entities",
+            json!({
+                "id": format!("urn:ngsi-ld:Vehicle:pipe{n}"),
+                "type": "Vehicle",
+                "speed": {"type": "Property", "value": n},
+            }),
+        )
+        .await
+    }
+
+    /// 5.8.6: a matching change notifies. Matching runs on one long-lived
+    /// task, so a panic while matching ONE change must not end notification
+    /// delivery for the process — the next change still notifies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_change_does_not_stop_the_next_notification() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, hits) = counting_endpoint().await;
+        let mut st = AppState::new("antares-panic-guard".into());
+        wire(&mut st);
+        subscribe(&st, "guard", &uri, 2_000).await;
+        // A poisoned mirror lock makes the matcher panic on the next change.
+        // The panic's source is incidental; the task boundary is the subject.
+        let mirror = st.sub_mirror.clone().expect("mirror");
+        let m = mirror.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = m.map.write().expect("mirror lock");
+            panic!("matcher panic");
+        })
+        .join();
+        assert_eq!(create_vehicle(&st, 1).await, 201);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        mirror.map.clear_poison();
+        assert_eq!(create_vehicle(&st, 2).await, 201);
+        for _ in 0..50 {
+            if hits.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the change after a panicking one must still be notified"
+        );
+    }
+
+    /// The matcher queue is bounded: behind a stalled subscriber the excess
+    /// changes are dropped and counted instead of growing without limit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overflowing_change_queue_drops_and_counts() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        // accepts, reads nothing, never answers — the serial consumer parks
+        // on the first delivery for the endpoint's whole timeout
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in listener.incoming() {
+                if let Ok(s) = s {
+                    held.push(s);
+                }
+            }
+        });
+        let mut st = AppState::new("antares-queue-bound".into());
+        wire(&mut st);
+        subscribe(&st, "staller", &format!("http://{addr}/notify"), 30_000).await;
+        let before = changes_dropped();
+        for n in 0..(CHANGE_QUEUE + 64) {
+            assert_eq!(create_vehicle(&st, 1_000 + n).await, 201);
+        }
+        assert!(
+            changes_dropped() > before,
+            "a full matcher queue must drop and count, not grow (dropped {} → {})",
+            before,
+            changes_dropped()
         );
     }
 }

@@ -9,9 +9,17 @@
 //! Plain-mode partitioning: weekly partitions are pre-created for a window
 //! around now; everything else (historic backfill) lands in the DEFAULT
 //! partition. Creating a partition whose range already has rows sitting in
-//! the DEFAULT partition fails in PostgreSQL — such ranges are logged and
-//! skipped, and those rows simply stay in the default partition (correct,
-//! just unpartitioned).
+//! the DEFAULT partition fails in PostgreSQL, so a single row written with an
+//! `observedAt` past the window permanently blocks that week's partition and
+//! sends all of its later traffic to DEFAULT as well. Such a range is
+//! recovered rather than skipped: the rows are moved out of DEFAULT into a
+//! standalone table, which is then ATTACHed as the partition.
+//!
+//! The recovery belongs here and NOT at ingest: clamping or rejecting an
+//! `observedAt` outside a horizon would let the `observed_at` column disagree
+//! with the raw timestamp string in `data`, and
+//! `compile::temporal::column_range_bound` may prune on that column only
+//! because it is a superset of the byte-exact text window (4.11).
 
 use sqlx::postgres::PgPool;
 use sqlx::{Acquire, Row};
@@ -98,17 +106,10 @@ pub async fn temporal_maintenance(
     // retention DML is cross-tenant service work (see migration 0005)
     crate::pg::set_service(&mut tx).await?;
     let mut done: Vec<String> = Vec::new();
-    // 4.22 garbage collection: expired transient entities are reaped here —
-    // reads already refuse them, so the lag this job runs at is invisible
-    // (the clause itself sanctions lagging deletion). Runs on both backends.
-    let reaped =
-        sqlx::query("DELETE FROM entities WHERE expires_at IS NOT NULL AND expires_at < now()")
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-    if reaped > 0 {
-        done.push(format!("reaped {reaped} expired transient entities (4.22)"));
-    }
+    // The 4.22 reaps run in their own transactions AFTER this one commits: both
+    // DELETEs grow with stored volume and can exceed the session
+    // statement_timeout, and a reap that times out must not abort the partition
+    // pre-creation that keeps ingest writable.
     if backend == TemporalBackend::Hypertable {
         if let Some(days) = retention_days {
             sqlx::query("SELECT public.drop_chunks('attr_instances', older_than => make_interval(days => $1::int))")
@@ -130,30 +131,47 @@ pub async fn temporal_maintenance(
             .await?;
             let (suffix, lo, hi): (String, String, String) =
                 (row.get("suffix"), row.get("lo"), row.get("hi"));
-            let ddl = format!(
-                "CREATE TABLE IF NOT EXISTS attr_instances_{suffix} PARTITION OF attr_instances \
-                 FOR VALUES FROM ('{lo}') TO ('{hi}')"
-            );
             // The failure below is EXPECTED (see module docs), and in
             // PostgreSQL a failed statement aborts the whole transaction —
             // every later one then returns 25P02. Tolerating an error means
             // owning a savepoint to roll back to; without it the first
             // already-occupied range poisons the entire maintenance pass.
             let mut sp = tx.begin().await?;
-            match sqlx::query(sqlx::AssertSqlSafe(ddl))
+            match sqlx::query(sqlx::AssertSqlSafe(create_partition_sql(&suffix, &lo, &hi)))
                 .execute(&mut *sp)
                 .await
             {
                 Ok(_) => {
                     sp.commit().await?;
                     done.push(format!("partition {suffix}: ok"));
+                    continue;
+                }
+                Err(_) => sp.rollback().await?,
+            }
+            // Rows for this range already sit in DEFAULT. Adopt them: the move
+            // empties the range, so the ATTACH's revalidation of DEFAULT
+            // passes. Its ACCESS EXCLUSIVE lock is bounded by the session
+            // lock_timeout, and a loser simply retries on the next tick.
+            let mut sp = tx.begin().await?;
+            let mut adopted = Ok(());
+            for stmt in adopt_default_rows_sql(&suffix, &lo, &hi) {
+                adopted = sqlx::query(sqlx::AssertSqlSafe(stmt))
+                    .execute(&mut *sp)
+                    .await
+                    .map(|_| ());
+                if adopted.is_err() {
+                    break;
+                }
+            }
+            match adopted {
+                Ok(()) => {
+                    sp.commit().await?;
+                    done.push(format!("partition {suffix}: adopted from default"));
                 }
                 Err(e) => {
-                    // rows for this range already sit in the DEFAULT partition —
-                    // fine, they stay there (see module docs). warn, not debug:
-                    // a PERMANENTLY failing create (permissions) must be visible
-                    // at default log level, or it silently degrades to
-                    // "everything lands in DEFAULT".
+                    // warn, not debug: a PERMANENTLY failing create
+                    // (permissions) must be visible at default log level, or it
+                    // silently degrades to "everything lands in DEFAULT".
                     sp.rollback().await?;
                     tracing::warn!("partition attr_instances_{suffix} not created: {e}");
                     done.push(format!("partition {suffix}: left in default"));
@@ -220,14 +238,18 @@ pub async fn temporal_maintenance(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // 4.22 garbage collection, on both backends: reads already refuse expired
+    // entities and instances, so these reaps only bound storage — the clause
+    // itself sanctions deletion lagging expiresAt.
+    match reap_expired_entities(pool).await {
+        Ok(0) => {}
+        Ok(n) => done.push(format!("reaped {n} expired transient entities (4.22)")),
+        Err(e) => done.push(format!("entity reap skipped ({e})")),
+    }
     // 4.22 also names Properties/Relationships: an attribute instance whose
-    // expiresAt has passed "should be deleted from an NGSI-LD system". Reads
-    // already refuse expired instances (pg_temporal read filter), so this
-    // reap only bounds storage — same sanctioned lag as the entity reap.
-    // It runs in its OWN transaction, after the claimed work has committed:
-    // the DELETE contends with concurrent ingest on the same rows, and a
-    // deadlock must cost only this reap — not roll back the partition and
-    // entity work (seen live under ~1.2k msg/s ingest). Next tick retries.
+    // expiresAt has passed "should be deleted from an NGSI-LD system". This
+    // DELETE additionally contends with concurrent ingest on the same rows, and
+    // a deadlock must cost only the reap (seen live under ~1.2k msg/s ingest).
     match reap_expired_instances(pool).await {
         Ok(0) => {}
         Ok(n) => done.push(format!("reaped {n} expired attribute instances (4.22)")),
@@ -237,6 +259,55 @@ pub async fn temporal_maintenance(
         done.push("nothing to do".into());
     }
     Ok(done.join("; "))
+}
+
+/// The 4.22 expired-entity DELETE, isolated so a reap that outruns
+/// `statement_timeout` costs only itself. Served by the partial index on
+/// `expires_at` (migration 0010) — without it this is a sequential scan of
+/// every entity in the deployment. Service role: the reap is cross-tenant work
+/// (RLS would hide other tenants' rows).
+async fn reap_expired_entities(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::pg::set_service(&mut tx).await?;
+    let n = sqlx::query("DELETE FROM entities WHERE expires_at IS NOT NULL AND expires_at < now()")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// One weekly partition, created directly under the parent. Fails while the
+/// DEFAULT partition still holds a row in `[lo, hi)`.
+fn create_partition_sql(suffix: &str, lo: &str, hi: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS attr_instances_{suffix} PARTITION OF attr_instances \
+         FOR VALUES FROM ('{lo}') TO ('{hi}')"
+    )
+}
+
+/// Recovery for a range DEFAULT already holds rows for, in execution order:
+/// build the week's table STANDALONE (a `PARTITION OF` would fail again), move
+/// exactly `[lo, hi)` out of DEFAULT into it, then ATTACH. The move is what
+/// makes the ATTACH legal, and its bounds are what keep every other row in
+/// DEFAULT. Run as one unit — a partial application would strand rows in an
+/// unattached table.
+fn adopt_default_rows_sql(suffix: &str, lo: &str, hi: &str) -> [String; 3] {
+    [
+        format!(
+            "CREATE TABLE IF NOT EXISTS attr_instances_{suffix} \
+             (LIKE attr_instances INCLUDING DEFAULTS INCLUDING CONSTRAINTS)"
+        ),
+        format!(
+            "WITH moved AS (DELETE FROM attr_instances_default \
+               WHERE observed_at >= '{lo}' AND observed_at < '{hi}' RETURNING *) \
+             INSERT INTO attr_instances_{suffix} SELECT * FROM moved"
+        ),
+        format!(
+            "ALTER TABLE attr_instances ATTACH PARTITION attr_instances_{suffix} \
+             FOR VALUES FROM ('{lo}') TO ('{hi}')"
+        ),
+    ]
 }
 
 /// The 4.22 expired-instance DELETE, isolated so a deadlock with concurrent
@@ -255,4 +326,53 @@ async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
     .rows_affected();
     tx.commit().await?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LO: &str = "2026-08-17 00:00:00+00";
+    const HI: &str = "2026-08-24 00:00:00+00";
+
+    #[test]
+    fn create_partition_covers_exactly_the_week() {
+        let sql = create_partition_sql("2026w34", LO, HI);
+        assert!(sql.contains("attr_instances_2026w34 PARTITION OF attr_instances"));
+        assert!(sql.contains(&format!("FROM ('{LO}') TO ('{HI}')")));
+    }
+
+    /// The week's table must be built standalone: `CREATE ... PARTITION OF`
+    /// is the statement that just failed, so repeating it cannot recover the
+    /// range.
+    #[test]
+    fn adopt_builds_the_table_standalone_then_attaches_it() {
+        let [create, _move, attach] = adopt_default_rows_sql("2026w34", LO, HI);
+        assert!(create.contains("LIKE attr_instances"), "{create}");
+        assert!(!create.contains("PARTITION OF"), "{create}");
+        assert!(
+            attach
+                .starts_with("ALTER TABLE attr_instances ATTACH PARTITION attr_instances_2026w34"),
+            "{attach}"
+        );
+        assert!(
+            attach.contains(&format!("FROM ('{LO}') TO ('{HI}')")),
+            "{attach}"
+        );
+    }
+
+    /// The move is bounded by the partition range on BOTH sides. Unbounded, it
+    /// would empty the DEFAULT partition of every historic-backfill row in the
+    /// deployment and stuff them into one week.
+    #[test]
+    fn adopt_moves_only_the_partition_range_out_of_default() {
+        let [_create, mv, _attach] = adopt_default_rows_sql("2026w34", LO, HI);
+        assert!(mv.contains("DELETE FROM attr_instances_default"), "{mv}");
+        assert!(mv.contains(&format!("observed_at >= '{LO}'")), "{mv}");
+        assert!(mv.contains(&format!("observed_at < '{HI}'")), "{mv}");
+        assert!(
+            mv.contains("INSERT INTO attr_instances_2026w34"),
+            "moved rows must land in the week's table: {mv}"
+        );
+    }
 }

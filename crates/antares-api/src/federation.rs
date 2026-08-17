@@ -361,10 +361,33 @@ pub fn via_tokens(headers: &HeaderMap) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How many `Via` elements this broker will process on one inbound request.
+///
+/// 6.3.18 fixes the header's purpose ("to avoid infinite loops") and Table
+/// 6.3.18-2 makes its listing part of registration matching, so every
+/// element is compared against every candidate registration: the chain is
+/// attacker-supplied input whose length multiplies the work of the request.
+/// RFC 7230 section 3.2.5 lets a recipient refuse a field longer than it is
+/// willing to process. A cascade deeper than this is a loop the alias
+/// pseudonyms failed to name, not a deployment.
+const MAX_VIA_HOPS: usize = 32;
+
+/// The number of `Via` elements received, counted across header fields
+/// without building the token list (RFC 7230 sections 3.2.2 and 5.7.1: the
+/// elements of a list header may be split over any number of field lines).
+fn via_hops(headers: &HeaderMap) -> usize {
+    headers
+        .get_all("via")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(',').count())
+        .sum()
+}
+
 /// Does the inbound Via chain already name this broker, in this tenant?
 /// (loop, 6.3.18) — `alias` is always [`alias_for`]'s tenant-qualified value.
 pub fn via_loop(headers: &HeaderMap, alias: &str) -> bool {
-    via_tokens(headers).iter().any(|t| t == alias)
+    via_hops(headers) > MAX_VIA_HOPS || via_tokens(headers).iter().any(|t| t == alias)
 }
 
 /// 6.3.17/6.3.18 loop handling for operations with matching registrations.
@@ -380,6 +403,13 @@ pub fn handle_via_loop(
     tenant: &TenantId,
     regs: &mut Vec<FedReg>,
 ) -> Option<Response> {
+    // A chain past [`MAX_VIA_HOPS`] is refused outright: the operation is
+    // not re-forwarded and not run locally either, because a request that
+    // deep is a cascade the pseudonyms failed to close.
+    if via_hops(headers) > MAX_VIA_HOPS {
+        regs.clear();
+        return Some(loop_508(tenant));
+    }
     if regs.is_empty() || !via_loop(headers, alias) {
         return None;
     }
@@ -451,6 +481,91 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
     }
 }
 
+/// The registration documents of one tenant: the ONE compiled mirror when
+/// wired (bus=nats), the store otherwise.
+fn reg_docs(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+    match &st.reg_mirror {
+        Some(m) => m.docs(tenant.as_str()),
+        None => st
+            .store
+            .list(tenant, Kind::Registration)
+            .unwrap_or_default(),
+    }
+}
+
+/// Does one stored registration take part in this operation, and through
+/// which RegistrationInfos (5.12)? Every condition is decided from the
+/// borrowed document — expiry, csf, datasetId, location, intervals, the Via
+/// chain — so a caller that only needs the verdict ([`would_federate`])
+/// stops here instead of compiling a `FedReg` per registration. Expiry is
+/// filtered HERE and only here: the single yield point.
+fn reg_candidate<'a>(
+    doc: &'a Value,
+    spec: &crate::csource::CsrSpec,
+    ctx: &Context,
+    seen: &[String],
+) -> Option<Vec<&'a Value>> {
+    if crate::csource::reg_expired(doc) {
+        return None;
+    }
+    // 5.7.2.4/5.7.4.4/5.6.21.4: a csf gates which Context Sources
+    // are considered (evaluated over the registration's own
+    // Context Source Properties, 5.10.2.4 semantics).
+    if let Some(csf) = &spec.csf {
+        if !crate::csource::csf_matches(csf, doc, ctx) {
+            return None;
+        }
+    }
+    // 5.12 datasetId condition (should-level): both sides specifying
+    // datasetId match only with a value in common; one side alone always
+    // matches.
+    if let Some(ds) = &spec.dataset_ids {
+        if let Some(reg_ds) = doc.get("datasetId").and_then(Value::as_array) {
+            if !reg_ds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|d| ds.iter().any(|q| q == d))
+            {
+                return None;
+            }
+        }
+    }
+    // 5.2.9 location + 4.3.6.1: a geo-scoped registration is only consulted
+    // when the query's geo filter matches its geometry; a registration
+    // without `location` is unconstrained.
+    if let Some(gq) = &spec.geo {
+        if let Some(geom) = doc.get("location") {
+            if !gq.matches_geometry(geom) {
+                return None;
+            }
+        }
+    }
+    // 5.2.9: a declared observation/management interval gates temporal
+    // fan-out on overlap with the temporal query; without any declared
+    // interval the registration is unconstrained.
+    if let Some(tq) = &spec.temporal {
+        if (doc.get("observationInterval").is_some() || doc.get("managementInterval").is_some())
+            && !crate::csource::temporal_interval_matches(doc, tq)
+        {
+            return None;
+        }
+    }
+    // Table 6.3.18-2 / 5.2.9: this source already handled the request.
+    if doc
+        .get("contextSourceAlias")
+        .and_then(Value::as_str)
+        .is_some_and(|a| seen.iter().any(|t| t == a))
+    {
+        return None;
+    }
+    let infos = crate::csource::matching_infos(spec, doc, ctx);
+    if infos.is_empty() {
+        None
+    } else {
+        Some(infos)
+    }
+}
+
 /// Registrations matching an entity spec (5.12), compiled for forwarding.
 ///
 /// Table 6.3.18-2 makes the inbound `Via` listing part of matching itself —
@@ -467,76 +582,18 @@ pub fn matching_regs(
     ctx: &Context,
     headers: &HeaderMap,
 ) -> Vec<FedReg> {
+    if via_hops(headers) > MAX_VIA_HOPS {
+        return Vec::new();
+    }
     let seen = via_tokens(headers);
-    // The ONE compiled mirror when wired (bus=nats), the store otherwise.
-    // Expiry is filtered HERE and only here — the single yield point.
-    let regs = match &st.reg_mirror {
-        Some(m) => m.docs(tenant.as_str()),
-        None => st
-            .store
-            .list(tenant, Kind::Registration)
-            .unwrap_or_default(),
-    };
-    regs.into_iter()
+    reg_docs(st, tenant)
+        .iter()
         .filter_map(|doc| {
-            if crate::csource::reg_expired(&doc) {
-                return None;
-            }
-            // 5.7.2.4/5.7.4.4/5.6.21.4: a csf gates which Context Sources
-            // are considered (evaluated over the registration's own
-            // Context Source Properties, 5.10.2.4 semantics).
-            if let Some(csf) = &spec.csf {
-                if !crate::csource::csf_matches(csf, &doc, ctx) {
-                    return None;
-                }
-            }
-            // 5.12 datasetId condition (should-level): both sides
-            // specifying datasetId match only with a value in common;
-            // one side alone always matches.
-            if let Some(ds) = &spec.dataset_ids {
-                if let Some(reg_ds) = doc.get("datasetId").and_then(Value::as_array) {
-                    if !reg_ds
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|d| ds.iter().any(|q| q == d))
-                    {
-                        return None;
-                    }
-                }
-            }
-            // 5.2.9 location + 4.3.6.1: a geo-scoped registration is only
-            // consulted when the query's geo filter matches its geometry;
-            // a registration without `location` is unconstrained.
-            if let Some(gq) = &spec.geo {
-                if let Some(geom) = doc.get("location") {
-                    if !gq.matches_geometry(geom) {
-                        return None;
-                    }
-                }
-            }
-            // 5.2.9: a declared observation/management interval gates
-            // temporal fan-out on overlap with the temporal query; without
-            // any declared interval the registration is unconstrained.
-            if let Some(tq) = &spec.temporal {
-                if (doc.get("observationInterval").is_some()
-                    || doc.get("managementInterval").is_some())
-                    && !crate::csource::temporal_interval_matches(&doc, tq)
-                {
-                    return None;
-                }
-            }
+            let infos = reg_candidate(doc, spec, ctx, &seen)?;
             let alias = doc
                 .get("contextSourceAlias")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            // Table 6.3.18-2 / 5.2.9: this source already handled the request.
-            if alias.as_ref().is_some_and(|a| seen.iter().any(|t| t == a)) {
-                return None;
-            }
-            let infos = crate::csource::matching_infos(spec, &doc, ctx);
-            if infos.is_empty() {
-                return None;
-            }
             let endpoint = doc
                 .get("endpoint")
                 .and_then(Value::as_str)?
@@ -1533,7 +1590,15 @@ pub fn would_federate(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> bool {
-    active(params) && !matching_regs(st, tenant, &query_spec(ctx, params), ctx, headers).is_empty()
+    if !active(params) || via_hops(headers) > MAX_VIA_HOPS {
+        return false;
+    }
+    // the verdict only — no forwarding set is compiled for it
+    let spec = query_spec(ctx, params);
+    let seen = via_tokens(headers);
+    reg_docs(st, tenant)
+        .iter()
+        .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some())
 }
 
 pub async fn fed_query(
@@ -1652,7 +1717,14 @@ pub async fn fed_query(
             continue;
         }
         if let Value::Array(a) = &body {
-            for c in a {
+            // A source only speaks for the entities its registration covers:
+            // an id outside that scope is dropped rather than merged, or a
+            // peer could overwrite unrelated local attributes on recency.
+            for c in a.iter().filter(|c| {
+                c.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| reg.can_match_id(i))
+            }) {
                 match import_entity(c, &reg, ctx) {
                     Some(doc) => out.push((reg.mode == "auxiliary", doc)),
                     None => warnings.push(warning(
@@ -1832,7 +1904,12 @@ pub async fn fed_query_temporal(
             continue;
         }
         if let Value::Array(a) = &body {
-            for c in a {
+            // Same scope gate as the non-temporal query fan-out.
+            for c in a.iter().filter(|c| {
+                c.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|i| reg.can_match_id(i))
+            }) {
                 match import_temporal(c, &reg, ctx) {
                     Some(doc) => out.push((reg.mode == "auxiliary", doc)),
                     None => warnings.push(warning(
@@ -2059,7 +2136,17 @@ pub async fn forward_part(
         body,
     )
     .await;
-    let detail = format!("distributed operation to {url} returned {status}");
+    // 6.3.17: "the error response should be as informative as possible" —
+    // informative about the operation, not about the deployment. The part is
+    // named by its Context Source Registration id (5.2.9), which the client
+    // can already read from /csourceRegistrations; the registered endpoint
+    // is internal topology and stays in the log, so that a client able to
+    // provoke a partial failure cannot enumerate the peers.
+    tracing::debug!("distributed operation to {url} returned {status}");
+    let detail = format!(
+        "distributed operation to registration {} returned {status}",
+        reg.reg_id
+    );
     // 6.3.17 p.278: for a proxied (exclusive/redirect) source the error
     // vocabulary is fixed — 508 loop, 504 timeout, 404 not found, and
     // "502 Bad Gateway — if the single forwarded request fails for any other
@@ -2679,6 +2766,192 @@ mod tests {
         assert_eq!(inst[0]["expiresAt"], "2030-01-01T00:00:00Z", "added");
         assert_eq!(inst[1]["expiresAt"], "2030-01-01T00:00:00Z", "capped");
         assert_eq!(inst[2]["expiresAt"], "2029-01-01T00:00:00Z", "earlier kept");
+    }
+
+    /// 6.3.17: "the error response should be as informative as possible" —
+    /// informative about the OPERATION, not about the deployment. The part
+    /// that failed is identified by its Context Source Registration id
+    /// (5.2.9), which the client can retrieve from /csourceRegistrations;
+    /// the registration `endpoint` is not part of any client-facing payload,
+    /// and a client able to provoke a partial failure must not be able to
+    /// enumerate the address of every registered Context Source.
+    #[tokio::test]
+    async fn partial_failure_detail_omits_the_peer_endpoint() {
+        use std::io::{Read, Write};
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        // a Context Source that refuses every forwarded write
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let mut r = reg("inclusive");
+        r.endpoint = format!("http://127.0.0.1:{port}");
+        let part = forward_part(
+            &st,
+            reqwest::Method::POST,
+            format!("{}/ngsi-ld/v1/entities", r.endpoint),
+            &[],
+            &HeaderMap::new(),
+            &tenant,
+            &r,
+            antares_jsonld::CORE_CONTEXT,
+            Some(json!({"id": "urn:ngsi-ld:V:1", "type": "Vehicle"})),
+        )
+        .await;
+        assert_eq!(part.status, 400, "the peer refused the write");
+        // one failed forward + one succeeded local part ⇒ 207 Multi-Status
+        let local = Part {
+            status: 204,
+            detail: "local write applied".into(),
+        };
+        let resp = combine(
+            vec![local, part],
+            StatusCode::NO_CONTENT.into_response(),
+            &tenant,
+        );
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(
+            !body.contains(&format!("127.0.0.1:{port}")),
+            "the peer host:port must never reach the client, got {body}"
+        );
+        assert!(
+            body.contains(&r.reg_id),
+            "the registration id is the client-safe identifier, got {body}"
+        );
+    }
+
+    /// 6.3.18: the Via header exists "to avoid infinite loops", and Table
+    /// 6.3.18-2 makes its listing part of registration matching — every
+    /// element is compared against every candidate registration. A chain
+    /// longer than any real cascade is therefore both a loop symptom and a
+    /// work amplifier, and is refused before the registrations are read.
+    #[test]
+    fn via_chain_beyond_the_hop_ceiling_is_refused() {
+        let chain = |n: usize| {
+            (0..n)
+                .map(|i| format!("1.1 hop{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let t = antares_model::TenantId::new("default").expect("tenant");
+        let over = hdrs(Some(&chain(MAX_VIA_HOPS + 1)));
+        assert!(
+            via_loop(&over, "me"),
+            "a chain past the ceiling is treated as a loop"
+        );
+        let mut regs = vec![reg("inclusive")];
+        let resp = handle_via_loop(&over, "me", &t, &mut regs)
+            .expect("an over-long Via chain must be refused");
+        assert_eq!(resp.status(), StatusCode::LOOP_DETECTED);
+        // and no registration is consulted: the candidate set is empty
+        // without a single registration document being examined
+        let st = AppState::new("me".into());
+        let ctx = st.loader.core();
+        let id = "urn:ngsi-ld:ContextSourceRegistration:hops";
+        st.store
+            .create(
+                &t,
+                Kind::Registration,
+                id,
+                json!({
+                    "id": id,
+                    "type": "ContextSourceRegistration",
+                    "endpoint": "http://peer:9090",
+                    "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+                }),
+            )
+            .expect("seed registration");
+        let spec = crate::csource::CsrSpec {
+            types: Some(vec![
+                "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
+            ]),
+            ..Default::default()
+        };
+        assert!(
+            matching_regs(&st, &t, &spec, &ctx, &over).is_empty(),
+            "no registration is matched past the hop ceiling"
+        );
+        // at the ceiling the chain is still processed normally
+        let at = hdrs(Some(&chain(MAX_VIA_HOPS)));
+        assert!(!via_loop(&at, "me"));
+        assert!(handle_via_loop(&at, "me", &t, &mut vec![reg("inclusive")]).is_none());
+        assert_eq!(matching_regs(&st, &t, &spec, &ctx, &at).len(), 1);
+    }
+
+    /// 5.7.2.4/4.23.1: `would_federate` only answers WHETHER a query leaves
+    /// the local scope, so it never compiles a forwarding set — but its
+    /// verdict must stay identical to the set's emptiness for every shape
+    /// that gates matching (type, id, the Via chain, local scope).
+    #[test]
+    fn would_federate_agrees_with_the_compiled_forward_set() {
+        let st = AppState::new("me".into());
+        let t = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let id = "urn:ngsi-ld:ContextSourceRegistration:wf";
+        st.store
+            .create(
+                &t,
+                Kind::Registration,
+                id,
+                json!({
+                    "id": id,
+                    "type": "ContextSourceRegistration",
+                    "endpoint": "http://peer:9090",
+                    "contextSourceAlias": "peer1",
+                    "information": [{"entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}]}],
+                }),
+            )
+            .expect("seed registration");
+        let params = |kv: &[(&str, &str)]| {
+            kv.iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<HashMap<String, String>>()
+        };
+        for (p, headers, expected) in [
+            (params(&[("type", "Vehicle")]), hdrs(None), true),
+            (params(&[("type", "Parking")]), hdrs(None), false),
+            (
+                params(&[("type", "Vehicle"), ("local", "true")]),
+                hdrs(None),
+                false,
+            ),
+            (
+                params(&[("type", "Vehicle")]),
+                hdrs(Some("1.1 peer1")),
+                false,
+            ),
+            (
+                params(&[("type", "Vehicle")]),
+                hdrs(Some("1.1 other")),
+                true,
+            ),
+        ] {
+            assert_eq!(
+                would_federate(&st, &t, &ctx, &p, &headers),
+                expected,
+                "would_federate verdict for {p:?}"
+            );
+            assert_eq!(
+                active(&p)
+                    && !matching_regs(&st, &t, &query_spec(&ctx, &p), &ctx, &headers).is_empty(),
+                expected,
+                "the compiled forward set must agree for {p:?}"
+            );
+        }
     }
 }
 

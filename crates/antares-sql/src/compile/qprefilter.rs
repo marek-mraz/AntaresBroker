@@ -393,6 +393,63 @@ mod tests {
         }
     }
 
+    /// Superset arithmetic one level down. A disjunction that refuses is a
+    /// refused CONJUNCT, not a refused statement: dropping `(a|b)` from
+    /// `(a|b);c` leaves `c`, which still admits every entity the evaluator
+    /// would keep.
+    #[test]
+    fn a_refused_disjunction_drops_only_its_own_conjunct() {
+        let c = pf(r#"(speed>25|name~="^x");heading<90"#).expect("compiles");
+        assert_eq!(c.sql.matches("EXISTS").count(), 1, "{}", c.sql);
+        assert_eq!(c.binds[0], ex("heading"), "the surviving conjunct");
+        assert_dense(&c, 3);
+        let r = between();
+        assert!(!prefilter_exact(
+            &parse_q(r#"(speed>25|name~="^x");heading<90"#).expect("parse"),
+            Some(&r),
+            &ex
+        ));
+        // nothing left to keep → no prefilter at all, never an empty predicate
+        assert!(pf(r#"name~="^x";label!~="^y""#).is_none());
+    }
+
+    /// A conjunction that dropped a member is still a legal OR branch: it
+    /// admits MORE than the branch it stands for, and a union of supersets is
+    /// a superset. It must never be reported exact.
+    #[test]
+    fn a_widened_conjunction_inside_a_disjunction_still_widens() {
+        let c = pf(r#"(speed>25;name~="^x")|heading>100"#).expect("compiles");
+        assert_eq!(c.sql.matches("EXISTS").count(), 2, "{}", c.sql);
+        assert!(c.sql.contains(" OR "), "{}", c.sql);
+        assert_eq!(c.binds[0], ex("speed"));
+        assert_dense(&c, 3);
+        let r = between();
+        assert!(!prefilter_exact(
+            &parse_q(r#"(speed>25;name~="^x")|heading>100"#).expect("parse"),
+            Some(&r),
+            &ex
+        ));
+    }
+
+    /// The attribute IRI, the stamps and every compared value are binds; the
+    /// statement carries this module's own text and `$n` only.
+    #[test]
+    fn client_text_never_reaches_the_statement() {
+        let node = QNode::Cmp {
+            path: QPath::dotted(vec!["a' OR 1=1 --".to_owned()]),
+            op: CmpOp::Eq,
+            value: QValue::Str("'; DROP TABLE attr_instances; --".to_owned()),
+        };
+        let c = compile_prefilter(&node, Some(&between()), "m", 1, &|t| t.to_owned())
+            .expect("compiles");
+        for needle in ["DROP", "TABLE", "--", "OR 1=1"] {
+            assert!(!c.sql.contains(needle), "{needle:?} leaked: {}", c.sql);
+        }
+        assert_eq!(c.binds[0], "a' OR 1=1 --");
+        assert!(c.binds.last().expect("jsonpath").contains("DROP"));
+        assert_dense(&c, 1);
+    }
+
     #[test]
     fn existence_list_and_range_leaves_compile() {
         let c = pf("speed").expect("existence compiles");

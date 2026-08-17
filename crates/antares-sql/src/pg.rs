@@ -6,7 +6,17 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
 
 /// Embedded migrations, run at start (like Scorpio's Flyway, but once).
+///
+/// `ANTARES_MIGRATE=0`/`false` skips that run on this process, so serving
+/// replicas do not race the same DDL and a deployment can migrate once from a
+/// separate job or init container against the same database. Unset — the
+/// default — migrates on boot exactly as before.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// The `ANTARES_MIGRATE` switch: off only for an explicit `0`/`false`.
+fn migrate_enabled(v: Option<&str>) -> bool {
+    !matches!(v, Some("0" | "false"))
+}
 
 /// One shared pool for all tenants — never per-tenant pools.
 /// `max_connections` ≈ 2× the PG box's cores; the default suits a small dev
@@ -39,15 +49,14 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Er
     // on a large attr_instances legitimately runs longer than a query ever
     // should. The lock timeout stays — a migration blocked on a lock must
     // fail rather than hold the boot path.
-    let mut migrate_conn = pool.acquire().await?;
-    {
+    if migrate_enabled(std::env::var("ANTARES_MIGRATE").ok().as_deref()) {
         use sqlx::Executor;
+        let mut migrate_conn = pool.acquire().await?;
         migrate_conn
             .execute(sqlx::raw_sql("SET statement_timeout = 0"))
             .await?;
         MIGRATOR.run(&mut *migrate_conn).await?;
     }
-    drop(migrate_conn);
     Ok(pool)
 }
 
@@ -68,11 +77,27 @@ pub async fn set_tenant(
 /// Does the connected role bypass RLS (superuser or BYPASSRLS)? RLS is
 /// a belt only when the role wears it — the broker warns at startup when the
 /// belt is off.
+///
+/// A probe that cannot answer fails CLOSED: an unreachable or erroring
+/// database is reported as bypassing, so the strict gate refuses the boot
+/// instead of passing on an error.
 pub async fn role_bypasses_rls(pool: &PgPool) -> bool {
-    sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+    bypasses(
+        sqlx::query_scalar(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        )
         .fetch_one(pool)
-        .await
-        .unwrap_or(false)
+        .await,
+    )
+}
+
+fn bypasses(probe: Result<bool, sqlx::Error>) -> bool {
+    probe.unwrap_or_else(|e| {
+        tracing::error!(
+            "row-level-security probe failed ({e}) — treating the role as RLS-bypassing"
+        );
+        true
+    })
 }
 
 /// Arm the transaction-scoped `antares.service` escape (migration 0005) for
@@ -94,4 +119,32 @@ pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) -> Result<(), sqlx:
         .execute(pool)
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bypasses, migrate_enabled};
+
+    /// The RLS probe answers a security gate: a probe that errors must read as
+    /// "unsafe", never as "the role does not bypass RLS".
+    #[test]
+    fn rls_probe_fails_closed() {
+        assert!(!bypasses(Ok(false)), "a role without BYPASSRLS is safe");
+        assert!(bypasses(Ok(true)), "superuser/BYPASSRLS bypasses");
+        assert!(
+            bypasses(Err(sqlx::Error::PoolTimedOut)),
+            "an unanswerable probe must not pass the gate"
+        );
+        assert!(bypasses(Err(sqlx::Error::RowNotFound)));
+    }
+
+    /// Migrations stay on unless a deployment explicitly turns them off.
+    #[test]
+    fn migrate_switch_defaults_on() {
+        assert!(migrate_enabled(None));
+        assert!(migrate_enabled(Some("1")));
+        assert!(migrate_enabled(Some("true")));
+        assert!(!migrate_enabled(Some("0")));
+        assert!(!migrate_enabled(Some("false")));
+    }
 }

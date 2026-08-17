@@ -542,7 +542,7 @@ fn check_entity_conflict(
     let all = st
         .store
         .list(tenant, Kind::Entity)
-        .map_err(|e| NgsiError::InternalError(e.to_string()))?;
+        .map_err(|_| NgsiError::InternalError("entity lookup failed".into()))?;
     for info in infos {
         let attrs: Vec<&str> = ["propertyNames", "relationshipNames"]
             .iter()
@@ -675,20 +675,17 @@ pub fn check_proxied_overlap(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let now = now_iso();
+    // Fail closed: treating a lookup failure as "no conflicts" would admit a
+    // second exclusive registration for the same scope.
     let existing = st
         .store
         .list(tenant, Kind::Registration)
-        .unwrap_or_default();
+        .map_err(|_| NgsiError::InternalError("registration lookup failed".into()))?;
     for other in &existing {
         if other.get("id").and_then(Value::as_str) == self_id {
             continue;
         }
-        if other
-            .get("expiresAt")
-            .and_then(Value::as_str)
-            .is_some_and(|e| e < now.as_str())
-        {
+        if reg_expired(other) {
             continue;
         }
         let omode = other
@@ -749,6 +746,22 @@ pub fn check_proxied_overlap(
         }
     }
     Ok(())
+}
+
+/// The 5.9.2.4 conflict rules ("if an exclusive or redirect Context Source
+/// Registration already matches … an error of type Conflict shall be
+/// raised") are decided by reading the registration set, and the create or
+/// update that follows writes it. Read and write are separate store
+/// operations, so without this lock two requests can each observe a
+/// conflict-free set and both land, leaving the two exclusive registrations
+/// for one Entity ID and Attribute the clause forbids. Every registration
+/// write holds it for the whole check-then-write sequence.
+static REGISTRATION_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn registration_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRATION_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Output shaping: compact IRIs.
@@ -844,20 +857,24 @@ pub async fn create_registration(
             }
         };
         validate_auxiliary_ops(&norm)?;
-        check_entity_conflict(&st, &tenant, &norm)?;
-        check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
-        let ts = now_iso();
-        norm.insert("createdAt".into(), Value::String(ts.clone()));
-        norm.insert("modifiedAt".into(), Value::String(ts));
-        let doc = Value::Object(norm);
-        if !st
-            .store
-            .create(&tenant, Kind::Registration, &id, doc.clone())?
-        {
-            return Err(
-                NgsiError::AlreadyExists(format!("registration {id} already exists")).into(),
-            );
-        }
+        let doc = {
+            let _serialized = registration_write_lock();
+            check_entity_conflict(&st, &tenant, &norm)?;
+            check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
+            let ts = now_iso();
+            norm.insert("createdAt".into(), Value::String(ts.clone()));
+            norm.insert("modifiedAt".into(), Value::String(ts));
+            let doc = Value::Object(norm);
+            if !st
+                .store
+                .create(&tenant, Kind::Registration, &id, doc.clone())?
+            {
+                return Err(
+                    NgsiError::AlreadyExists(format!("registration {id} already exists")).into(),
+                );
+            }
+            doc
+        };
         st.reg_changed(&tenant, &id, Some(&doc));
         {
             // Prepare in the request path (ordering), spawn only the send
@@ -1285,6 +1302,11 @@ pub fn csr_matches(spec: &CsrSpec, doc: &Value, ctx: &Context) -> bool {
 /// 5.12 entity/attr matching + temporal interval rules + geoQ vs the
 /// registration's own `location`.
 pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool {
+    // An expired registration is no longer a Context Source: it must not be
+    // reported as newlyMatching, nor receive a forwarded subscription copy.
+    if reg_expired(reg) {
+        return false;
+    }
     let spec = spec_for_subscription(sub);
     if !csr_matches(&spec, reg, ctx) {
         return false;
@@ -1428,42 +1450,53 @@ pub async fn update_registration(
             .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
-        let before = st.store.get(&tenant, Kind::Registration, &id)?;
-        if let Some(prev) = before.as_ref().and_then(Value::as_object) {
-            // validate the post-merge document (4.3.6.3) BEFORE mutating:
-            // a patch may flip the mode or rewrite information
-            let mut merged = prev.clone();
-            for (k, v) in &norm {
-                if k == "id" {
-                    continue;
+        // The 5.9.3.4 re-checks below read the registration set that the
+        // mutate then writes — the pair is atomic or a concurrent write can
+        // invalidate the checks between them.
+        let (before, res) = {
+            let _serialized = registration_write_lock();
+            let before = st.store.get(&tenant, Kind::Registration, &id)?;
+            if let Some(prev) = before.as_ref().and_then(Value::as_object) {
+                // validate the post-merge document (4.3.6.3) BEFORE mutating:
+                // a patch may flip the mode or rewrite information
+                let mut merged = prev.clone();
+                for (k, v) in &norm {
+                    if k == "id" {
+                        continue;
+                    }
+                    if v.is_null() {
+                        merged.remove(k);
+                    } else {
+                        merged.insert(k.clone(), v.clone());
+                    }
                 }
-                if v.is_null() {
-                    merged.remove(k);
-                } else {
-                    merged.insert(k.clone(), v.clone());
-                }
+                validate_exclusive(&merged)?;
+                // 5.9.3.4: the mode-specific rules apply to the merged document
+                validate_auxiliary_ops(&merged)?;
+                check_entity_conflict(&st, &tenant, &merged)?;
+                check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx)?;
             }
-            validate_exclusive(&merged)?;
-            // 5.9.3.4: the mode-specific rules apply to the merged document
-            validate_auxiliary_ops(&merged)?;
-            check_entity_conflict(&st, &tenant, &merged)?;
-            check_proxied_overlap(&st, &tenant, &merged, Some(&id), &parsed.ctx)?;
-        }
-        let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
-            let target = doc.as_object_mut().expect("registration object");
-            for (k, v) in &norm {
-                if k == "id" {
-                    continue;
+            let res = st.store.mutate(&tenant, Kind::Registration, &id, |doc| {
+                let Some(target) = doc.as_object_mut() else {
+                    return Err(NgsiError::InternalError(
+                        "stored registration is not a JSON object".into(),
+                    ));
+                };
+                for (k, v) in &norm {
+                    if k == "id" {
+                        continue;
+                    }
+                    if v.is_null() {
+                        target.remove(k);
+                    } else {
+                        target.insert(k.clone(), v.clone());
+                    }
                 }
-                if v.is_null() {
-                    target.remove(k);
-                } else {
-                    target.insert(k.clone(), v.clone());
-                }
-            }
-            target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            Ok::<(), NgsiError>(())
-        })?;
+                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                Ok::<(), NgsiError>(())
+            })?;
+            (before, res)
+        };
         match res {
             None => Err(NgsiError::ResourceNotFound(format!("registration {id} not found")).into()),
             Some(Err(e)) => Err(ApiError::from(e)),
@@ -1772,5 +1805,144 @@ mod csi_tests {
         assert!(!ok("ngsildConformance", "latest"));
         // ordinary custom keys stay free-form
         assert!(ok("Authorization", "Bearer abc"));
+    }
+}
+
+#[cfg(test)]
+mod concurrent_create_5_9_2_4 {
+    use super::*;
+
+    fn exclusive_body(n: usize) -> Bytes {
+        Bytes::from(format!(
+            r#"{{"id":"urn:ngsi-ld:ContextSourceRegistration:race{n}",
+                 "type":"ContextSourceRegistration",
+                 "endpoint":"http://peer:9090",
+                 "mode":"exclusive",
+                 "information":[{{"entities":[{{"id":"urn:ngsi-ld:Vehicle:race",
+                                                "type":"Vehicle"}}],
+                                  "propertyNames":["speed"]}}]}}"#
+        ))
+    }
+
+    fn json_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/json".parse().expect("header value"),
+        );
+        h
+    }
+
+    /// 5.9.2.4: "If an exclusive or redirect Context Source Registration
+    /// already matches against the Entity ID (URI) and any of the Attributes
+    /// defined in the registration, an error of type Conflict shall be
+    /// raised." Requests racing each other must not both slip past that
+    /// check: whatever the interleaving, one registration is stored and
+    /// every other request gets the Conflict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_exclusive_creates_store_exactly_one_registration() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        for round in 0..25 {
+            let st = crate::state::AppState::new("me".into());
+            let gate = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+            let mut tasks = Vec::new();
+            for n in 0..8 {
+                let (st, gate) = (st.clone(), gate.clone());
+                tasks.push(tokio::spawn(async move {
+                    gate.wait().await;
+                    create_registration(
+                        State(st),
+                        CleanParams(HashMap::new()),
+                        json_headers(),
+                        exclusive_body(n),
+                    )
+                    .await
+                    .status()
+                }));
+            }
+            let mut created = 0;
+            for t in tasks {
+                match t.await.expect("task") {
+                    StatusCode::CREATED => created += 1,
+                    StatusCode::CONFLICT => {}
+                    other => panic!("round {round}: unexpected status {other}"),
+                }
+            }
+            let stored = st
+                .store
+                .list(&tenant, Kind::Registration)
+                .expect("registrations");
+            assert_eq!(
+                stored.len(),
+                1,
+                "round {round}: 5.9.2.4 forbids a second exclusive registration \
+                 for the same Entity ID and Attribute"
+            );
+            assert_eq!(created, 1, "round {round}: exactly one create may succeed");
+        }
+    }
+
+    /// 5.9.3.4 applies the same 5.9.2.4 mode rules to the merged document,
+    /// so two patches that each flip an inclusive registration to exclusive
+    /// over one Entity ID and Attribute may not both take effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_patches_to_exclusive_leave_one_exclusive_registration() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        for round in 0..25 {
+            let st = crate::state::AppState::new("me".into());
+            for n in 0..4 {
+                let body = Bytes::from(
+                    String::from_utf8_lossy(&exclusive_body(n))
+                        .replace(r#""mode":"exclusive","#, ""),
+                );
+                let status = create_registration(
+                    State(st.clone()),
+                    CleanParams(HashMap::new()),
+                    json_headers(),
+                    body,
+                )
+                .await
+                .status();
+                assert_eq!(status, StatusCode::CREATED, "round {round}: seed {n}");
+            }
+            let gate = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+            let mut tasks = Vec::new();
+            for n in 0..4 {
+                let (st, gate) = (st.clone(), gate.clone());
+                tasks.push(tokio::spawn(async move {
+                    gate.wait().await;
+                    update_registration(
+                        State(st),
+                        Path(format!("urn:ngsi-ld:ContextSourceRegistration:race{n}")),
+                        CleanParams(HashMap::new()),
+                        json_headers(),
+                        Bytes::from(r#"{"mode":"exclusive"}"#),
+                    )
+                    .await
+                    .status()
+                }));
+            }
+            let mut patched = 0;
+            for t in tasks {
+                match t.await.expect("task") {
+                    StatusCode::NO_CONTENT => patched += 1,
+                    StatusCode::CONFLICT => {}
+                    other => panic!("round {round}: unexpected status {other}"),
+                }
+            }
+            let exclusive = st
+                .store
+                .list(&tenant, Kind::Registration)
+                .expect("registrations")
+                .iter()
+                .filter(|r| r.get("mode").and_then(Value::as_str) == Some("exclusive"))
+                .count();
+            assert_eq!(
+                exclusive, 1,
+                "round {round}: 5.9.2.4 forbids a second exclusive registration \
+                 for the same Entity ID and Attribute"
+            );
+            assert_eq!(patched, 1, "round {round}: exactly one patch may succeed");
+        }
     }
 }

@@ -113,6 +113,138 @@ async fn entity_maps_pages_and_ttl_sweep() {
     assert_eq!(maps.page(&t, "urn:map:1", 0, 10).expect("live").len(), 2);
 }
 
+/// 5.5.14: an expired EntityMap "cannot be accessed". The TTL sweep lags by
+/// design (it runs on a timer), so the read itself must refuse the rows —
+/// paging a map past its expiry until the sweep catches up serves entity
+/// positions the broker has already promised to forget.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_maps_page_refuses_a_map_past_its_ttl() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgmapsttl").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let maps = EntityMapStore::new(pool.clone());
+
+    maps.put(
+        &t,
+        "urn:map:ttl",
+        "chk",
+        "2020-01-01T00:00:00Z",
+        &[("urn:e:1".into(), "urn:reg:A".into(), None)],
+    )
+    .expect("put expired");
+    // no sweep in between: the read alone must refuse it
+    assert!(
+        maps.page(&t, "urn:map:ttl", 0, 10)
+            .expect("page")
+            .is_empty(),
+        "an expired map must not be pageable before the sweep runs"
+    );
+}
+
+/// Tenant isolation (the explicit predicate plus the RLS policy): a map
+/// materialized for one tenant is invisible to every other one, including at
+/// an offset past its first page.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_maps_never_page_across_tenants() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let owner = TenantId::new("pgmapsowner").expect("tenant");
+    let other = TenantId::new("pgmapsother").expect("tenant");
+    pg::ensure_tenant(&pool, &owner).await.expect("owner row");
+    pg::ensure_tenant(&pool, &other).await.expect("other row");
+    let maps = EntityMapStore::new(pool.clone());
+
+    maps.put(
+        &owner,
+        "urn:map:shared-id",
+        "chk",
+        "2030-01-01T00:00:00Z",
+        &[
+            ("urn:e:1".into(), "urn:reg:A".into(), None),
+            ("urn:e:2".into(), "urn:reg:B".into(), None),
+        ],
+    )
+    .expect("put");
+    assert_eq!(
+        maps.page(&owner, "urn:map:shared-id", 0, 10)
+            .expect("own")
+            .len(),
+        2
+    );
+    assert!(
+        maps.page(&other, "urn:map:shared-id", 0, 10)
+            .expect("cross-tenant page")
+            .is_empty(),
+        "another tenant's map id must resolve to nothing"
+    );
+    // and a page BEYOND the map is empty rather than wrapping to position 0
+    assert!(maps
+        .page(&owner, "urn:map:shared-id", 2, 10)
+        .expect("past end")
+        .is_empty());
+}
+
+/// A re-materialized map replaces its predecessor: `put` clears the old rows
+/// first, so a shrinking map cannot page entries that no longer belong to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_maps_put_replaces_the_previous_materialization() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgmapsreplace").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let maps = EntityMapStore::new(pool.clone());
+
+    maps.put(
+        &t,
+        "urn:map:r",
+        "chk1",
+        "2030-01-01T00:00:00Z",
+        &[
+            ("urn:e:1".into(), "urn:reg:A".into(), None),
+            ("urn:e:2".into(), "urn:reg:B".into(), None),
+        ],
+    )
+    .expect("put");
+    maps.put(
+        &t,
+        "urn:map:r",
+        "chk2",
+        "2030-01-01T00:00:00Z",
+        &[("urn:e:9".into(), "urn:reg:Z".into(), None)],
+    )
+    .expect("re-put");
+    let page = maps.page(&t, "urn:map:r", 0, 10).expect("page");
+    assert_eq!(page, vec![("urn:e:9".to_owned(), "urn:reg:Z".to_owned())]);
+    assert!(
+        !page.iter().any(|(e, _)| e == "urn:e:1"),
+        "a stale entry from the previous materialization must not survive"
+    );
+}
+
+/// An empty batch enqueues nothing at all — the guard has to hold inside the
+/// caller's transaction, where a zero-row INSERT would still be a round trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn outbox_enqueue_many_of_nothing_writes_nothing() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgoutboxempty").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    let mut tx = pool.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &t).await.expect("set tenant");
+    outbox::enqueue_many(&mut tx, &t, &[])
+        .await
+        .expect("empty batch");
+    tx.commit().await.expect("commit");
+
+    let page = outbox::peek(&pool, 1000).expect("peek");
+    assert!(
+        !page.iter().any(|(_, tn, _)| tn == "pgoutboxempty"),
+        "an empty batch must leave no rows behind"
+    );
+}
+
 /// Ack must delete EXACTLY the
 /// published seqs. bigserial allocates at INSERT and transactions commit out
 /// of order — a lower-seq row whose transaction commits BETWEEN peek and ack

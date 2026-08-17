@@ -156,13 +156,14 @@ async fn clause_5_7_2_4_split_aggregate_filter_memory() {
 }
 
 /// The SQL arm: the compiled q must NOT drop the local half before the
-/// merge. Skips loudly without ANTARES_TEST_DATABASE_URL.
+/// merge. Needs a live PostGIS, so it is ignored by default — a run
+/// without a database reports it as `ignored`, never as a pass. When it
+/// IS selected the missing URL is a hard failure, not a vacuous pass.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live PostGIS in ANTARES_TEST_DATABASE_URL: cargo test -p antares-api --test split_entities_5_7_2 -- --ignored"]
 async fn clause_5_7_2_4_split_aggregate_filter_postgres() {
-    let Ok(url) = std::env::var("ANTARES_TEST_DATABASE_URL") else {
-        eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
-        return;
-    };
+    let url = std::env::var("ANTARES_TEST_DATABASE_URL")
+        .expect("ANTARES_TEST_DATABASE_URL must point at a live PostGIS");
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
     let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
     let store =

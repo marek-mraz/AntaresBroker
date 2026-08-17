@@ -66,6 +66,12 @@ pub struct CtxUsage {
     pub hits: u64,
 }
 
+/// Name resolution runs before the HTTP client exists, so none of its
+/// timeouts cover it: an unresponsive resolver would hold the request path
+/// open indefinitely. A lookup that does not answer within this bound is a
+/// DENIAL — the policy never passes a destination it could not check.
+const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Egress policy hook for @context fetches: scheme allowlist is
 /// enforced in `fetch`; this adds the private-range deny (loopback,
 /// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
@@ -101,6 +107,21 @@ impl EgressPolicy {
         }
     }
 
+    /// The cloud instance-metadata range (169.254.0.0/16, RFC 3927) and its
+    /// IPv6 spellings. Refused whatever `allow_private` says: no development
+    /// box, compose stack or conformance mock lives there, so denying it costs
+    /// nothing, while reaching it from a client-supplied @context URL or
+    /// notification endpoint is the classic credential-theft SSRF.
+    pub(crate) fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .or_else(|| v6.to_ipv4())
+                .is_some_and(|v4| v4.is_link_local()),
+        }
+    }
+
     pub(crate) fn ip_is_private(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => {
@@ -129,6 +150,23 @@ impl EgressPolicy {
     /// Deny-by-default for private destinations. Resolves the host
     /// once; any private address in the answer denies the fetch.
     pub async fn check_host(&self, host: &str, port: u16) -> Result<(), String> {
+        self.check_host_within(host, port, DNS_TIMEOUT).await
+    }
+
+    async fn check_host_within(
+        &self,
+        host: &str,
+        port: u16,
+        dns_timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        // The metadata range is refused before the private-egress switch is
+        // consulted, so a deployment that allows private egress (the default)
+        // still cannot be steered at its own instance credentials.
+        if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            if Self::ip_is_metadata(ip) {
+                return Err(format!("egress to {ip} denied (instance metadata)"));
+            }
+        }
         if self.allow_private {
             return Ok(());
         }
@@ -143,8 +181,13 @@ impl EgressPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let addrs = tokio::net::lookup_host((host, port))
+            // The lookup runs under its own deadline and a lookup that does
+            // not answer is a DENIAL: a destination the policy could not
+            // check is never allowed through, and the request path never
+            // waits on the resolver.
+            let addrs = tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port)))
                 .await
+                .map_err(|_| format!("resolving {host}: timed out"))?
                 .map_err(|e| format!("resolving {host}: {e}"))?;
             for a in addrs {
                 if Self::ip_is_private(a.ip()) {
@@ -158,7 +201,7 @@ impl EgressPolicy {
         // wasm32: a page cannot resolve DNS — the browser does, and its
         // same-origin/CORS machinery is the egress boundary there.
         #[cfg(target_arch = "wasm32")]
-        let _ = port;
+        let _ = (port, dns_timeout);
         Ok(())
     }
 }
@@ -225,6 +268,7 @@ impl reqwest::dns::Resolve for PolicyResolver {
             let host = name.as_str().to_owned();
             let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
             let kept: Vec<std::net::SocketAddr> = addrs
+                .filter(|a| !EgressPolicy::ip_is_metadata(a.ip()))
                 .filter(|a| allow_private || !EgressPolicy::ip_is_private(a.ip()))
                 .collect();
             if kept.is_empty() {
@@ -266,7 +310,8 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
             .unwrap_or("")
             .parse::<std::net::IpAddr>()
         {
-            if !allow_private && EgressPolicy::ip_is_private(ip) {
+            if EgressPolicy::ip_is_metadata(ip) || (!allow_private && EgressPolicy::ip_is_private(ip))
+            {
                 // stop (don't follow) — the caller sees a non-2xx and fails the
                 // fetch, but we never connected to the private target.
                 return attempt.stop();
@@ -405,6 +450,38 @@ const MAX_USAGE_ENTRIES: usize = 4096;
 /// fetch, so at most this many URLs are ever contacted.
 const MAX_CONTEXT_URLS: usize = 32;
 
+/// Byte budget of the fetched-document cache. Entry count alone is not a
+/// memory bound when one entry may be MAX_CONTEXT_BYTES.
+const MAX_FETCHED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Entry ceiling, charged through the byte budget: every entry costs at
+/// least MAX_FETCHED_CACHE_BYTES/MAX_FETCHED_ENTRIES of it, so a flood of
+/// tiny documents cannot turn a byte budget into an unbounded map.
+const MAX_FETCHED_ENTRIES: u64 = 256;
+
+/// The fetched-document cache, bounded by BYTES: the weight of an entry is
+/// the size of the document it holds (floored, see above).
+#[cfg(not(target_arch = "wasm32"))]
+fn fetched_cache() -> BoundedCache<String, FetchedDoc> {
+    // what one entry costs of the budget at minimum
+    let floor = (MAX_FETCHED_CACHE_BYTES / MAX_FETCHED_ENTRIES) as u32;
+    BoundedCache::builder()
+        .max_capacity(MAX_FETCHED_CACHE_BYTES)
+        .weigher(move |_url: &String, doc: &FetchedDoc| {
+            u32::try_from(doc.value.to_string().len())
+                .unwrap_or(u32::MAX)
+                .max(floor)
+        })
+        .build()
+}
+
+/// wasm32: the FIFO minicache carries no weigher, and a browser tab's
+/// @context set is tiny — the entry bound is the bound there.
+#[cfg(target_arch = "wasm32")]
+fn fetched_cache() -> BoundedCache<String, FetchedDoc> {
+    BoundedCache::new(MAX_FETCHED_ENTRIES)
+}
+
 #[derive(Clone)]
 struct FetchedDoc {
     value: Arc<Value>,
@@ -431,8 +508,9 @@ pub struct Loader {
     /// merged-cache key → every URL that resolution touched (so cache hits
     /// still bump numberOfHits for nested references).
     merged_urls: BoundedCache<String, Arc<Vec<String>>>,
-    /// Bounded concurrency on cold context resolution — a burst of
-    /// exotic-context requests can't blow the JSON working-set budget.
+    /// Bounded concurrency on cold context FETCHES (one permit per network
+    /// fetch, not per resolution) — a burst of exotic-context requests can't
+    /// blow the JSON working-set budget.
     resolve_permits: tokio::sync::Semaphore,
     /// Write-through: freshly fetched remote contexts are handed to this
     /// hook (the broker persists them as kind='Cached' rows) so the cache
@@ -482,7 +560,7 @@ impl Loader {
                 .expect("reqwest client"),
             ),
             policy,
-            fetched: BoundedCache::new(256),
+            fetched: fetched_cache(),
             merged: BoundedCache::new(256),
             core_only: Arc::new(core),
             usage: RwLock::new(HashMap::new()),
@@ -676,12 +754,6 @@ impl Loader {
                 return Ok(hit);
             }
         }
-        // Cold resolution is the expensive path — bound its concurrency.
-        let _permit = self
-            .resolve_permits
-            .acquire()
-            .await
-            .expect("semaphore never closed");
         let mut ctx = Context::default();
         let urls = std::sync::Mutex::new(Vec::new());
         self.merge_entry(&mut ctx, user, 0, &urls).await?;
@@ -829,6 +901,16 @@ impl Loader {
             .check_host(&host, port)
             .await
             .map_err(|e| err(format!("fetching {url}: {e}")))?;
+        // Bounded concurrency on cold fetching. The permit covers this ONE
+        // network fetch and is released before the crawl recurses into the
+        // document's own references — held across a whole recursive
+        // resolution instead, a handful of slow context trees would stall
+        // every cold resolution in the process.
+        let _permit = self
+            .resolve_permits
+            .acquire()
+            .await
+            .expect("semaphore never closed");
         // The whole HTTP interaction is one Send unit (http_interaction);
         // only Send data (ttl + bytes) crosses back out.
         let interact = async {
@@ -1292,6 +1374,21 @@ mod tests {
             allow_private: true,
         };
         assert!(allow.check_host("127.0.0.1", 80).await.is_ok());
+        // ...but the instance-metadata range is refused even then: allowing
+        // private egress is a development convenience, handing out cloud
+        // credentials is not part of it.
+        for host in [
+            "169.254.169.254",
+            "169.254.170.2",
+            "::ffff:169.254.169.254",
+            "::169.254.169.254",
+        ] {
+            let err = allow
+                .check_host(host, 80)
+                .await
+                .expect_err("{host} must be denied whatever the private-egress setting");
+            assert!(err.contains("metadata"), "{host}: {err}");
+        }
     }
 
     /// 5.13.5.4 Delete and Reload: on reload the broker re-downloads BEFORE
@@ -1505,6 +1602,51 @@ mod tests {
         assert!(
             list.iter().any(|u| u.url.ends_with("/4099.jsonld")),
             "the most recently used entry must survive eviction"
+        );
+    }
+
+    /// Name resolution is on the request path and outside every client
+    /// timeout: a resolver that never answers must not hold the caller, and
+    /// the unanswered lookup must DENY rather than let the fetch through.
+    #[tokio::test]
+    async fn unanswered_dns_lookup_denies_instead_of_hanging() {
+        let deny = EgressPolicy {
+            allow_private: false,
+        };
+        let started = std::time::Instant::now();
+        let err = deny
+            .check_host_within(
+                "ctx.example.invalid",
+                443,
+                std::time::Duration::from_millis(0),
+            )
+            .await
+            .expect_err("an unanswered lookup must be denied, never allowed");
+        assert!(err.contains("timed out"), "denial names the timeout: {err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the caller must not wait on the resolver"
+        );
+    }
+
+    /// The fetch cache is bounded in BYTES, not just in entries: one entry
+    /// may be MAX_CONTEXT_BYTES, so an entry-only bound is no memory bound.
+    #[tokio::test]
+    async fn fetch_cache_holds_a_byte_budget() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let mib = 1024 * 1024;
+        let doc = Value::String("x".repeat(mib));
+        for i in 0..40 {
+            loader
+                .put_local(format!("https://ctx.example/{i}.jsonld"), doc.clone())
+                .await;
+        }
+        let entries = loader.cache_stats()["fetched"].as_u64().expect("count");
+        assert!(
+            entries <= MAX_FETCHED_CACHE_BYTES / mib as u64,
+            "byte budget breached: {entries} entries of 1 MiB"
         );
     }
 

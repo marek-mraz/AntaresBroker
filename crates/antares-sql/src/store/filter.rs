@@ -182,8 +182,183 @@ pub struct TemporalOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const NOW: &str = "2026-08-08T12:00:00.000Z";
+
+    /// Defaults push nothing down: a filter built with `..Default::default()`
+    /// must not silently add a predicate, and its expander is the identity
+    /// (terms stay terms until a request context replaces it).
+    #[test]
+    fn entity_filter_default_pushes_nothing_down() {
+        let f = EntityFilter::default();
+        assert!(f.ids.is_none());
+        assert!(f.types.is_none());
+        assert!(f.attrs.is_none());
+        assert!(f.q.is_none());
+        assert!(f.scope_q.is_none());
+        assert!(f.geo.is_none());
+        assert!(f.page.is_none(), "no LIMIT until the caller proves decided");
+        assert!(f.keep_attrs.is_none());
+        assert!(f.drop_attrs.is_none());
+        assert_eq!((f.expand)("Vehicle"), "Vehicle");
+    }
+
+    /// The default lastN ordering key is `observedAt` (4.11); a different
+    /// default would silently rank instances by another time property.
+    #[test]
+    fn temporal_filter_default_orders_by_observed_at() {
+        let f = TemporalFilter::default();
+        assert_eq!(f.timeproperty, "observedAt");
+        assert!(f.ids.is_none());
+        assert!(f.types.is_none());
+        assert!(f.attrs.is_none());
+        assert!(f.range.is_none(), "no window means no instance pruning");
+        assert!(f.last_n.is_none());
+        assert!(f.page.is_none());
+        assert!(f.q.is_none());
+        assert!(f.geo.is_none());
+        assert_eq!((f.expand)("speed"), "speed");
+    }
+
+    /// 4.22: expiry has PASSED only when the stamp lies strictly before now —
+    /// the same strictness as the `expires_at < now()` reaping predicate, so a
+    /// read and the sweep never disagree at the boundary instant.
+    #[test]
+    fn expiry_exactly_at_now_has_not_passed() {
+        assert!(!expired_at(&json!({ "expiresAt": NOW }), NOW));
+        // same instant, coarser spelling: still not expired
+        assert!(!expired_at(
+            &json!({"expiresAt": "2026-08-08T12:00:00Z"}),
+            NOW
+        ));
+        // one millisecond earlier is
+        assert!(expired_at(
+            &json!({"expiresAt": "2026-08-08T11:59:59.999Z"}),
+            NOW
+        ));
+    }
+
+    /// 4.6.3 DateTime accepts a comma as the fraction separator, so a stored
+    /// `expiresAt` may carry one. Judging it by bytes puts ',' (0x2C) before
+    /// '.' (0x2E) and calls a still-live stamp expired — the comparison must
+    /// stay on instants.
+    #[test]
+    fn comma_fraction_expiry_is_judged_by_instant() {
+        assert!(
+            !expired_at(&json!({"expiresAt": "2026-08-08T12:00:00,500Z"}), NOW),
+            "half a second in the future is not expired"
+        );
+        assert!(expired_at(
+            &json!({"expiresAt": "2026-08-08T11:59:59,999Z"}),
+            NOW
+        ));
+    }
+
+    /// A comma-fraction expiry still in the future must not cost the instance
+    /// its place in the document.
+    #[test]
+    fn a_live_comma_fraction_instance_is_not_stripped() {
+        let mut doc = json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [{"value": 1, "instanceId": "i1",
+                                "expiresAt": "2026-08-08T12:00:00,500Z"}]
+        });
+        assert!(!strip_expired(&mut doc, NOW));
+        assert_eq!(doc["https://a/attr"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// A non-UTC offset is judged by instant: 13:30+02:00 is 11:30Z, expired
+    /// against a 12:00Z now even though its bytes sort after it.
+    #[test]
+    fn offset_expiry_is_judged_by_instant_not_bytes() {
+        assert!(expired_at(
+            &json!({"expiresAt": "2026-08-08T13:30:00+02:00"}),
+            NOW
+        ));
+        assert!(!expired_at(
+            &json!({"expiresAt": "2026-08-08T11:30:00-02:00"}),
+            NOW
+        ));
+    }
+
+    /// Hostile `expiresAt` shapes decide without panicking: a non-string is no
+    /// expiry at all, an unparseable string falls back to the byte compare.
+    #[test]
+    fn a_hostile_expiry_never_panics() {
+        for v in [
+            json!({ "expiresAt": 1 }),
+            json!({ "expiresAt": null }),
+            json!({"expiresAt": {"@value": "2020-01-01T00:00:00Z"}}),
+            json!({ "expiresAt": ["2020-01-01T00:00:00Z"] }),
+            json!({ "expiresAt": true }),
+            json!({}),
+        ] {
+            assert!(!expired_at(&v, NOW), "a non-string expiresAt is no expiry");
+        }
+        // unparseable strings stay decidable through the byte fallback
+        assert!(expired_at(&json!({ "expiresAt": "" }), NOW));
+        assert!(expired_at(
+            &json!({"expiresAt": "2026-08-08T11:00:00"}),
+            NOW
+        ));
+        assert!(!expired_at(
+            &json!({"expiresAt": "9999-99-99T99:99:99Z"}),
+            NOW
+        ));
+    }
+
+    /// Multi-instance (4.5.5) attribute: the expired instance must be gone
+    /// from the document entirely, not merely reordered or emptied.
+    #[test]
+    fn an_expired_instance_never_survives_a_multi_instance_attribute() {
+        let mut doc = json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [
+                {"value": 1, "instanceId": "i1", "datasetId": "urn:d:1"},
+                {"value": 2, "instanceId": "i2", "datasetId": "urn:d:2",
+                 "expiresAt": "2026-08-08T11:00:00Z"}
+            ]
+        });
+        assert!(!strip_expired(&mut doc, NOW));
+        let text = serde_json::to_string(&doc).expect("serialize");
+        assert!(
+            !text.contains("i2"),
+            "expired instance still present: {text}"
+        );
+        assert!(!text.contains("urn:d:2"));
+        assert!(text.contains("i1"));
+    }
+
+    /// Only attribute arrays are instance-filtered: an already-empty array is
+    /// left in place (it lost nothing), and a doc that is not an object is
+    /// simply not expired.
+    #[test]
+    fn strip_expired_leaves_untouched_what_it_must_not_remove() {
+        let mut doc = json!({
+            "id": "urn:x", "type": ["T"], "scope": ["/a"],
+            "https://a/empty": []
+        });
+        assert!(!strip_expired(&mut doc, NOW));
+        assert!(doc.get("https://a/empty").is_some(), "empty array kept");
+        assert_eq!(doc["scope"], json!(["/a"]));
+
+        let mut not_an_object = json!(["urn:x"]);
+        assert!(!strip_expired(&mut not_an_object, NOW));
+        assert_eq!(not_an_object, json!(["urn:x"]));
+    }
+
+    /// An entity expiry outranks the instance pass: the caller drops the whole
+    /// document, so a live instance inside it must never reach a response.
+    #[test]
+    fn an_expired_entity_is_dropped_before_any_instance_survives() {
+        let mut doc = json!({
+            "id": "urn:x", "type": ["T"], "expiresAt": "2026-08-08T11:00:00Z",
+            "https://a/attr": [{"value": 1, "instanceId": "i1",
+                                "expiresAt": "2999-01-01T00:00:00Z"}]
+        });
+        assert!(strip_expired(&mut doc, NOW));
+    }
 
     #[test]
     fn expired_entity_is_dropped_whole() {

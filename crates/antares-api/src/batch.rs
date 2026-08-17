@@ -147,6 +147,7 @@ fn err_entry(id: Option<&str>, e: &NgsiError) -> Value {
 /// error results merge into E).
 fn err_remote(id: Option<&str>, status: u16, detail: &str) -> Value {
     let etype = match status {
+        400 => "BadRequestData",
         404 => "ResourceNotFound",
         409 if detail.contains("does not accept") => "Conflict",
         409 => "AlreadyExists",
@@ -175,9 +176,14 @@ fn merge_remote_batch(
     ok: &mut Vec<(String, bool)>,
     err: &mut Vec<Value>,
 ) {
+    // Only the Entities this broker forwarded may appear in the client's
+    // S/E arrays: an id the Context Source names but we never sent is not
+    // part of this request's outcome, and the source's own error text is
+    // rebuilt from its status rather than relayed verbatim.
+    let mine = |id: &str| sent_ids.iter().any(|s| s == id);
     match (status, body) {
         (200..=206, Value::Array(a)) => {
-            for id in a.iter().filter_map(Value::as_str) {
+            for id in a.iter().filter_map(Value::as_str).filter(|i| mine(i)) {
                 ok.push((id.to_owned(), created));
             }
         }
@@ -188,12 +194,30 @@ fn merge_remote_batch(
         }
         (207, Value::Object(o)) => {
             if let Some(Value::Array(a)) = o.get("success") {
-                for id in a.iter().filter_map(Value::as_str) {
+                for id in a.iter().filter_map(Value::as_str).filter(|i| mine(i)) {
                     ok.push((id.to_owned(), created));
                 }
             }
             if let Some(Value::Array(a)) = o.get("errors") {
-                err.extend(a.iter().cloned());
+                for e in a {
+                    let Some(id) = e
+                        .get("entityId")
+                        .and_then(Value::as_str)
+                        .filter(|i| mine(i))
+                    else {
+                        continue;
+                    };
+                    let remote = e
+                        .get("error")
+                        .and_then(|p| p.get("status"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(u64::from(status)) as u16;
+                    err.push(err_remote(
+                        Some(id),
+                        remote,
+                        "forwarded batch operation reported an error for this entity",
+                    ));
+                }
             }
         }
         _ => {
@@ -285,8 +309,17 @@ async fn batch_write(
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     check_params(params, &["options", "local"])?;
-    let update_mode = params.get("options").map(String::as_str); // replace|update for upsert; noOverwrite|overwrite for update
-    let no_overwrite = update_mode == Some("noOverwrite");
+    // 6.3.7: `options` is a comma separated list of strings, so a mode is
+    // selected when it appears as ONE MEMBER of the list — never by
+    // whole-string equality. 6.15.3.1 replace (default) | update for
+    // upsert; 6.16.3.1 noOverwrite for update.
+    let has_option = |name: &str| {
+        params
+            .get("options")
+            .is_some_and(|o| o.split(',').any(|s| s.trim() == name))
+    };
+    let update_mode = has_option("update");
+    let no_overwrite = has_option("noOverwrite");
     let items = parse_batch(st, headers, body).await?;
     // distributed batch (4.3.6): one forwarded request per matching source
     let mut fwd_items: Vec<(
@@ -439,7 +472,7 @@ async fn batch_write(
                 // turn out absent (or vanish mid-flight) fall through to the
                 // replace batch — never a silent success (TOCTOU fix).
                 let mut replaces: Vec<(String, Value)> = Vec::new();
-                if update_mode == Some("update") {
+                if update_mode {
                     let ids: Vec<String> = round.iter().map(|(id, _)| id.clone()).collect();
                     let docs: HashMap<&str, &Value> =
                         round.iter().map(|(id, d)| (id.as_str(), d)).collect();
@@ -610,7 +643,7 @@ async fn batch_write(
         if let Some(o) = params.get("options") {
             query.push(("options".into(), o.clone()));
         }
-        let replace_mode = update_mode != Some("update");
+        let replace_mode = !update_mode;
         let mut remote_ok: Vec<(String, bool)> = Vec::new();
         let mut remote_err: Vec<Value> = Vec::new();
         for reg in &fed_regs {
@@ -1363,6 +1396,168 @@ pub(crate) fn query_doc_params(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        crate::router(AppState::new("antares-test".into()))
+    }
+
+    async fn post(app: &Router, uri: &str, body: Value) -> Response {
+        let s = body.to_string();
+        app.clone()
+            .oneshot(
+                Request::post(uri)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", s.len())
+                    .body(Body::from(s))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp")
+    }
+
+    async fn get_entity(app: &Router, id: &str) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/ngsi-ld/v1/entities/{id}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK, "entity {id} readable");
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// 6.3.7: `options` is a comma separated list of strings, so the
+    /// 6.15.3.1 "update" upsert mode applies whenever it is one member of
+    /// the list — existing Entity content is updated, not replaced.
+    #[tokio::test]
+    async fn upsert_update_mode_in_option_list_merges() {
+        let app = app();
+        let id = "urn:ngsi-ld:Building:optlist-upsert";
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/create",
+            json!([{"id": id, "type": "Building",
+                    "speed": {"type": "Property", "value": 1},
+                    "brand": {"type": "Property", "value": "acme"}}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/upsert?options=update,sysAttrs",
+            json!([{"id": id, "type": "Building",
+                    "speed": {"type": "Property", "value": 2}}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let doc = get_entity(&app, id).await;
+        assert_eq!(doc["speed"]["value"], 2, "the payload attribute is applied");
+        // update mode must NOT destroy attributes absent from the payload
+        assert_eq!(
+            doc["brand"]["value"], "acme",
+            "update mode keeps attributes not in the payload: {doc}"
+        );
+    }
+
+    /// 6.3.7 + 6.16.3.1: "noOverwrite" as one member of the `options` list
+    /// disables Attribute overwrite for Batch Entity Update (5.6.9).
+    #[tokio::test]
+    async fn batch_update_no_overwrite_in_option_list_is_honoured() {
+        let app = app();
+        let id = "urn:ngsi-ld:Building:optlist-update";
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/create",
+            json!([{"id": id, "type": "Building",
+                    "speed": {"type": "Property", "value": 1}}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/update?options=noOverwrite,sysAttrs",
+            json!([{"id": id, "type": "Building",
+                    "speed": {"type": "Property", "value": 2},
+                    "brand": {"type": "Property", "value": "acme"}}]),
+        )
+        .await;
+        assert!(
+            resp.status() == StatusCode::NO_CONTENT || resp.status() == StatusCode::MULTI_STATUS,
+            "batch update answered {}",
+            resp.status()
+        );
+        let doc = get_entity(&app, id).await;
+        assert_eq!(
+            doc["speed"]["value"], 1,
+            "noOverwrite leaves the existing instance alone: {doc}"
+        );
+        assert_ne!(doc["speed"]["value"], 2, "the payload must not overwrite");
+        assert_eq!(doc["brand"]["value"], "acme", "new attributes are appended");
+    }
+
+    /// 5.6.7.4: what merges into the client's S and E arrays is the outcome
+    /// of the Entities this broker forwarded. Ids a Context Source invents
+    /// are dropped, and its error text is never relayed verbatim.
+    #[test]
+    fn remote_batch_results_are_confined_to_forwarded_ids() {
+        let sent = vec!["urn:ngsi-ld:Building:mine".to_owned()];
+        let (mut ok, mut err) = (Vec::new(), Vec::new());
+        merge_remote_batch(
+            207,
+            &json!({
+                "success": ["urn:ngsi-ld:Building:mine", "urn:ngsi-ld:Secret:peer"],
+                "errors": [
+                    {"entityId": "urn:ngsi-ld:Building:mine",
+                     "error": {"status": 404, "detail": "row 42 of table peer_secrets"}},
+                    {"entityId": "urn:ngsi-ld:Secret:other",
+                     "error": {"status": 409, "detail": "peer internals"}}
+                ]
+            }),
+            &sent,
+            false,
+            &mut ok,
+            &mut err,
+        );
+        assert_eq!(
+            ok,
+            vec![("urn:ngsi-ld:Building:mine".to_owned(), false)],
+            "only forwarded ids reach S"
+        );
+        assert_eq!(err.len(), 1, "only forwarded ids reach E: {err:?}");
+        assert_eq!(err[0]["entityId"], "urn:ngsi-ld:Building:mine");
+        let dump = Value::Array(err.clone()).to_string();
+        assert!(
+            !dump.contains("Secret") && !dump.contains("peer"),
+            "peer ids and error text must not be relayed: {dump}"
+        );
+        assert_eq!(err[0]["error"]["status"], 404, "the remote status travels");
+        // a 2xx id list is confined the same way
+        let (mut ok, mut err) = (Vec::new(), Vec::new());
+        merge_remote_batch(
+            201,
+            &json!(["urn:ngsi-ld:Building:mine", "urn:ngsi-ld:Secret:peer"]),
+            &sent,
+            true,
+            &mut ok,
+            &mut err,
+        );
+        assert_eq!(ok, vec![("urn:ngsi-ld:Building:mine".to_owned(), true)]);
+        assert!(err.is_empty());
+    }
 }
 
 pub async fn batch_query(

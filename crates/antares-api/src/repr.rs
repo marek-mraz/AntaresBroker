@@ -143,8 +143,15 @@ pub struct ProjNode {
 /// Parse + validate a pick=/omit= value (4.21) into a projection tree.
 pub(crate) fn parse_projection(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, NgsiError> {
     let bad = || NgsiError::BadRequestData(format!("invalid attribute projection {s:?} (4.21)"));
+    // Each `{…}` level is one Linked Entity hop (5.7.1.4), so a selection
+    // deeper than the joinLevel ceiling can never be satisfied. Bounding it
+    // here, before the recursive descent below, is what keeps the recursion
+    // finite: pick=/omit= reach this parser as plain STRINGS — from the URI,
+    // or from inside a query body, where the JSON nesting wall never sees
+    // their braces.
     if s.is_empty()
         || s.matches('{').count() != s.matches('}').count()
+        || crate::bounds::json_depth(s.as_bytes()) > crate::bounds::MAX_JOIN_LEVEL
         || !s
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_,.:{}#/%-+@|".contains(c))
@@ -624,5 +631,332 @@ mod clause_4_21 {
                 "{bad:?} must be rejected"
             );
         }
+    }
+
+    /// Each `{…}` level of a projection is one Linked Entity hop (5.7.1.4),
+    /// so a selection deeper than the joinLevel ceiling can never be
+    /// satisfied. The depth is bounded BEFORE the recursive descent parses
+    /// it: pick= arrives as a plain string inside a query body, where the
+    /// JSON nesting wall never sees its braces.
+    #[test]
+    fn projection_nesting_is_bounded_before_the_parser_recurses() {
+        let ctx = Loader::new().core();
+        let cap = crate::bounds::MAX_JOIN_LEVEL;
+        let nested = |n: usize| "a{".repeat(n) + "b" + &"}".repeat(n);
+        // the body path can carry a projection far past any stack budget
+        assert!(
+            parse_projection(&nested(200_000), &ctx).is_err(),
+            "a body-sized projection must be rejected, not recursed into"
+        );
+        assert!(parse_projection(&nested(cap), &ctx).is_ok(), "at the cap");
+        assert!(
+            parse_projection(&nested(cap + 1), &ctx).is_err(),
+            "one level over the cap must be rejected"
+        );
+    }
+
+    /// 5.7.1.4: proj_depth reports the hops a projection implies, so the
+    /// joinLevel comparison upstream is made against the deepest branch.
+    #[test]
+    fn projection_depth_counts_the_deepest_branch() {
+        let ctx = Loader::new().core();
+        let d = |s: &str| proj_depth(&parse_projection(s, &ctx).expect("parse"));
+        assert_eq!(d("a,b"), 0, "a flat selection implies no hop");
+        assert_eq!(d("a{b}"), 1);
+        assert_eq!(d("a,b{c{d}}"), 2, "the deepest branch wins");
+    }
+}
+
+#[cfg(test)]
+mod clause_6_3_7 {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 6.3.7: an unknown options or format value is not silently ignored.
+    #[test]
+    fn unknown_options_and_format_values_are_rejected() {
+        let ctx = Loader::new().core();
+        for p in [
+            params(&[("options", "sysattrs")]),
+            params(&[("options", "keyValues,bogus")]),
+            params(&[("options", "")]),
+            params(&[("format", "verbose")]),
+            params(&[("format", "KeyValues")]),
+        ] {
+            let e = parse_repr(&p, &ctx).expect_err("must be rejected");
+            assert!(
+                matches!(e, NgsiError::InvalidRequest(_)),
+                "unsupported representation value is InvalidRequest, got {e:?}"
+            );
+        }
+    }
+
+    /// 6.3.7: format wins over options when the two disagree, and keyValues
+    /// is the older spelling of simplified.
+    #[test]
+    fn format_wins_over_options_on_conflict() {
+        let ctx = Loader::new().core();
+        let r = parse_repr(
+            &params(&[("options", "concise"), ("format", "simplified")]),
+            &ctx,
+        )
+        .expect("parse");
+        assert!(r.key_values, "format=simplified wins");
+        assert!(!r.concise, "options=concise must NOT survive the conflict");
+        let r = parse_repr(
+            &params(&[("options", "keyValues"), ("format", "normalized")]),
+            &ctx,
+        )
+        .expect("parse");
+        assert!(!r.key_values && !r.concise, "normalized is neither");
+        let r = parse_repr(&params(&[("options", "sysAttrs,keyValues")]), &ctx).expect("parse");
+        assert!(r.sys_attrs && r.key_values);
+    }
+
+    /// 4.21: pick, omit and attrs are mutually exclusive — any pair is a 400,
+    /// each one alone is fine.
+    #[test]
+    fn pick_omit_and_attrs_cannot_be_combined() {
+        let ctx = Loader::new().core();
+        for p in [
+            params(&[("pick", "a"), ("omit", "b")]),
+            params(&[("pick", "a"), ("attrs", "b")]),
+            params(&[("omit", "a"), ("attrs", "b")]),
+            params(&[("pick", "a"), ("omit", "b"), ("attrs", "c")]),
+        ] {
+            let e = parse_repr(&p, &ctx).expect_err("must be rejected");
+            assert!(matches!(e, NgsiError::BadRequestData(_)), "got {e:?}");
+        }
+        assert!(parse_repr(&params(&[("pick", "a")]), &ctx).is_ok());
+        assert!(parse_repr(&params(&[("attrs", "a")]), &ctx).is_ok());
+    }
+
+    /// attrs= selects ATTRIBUTES: an entity meta member or @context is not an
+    /// attribute name, and an empty member is a grammar violation.
+    #[test]
+    fn attrs_rejects_entity_members_and_empty_names() {
+        let ctx = Loader::new().core();
+        for bad in ["id", "type", "scope", "createdAt", "@context", "a,,b", ""] {
+            assert!(
+                parse_repr(&params(&[("attrs", bad)]), &ctx).is_err(),
+                "attrs={bad:?} must be rejected"
+            );
+        }
+        let r = parse_repr(&params(&[("attrs", "temperature, humidity")]), &ctx).expect("parse");
+        let list = r.attrs.expect("attrs");
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|a| a.contains("://")), "names are expanded");
+    }
+
+    fn entity() -> Value {
+        json!({
+            "id": "urn:ngsi-ld:E:1",
+            "type": "T",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "modifiedAt": "2026-01-02T00:00:00Z",
+            "https://example.org/temperature": [
+                {"type": "Property", "value": 21,
+                 "createdAt": "2026-01-01T00:00:00Z",
+                 "https://example.org/accuracy": [{"type": "Property", "value": 0.5}]},
+                {"type": "Property", "value": 9, "datasetId": "urn:ds:2"}
+            ]
+        })
+    }
+
+    /// 6.3.11 Table 6.3.11-1: createdAt/modifiedAt are system attributes —
+    /// they must be absent from the default representation, on the entity AND
+    /// on every attribute instance, and present with options=sysAttrs.
+    #[test]
+    fn system_attributes_stay_hidden_without_sysattrs() {
+        let plain = apply(&entity(), &Repr::default());
+        assert!(plain.get("createdAt").is_none(), "entity createdAt leaked");
+        assert!(
+            plain.get("modifiedAt").is_none(),
+            "entity modifiedAt leaked"
+        );
+        assert!(
+            plain["https://example.org/temperature"][0]
+                .get("createdAt")
+                .is_none(),
+            "instance createdAt leaked"
+        );
+        assert_eq!(plain["id"], "urn:ngsi-ld:E:1");
+        let sys = apply(
+            &entity(),
+            &Repr {
+                sys_attrs: true,
+                ..Repr::default()
+            },
+        );
+        assert_eq!(sys["createdAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(
+            sys["https://example.org/temperature"][0]["createdAt"],
+            "2026-01-01T00:00:00Z"
+        );
+    }
+
+    /// 4.5.4 concise: the type member is dropped and an instance left with a
+    /// lone value collapses to that bare value — sub-attributes included.
+    #[test]
+    fn concise_drops_type_and_collapses_bare_values() {
+        let out = apply(
+            &entity(),
+            &Repr {
+                concise: true,
+                ..Repr::default()
+            },
+        );
+        let inst = &out["https://example.org/temperature"][0];
+        assert!(inst.get("type").is_none(), "concise keeps no type member");
+        assert_eq!(
+            inst["https://example.org/accuracy"],
+            json!([0.5]),
+            "a value-only sub-attribute collapses to the bare value"
+        );
+        // an instance carrying more than value keeps the object form
+        let d = apply(
+            &json!({"https://example.org/a": [{"type": "Property", "value": 1, "unitCode": "CEL"}]}),
+            &Repr {
+                concise: true,
+                ..Repr::default()
+            },
+        );
+        assert_eq!(d["https://example.org/a"][0]["unitCode"], "CEL");
+        assert_eq!(d["https://example.org/a"][0]["value"], 1);
+    }
+
+    /// 4.5.4: with several instances the simplified form is a dataset map
+    /// keyed by datasetId, "@none" standing for the default instance — a bare
+    /// array of values would lose which instance is which.
+    #[test]
+    fn simplified_multi_instance_uses_the_dataset_map() {
+        let out = apply(
+            &entity(),
+            &Repr {
+                key_values: true,
+                ..Repr::default()
+            },
+        );
+        let t = &out["https://example.org/temperature"];
+        assert!(t.get("dataset").is_some(), "multi-instance needs the map");
+        assert_eq!(t["dataset"]["@none"], 21);
+        assert_eq!(t["dataset"]["urn:ds:2"], 9);
+        assert!(t.as_array().is_none(), "not a bare array");
+        // one instance stays a bare value
+        let one = apply(
+            &json!({"https://example.org/a": [{"type": "Property", "value": 1}]}),
+            &Repr {
+                key_values: true,
+                ..Repr::default()
+            },
+        );
+        assert_eq!(one["https://example.org/a"], json!(1));
+    }
+
+    /// datasetId= selects instances; "@none" selects the default one. An
+    /// attribute left with no surviving instance is absent, not empty.
+    #[test]
+    fn dataset_id_filter_selects_instances_and_drops_empty_attributes() {
+        let sel = |ids: &[&str]| {
+            apply(
+                &entity(),
+                &Repr {
+                    dataset_id: Some(ids.iter().map(|s| (*s).to_owned()).collect()),
+                    ..Repr::default()
+                },
+            )
+        };
+        let out = sel(&["urn:ds:2"]);
+        let insts = out["https://example.org/temperature"]
+            .as_array()
+            .expect("array");
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0]["value"], 9, "the default instance must be gone");
+        let out = sel(&["@none"]);
+        let insts = out["https://example.org/temperature"]
+            .as_array()
+            .expect("array");
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0]["value"], 21);
+        let out = sel(&["urn:ds:absent"]);
+        assert!(
+            out.get("https://example.org/temperature").is_none(),
+            "an attribute with no matching instance is omitted entirely"
+        );
+        assert_eq!(out["id"], "urn:ngsi-ld:E:1", "entity members survive");
+    }
+
+    /// The reserved members of an attribute instance carry values, not
+    /// sub-attributes: an array-valued `value` (or objectList, previousValue…)
+    /// must be passed through untouched, never walked as a list of instances.
+    #[test]
+    fn array_valued_reserved_members_are_not_sub_attributes() {
+        let doc = json!({"https://example.org/a": [{
+            "type": "ListProperty",
+            "valueList": [1, 2, 3],
+            "value": [{"type": "Property", "value": 7}],
+            "previousValue": [9],
+            "https://example.org/note": [{"type": "Property", "value": "sub"}]
+        }]});
+        let out = apply(&doc, &Repr::default());
+        let inst = &out["https://example.org/a"][0];
+        assert_eq!(inst["valueList"], json!([1, 2, 3]));
+        assert_eq!(
+            inst["value"],
+            json!([{"type": "Property", "value": 7}]),
+            "an array value is data, not an instance list to transform"
+        );
+        assert_eq!(inst["previousValue"], json!([9]));
+        // a genuine sub-attribute IS walked
+        assert_eq!(inst["https://example.org/note"][0]["value"], "sub");
+        // …and the walk applies the representation to it
+        let sys = apply(
+            &json!({"https://example.org/a": [{"type": "Property", "value": 1,
+                "https://example.org/note": [{"type": "Property", "value": "s",
+                    "modifiedAt": "2026-01-01T00:00:00Z"}]}]}),
+            &Repr::default(),
+        );
+        assert!(
+            sys["https://example.org/a"][0]["https://example.org/note"][0]
+                .get("modifiedAt")
+                .is_none(),
+            "the sysAttrs gate reaches sub-attributes"
+        );
+    }
+
+    /// 4.21: pick constrains core members too — an entity member not picked
+    /// does not survive; omit only drops the heads it names outright.
+    #[test]
+    fn pick_is_strict_over_core_members_and_omit_is_not() {
+        let ctx = Loader::new().core();
+        let picked = apply(
+            &entity(),
+            &Repr {
+                pick: Some(parse_projection("id", &ctx).expect("pick")),
+                ..Repr::default()
+            },
+        );
+        assert_eq!(picked["id"], "urn:ngsi-ld:E:1");
+        assert!(picked.get("type").is_none(), "type was not picked");
+        assert!(
+            picked.get("https://example.org/temperature").is_none(),
+            "an unpicked attribute must not survive"
+        );
+        let omitted = apply(
+            &entity(),
+            &Repr {
+                omit: Some(parse_projection("scope", &ctx).expect("omit")),
+                ..Repr::default()
+            },
+        );
+        assert_eq!(omitted["type"], "T", "omit leaves the rest of the entity");
     }
 }

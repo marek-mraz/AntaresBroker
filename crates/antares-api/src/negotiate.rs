@@ -44,7 +44,11 @@ pub(crate) fn percent_decode(input: &[u8]) -> String {
     let mut i = 0;
     while i < input.len() {
         if input[i] == b'%' && i + 2 < input.len() {
-            let hex = std::str::from_utf8(&input[i + 1..i + 3]).ok();
+            // from_str_radix accepts a leading sign, so "%+1" would decode as
+            // 0x01. RFC 3986 clause 2.1 admits two hex digits and nothing else.
+            let hex = std::str::from_utf8(&input[i + 1..i + 3])
+                .ok()
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
             if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(b);
                 i += 3;
@@ -128,83 +132,130 @@ pub enum Accept {
     GeoJson,
 }
 
+/// One pass of RFC 9110 clause 5.3.2 over the representations 6.3.4 offers
+/// for this operation. A media type takes its weight from the MOST SPECIFIC
+/// range that matches it, so `application/json;q=0, */*` refuses json and
+/// still offers the rest; `q=0` removes a representation from the offered set
+/// rather than merely ranking it last.
+fn negotiate(
+    headers: &HeaderMap,
+    offers: &[(&str, Accept)],
+    available: &'static [&'static str],
+) -> ApiResult<Accept> {
+    let Some(raw) = headers.get(header::ACCEPT) else {
+        return Ok(Accept::Json);
+    };
+    let ranges: Vec<(String, f32)> = raw
+        .to_str()
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|part| {
+            let mut segs = part.split(';');
+            let mt = segs.next()?.trim().to_ascii_lowercase();
+            if mt.is_empty() {
+                return None;
+            }
+            let mut q = 1.0f32;
+            for p in segs {
+                if let Some(v) = p.trim().strip_prefix("q=") {
+                    // A malformed or non-finite weight is not one of the HTTP
+                    // Accept processing rules, so it must not decide the
+                    // outcome — the range keeps the default weight.
+                    q = v
+                        .parse()
+                        .ok()
+                        .filter(|f: &f32| f.is_finite())
+                        .unwrap_or(1.0);
+                }
+            }
+            Some((mt, q))
+        })
+        .collect();
+    // 6.3.4: "the order of the list above is significant … the first one of
+    // the list shall be selected, unless amended by the HTTP Accept header
+    // processing rules, e.g. the presence of a q parameter". The weight
+    // decides first; the offer order is the tie-break, never the order the
+    // client happened to write its tokens in.
+    let mut best: Option<(f32, Accept)> = None;
+    for (mt, kind) in offers {
+        let mut matched: Option<(u8, f32)> = None;
+        for (range, q) in &ranges {
+            let spec = match range.as_str() {
+                r if r == *mt => 2u8,
+                "application/*" => 1,
+                "*/*" => 0,
+                _ => continue,
+            };
+            let better = match matched {
+                None => true,
+                Some((s, mq)) => spec > s || (spec == s && *q > mq),
+            };
+            if better {
+                matched = Some((spec, *q));
+            }
+        }
+        let Some((_, q)) = matched.filter(|(_, q)| *q > 0.0) else {
+            continue;
+        };
+        if match best {
+            None => true,
+            Some((bq, _)) => q > bq,
+        } {
+            best = Some((q, *kind));
+        }
+    }
+    match best {
+        Some((_, kind)) => Ok(kind),
+        None => Err(ApiError::NotAcceptable(available)),
+    }
+}
+
 /// Accept negotiation (6.3.4): json, ld+json, geo+json, */*; 406 otherwise.
 /// Absent Accept ⇒ application/json. geo+json is only valid on
 /// Retrieve/Query Entities (6.3.15) — everywhere else it is a 406.
 pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
-    let Some(raw) = headers.get(header::ACCEPT) else {
-        return Ok(Accept::Json);
-    };
-    let raw = raw.to_str().unwrap_or("");
-    // (q, specificity, 6.3.4 list rank, kind)
-    let mut best: Option<(f32, u8, u8, Accept)> = None;
-    for part in raw.split(',') {
-        let mut segs = part.split(';');
-        let mt = segs.next().unwrap_or("").trim().to_ascii_lowercase();
-        let mut q = 1.0f32;
-        for p in segs {
-            if let Some(v) = p.trim().strip_prefix("q=") {
-                q = v.parse().unwrap_or(1.0);
-            }
-        }
-        // 6.3.4: the option list is json > ld+json > geo+json and "the order of
-        // the list above is significant … the first one of the list shall be
-        // selected, unless amended by the HTTP Accept header processing rules,
-        // e.g. the presence of a q parameter". So q wins first, then
-        // specificity, and list rank is the final tie-break — never the order
-        // the client happened to write the tokens in.
-        let cand = match mt.as_str() {
-            "application/json" => Some((2, 0, Accept::Json)),
-            "application/ld+json" => Some((2, 1, Accept::LdJson)),
-            "application/geo+json" => Some((2, 2, Accept::GeoJson)),
-            "application/*" => Some((1, 0, Accept::Json)),
-            "*/*" => Some((0, 0, Accept::Json)),
-            _ => None,
-        };
-        if let Some((spec, rank, kind)) = cand {
-            let better = match &best {
-                None => true,
-                Some((bq, bspec, brank, _)) => {
-                    q > *bq || (q == *bq && (spec > *bspec || (spec == *bspec && rank < *brank)))
-                }
-            };
-            if better {
-                best = Some((q, spec, rank, kind));
-            }
-        }
-    }
-    match best {
-        Some((q, _, _, kind)) if q > 0.0 => Ok(kind),
-        _ => Err(ApiError::NotAcceptable(&[
+    negotiate(
+        headers,
+        &[
+            ("application/json", Accept::Json),
+            ("application/ld+json", Accept::LdJson),
+            ("application/geo+json", Accept::GeoJson),
+        ],
+        &[
             "application/json",
             "application/ld+json",
             "application/geo+json",
-        ])),
-    }
+        ],
+    )
 }
 
 /// Accept negotiation for every operation that is NOT Retrieve/Query
-/// Entities: application/geo+json ⇒ 406 (6.3.15).
+/// Entities: geo+json is not among the representations offered (6.3.15). It
+/// is left out of the offered set rather than negotiated and then refused, so
+/// a client that weights geo+json highest but also accepts ld+json is served
+/// ld+json instead of a 406.
 pub fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
-    match parse_accept_geo(headers)? {
-        Accept::GeoJson => Err(ApiError::NotAcceptable(&[
-            "application/json",
-            "application/ld+json",
-        ])),
-        other => Ok(other),
-    }
+    negotiate(
+        headers,
+        &[
+            ("application/json", Accept::Json),
+            ("application/ld+json", Accept::LdJson),
+        ],
+        &["application/json", "application/ld+json"],
+    )
 }
 
 /// 6.3.6: "Prefer: body=json" on a GeoJSON response — the @context is
 /// conveyed only by the Link header and omitted from the payload body.
 pub fn prefer_body_json(headers: &HeaderMap) -> bool {
+    // RFC 9110 clause 5.3: repeated field lines carry the same meaning as one
+    // comma-separated list, so every Prefer line is searched.
     headers
-        .get("Prefer")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|p| {
-            p.split(',')
-                .any(|t| t.trim().eq_ignore_ascii_case("body=json"))
-        })
+        .get_all("Prefer")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|p| p.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case("body=json"))
 }
 
 /// 6.3.6: build a payload-carrying response honouring Prefer on GeoJSON —
@@ -867,6 +918,549 @@ mod clause_5_5_3 {
         assert_eq!(doc["title"], "ResourceNotFound");
         assert!(doc["detail"].as_str().is_some_and(|d| d.contains("urn:x")));
         assert_eq!(doc["status"], 404);
+    }
+}
+
+/// 6.3.4/6.3.5/6.3.14 negotiation surface: header parsing on hostile input,
+/// the shape of what goes back on the wire, and what must NOT be in it.
+#[cfg(test)]
+mod negotiation {
+    use super::*;
+    use axum::extract::FromRequestParts;
+    use axum::http::HeaderValue;
+    use serde_json::json;
+
+    fn hdr(name: &'static str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(name, HeaderValue::from_str(value).expect("header value"));
+        h
+    }
+
+    fn accept(value: &str) -> HeaderMap {
+        hdr("accept", value)
+    }
+
+    /// The selected representation on an operation that does not offer
+    /// geo+json (6.3.15), and on one that does.
+    fn acc(value: &str) -> Accept {
+        parse_accept(&accept(value)).expect("acceptable")
+    }
+    fn acc_geo(value: &str) -> Accept {
+        parse_accept_geo(&accept(value)).expect("acceptable")
+    }
+
+    /// 6.3.14: an NGSILD-Tenant that is not `[A-Za-z0-9_-]{1,64}` is a
+    /// BadRequestData 400 — never a panic, a 500, or a silent fallback to the
+    /// default tenant.
+    #[test]
+    fn tenant_header_is_validated_or_400() {
+        assert_eq!(
+            tenant_from(&HeaderMap::new())
+                .expect("absent header")
+                .as_str(),
+            TenantId::DEFAULT
+        );
+        assert_eq!(
+            tenant_from(&hdr("NGSILD-Tenant", "city-01_A"))
+                .expect("valid tenant")
+                .as_str(),
+            "city-01_A"
+        );
+        let long = "x".repeat(65);
+        for bad in ["", "a b", "a/b", "../etc", "a.b", "tenant;drop", &long] {
+            let err = tenant_from(&hdr("NGSILD-Tenant", bad))
+                .map(|t| t.as_str().to_owned())
+                .expect_err("hostile tenant must be rejected");
+            assert!(
+                matches!(err, ApiError::Ngsi(NgsiError::BadRequestData(_))),
+                "{bad:?} → {err:?}"
+            );
+        }
+        // bytes that are valid in a header field but not in a Rust str
+        let mut h = HeaderMap::new();
+        h.insert(
+            "NGSILD-Tenant",
+            HeaderValue::from_bytes(&[0xff, 0xfe]).expect("opaque header bytes"),
+        );
+        let err = tenant_from(&h)
+            .map(|t| t.as_str().to_owned())
+            .expect_err("non-ASCII tenant");
+        assert!(matches!(err, ApiError::Ngsi(NgsiError::BadRequestData(_))));
+    }
+
+    /// The 400 for a hostile tenant carries the ProblemDetails shape and no
+    /// broker internals.
+    #[tokio::test]
+    async fn rejected_tenant_body_leaks_nothing() {
+        let err = tenant_from(&hdr("NGSILD-Tenant", "a b"))
+            .map(|_| ())
+            .expect_err("invalid tenant");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(doc["title"], "BadRequestData");
+        let body = String::from_utf8_lossy(&bytes);
+        for internal in ["/workspace", ".rs", "panicked", "TenantId("] {
+            assert!(!body.contains(internal), "{internal} leaked: {body}");
+        }
+    }
+
+    /// 6.3.4: absent Accept ⇒ application/json; the wildcards expand to the
+    /// first option of the list; an Accept naming nothing of the list — or
+    /// weighting everything to zero — is a 406.
+    #[test]
+    fn accept_wildcards_and_unacceptable_headers() {
+        assert_eq!(
+            parse_accept(&HeaderMap::new()).expect("absent Accept"),
+            Accept::Json
+        );
+        assert_eq!(acc("*/*"), Accept::Json);
+        assert_eq!(acc("application/*"), Accept::Json);
+        assert_eq!(acc_geo("*/*"), Accept::Json);
+        assert_eq!(acc("application/json;charset=utf-8"), Accept::Json);
+        assert_eq!(
+            acc("APPLICATION/LD+JSON"),
+            Accept::LdJson,
+            "media types are case-insensitive"
+        );
+        for bad in [
+            "",
+            "text/html",
+            "text/*",
+            "application/xml, text/turtle",
+            "*/*;q=0",
+        ] {
+            assert!(
+                matches!(parse_accept(&accept(bad)), Err(ApiError::NotAcceptable(_))),
+                "{bad:?} must be 406"
+            );
+        }
+        // header bytes that are not a Rust str: nothing acceptable was named
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::ACCEPT,
+            HeaderValue::from_bytes(&[0xff]).expect("opaque header bytes"),
+        );
+        assert!(matches!(parse_accept(&h), Err(ApiError::NotAcceptable(_))));
+    }
+
+    /// 6.3.4: "the first one of the list shall be selected, unless amended by
+    /// the HTTP Accept header processing rules". A malformed or non-finite
+    /// weight is not one of those rules and must not decide the outcome.
+    #[test]
+    fn accept_quality_values() {
+        assert_eq!(
+            acc("application/ld+json, application/json"),
+            Accept::Json,
+            "list order, not header order"
+        );
+        assert_eq!(
+            acc("application/json;q=0.1, application/ld+json;q=0.9"),
+            Accept::LdJson
+        );
+        assert_eq!(
+            acc("application/json;q=0, application/ld+json"),
+            Accept::LdJson,
+            "q=0 removes json from the offered set"
+        );
+        assert_eq!(
+            acc("*/*;q=0.9, application/ld+json;q=0.8"),
+            Accept::Json,
+            "RFC 9110 5.3.2: json takes the wildcard's 0.9, which outranks 0.8"
+        );
+        assert_eq!(
+            acc("application/json;q=0, */*"),
+            Accept::LdJson,
+            "the exact range is the more specific match, so json stays refused"
+        );
+        for weird in ["q=NaN", "q=inf", "q=", "q=abc", "q=1.0.0"] {
+            assert_eq!(
+                acc(&format!("application/ld+json;{weird}")),
+                Accept::LdJson,
+                "{weird} is not a usable weight — the type stays acceptable"
+            );
+        }
+    }
+
+    /// 6.3.15 restricts application/geo+json to Retrieve/Query Entity. On
+    /// every other operation it is simply not on offer, so a client that also
+    /// named an available representation gets that one; a client that named
+    /// only geo+json gets a 406 whose body must NOT advertise geo+json.
+    #[tokio::test]
+    async fn geojson_is_unavailable_outside_entity_consumption() {
+        assert_eq!(acc("application/geo+json, application/json"), Accept::Json);
+        assert_eq!(
+            acc("application/geo+json;q=0.9, application/ld+json;q=0.1"),
+            Accept::LdJson,
+            "the only available representation wins even weighted below geo"
+        );
+        assert_eq!(
+            acc_geo("application/geo+json"),
+            Accept::GeoJson,
+            "on Retrieve/Query Entity it IS available"
+        );
+        let err = parse_accept(&accept("application/geo+json"))
+            .map(|_| ())
+            .expect_err("406 on other operations");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            !body.contains("geo+json"),
+            "must not offer geo+json: {body}"
+        );
+        assert!(!body.contains("detail"), "no internals in a 406: {body}");
+    }
+
+    /// A pathological Accept header is bounded work and still answers.
+    #[test]
+    fn huge_accept_header_is_survivable() {
+        let raw = ["text/html;q=0.5"; 5000].join(",");
+        assert!(matches!(
+            parse_accept(&accept(&raw)),
+            Err(ApiError::NotAcceptable(_))
+        ));
+        let raw = format!("{raw},application/ld+json");
+        assert_eq!(acc(&raw), Accept::LdJson);
+    }
+
+    /// Percent-decoding accepts only `%` + two hex digits; anything else is
+    /// literal text, and bytes that are not UTF-8 are replaced rather than
+    /// panicked on.
+    #[test]
+    fn percent_decoding_is_strict_and_total() {
+        assert_eq!(percent_decode(b"plain"), "plain");
+        assert_eq!(percent_decode(b"%41%42"), "AB");
+        assert_eq!(percent_decode(b"%7B%22a%22%7D"), r#"{"a"}"#);
+        assert_eq!(percent_decode(b"100%"), "100%");
+        assert_eq!(percent_decode(b"%4"), "%4");
+        assert_eq!(percent_decode(b"%zz"), "%zz");
+        assert_eq!(percent_decode(b"%+1"), "%+1", "a sign is not a hex digit");
+        assert_eq!(percent_decode(b"% 1"), "% 1");
+        assert_eq!(percent_decode(b"%ff"), "\u{fffd}", "lone continuation byte");
+        assert_eq!(percent_decode(b"%25%34%31"), "%41", "decoded exactly once");
+    }
+
+    /// Query parsing (5.7.2 parameter conventions): `+` is a space, values
+    /// are percent-decoded, empty-valued parameters are dropped, and a
+    /// hostile query string never panics.
+    #[tokio::test]
+    async fn clean_params_drops_empties_and_decodes() {
+        let (mut parts, ()) = axum::http::Request::builder()
+            .uri("/x?q=a%3D%3D1&name=a+b&datasetId=&flag&&raw=%ff&half=%4")
+            .body(())
+            .expect("request")
+            .into_parts();
+        let CleanParams(m) = CleanParams::from_request_parts(&mut parts, &())
+            .await
+            .expect("infallible");
+        assert_eq!(m.get("q").map(String::as_str), Some("a==1"));
+        assert_eq!(m.get("name").map(String::as_str), Some("a b"));
+        assert!(m.get("datasetId").is_none(), "empty value means absent");
+        assert!(m.get("flag").is_none(), "valueless key means absent");
+        assert_eq!(m.get("raw").map(String::as_str), Some("\u{fffd}"));
+        assert_eq!(m.get("half").map(String::as_str), Some("%4"));
+    }
+
+    /// 6.3.20: a query parameter the operation does not define is an
+    /// InvalidRequest 400.
+    #[test]
+    fn unknown_query_parameters_are_rejected() {
+        let mut p = std::collections::HashMap::new();
+        p.insert("type".to_owned(), "T".to_owned());
+        assert!(check_params(&p, &["type", "q"]).is_ok());
+        p.insert("bogus".to_owned(), "1".to_owned());
+        let err = check_params(&p, &["type", "q"]).expect_err("unknown parameter");
+        assert!(matches!(err, ApiError::Ngsi(NgsiError::InvalidRequest(_))));
+    }
+
+    /// 6.3.5: the @context Link header is the one with the JSON-LD context
+    /// relation, and only a properly bracketed URI-reference counts.
+    #[test]
+    fn link_header_context_extraction() {
+        let link = |v: &str| hdr("link", v);
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://example.org/c.jsonld>; rel=\"{JSONLD_CONTEXT_REL}\"; type=\"application/ld+json\""
+            ))),
+            Some("https://example.org/c.jsonld".to_owned())
+        );
+        assert_eq!(link_context(&HeaderMap::new()), None);
+        assert_eq!(
+            link_context(&link("<https://example.org/c.jsonld>; rel=\"alternate\"")),
+            None,
+            "another relation is not the @context"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "https://example.org/c.jsonld; rel=\"{JSONLD_CONTEXT_REL}\""
+            ))),
+            None,
+            "an unbracketed target is not a Link value"
+        );
+        // several Link field lines: the JSON-LD one is picked out
+        let mut h = HeaderMap::new();
+        h.append(
+            header::LINK,
+            HeaderValue::from_static("<https://a/x>; rel=\"self\""),
+        );
+        h.append(
+            header::LINK,
+            HeaderValue::from_str(&format!(
+                "<https://example.org/c.jsonld>; rel=\"{JSONLD_CONTEXT_REL}\""
+            ))
+            .expect("link"),
+        );
+        assert_eq!(
+            link_context(&h),
+            Some("https://example.org/c.jsonld".to_owned())
+        );
+    }
+
+    /// Request Content-Type is compared as a bare media type.
+    #[test]
+    fn content_type_strips_parameters_and_case() {
+        assert_eq!(content_type(&HeaderMap::new()), "");
+        assert_eq!(
+            content_type(&hdr("content-type", "Application/LD+JSON; charset=UTF-8")),
+            "application/ld+json"
+        );
+        assert_eq!(
+            content_type(&hdr("content-type", " application/json ")),
+            "application/json"
+        );
+    }
+
+    /// 6.3.5 request bodies: an unsupported media type is a bare 415, an
+    /// empty or non-object body is an InvalidRequest 400, and the 400 detail
+    /// carries no broker internals.
+    #[tokio::test]
+    async fn body_parsing_error_paths() {
+        let loader = antares_jsonld::Loader::new();
+        let ct = |v: &'static str| hdr("content-type", v);
+
+        for (mime, kind) in [
+            ("text/plain", BodyKind::Standard),
+            ("application/xml", BodyKind::Standard),
+            ("application/merge-patch+json", BodyKind::Standard),
+        ] {
+            let err = parse_body(&loader, &ct(mime), b"{}", kind)
+                .await
+                .map(|_| ())
+                .expect_err("unsupported media type");
+            assert!(
+                matches!(err, ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE)),
+                "{mime} → {err:?}"
+            );
+        }
+        assert!(parse_body(
+            &loader,
+            &ct("application/merge-patch+json"),
+            br#"{"a":1}"#,
+            BodyKind::MergePatch
+        )
+        .await
+        .is_ok());
+
+        for (bytes, what) in [
+            (&b""[..], "empty"),
+            (&b"[{\"id\":\"urn:x\"}]"[..], "array"),
+            (&b"\"scalar\""[..], "scalar"),
+            (&b"{oops"[..], "malformed"),
+            (&[0x7b, 0xff, 0x7d][..], "non-UTF-8"),
+        ] {
+            let err = parse_body(&loader, &ct("application/json"), bytes, BodyKind::Standard)
+                .await
+                .map(|_| ())
+                .expect_err(what);
+            assert!(
+                matches!(err, ApiError::Ngsi(NgsiError::InvalidRequest(_))),
+                "{what} body → {err:?}"
+            );
+            // the 400 detail may quote the parser, never the broker's insides
+            let detail = format!("{err:?}");
+            for internal in ["/workspace", ".rs:", "antares_"] {
+                assert!(!detail.contains(internal), "{internal} leaked: {detail}");
+            }
+        }
+    }
+
+    /// 6.3.6 response building: application/json carries the @context in the
+    /// Link header and NOT in the body; application/ld+json the other way
+    /// round.
+    #[tokio::test]
+    async fn respond_places_the_context_per_media_type() {
+        let loader = antares_jsonld::Loader::new();
+        let ctx = loader.core();
+        let t = TenantId::default();
+        let payload = json!({"id": "urn:a", "type": "T"});
+
+        let resp = respond(StatusCode::OK, payload.clone(), &ctx, Accept::Json, &t);
+        assert!(resp.headers().get(header::LINK).is_some());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(doc.get("@context").is_none(), "json body: Link only");
+
+        let resp = respond(StatusCode::OK, payload, &ctx, Accept::LdJson, &t);
+        assert!(
+            resp.headers().get(header::LINK).is_none(),
+            "ld+json body carries the @context itself — no Link header"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let doc: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(doc["@context"], json!(CORE_CONTEXT));
+    }
+
+    /// The streamed list response is a JSON array in both media types, with
+    /// the same @context placement rule as `respond`.
+    #[tokio::test]
+    async fn respond_list_shapes() {
+        let loader = antares_jsonld::Loader::new();
+        let ctx = loader.core();
+        let t = TenantId::default();
+        let docs = vec![
+            json!({"id": "urn:a", "type": "T"}),
+            json!({"id": "urn:b", "type": "T"}),
+        ];
+
+        let resp = respond_list(StatusCode::OK, docs.clone(), &ctx, Accept::Json, &t);
+        assert!(resp.headers().get(header::LINK).is_some());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            r#"[{"id":"urn:a","type":"T"},{"id":"urn:b","type":"T"}]"#
+        );
+
+        let resp = respond_list(StatusCode::OK, docs, &ctx, Accept::LdJson, &t);
+        assert!(resp.headers().get(header::LINK).is_none());
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let arr: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(arr[0]["@context"], json!(CORE_CONTEXT));
+        assert_eq!(arr[1]["@context"], json!(CORE_CONTEXT));
+
+        let resp = respond_list(StatusCode::OK, vec![], &ctx, Accept::Json, &t);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(String::from_utf8_lossy(&bytes), "[]");
+    }
+
+    /// 6.3.14: the tenant is echoed only when it is not the default one.
+    #[test]
+    fn tenant_echo_is_conditional() {
+        let mut resp = StatusCode::OK.into_response();
+        echo_tenant(&TenantId::default(), &mut resp);
+        assert!(
+            resp.headers().get("NGSILD-Tenant").is_none(),
+            "the default tenant is not echoed"
+        );
+        let mut resp = StatusCode::OK.into_response();
+        echo_tenant(&TenantId::new("city-01").expect("valid"), &mut resp);
+        assert_eq!(
+            resp.headers()
+                .get("NGSILD-Tenant")
+                .and_then(|v| v.to_str().ok()),
+            Some("city-01")
+        );
+    }
+
+    /// 6.3.6 `Prefer: body=json` is one preference among the comma-separated
+    /// list, on whichever field line it arrives.
+    #[test]
+    fn prefer_body_json_detection() {
+        assert!(!prefer_body_json(&HeaderMap::new()));
+        assert!(prefer_body_json(&hdr("prefer", "body=json")));
+        assert!(prefer_body_json(&hdr("prefer", "ngsi-ld=1.5, Body=JSON")));
+        assert!(!prefer_body_json(&hdr("prefer", "body=ld+json")));
+        assert!(!prefer_body_json(&hdr("prefer", "ngsi-ld=1.5")));
+        let mut h = HeaderMap::new();
+        h.append("prefer", HeaderValue::from_static("ngsi-ld=1.5"));
+        h.append("prefer", HeaderValue::from_static("body=json"));
+        assert!(prefer_body_json(&h), "a second Prefer line counts too");
+    }
+
+    /// The advertised context URL is a single URL or the core context.
+    #[test]
+    fn context_link_url_selection() {
+        let ctx_with = |source: Value| {
+            let mut c = Context::default();
+            c.source = source;
+            c
+        };
+        assert_eq!(
+            context_link_url(&ctx_with(json!("https://example.org/c.jsonld"))),
+            "https://example.org/c.jsonld"
+        );
+        assert_eq!(
+            context_link_url(&ctx_with(json!(["https://example.org/c.jsonld"]))),
+            "https://example.org/c.jsonld"
+        );
+        assert_eq!(
+            context_link_url(&ctx_with(json!(["https://a/x", "https://b/y"]))),
+            CORE_CONTEXT,
+            "an inline list cannot be advertised by reference"
+        );
+        assert_eq!(context_link_url(&ctx_with(json!({"a": "b"}))), CORE_CONTEXT);
+        assert_eq!(context_link_url(&ctx_with(Value::Null)), CORE_CONTEXT);
+    }
+
+    /// The small response builders: 201 carries Location and no body, 204
+    /// carries neither, 207 is application/json.
+    #[tokio::test]
+    async fn status_only_responses() {
+        let t = TenantId::new("city-01").expect("valid");
+        let resp = created("/ngsi-ld/v1/entities/urn:a".to_owned(), &t);
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            resp.headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/ngsi-ld/v1/entities/urn:a")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("NGSILD-Tenant")
+                .and_then(|v| v.to_str().ok()),
+            Some("city-01")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(bytes.is_empty(), "201 carries no payload");
+
+        assert_eq!(no_content(&t).status(), StatusCode::NO_CONTENT);
+        let resp = multi_status(json!({"success": [], "errors": []}), &t);
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+    }
+
+    /// The @context member is consumed during parsing and never re-served
+    /// from the stored document.
+    #[test]
+    fn without_context_strips_the_member() {
+        let o = without_context(&json!({"id": "urn:a", "@context": "https://x"}));
+        assert!(!o.contains_key("@context"));
+        assert!(o.contains_key("id"));
+        assert!(without_context(&json!("not an object")).is_empty());
     }
 }
 
