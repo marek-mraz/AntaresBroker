@@ -1124,7 +1124,19 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
     };
     let mut out = Map::new();
     for (k, v) in expanded.as_object()? {
-        if ["id", "type", "scope", "createdAt", "modifiedAt"].contains(&k.as_str())
+        // The scope narrows ATTRIBUTES (5.2.9 `attrs`); the entity-level
+        // members stay, or 4.5.5.3 would read the missing expiresAt as
+        // "absent from a received version" and drop the local one.
+        if [
+            "id",
+            "type",
+            "scope",
+            "createdAt",
+            "modifiedAt",
+            "expiresAt",
+            "deletedAt",
+        ]
+        .contains(&k.as_str())
             || scope.iter().any(|s| s == k)
         {
             out.insert(k.clone(), v.clone());
@@ -1158,7 +1170,16 @@ fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value>
     };
     let mut out = Map::new();
     for (k, v) in expanded.as_object()? {
-        if ["id", "type", "scope", "createdAt", "modifiedAt"].contains(&k.as_str())
+        if [
+            "id",
+            "type",
+            "scope",
+            "createdAt",
+            "modifiedAt",
+            "expiresAt",
+            "deletedAt",
+        ]
+        .contains(&k.as_str())
             || scope.iter().any(|s| s == k)
         {
             out.insert(k.clone(), v.clone());
@@ -1339,11 +1360,16 @@ pub async fn fed_retrieve_temporal(
     out
 }
 
-fn recency(inst: &Value) -> &str {
-    inst.get("observedAt")
-        .or_else(|| inst.get("modifiedAt"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
+/// The DateTime 4.5.5.3 arbitrates on, as a comparable key: 4.6.3 admits the
+/// same instant with or without a fraction, so a raw string compare would
+/// rank `…:01.500Z` below `…:01Z`.
+fn recency(inst: &Value) -> String {
+    crate::temporal::dt_key(
+        inst.get("observedAt")
+            .or_else(|| inst.get("modifiedAt"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
 }
 
 /// 4.5.5.2 Processing of Conflicting Transient Entities: for each received
@@ -1368,7 +1394,7 @@ fn push_down_expires(doc: &mut Value) {
         };
         for inst in instances.iter_mut().filter_map(Value::as_object_mut) {
             match inst.get("expiresAt").and_then(Value::as_str) {
-                Some(ae) if ae <= exp.as_str() => {}
+                Some(ae) if crate::temporal::dt_key(ae) <= crate::temporal::dt_key(&exp) => {}
                 _ => {
                     inst.insert("expiresAt".into(), Value::String(exp.clone()));
                 }
@@ -1383,7 +1409,7 @@ fn push_down_expires(doc: &mut Value) {
 fn expired(inst: &Value, now: &str) -> bool {
     inst.get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| e < now)
+        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(now))
 }
 
 /// 4.3.6.2: "An auxiliary Context Source Registration never overrides data
@@ -1402,18 +1428,22 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
     let Some(ao) = add.as_object() else { return };
     // 4.5.5.3: entity-level expiresAt — "missing from at least one version of
     // the Entity received" → removed; present in all versions → the DateTime
-    // furthest in the future.
-    match (
-        bo.get("expiresAt").and_then(Value::as_str),
-        ao.get("expiresAt").and_then(Value::as_str),
-    ) {
-        (Some(b), Some(a)) => {
-            if a > b {
-                bo.insert("expiresAt".into(), Value::String(a.to_owned()));
+    // furthest in the future. 4.3.6.2 keeps auxiliary versions out of this:
+    // they never override data the broker holds directly, and removing or
+    // extending the lifetime is an override.
+    if !aux {
+        match (
+            bo.get("expiresAt").and_then(Value::as_str),
+            ao.get("expiresAt").and_then(Value::as_str),
+        ) {
+            (Some(b), Some(a)) => {
+                if crate::temporal::dt_key(a) > crate::temporal::dt_key(b) {
+                    bo.insert("expiresAt".into(), Value::String(a.to_owned()));
+                }
             }
-        }
-        _ => {
-            bo.remove("expiresAt");
+            _ => {
+                bo.remove("expiresAt");
+            }
         }
     }
     for (k, v) in ao {
@@ -1663,13 +1693,107 @@ pub async fn fed_query(
         let Some(op) = reg.query_op() else {
             return (reg, 0, Value::Null, Vec::new());
         };
+        // The forwarded selection is decided ONCE and then rendered either as
+        // query parameters (Query Entities, 5.7.2) or as a Query body
+        // (5.2.23) — the two must ask the peer the same question.
+        //
+        // 4.3.6.1: the forwarded id list carries only ids this registration
+        // can match — never the full client list.
+        let ids: Option<String> = match params.get("id") {
+            Some(ids) => {
+                let keep: Vec<&str> = ids
+                    .split(',')
+                    .filter(|i| reg.can_match_id(i.trim()))
+                    .collect();
+                (!keep.is_empty()).then(|| keep.join(","))
+            }
+            // the registration is scoped to exact ids only — ask for those
+            None if !reg.ent_unrestricted
+                && reg.ent_patterns.is_empty()
+                && !reg.ent_ids.is_empty() =>
+            {
+                Some(reg.ent_ids.join(","))
+            }
+            None => None,
+        };
+        let attrs: Option<String> = match &reg.attrs {
+            Some(scope) => Some(
+                scope
+                    .iter()
+                    .map(|a| ctx.compact_iri(a))
+                    .collect::<Vec<String>>()
+                    .join(","),
+            ),
+            None => params.get("attrs").cloned(),
+        };
+        // 5.7.2.4: with split entities the filters "shall be removed
+        // before forwarding" and re-applied on the aggregate (which the
+        // local re-check always does); otherwise the request is forwarded
+        // WITH its filters, so the peer returns its filtered subset
+        // instead of everything. A registered jsonldContext (4.3.6.6)
+        // recompacts only attrs/type/geoproperty — q/scopeQ terms cannot
+        // be recompacted, so push-down is skipped there rather than
+        // filtering at the remote against the wrong terms.
+        let push_filters = !split_entities(params) && !has_reg_context(&reg);
+        let filter = |k: &str| {
+            push_filters
+                .then(|| params.get(k))
+                .flatten()
+                .map(String::to_owned)
+        };
         let (status, body, peer_warns) = if op == "queryBatch" {
             let mut sel = Map::new();
             if let Some(t) = params.get("type") {
                 sel.insert("type".into(), Value::String(t.clone()));
             }
-            if let Some(id) = reg.ent_ids.first() {
-                sel.insert("id".into(), Value::String(id.clone()));
+            match &ids {
+                // 5.2.33: `id` is one URI or an array of them, and it takes
+                // precedence over idPattern — so a pattern only travels when
+                // no id list survived the narrowing.
+                Some(list) if list.contains(',') => {
+                    let arr: Vec<Value> =
+                        list.split(',').map(|i| Value::String(i.into())).collect();
+                    sel.insert("id".into(), Value::Array(arr));
+                }
+                Some(one) => {
+                    sel.insert("id".into(), Value::String(one.clone()));
+                }
+                None => {
+                    if let Some(p) = params.get("idPattern") {
+                        sel.insert("idPattern".into(), Value::String(p.clone()));
+                    }
+                }
+            }
+            let mut q_body = Map::new();
+            q_body.insert("type".into(), Value::String("Query".into()));
+            if !sel.is_empty() {
+                q_body.insert("entities".into(), json!([Value::Object(sel)]));
+            }
+            if let Some(a) = &attrs {
+                let list: Vec<Value> = a.split(',').map(|n| Value::String(n.into())).collect();
+                q_body.insert("attrs".into(), Value::Array(list));
+            }
+            if let Some(q) = filter("q") {
+                q_body.insert("q".into(), Value::String(q));
+            }
+            if let Some(s) = filter("scopeQ") {
+                q_body.insert("scopeQ".into(), Value::String(s));
+            }
+            let mut geo = Map::new();
+            for k in ["georel", "geometry", "coordinates", "geoproperty"] {
+                if let Some(v) = filter(k) {
+                    // 5.2.13 GeoQuery carries coordinates as the GeoJSON
+                    // value, not as the query-string spelling of it.
+                    let parsed = if k == "coordinates" {
+                        serde_json::from_str(&v).unwrap_or(Value::String(v))
+                    } else {
+                        Value::String(v)
+                    };
+                    geo.insert(k.into(), parsed);
+                }
+            }
+            if !geo.is_empty() {
+                q_body.insert("geoQ".into(), Value::Object(geo));
             }
             forward(
                 st,
@@ -1680,7 +1804,7 @@ pub async fn fed_query(
                 tenant,
                 &reg,
                 ctx_url,
-                Some(json!({"type": "Query", "entities": [Value::Object(sel)]})),
+                Some(Value::Object(q_body)),
             )
             .await
         } else {
@@ -1688,49 +1812,22 @@ pub async fn fed_query(
             if let Some(t) = params.get("type") {
                 query.push(("type".into(), t.clone()));
             }
-            if let Some(ids) = params.get("id") {
-                // 4.3.6.1: the forwarded id list carries only ids this
-                // registration can match — never the full client list.
-                let keep: Vec<&str> = ids
-                    .split(',')
-                    .filter(|i| reg.can_match_id(i.trim()))
-                    .collect();
-                if !keep.is_empty() {
-                    query.push(("id".into(), keep.join(",")));
-                }
-            } else if !reg.ent_unrestricted
-                && reg.ent_patterns.is_empty()
-                && !reg.ent_ids.is_empty()
-            {
-                // the registration is scoped to exact ids only — ask for those
-                query.push(("id".into(), reg.ent_ids.join(",")));
+            if let Some(list) = &ids {
+                query.push(("id".into(), list.clone()));
             }
-            if let Some(scope) = &reg.attrs {
-                let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
-                query.push(("attrs".into(), names.join(",")));
-            } else if let Some(a) = params.get("attrs") {
+            if let Some(a) = &attrs {
                 query.push(("attrs".into(), a.clone()));
             }
-            // 5.7.2.4: with split entities the filters "shall be removed
-            // before forwarding" and re-applied on the aggregate (which the
-            // local re-check always does); otherwise the request is forwarded
-            // WITH its filters, so the peer returns its filtered subset
-            // instead of everything. A registered jsonldContext (4.3.6.6)
-            // recompacts only attrs/type/geoproperty — q/scopeQ terms cannot
-            // be recompacted, so push-down is skipped there rather than
-            // filtering at the remote against the wrong terms.
-            if !split_entities(params) && !has_reg_context(&reg) {
-                for k in [
-                    "q",
-                    "georel",
-                    "geometry",
-                    "coordinates",
-                    "geoproperty",
-                    "scopeQ",
-                ] {
-                    if let Some(v) = params.get(k) {
-                        query.push((k.into(), v.clone()));
-                    }
+            for k in [
+                "q",
+                "georel",
+                "geometry",
+                "coordinates",
+                "geoproperty",
+                "scopeQ",
+            ] {
+                if let Some(v) = filter(k) {
+                    query.push((k.into(), v));
                 }
             }
             forward(
@@ -2806,6 +2903,86 @@ mod tests {
         let add3 = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2032-01-01T00:00:00Z"});
         merge_docs(&mut base, &add3, false);
         assert!(base.get("expiresAt").is_none());
+    }
+
+    /// 4.3.6.2: "An auxiliary Context Source Registration never overrides
+    /// data held directly within a Context Broker." The entity-level
+    /// expiresAt reconciliation is part of that data, so an auxiliary
+    /// version can neither remove it nor push it further out.
+    #[test]
+    fn auxiliary_merge_never_touches_entity_expires_at() {
+        let mut base = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2030-01-01T00:00:00Z"});
+        let aux_without = json!({"id": "urn:x", "type": ["T"]});
+        merge_docs(&mut base, &aux_without, true);
+        assert_eq!(
+            base["expiresAt"], "2030-01-01T00:00:00Z",
+            "an auxiliary version lacking expiresAt must not remove the broker's own"
+        );
+        let aux_later = json!({"id": "urn:x", "type": ["T"], "expiresAt": "2031-01-01T00:00:00Z"});
+        merge_docs(&mut base, &aux_later, true);
+        assert_eq!(
+            base["expiresAt"], "2030-01-01T00:00:00Z",
+            "an auxiliary version must not extend the broker's own expiresAt"
+        );
+    }
+
+    /// 4.5.5.3 arbitrates on the most recent DateTime, and 4.6.3 lets the
+    /// same instant be written with or without a fraction — so the winner
+    /// must be chosen on the instant, never on the spelling.
+    #[test]
+    fn recency_arbitrates_on_the_instant_not_the_spelling() {
+        let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let mut base = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 1, "observedAt": "2026-01-01T00:00:01Z"}]
+        });
+        let add = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 2, "observedAt": "2026-01-01T00:00:01.500Z"}]
+        });
+        merge_docs(&mut base, &add, false);
+        assert_eq!(
+            base[attr][0]["value"], 2,
+            "the later instant wins even though its string sorts lower"
+        );
+        // and the converse: a fraction that is EARLIER must not win
+        let older = json!({
+            "id": "urn:x", "type": ["T"],
+            attr: [{"type": "Property", "value": 3, "observedAt": "2026-01-01T00:00:01.250Z"}]
+        });
+        merge_docs(&mut base, &older, false);
+        assert_eq!(base[attr][0]["value"], 2, "an earlier instant must not win");
+    }
+
+    /// 4.5.5.2/4.5.7: the registration-scope filter narrows ATTRIBUTES, so
+    /// the entity-level lifetime members must cross it — dropping expiresAt
+    /// here made the 4.5.5.3 reconciliation delete the local one.
+    #[test]
+    fn scoped_import_keeps_the_entity_level_lifetime_members() {
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+        let reg = FedReg {
+            attrs: Some(vec![speed.to_owned()]),
+            ..FedReg::default()
+        };
+        let remote = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": "Vehicle",
+            "expiresAt": "2030-01-01T00:00:00Z",
+            "speed": {"type": "Property", "value": 1},
+            "brandName": {"type": "Property", "value": "x"}
+        });
+        let ctx = antares_jsonld::Loader::new().core();
+        let imported = import_entity(&remote, &reg, &ctx).expect("import");
+        assert_eq!(
+            imported["expiresAt"], "2030-01-01T00:00:00Z",
+            "entity-level expiresAt must survive the scope filter"
+        );
+        assert!(
+            imported
+                .get("https://uri.etsi.org/ngsi-ld/default-context/brandName")
+                .is_none(),
+            "an out-of-scope attribute must not be imported"
+        );
     }
 
     /// 4.5.5.2: a received version's entity-level expiresAt is pushed onto

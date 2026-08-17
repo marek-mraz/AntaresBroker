@@ -20,10 +20,12 @@ use tower::ServiceExt;
 const REMOTE_ID: &str = "urn:ngsi-ld:Vehicle:pushdown";
 
 /// Mock Context Source: replies one entity to every request and keeps the
-/// head (request line + headers) of the last request it saw.
+/// last request it saw — head (request line + headers) and body, so both the
+/// query-parameter forward and the 5.2.23 Query body can be asserted.
 struct Mock {
     port: u16,
     last_head: Arc<std::sync::Mutex<String>>,
+    last_body: Arc<std::sync::Mutex<String>>,
 }
 
 fn mock_source(temporal: bool) -> Mock {
@@ -56,21 +58,50 @@ fn mock_source(temporal: bool) -> Mock {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let last_head: Arc<std::sync::Mutex<String>> = Arc::default();
+    let last_body: Arc<std::sync::Mutex<String>> = Arc::default();
     let head = last_head.clone();
+    let body_slot = last_body.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
+            // read until the declared body has arrived — a POST body may land
+            // in a later segment than its headers
+            let mut raw = Vec::new();
             let mut buf = [0u8; 8192];
-            let n = s.read(&mut buf).unwrap_or(0);
-            *head.lock().expect("lock") = String::from_utf8_lossy(&buf[..n])
-                .split("\r\n\r\n")
-                .next()
-                .unwrap_or_default()
-                .to_owned();
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                let Some((h, b)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let want: usize = h
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("content-length:")
+                            .or_else(|| l.strip_prefix("Content-Length:"))
+                    })
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if b.len() >= want {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            let (h, b) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+            *head.lock().expect("lock") = h.to_owned();
+            *body_slot.lock().expect("lock") = b.to_owned();
             let _ = s.write_all(reply.as_bytes());
         }
     });
-    Mock { port, last_head }
+    Mock {
+        port,
+        last_head,
+        last_body,
+    }
 }
 
 async fn register(st: &AppState, port: u16, ops: &[&str], csi: Option<serde_json::Value>) {
@@ -149,6 +180,42 @@ async fn non_split_query_forwards_filters() {
             "forwarded request must carry {needle}: {head}"
         );
     }
+}
+
+/// A source that supports only queryBatch (5.6.7-shaped POST) must be asked
+/// the SAME question as one supporting queryEntity: the 5.2.23 Query body
+/// carries the client's type, attrs, q, scopeQ and geoQ. Forwarding a body
+/// built from the registration's own EntityInfo instead returns entities the
+/// client never asked for and hides the ones it did.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_batch_forwards_the_clients_query_not_the_registrations() {
+    let st = state();
+    let m = mock_source(false);
+    register(&st, m.port, &["queryBatch"], None).await;
+
+    let body = get(
+        &st,
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=speed&q=speed%3E20&scopeQ=%2FA&\
+         georel=near%3BmaxDistance%3D%3D2000&geometry=Point&coordinates=%5B8.6,41.2%5D",
+    )
+    .await;
+    assert!(body.contains(REMOTE_ID), "remote data still flows: {body}");
+
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.starts_with("POST /ngsi-ld/v1/entityOperations/query"),
+        "the batch source is asked over the query resource: {head}"
+    );
+    let sent: serde_json::Value =
+        serde_json::from_str(&m.last_body.lock().expect("lock").clone()).expect("Query body");
+    assert_eq!(sent["type"], "Query");
+    assert_eq!(sent["entities"][0]["type"], "Vehicle");
+    assert_eq!(sent["attrs"][0], "speed");
+    assert_eq!(sent["q"], "speed>20");
+    assert_eq!(sent["scopeQ"], "/A");
+    assert_eq!(sent["geoQ"]["georel"], "near;maxDistance==2000");
+    assert_eq!(sent["geoQ"]["geometry"], "Point");
+    assert_eq!(sent["geoQ"]["coordinates"], serde_json::json!([8.6, 41.2]));
 }
 
 /// 5.7.2.4 split: "the filters … shall be removed before forwarding".
