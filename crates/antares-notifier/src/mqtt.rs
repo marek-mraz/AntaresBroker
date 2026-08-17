@@ -16,6 +16,28 @@ fn bad(m: String) -> NgsiError {
     NgsiError::BadRequestData(m)
 }
 
+/// Strip the authority's userinfo from an endpoint URI. 7.2 allows
+/// credentials there (`mqtt[s]://[<username>][:<password>]@<host>…`), while
+/// a rejected endpoint travels back to the client as the `detail` member of
+/// the ProblemDetails body (5.5.3) and into the delivery logs — neither may
+/// carry the subscription's password. Everything after the last `@` of the
+/// authority is kept; an `@` in the topic is path data, not userinfo.
+fn redacted(uri: &str) -> String {
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return uri.to_owned();
+    };
+    match rest.split_once('/') {
+        Some((authority, path)) => {
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            format!("{scheme}://{host}/{path}")
+        }
+        None => {
+            let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+            format!("{scheme}://{host}")
+        }
+    }
+}
+
 /// Parsed `mqtt[s]://[user][:pass]@host[:port]/topic[/subtopic]*` (7.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MqttEndpoint {
@@ -28,19 +50,24 @@ pub struct MqttEndpoint {
 }
 
 impl MqttEndpoint {
+    /// 7.2 endpoint URI syntax. A URI that does not meet it fails the
+    /// 5.2.15 restrictions, so the caller raises BadRequestData — 400 per
+    /// Table 6.3.2-1. The message names only the redacted URI: the
+    /// credentials 7.2 permits in the userinfo never reach the response body.
     pub fn parse(uri: &str) -> Result<Self, NgsiError> {
+        let safe = redacted(uri);
         let (secure, rest) = if let Some(r) = uri.strip_prefix("mqtts://") {
             (true, r)
         } else if let Some(r) = uri.strip_prefix("mqtt://") {
             (false, r)
         } else {
-            return Err(bad(format!("not an mqtt(s) endpoint URI: {uri:?}")));
+            return Err(bad(format!("not an mqtt(s) endpoint URI: {safe:?}")));
         };
         let (authority, topic) = rest
             .split_once('/')
-            .ok_or_else(|| bad(format!("mqtt endpoint {uri:?} has no topic")))?;
+            .ok_or_else(|| bad(format!("mqtt endpoint {safe:?} has no topic")))?;
         if topic.is_empty() {
-            return Err(bad(format!("mqtt endpoint {uri:?} has no topic")));
+            return Err(bad(format!("mqtt endpoint {safe:?} has no topic")));
         }
         let (userinfo, hostport) = match authority.rsplit_once('@') {
             Some((u, h)) => (Some(u), h),
@@ -60,12 +87,12 @@ impl MqttEndpoint {
             Some((h, p)) => (
                 h.to_owned(),
                 p.parse::<u16>()
-                    .map_err(|_| bad(format!("invalid mqtt port in {uri:?}")))?,
+                    .map_err(|_| bad(format!("invalid mqtt port in {safe:?}")))?,
             ),
             None => (hostport.to_owned(), if secure { 8883 } else { 1883 }),
         };
         if host.is_empty() {
-            return Err(bad(format!("mqtt endpoint {uri:?} has no host")));
+            return Err(bad(format!("mqtt endpoint {safe:?} has no host")));
         }
         Ok(Self {
             secure,
@@ -192,6 +219,133 @@ fn shared_tls_config() -> Result<rumqttc::TlsConfiguration, NgsiError> {
     })
     .clone()
     .ok_or_else(|| NgsiError::InternalError("mqtts trust store unavailable".into()))
+}
+
+/// Is egress to private/loopback ranges allowed? The MQTT destination is
+/// client-supplied (`notification.endpoint.uri`, 7.2), so it is governed by
+/// the same deployment switch as the HTTP callbacks and @context fetches:
+/// private egress is allowed by default (dev boxes, compose stacks and the
+/// conformance mocks all live there) and
+/// `ANTARES_EGRESS_ALLOW_PRIVATE=false` turns the deny on for
+/// internet-exposed deployments. Read once per process.
+fn allow_private_egress() -> bool {
+    static ALLOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOW.get_or_init(|| {
+        allow_private_from(
+            std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Read the switch tolerantly, as the HTTP side does: a security control
+/// that understands one spelling hands the operator the opposite of the
+/// intent when the value is `FALSE` or carries stray whitespace.
+fn allow_private_from(v: Option<&str>) -> bool {
+    v.is_none_or(|v| {
+        let v = v.trim();
+        !(v.eq_ignore_ascii_case("false") || v == "0")
+    })
+}
+
+/// The cloud instance-metadata endpoints — IPv4 link-local (169.254.0.0/16,
+/// RFC 3927), its IPv6 spellings and the IMDS-over-IPv6 ULA `fd00:ec2::254`.
+/// Refused whatever the private-egress switch says: a subscription that
+/// points its notifications at the instance credentials is the classic
+/// credential-theft SSRF, and no real MQTT broker lives there.
+fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254]
+                || v6
+                    .to_ipv4_mapped()
+                    .or_else(|| v6.to_ipv4())
+                    .is_some_and(|v4| v4.is_link_local())
+        }
+    }
+}
+
+fn ip_is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            // an IPv4-mapped address (::ffff:a.b.c.d) is the v4 target in v6
+            // spelling — judge it as its v4 self, or ::ffff:127.0.0.1 slips
+            // past the v6 checks
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_private(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fc00::/7 unique-local + fe80::/10 link-local
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Resolve the endpoint host ONCE and return the address to dial, or a
+/// denial. Resolving for the check and then handing the NAME to the MQTT
+/// client would leave a window in which the answer changes (DNS rebinding):
+/// the connector would dial an address the policy never saw. The address
+/// this returns is the address dialled, so check and connect see the same
+/// answer by construction. A host that cannot be resolved is a DENIAL — a
+/// destination the policy could not judge is never dialled — and the
+/// resolver runs under the sink's own deadline.
+async fn checked_addr(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+    dns_timeout: Duration,
+) -> Result<std::net::SocketAddr, NgsiError> {
+    let denied = || {
+        NgsiError::InternalError(format!(
+            "mqtt egress to {host}:{port} denied (instance metadata or private range)"
+        ))
+    };
+    let addrs: Vec<std::net::SocketAddr> = match host
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+    {
+        // an IP literal needs no resolver, and is judged by the same rules
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        Err(_) => tokio::time::timeout(dns_timeout, tokio::net::lookup_host((host, port)))
+            .await
+            .map_err(|_| {
+                NgsiError::InternalError(format!("mqtt egress: resolving {host} timed out"))
+            })?
+            .map_err(|e| NgsiError::InternalError(format!("mqtt egress: resolving {host}: {e}")))?
+            .collect(),
+    };
+    addrs
+        .into_iter()
+        .find(|a| !ip_is_metadata(a.ip()) && (allow_private || !ip_is_private(a.ip())))
+        .ok_or_else(denied)
+}
+
+/// What to hand rumqttc as the broker address. Plain MQTT dials the checked
+/// ADDRESS, which pins the resolution the policy judged (and makes the
+/// event loop's own re-dial after a dropped connection reuse it instead of
+/// resolving the name again, unchecked). mqtts keeps the host NAME: rumqttc
+/// verifies the server certificate against the string it is given, so an
+/// address there would demand an IP SAN and break certificate verification
+/// against every ordinary broker certificate. For mqtts the check above
+/// still gates the connect, and the certificate name check is what stops a
+/// changed answer from impersonating the endpoint.
+fn dial_host(ep: &MqttEndpoint, addr: std::net::SocketAddr) -> String {
+    if ep.secure {
+        ep.host.clone()
+    } else {
+        addr.ip().to_string()
+    }
 }
 
 /// One pooled connection: the client plus its event-loop pump task.
@@ -333,8 +487,12 @@ impl MqttSink {
         let refused = |e: String| {
             NgsiError::InternalError(format!("mqtt connect {}:{}: {e}", ep.host, ep.port))
         };
+        // Egress policy first: resolve once, judge the answer, dial what was
+        // judged. Nothing below opens a socket to an unchecked destination.
+        let addr = checked_addr(&ep.host, ep.port, allow_private_egress(), self.timeout).await?;
+        let dial = dial_host(ep, addr);
         if params.v5 {
-            let mut opts = rumqttc::v5::MqttOptions::new(id, &ep.host, ep.port);
+            let mut opts = rumqttc::v5::MqttOptions::new(id, dial, addr.port());
             opts.set_keep_alive(Duration::from_secs(30));
             if let Some(u) = &ep.username {
                 opts.set_credentials(u, ep.password.as_deref().unwrap_or(""));
@@ -364,7 +522,7 @@ impl MqttSink {
                 last_used: Instant::now(),
             })
         } else {
-            let mut opts = rumqttc::MqttOptions::new(id, &ep.host, ep.port);
+            let mut opts = rumqttc::MqttOptions::new(id, dial, addr.port());
             opts.set_keep_alive(Duration::from_secs(30));
             if let Some(u) = &ep.username {
                 opts.set_credentials(u, ep.password.as_deref().unwrap_or(""));
@@ -442,6 +600,41 @@ mod tests {
         }
     }
 
+    /// 7.2 endpoint URIs may carry credentials in the userinfo
+    /// (`mqtt[s]://<username>:<password>@host`). A parse failure is answered
+    /// to the client as BadRequestData (5.8.1.4, 400 per Table 6.3.2-1) and
+    /// the message becomes the 5.5.3 ProblemDetails `detail`, so no password
+    /// may appear in it.
+    #[test]
+    fn parse_errors_redact_endpoint_userinfo() {
+        for uri in [
+            "mqtt://user:hunter2@host",            // no topic
+            "mqtt://user:hunter2@host/",           // empty topic
+            "mqtt://user:hunter2@host:notaport/t", // bad port
+            "mqtts://user:hunter2@/t",             // no host
+            "http://user:hunter2@host/t",          // wrong scheme
+        ] {
+            let NgsiError::BadRequestData(msg) =
+                MqttEndpoint::parse(uri).expect_err(&format!("{uri} must be rejected"))
+            else {
+                panic!("{uri} must be BadRequestData (400, Table 6.3.2-1)");
+            };
+            assert!(
+                !msg.contains("hunter2"),
+                "the password leaked into the 400 detail: {msg}"
+            );
+            assert!(
+                !msg.contains("user:"),
+                "the userinfo leaked into the 400 detail: {msg}"
+            );
+            // the detail must still be useful: scheme and host survive
+            assert!(
+                msg.contains("host") || uri.contains("@/"),
+                "the redacted detail lost the host: {msg}"
+            );
+        }
+    }
+
     #[test]
     fn notifier_info_defaults_and_validation() {
         let p = MqttParams::from_notifier_info([]).expect("defaults");
@@ -498,6 +691,109 @@ mod tests {
             std::sync::Arc::ptr_eq(&a, &b),
             "each call built a fresh trust store instead of sharing one"
         );
+    }
+
+    /// The MQTT destination is client-supplied (`notification.endpoint.uri`,
+    /// 7.2), so it is an egress target: the cloud instance-metadata range is
+    /// refused before any socket is opened, whatever the private-egress
+    /// switch says, and the refusal must not echo the endpoint credentials.
+    #[tokio::test]
+    async fn deliver_refuses_instance_metadata_endpoint() {
+        let ep = MqttEndpoint::parse("mqtt://user:hunter2@169.254.169.254/t").expect("parse");
+        let sink = MqttSink::new(2, Duration::from_millis(250));
+        let err = sink
+            .deliver(&ep, MqttParams::default(), b"{}")
+            .await
+            .expect_err("the metadata range must never be dialled");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("denied"),
+            "expected an egress denial, got: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2"),
+            "the endpoint password leaked into the delivery error: {msg}"
+        );
+    }
+
+    /// Egress classification, restated from the HTTP side's policy: the
+    /// metadata range is refused unconditionally, private ranges only when
+    /// the deployment switched private egress off, and IPv4-mapped IPv6
+    /// spellings are judged as their IPv4 selves.
+    #[tokio::test]
+    async fn checked_addr_applies_the_egress_rules_to_resolved_addresses() {
+        let d = Duration::from_secs(2);
+        // metadata: denied with private egress ALLOWED (the default)
+        for host in ["169.254.169.254", "::ffff:169.254.169.254", "fd00:ec2::254"] {
+            let e = checked_addr(host, 1883, true, d)
+                .await
+                .expect_err("metadata range must be refused whatever the switch says");
+            assert!(e.to_string().contains("denied"), "{host}: {e}");
+        }
+        // loopback and RFC 1918: allowed by default, refused when the
+        // deployment turns private egress off
+        for host in [
+            "127.0.0.1",
+            "::ffff:127.0.0.1",
+            "10.1.2.3",
+            "::1",
+            "localhost",
+        ] {
+            let ok = checked_addr(host, 1883, true, d)
+                .await
+                .unwrap_or_else(|e| panic!("{host} must be reachable by default: {e}"));
+            assert_eq!(ok.port(), 1883);
+            assert!(
+                checked_addr(host, 1883, false, d).await.is_err(),
+                "{host} must be refused with private egress off"
+            );
+        }
+        // a public literal clears the strict policy and comes back as the
+        // ADDRESS to dial — the resolution the check judged, pinned
+        let a = checked_addr("93.184.216.34", 8883, false, d)
+            .await
+            .expect("public address allowed");
+        assert_eq!(a.to_string(), "93.184.216.34:8883");
+        // a name that cannot be resolved is a denial, not a pass-through
+        assert!(
+            checked_addr("no-such-host.invalid", 1883, true, d)
+                .await
+                .is_err(),
+            "an unresolvable destination must not be dialled"
+        );
+    }
+
+    /// The address the policy judged is the address dialled — except for
+    /// mqtts, where the certificate is verified against the host NAME.
+    #[test]
+    fn dial_host_pins_the_address_and_keeps_the_tls_name() {
+        let plain = MqttEndpoint::parse("mqtt://broker.example/t").expect("plain");
+        let addr = "203.0.113.7:1883".parse().expect("addr");
+        assert_eq!(dial_host(&plain, addr), "203.0.113.7");
+        let secure = MqttEndpoint::parse("mqtts://broker.example/t").expect("secure");
+        assert_eq!(
+            dial_host(&secure, addr),
+            "broker.example",
+            "mqtts must dial the name so the certificate name check still applies"
+        );
+        // IPv6 comes back unbracketed, which is what rumqttc resolves
+        let v6 = "[2001:db8::1]:1883".parse().expect("v6 addr");
+        assert_eq!(dial_host(&plain, v6), "2001:db8::1");
+    }
+
+    /// The private-egress switch is read exactly as the HTTP side reads it:
+    /// allowed unless the value spells false.
+    #[test]
+    fn private_egress_switch_parses_tolerantly() {
+        for v in [None, Some(""), Some("true"), Some("yes"), Some(" 1 ")] {
+            assert!(allow_private_from(v), "{v:?} must allow private egress");
+        }
+        for v in ["false", "FALSE", " False ", "0", " 0 "] {
+            assert!(
+                !allow_private_from(Some(v)),
+                "{v:?} must deny private egress"
+            );
+        }
     }
 
     #[test]
