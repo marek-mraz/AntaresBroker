@@ -6,7 +6,9 @@ cd "$(dirname "$0")/.."
 
 # Vars the check ignores: test-only, negative-test typo strings, k8s
 # service-env artifacts filtered by the code itself, NATS subject names.
-IGNORE='^ANTARES_(TEST_|BOGUS_|STROE|HTPT_|HTTP_PROT$|CHANGES$|REGISTRY$|SERVICE|PORT$|PORT_|API_SERVICE|FILE_PORT|FILE$|GIT_HASH$|_)'
+# PORTAL/DB_PORT/WORKER_PROT are the kubelet-shape fixtures of
+# the_service_link_exemption_does_not_over_reach — never real knobs.
+IGNORE='^ANTARES_(TEST_|BOGUS_|STROE|HTPT_|HTTP_PROT$|CHANGES$|REGISTRY$|SERVICE|PORT$|PORT_|API_SERVICE|FILE_PORT|FILE$|GIT_HASH$|_|PORTAL$|DB_PORT$|WORKER_PROT$)'
 
 code_vars=$(/usr/bin/grep -rhoa 'ANTARES_[A-Z0-9_]*' crates/ --include='*.rs' \
   | sort -u | /usr/bin/grep -Ev "$IGNORE" | /usr/bin/grep -Ev '^ANTARES_$' || true)

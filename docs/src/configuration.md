@@ -24,6 +24,9 @@ here).
 | `ANTARES_DATA_DIR` | — (required for `file`) | Directory for the redb file. Must be a mounted volume — data never lives inside the image. |
 | `ANTARES_DATABASE_URL` | — (required for `postgres`/`timescale`) | PostgreSQL connection string; PostGIS required, TimescaleDB for `timescale`. Bounded startup retry while the DB boots. |
 | `ANTARES_REQUIRE_RLS` | unset | `1`/`true`: refuse to start when the DB role bypasses Row-Level Security (defense-in-depth for shared-schema multi-tenancy). |
+| `ANTARES_PG_POOL` | `20` | Connection-pool size for `postgres`/`timescale`. Unparsable value = fatal. Sessions carry `statement_timeout` 30 s / `lock_timeout` 5 s. |
+| `ANTARES_MIGRATE` | on | `0`/`false` skips running migrations from this process, so serving replicas do not race the DDL — run them once from a job or init container instead. |
+| `ANTARES_ALLOW_SHARED_LOCAL` | unset | `1` permits `bus=local` with a `postgres`/`timescale` store — safe ONLY for a strictly single-process deployment; two such processes double-fire notifications. |
 | `ANTARES_TEMPORAL_RETENTION_DAYS` | unset (keep forever) | Temporal history retention; the sweep job prunes older attribute instances. |
 | `ANTARES_SWEEP_SECS` | `900` | Cadence of the background GC sweep (expired entities/registrations, 4.22) — identical across store modes. |
 
@@ -49,6 +52,9 @@ here).
 
 | Variable | Default | Effect |
 |---|---|---|
+| `ANTARES_HEADER_READ_TIMEOUT_MS` | `10000` | A connection that has not finished its request HEAD within this window is closed (slow-loris bound). |
+| `ANTARES_MAX_CONNECTIONS` | `10000` | Concurrent-connection ceiling; further accepts are dropped. Counts keep-alive and LB health-check connections too — size accordingly. |
+| `ANTARES_DISCOVERY_SCAN_MAX` | `100000` | Entities one `/types`/`/attributes` discovery fold may read; past it the answer is 403 TooManyResults (5.5.6) instead of an unbounded scan. |
 | `ANTARES_DRAIN_DELAY_MS` | `500` | Rolling update, step 2: keep serving this long after `/q/health` flips to 503 — the load balancer's notice window. |
 | `ANTARES_DRAIN_DEADLINE_SECS` | `20` | Bound on waiting for in-flight connections during drain. Container `stop_grace_period` / `terminationGracePeriodSeconds` MUST exceed delay + deadline. |
 | `ANTARES_TELEMETRY` | off | `1`/`true`/`on` enables the OTLP span pipeline (needs the endpoint too). |
