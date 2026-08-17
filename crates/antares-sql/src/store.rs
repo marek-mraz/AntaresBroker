@@ -250,6 +250,14 @@ pub struct Store {
     /// this depth sustained at the measured ~3.1k writes/s ceiling.
     write_waiters: std::sync::atomic::AtomicUsize,
     write_waiters_peak: std::sync::atomic::AtomicUsize,
+    /// Change hooks fire in COMMIT order. The hook runs after the
+    /// write-critical section (it may write other kinds through the store,
+    /// so running it inside would deadlock), which lets a later commit's
+    /// hook overtake an earlier one — the consumer would record stale state
+    /// as newest. Entity writes therefore hold this from before the commit
+    /// until the emit is done. Only the local single-process path needs it:
+    /// across processes the transactional outbox is the ordered channel.
+    emit_order: std::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -389,6 +397,7 @@ impl Store {
         Ok(Self {
             inner: RwLock::new(inner),
             hook: RwLock::new(None),
+            emit_order: std::sync::Mutex::new(()),
             shadow: Some(Shadow { db }),
             write_waiters: Default::default(),
             write_waiters_peak: Default::default(),
@@ -438,6 +447,15 @@ impl Store {
             .hook
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(h);
+    }
+
+    /// Held from before an entity commit until its emit returns (see
+    /// `emit_order`). Not for other kinds: their writes emit nothing, and a
+    /// hook that writes them re-enters the store.
+    fn emit_ordered(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.emit_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn emit(&self, tenant: &TenantId, before: Option<Value>, after: Option<Value>) {
@@ -584,6 +602,7 @@ impl Store {
 
     /// Insert a new resource; `false` if the id already exists.
     pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
+        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
         let created = on_blocking(|| {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
@@ -608,6 +627,7 @@ impl Store {
     /// entity did not (4.22), so the upsert reports CREATED and the caller
     /// answers 201 with a Location header instead of a silent 204.
     pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
+        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
         let (prev, expired) = on_blocking(|| {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
@@ -642,6 +662,7 @@ impl Store {
     /// stopped serving. The row itself still goes — the sweep would take it
     /// anyway, and leaving it would resurrect the 409.
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
+        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
         let removed = on_blocking(|| {
             let mut inner = self.write_inner();
             // an expired doc is left in place for the sweep to reap: removing
@@ -688,6 +709,7 @@ impl Store {
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Option<Result<T, E>> {
+        let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
         let (result, change) = on_blocking(|| {
             let mut inner = self.write_inner();
             if self.is_expired(&inner, kind, tenant.as_str(), id) {
@@ -784,6 +806,68 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Two writers to the same entity: the change hook fires in COMMIT
+    /// order. The first writer's hook is gated open only after the second
+    /// writer has had every chance to overtake it — if the second commit may
+    /// emit before the first commit's emit, the notification pipeline sees
+    /// the versions reversed and records stale state as newest.
+    #[test]
+    fn change_hook_fires_in_commit_order_per_entity() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let s = Arc::new(Store::default());
+        let seen: Arc<std::sync::Mutex<Vec<i64>>> = Arc::default();
+        let entered = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        {
+            let (seen, entered, released) = (seen.clone(), entered.clone(), released.clone());
+            s.set_change_hook(Box::new(move |_t, _b, after| {
+                let v = after
+                    .as_ref()
+                    .and_then(|a| a.get("v"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(-1);
+                if v == 1 {
+                    entered.store(true, Ordering::SeqCst);
+                    while !released.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(v);
+            }));
+        }
+        let t = TenantId::new("emit-order").expect("tenant");
+        let doc = |v: i64| json!({"id": "urn:x:1", "type": ["T"], "v": v});
+        let s1 = s.clone();
+        let t1c = t.clone();
+        let w1 = std::thread::spawn(move || {
+            s1.upsert(&t1c, Kind::Entity, "urn:x:1", doc(1));
+        });
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // writer 1 has committed and sits inside its hook. Writer 2 now has
+        // every chance to commit AND emit before writer 1's emit finishes.
+        let s2 = s.clone();
+        let t2c = t.clone();
+        let w2 = std::thread::spawn(move || {
+            s2.upsert(&t2c, Kind::Entity, "urn:x:1", doc(2));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
+        w1.join().expect("writer 1");
+        w2.join().expect("writer 2");
+        assert_eq!(
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![1, 2],
+            "hooks must fire in commit order, or the consumer records stale state as newest"
+        );
+    }
 
     #[test]
     fn commit_queue_counts_writers() {
