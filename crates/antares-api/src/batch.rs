@@ -149,7 +149,6 @@ fn err_remote(id: Option<&str>, status: u16, detail: &str) -> Value {
     let etype = match status {
         400 => "BadRequestData",
         404 => "ResourceNotFound",
-        409 if detail.contains("does not accept") => "Conflict",
         409 => "AlreadyExists",
         422 => "OperationNotSupported",
         _ => "InternalError",
@@ -499,8 +498,12 @@ async fn batch_write(
                     for (_, doc) in replaces.iter_mut() {
                         stamp_new(doc, &ts);
                     }
-                    let flags = st.store.batch_upsert(&tenant, replaces.clone())?;
-                    for ((id, _), created) in replaces.iter().zip(flags) {
+                    // ids first, then MOVE the documents into the store —
+                    // the loop below only needs the ids, so the batch payload
+                    // is never deep-cloned on the ingest hot path.
+                    let ids: Vec<String> = replaces.iter().map(|(id, _)| id.clone()).collect();
+                    let flags = st.store.batch_upsert(&tenant, replaces)?;
+                    for (id, created) in ids.iter().zip(flags) {
                         if created {
                             any_created = true;
                             if !created_ids.contains(id) {
@@ -588,8 +591,9 @@ async fn batch_write(
     }
     // The collected creates, one multi-row statement, one transaction.
     if !pending_creates.is_empty() {
-        let flags = st.store.batch_create(&tenant, pending_creates.clone())?;
-        for ((id, _), created) in pending_creates.iter().zip(flags) {
+        let ids: Vec<String> = pending_creates.iter().map(|(id, _)| id.clone()).collect();
+        let flags = st.store.batch_create(&tenant, pending_creates)?;
+        for (id, created) in ids.iter().zip(flags) {
             if created {
                 any_created = true;
                 if !created_ids.contains(id) {
@@ -689,6 +693,9 @@ async fn batch_write(
             // options=update is no Create Entity parameter (5.6.1.3) and
             // would 400 the forward; the append fallback re-adds
             // noOverwrite explicitly (5.6.9.4).
+            // The id is reported to the client verbatim, so it is kept raw
+            // here and percent-encoded per RFC 3986 clause 3.3 only where it
+            // becomes a path segment of a forwarded URL.
             let ent_id = |ent: &Value| {
                 ent.get("id")
                     .and_then(Value::as_str)
@@ -736,7 +743,11 @@ async fn batch_write(
                             let (status, _, _) = crate::federation::forward(
                                 st,
                                 reqwest::Method::PUT,
-                                format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                                format!(
+                                    "{}/ngsi-ld/v1/entities/{}",
+                                    reg.endpoint,
+                                    crate::federation::path_segment(id.as_str())
+                                ),
                                 &[],
                                 headers,
                                 &tenant,
@@ -750,7 +761,11 @@ async fn batch_write(
                             let (status, _, _) = crate::federation::forward(
                                 st,
                                 reqwest::Method::PATCH,
-                                format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                                format!(
+                                    "{}/ngsi-ld/v1/entities/{}/attrs",
+                                    reg.endpoint,
+                                    crate::federation::path_segment(id.as_str())
+                                ),
                                 &[],
                                 headers,
                                 &tenant,
@@ -776,7 +791,11 @@ async fn batch_write(
                         let (status, _, _) = crate::federation::forward(
                             st,
                             reqwest::Method::PUT,
-                            format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[],
                             headers,
                             &tenant,
@@ -794,7 +813,11 @@ async fn batch_write(
                         let (status, _, _) = crate::federation::forward(
                             st,
                             reqwest::Method::PATCH,
-                            format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}/attrs",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[],
                             headers,
                             &tenant,
@@ -812,7 +835,11 @@ async fn batch_write(
                         let (status, _, _) = crate::federation::forward(
                             st,
                             reqwest::Method::PATCH,
-                            format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}/attrs",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[],
                             headers,
                             &tenant,
@@ -832,7 +859,11 @@ async fn batch_write(
                         let (status, _, _) = crate::federation::forward(
                             st,
                             reqwest::Method::PATCH,
-                            format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[],
                             headers,
                             &tenant,
@@ -851,7 +882,11 @@ async fn batch_write(
                         let (status, _, _) = crate::federation::forward(
                             st,
                             reqwest::Method::POST,
-                            format!("{}/ngsi-ld/v1/entities/{id}/attrs", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}/attrs",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[("options".into(), "noOverwrite".into())],
                             headers,
                             &tenant,
@@ -866,11 +901,15 @@ async fn batch_write(
                 _ => handled = false,
             }
             if !handled && reg.is_proxy() {
+                // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 last rung: "In case CSR is
+                // an exclusive or redirect Context Source Registration, add an
+                // Error of type Conflict for each Entity in IN to E."
                 for id in &sent_ids {
-                    remote_err.push(err_remote(
+                    remote_err.push(err_entry(
                         Some(id),
-                        409,
-                        &format!("registration does not accept the operation {op}"),
+                        &NgsiError::Conflict(format!(
+                            "registration does not accept the operation {op}"
+                        )),
                     ));
                 }
             }
@@ -888,8 +927,12 @@ async fn batch_write(
         }
         out.errors.extend(remote_err);
     }
-    // 5.6.8: a 201 upsert body lists ONLY the newly created ids
-    if mode == BatchMode::Upsert && any_created {
+    // 5.6.8.5: the created-only S array is the ALL-SUCCEEDED reading ("if all
+    // Entities not existing prior to this request have been successfully
+    // created and the others have been successfully updated"). Once E is
+    // non-empty the third bullet applies and S is "the list of Entities
+    // successfully created or updated".
+    if mode == BatchMode::Upsert && any_created && out.errors.is_empty() {
         out.success = created_ids.into_iter().map(Value::String).collect();
     }
     let (status, body_on_ok) = match mode {
@@ -932,6 +975,16 @@ pub async fn batch_delete(
             return Err(NgsiError::BadRequestData(
                 "batch array must not contain null items".into(),
             )
+            .into());
+        }
+        // Batch entity count cap — the same ceiling the write batches carry,
+        // and the one that bounds the per-id forwarded DELETE fan-out below.
+        if ids.len() > *crate::bounds::MAX_BATCH_ITEMS {
+            return Err(NgsiError::BadRequestData(format!(
+                "batch of {} exceeds the {}-entity limit",
+                ids.len(),
+                *crate::bounds::MAX_BATCH_ITEMS
+            ))
             .into());
         }
         let spec = crate::csource::CsrSpec {
@@ -1040,7 +1093,11 @@ pub async fn batch_delete(
                         let (status, _, _) = crate::federation::forward(
                             &st,
                             reqwest::Method::DELETE,
-                            format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                            format!(
+                                "{}/ngsi-ld/v1/entities/{}",
+                                reg.endpoint,
+                                crate::federation::path_segment(id.as_str())
+                            ),
                             &[],
                             &headers,
                             &tenant,
@@ -1060,11 +1117,15 @@ pub async fn batch_delete(
                         }
                     }
                 } else if reg.is_proxy() {
+                    // 5.6.10.4 last rung: an exclusive or redirect CSR that
+                    // supports neither delete operation contributes an Error
+                    // of type Conflict for each Entity in IN.
                     for id in &sent_ids {
-                        remote_err.push(err_remote(
+                        remote_err.push(err_entry(
                             Some(id),
-                            409,
-                            "registration does not accept the operation deleteBatch",
+                            &NgsiError::Conflict(
+                                "registration does not accept the operation deleteBatch".into(),
+                            ),
                         ));
                     }
                 }
@@ -1125,6 +1186,7 @@ pub(crate) fn query_doc_params(
         None => {}
         Some(Value::Array(es)) if !es.is_empty() => {
             let (mut types, mut ids, mut pats) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut with_id, mut with_pat) = (0usize, 0usize);
             for e in es {
                 if !e.is_object() {
                     return Err(bad(
@@ -1143,6 +1205,7 @@ pub(crate) fn query_doc_params(
                     Some(Value::String(s)) => {
                         antares_model::EntityId::new(s)?;
                         ids.push(s.clone());
+                        with_id += 1;
                     }
                     Some(Value::Array(a)) => {
                         for i in a {
@@ -1152,6 +1215,7 @@ pub(crate) fn query_doc_params(
                             antares_model::EntityId::new(s)?;
                             ids.push(s.to_owned());
                         }
+                        with_id += 1;
                     }
                     Some(_) => {
                         return Err(bad(
@@ -1161,7 +1225,10 @@ pub(crate) fn query_doc_params(
                 }
                 match e.get("idPattern") {
                     None => {}
-                    Some(Value::String(s)) => pats.push(s.clone()),
+                    Some(Value::String(s)) => {
+                        pats.push(s.clone());
+                        with_pat += 1;
+                    }
                     Some(_) => {
                         return Err(bad(
                             "EntitySelector idPattern must be a string (5.2.33)".into()
@@ -1172,10 +1239,17 @@ pub(crate) fn query_doc_params(
             if !types.is_empty() {
                 vp.insert("type".into(), types.join(","));
             }
-            if !ids.is_empty() {
+            // 5.2.33: the selectors are a union, and "id takes precedence over
+            // idPattern" holds PER selector. These flat params carry a single
+            // id/idPattern pair applied to the whole result, so a member is
+            // only emitted when every selector agrees on it — otherwise one
+            // selector's id would filter away the Entities another selector
+            // selects on its own. Where they disagree the type predicate alone
+            // stands, which over-matches rather than losing Entities.
+            if with_id == es.len() && !ids.is_empty() {
                 vp.insert("id".into(), ids.join(","));
             }
-            if !pats.is_empty() {
+            if with_id == 0 && with_pat == es.len() && !pats.is_empty() {
                 vp.insert("idPattern".into(), pats.join("|"));
             }
         }
@@ -1239,11 +1313,7 @@ pub(crate) fn query_doc_params(
         match q.get(k) {
             None => {}
             Some(Value::Bool(b)) => {
-                // splitEntities semantics live with DistributedOperations;
-                // stored entities are complete here (the false reading).
-                if k == "entityMap" {
-                    vp.insert(k.into(), b.to_string());
-                }
+                vp.insert(k.into(), b.to_string());
             }
             Some(_) => return Err(bad(format!("Query {k} must be a boolean (5.2.23)"))),
         }
@@ -1425,6 +1495,11 @@ mod tests {
             .expect("resp")
     }
 
+    async fn body_json(resp: Response) -> Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
     async fn get_entity(app: &Router, id: &str) -> Value {
         let resp = app
             .clone()
@@ -1495,10 +1570,24 @@ mod tests {
                     "brand": {"type": "Property", "value": "acme"}}]),
         )
         .await;
+        // `speed` already existed, so the skip is a partial failure: 5.6.9.5
+        // makes 207 with the S and E arrays the only correct answer.
+        assert_eq!(
+            resp.status(),
+            StatusCode::MULTI_STATUS,
+            "the skipped instance must be reported"
+        );
+        let outcome = body_json(resp).await;
+        let errs = outcome["errors"].as_array().expect("E array");
+        assert_eq!(errs.len(), 1, "{outcome}");
+        assert_eq!(errs[0]["entityId"], id, "E names the entity: {outcome}");
         assert!(
-            resp.status() == StatusCode::NO_CONTENT || resp.status() == StatusCode::MULTI_STATUS,
-            "batch update answered {}",
-            resp.status()
+            !outcome["success"]
+                .as_array()
+                .expect("S array")
+                .iter()
+                .any(|v| v.as_str() == Some(id)),
+            "a partially skipped entity must not also be in S: {outcome}"
         );
         let doc = get_entity(&app, id).await;
         assert_eq!(
@@ -1557,6 +1646,166 @@ mod tests {
         );
         assert_eq!(ok, vec![("urn:ngsi-ld:Building:mine".to_owned(), true)]);
         assert!(err.is_empty());
+    }
+
+    /// 5.6.10.3: the Batch Entity Delete input is "an array of Entity IDs"
+    /// with no per-operation exemption from this broker's batch ceiling —
+    /// an over-cap array is rejected whole and deletes nothing.
+    #[tokio::test]
+    async fn batch_delete_over_the_item_cap_deletes_nothing() {
+        let app = app();
+        let id = "urn:ngsi-ld:Building:delete-cap";
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/create",
+            json!([{"id": id, "type": "Building"}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mut ids: Vec<Value> = (0..*crate::bounds::MAX_BATCH_ITEMS)
+            .map(|i| Value::String(format!("urn:ngsi-ld:Building:cap-{i}")))
+            .collect();
+        ids.push(Value::String(id.to_owned()));
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/delete",
+            Value::Array(ids),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "over-cap delete");
+        let doc = body_json(resp).await;
+        assert!(
+            doc["type"]
+                .as_str()
+                .expect("problem type")
+                .ends_with("BadRequestData"),
+            "{doc}"
+        );
+        // rejected whole: the in-range entity of the same array survives
+        get_entity(&app, id).await;
+    }
+
+    /// 5.6.8.5 third bullet: when only some Entities succeeded, S is "the
+    /// list of Entities successfully created **or updated**" — the
+    /// created-only list of the second bullet is the all-succeeded case.
+    #[tokio::test]
+    async fn upsert_207_success_carries_updated_entities_too() {
+        let app = app();
+        let existing = "urn:ngsi-ld:Building:upsert-207-old";
+        let fresh = "urn:ngsi-ld:Building:upsert-207-new";
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/create",
+            json!([{"id": existing, "type": "Building"}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/upsert",
+            json!([
+                {"id": existing, "type": "Building",
+                 "speed": {"type": "Property", "value": 1}},
+                {"id": fresh, "type": "Building"},
+                "not an entity"
+            ]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let doc = body_json(resp).await;
+        let s: Vec<&str> = doc["success"]
+            .as_array()
+            .expect("S array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(s.contains(&existing), "the updated Entity is in S: {doc}");
+        assert!(s.contains(&fresh), "the created Entity is in S: {doc}");
+        assert_eq!(doc["errors"].as_array().expect("E array").len(), 1, "{doc}");
+    }
+
+    /// Table 5.2.23-1 splitEntities: "If true it is assumed that single
+    /// Entities are distributed between different Context Brokers and/or
+    /// Context Sources and this has to be taken into account when applying
+    /// any kind of filters" — the body member drives the same read as the
+    /// query-parameter twin, so it has to reach the filter path.
+    #[test]
+    fn query_body_split_entities_reaches_the_filter_params() {
+        let q = json!({"type": "Query", "entityMap": true, "splitEntities": true});
+        let mut vp = HashMap::new();
+        query_doc_params(q.as_object().expect("object"), false, &mut vp).expect("valid Query");
+        assert_eq!(
+            vp.get("splitEntities").map(String::as_str),
+            Some("true"),
+            "splitEntities must not be dropped: {vp:?}"
+        );
+        assert_eq!(vp.get("entityMap").map(String::as_str), Some("true"));
+        // the false reading is carried through unchanged, never as "true"
+        let q = json!({"type": "Query", "splitEntities": false});
+        let mut vp = HashMap::new();
+        query_doc_params(q.as_object().expect("object"), false, &mut vp).expect("valid Query");
+        assert_eq!(vp.get("splitEntities").map(String::as_str), Some("false"));
+    }
+
+    /// 5.2.33: the `entities` EntitySelectors are a union and "id takes
+    /// precedence over idPattern" PER selector. A flat filter carries one
+    /// id/idPattern pair, so a member may only be emitted when it holds for
+    /// every selector — otherwise the flat filter excludes Entities that a
+    /// selector on its own selects.
+    #[test]
+    fn entity_selectors_are_a_union_not_a_flat_id_filter() {
+        let mixed = json!({"type": "Query", "entities": [
+            {"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:1"},
+            {"type": "Building", "idPattern": "^urn:ngsi-ld:Building:"}
+        ]});
+        let mut vp = HashMap::new();
+        query_doc_params(mixed.as_object().expect("object"), false, &mut vp).expect("valid Query");
+        assert_eq!(vp.get("type").map(String::as_str), Some("Vehicle,Building"));
+        assert!(
+            !vp.contains_key("id"),
+            "an id from one selector must not filter the other selector out: {vp:?}"
+        );
+        assert!(
+            !vp.contains_key("idPattern"),
+            "a pattern from one selector must not filter the other out: {vp:?}"
+        );
+        // every selector carries id → the union of ids is exact
+        let all_ids = json!({"type": "Query", "entities": [
+            {"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:1"},
+            {"type": "Building", "id": ["urn:ngsi-ld:Building:1"]}
+        ]});
+        let mut vp = HashMap::new();
+        query_doc_params(all_ids.as_object().expect("object"), false, &mut vp)
+            .expect("valid Query");
+        assert_eq!(
+            vp.get("id").map(String::as_str),
+            Some("urn:ngsi-ld:Vehicle:1,urn:ngsi-ld:Building:1")
+        );
+        assert!(!vp.contains_key("idPattern"));
+        // no selector carries id and every one carries idPattern → union
+        let all_pats = json!({"type": "Query", "entities": [
+            {"type": "Vehicle", "idPattern": "^urn:ngsi-ld:Vehicle:"},
+            {"type": "Building", "idPattern": "^urn:ngsi-ld:Building:"}
+        ]});
+        let mut vp = HashMap::new();
+        query_doc_params(all_pats.as_object().expect("object"), false, &mut vp)
+            .expect("valid Query");
+        assert_eq!(
+            vp.get("idPattern").map(String::as_str),
+            Some("^urn:ngsi-ld:Vehicle:|^urn:ngsi-ld:Building:")
+        );
+        assert!(!vp.contains_key("id"));
+        // a single selector keeps the 5.2.33 id-over-idPattern precedence
+        let both = json!({"type": "Query", "entities": [
+            {"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:1", "idPattern": "^urn:"}
+        ]});
+        let mut vp = HashMap::new();
+        query_doc_params(both.as_object().expect("object"), false, &mut vp).expect("valid Query");
+        assert_eq!(
+            vp.get("id").map(String::as_str),
+            Some("urn:ngsi-ld:Vehicle:1")
+        );
+        assert!(!vp.contains_key("idPattern"), "id wins in one selector");
     }
 }
 
