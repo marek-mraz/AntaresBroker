@@ -304,8 +304,9 @@ mod tests {
     }
 
     /// Reserved entity members must never be overwritten by an attribute that
-    /// compacts to the same name: the round-trip guard in compaction keeps
-    /// such an attribute at its full IRI.
+    /// would compact to the same name: the round-trip guard in compaction
+    /// falls back to prefix compaction, so the attribute keeps a key of its
+    /// own and the system members keep their values.
     #[test]
     fn reserved_members_are_not_clobbered_by_attributes() {
         let ctx = Loader::new().core();
@@ -323,7 +324,17 @@ mod tests {
         assert_eq!(out["id"], "urn:ngsi-ld:B:1");
         assert_eq!(out["type"], "Building");
         assert_eq!(out.as_object().unwrap().len(), 5, "no member lost: {out}");
-        assert_eq!(out[format!("{vocab}value")]["value"], "shadow");
+        // negative: not one of the three shadows may be rendered under its
+        // bare reserved name — each keeps a key that expands back to itself.
+        for shadow in ["type", "id", "value"] {
+            let key = ctx.compact_iri(&format!("{vocab}{shadow}"));
+            assert_ne!(key, shadow, "{shadow} was clobbered: {out}");
+            assert_eq!(ctx.expand_key(&key), format!("{vocab}{shadow}"));
+            assert_eq!(
+                out[&key]["value"], "shadow",
+                "{shadow} lost its value: {out}"
+            );
+        }
     }
 
     /// Non-object input is returned untouched; timestamps pass through
@@ -331,7 +342,10 @@ mod tests {
     #[test]
     fn entity_edge_shapes() {
         let ctx = Loader::new().core();
-        assert_eq!(compact_entity(&json!("not an object"), &ctx), json!("not an object"));
+        assert_eq!(
+            compact_entity(&json!("not an object"), &ctx),
+            json!("not an object")
+        );
         assert_eq!(compact_entity(&json!([]), &ctx), json!([]));
         assert_eq!(compact_entity(&json!({}), &ctx), json!({}));
         let out = compact_entity(
@@ -352,10 +366,19 @@ mod tests {
     #[test]
     fn compact_types_shapes() {
         let ctx = ctx_of(json!({"B": "https://example.org/B"}));
-        assert_eq!(compact_types(&json!("https://example.org/B"), &ctx), json!("B"));
-        assert_eq!(compact_types(&json!(["https://example.org/B"]), &ctx), json!("B"));
         assert_eq!(
-            compact_types(&json!(["https://example.org/B", "https://example.org/C"]), &ctx),
+            compact_types(&json!("https://example.org/B"), &ctx),
+            json!("B")
+        );
+        assert_eq!(
+            compact_types(&json!(["https://example.org/B"]), &ctx),
+            json!("B")
+        );
+        assert_eq!(
+            compact_types(
+                &json!(["https://example.org/B", "https://example.org/C"]),
+                &ctx
+            ),
             json!(["B", "https://example.org/C"])
         );
         // an empty list stays a list, non-strings pass through unchanged
@@ -383,7 +406,11 @@ mod tests {
         assert_eq!(out["unitCode"], "CEL");
         // the sub-attribute IRI, in contrast, does compact to its term
         assert_eq!(out["name"], json!({"type": "Property", "value": "sub"}));
-        assert!(out.as_object().unwrap().get("https://example.org/name").is_none());
+        assert!(out
+            .as_object()
+            .unwrap()
+            .get("https://example.org/name")
+            .is_none());
     }
 
     /// vocab / previousVocab / objectType / entityTypeSealed all carry IRIs
@@ -419,7 +446,10 @@ mod tests {
                     "previousObjectList": ["urn:c"]}),
             &ctx,
         );
-        assert_eq!(out["objectList"], json!([{"object": "urn:a"}, {"object": "urn:b"}]));
+        assert_eq!(
+            out["objectList"],
+            json!([{"object": "urn:a"}, {"object": "urn:b"}])
+        );
         assert_eq!(out["previousObjectList"], json!([{"object": "urn:c"}]));
         let out = compact_instance(&json!({"objectList": "urn:a"}), &ctx);
         assert_eq!(out["objectList"], json!("urn:a"));
@@ -462,7 +492,10 @@ mod tests {
             out["loc"],
             json!({"type": "Polygon", "coordinates": [[[0,0],[1,0],[0,1],[0,0]]]})
         );
-        assert_eq!(out["v"], json!({"vocab": "https://example.org/loc", "extra": 1}));
+        assert_eq!(
+            out["v"],
+            json!({"vocab": "https://example.org/loc", "extra": 1})
+        );
         assert_eq!(compact_entity_shallow(&json!("x"), &ctx), json!("x"));
     }
 

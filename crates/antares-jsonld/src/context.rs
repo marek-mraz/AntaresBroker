@@ -38,6 +38,8 @@ pub struct Context {
     /// The @context value to hand back in responses (Link header / body):
     /// what the client sent, before the implicit core merge.
     pub source: Value,
+    /// Total bytes of expanded term IRIs merged so far — see [`Context::charge`].
+    bytes: usize,
 }
 
 impl Context {
@@ -74,6 +76,7 @@ impl Context {
             match def {
                 Value::String(s) => {
                     let iri = self.expand_iri_for_def(s);
+                    self.charge(&iri)?;
                     self.terms.insert(
                         term.clone(),
                         TermDef {
@@ -96,15 +99,23 @@ impl Context {
                     }
                     let id = match o.get("@id").and_then(Value::as_str) {
                         Some(id) => self.expand_iri_for_def(id),
-                        // No @id: term maps into the vocab (or is a keyword alias we skip).
+                        // No @id: the term maps into the active vocabulary
+                        // (or is a keyword alias we skip). The core @context
+                        // is merged last (4.4), so its @vocab is not set yet
+                        // — fall back to it rather than leave a RELATIVE IRI
+                        // that 4.5.1 then has to reject.
                         None => {
                             if o.contains_key("@container") || o.contains_key("@type") {
-                                self.expand_iri_for_def(term)
+                                match self.expand_iri_for_def(term) {
+                                    iri if is_absolute_iri(&iri) => iri,
+                                    _ => format!("{}{term}", vocab_or_default(&self.vocab)),
+                                }
                             } else {
                                 continue;
                             }
                         }
                     };
+                    self.charge(&id)?;
                     let t = o.get("@type").and_then(Value::as_str).unwrap_or("");
                     let c = o.get("@container").and_then(Value::as_str).unwrap_or("");
                     self.terms.insert(
@@ -123,6 +134,23 @@ impl Context {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// 5.5.6: an `@context` that "is invalid" is BadRequestData. The term map
+    /// is built from client-supplied documents, and a chain of prefix
+    /// definitions (`"t1": "t0:…"`, `"t2": "t1:…"`, …) makes every definition
+    /// carry the whole chain, so N terms expand to O(N²) bytes. The merged
+    /// IRIs are budgeted against the ceiling one @context document may
+    /// occupy, on the Context rather than per call so a chain split across
+    /// several documents cannot walk past it.
+    fn charge(&mut self, iri: &str) -> Result<(), NgsiError> {
+        self.bytes += iri.len();
+        if self.bytes > crate::loader::MAX_CONTEXT_BYTES {
+            return Err(NgsiError::BadRequestData(
+                "@context term definitions exceed the maximum size".into(),
+            ));
         }
         Ok(())
     }
@@ -217,18 +245,34 @@ impl Context {
                 break;
             }
         }
-        // prefix compaction: longest matching prefix-capable term
-        let mut best: Option<(usize, String)> = None;
+        // Prefix compaction: longest matching prefix-capable term. `terms` is
+        // a randomly-seeded HashMap, so ties are broken on the term itself
+        // (shortest, then lexicographic — the same rule as `freeze`) or the
+        // chosen prefix would differ between processes.
+        let mut best: Option<(usize, &str)> = None;
         for (term, def) in &self.terms {
-            if def.prefix_ok && !def.iri.is_empty() {
-                if let Some(rest) = iri.strip_prefix(&def.iri) {
-                    if !rest.is_empty() && best.as_ref().is_none_or(|(l, _)| def.iri.len() > *l) {
-                        best = Some((def.iri.len(), format!("{term}:{rest}")));
+            if def.prefix_ok
+                && !def.iri.is_empty()
+                && iri.strip_prefix(&def.iri).is_some_and(|r| !r.is_empty())
+            {
+                let better = match best {
+                    None => true,
+                    Some((l, t)) => {
+                        (
+                            def.iri.len(),
+                            std::cmp::Reverse((term.len(), term.as_str())),
+                        ) > (l, std::cmp::Reverse((t.len(), t)))
                     }
+                };
+                if better {
+                    best = Some((def.iri.len(), term));
                 }
             }
         }
-        best.map(|(_, s)| s).unwrap_or_else(|| iri.to_owned())
+        match best {
+            Some((l, term)) => format!("{term}:{}", &iri[l..]),
+            None => iri.to_owned(),
+        }
     }
 }
 
@@ -240,15 +284,18 @@ fn vocab_or_default(vocab: &str) -> &str {
     }
 }
 
+/// RFC 3986 3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` — the
+/// scheme starts with a letter, and the part after the colon must not be
+/// empty. 4.5.1/5.5.4 lean on this to keep every expanded Attribute name
+/// absolute.
 pub fn is_absolute_iri(s: &str) -> bool {
     match s.split_once(':') {
         Some((scheme, rest)) => {
-            !scheme.is_empty()
-                && !rest.is_empty()
+            !rest.is_empty()
+                && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
                 && scheme
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-                && !scheme.chars().next().is_some_and(|c| c.is_ascii_digit())
         }
         None => false,
     }
@@ -354,7 +401,10 @@ mod tests {
             c.expand_key("observedAt"),
             "https://uri.etsi.org/ngsi-ld/observedAt"
         );
-        assert_ne!(c.expand_key("observedAt"), "https://evil.example/observedAt");
+        assert_ne!(
+            c.expand_key("observedAt"),
+            "https://evil.example/observedAt"
+        );
         // the user's unrelated term is untouched by the core merge
         assert_eq!(c.expand_key("speed"), "https://example.org/speed");
     }
@@ -364,8 +414,12 @@ mod tests {
     #[test]
     fn null_definition_removes_term() {
         let mut c = Context::default();
-        c.merge_object(json!({"speed": "https://example.org/speed"}).as_object().unwrap())
-            .unwrap();
+        c.merge_object(
+            json!({"speed": "https://example.org/speed"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
         c.merge_object(json!({"speed": null}).as_object().unwrap())
             .unwrap();
         c.freeze();
@@ -432,9 +486,12 @@ mod tests {
             c.term("implicit").unwrap().iri,
             "https://uri.etsi.org/ngsi-ld/default-context/implicit"
         );
-        // an expanded definition is not prefix-capable unless @prefix says so
+        // an expanded definition is not prefix-capable unless @prefix says
+        // so: "rel:x" stays the IRI it already is and is NOT rewritten
+        // through the term.
         assert!(!rel.prefix_ok);
-        assert_eq!(c.expand_key("rel:x"), "https://example.org/rel:x");
+        assert_eq!(c.expand_key("rel:x"), "rel:x");
+        assert_ne!(c.expand_key("rel:x"), "https://example.org/relx");
     }
 
     /// The @context is attacker-supplied. Prefix chaining ("t1" defined
@@ -480,7 +537,10 @@ mod tests {
         let mut c = Context::default();
         c.merge_object(&obj).expect("plain context accepted");
         c.freeze();
-        assert_eq!(c.expand_key("term19999"), "https://ex.example/vocab#term19999");
+        assert_eq!(
+            c.expand_key("term19999"),
+            "https://ex.example/vocab#term19999"
+        );
     }
 
     /// Self-referential and mutually-referential prefixes must terminate:
@@ -557,7 +617,10 @@ mod tests {
     #[test]
     fn absolute_iri_keys_pass_through() {
         let c = ctx(json!({"ex": {"@id": "https://example.org/"}}));
-        assert_eq!(c.expand_key("https://other.example/a"), "https://other.example/a");
+        assert_eq!(
+            c.expand_key("https://other.example/a"),
+            "https://other.example/a"
+        );
         assert_eq!(c.expand_key("urn:ngsi-ld:X"), "urn:ngsi-ld:X");
         // @id-form definitions are not prefixes (JSON-LD 1.1 simple-term rule)
         assert_eq!(c.expand_key("ex:a"), "ex:a");
@@ -596,7 +659,10 @@ mod tests {
             "https://voc.example/a:b"
         );
         // the vocab IRI itself has an empty remainder
-        assert_eq!(c.compact_iri("https://voc.example/"), "https://voc.example/");
+        assert_eq!(
+            c.compact_iri("https://voc.example/"),
+            "https://voc.example/"
+        );
     }
 
     /// Longest matching prefix wins, and a term whose IRI is empty is never
@@ -608,7 +674,9 @@ mod tests {
                            "nil": {"@id": "", "@prefix": true}}));
         assert_eq!(c.compact_iri("https://example.org/sub/x"), "sub:x");
         assert_eq!(c.compact_iri("https://example.org/y"), "ex:y");
-        assert!(!c.compact_iri("https://elsewhere.example/z").starts_with("nil:"));
+        assert!(!c
+            .compact_iri("https://elsewhere.example/z")
+            .starts_with("nil:"));
     }
 
     /// Compaction must be reproducible across processes: when several
@@ -623,7 +691,10 @@ mod tests {
             "b": "https://example.org/", "a": "https://example.org/"
         });
         for _ in 0..50 {
-            assert_eq!(ctx(defs.clone()).compact_iri("https://example.org/z"), "a:z");
+            assert_eq!(
+                ctx(defs.clone()).compact_iri("https://example.org/z"),
+                "a:z"
+            );
         }
     }
 

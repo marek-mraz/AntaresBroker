@@ -101,24 +101,41 @@ pub fn allow_private_egress(v: bool) {
 impl EgressPolicy {
     pub fn from_env() -> Self {
         Self {
-            allow_private: std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
-                .map_or(true, |v| v != "false" && v != "0")
-                || ALLOW_PRIVATE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed),
+            allow_private: Self::allow_private_from(
+                std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
+                    .ok()
+                    .as_deref(),
+            ) || ALLOW_PRIVATE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
-    /// The cloud instance-metadata range (169.254.0.0/16, RFC 3927) and its
-    /// IPv6 spellings. Refused whatever `allow_private` says: no development
-    /// box, compose stack or conformance mock lives there, so denying it costs
-    /// nothing, while reaching it from a client-supplied @context URL or
-    /// notification endpoint is the classic credential-theft SSRF.
+    /// Read the switch tolerantly: a security control that only understands
+    /// one spelling hands the operator the opposite of the intent when the
+    /// value is `FALSE` or carries stray whitespace.
+    fn allow_private_from(v: Option<&str>) -> bool {
+        v.is_none_or(|v| {
+            let v = v.trim();
+            !(v.eq_ignore_ascii_case("false") || v == "0")
+        })
+    }
+
+    /// The cloud instance-metadata endpoints — the IPv4 link-local range
+    /// (169.254.0.0/16, RFC 3927), its IPv6 spellings, and the IMDS-over-IPv6
+    /// ULA `fd00:ec2::254`. Refused whatever `allow_private` says: no
+    /// development box, compose stack or conformance mock lives there, so
+    /// denying it costs nothing, while reaching it from a client-supplied
+    /// @context URL or notification endpoint is the classic credential-theft
+    /// SSRF.
     pub(crate) fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => v4.is_link_local(),
-            std::net::IpAddr::V6(v6) => v6
-                .to_ipv4_mapped()
-                .or_else(|| v6.to_ipv4())
-                .is_some_and(|v4| v4.is_link_local()),
+            std::net::IpAddr::V6(v6) => {
+                v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254]
+                    || v6
+                        .to_ipv4_mapped()
+                        .or_else(|| v6.to_ipv4())
+                        .is_some_and(|v4| v4.is_link_local())
+            }
         }
     }
 
@@ -191,10 +208,10 @@ impl EgressPolicy {
                 .map_err(|e| format!("resolving {host}: {e}"))?;
             for a in addrs {
                 if Self::ip_is_private(a.ip()) {
-                    return Err(format!(
-                        "egress to {host} denied ({} is a private range)",
-                        a.ip()
-                    ));
+                    // The denial reaches the client verbatim in the RFC 7807
+                    // `detail`; naming the resolved address would turn the
+                    // request parameter into an internal-DNS oracle.
+                    return Err(format!("egress to {host} denied (private range)"));
                 }
             }
         }
@@ -310,7 +327,8 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
             .unwrap_or("")
             .parse::<std::net::IpAddr>()
         {
-            if EgressPolicy::ip_is_metadata(ip) || (!allow_private && EgressPolicy::ip_is_private(ip))
+            if EgressPolicy::ip_is_metadata(ip)
+                || (!allow_private && EgressPolicy::ip_is_private(ip))
             {
                 // stop (don't follow) — the caller sees a non-2xx and fails the
                 // fetch, but we never connected to the private target.
@@ -439,7 +457,7 @@ fn ttl_from_headers(
 }
 
 /// @context responses above this size are refused.
-const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_CONTEXT_BYTES: usize = 5 * 1024 * 1024;
 
 /// Cap on usage-registry entries (client-supplied URLs); past it, adding a
 /// new URL evicts the least recently used entry.
@@ -449,6 +467,14 @@ const MAX_USAGE_ENTRIES: usize = 4096;
 /// not turn one request into an unbounded crawl. Checked BEFORE each
 /// fetch, so at most this many URLs are ever contacted.
 const MAX_CONTEXT_URLS: usize = 32;
+
+/// The merged-context cache is keyed by the SERIALIZED user @context, which
+/// an `application/ld+json` body may carry inline up to the body cap — 256
+/// multi-megabyte keys (plus the term maps built from them) are no memory
+/// bound at all. Past this length the merge is simply not cached: no network
+/// is involved, the fetched documents stay warm, and the attacker's lever
+/// disappears.
+const MAX_MERGED_KEY_BYTES: usize = 8 * 1024;
 
 /// Byte budget of the fetched-document cache. Entry count alone is not a
 /// memory bound when one entry may be MAX_CONTEXT_BYTES.
@@ -732,7 +758,11 @@ impl Loader {
         // urls already counted on the merged-hit path — the fallthrough
         // rebuild below must not bump them a second time.
         let mut counted: Vec<String> = Vec::new();
-        if let Some(hit) = self.merged.get(&key) {
+        if let Some(hit) = self
+            .merged
+            .get(&key)
+            .filter(|_| !self.merged_hit_is_stale(&key))
+        {
             if count {
                 // cache hit: bump every URL this context resolution involves.
                 // A bump that finds the shared row GONE means another
@@ -779,9 +809,27 @@ impl Loader {
         ctx.freeze();
         ctx.source = user.clone();
         let arc = Arc::new(ctx);
-        self.merged_urls.insert(key.clone(), Arc::new(urls));
-        self.merged.insert(key, Arc::clone(&arc));
+        if key.len() <= MAX_MERGED_KEY_BYTES {
+            self.merged_urls.insert(key.clone(), Arc::new(urls));
+            self.merged.insert(key, Arc::clone(&arc));
+        }
         Ok(arc)
+    }
+
+    /// 6.3.16: "implementations shall periodically invalidate the "Cached"
+    /// @contexts according to the headers mentioned above." A merged context
+    /// is only as fresh as the documents it was built from, so a hit whose
+    /// sources are past their deadline must be rebuilt rather than served.
+    fn merged_hit_is_stale(&self, key: &str) -> bool {
+        self.merged_urls
+            .get(key)
+            .iter()
+            .flat_map(|u| u.iter())
+            .any(|url| {
+                self.fetched
+                    .get(url)
+                    .is_some_and(|d| d.stale_at.is_some_and(|t| Instant::now() >= t))
+            })
     }
 
     fn merge_entry<'a>(
@@ -807,8 +855,13 @@ impl Loader {
         base: Option<std::sync::Arc<String>>,
     ) -> BoxFut<'a, Result<(), NgsiError>> {
         Box::pin(async move {
+            // 5.5.6: an @context that "is invalid" is BadRequestData; 504
+            // LdContextNotAvailable is reserved for one that "is not
+            // available". Both caps below are reached from client-supplied
+            // structure alone, so a client must not be able to mint gateway
+            // errors on demand.
             if depth > 8 {
-                return Err(NgsiError::LdContextNotAvailable(
+                return Err(NgsiError::BadRequestData(
                     "@context nesting too deep".into(),
                 ));
             }
@@ -842,7 +895,7 @@ impl Loader {
                     // extending the crawl. Poisoned lock fails closed.
                     let fetched_so_far = urls.lock().map(|u| u.len()).unwrap_or(usize::MAX);
                     if fetched_so_far >= MAX_CONTEXT_URLS {
-                        return Err(NgsiError::LdContextNotAvailable(format!(
+                        return Err(NgsiError::BadRequestData(format!(
                             "@context resolution exceeds {MAX_CONTEXT_URLS} referenced URLs"
                         )));
                     }
@@ -1573,8 +1626,8 @@ mod tests {
             .await
             .expect_err("a 40-URL crawl must be rejected");
         assert!(
-            matches!(err, NgsiError::LdContextNotAvailable(_)),
-            "cap breach → LdContextNotAvailable, got {err:?}"
+            matches!(err, NgsiError::BadRequestData(_)),
+            "5.5.6: a client-supplied cap breach is invalid input, got {err:?}"
         );
         let n = hits.load(Ordering::SeqCst);
         assert!(n <= 33, "crawl must stop at the cap, made {n} fetches");
@@ -1647,6 +1700,183 @@ mod tests {
         assert!(
             entries <= MAX_FETCHED_CACHE_BYTES / mib as u64,
             "byte budget breached: {entries} entries of 1 MiB"
+        );
+    }
+
+    /// 6.3.16: "implementations shall periodically invalidate the "Cached"
+    /// @contexts according to the headers mentioned above." A repeat
+    /// resolution of the same @context value is served from the merged cache,
+    /// so the lifetime has to be enforced THERE too or a max-age=0 document is
+    /// frozen for the process lifetime.
+    #[tokio::test]
+    async fn merged_cache_honours_the_context_lifetime() {
+        let body = Arc::new(std::sync::Mutex::new(
+            r#"{"@context":{"speed":"https://a.example/speed"}}"#.to_string(),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = body.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let b = served.lock().map(|b| b.clone()).unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nCache-Control: max-age=0\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{b}",
+                    b.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let url = Value::String(format!("http://{addr}/ctx.jsonld"));
+        let ctx = loader.resolve(&url).await.expect("first resolve");
+        assert_eq!(ctx.expand_key("speed"), "https://a.example/speed");
+
+        *body.lock().expect("lock") =
+            r#"{"@context":{"speed":"https://b.example/speed"}}"#.to_string();
+        let ctx = loader.resolve(&url).await.expect("second resolve");
+        assert_eq!(
+            ctx.expand_key("speed"),
+            "https://b.example/speed",
+            "an expired @context must be re-resolved, not served from the merged cache"
+        );
+    }
+
+    /// The merged cache is keyed by the SERIALIZED user @context, which an
+    /// `application/ld+json` body may carry inline up to the body cap — an
+    /// entry-only bound is no memory bound when one key is megabytes.
+    #[tokio::test]
+    async fn merged_cache_refuses_oversized_keys() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let mut big = serde_json::Map::new();
+        for i in 0..2000 {
+            big.insert(
+                format!("term{i:06}"),
+                Value::String(format!("https://ex.example/{i:06}")),
+            );
+        }
+        let user = Value::Object(big);
+        assert!(user.to_string().len() > MAX_MERGED_KEY_BYTES);
+        for _ in 0..8 {
+            loader.resolve(&user).await.expect("resolve");
+        }
+        let stats = loader.cache_stats();
+        assert_eq!(
+            stats["merged"].as_u64().expect("count"),
+            0,
+            "an oversized inline @context must not be cached: {stats}"
+        );
+        // negative: a small inline @context still is.
+        loader
+            .resolve(&serde_json::json!({"a": "https://ex.example/a"}))
+            .await
+            .expect("resolve");
+        assert_eq!(loader.cache_stats()["merged"].as_u64().expect("count"), 1);
+    }
+
+    /// The doc comment on `ip_is_metadata` promises the metadata range is
+    /// "Refused whatever `allow_private` says" — that has to include the
+    /// native IPv6 spelling of the AWS IMDS endpoint, which is a ULA and would
+    /// otherwise be waved through by the default private-egress setting.
+    #[tokio::test]
+    async fn metadata_endpoint_is_denied_in_every_spelling() {
+        let allow = EgressPolicy {
+            allow_private: true,
+        };
+        for host in [
+            "169.254.169.254",
+            "::ffff:169.254.169.254",
+            "::169.254.169.254",
+            "fd00:ec2::254",
+            "[fd00:ec2::254]",
+        ] {
+            let err = allow
+                .check_host(host, 80)
+                .await
+                .expect_err("the metadata endpoint must be denied");
+            assert!(err.contains("metadata"), "{host}: {err}");
+        }
+    }
+
+    /// The denial text is returned to the client verbatim in the RFC 7807
+    /// `detail`, so naming the address a hostname resolved to turns the
+    /// request parameter into an internal-DNS oracle.
+    #[tokio::test]
+    async fn private_range_denial_does_not_name_the_resolved_address() {
+        let deny = EgressPolicy {
+            allow_private: false,
+        };
+        // A NAME that resolves privately takes the resolver path — the one
+        // that used to embed the answer. Where the name does not resolve the
+        // message is the lookup error, which leaks nothing.
+        let err = deny
+            .check_host("ip6-localhost", 80)
+            .await
+            .expect_err("a name resolving into a private range is denied");
+        assert!(
+            !err.contains("::1") && !err.contains("127.0.0.1"),
+            "leaked the resolved address: {err}"
+        );
+        for host in ["10.1.2.3", "127.0.0.1"] {
+            // an IP LITERAL is the client's own input — echoing it back leaks
+            // nothing it did not already know.
+            let err = deny.check_host(host, 80).await.expect_err("denied");
+            assert!(err.contains("private range"), "{host}: {err}");
+        }
+    }
+
+    /// 5.5.6 assigns 504 LdContextNotAvailable to a remote @context that "is
+    /// not available" and BadRequestData to one that "is invalid". Nested
+    /// arrays and an over-long reference tree are entirely client-supplied and
+    /// touch no network, so they are the invalid case — a client must not be
+    /// able to mint gateway errors on demand.
+    #[tokio::test]
+    async fn client_side_context_caps_are_bad_request_not_gateway_errors() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let mut nested = serde_json::json!(["x"]);
+        for _ in 0..12 {
+            nested = Value::Array(vec![nested]);
+        }
+        let err = loader
+            .resolve(&nested)
+            .await
+            .expect_err("a too-deep @context must be rejected");
+        assert!(
+            matches!(err, NgsiError::BadRequestData(_)),
+            "an over-nested @context is invalid input, got {err:?}"
+        );
+    }
+
+    /// A security switch that only understands one spelling silently gives
+    /// the operator the opposite of the intent.
+    #[test]
+    fn egress_switch_ignores_case_and_whitespace() {
+        for v in ["false", "FALSE", "False", " false ", "0", " 0\t"] {
+            assert!(
+                !EgressPolicy::allow_private_from(Some(v)),
+                "{v:?} must turn the private-egress deny ON"
+            );
+        }
+        for v in ["true", "1", "", "yes"] {
+            assert!(
+                EgressPolicy::allow_private_from(Some(v)),
+                "{v:?} must leave private egress allowed"
+            );
+        }
+        assert!(
+            EgressPolicy::allow_private_from(None),
+            "unset means allowed"
         );
     }
 

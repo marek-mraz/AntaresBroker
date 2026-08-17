@@ -39,6 +39,29 @@ const NON_REIFIED_TERMS: &[&str] = &[
     "previousValue",
     "previousObject",
     "previousLanguageMap",
+    // 4.5.1/4.5.2.2 System Generated + 4.22: the core context maps these 1:1
+    // onto their own IRI, so an attribute carrying the fully-qualified
+    // spelling compacts back onto the Entity's system member.
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "expiresAt",
+    "scope",
+];
+
+/// 5.2.5 Table 5.2.5-2 output-only members plus the 4.5.2.2 Prohibited ones:
+/// "shall never include" `entity`/`entityList` (inline Linked Entity
+/// retrieval) and the `previous*` family (showChanges notifications).
+const OUTPUT_ONLY: &[&str] = &[
+    "entity",
+    "entityList",
+    "previousValue",
+    "previousObject",
+    "previousLanguageMap",
+    "previousJson",
+    "previousVocab",
+    "previousValueList",
+    "previousObjectList",
 ];
 
 /// Instance members that are NOT sub-attributes.
@@ -286,7 +309,19 @@ pub fn expand_entity(
         if !opts.temporal {
             validate_dataset_ids(key, &instances)?;
         }
-        out.insert(iri, Value::Array(instances.into_iter().collect()));
+        // 4.5.5.1: "There can only be one default Attribute instance for an
+        // Attribute with a given Attribute name in any request or response" —
+        // a term and its own expanded IRI are ONE Attribute name, so keeping
+        // the last writer would silently discard the other member's data.
+        if out
+            .insert(iri.clone(), Value::Array(instances.into_iter().collect()))
+            .is_some()
+        {
+            return Err(bad(&format!(
+                "attribute {key} expands to {iri}, which another member of \
+                 this Entity already defines (4.5.5.1)"
+            )));
+        }
     }
     Ok(Value::Object(out))
 }
@@ -340,6 +375,27 @@ fn expand_attr_name(name: &str, ctx: &Context) -> Result<String, NgsiError> {
         Err(NgsiError::BadRequestData(format!(
             "attribute name {name:?} does not expand to an absolute IRI"
         )))
+    }
+}
+
+/// Table 5.2.6-1 `objectType` / Table 5.2.35-1 `vocab`: "String or String[]",
+/// "Both short hand string(s) (type name) or URI(s) are allowed" — every entry
+/// is @vocab-coerced against the request @context, so the short and the
+/// expanded spelling of one target type cannot be stored differently.
+fn expand_terms(name: &str, member: &str, v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
+    let bad = || NgsiError::BadRequestData(format!("attribute {name}: invalid {member}"));
+    match v {
+        Value::String(s) => Ok(Value::String(ctx.expand_key(s))),
+        Value::Array(a) => Ok(Value::Array(
+            a.iter()
+                .map(|s| {
+                    s.as_str()
+                        .map(|s| Value::String(ctx.expand_key(s)))
+                        .ok_or_else(bad)
+                })
+                .collect::<Result<_, _>>()?,
+        )),
+        _ => Err(bad()),
     }
 }
 
@@ -426,12 +482,6 @@ pub fn is_deletion_instance(inst: &Value) -> bool {
         })
 }
 
-/// Expand one attribute's value into a normalized instance list.
-/// 4.6.2 Supported names: `name = unicodeLetter *(unicodeLetter /
-/// unicodeNumber / "_")`. A key containing ':' is a compact or absolute IRI
-/// (the spec's prefix:name production) and is outside the term grammar.
-// Known ceiling: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
-// through as an IRI; tighten to per-part validation if it ever matters.
 /// 4.18 Scope grammar: [/] ScopeLevel *(/ScopeLevel), ScopeLevel =
 /// unicodeLetter *(letter/digit/_) — shared by entity scopes and the 5.2.9
 /// registration scope member.
@@ -445,6 +495,11 @@ pub fn valid_scope_value(s: &str) -> bool {
         })
 }
 
+/// 4.6.2 Supported names: `name = unicodeLetter *(unicodeLetter /
+/// unicodeNumber / "_")`. A key containing ':' is a compact or absolute IRI
+/// (the spec's prefix:name production) and is outside the term grammar.
+// Known ceiling: colon-keys are exempt wholesale — a malformed "pre fix:x" slips
+// through as an IRI; tighten to per-part validation if it ever matters.
 pub(crate) fn valid_name(s: &str) -> bool {
     if s.contains(':') {
         return true;
@@ -454,6 +509,7 @@ pub(crate) fn valid_name(s: &str) -> bool {
         && ch.all(|c| c.is_alphabetic() || c.is_numeric() || c == '_')
 }
 
+/// Expand one attribute's value into a normalized instance list.
 fn expand_attribute(
     name: &str,
     v: &Value,
@@ -608,17 +664,6 @@ fn expand_instance(
             ("vocab", &["VocabProperty"]),
             ("valueList", &["ListProperty"]),
             ("objectList", &["ListRelationship"]),
-        ];
-        const OUTPUT_ONLY: &[&str] = &[
-            "entity",
-            "entityList",
-            "previousValue",
-            "previousObject",
-            "previousLanguageMap",
-            "previousJson",
-            "previousVocab",
-            "previousValueList",
-            "previousObjectList",
         ];
         for (m, owners) in VALUE_OWNERS {
             if obj.contains_key(*m) && !owners.contains(&attr_type) {
@@ -801,19 +846,7 @@ fn expand_instance(
             let vv = obj
                 .get("vocab")
                 .ok_or_else(|| bad(format!("attribute {name}: needs vocab")))?;
-            let expanded = match vv {
-                Value::String(s) => Value::String(ctx.expand_key(s)),
-                Value::Array(a) => Value::Array(
-                    a.iter()
-                        .map(|s| match s {
-                            Value::String(s) => Ok(Value::String(ctx.expand_key(s))),
-                            _ => Err(bad(format!("attribute {name}: invalid vocab"))),
-                        })
-                        .collect::<Result<_, _>>()?,
-                ),
-                _ => return Err(bad(format!("attribute {name}: invalid vocab"))),
-            };
-            out.insert("vocab".into(), expanded);
+            out.insert("vocab".into(), expand_terms(name, "vocab", vv, ctx)?);
         }
         "ListProperty" => {
             let l = obj
@@ -935,11 +968,10 @@ fn expand_instance(
         out.insert("lang".into(), l.clone());
     }
     if let Some(ot) = obj.get("objectType") {
-        let expanded = match ot {
-            Value::String(s) => Value::String(ctx.expand_key(s)),
-            other => other.clone(),
-        };
-        out.insert("objectType".into(), expanded);
+        out.insert(
+            "objectType".into(),
+            expand_terms(name, "objectType", ot, ctx)?,
+        );
     }
 
     // sub-attributes
@@ -960,7 +992,14 @@ fn expand_instance(
         }
         let iri = expand_attr_name(k, ctx)?;
         let instances = expand_attribute(k, sub, ctx, opts, depth + 1)?;
-        out.insert(iri, Value::Array(instances));
+        // 4.5.5.1 again, one level down: two sub-attribute names expanding to
+        // one IRI would drop whichever the map orders first.
+        if out.insert(iri.clone(), Value::Array(instances)).is_some() {
+            return Err(bad(format!(
+                "attribute {name}: sub-attribute {k} expands to {iri}, which \
+                 another member already defines (4.5.5.1)"
+            )));
+        }
     }
 
     // 5.2.1: "In all other cases, implementations shall raise an error of
@@ -1015,7 +1054,15 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
     let mut out = Map::new();
     for (k, v) in obj {
         match k.as_str() {
-            "@context" | "createdAt" | "modifiedAt" | "instanceId" => continue,
+            // 5.2.5 Table 5.2.5-2 / 4.5.2.2 System Generated: output-only
+            // members "shall not be provided by Context Producers. In the
+            // event that they are provided (in update or create operations)
+            // NGSI-LD implementations shall ignore them." The sealed
+            // subproperties are Prohibited outside a full ngsildproof
+            // instance, which this path cannot identify.
+            "@context" | "createdAt" | "modifiedAt" | "deletedAt" | "instanceId"
+            | "entityIdSealed" | "entityTypeSealed" => continue,
+            _ if OUTPUT_ONLY.contains(&k.as_str()) => continue,
             "type" => {
                 let t = v
                     .as_str()
@@ -1023,12 +1070,14 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
                     .ok_or_else(|| bad("invalid attribute type in fragment".into()))?;
                 out.insert("type".into(), Value::String(t.to_owned()));
             }
-            "observedAt" => {
+            // 4.6.3: both members are ISO 8601 DateTimes (4.8 observedAt,
+            // 4.22 expiresAt) — the same check the full-instance path runs.
+            "observedAt" | "expiresAt" => {
                 let sdt = v
                     .as_str()
                     .filter(|s| parse_datetime(s))
-                    .ok_or_else(|| bad("invalid observedAt in fragment".into()))?;
-                out.insert("observedAt".into(), Value::String(sdt.to_owned()));
+                    .ok_or_else(|| bad(format!("invalid {k} in fragment")))?;
+                out.insert(k.clone(), Value::String(sdt.to_owned()));
             }
             "value" => {
                 if v.is_null() {
@@ -1068,7 +1117,13 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
                     },
                     1,
                 )?;
-                out.insert(iri, Value::Array(instances));
+                // 4.5.5.1: one Attribute name = one member of the fragment.
+                if out.insert(iri.clone(), Value::Array(instances)).is_some() {
+                    return Err(bad(format!(
+                        "sub-attribute {k} expands to {iri}, which another \
+                         member of this fragment already defines (4.5.5.1)"
+                    )));
+                }
             }
         }
     }
@@ -1105,13 +1160,15 @@ fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError
 
 /// 4.6.3: supported Value geometries are "All the GeoJSON Geometries \[8\]
 /// with the exception of GeometryCollection" — GEO_TYPES holds exactly that
-/// set, and every geometry carries coordinates.
+/// set, and every one of them carries a `coordinates` ARRAY (RFC 7946 3.1): a
+/// scalar or object one is not a geometry and must not reach the 4.5.16
+/// GeoJSON rendering path.
 pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
     let ok = v.as_object().is_some_and(|o| {
         o.get("type")
             .and_then(Value::as_str)
             .is_some_and(|t| GEO_TYPES.contains(&t))
-            && o.contains_key("coordinates")
+            && o.get("coordinates").is_some_and(Value::is_array)
     });
     if ok {
         Ok(())
@@ -2993,7 +3050,10 @@ mod reserved_member_guards {
         ] {
             let frag = json!({"type": "Property", "value": 1, "datasetId": bad});
             let out = expand_attr_fragment(frag.as_object().expect("obj"), &core());
-            assert!(out.is_err(), "datasetId {bad} must be rejected, got {out:?}");
+            assert!(
+                out.is_err(),
+                "datasetId {bad} must be rejected, got {out:?}"
+            );
             // negative: no non-string datasetId ever reaches the output.
             if let Ok(Value::Object(m)) = &out {
                 assert!(m.get("datasetId").is_none_or(Value::is_string));
@@ -3013,7 +3073,11 @@ mod reserved_member_guards {
     fn concise_values_do_not_smuggle_the_ngsi_null() {
         let create = |attr: serde_json::Value| -> Result<Value, NgsiError> {
             let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T", "a": attr});
-            expand_entity(doc.as_object().expect("obj"), &core(), ExpandOpts::default())
+            expand_entity(
+                doc.as_object().expect("obj"),
+                &core(),
+                ExpandOpts::default(),
+            )
         };
         for attr in [
             json!(["urn:ngsi-ld:null"]),
@@ -3039,11 +3103,239 @@ mod reserved_member_guards {
         )
         .is_ok());
         let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T", "a": {"foo": "bar"}});
-        let out = expand_entity(doc.as_object().expect("obj"), &core(), ExpandOpts::default())
-            .expect("plain compound value");
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts::default(),
+        )
+        .expect("plain compound value");
         assert_eq!(
             out["https://uri.etsi.org/ngsi-ld/default-context/a"][0]["value"]["foo"],
             "bar"
+        );
+    }
+
+    /// 5.2.5 Table 5.2.5-2 preamble: the output-only members "shall not be
+    /// provided by Context Producers. In the event that they are provided (in
+    /// update or create operations) NGSI-LD implementations shall ignore
+    /// them." 4.5.2.2 Prohibited adds "shall never include" for entity,
+    /// entityList and the previous* family, and entityIdSealed/
+    /// entityTypeSealed "unless the Property name is ngsildproof".
+    #[test]
+    fn fragment_ignores_output_only_and_prohibited_members() {
+        let frag = json!({
+            "type": "Property",
+            "value": 5,
+            "previousValue": 999,
+            "previousObject": "urn:ngsi-ld:Other:1",
+            "previousLanguageMap": {"en": "x"},
+            "previousJson": {"a": 1},
+            "previousVocab": "x",
+            "previousValueList": [1],
+            "previousObjectList": ["urn:ngsi-ld:Other:1"],
+            "entity": {"id": "urn:evil", "type": "T"},
+            "entityList": [{"id": "urn:evil", "type": "T"}],
+            "entityIdSealed": "urn:evil",
+            "entityTypeSealed": "T",
+            "deletedAt": "2026-01-01T00:00:00Z",
+        });
+        let out = expand_attr_fragment(frag.as_object().expect("obj"), &core())
+            .expect("the ignored members must not make the fragment invalid");
+        let m = out.as_object().expect("object");
+        for k in [
+            "previousValue",
+            "previousObject",
+            "previousLanguageMap",
+            "previousJson",
+            "previousVocab",
+            "previousValueList",
+            "previousObjectList",
+            "entity",
+            "entityList",
+            "entityIdSealed",
+            "entityTypeSealed",
+            "deletedAt",
+        ] {
+            assert!(
+                !m.contains_key(k),
+                "{k} must be ignored on input, got {out:#}"
+            );
+        }
+        // negative: the members the fragment IS allowed to carry survive.
+        assert_eq!(m["value"], 5);
+        assert_eq!(m["type"], "Property");
+    }
+
+    /// 4.6.3/4.22: expiresAt is an ISO 8601 DateTime in a partial-update
+    /// fragment exactly as in a full instance — an unparsable one must not
+    /// reach the transient-entity boundary check.
+    #[test]
+    fn fragment_expires_at_is_a_datetime() {
+        let frag = json!({"type": "Property", "value": 1, "expiresAt": "soon"});
+        let out = expand_attr_fragment(frag.as_object().expect("obj"), &core());
+        assert!(
+            matches!(out, Err(NgsiError::BadRequestData(_))),
+            "an invalid expiresAt is BadRequestData, got {out:?}"
+        );
+        // negative: no unvalidated expiresAt ever reaches the output.
+        if let Ok(Value::Object(m)) = &out {
+            assert!(m.get("expiresAt").is_none());
+        }
+        let frag = json!({"type": "Property", "value": 1, "expiresAt": "2026-01-01T00:00:00Z"});
+        let out = expand_attr_fragment(frag.as_object().expect("obj"), &core())
+            .expect("a valid DateTime is kept");
+        assert_eq!(out["expiresAt"], "2026-01-01T00:00:00Z");
+    }
+
+    /// 4.5.1: "Terms defined in the Core Context as non-reified Properties
+    /// (such as datasetId, instanceId, etc.) shall not be used as Attribute
+    /// names." createdAt/modifiedAt/deletedAt/expiresAt/scope map 1:1 onto
+    /// their core IRI, so the fully-qualified spelling would compact straight
+    /// back onto the Entity's own system member.
+    #[test]
+    fn core_system_member_iris_cannot_be_attribute_names() {
+        for term in ["createdAt", "modifiedAt", "deletedAt", "expiresAt", "scope"] {
+            let mut doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T"});
+            doc.as_object_mut().expect("obj").insert(
+                format!("https://uri.etsi.org/ngsi-ld/{term}"),
+                json!({"type": "Property", "value": "pwned"}),
+            );
+            let out = expand_entity(
+                doc.as_object().expect("obj"),
+                &core(),
+                ExpandOpts::default(),
+            );
+            assert!(
+                matches!(out, Err(NgsiError::BadRequestData(_))),
+                "{term} as an Attribute name is BadRequestData, got {out:?}"
+            );
+            // negative: the poisoned value never reaches the expanded entity.
+            if let Ok(v) = &out {
+                assert_ne!(v[term], "pwned");
+            }
+        }
+        // negative: the system members themselves still expand normally.
+        let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+            "expiresAt": "2026-01-01T00:00:00Z", "scope": "/a"});
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts::default(),
+        )
+        .expect("plain system members");
+        assert_eq!(out["expiresAt"], "2026-01-01T00:00:00Z");
+    }
+
+    /// Table 5.2.6-1: objectType is "String or String[]" and "Both short hand
+    /// string(s) (type name) or URI(s) are allowed" — both shapes are
+    /// @vocab-coerced, so the two spellings of one target type cannot be
+    /// stored differently.
+    #[test]
+    fn object_type_expands_in_both_string_and_array_form() {
+        let expanded = "https://uri.etsi.org/ngsi-ld/default-context/Device";
+        let rel = |ot: serde_json::Value| -> Result<Value, NgsiError> {
+            let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+                "r": {"type": "Relationship", "object": "urn:ngsi-ld:D:1", "objectType": ot}});
+            expand_entity(
+                doc.as_object().expect("obj"),
+                &core(),
+                ExpandOpts::default(),
+            )
+        };
+        let scalar = rel(json!("Device")).expect("scalar objectType");
+        let array = rel(json!(["Device"])).expect("array objectType");
+        let at = |v: &Value| {
+            v["https://uri.etsi.org/ngsi-ld/default-context/r"][0]["objectType"].clone()
+        };
+        assert_eq!(at(&scalar), json!(expanded));
+        assert_eq!(at(&array), json!([expanded]));
+        // negative: the bare term must never survive unexpanded.
+        assert_ne!(at(&array), json!(["Device"]));
+        for bad in [json!(42), json!({"a": 1}), json!([1])] {
+            let out = rel(bad.clone());
+            assert!(
+                matches!(out, Err(NgsiError::BadRequestData(_))),
+                "objectType {bad} must be rejected, got {out:?}"
+            );
+        }
+    }
+
+    /// 4.6.3/Table 5.2.7-1: a GeoProperty value is a clause 4.7 GeoJSON
+    /// geometry, whose "coordinates" is an array — a scalar or object one is
+    /// not a geometry and must not reach the GeoJSON rendering path.
+    #[test]
+    fn geojson_coordinates_must_be_an_array() {
+        for bad in [json!("boom"), json!(42), json!({"lat": 1}), json!(null)] {
+            let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+                "location": {"type": "GeoProperty",
+                             "value": {"type": "Point", "coordinates": bad}}});
+            let out = expand_entity(
+                doc.as_object().expect("obj"),
+                &core(),
+                ExpandOpts::default(),
+            );
+            assert!(
+                matches!(out, Err(NgsiError::BadRequestData(_))),
+                "coordinates {bad} must be rejected, got {out:?}"
+            );
+        }
+        // negative: a real geometry still passes untouched.
+        let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+            "location": {"type": "GeoProperty",
+                         "value": {"type": "Point", "coordinates": [1.0, 2.0]}}});
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts::default(),
+        )
+        .expect("valid Point");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/location"][0]["value"]["coordinates"],
+            json!([1.0, 2.0])
+        );
+    }
+
+    /// 4.5.5.1: "There can only be one default Attribute instance for an
+    /// Attribute with a given Attribute name in any request or response" — a
+    /// term and its own expanded IRI are one Attribute name, so accepting
+    /// both would silently discard one client's data.
+    #[test]
+    fn two_names_expanding_to_one_iri_are_rejected() {
+        let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+            "temperature": {"type": "Property", "value": 1},
+            "https://uri.etsi.org/ngsi-ld/default-context/temperature":
+                {"type": "Property", "value": 2}});
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts::default(),
+        );
+        assert!(
+            matches!(out, Err(NgsiError::BadRequestData(_))),
+            "duplicate expanded Attribute name is BadRequestData, got {out:?}"
+        );
+        // negative: neither value may survive alone as the single instance.
+        if let Ok(v) = &out {
+            assert!(
+                v["https://uri.etsi.org/ngsi-ld/default-context/temperature"]
+                    .as_array()
+                    .is_none_or(|a| a.len() != 1)
+            );
+        }
+        // the same collision one level down, on sub-attributes.
+        let doc = json!({"id": "urn:ngsi-ld:V:1", "type": "T",
+            "speed": {"type": "Property", "value": 1,
+                "accuracy": {"type": "Property", "value": 1},
+                "https://uri.etsi.org/ngsi-ld/default-context/accuracy":
+                    {"type": "Property", "value": 2}}});
+        let out = expand_entity(
+            doc.as_object().expect("obj"),
+            &core(),
+            ExpandOpts::default(),
+        );
+        assert!(
+            matches!(out, Err(NgsiError::BadRequestData(_))),
+            "duplicate expanded sub-Attribute name is BadRequestData, got {out:?}"
         );
     }
 

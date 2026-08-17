@@ -143,7 +143,11 @@ mod tests {
             assert_eq!(c.get(&0), Some(0));
         }
         c.insert(4, 4);
-        assert_eq!(c.get(&0), None, "get must not protect an entry from FIFO eviction");
+        assert_eq!(
+            c.get(&0),
+            None,
+            "get must not protect an entry from FIFO eviction"
+        );
         assert_eq!(c.get(&1), Some(1));
     }
 
@@ -169,7 +173,11 @@ mod tests {
         assert_eq!(c.entry_count(), 1);
         c.insert(2, 2);
         assert_eq!(c.entry_count(), 2);
-        assert_eq!(c.get(&1), Some(1), "the surviving entry must not be evicted early");
+        assert_eq!(
+            c.get(&1),
+            Some(1),
+            "the surviving entry must not be evicted early"
+        );
         c.insert(3, 3);
         assert_eq!(c.entry_count(), 2);
         assert_eq!(c.get(&1), None);
