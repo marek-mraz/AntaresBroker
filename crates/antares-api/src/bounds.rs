@@ -68,6 +68,18 @@ pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
 /// the budget yields no further target — the same outcome an unresolvable
 /// linked entity already has — instead of a store scan per candidate entity.
 pub const MAX_Q_LINK_LOOKUPS: usize = 512;
+/// Compiled regular expressions the process retains (see `regexcache`). The
+/// pattern is client input — the `patternOp`/`notPatternOp` operand of a
+/// query term (4.9) and the `idPattern` of an EntitySelector (5.2.33), an
+/// EntityInfo (5.2.8) or a query parameter (Table 6.4.3.2-1) — so retention
+/// is capped in BOTH dimensions: at most this many distinct patterns, each
+/// compiled to at most `MAX_REGEX_PROGRAM_BYTES`. The worst case a client mix
+/// can reach is therefore 32 MiB of compiled programs, whatever patterns are
+/// sent. Nothing is rejected by these caps: a pattern whose program does not
+/// fit is still compiled (acceptance stays exactly `Regex::new`'s), it is
+/// only not retained.
+pub const MAX_REGEX_CACHE: usize = 1024;
+pub const MAX_REGEX_PROGRAM_BYTES: usize = 32 * 1024;
 
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
@@ -91,6 +103,8 @@ impl LimitStats {
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
             "maxQLinkLookups": MAX_Q_LINK_LOOKUPS,
+            "maxRegexCache": MAX_REGEX_CACHE,
+            "maxRegexProgramBytes": MAX_REGEX_PROGRAM_BYTES,
             "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
             "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
             "rejectedBodyTooDeep": self.body_too_deep.load(Ordering::Relaxed),
@@ -248,6 +262,8 @@ mod tests {
                 "maxJsonDepth",
                 "maxQLinkLookups",
                 "maxQNodes",
+                "maxRegexCache",
+                "maxRegexProgramBytes",
                 "maxUriBytes",
                 "rejectedBodyTooDeep",
                 "rejectedBodyTooLarge",

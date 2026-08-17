@@ -17,6 +17,7 @@ pub mod geo;
 pub mod negotiate;
 pub mod notify;
 pub mod qeval;
+pub mod regexcache;
 pub mod repr;
 pub mod snapshots;
 pub mod state;

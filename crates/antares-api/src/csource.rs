@@ -593,7 +593,7 @@ fn check_entity_conflict(
             let pattern = e
                 .get("idPattern")
                 .and_then(Value::as_str)
-                .and_then(|p| regex::Regex::new(p).ok());
+                .and_then(|p| crate::regexcache::compile(p).ok());
             for existing in &candidates.rows {
                 let eid = existing.get("id").and_then(Value::as_str).unwrap_or("");
                 let id_hit = match (want_id, &pattern) {
@@ -1239,7 +1239,7 @@ fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
             }
         }
         if let Some(p) = ei_pat {
-            if let Ok(re) = regex::Regex::new(p) {
+            if let Ok(re) = crate::regexcache::compile(p) {
                 if ids.iter().any(|i| re.find(i).is_some()) {
                     return true;
                 }
@@ -1248,7 +1248,7 @@ fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
     }
     if let Some(qp) = &spec.id_pattern {
         if let Some(rid) = ei_id {
-            if regex::Regex::new(qp).is_ok_and(|re| re.find(rid).is_some()) {
+            if crate::regexcache::compile(qp).is_ok_and(|re| re.find(rid).is_some()) {
                 return true;
             }
         }

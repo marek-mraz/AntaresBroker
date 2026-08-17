@@ -48,17 +48,22 @@ fn eval_node(
         // matching."
         QNode::Cmp { path, op, value } => {
             // The pattern of `~=` / `!~=` belongs to the Query Term, not to
-            // the target: compile it once per term instead of once per
-            // candidate value. A pattern that does not compile has no L(R),
-            // so neither operator matches (4.9 p.92) — that is what the
-            // `None` below means downstream.
+            // the target: it is compiled once per term instead of once per
+            // candidate value, and the compiled program is shared
+            // process-wide, so re-evaluating the same term over the next
+            // candidate entity or the next event costs no compile at all.
+            // A pattern that does not compile has no L(R), so neither
+            // operator matches (4.9 p.92) — that is what the `None` below
+            // means downstream.
             let re = match (op, value) {
-                (CmpOp::Pattern | CmpOp::NotPattern, QValue::Str(s)) => regex::Regex::new(s).ok(),
+                (CmpOp::Pattern | CmpOp::NotPattern, QValue::Str(s)) => {
+                    crate::regexcache::compile(s).ok()
+                }
                 _ => None,
             };
             resolve_qpath(entity, path, ctx, lookup, budget)
                 .iter()
-                .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value, re.as_ref()))
+                .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value, re.as_deref()))
         }
     }
 }
@@ -666,6 +671,45 @@ mod bounds_and_patterns {
                 "q={q} target={target}"
             );
         }
+    }
+
+    /// 4.9 patternOp: the Query Term's pattern is compiled through the
+    /// process-wide cache, so re-evaluating the same term over the next
+    /// candidate entity (or the next event, for a subscription) reuses the
+    /// compiled program instead of rebuilding it.
+    #[test]
+    fn pattern_term_compiles_through_the_shared_cache() {
+        let _serial = crate::regexcache::serial_lock();
+        let ctx = ctx();
+        let pat = "^Merc[a-z]+-qterm$";
+        assert!(
+            crate::regexcache::cached(pat).is_none(),
+            "the probe pattern must start uncompiled"
+        );
+        let q = format!(r#"brandName~="{pat}""#);
+        let ast = parse_q(&q).expect(&q);
+        let hit = with_value("brandName", json!("Mercedes-qterm"));
+        assert!(eval_q(&ast, &hit, &ctx, &|_| None));
+        let held = crate::regexcache::cached(pat).expect("the term's pattern is retained");
+        // the next candidate reuses it: a recompile would replace the entry
+        let miss = with_value("brandName", json!("Volvo"));
+        assert!(!eval_q(&ast, &miss, &ctx, &|_| None));
+        assert!(
+            crate::regexcache::cached(pat).is_some_and(|now| std::sync::Arc::ptr_eq(&held, &now)),
+            "the second candidate must not rebuild the program"
+        );
+        // an invalid pattern still has no L(R) (p.92) and is still not held
+        let bad = parse_q(r#"brandName~="[qterm""#).expect("parses");
+        assert!(!eval_q(
+            &bad,
+            &with_value("brandName", json!("[qterm")),
+            &ctx,
+            &|_| None
+        ));
+        assert!(
+            crate::regexcache::cached("[qterm").is_none(),
+            "an uncompilable pattern is never retained"
+        );
     }
 
     /// A hostile `~=` pattern costs compile time, not match time (the regex

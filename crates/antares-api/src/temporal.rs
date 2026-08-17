@@ -1703,7 +1703,7 @@ pub(crate) async fn query_temporal_inner(
     }
     let id_pattern = match params.get("idPattern") {
         Some(p) => Some(
-            regex::Regex::new(p)
+            crate::regexcache::compile(p)
                 .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
         ),
         None => None,
