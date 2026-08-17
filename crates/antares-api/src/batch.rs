@@ -1481,6 +1481,130 @@ pub(crate) fn query_doc_params(
     Ok(())
 }
 
+pub async fn batch_query(
+    State(st): State<AppState>,
+    CleanParams(params): CleanParams,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match batch_query_inner(&st, &params, &headers, &body).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn batch_query_inner(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    check_params(
+        params,
+        &["limit", "offset", "count", "options", "format", "local"],
+    )?;
+    // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
+    let accept = parse_accept_geo(headers)?;
+    let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
+    let q = parsed
+        .value
+        .as_object()
+        .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
+    if q.get("type").and_then(Value::as_str) != Some("Query") {
+        return Err(NgsiError::BadRequestData("body type must be Query (5.2.23)".into()).into());
+    }
+    // Convert Query members into virtual params reusing the GET filter path.
+    let mut vp: HashMap<String, String> = HashMap::new();
+    query_doc_params(q, false, &mut vp)?;
+    if let Some(l) = params.get("local") {
+        vp.insert("local".into(), l.clone());
+    }
+    let fed = if crate::federation::active(&vp)
+        && !crate::federation::via_loop(
+            headers,
+            &crate::federation::alias_for(&st.host_alias, &tenant),
+        ) {
+        // 6.3.17 scopes NGSILD-Warning to GET /entities(/{id}) — collected
+        // here for the log only, never emitted on entityOperations/query
+        let mut warnings = Vec::new();
+        let fed =
+            crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp, &mut warnings)
+                .await;
+        for w in &warnings {
+            tracing::debug!("distributed query warning (batch query): {w}");
+        }
+        fed
+    } else {
+        Vec::new()
+    };
+    let mut matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
+    let mut page_params = params.clone();
+    page_params.extend(vp.clone());
+    // 5.2.43 ordering: same 4.23 keys as the GET twin, applied pre-pagination
+    if let Some(spec) = page_params.get("orderBy") {
+        crate::entities::order_entities(&mut matches, spec, &page_params, &parsed.ctx)?;
+    }
+    let (page, count_hdr, _links) = paginate(
+        st,
+        &page_params,
+        matches,
+        "/ngsi-ld/v1/entityOperations/query",
+    )?;
+    // body members (pick/omit/attrs/lang/datasetId) shape the representation
+    // exactly like their 6.3.7 query-parameter twins
+    let repr = parse_repr(&page_params, &parsed.ctx)?;
+    let join = crate::entities::parse_join(&vp)?;
+    let mut payload: Vec<Value> = page
+        .iter()
+        .filter_map(|doc| {
+            let shaped = apply(doc, &repr);
+            if repr.pick.is_some() && shaped.as_object().is_some_and(|o| o.is_empty()) {
+                return None;
+            }
+            Some(crate::entities::compact_for(&repr, &shaped, &parsed.ctx))
+        })
+        .collect();
+    if let Some((mode, level)) = &join {
+        match mode.as_str() {
+            "inline" => {
+                for p in &mut payload {
+                    crate::entities::inline_join(st, &tenant, &parsed.ctx, &repr, p, *level);
+                }
+            }
+            "flat" => {
+                let mut linked = std::collections::BTreeMap::new();
+                for doc in &page {
+                    crate::entities::collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
+                }
+                let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
+                for (id, (ldoc, lrepr)) in linked {
+                    if !page_ids.contains(&id.as_str()) {
+                        payload.push(crate::entities::compact_for(
+                            &lrepr,
+                            &apply(&ldoc, &lrepr),
+                            &parsed.ctx,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let out = if accept == Accept::GeoJson {
+        crate::entities::to_geojson_collection(payload, None, &parsed.ctx)
+    } else {
+        Value::Array(payload)
+    };
+    let mut resp = respond_prefer(StatusCode::OK, out, &parsed.ctx, accept, &tenant, headers);
+    if let Some(total) = count_hdr {
+        if let Ok(v) = total.to_string().parse() {
+            resp.headers_mut().insert("NGSILD-Results-Count", v);
+        }
+    }
+    Ok(resp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1863,128 +1987,4 @@ mod tests {
         );
         assert!(!vp.contains_key("idPattern"), "id wins in one selector");
     }
-}
-
-pub async fn batch_query(
-    State(st): State<AppState>,
-    CleanParams(params): CleanParams,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match batch_query_inner(&st, &params, &headers, &body).await {
-        Ok(r) => r,
-        Err(e) => e.into_response(),
-    }
-}
-
-async fn batch_query_inner(
-    st: &AppState,
-    params: &HashMap<String, String>,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> ApiResult<Response> {
-    let tenant = tenant_from(headers)?;
-    check_params(
-        params,
-        &["limit", "offset", "count", "options", "format", "local"],
-    )?;
-    // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
-    let accept = parse_accept_geo(headers)?;
-    let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let q = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
-    if q.get("type").and_then(Value::as_str) != Some("Query") {
-        return Err(NgsiError::BadRequestData("body type must be Query (5.2.23)".into()).into());
-    }
-    // Convert Query members into virtual params reusing the GET filter path.
-    let mut vp: HashMap<String, String> = HashMap::new();
-    query_doc_params(q, false, &mut vp)?;
-    if let Some(l) = params.get("local") {
-        vp.insert("local".into(), l.clone());
-    }
-    let fed = if crate::federation::active(&vp)
-        && !crate::federation::via_loop(
-            headers,
-            &crate::federation::alias_for(&st.host_alias, &tenant),
-        ) {
-        // 6.3.17 scopes NGSILD-Warning to GET /entities(/{id}) — collected
-        // here for the log only, never emitted on entityOperations/query
-        let mut warnings = Vec::new();
-        let fed =
-            crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp, &mut warnings)
-                .await;
-        for w in &warnings {
-            tracing::debug!("distributed query warning (batch query): {w}");
-        }
-        fed
-    } else {
-        Vec::new()
-    };
-    let mut matches = crate::entities::filter_entities_fed(st, &tenant, &vp, &parsed.ctx, fed)?;
-    let mut page_params = params.clone();
-    page_params.extend(vp.clone());
-    // 5.2.43 ordering: same 4.23 keys as the GET twin, applied pre-pagination
-    if let Some(spec) = page_params.get("orderBy") {
-        crate::entities::order_entities(&mut matches, spec, &page_params, &parsed.ctx)?;
-    }
-    let (page, count_hdr, _links) = paginate(
-        st,
-        &page_params,
-        matches,
-        "/ngsi-ld/v1/entityOperations/query",
-    )?;
-    // body members (pick/omit/attrs/lang/datasetId) shape the representation
-    // exactly like their 6.3.7 query-parameter twins
-    let repr = parse_repr(&page_params, &parsed.ctx)?;
-    let join = crate::entities::parse_join(&vp)?;
-    let mut payload: Vec<Value> = page
-        .iter()
-        .filter_map(|doc| {
-            let shaped = apply(doc, &repr);
-            if repr.pick.is_some() && shaped.as_object().is_some_and(|o| o.is_empty()) {
-                return None;
-            }
-            Some(crate::entities::compact_for(&repr, &shaped, &parsed.ctx))
-        })
-        .collect();
-    if let Some((mode, level)) = &join {
-        match mode.as_str() {
-            "inline" => {
-                for p in &mut payload {
-                    crate::entities::inline_join(st, &tenant, &parsed.ctx, &repr, p, *level);
-                }
-            }
-            "flat" => {
-                let mut linked = std::collections::BTreeMap::new();
-                for doc in &page {
-                    crate::entities::collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
-                }
-                let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
-                for (id, (ldoc, lrepr)) in linked {
-                    if !page_ids.contains(&id.as_str()) {
-                        payload.push(crate::entities::compact_for(
-                            &lrepr,
-                            &apply(&ldoc, &lrepr),
-                            &parsed.ctx,
-                        ));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let out = if accept == Accept::GeoJson {
-        crate::entities::to_geojson_collection(payload, None, &parsed.ctx)
-    } else {
-        Value::Array(payload)
-    };
-    let mut resp = respond_prefer(StatusCode::OK, out, &parsed.ctx, accept, &tenant, headers);
-    if let Some(total) = count_hdr {
-        if let Ok(v) = total.to_string().parse() {
-            resp.headers_mut().insert("NGSILD-Results-Count", v);
-        }
-    }
-    Ok(resp)
 }
