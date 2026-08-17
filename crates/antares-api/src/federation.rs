@@ -2610,8 +2610,10 @@ mod tests {
     fn a_response_id_the_query_selects_survives_the_registration_pattern() {
         let mut r = reg("inclusive");
         r.ent_patterns = vec!["^urn:ngsi-ld:V:sk_bb:.*$".into()];
-        let mut spec = crate::csource::CsrSpec::default();
-        spec.id_pattern = Some("^urn:ngsi-ld:V:sk_zvolen:.*$".into());
+        let spec = crate::csource::CsrSpec {
+            id_pattern: Some("^urn:ngsi-ld:V:sk_zvolen:.*$".into()),
+            ..Default::default()
+        };
         assert!(
             admits_import(&r, &spec, "urn:ngsi-ld:V:sk_zvolen:7"),
             "the client's own pattern admits the id the peer answered with"
@@ -2628,8 +2630,10 @@ mod tests {
         let none = crate::csource::CsrSpec::default();
         assert!(!admits_import(&r, &none, "urn:ngsi-ld:V:sk_zvolen:7"));
         // exact query ids admit exactly themselves
-        let mut exact = crate::csource::CsrSpec::default();
-        exact.ids = Some(vec!["urn:ngsi-ld:V:sk_zvolen:7".into()]);
+        let exact = crate::csource::CsrSpec {
+            ids: Some(vec!["urn:ngsi-ld:V:sk_zvolen:7".into()]),
+            ..Default::default()
+        };
         assert!(admits_import(&r, &exact, "urn:ngsi-ld:V:sk_zvolen:7"));
         assert!(!admits_import(&r, &exact, "urn:ngsi-ld:V:sk_zvolen:8"));
     }

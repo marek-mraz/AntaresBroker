@@ -17,7 +17,10 @@ geo = { workspace = true }
 geo-types = { workspace = true }
 geojson = { workspace = true }
 sonic-rs = { workspace = true, optional = true }
-futures-util = { workspace = true }
+# `std` spelled out: guarded()'s catch_unwind lives behind it, and a
+# consumer that builds this crate without the rest of the workspace (the
+# wasm crate) must not lose it to feature resolution.
+futures-util = { workspace = true, features = ["std"] }
 chrono = { workspace = true }
 icu_collator = { workspace = true }
 icu_locale_core = { workspace = true }
