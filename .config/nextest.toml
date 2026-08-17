@@ -18,3 +18,18 @@ path = "junit.xml"
 # nothing to show but the test name
 store-success-output = false
 store-failure-output = true
+
+# nextest runs each test in its OWN PROCESS, so the in-process serialization
+# these integration suites carry (nats_e2e's SERIAL mutex, pg_temporal's
+# PARTITION_DDL lock) serializes nothing here — and the pentest/outbox tests
+# assert EXCLUSIVE database state that a concurrently running broker's outbox
+# drain legitimately destroys (seen as CI #113: the drain published the rows
+# the sigkill drill and the RLS pentest had just seeded). One serial group
+# restores the sequencing `cargo test`'s one-binary-at-a-time execution used
+# to provide. Defined on the default profile; ci inherits.
+[test-groups]
+db-exclusive = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(nats_e2e) or binary(pg_rls_pentest) or binary(pg_outbox_maps) or binary(pg_temporal) or binary(pg_doc) or binary(pg_entity) or binary(pg)'
+test-group = 'db-exclusive'
