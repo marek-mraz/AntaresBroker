@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     env:
-      # Live PostGIS for the antares-sql integration tests (C14) — without this
+      # Live PostGIS for the antares-sql integration tests — without this
       # they skip vacuously and CI proves nothing about the Pg store.
       ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15432/antares
       CARGO_TERM_COLOR: always
@@ -63,6 +63,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The whole cargo suite runs under nextest so every config emits JUnit
+      # (.config/nextest.toml, profile `ci`) — dev/unit-report-site.py folds
+      # those into the /reports/unit/ page. Plain `cargo test` leaves no
+      # machine-readable trace behind.
+      - uses: taiki-e/install-action@nextest
       # Live MQTT server for the clause-7 e2e — without the env var the
       # test skips vacuously and CI proves nothing about MQTT delivery.
       - name: Start mosquitto for the MQTT e2e
@@ -79,11 +84,29 @@ jobs:
           docker run -d --name nats -p 4222:4222 nats:2-alpine -js
           echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # --locked everywhere below: the image builds with it (Dockerfile), so
+      # without it CI would gate on a dependency set the shipped binary never
+      # used, and an out-of-date Cargo.lock would pass here and fail there.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: dev/unit-junit.sh default --workspace
+      # nextest cannot execute doctests. They stay gated here (a broken doc
+      # example is still a red build) but contribute no JUnit, which the
+      # /reports/unit/ footer says out loud rather than quietly overcounting.
+      - run: cargo test --locked --workspace --doc
+      # The federated-store and outbox-drain tests are #[ignore] so that a cell
+      # without a database reports them as ignored instead of silently passing.
+      # This job HAS a database, so it must ask for them by name. Not a blanket
+      # --run-ignored all: that would also pull in the release-only timing gate.
+      - name: Tests that need a live database
+        run: |
+          dev/unit-junit.sh ignored-db-api -p antares-api \
+            --test split_entities_5_7_2 --test temporal_fed_paging_5_7_4 \
+            --run-ignored ignored-only
+          dev/unit-junit.sh ignored-db-broker -p antares-broker --bin antares \
+            --run-ignored ignored-only outbox_flush_waits
       # feature matrix: no defaults + all features
-      - run: cargo test --workspace --no-default-features
-      - run: cargo test --workspace --all-features
+      - run: dev/unit-junit.sh no-default-features --workspace --no-default-features
+      - run: dev/unit-junit.sh all-features --workspace --all-features
       # Same store tests, timescale temporal mode (hypertable DDL branch,
       # compression-vs-RLS ordering, backend detection).
       - name: Store tests against the timescale temporal mode
@@ -94,7 +117,16 @@ jobs:
           which psql >/dev/null || sudo apt-get install -y -qq postgresql-client
           PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
-          cargo test -p antares-sql
+          dev/unit-junit.sh timescale-store -p antares-sql
+      # Uploaded even on a red job: a failing config is exactly the one the
+      # reports page must render, and fold-reports.sh takes the NEWEST bundle.
+      - name: Unit JUnit bundle (folded into /reports/unit/)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: unit-junit
+          path: unit-junit/
+          if-no-files-found: warn
       # License gate (nothing links TSL — Timescale is talked to
       # over SQL only) + advisories. Not the cargo-deny-action: its docker
       # image ships an x86_64 binary — Exec format error on this arm runner.
@@ -138,4 +170,7 @@ jobs:
         with:
           toolchain: "1.97"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace -j 2
+      # --locked matters most here: without it an old cargo would happily
+      # resolve older dependency versions and the MSRV claim would be proven
+      # against a lockfile nothing else uses.
+      - run: cargo check --locked --workspace -j 2

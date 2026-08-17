@@ -6,6 +6,7 @@
 [![strict](https://github.com/marek-mraz/AntaresBroker/actions/workflows/strict.yml/badge.svg)](https://github.com/marek-mraz/AntaresBroker/actions/workflows/strict.yml)
 [![roll-weekly](https://github.com/marek-mraz/AntaresBroker/actions/workflows/roll-weekly.yml/badge.svg)](https://github.com/marek-mraz/AntaresBroker/actions/workflows/roll-weekly.yml)
 [![ETSI conformance](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)
+[![unit tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fbadge-unit.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/unit/)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fantares-ngsi-ld-demo.marek-mraz.com%2Freports%2Fcoverage-badge.json)](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/)
 [![license: EUPL-1.2](https://img.shields.io/badge/license-EUPL--1.2-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/release/marek-mraz/AntaresBroker?include_prereleases)](https://github.com/marek-mraz/AntaresBroker/releases)

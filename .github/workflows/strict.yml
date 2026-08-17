@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-machete
@@ -103,7 +103,7 @@ jobs:
           tool: cargo-llvm-cov
       # Initial floor 60 = deliberately under the first measured number;
       # ratchet it up once the daily run reports the real figure.
-      - run: cargo llvm-cov --workspace --fail-under-lines 60
+      - run: cargo llvm-cov --locked --workspace --fail-under-lines 60
       - name: Coverage summary
         if: always()
         run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY" || true

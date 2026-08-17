@@ -140,6 +140,8 @@ page = f"""<!doctype html>
 <style>
   body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; color: #1a1a1a; background: #fff; }}
   h1 {{ font-size: 1.5rem; }}
+  nav {{ margin-bottom: 1rem; font-size: .9rem; }}
+  nav a {{ margin-right: 1rem; }}
   .banner {{ padding: .6rem 1rem; border-radius: .5rem; font-weight: 600;
              background: {"#e6f6e6" if all_green else "#fde8e8"};
              color: {"#176617" if all_green else "#8f1d1d"}; }}
@@ -155,6 +157,8 @@ page = f"""<!doctype html>
   }}
 </style>
 <h1>Antares — ETSI NGSI-LD (CIM 009 V1.9.1) conformance</h1>
+<nav><a href="../unit/">Unit &amp; integration tests →</a>
+<a href="../coverage/">Coverage →</a></nav>
 <p class="banner">{banner}</p>
 <p>One full run of every ETSI Robot suite per store mode; each suite row
 links Robot's own drill-down for that run. Produced by the

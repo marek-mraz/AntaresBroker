@@ -347,7 +347,9 @@ jobs:
       - run: sudo apt-get install -y -q musl-tools
       - name: Build + package
         run: |
-          cargo build --release --target ${{ matrix.target }} -p antares-broker
+          # --locked: the released binary and the released image must be built
+          # from the same dependency set (the Dockerfile builds locked too).
+          cargo build --locked --release --target ${{ matrix.target }} -p antares-broker
           strip "target/${{ matrix.target }}/release/antares"
           VER="${GITHUB_REF#refs/tags/}"
           tar czf "antares-$VER-${{ matrix.target }}.tar.gz"             -C "target/${{ matrix.target }}/release" antares             -C "$GITHUB_WORKSPACE" LICENSE README.md

@@ -1,0 +1,20 @@
+# cargo-nextest config. The `ci` profile is the ONE thing that makes the
+# unit half of the test story machine-readable: every workspace/feature
+# config writes a JUnit file, dev/unit-junit.sh keeps it under a per-config
+# name, and dev/unit-report-site.py folds them all into one page next to the
+# ETSI report. Robot HTML stays the drill-down for the ETSI half.
+
+[profile.ci]
+# A red config must still report EVERY test it ran, otherwise the page shows
+# "12 passed" for a run that stopped at the first failure and reads green-ish.
+fail-fast = false
+failure-output = "immediate-final"
+status-level = "fail"
+
+[profile.ci.junit]
+# relative to target/nextest/ci/
+path = "junit.xml"
+# without this a failure's <failure> body is empty and the report page has
+# nothing to show but the test name
+store-success-output = false
+store-failure-output = true

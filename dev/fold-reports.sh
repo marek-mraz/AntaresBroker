@@ -18,6 +18,21 @@ else
   echo '{"schemaVersion":1,"label":"ETSI CIM 009","message":"no recent run","color":"lightgrey"}' \
     > site/reports/badge.json
 fi
+# the unit/integration JUnit bundle from the newest `workspace` job —
+# rendered as its own page so the ETSI half keeps Robot's HTML untouched
+uid=$(gh api "repos/$REPO/actions/artifacts?name=unit-junit&per_page=1" \
+      -q '.artifacts[0].id' 2>/dev/null || true)
+mkdir -p site/reports/unit
+if [ -n "$uid" ] && [ "$uid" != "null" ]; then
+  gh api "repos/$REPO/actions/artifacts/$uid/zip" > unit.zip
+  mkdir -p unit-junit && unzip -q -o unit.zip -d unit-junit
+  python3 dev/unit-report-site.py unit-junit site/reports/unit
+else
+  echo '<!doctype html><title>Unit tests</title><p>No unit-junit bundle in the retention window — run the ci workflow.' \
+    > site/reports/unit/index.html
+  echo '{"schemaVersion":1,"label":"unit tests","message":"no recent run","color":"lightgrey"}' \
+    > site/reports/badge-unit.json
+fi
 # the weekly merged coverage (html + % badge)
 cid=$(gh api "repos/$REPO/actions/artifacts?name=etsi-coverage-merged&per_page=1" \
       -q '.artifacts[0].id' 2>/dev/null || true)
