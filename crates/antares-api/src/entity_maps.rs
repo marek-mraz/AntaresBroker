@@ -52,10 +52,24 @@ pub(crate) fn map_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Valu
     Some(doc)
 }
 
-pub(crate) fn map_put(st: &AppState, tenant: &TenantId, doc: Value) {
+pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) {
     let Some(id) = doc.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return;
     };
+    // 6.4.3.2-1: "the actual expiresAt time of the EntityMap shall be set by
+    // the Context Broker or Context Source, possibly overriding the requested
+    // duration" — the 5.14.2.4 update path carries a client-chosen instant, so
+    // the ceiling binds here, at the one point every writer goes through. An
+    // absent or unreadable expiry is left alone: 5.5.14 keeps it unusable.
+    let ceiling = chrono::Utc::now() + chrono::Duration::seconds(MAX_LIFETIME_SECS);
+    if doc
+        .get("expiresAt")
+        .and_then(Value::as_str)
+        .and_then(dt)
+        .is_some_and(|e| e > ceiling)
+    {
+        doc["expiresAt"] = json!(ceiling.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
     let existing = st.store.list(tenant, Kind::EntityMap).unwrap_or_default();
     if existing.len() >= MAX_MAPS_PER_TENANT && !existing.iter().any(|d| d["id"] == id.as_str()) {
         // eviction order is a heuristic — earliest expiresAt string wins
@@ -258,11 +272,33 @@ fn allowed_create_params() -> Vec<&'static str> {
     v
 }
 
+/// The 6.35.3.1/6.35.3.2 parameters: the query set above plus the temporal
+/// query's own (5.7.4). Checked in the handler because a split-reduced
+/// temporal query rebuilds its parameters from a fixed list and would drop an
+/// unknown one before 5.7.4 ever sees it (6.3.20).
+fn allowed_temporal_create_params() -> Vec<&'static str> {
+    let mut v = allowed_create_params();
+    v.extend([
+        "timerel",
+        "timeAt",
+        "endTimeAt",
+        "timeproperty",
+        "aggrMethods",
+        "aggrPeriodDuration",
+        "lastN",
+    ]);
+    v
+}
+
 /// 5.14.4.4: run the (split-reduced when applicable) local query and record
 /// each matching id under the "@none" local marker; forward to matching
 /// registrations supporting createEntityMapQueryEntity and merge each
 /// returned EntityMap (ids → registration id, linkedMaps → remote map id);
 /// store the local EntityMap and return it.
+/// Known ceiling: the local candidate ids are the first max_limit matches —
+/// the query is paged into the store instead of materializing every matching
+/// Entity document, so one request cannot pull a whole tenant into memory.
+/// Raise the cap if local candidate sets outgrow it.
 pub(crate) async fn build_query_map(
     st: &AppState,
     tenant: &TenantId,
@@ -305,7 +341,12 @@ pub(crate) async fn build_query_map(
     } else {
         params.clone()
     };
-    let local_docs = crate::entities::filter_entities(st, tenant, &eff, ctx)?;
+    // idPattern is invisible to the store, so a pushed page would slice the
+    // wrong set — there the ceiling below is the only bound.
+    let page = (!eff.contains_key("idPattern")).then_some((0, st.max_limit));
+    let mut local_docs =
+        crate::entities::filter_entities_paged(st, tenant, &eff, ctx, Vec::new(), page, None)?.docs;
+    local_docs.truncate(st.max_limit);
     let mut emap = Map::new();
     for d in &local_docs {
         if let Some(id) = d.get("id").and_then(Value::as_str) {
@@ -529,7 +570,10 @@ pub(crate) async fn build_temporal_map(
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .map_err(|e| NgsiError::InternalError(format!("temporal candidate read: {e}")))?;
-    let candidates: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Array(vec![]));
+    // 5.5.14: the map FIXES the Entities considered by every later request, so
+    // an unreadable candidate set must fail rather than become "no candidates".
+    let candidates: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| NgsiError::InternalError("temporal candidate parse".into()))?;
     let mut emap = Map::new();
     if let Some(arr) = candidates.as_array() {
         for d in arr {
@@ -588,6 +632,7 @@ pub async fn create_temporal_entity_map(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        check_params(&params, &allowed_temporal_create_params())?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let doc = build_temporal_map(&st, &tenant, &headers, &ctx, &params).await?;
@@ -615,6 +660,7 @@ pub async fn create_temporal_entity_map_post(
             .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
         let mut vp: HashMap<String, String> = params.clone();
         crate::batch::query_doc_params(qo, true, &mut vp)?;
+        check_params(&vp, &allowed_temporal_create_params())?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let doc = build_temporal_map(&st, &tenant, &headers, &ctx, &vp).await?;
@@ -817,6 +863,118 @@ mod tests {
             st.store.list(&t, Kind::EntityMap).expect("list").len(),
             before
         );
+    }
+
+    /// 5.14.4.4 + 5.5.9.3: the EntityMap holds the CANDIDATE identifiers a
+    /// later paginated request re-checks, so building one must not depend on
+    /// materializing the tenant's whole match set. The candidate set is
+    /// bounded by the broker ceiling, exactly as the temporal twin is.
+    #[tokio::test]
+    async fn clause_5_14_4_query_map_candidate_set_is_bounded() {
+        let mut st = AppState::new("antares-em-bound".into());
+        st.max_limit = 8;
+        let t = TenantId::default();
+        for i in 0..40 {
+            let id = format!("urn:ngsi-ld:Vehicle:{i:03}");
+            st.store
+                .create(
+                    &t,
+                    Kind::Entity,
+                    &id,
+                    json!({
+                        "id": id,
+                        "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
+                    }),
+                )
+                .expect("seed");
+        }
+        let doc = build_query_map(
+            &st,
+            &t,
+            &HeaderMap::new(),
+            &antares_jsonld::Context::default(),
+            &params(&[("type", "Vehicle"), ("local", "true")]),
+        )
+        .await
+        .expect("EntityMap");
+        let emap = doc["entityMap"].as_object().expect("entityMap object");
+        assert!(!emap.is_empty(), "the matching entities are candidates");
+        assert!(
+            emap.len() <= st.max_limit,
+            "the candidate set is unbounded: {} entries for a ceiling of {}",
+            emap.len(),
+            st.max_limit
+        );
+        // a query that matches nothing must not pick up unrelated entities
+        let none = build_query_map(
+            &st,
+            &t,
+            &HeaderMap::new(),
+            &antares_jsonld::Context::default(),
+            &params(&[("type", "Ship"), ("local", "true")]),
+        )
+        .await
+        .expect("EntityMap");
+        assert_eq!(none["entityMap"], json!({}));
+    }
+
+    /// 5.5.14 + Table 6.4.3.2-1: "the actual expiresAt time of the EntityMap
+    /// shall be set by the Context Broker or Context Source, possibly
+    /// overriding the requested duration" — the 5.14.2.4 update path writes a
+    /// client-chosen instant, so the broker ceiling binds when the map is
+    /// stored, not only when it is created.
+    #[test]
+    fn clause_5_5_14_stored_expiry_never_exceeds_the_broker_ceiling() {
+        let st = AppState::new("antares-em-clamp".into());
+        let t = TenantId::default();
+        let ceiling = chrono::Utc::now() + chrono::Duration::seconds(MAX_LIFETIME_SECS);
+        let far = "urn:ngsi-ld:entitymap:far";
+        let mut doc = live_map(far);
+        doc["expiresAt"] = json!("2099-01-01T00:00:00.000Z");
+        map_put(&st, &t, doc);
+        let stored = map_get(&st, &t, far).expect("a clamped map is still live");
+        let at = dt(stored["expiresAt"].as_str().expect("expiresAt")).expect("RFC 3339 expiry");
+        assert!(
+            at <= ceiling + chrono::Duration::seconds(5),
+            "a client cannot pin an EntityMap past the broker ceiling: {at}"
+        );
+        assert!(at > chrono::Utc::now(), "the map stays usable: {at}");
+        // an expiry inside the ceiling is stored verbatim, not rewritten
+        let near = "urn:ngsi-ld:entitymap:near";
+        let doc = live_map(near);
+        let want = doc["expiresAt"].clone();
+        map_put(&st, &t, doc);
+        assert_eq!(map_get(&st, &t, near).expect("live")["expiresAt"], want);
+    }
+
+    /// 6.3.20: an unknown query parameter is InvalidRequest. The temporal
+    /// EntityMap resources take the 6.35.3.1/6.35.3.2 parameters and nothing
+    /// else — including when splitEntities=true reduces the query, where the
+    /// unknown parameter would otherwise be dropped before anything sees it.
+    #[tokio::test]
+    async fn clause_6_3_20_temporal_map_rejects_unknown_parameters() {
+        let st = AppState::new("antares-em-params".into());
+        let p = params(&[
+            ("type", "Vehicle"),
+            ("timerel", "before"),
+            ("timeAt", "2020-01-01T00:00:00Z"),
+            ("splitEntities", "true"),
+            ("bogus", "1"),
+        ]);
+        let resp =
+            create_temporal_entity_map(State(st.clone()), CleanParams(p), HeaderMap::new()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "GET");
+        let body = Bytes::from_static(
+            br#"{"type":"Query","timerel":"before","timeAt":"2020-01-01T00:00:00Z"}"#,
+        );
+        let resp = create_temporal_entity_map_post(
+            State(st.clone()),
+            CleanParams(params(&[("bogus", "1")])),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "POST");
     }
 
     /// 5.14.1.4 / 5.14.3.4: "If the EntityMap id is not present or it is not

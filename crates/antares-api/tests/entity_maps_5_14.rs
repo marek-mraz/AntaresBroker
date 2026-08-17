@@ -233,7 +233,18 @@ async fn clause_5_14_2_update() {
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 
     let (_, _, body) = get(&st, &loc).await;
-    assert_eq!(body["expiresAt"], "2099-01-01T00:00:00Z", "{body}");
+    // Table 6.4.3.2-1: "the actual expiresAt time of the EntityMap shall be
+    // set by the Context Broker or Context Source, possibly overriding the
+    // requested duration" — a year-2099 request is clamped to the ceiling.
+    let stored = body["expiresAt"].as_str().expect("expiresAt");
+    assert!(
+        stored < "2099-01-01T00:00:00Z",
+        "a requested lifetime beyond the broker ceiling must be overridden: {body}"
+    );
+    assert!(
+        stored > "2026-08-17T00:00:00Z",
+        "the clamp must still leave the map usable: {body}"
+    );
     // the output-only members were NOT overwritten by the client
     assert!(
         !body["entityMap"]

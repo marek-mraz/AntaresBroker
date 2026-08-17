@@ -133,42 +133,44 @@ fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
         || doc["owner"].as_str().unwrap_or(TenantId::DEFAULT) == tenant.as_str()
 }
 
-async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> Option<CtxEntry> {
-    if let Some(doc) = st.store.context_get(id).ok()? {
+/// Resolve an id to the @context it names (5.13.4.4). Every probe is a keyed
+/// lookup: a store failure is an error, never "not found" — answering 404 for
+/// a hiccup would tell the client to add the @context a second time.
+async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> ApiResult<Option<CtxEntry>> {
+    if let Some(doc) = st.store.context_get(id)? {
         // Cached rows are addressable by their deterministic localId too.
         if doc["kind"].as_str() == Some("Cached") {
-            return Some(cached_from_row(&doc));
+            return Ok(Some(cached_from_row(&doc)));
         }
         // another tenant's row is as absent as one that never existed
-        return row_visible(&doc, tenant).then_some(CtxEntry::Stored(doc));
+        return Ok(row_visible(&doc, tenant).then_some(CtxEntry::Stored(doc)));
     }
-    // stored entries are also addressable by their full URL
-    if id.contains("/ngsi-ld/v1/jsonldContexts/") {
-        if let Some(doc) = st
-            .store
-            .context_list()
-            .ok()?
-            .into_iter()
-            .find(|c| c["url"].as_str() == Some(id) && row_visible(c, tenant))
-        {
-            return Some(CtxEntry::Stored(doc));
+    // Stored entries are also addressable by their full URL (5.13.2.4): the
+    // row key IS the URL's trailing segment, so this is one keyed lookup and
+    // the row's own url still has to match the id.
+    if let Some(pos) = id.rfind("/ngsi-ld/v1/jsonldContexts/") {
+        let local_id = &id[pos + "/ngsi-ld/v1/jsonldContexts/".len()..];
+        if let Some(doc) = st.store.context_get(local_id)? {
+            if doc["url"].as_str() == Some(id) && row_visible(&doc, tenant) {
+                return Ok(Some(CtxEntry::Stored(doc)));
+            }
         }
     }
     if Loader::is_pinned_core(id) {
-        return Some(CtxEntry::Core(id.to_owned()));
+        return Ok(Some(CtxEntry::Core(id.to_owned())));
     }
     // Cached entries: the persisted row is the ONE existence truth (the
     // per-instance usage map split-brains behind a load balancer). The row id
     // is uuid5(url), so a URL-shaped id resolves in O(1).
     if id.starts_with("http://") || id.starts_with("https://") {
         let rid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id.as_bytes()).to_string();
-        if let Some(doc) = st.store.context_get(&rid).ok()? {
+        if let Some(doc) = st.store.context_get(&rid)? {
             if doc["kind"].as_str() == Some("Cached") {
-                return Some(cached_from_row(&doc));
+                return Ok(Some(cached_from_row(&doc)));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 // ---------- POST /jsonldContexts (5.13.2) ----------
@@ -248,10 +250,10 @@ pub async fn list_contexts(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
-        check_params(
-            &params,
-            &["kind", "details", "local", "limit", "offset", "count"],
-        )?;
+        // Table 6.29.3.2-1: details and kind are the only parameters of this
+        // resource — it serves the whole list, so a pagination parameter would
+        // be accepted and silently ignored.
+        check_params(&params, &["kind", "details", "local"])?;
         let details = details_param(&params)?;
         let kind_filter = params.get("kind");
         if let Some(k) = kind_filter {
@@ -343,7 +345,7 @@ pub async fn serve_context(
         check_params(&params, &["details", "local"])?;
         let details = details_param(&params)?;
         let entry = find_entry(&st, &tenant, &id)
-            .await
+            .await?
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("@context {id} not found")))?;
         let payload = match &entry {
             CtxEntry::Stored(doc) => {
@@ -429,7 +431,7 @@ pub async fn delete_context(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["reload", "local"])?;
         let reload = reload_param(&params)?;
-        let entry = find_entry(&st, &tenant, &id).await;
+        let entry = find_entry(&st, &tenant, &id).await?;
         if reload {
             // reload is only meaningful for Cached @contexts (5.13.5.4);
             // unknown ids and non-Cached kinds are 400 (051_04_01/05)
@@ -482,6 +484,91 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(header::HOST, "attacker.example".parse().expect("host"));
         h
+    }
+
+    fn hosted_row(url: &str, local_id: &str, owner: &TenantId) -> Value {
+        json!({
+            "url": url,
+            "localId": local_id,
+            "kind": "Hosted",
+            "createdAt": now_iso(),
+            "owner": owner.as_str(),
+            "body": {"@context": {}},
+        })
+    }
+
+    /// 5.13.4.4: a stored @context resolves by its locally unique URI —
+    /// the localId and the full published URL name the SAME entry (5.13.2.4),
+    /// while a URL that only ends in a known localId names no entry at all,
+    /// and another tenant's Hosted row stays invisible (5.13.1).
+    #[tokio::test]
+    async fn clause_5_13_4_entry_resolves_by_local_id_and_by_url() {
+        let st = AppState::new("antares-ctx-find".into());
+        let owner = TenantId::default();
+        let other = TenantId::new("beta").expect("tenant");
+        let local_id = "b2a1c0de-0000-4000-8000-000000000001";
+        let url = format!("http://broker.example/ngsi-ld/v1/jsonldContexts/{local_id}");
+        st.store
+            .context_put(local_id, hosted_row(&url, local_id, &owner))
+            .expect("store the @context");
+        assert!(
+            find_entry(&st, &owner, local_id)
+                .await
+                .expect("store")
+                .is_some(),
+            "the localId names the entry"
+        );
+        assert!(
+            find_entry(&st, &owner, &url)
+                .await
+                .expect("store")
+                .is_some(),
+            "the published URL names the same entry"
+        );
+        assert!(
+            find_entry(&st, &other, &url)
+                .await
+                .expect("store")
+                .is_none(),
+            "another tenant's Hosted @context is as absent as one that never existed"
+        );
+        let forged = format!("http://attacker.example/ngsi-ld/v1/jsonldContexts/{local_id}");
+        assert!(
+            find_entry(&st, &owner, &forged)
+                .await
+                .expect("store")
+                .is_none(),
+            "a foreign URL ending in a known localId is not that entry"
+        );
+        assert!(find_entry(&st, &owner, "no-such-context")
+            .await
+            .expect("store")
+            .is_none());
+    }
+
+    /// Table 6.29.3.2-1: List @contexts defines `details` and `kind` only —
+    /// a pagination parameter this resource does not implement must be
+    /// refused (6.3.20 InvalidRequest), never accepted and ignored.
+    #[tokio::test]
+    async fn clause_6_29_3_2_list_takes_only_the_table_parameters() {
+        let st = AppState::new("antares-ctx-params".into());
+        for bad in ["limit", "offset", "count", "bogus"] {
+            let p: HashMap<String, String> =
+                [(bad.to_owned(), "1".to_owned())].into_iter().collect();
+            let resp = list_contexts(State(st.clone()), CleanParams(p), HeaderMap::new()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{bad:?} is not a List @contexts parameter"
+            );
+        }
+        for good in [("details", "true"), ("kind", "Hosted")] {
+            let p: HashMap<String, String> = [(good.0.to_owned(), good.1.to_owned())]
+                .into_iter()
+                .collect();
+            let resp = list_contexts(State(st.clone()), CleanParams(p), HeaderMap::new()).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{good:?}");
+        }
     }
 
     /// 5.13.2.4/5.13.3.5: the URI published for a broker-served @context
