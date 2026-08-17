@@ -700,20 +700,7 @@ pub fn matching_regs(
                 }
             }
             let tenant = doc.get("tenant").and_then(Value::as_str).map(str::to_owned);
-            let csi = doc
-                .get("contextSourceInfo")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|kv| {
-                            Some((
-                                kv.get("key")?.as_str()?.to_owned(),
-                                kv.get("value")?.as_str()?.to_owned(),
-                            ))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let csi = csi_of(doc);
             Some(FedReg {
                 reg_id: doc
                     .get("id")
@@ -1201,6 +1188,23 @@ pub(crate) fn doc_supports(reg: &Value, op: &str) -> bool {
 
 /// A minimal FedReg view of a raw registration document — enough for
 /// `forward` (endpoint/tenant/csi/alias) and `supports`.
+/// 4.3.6.6 contextSourceInfo, as the key/value pairs a forward applies.
+fn csi_of(reg: &Value) -> Vec<(String, String)> {
+    reg.get("contextSourceInfo")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|kv| {
+                    Some((
+                        kv.get("key")?.as_str()?.to_owned(),
+                        kv.get("value")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
     let endpoint = reg
         .get("endpoint")
@@ -1239,7 +1243,10 @@ pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
             .get("contextSourceAlias")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        csi: Vec::new(),
+        // 4.3.6.6: the registered headers (auth among them) travel with every
+        // forward, including the subscription operations that build their
+        // registration view from this function.
+        csi: csi_of(reg),
         local_only: false,
         timeout_ms: reg
             .get("management")
@@ -2435,6 +2442,33 @@ mod tests {
             h.insert("via", v.parse().expect("via"));
         }
         h
+    }
+
+    /// 4.3.6.6: contextSourceInfo carries the headers a source needs to
+    /// answer at all (an API key, say). The minimal registration view built
+    /// for the subscription operations dropped them, so every forwarded
+    /// subscription create, update and delete went out unauthenticated.
+    #[test]
+    fn the_minimal_registration_view_keeps_context_source_info() {
+        let doc = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:csi",
+            "endpoint": "http://peer:9090",
+            "contextSourceInfo": [
+                {"key": "X-API-Key", "value": "s3cret"},
+                {"key": "jsonldContext", "value": "https://example.org/ctx.jsonld"}
+            ]
+        });
+        let reg = fed_reg_of("urn:ngsi-ld:ContextSourceRegistration:csi", &doc);
+        assert_eq!(
+            reg.csi,
+            vec![
+                ("X-API-Key".to_owned(), "s3cret".to_owned()),
+                (
+                    "jsonldContext".to_owned(),
+                    "https://example.org/ctx.jsonld".to_owned()
+                ),
+            ]
+        );
     }
 
     /// 4.17: `type` is one Entity Type Selection. Splitting it on commas

@@ -288,30 +288,37 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
     assert_eq!(body.as_array().map(Vec::len), Some(0), "{body}");
 }
 
-/// 5.8.6: with a csf on the Subscription, an inbound notification whose
-/// origin Context Source does not match the filter is NOT forwarded.
+/// 5.8.6 + 5.11.2: the csf decides which Context Sources take part. A source
+/// the filter excludes is never subscribed at all, and a source that STOPS
+/// matching the filter after its copy exists stops reaching the subscriber.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
     let mut st = AppState::new("antares-distsub3".into());
     antares_api::notify::wire(&mut st);
-    let (remote_port, remote_seen) = recording_mock();
-    let reg = json!({
-        "id": "urn:ngsi-ld:ContextSourceRegistration:ds3",
-        "type": "ContextSourceRegistration",
-        "information": [{"entities": [{"type": "Vehicle"}]}],
-        "operations": ["federationOps"],
-        "endpoint": format!("http://127.0.0.1:{remote_port}"),
-        "sourceType": {"type": "Property", "value": "archive"},
-    });
-    let (status, _) = send(
-        &st,
-        "POST",
-        "/ngsi-ld/v1/csourceRegistrations",
-        Some(reg.to_string()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
+    let (sensor_port, sensor_seen) = recording_mock();
+    let (archive_port, archive_seen) = recording_mock();
+    for (name, port, source_type) in [
+        ("ds3-sensor", sensor_port, "sensor"),
+        ("ds3-archive", archive_port, "archive"),
+    ] {
+        let reg = json!({
+            "id": format!("urn:ngsi-ld:ContextSourceRegistration:{name}"),
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Vehicle"}]}],
+            "operations": ["federationOps"],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+            "sourceType": {"type": "Property", "value": source_type},
+        });
+        let (status, body) = send(
+            &st,
+            "POST",
+            "/ngsi-ld/v1/csourceRegistrations",
+            Some(reg.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
 
     let (orig_port, orig_seen) = recording_mock();
     let sub = json!({
@@ -329,16 +336,20 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    wait_for("the forwarded remote subscription", || {
-        remote_seen
-            .lock()
+    let posted = |seen: &Arc<Mutex<Vec<String>>>| {
+        seen.lock()
             .expect("seen")
             .iter()
             .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
-    })
-    .await;
+    };
+    wait_for("the forwarded remote subscription", || posted(&sensor_seen)).await;
+    assert!(
+        !posted(&archive_seen),
+        "a source the csf excludes must never be subscribed: {:?}",
+        archive_seen.lock().expect("seen")
+    );
     let remote_id: String = {
-        let seen = remote_seen.lock().expect("seen");
+        let seen = sensor_seen.lock().expect("seen");
         let r = seen
             .iter()
             .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
@@ -350,24 +361,67 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
             .to_owned()
     };
 
-    // the origin is an "archive" source; csf wants "sensor" → NOT forwarded
-    let inbound = json!({
-        "type": "Notification",
-        "subscriptionId": remote_id,
-        "data": [{"id": "urn:ngsi-ld:Vehicle:gated", "type": "Vehicle"}],
-    });
+    // positive control: while the origin matches the filter, its notification
+    // reaches the subscriber — without this the negative below is vacuous
+    let inbound = |entity: &str| {
+        json!({
+            "type": "Notification",
+            "subscriptionId": remote_id,
+            "data": [{"id": entity, "type": "Vehicle"}],
+        })
+        .to_string()
+    };
     let (status, _) = send(
         &st,
         "POST",
         "/ngsi-ld/ex/remote-notify",
-        Some(inbound.to_string()),
+        Some(inbound("urn:ngsi-ld:Vehicle:matching")),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    wait_for("the subscriber notification", || {
+        !orig_seen.lock().expect("seen").is_empty()
+    })
+    .await;
+    let delivered = orig_seen.lock().expect("seen").len();
+
+    // the origin stops matching the csf
+    let (status, body) = send(
+        &st,
+        "PATCH",
+        "/ngsi-ld/v1/csourceRegistrations/urn:ngsi-ld:ContextSourceRegistration:ds3-sensor",
+        Some(json!({"sourceType": {"type": "Property", "value": "archive"}}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // 5.11.2: the source no longer belongs to the subscription, so its copy
+    // is deleted at the source and the mapping with it
+    wait_for("the remote copy to be deleted", || {
+        sensor_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("DELETE /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(inbound("urn:ngsi-ld:Vehicle:gated")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a notification for a mapping that no longer exists is refused"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    assert!(
-        orig_seen.lock().expect("seen").is_empty(),
-        "csf must gate the archive-origin notification out"
+    assert_eq!(
+        orig_seen.lock().expect("seen").len(),
+        delivered,
+        "an origin that no longer matches the csf must reach the subscriber no more"
     );
 }
 

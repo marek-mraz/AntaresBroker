@@ -1631,6 +1631,13 @@ async fn deliver_as(
     ctx: &Context,
     trigger_reason: Option<&str>,
 ) {
+    // 5.2.12: a paused subscription (isActive false) and an expired one send
+    // nothing. Every caller that assembles data locally checks this first;
+    // the ones that arrive with data already assembled — the 5.8.6 inbound
+    // notification among them — did not, so the check belongs here too.
+    if !is_active(sub) {
+        return;
+    }
     let sub_id = sub_str(sub, "id").unwrap_or_default().to_owned();
     let Some(ep) = sub
         .get("notification")
