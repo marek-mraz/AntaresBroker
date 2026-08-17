@@ -4,8 +4,8 @@ name: roll-weekly
 # roll-under-suite job — the FULL ETSI suite through the haproxy while dev/rolling-update.sh rolls the two broker1
 # replicas underneath it, postgres mode (shared state + bus=nats) — runs
 # weekly so the "zero-downtime rolling update" README claim is continuously
-# proven, and its badge goes red the week it stops being true. Same steps as
-# full.yml's etsi-roll job (kept in sync by hand — the job is 40 lines);
+# proven, and its badge goes red the week it stops being true. This is the
+# roll job's ONLY home since 2026-08-17 (full.yml's copy was removed);
 # the image build is the etsi-matrix build job shape and shares its
 # type=gha layer cache, so a quiet week rebuilds only the antares-* crates.
 
@@ -52,8 +52,8 @@ jobs:
           retention-days: 3
 
   etsi-roll:
-    # Identical to full.yml's etsi-roll — the suite has no retries and
-    # asserts exact single responses, so ANY red TP is a real drain bug.
+    # The suite has no retries and asserts exact single responses, so ANY
+    # red TP is a real drain bug.
     name: roll-under-suite (postgres)
     needs: [build]
     runs-on: ubuntu-latest

@@ -24,8 +24,8 @@ and an `antares-worker` Deployment with matcher/notifier/temporal/registry),
 `broker-file.yaml` (single-replica file mode, `Recreate` strategy). All pod
 specs set `enableServiceLinks: false` (kubelet's injected `ANTARES_*`
 service-link vars would otherwise trip the unknown-config check; the broker
-also exempts those exact shapes). Proven by full.yml's `k8s-manifests` kind
-smoke: apply + every `rollout status` green.
+also exempts those exact shapes). Proven by k8s-smoke.yml's `k8s-manifests`
+kind smoke (dispatch): apply + every `rollout status` green.
 
 - A worker pod serves **only** `/q/health`, `/q/ready`, `/q/metrics` — the
   NGSI-LD API exists only on pods with the `api` role.
@@ -75,7 +75,7 @@ Measured in-sandbox 2026-08-15: full roll ≈ 43 s (the api pod pays the
 ~21 s drain, workers ~2 s each), 52/52 LB requests answered 200 across the
 whole roll.
 
-Proven: full.yml's `etsi-roll` job and the weekly `roll-weekly` workflow run
+Proven: the `roll-weekly` workflow (Tue 04:17 UTC + dispatch) runs
 the FULL ETSI suite through the LB while the replicas roll in a loop — the
 suite has no retries, so any red TP is a real drain bug. The per-push
 `postgres-nats`/`timescale-nats` matrix cells do the same over the
@@ -111,8 +111,8 @@ is refused at startup rather than partially served.
 | ETSI conformance, per-commit gate (file/postgres/timescale × 8 suites) | ci.yml → etsi-matrix.yml `preset: quick` (every push) |
 | ETSI conformance, FULL seven cells (memory/file/postgres/timescale + the two rolling role-fleet cells + wasm-file) × 8 suites | etsi-full.yml (every 3 days + dispatch) and full.yml (`v*` tags); its bundle feeds [the report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) + per-cell badges |
 | The browser artifact serves the full API from a container (file store, serial suites + IOP) | the `wasm-file` matrix cell (`WASM=1 WASM_DOCKER=1 STORE=file` through the one pipeline — Dockerfile.wasm, the same www/pkg bytes a page loads) |
-| Zero-downtime rolling update | full.yml `etsi-roll` (tags/dispatch) + `roll-weekly` (Tue 04:17 UTC) + the per-push `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
+| Zero-downtime rolling update | `roll-weekly` (Tue 04:17 UTC + dispatch) + the per-push `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
 | Role-pair exactly-once semantics (duplicated matcher/notifier/temporal/registry pods) | ci.yml nats job (`nats_e2e::role_pairs_exactly_once_semantics`, live PG + NATS) |
 | NATS bus + role split e2e | ci.yml nats job (`nats_e2e`, live PG + NATS) |
-| k8s manifests boot | full.yml `k8s-manifests` kind smoke |
+| k8s manifests boot | k8s-smoke.yml kind smoke (dispatch) |
 | Coverage | etsi-coverage.yml (Mon 04:41 UTC) → merged lcov/html on the report page |

@@ -15,8 +15,9 @@ name: ci
 # ETSI matrix never runs — the whole pipeline stops at the gate.
 #
 # Nothing else lives here. The full seven-cell matrix runs in etsi-full.yml
-# (every 3 days) and full.yml (v* tags); the browser-tier wasm proof, the
-# roll-under-suite drill, the wasm Node tier and the k8s manifest smoke are full.yml. The matrix
+# (every 3 days) and full.yml (v* tags); the browser-tier wasm proof and
+# the wasm Node tier are full.yml; the roll-under-suite drill is
+# roll-weekly.yml and the k8s manifest smoke is k8s-smoke.yml. The matrix
 # itself is the reusable etsi-matrix.yml, shared by all three pipelines.
 
 # Runs on push to master, on pull requests, and on manual dispatch.

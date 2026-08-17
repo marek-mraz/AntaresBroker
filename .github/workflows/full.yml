@@ -4,9 +4,10 @@ name: full
 # workspace tests, the browser/wasm artifact + wasm Node tier, the reusable
 # cell matrix (FULL preset: all seven cells, each already serial-all-suites
 # against one stack — the former etsi-serial job duplicated this and was
-# removed 2026-08-16), the roll-under-suite drill and the k8s manifest smoke. A
-# green v* tag publishes the release image (:<version> + :latest); manual
-# dispatches publish nothing.
+# removed 2026-08-16). A green v* tag publishes the release image
+# (:<version> + :latest); manual dispatches publish nothing.
+# Moved out 2026-08-17: the roll-under-suite drill lives in roll-weekly.yml
+# (weekly + dispatch), the k8s manifest smoke in k8s-smoke.yml (dispatch).
 
 on:
   push:
@@ -84,52 +85,6 @@ jobs:
       contents: read
       actions: write # the summary job deletes the merged per-cell artifacts
 
-  k8s-manifests:
-    # Lint every reference manifest, then kind-deploy the self-contained
-    # subset (nats + postgres-dev + both broker shapes) with the image the
-    # build job produced. `rollout status` green == readiness probes
-    # (/q/health) answered. The CNPG Cluster is lint-only here — the operator
-    # belongs to a real cluster.
-    name: K8s reference manifests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: matrix
-    steps:
-      - uses: actions/checkout@v5
-      - name: kubeconform lint
-        run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar xz kubeconform
-          ./kubeconform -strict -summary -ignore-missing-schemas deploy/k8s/
-      - uses: helm/kind-action@v1
-        with:
-          cluster_name: antares-smoke
-      - uses: actions/download-artifact@v7
-        with:
-          name: antares-image
-      - name: Load the image under test
-        run: |
-          gunzip antares-image.tgz
-          kind load image-archive antares-image.tar --name antares-smoke
-      - name: Deploy the self-contained subset
-        run: |
-          kubectl apply -f deploy/k8s/namespace.yaml
-          kubectl apply -f deploy/k8s/nats.yaml -f deploy/k8s/postgres-dev.yaml
-          # kind has one PG: point the brokers at postgres-dev instead of CNPG,
-          # and a single-node NATS quorum: R1 streams
-          sed -e 's|antares-pg-rw.antares.svc|postgres.antares.svc|' \
-              -e 's|value: "3"|value: "1"|' deploy/k8s/broker-postgres.yaml \
-            | kubectl apply -f -
-          kubectl apply -f deploy/k8s/broker-file.yaml
-      - name: Wait for every rollout
-        run: |
-          kubectl -n antares rollout status statefulset/nats --timeout=180s
-          kubectl -n antares rollout status deploy/postgres-dev --timeout=180s
-          kubectl -n antares rollout status deploy/antares-api --timeout=300s
-          kubectl -n antares rollout status deploy/antares-worker --timeout=300s
-          kubectl -n antares rollout status deploy/antares-file --timeout=300s
-          kubectl -n antares get pods -o wide
-
   # etsi-serial was REMOVED 2026-08-16: it duplicated the matrix exactly.
   # Its comment claimed the matrix cells got a fresh stack per suite — true
   # in the 32-cell era, stale since the matrix became all-suites-per-cell:
@@ -191,69 +146,6 @@ jobs:
           cat results/wasm-node/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
 
-  etsi-roll:
-    # The ETSI-during-roll gate. The FULL suite runs through the
-    # haproxy while dev/rolling-update.sh rolls the two broker1 replicas
-    # underneath it in a loop, postgres mode (shared state + bus=nats — the
-    # only rung where a roll is defined). The suite has no
-    # retries and asserts exact single responses, which makes it a brutally
-    # strict drain client: ANY red TP here is a real drain bug, never
-    # flake. Runs with the serial tier (nightly / tags / dispatch) — it is
-    # a full-suite wall-clock cost, not a per-commit one.
-    name: roll-under-suite (postgres)
-    needs: [workspace, matrix]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Fetch the ETSI test suite (submodule)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync
-          git submodule update --init --depth 1
-
-      - name: Load the image built once for all jobs
-        uses: actions/download-artifact@v7
-        with:
-          name: antares-image
-
-      - run: docker load < antares-image.tgz
-
-      - name: Full suite through the LB while the brokers roll
-        env:
-          STORE: postgres
-          HA: "1"
-          ROLL_DURING_RUN: "1"
-          SKIP_BUILD: "1"
-          STOP_ON_ERROR: "0"
-          CALLBACK_HOST: localhost
-          RESULTS_DIR: results/roll-postgres
-        run: ./dev/etsi-pipeline.sh || true
-
-      - name: Upload roll results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ETSI-roll-postgres
-          path: |
-            results/roll-postgres/run-summary.md
-            results/roll-postgres/gate-status.txt
-            results/roll-postgres/failures.csv
-            results/roll-postgres/roll-loop.log
-            results/roll-postgres/**/log.html
-            results/roll-postgres/**/report.html
-          retention-days: 14
-
-      - name: Gate — green under continuous rolls
-        run: |
-          gate=$(cat results/roll-postgres/gate-status.txt 2>/dev/null || echo MISSING)
-          echo "K8 roll gate = $gate"
-          cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
-          [ "$gate" = PASS ]
-
   build-arm:
     # The arm64 half of the released manifest — BUILT, never tested
     # (decision 2026-08-07): all gates run amd64 only; the arm signal is
@@ -287,11 +179,12 @@ jobs:
 
   publish-release:
     # A version tag is the only thing that mints a production image, and it
-    # needs ALL THREE gates: the store matrix, the serial all-suites run,
-    # and the roll-under-suite drill.
+    # needs the full cell matrix green (each cell is serial-all-suites).
+    # The roll drill (roll-weekly.yml) and k8s smoke (k8s-smoke.yml) run on
+    # their own cadence and no longer gate the release.
     name: Publish the release image to GHCR
     if: startsWith(github.ref, 'refs/tags/v') && success()
-    needs: [matrix, etsi-roll, build-arm]
+    needs: [matrix, build-arm]
     runs-on: ubuntu-latest
     permissions:
       packages: write

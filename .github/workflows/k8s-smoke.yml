@@ -1,0 +1,87 @@
+name: k8s-smoke
+
+# The k8s reference-manifest smoke, parked out of full.yml (2026-08-17):
+# dispatch-only for now. Builds the image itself (same build shape as
+# etsi-matrix / roll-weekly, shares the type=gha layer cache), lints every
+# reference manifest, then kind-deploys the self-contained subset.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: k8s-smoke
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the image under test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:latest (dep layer cached across runs)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export it for the smoke job
+        run: docker save antares-local:latest | gzip > antares-image.tgz
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: antares-image
+          path: antares-image.tgz
+          retention-days: 3
+
+  k8s-manifests:
+    # Lint every reference manifest, then kind-deploy the self-contained
+    # subset (nats + postgres-dev + both broker shapes) with the image the
+    # build job produced. `rollout status` green == readiness probes
+    # (/q/health) answered. The CNPG Cluster is lint-only here — the operator
+    # belongs to a real cluster.
+    name: K8s reference manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v5
+      - name: kubeconform lint
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas deploy/k8s/
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: antares-smoke
+      - uses: actions/download-artifact@v7
+        with:
+          name: antares-image
+      - name: Load the image under test
+        run: |
+          gunzip antares-image.tgz
+          kind load image-archive antares-image.tar --name antares-smoke
+      - name: Deploy the self-contained subset
+        run: |
+          kubectl apply -f deploy/k8s/namespace.yaml
+          kubectl apply -f deploy/k8s/nats.yaml -f deploy/k8s/postgres-dev.yaml
+          # kind has one PG: point the brokers at postgres-dev instead of CNPG,
+          # and a single-node NATS quorum: R1 streams
+          sed -e 's|antares-pg-rw.antares.svc|postgres.antares.svc|' \
+              -e 's|value: "3"|value: "1"|' deploy/k8s/broker-postgres.yaml \
+            | kubectl apply -f -
+          kubectl apply -f deploy/k8s/broker-file.yaml
+      - name: Wait for every rollout
+        run: |
+          kubectl -n antares rollout status statefulset/nats --timeout=180s
+          kubectl -n antares rollout status deploy/postgres-dev --timeout=180s
+          kubectl -n antares rollout status deploy/antares-api --timeout=300s
+          kubectl -n antares rollout status deploy/antares-worker --timeout=300s
+          kubectl -n antares rollout status deploy/antares-file --timeout=300s
+          kubectl -n antares get pods -o wide
