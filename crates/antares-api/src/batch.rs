@@ -1259,6 +1259,19 @@ pub(crate) fn query_doc_params(
             ))
         }
     }
+    // A member lifted out of the body becomes the same parameter the GET twin
+    // carries in the URI, where it is capped at MAX_URI_BYTES (6.3.4 bare
+    // 414). Without the same cap here the POST form is the cheap way to hand
+    // the query and projection parsers a multi-megabyte string.
+    let capped = |k: &str, s: String| -> Result<String, NgsiError> {
+        if s.len() > crate::bounds::MAX_URI_BYTES {
+            return Err(bad(format!(
+                "Query {k} exceeds the {} byte limit",
+                crate::bounds::MAX_URI_BYTES
+            )));
+        }
+        Ok(s)
+    };
     for k in [
         "q",
         "scopeQ",
@@ -1271,7 +1284,7 @@ pub(crate) fn query_doc_params(
         match q.get(k) {
             None => {}
             Some(Value::String(s)) => {
-                vp.insert(k.into(), s.clone());
+                vp.insert(k.into(), capped(k, s.clone())?);
             }
             Some(_) => return Err(bad(format!("Query {k} must be a string (5.2.23)"))),
         }
@@ -1293,7 +1306,7 @@ pub(crate) fn query_doc_params(
                         bad(format!("Query {k} entries must be strings (5.2.23)"))
                     })?);
                 }
-                vp.insert(k.into(), parts.join(","));
+                vp.insert(k.into(), capped(k, parts.join(","))?);
             }
             Some(_) => {
                 return Err(bad(format!(
@@ -1498,6 +1511,49 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// A Query member lifted out of the body becomes the parameter its GET
+    /// twin carries in the URI, where 6.3.4 caps it — the POST form must not
+    /// be the cheap way past that cap.
+    #[tokio::test]
+    async fn query_body_members_are_capped_like_the_uri() {
+        let app = app();
+        let huge = "a".repeat(crate::bounds::MAX_URI_BYTES + 1);
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}], "q": format!("name==\"{huge}\"")}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert!(
+            body["title"].as_str().is_some_and(|t| t.contains("Bad")),
+            "{body}"
+        );
+
+        // the same member just inside the cap is still served
+        let ok = "a".repeat(64);
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}], "q": format!("name==\"{ok}\"")}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "a normal query still works");
+
+        // and the array members are assembled under the same cap
+        let many: Vec<Value> = (0..600)
+            .map(|i| Value::String(format!("attribute-with-a-long-name-{i:04}")))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}], "attrs": many}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     async fn get_entity(app: &Router, id: &str) -> Value {

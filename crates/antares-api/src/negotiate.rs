@@ -114,6 +114,13 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Tenant from the NGSILD-Tenant header (6.3.14).
 pub fn tenant_from(headers: &HeaderMap) -> ApiResult<TenantId> {
+    // NGSILD-Tenant carries one value (6.3.14), so it is not a list-type
+    // field: repeated field lines cannot be joined (RFC 9110 clause 5.3) and
+    // silently taking the first would let a second value decide nothing while
+    // looking like it should.
+    if headers.get_all("NGSILD-Tenant").iter().count() > 1 {
+        return Err(NgsiError::BadRequestData("repeated NGSILD-Tenant".into()).into());
+    }
     match headers.get("NGSILD-Tenant") {
         None => Ok(TenantId::default()),
         Some(v) => {
@@ -142,13 +149,17 @@ fn negotiate(
     offers: &[(&str, Accept)],
     available: &'static [&'static str],
 ) -> ApiResult<Accept> {
-    let Some(raw) = headers.get(header::ACCEPT) else {
+    if !headers.contains_key(header::ACCEPT) {
         return Ok(Accept::Json);
-    };
-    let ranges: Vec<(String, f32)> = raw
-        .to_str()
-        .unwrap_or("")
-        .split(',')
+    }
+    // Accept is a list-type field, so its members may arrive split over any
+    // number of field lines (RFC 9110 clause 5.3) — reading only the first
+    // one turned a legal request into a 406.
+    let ranges: Vec<(String, f32)> = headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
         .filter_map(|part| {
             let mut segs = part.split(';');
             let mt = segs.next()?.trim().to_ascii_lowercase();
@@ -852,6 +863,45 @@ mod clause_5_5_3 {
         .await
         .expect("json + Link is the sanctioned pair");
         assert!(ok.value.get("@context").is_none());
+    }
+
+    /// RFC 9110 clause 5.3: a list-type field may be split over any number of
+    /// field lines, and a single-value field may not be repeated at all.
+    #[test]
+    fn list_headers_are_read_across_field_lines_and_tenant_is_not() {
+        let mut h = HeaderMap::new();
+        h.append(
+            header::ACCEPT,
+            axum::http::HeaderValue::from_static("application/json;q=0.1"),
+        );
+        h.append(
+            header::ACCEPT,
+            axum::http::HeaderValue::from_static("application/ld+json;q=0.9"),
+        );
+        assert_eq!(
+            parse_accept(&h).expect("both field lines are one list"),
+            Accept::LdJson,
+            "a weight on a later field line must still decide"
+        );
+
+        let mut h = HeaderMap::new();
+        h.append(
+            "NGSILD-Tenant",
+            axum::http::HeaderValue::from_static("alpha"),
+        );
+        h.append(
+            "NGSILD-Tenant",
+            axum::http::HeaderValue::from_static("beta"),
+        );
+        let err = tenant_from(&h).expect_err("a repeated tenant names two tenants");
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+        // the single-valued case is untouched
+        let mut h = HeaderMap::new();
+        h.insert(
+            "NGSILD-Tenant",
+            axum::http::HeaderValue::from_static("alpha"),
+        );
+        assert_eq!(tenant_from(&h).expect("one tenant").as_str(), "alpha");
     }
 
     /// 6.3.4: "Not Acceptable Media Type … shall result in a 406 HTTP status

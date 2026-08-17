@@ -37,6 +37,16 @@ pub fn normalize_subscription(
     }
     let mut out = Map::new();
     for (k, v) in doc {
+        // 5.4 Fragment member removal: null and the NGSI-LD Null both delete
+        // the member. Read literally, the NGSI-LD Null was stored as the
+        // string it is spelled with, so the member survived carrying it.
+        if is_patch && k != "id" && (v.is_null() || v.as_str() == Some("urn:ngsi-ld:null")) {
+            if ["type", "notification"].contains(&k.as_str()) {
+                return Err(bad(format!("cannot remove mandatory member {k} (5.8.3)")));
+            }
+            out.insert(k.clone(), Value::Null);
+            continue;
+        }
         match k.as_str() {
             "@context" | "createdAt" | "modifiedAt" | "status" => continue,
             "id" => {
@@ -951,9 +961,23 @@ mod tests {
             normalize_subscription(doc.as_object().unwrap(), &ctx, false).is_err(),
             "create with a first-level null URN must be rejected"
         );
-        // patch fragment: not the create-path error (removal semantics)
+        // patch fragment: 5.4 removal semantics — the member is marked for
+        // deletion, never stored carrying the string it is spelled with
         let patch = json!({"description": "urn:ngsi-ld:null"});
-        assert!(normalize_subscription(patch.as_object().unwrap(), &ctx, true).is_ok());
+        let n = normalize_subscription(patch.as_object().unwrap(), &ctx, true).expect("fragment");
+        assert_eq!(
+            n["description"],
+            Value::Null,
+            "the NGSI-LD Null removes the member, like a JSON null"
+        );
+        // and a mandatory member cannot be removed at all (5.8.3)
+        for k in ["type", "notification"] {
+            let patch = json!({ k: "urn:ngsi-ld:null" });
+            assert!(
+                normalize_subscription(patch.as_object().unwrap(), &ctx, true).is_err(),
+                "removing the mandatory member {k} must be refused"
+            );
+        }
     }
 
     #[test]

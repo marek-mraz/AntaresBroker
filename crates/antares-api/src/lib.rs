@@ -344,12 +344,6 @@ pub fn router(state: AppState) -> Router {
         .nest(
             API_ROOT,
             api.layer(axum::middleware::from_fn(conformance::prefer_version_layer))
-                // Bounds wall: URI length, body size, JSON depth — checked
-                // before any parse (size-check-before-parse).
-                .layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    bounds::bounds_layer,
-                ))
                 // 5.5.10: non-create operations targeting a non-existing
                 // Tenant answer NonexistentTenant 404; create operations
                 // implicitly create the Tenant.
@@ -360,6 +354,14 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     tenant_exists_layer,
+                ))
+                // Bounds wall: URI length, body size, JSON depth — checked
+                // before any parse (size-check-before-parse), and outside the
+                // tenant and snapshot lookups so 6.3.4's bare 411/414 is not
+                // spent on a store round-trip or masked by its 404.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    bounds::bounds_layer,
                 ))
                 // axum's built-in extractor limit defaults to 2 MiB and fires
                 // BEFORE the bounds wall's documented cap — a 3 MiB body was
@@ -1588,6 +1590,44 @@ mod tests {
                 .map(|v| v.to_str().unwrap()),
             Some("ngsi-ld=1.9")
         );
+    }
+
+    /// 6.3.4 answers an over-long URI with a bare 414 and an over-large body
+    /// with 413. Both are preconditions on the request itself, so they must
+    /// not be spent on — or masked by — the 5.5.10 tenant lookup.
+    #[tokio::test]
+    async fn the_bounds_wall_answers_before_the_tenant_lookup() {
+        let app = app();
+        let long = "x".repeat(crate::bounds::MAX_URI_BYTES + 1);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/ngsi-ld/v1/entities?type=T&idPattern={long}"))
+                    .header("NGSILD-Tenant", "ghost")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(
+            resp.status(),
+            StatusCode::URI_TOO_LONG,
+            "the URI precondition decides, not the unknown tenant"
+        );
+
+        let big = vec![b'a'; crate::bounds::MAX_BODY_BYTES + 1];
+        let resp = app
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entities")
+                    .header("Content-Type", "application/json")
+                    .header("NGSILD-Tenant", "ghost")
+                    .header("Content-Length", big.len())
+                    .body(Body::from(big))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
