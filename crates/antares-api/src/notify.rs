@@ -93,10 +93,33 @@ impl Mirror for DocMirror {
 ///   only fire when a watched attribute changed — 5.8.6);
 /// - anything else (4.17 selection expressions, shapes the index cannot
 ///   prove) → `broad`, evaluated on every change.
+///
+/// The mirror also carries the interval sweep's clocks: the earliest instant
+/// at which a periodic subscription it holds can be due (5.8.6 sends that
+/// Notification "when the time interval (in seconds) specified in such value
+/// field is reached"), so ticks that cannot fire anything never read the
+/// store. Per instance, not global — one broker process, one clock pair.
 #[derive(Default)]
 pub struct SubMirror {
     map: std::sync::RwLock<std::collections::HashMap<String, TenantIndex>>,
+    /// Epoch millis; `0` = sweep at the next tick. Set by every sweep from
+    /// the subscriptions it saw, and zeroed again by `apply` whenever a
+    /// periodic subscription is written, so a new one is never waited out.
+    next_sub_sweep_ms: std::sync::atomic::AtomicI64,
+    /// The same clock for Context Source Registration Subscriptions
+    /// (5.11.7). Their writes reach no mirror, so a sweep never trusts this
+    /// one for longer than `CSUB_SWEEP_HORIZON_MS`.
+    next_csub_sweep_ms: std::sync::atomic::AtomicI64,
 }
+
+/// How long a sweep may skip the Context Source Registration Subscription
+/// half of the tick. A newly created one cannot be due sooner than its own
+/// `timeInterval` after creation, and the smallest interval the API defines
+/// is one second (`Subscription.Periodic.timeInterval`, minimum 1), so a
+/// second of blindness cannot delay a firing. Table 5.2.12-1 only bounds
+/// `timeInterval` by "greater than 0": for a sub-second one created between
+/// sweeps, this is the worst-case delay of its FIRST firing.
+const CSUB_SWEEP_HORIZON_MS: i64 = 1000;
 
 #[derive(Default)]
 struct TenantIndex {
@@ -180,6 +203,13 @@ impl SubMirror {
             }
         }
         if let Some(d) = doc {
+            if d.get("timeInterval").is_some() {
+                // A periodic subscription just appeared or changed its
+                // anchor: the sweep clock computed without it must not hold
+                // it back (5.8.6).
+                self.next_sub_sweep_ms
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            }
             match index_keys(&d) {
                 Keys::Types(ts) => {
                     for ty in ts {
@@ -233,6 +263,25 @@ impl SubMirror {
             .expect("sub mirror lock")
             .get(tenant)
             .map(|t| t.docs.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The interval sweep's whole input: the tenant's periodic (5.2.12
+    /// `timeInterval`) subscriptions. `docs` clones every subscription of the
+    /// tenant, which at 100 000 subscriptions is the sweep's dominant cost
+    /// even on a tick where nothing is due.
+    fn periodic_docs(&self, tenant: &str) -> Vec<Value> {
+        self.map
+            .read()
+            .expect("sub mirror lock")
+            .get(tenant)
+            .map(|t| {
+                t.docs
+                    .values()
+                    .filter(|d| d.get("timeInterval").is_some())
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -650,11 +699,32 @@ pub(crate) fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
             Some(_) => false,
         };
         let pat_ok = e.get("id").is_some()
-            || e.get("idPattern")
-                .and_then(Value::as_str)
-                .is_none_or(|p| regex::Regex::new(p).is_ok_and(|re| re.find(id).is_some()));
+            || e.get("idPattern").and_then(Value::as_str).is_none_or(|p| {
+                crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some())
+            });
         t_ok && id_ok && pat_ok
     })
+}
+
+/// A subscription's `geoQ` (Table 5.2.13-1) in the parameter shape the 4.10
+/// GeoQuery parser takes.
+fn geo_params(g: &Map<String, Value>) -> std::collections::HashMap<String, String> {
+    let mut params: std::collections::HashMap<String, String> = Default::default();
+    for k in ["georel", "geometry", "geoproperty"] {
+        if let Some(s) = g.get(k).and_then(Value::as_str) {
+            params.insert(k.into(), s.to_owned());
+        }
+    }
+    if let Some(c) = g.get("coordinates") {
+        params.insert(
+            "coordinates".into(),
+            match c {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+        );
+    }
+    params
 }
 
 /// q / scopeQ / geoQ conditions against an internal entity doc.
@@ -686,22 +756,7 @@ pub(crate) fn conditions_match(
         }
     }
     if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
-        let mut params: std::collections::HashMap<String, String> = Default::default();
-        for k in ["georel", "geometry", "geoproperty"] {
-            if let Some(s) = g.get(k).and_then(Value::as_str) {
-                params.insert(k.into(), s.to_owned());
-            }
-        }
-        if let Some(c) = g.get("coordinates") {
-            params.insert(
-                "coordinates".into(),
-                match c {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                },
-            );
-        }
-        match crate::geo::GeoQuery::from_params(&params) {
+        match crate::geo::GeoQuery::from_params(&geo_params(g)) {
             Ok(Some(gq)) => {
                 if !gq.matches(doc, ctx) {
                     return false;
@@ -1170,6 +1225,45 @@ pub async fn process_change(
     }
 }
 
+/// When an interval subscription is next due, in epoch millis: one
+/// `timeInterval` after the last Notification it sent (Table 5.2.14.2-1
+/// `lastNotification`), or after its creation while it has sent none. Without
+/// either anchor it is due immediately.
+fn due_at_ms(sub: &Value, interval: f64) -> i64 {
+    let anchor = sub
+        .get("notification")
+        .and_then(|n| n.get("lastNotification"))
+        .and_then(Value::as_str)
+        .or_else(|| sub.get("createdAt").and_then(Value::as_str));
+    match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+        Some(last) => last.timestamp_millis() + (interval * 1000.0) as i64,
+        None => i64::MIN,
+    }
+}
+
+/// The exact Entity ids a subscription's `entities` selector pins down, or
+/// `None` when it leaves any of them open. Table 5.2.33-1: `id` is a String
+/// or a String[] and "id takes precedence over idPattern", so an entry
+/// carrying an id constrains the read exactly — while one entry without an id
+/// (a bare type, or an idPattern no store column can answer) admits every id
+/// and forfeits the narrowing for the whole OR-ed selector.
+fn selector_ids(sub: &Value) -> Option<Vec<String>> {
+    let sel = sub.get("entities").and_then(Value::as_array)?;
+    let mut ids = Vec::new();
+    for e in sel {
+        match e.get("id") {
+            Some(Value::String(i)) => ids.push(i.clone()),
+            Some(Value::Array(a)) => {
+                for v in a {
+                    ids.push(v.as_str()?.to_owned());
+                }
+            }
+            _ => return None,
+        }
+    }
+    (!ids.is_empty()).then_some(ids)
+}
+
 /// timeInterval subscriptions: fire when due, with all matching entities.
 /// Multi-instance: claim one interval firing under the subscription row
 /// lock — N matcher pods race, exactly one wins (single-winner by
@@ -1188,19 +1282,7 @@ fn claim_interval(
         return false;
     };
     let res = st.store.mutate(tenant, kind, id, |doc| {
-        let anchor = doc
-            .get("notification")
-            .and_then(|n| n.get("lastNotification"))
-            .and_then(Value::as_str)
-            .or_else(|| doc.get("createdAt").and_then(Value::as_str));
-        let due = match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
-            Some(last) => {
-                (chrono::Utc::now() - last.with_timezone(&chrono::Utc)).num_milliseconds()
-                    >= (interval * 1000.0) as i64
-            }
-            None => true,
-        };
-        if !due {
+        if chrono::Utc::now().timestamp_millis() < due_at_ms(doc, interval) {
             return Err(());
         }
         if let Some(n) = doc
@@ -1217,16 +1299,49 @@ fn claim_interval(
     matches!(res, Ok(Some(Ok(()))))
 }
 
+/// One sweep of the interval subscriptions (5.8.6, 5.11.7): "If a
+/// Subscription defines a timeInterval member, a Notification shall be sent
+/// periodically, when the time interval (in seconds) specified in such value
+/// field is reached, regardless of Attribute changes."
+///
+/// The sweep runs on a fixed tick, so its idle cost is what has to stay
+/// small. Two things keep it off the store. A tick that cannot fire anything
+/// returns before enumerating tenants: each sweep records the earliest instant
+/// a subscription it saw can next be due, subscription writes zero that clock
+/// through the mirror, and the Context Source Registration Subscription half —
+/// whose writes reach no mirror — is never skipped for longer than
+/// `CSUB_SWEEP_HORIZON_MS`. And a due subscription reads only the Entities its
+/// own selector can match instead of its tenant's entity set.
 pub async fn interval_tick(st: &AppState) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let clocks = st.sub_mirror.as_ref().map(|m| {
+        (
+            m.next_sub_sweep_ms.load(Relaxed),
+            m.next_csub_sweep_ms.load(Relaxed),
+        )
+    });
+    let (sweep_subs, sweep_csubs) = match clocks {
+        Some((sub_clock, csub_clock)) => (now_ms >= sub_clock, now_ms >= csub_clock),
+        // Never-wired fallback: no clock to keep, so every tick sweeps.
+        None => (true, true),
+    };
+    if !sweep_subs && !sweep_csubs {
+        return;
+    }
+    // Earliest next-due instant seen by this sweep, per half.
+    let mut next_sub = i64::MAX;
+    let mut next_csub = i64::MAX;
     for tenant_str in st.store.subscription_tenants().unwrap_or_default() {
         let Ok(tenant) = TenantId::new(&tenant_str) else {
             continue;
         };
         // Same source the matcher reads: the indexed mirror, with the store
         // list only as the never-wired fallback.
-        let subs = match &st.sub_mirror {
-            Some(m) => m.docs(tenant.as_str()),
-            None => st
+        let subs = match (&st.sub_mirror, sweep_subs) {
+            (_, false) => Vec::new(),
+            (Some(m), _) => m.periodic_docs(tenant.as_str()),
+            (None, _) => st
                 .store
                 .list(&tenant, Kind::Subscription)
                 .unwrap_or_default(),
@@ -1238,43 +1353,59 @@ pub async fn interval_tick(st: &AppState) {
             if !is_active(&sub) {
                 continue;
             }
-            let anchor = sub
-                .get("notification")
-                .and_then(|n| n.get("lastNotification"))
-                .and_then(Value::as_str)
-                .or_else(|| sub.get("createdAt").and_then(Value::as_str));
-            let due = match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
-                Some(last) => {
-                    (chrono::Utc::now() - last.with_timezone(&chrono::Utc)).num_milliseconds()
-                        >= (interval * 1000.0) as i64
-                }
-                None => true,
-            };
-            if !due {
+            let due_at = due_at_ms(&sub, interval);
+            if now_ms < due_at {
+                next_sub = next_sub.min(due_at);
                 continue;
             }
+            // Due: the following firing is one interval away. Recorded before
+            // the claim, so a pod that LOSES the race (another one is firing
+            // this subscription right now) keeps sweeping on the interval
+            // instead of parking on an anchor only the winner advanced.
+            next_sub = next_sub.min(now_ms + (interval * 1000.0) as i64);
             if st.nats && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
                 continue;
             }
             let ctx = sub_context(st, &sub).await;
             let now = now_iso();
-            // Read only the entity types this subscription can select, where
-            // the index proves the selector exact; the full
-            // selector/q/geo/scope check below stays the truth (5.8.6).
+            // 5.8.6: the periodic Notification "shall include all the
+            // subscribed Entities that match the query, geoquery and Scope
+            // query conditions" — so the read is exactly this subscription's
+            // own selector (5.2.33) and conditions, never the tenant's entity
+            // set. Only predicates a store reproduces without hiding a
+            // candidate are offered (ids when every selector entry names one,
+            // types when the index proves them plain, q/scopeQ/geoQ under the
+            // store's own rule that SQL removes rows and never decides them);
+            // the selector_match/conditions_match pair below stays the
+            // arbiter, exactly as on the query path.
             let type_groups: Vec<Vec<String>> = match index_keys(&sub) {
                 Keys::Types(ts) => ts.into_iter().map(|t| vec![t]).collect(),
                 _ => Vec::new(),
             };
+            let ids = selector_ids(&sub);
             // The filter borrows a term expander that is not Sync, so it lives
             // and dies inside this block: held across the delivery await it
             // would make the whole interval task non-Send.
             let rows = {
+                let expand = |t: &str| ctx.expand_key(t);
+                let id_refs: Vec<&str> = ids.iter().flatten().map(String::as_str).collect();
+                // q values in subscription bodies may be percent-encoded (4.9)
+                let q_ast = sub_str(&sub, "q").and_then(|q| {
+                    antares_ql::parse_q(&crate::negotiate::percent_decode(q.as_bytes())).ok()
+                });
+                let geo = sub.get("geoQ").and_then(Value::as_object).and_then(|g| {
+                    crate::geo::GeoQuery::from_params(&geo_params(g))
+                        .ok()
+                        .flatten()
+                });
+                let geo_spec = geo.as_ref().and_then(|g| g.to_sql_spec(&ctx));
                 let filter = antares_sql::store::filter::EntityFilter {
-                    types: if type_groups.is_empty() {
-                        None
-                    } else {
-                        Some(type_groups.as_slice())
-                    },
+                    ids: ids.as_ref().map(|_| id_refs.as_slice()),
+                    types: (!type_groups.is_empty()).then_some(type_groups.as_slice()),
+                    q: q_ast.as_ref(),
+                    scope_q: sub_str(&sub, "scopeQ"),
+                    geo: geo_spec.as_ref(),
+                    expand: &expand,
                     ..Default::default()
                 };
                 st.store
@@ -1290,9 +1421,17 @@ pub async fn interval_tick(st: &AppState) {
                 .flat_map(|d| build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now))
                 .collect();
             if matching.is_empty() {
+                // 5.8.6: "If there are no matching Entities, no Notification
+                // is sent" — lastNotification stays untouched, so this
+                // subscription is still due and every following tick
+                // re-checks it.
+                next_sub = next_sub.min(due_at);
                 continue;
             }
             deliver(st, &tenant, &sub, matching, &ctx).await;
+        }
+        if !sweep_csubs {
+            continue;
         }
         // csource timeInterval subs: periodic CSourceNotification with all
         // matching registrations, independent of changes (5.11.7)
@@ -1307,21 +1446,12 @@ pub async fn interval_tick(st: &AppState) {
             if !is_active(&sub) {
                 continue;
             }
-            let anchor = sub
-                .get("notification")
-                .and_then(|n| n.get("lastNotification"))
-                .and_then(Value::as_str)
-                .or_else(|| sub.get("createdAt").and_then(Value::as_str));
-            let due = match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
-                Some(last) => {
-                    (chrono::Utc::now() - last.with_timezone(&chrono::Utc)).num_milliseconds()
-                        >= (interval * 1000.0) as i64
-                }
-                None => true,
-            };
-            if !due {
+            let due_at = due_at_ms(&sub, interval);
+            if now_ms < due_at {
+                next_csub = next_csub.min(due_at);
                 continue;
             }
+            next_csub = next_csub.min(now_ms + (interval * 1000.0) as i64);
             if st.nats && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval) {
                 continue;
             }
@@ -1354,6 +1484,24 @@ pub async fn interval_tick(st: &AppState) {
                 Some("newlyMatching"),
             )
             .await;
+        }
+    }
+    if let (Some(m), Some((sub_clock, csub_clock))) = (&st.sub_mirror, clocks) {
+        // A periodic subscription written DURING the sweep has already zeroed
+        // the clock: the exchange then fails, the zero stands and the next
+        // tick sweeps rather than waiting out an interval computed without it.
+        if sweep_subs {
+            let _ = m
+                .next_sub_sweep_ms
+                .compare_exchange(sub_clock, next_sub, Relaxed, Relaxed);
+        }
+        if sweep_csubs {
+            let _ = m.next_csub_sweep_ms.compare_exchange(
+                csub_clock,
+                next_csub.min(now_ms + CSUB_SWEEP_HORIZON_MS),
+                Relaxed,
+                Relaxed,
+            );
         }
     }
 }
@@ -2408,10 +2556,8 @@ mod change_pipeline {
         let addr = listener.local_addr().expect("addr");
         std::thread::spawn(move || {
             let mut held = Vec::new();
-            for s in listener.incoming() {
-                if let Ok(s) = s {
-                    held.push(s);
-                }
+            for s in listener.incoming().flatten() {
+                held.push(s);
             }
         });
         let mut st = AppState::new("antares-queue-bound".into());
@@ -3018,5 +3164,326 @@ mod clause_5_2_14_2_bookkeeping {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(n.get("timesSent"), Some(&json!(1)));
         assert!(n.get("lastNotification").is_some());
+    }
+}
+
+/// 5.8.6 periodic notifications: what a due `timeInterval` subscription
+/// reads, what it sends, and which ticks it costs nothing at all.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod clause_5_8_6_periodic_sweep {
+    use super::*;
+    use serde_json::json;
+
+    const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context";
+
+    fn entity(id: &str, ty: &str) -> Value {
+        json!({"id": id, "type": [format!("{DC}/{ty}")]})
+    }
+
+    /// 5.8.6 narrows the periodic read to "all the subscribed Entities" — and
+    /// a narrowing may only ever over-select: every Entity the arbiter
+    /// (`selector_match`) accepts has to survive both predicates the sweep
+    /// hands the store, or that subscription silently stops reporting it.
+    #[test]
+    fn periodic_read_narrowing_never_under_selects() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let docs = [
+            entity("urn:ngsi-ld:Vehicle:1", "Vehicle"),
+            entity("urn:ngsi-ld:Vehicle:2", "Vehicle"),
+            entity("urn:ngsi-ld:Building:1", "Building"),
+        ];
+        let subs: Vec<(&str, Value)> = vec![
+            (
+                "plain type",
+                json!({"entities": [{"type": format!("{DC}/Vehicle")}]}),
+            ),
+            (
+                "one id with its type",
+                json!({"entities": [{"id": "urn:ngsi-ld:Vehicle:2",
+                                     "type": format!("{DC}/Vehicle")}]}),
+            ),
+            (
+                "id array",
+                json!({"entities": [{"id": ["urn:ngsi-ld:Vehicle:1",
+                                            "urn:ngsi-ld:Building:1"]}]}),
+            ),
+            (
+                "one id plus a bare-type entry",
+                json!({"entities": [{"id": "urn:ngsi-ld:Vehicle:1"},
+                                    {"type": format!("{DC}/Building")}]}),
+            ),
+            (
+                "idPattern only",
+                json!({"entities": [{"idPattern": "^urn:ngsi-ld:Vehicle:"}]}),
+            ),
+            (
+                "id overriding a contradicting idPattern",
+                json!({"entities": [{"id": "urn:ngsi-ld:Vehicle:1",
+                                     "idPattern": "^urn:ngsi-ld:Building:"}]}),
+            ),
+            (
+                "type selection expression",
+                json!({"entities": [{"type": format!("{DC}/Vehicle|{DC}/Building")}]}),
+            ),
+            (
+                "no entities selector at all",
+                json!({"watchedAttributes": [format!("{DC}/speed")]}),
+            ),
+        ];
+        for (name, sub) in &subs {
+            let ids = selector_ids(sub);
+            let type_groups: Vec<Vec<String>> = match index_keys(sub) {
+                Keys::Types(ts) => ts.into_iter().map(|t| vec![t]).collect(),
+                _ => Vec::new(),
+            };
+            for doc in &docs {
+                if !selector_match(sub, doc, &ctx) {
+                    continue;
+                }
+                let id = doc["id"].as_str().expect("id");
+                if let Some(ids) = &ids {
+                    assert!(
+                        ids.iter().any(|i| i == id),
+                        "{name}: selector_match accepts {id}, so the id narrowing must keep it"
+                    );
+                }
+                if !type_groups.is_empty() {
+                    let types: Vec<&str> = doc["type"]
+                        .as_array()
+                        .expect("type array")
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    assert!(
+                        type_groups
+                            .iter()
+                            .any(|g| g.iter().all(|t| types.contains(&t.as_str()))),
+                        "{name}: selector_match accepts {id}, so the type narrowing must keep it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Table 5.2.33-1: `id` is a String or a String[] and takes precedence
+    /// over `idPattern`, so it pins the read exactly — while any entry
+    /// leaving the id open (a bare type, an idPattern, no selector at all)
+    /// must yield NO id predicate, since the OR-ed selector then admits
+    /// Entities no listed id names.
+    #[test]
+    fn periodic_read_narrows_by_id_only_when_every_selector_entry_pins_one() {
+        assert_eq!(
+            selector_ids(&json!({"entities": [{"id": "urn:x:A", "type": "T"}]})),
+            Some(vec!["urn:x:A".to_owned()])
+        );
+        assert_eq!(
+            selector_ids(&json!({"entities": [{"id": ["urn:x:A", "urn:x:B"]},
+                                              {"id": "urn:x:C"}]})),
+            Some(vec![
+                "urn:x:A".to_owned(),
+                "urn:x:B".to_owned(),
+                "urn:x:C".to_owned()
+            ])
+        );
+        for open in [
+            json!({"entities": [{"id": "urn:x:A"}, {"type": "T"}]}),
+            json!({"entities": [{"idPattern": "^urn:x:"}]}),
+            json!({"entities": [{"type": "T"}]}),
+            json!({"entities": []}),
+            json!({"watchedAttributes": ["a"]}),
+            json!({}),
+            json!({"entities": [{"id": {"not": "a string"}}]}),
+        ] {
+            assert_eq!(
+                selector_ids(&open),
+                None,
+                "{open} leaves the id open — narrowing by id would drop matching Entities"
+            );
+        }
+    }
+
+    /// An endpoint that keeps every notification body it receives.
+    async fn recording_endpoint() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        let sink = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move |body: String| {
+                let sink = sink.clone();
+                async move {
+                    if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                        sink.lock().expect("recorded bodies").push(v);
+                    }
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (format!("http://{addr}/notify"), seen)
+    }
+
+    /// A periodic subscription created `age_s` seconds ago with a one-second
+    /// interval — due on the next sweep.
+    fn periodic(id: &str, uri: &str, entities: Value, age_s: i64) -> Value {
+        let created = chrono::Utc::now() - chrono::Duration::seconds(age_s);
+        json!({
+            "id": id,
+            "type": "Subscription",
+            "timeInterval": 1,
+            "createdAt": created.to_rfc3339(),
+            "entities": entities,
+            "notification": {"endpoint": {"uri": uri, "accept": "application/json"}},
+        })
+    }
+
+    fn install(st: &AppState, tenant: &TenantId, sub: &Value) {
+        let id = sub["id"].as_str().expect("sub id");
+        st.store
+            .create(tenant, Kind::Subscription, id, sub.clone())
+            .expect("subscription row");
+        if let Some(m) = &st.sub_mirror {
+            m.apply(tenant.as_str(), id, Some(sub.clone()));
+        }
+    }
+
+    fn state_with_mirror(alias: &str) -> (AppState, Arc<SubMirror>, TenantId) {
+        let mut st = AppState::new(alias.into());
+        let mirror = Arc::new(SubMirror::default());
+        st.sub_mirror = Some(mirror.clone());
+        let tenant = TenantId::new("default").expect("tenant");
+        (st, mirror, tenant)
+    }
+
+    /// 5.8.6: the periodic Notification carries "all the subscribed Entities
+    /// that match the query, geoquery and Scope query conditions" — the one
+    /// Entity this selector names out of a populated tenant, and nothing
+    /// else. And for the subscription whose selector matches nothing: "If
+    /// there are no matching Entities, no Notification is sent."
+    #[tokio::test(flavor = "multi_thread")]
+    async fn periodic_sweep_notifies_only_the_subscribed_entities() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, seen) = recording_endpoint().await;
+        let (st, _mirror, tenant) = state_with_mirror("antares-periodic-narrowing");
+        for (id, ty) in [
+            ("urn:ngsi-ld:Vehicle:1", "Vehicle"),
+            ("urn:ngsi-ld:Vehicle:2", "Vehicle"),
+            ("urn:ngsi-ld:Vehicle:3", "Vehicle"),
+            ("urn:ngsi-ld:Building:1", "Building"),
+        ] {
+            st.store
+                .create(&tenant, Kind::Entity, id, entity(id, ty))
+                .expect("entity row");
+        }
+        install(
+            &st,
+            &tenant,
+            &periodic(
+                "urn:ngsi-ld:Subscription:one",
+                &uri,
+                json!([{"id": "urn:ngsi-ld:Vehicle:2", "type": format!("{DC}/Vehicle")}]),
+                10,
+            ),
+        );
+        install(
+            &st,
+            &tenant,
+            &periodic(
+                "urn:ngsi-ld:Subscription:none",
+                &uri,
+                json!([{"id": "urn:ngsi-ld:Vehicle:404", "type": format!("{DC}/Vehicle")}]),
+                10,
+            ),
+        );
+
+        interval_tick(&st).await;
+
+        let bodies = seen.lock().expect("recorded bodies").clone();
+        assert_eq!(bodies.len(), 1, "exactly one subscription had a match");
+        let body = &bodies[0];
+        assert_eq!(
+            body["subscriptionId"], "urn:ngsi-ld:Subscription:one",
+            "a subscription matching no Entity sends no Notification"
+        );
+        let data = body["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 1, "only the subscribed Entity is included");
+        assert_eq!(data[0]["id"], "urn:ngsi-ld:Vehicle:2");
+        for other in [
+            "urn:ngsi-ld:Vehicle:1",
+            "urn:ngsi-ld:Vehicle:3",
+            "urn:ngsi-ld:Building:1",
+        ] {
+            assert!(
+                !body.to_string().contains(other),
+                "{other} is not subscribed and must not appear in the notification"
+            );
+        }
+    }
+
+    /// The sweep clock: 5.8.6 sends the periodic Notification "when the time
+    /// interval (in seconds) specified in such value field is reached", so a
+    /// tick before the earliest such instant cannot fire and must not sweep —
+    /// while writing a periodic subscription clears the clock, because a
+    /// subscription the previous sweep never saw may be due sooner.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn armed_sweep_clock_skips_the_tick_until_a_subscription_write_clears_it() {
+        use std::sync::atomic::Ordering::Relaxed;
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, seen) = recording_endpoint().await;
+        let (st, mirror, tenant) = state_with_mirror("antares-periodic-clock");
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Vehicle:1",
+                entity("urn:ngsi-ld:Vehicle:1", "Vehicle"),
+            )
+            .expect("entity row");
+        let sub = periodic(
+            "urn:ngsi-ld:Subscription:clock",
+            &uri,
+            json!([{"type": format!("{DC}/Vehicle")}]),
+            10,
+        );
+        install(&st, &tenant, &sub);
+        let armed = chrono::Utc::now().timestamp_millis() + 60_000;
+        mirror.next_sub_sweep_ms.store(armed, Relaxed);
+
+        interval_tick(&st).await;
+        assert!(
+            seen.lock().expect("recorded bodies").is_empty(),
+            "a tick before the clock must not fire, due subscription or not"
+        );
+        assert_eq!(
+            mirror.next_sub_sweep_ms.load(Relaxed),
+            armed,
+            "a skipped tick leaves the clock alone"
+        );
+
+        // what a subscription write does
+        mirror.apply(
+            tenant.as_str(),
+            sub["id"].as_str().expect("sub id"),
+            Some(sub.clone()),
+        );
+        assert_eq!(
+            mirror.next_sub_sweep_ms.load(Relaxed),
+            0,
+            "writing a periodic subscription clears the sweep clock"
+        );
+
+        interval_tick(&st).await;
+        assert_eq!(
+            seen.lock().expect("recorded bodies").len(),
+            1,
+            "with the clock cleared the due subscription fires"
+        );
+        assert!(
+            mirror.next_sub_sweep_ms.load(Relaxed) > chrono::Utc::now().timestamp_millis(),
+            "after firing, the clock points at the next due instant"
+        );
     }
 }
