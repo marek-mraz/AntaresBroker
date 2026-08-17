@@ -738,8 +738,9 @@ pub(crate) fn conditions_match(
     if let Some(q) = sub_str(sub, "q") {
         // q values in subscription bodies may be percent-encoded (4.9, 046_05)
         let q = crate::negotiate::percent_decode(q.as_bytes());
-        match antares_ql::parse_q(&q) {
-            Ok(node) => {
+        // parsed once per distinct q text, not once per event per candidate
+        match crate::regexcache::q_node(&q) {
+            Some(node) => {
                 // 4.9 EXAMPLE 13/14: linked-entity q terms (attr{path})
                 // resolve through the local store, same tenant
                 let lookup = |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten();
@@ -747,7 +748,7 @@ pub(crate) fn conditions_match(
                     return false;
                 }
             }
-            Err(_) => return false,
+            None => return false,
         }
     }
     if let Some(sq) = sub_str(sub, "scopeQ") {
@@ -756,13 +757,21 @@ pub(crate) fn conditions_match(
         }
     }
     if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
-        match crate::geo::GeoQuery::from_params(&geo_params(g)) {
-            Ok(Some(gq)) => {
+        // the geometry parse is shared per distinct geoQ member; the
+        // serialization of the stored member is the key
+        let key = serde_json::to_string(g).unwrap_or_default();
+        let gq = crate::regexcache::geo_query(&key, || {
+            crate::geo::GeoQuery::from_params(&geo_params(g))
+                .ok()
+                .flatten()
+        });
+        match gq {
+            Some(gq) => {
                 if !gq.matches(doc, ctx) {
                     return false;
                 }
             }
-            _ => return false,
+            None => return false,
         }
     }
     true
@@ -1389,20 +1398,25 @@ pub async fn interval_tick(st: &AppState) {
             let rows = {
                 let expand = |t: &str| ctx.expand_key(t);
                 let id_refs: Vec<&str> = ids.iter().flatten().map(String::as_str).collect();
-                // q values in subscription bodies may be percent-encoded (4.9)
+                // q values in subscription bodies may be percent-encoded (4.9);
+                // parses shared per distinct expression text, as in
+                // conditions_match — the sweep re-runs per due subscription
                 let q_ast = sub_str(&sub, "q").and_then(|q| {
-                    antares_ql::parse_q(&crate::negotiate::percent_decode(q.as_bytes())).ok()
+                    crate::regexcache::q_node(&crate::negotiate::percent_decode(q.as_bytes()))
                 });
                 let geo = sub.get("geoQ").and_then(Value::as_object).and_then(|g| {
-                    crate::geo::GeoQuery::from_params(&geo_params(g))
-                        .ok()
-                        .flatten()
+                    let key = serde_json::to_string(g).unwrap_or_default();
+                    crate::regexcache::geo_query(&key, || {
+                        crate::geo::GeoQuery::from_params(&geo_params(g))
+                            .ok()
+                            .flatten()
+                    })
                 });
                 let geo_spec = geo.as_ref().and_then(|g| g.to_sql_spec(&ctx));
                 let filter = antares_sql::store::filter::EntityFilter {
                     ids: ids.as_ref().map(|_| id_refs.as_slice()),
                     types: (!type_groups.is_empty()).then_some(type_groups.as_slice()),
-                    q: q_ast.as_ref(),
+                    q: q_ast.as_deref(),
                     scope_q: sub_str(&sub, "scopeQ"),
                     geo: geo_spec.as_ref(),
                     expand: &expand,

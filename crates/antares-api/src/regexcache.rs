@@ -84,6 +84,53 @@ pub fn len() -> usize {
     CACHE.read().map(|c| c.len()).unwrap_or(0)
 }
 
+static Q_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<antares_ql::QNode>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static GEO_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<crate::geo::GeoQuery>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The parsed 4.9 query for `q`, shared across every event that evaluates the
+/// same subscription. Like the regex cache this changes no outcome: only an
+/// `Ok` parse is retained, so an invalid or over-complex `q` keeps exactly
+/// the handling its call site has (`parse_q` is re-run and its error stands).
+/// Entry size is already capped by the parser's own complexity ceiling
+/// (`MAX_Q_NODES`), entry count by the same generational flush as above.
+pub fn q_node(q: &str) -> Option<Arc<antares_ql::QNode>> {
+    if let Some(hit) = Q_CACHE.read().ok().and_then(|c| c.get(q).cloned()) {
+        return Some(hit);
+    }
+    let node = Arc::new(antares_ql::parse_q(q).ok()?);
+    if let Ok(mut c) = Q_CACHE.write() {
+        if c.len() >= MAX_REGEX_CACHE {
+            c.clear();
+        }
+        c.insert(q.into(), Arc::clone(&node));
+    }
+    Some(node)
+}
+
+/// The parsed geoquery (4.10) for a subscription's `geoQ`, keyed by the
+/// caller's serialization of that member. `build` runs on a miss and only a
+/// `Some` is retained — a `geoQ` that does not parse keeps failing exactly as
+/// before, per call. Geometry size is already capped at the parse
+/// (`MAX_GEO_VERTICES`), entry count by the generational flush.
+pub fn geo_query(
+    key: &str,
+    build: impl FnOnce() -> Option<crate::geo::GeoQuery>,
+) -> Option<Arc<crate::geo::GeoQuery>> {
+    if let Some(hit) = GEO_CACHE.read().ok().and_then(|c| c.get(key).cloned()) {
+        return Some(hit);
+    }
+    let gq = Arc::new(build()?);
+    if let Ok(mut c) = GEO_CACHE.write() {
+        if c.len() >= MAX_REGEX_CACHE {
+            c.clear();
+        }
+        c.insert(key.into(), Arc::clone(&gq));
+    }
+    Some(gq)
+}
+
 /// Test-only serialization. The bounded-retention test deliberately flushes
 /// the shared cache, which would otherwise race every test that asserts what
 /// is retained — including the query-term test in `qeval`.
@@ -193,6 +240,72 @@ mod tests {
         );
         assert!(first.is_match(&"a".repeat(255 * 64)));
         assert!(!first.is_match("a"), "and it is the pattern that was asked");
+    }
+
+    /// The same q text parses once and every caller shares the tree; an
+    /// invalid or over-complex q is parsed as before and never retained, so
+    /// its call-site handling (no-match / 400) is unchanged.
+    #[test]
+    fn q_text_is_parsed_once_and_bad_q_is_not_retained() {
+        let _serial = serial_lock();
+        let q = r#"speed>20;brandName=="cache-q-probe""#;
+        let first = q_node(q).expect("valid q");
+        let second = q_node(q).expect("valid q");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the second evaluation must reuse the parsed tree"
+        );
+        for bad in ["", "==5", "a==\"unterminated", "a==1)"] {
+            assert!(q_node(bad).is_none(), "invalid q {bad:?} must not parse");
+            assert!(
+                Q_CACHE.read().is_ok_and(|c| !c.contains_key(bad)),
+                "invalid q {bad:?} must not be retained"
+            );
+        }
+        // boundedness under distinct client q texts
+        for i in 0..MAX_REGEX_CACHE + 64 {
+            q_node(&format!("qbound{i}>0")).expect("valid q");
+            assert!(
+                Q_CACHE.read().map(|c| c.len()).unwrap_or(usize::MAX) <= MAX_REGEX_CACHE,
+                "q cache must stay bounded"
+            );
+        }
+    }
+
+    /// The geo cache shares one parsed geometry per distinct geoQ key, and a
+    /// geoQ whose build fails is rebuilt (and re-fails) per call — never a
+    /// cached wrong answer.
+    #[test]
+    fn geo_query_is_shared_per_key_and_failures_are_not_retained() {
+        let _serial = serial_lock();
+        let build_calls = std::sync::atomic::AtomicUsize::new(0);
+        let params = || {
+            let mut m = HashMap::new();
+            m.insert("georel".to_owned(), "near;maxDistance==2000".to_owned());
+            m.insert("geometry".to_owned(), "Point".to_owned());
+            m.insert("coordinates".to_owned(), "[13.38,52.52]".to_owned());
+            m
+        };
+        let build = || {
+            build_calls.fetch_add(1, Ordering::Relaxed);
+            crate::geo::GeoQuery::from_params(&params()).ok().flatten()
+        };
+        let first = geo_query("geo-probe-1", build).expect("valid geoQ");
+        let second = geo_query("geo-probe-1", build).expect("valid geoQ");
+        assert!(Arc::ptr_eq(&first, &second), "one parse per key");
+        assert_eq!(
+            build_calls.load(Ordering::Relaxed),
+            1,
+            "the second call must not rebuild"
+        );
+        assert!(
+            geo_query("geo-probe-bad", || None).is_none(),
+            "a failing build yields None"
+        );
+        assert!(
+            geo_query("geo-probe-bad", build).is_some(),
+            "…and is not retained as a failure: the next build runs"
+        );
     }
 
     /// Concurrent use: the same and different patterns compiled from many
