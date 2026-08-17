@@ -1,5 +1,6 @@
 //! Attribute-level operations (5.6.2–5.6.5, 5.6.19; resources 6.6/6.7).
 
+use crate::federation::path_segment;
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, ExpandOpts};
@@ -51,14 +52,12 @@ fn update_result(
     tenant: &antares_model::TenantId,
     updated: Vec<String>,
     not_updated: Vec<(String, String)>,
-    ctx: &antares_jsonld::Context,
 ) -> Response {
     if not_updated.is_empty() {
         return no_content(tenant);
     }
-    // 207 bodies carry fully-qualified attribute names (6.3.5: errors and
-    // multi-status responses are application/json with expanded names).
-    let _ = ctx;
+    // Attribute names are the expanded IRIs the write worked on (5.5.7);
+    // the Entity core members keep their reserved names `type` and `scope`.
     let payload = serde_json::json!({
         "updated": updated,
         "notUpdated": not_updated
@@ -208,12 +207,7 @@ async fn append_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(
-                &tenant,
-                updated.clone(),
-                not_updated.clone(),
-                &parsed.ctx,
-            )),
+            Some(Ok(())) => Ok(update_result(&tenant, updated.clone(), not_updated.clone())),
         })
     };
     if regs.is_empty() {
@@ -223,10 +217,7 @@ async fn append_attrs_inner(
             .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
-    let mut query = Vec::new();
-    if let Some(o) = params.get("options") {
-        query.push(("options".to_string(), o.clone()));
-    }
+    let query = fwd_query(params, &["options", "type"]);
     let fed_parts = crate::federation::fed_attr_parts(
         st,
         headers,
@@ -235,7 +226,7 @@ async fn append_attrs_inner(
         &regs,
         "appendAttrs",
         reqwest::Method::POST,
-        &format!("/entities/{id}/attrs/"),
+        &format!("/entities/{}/attrs/", path_segment(id)),
         &query,
         Some(Value::Object(without_context_map(obj))),
     )
@@ -314,14 +305,19 @@ pub(crate) fn matches_type_param(
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    // 4.17: `,`/`|` = OR over alternatives, `(a;b)` = AND within one
-    sel.split([',', '|']).any(|alt| {
-        alt.trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .split(';')
-            .all(|t| types.contains(&ctx.expand_key(t.trim()).as_str()))
-    })
+    crate::entities::type_selection_matches(sel, &types, ctx)
+}
+
+/// The URL parameters that travel with a forwarded attribute operation.
+/// `type` narrows the target Entity for the registered source exactly as it
+/// does locally — 5.6.5.4 identifies the target by its "id (URI), and where
+/// specified type", and the parameter is shall-support on each of these
+/// resources (Tables 6.6.3.1-1, 6.6.3.2-1, 6.7.3.1-1, 6.7.3.2-1, 6.7.3.3-1).
+/// `local` never travels: Table 6.3.18-1 scopes it to the receiving broker.
+fn fwd_query(params: &HashMap<String, String>, keys: &[&str]) -> Vec<(String, String)> {
+    keys.iter()
+        .filter_map(|k| params.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+        .collect()
 }
 
 /// Attribute IRIs of an expanded fragment (entity meta members excluded).
@@ -459,6 +455,24 @@ fn combine_attr_parts(
             .into_response();
         crate::negotiate::echo_tenant(tenant, &mut resp);
         return resp;
+    }
+    // 6.3.17: "In the case of an exclusive or redirect registration, where all
+    // of the data is held outside of the Context Broker and held in a single
+    // registered source, the following errors shall be returned: 508 Loop
+    // Detected … 504 Gateway Timeout … 404 Not Found … 502 Bad Gateway."
+    // 207 Multi Status is the answer for an entity distributed over multiple
+    // endpoints, so a lone proxied source's failure passes through as itself.
+    if let ([reg], [part]) = (regs, fed_parts) {
+        if reg.is_proxy() && !part.ok() && matches!(local, LocalOutcome::Skipped) {
+            return crate::federation::combine(
+                vec![crate::federation::Part {
+                    status: part.status,
+                    detail: part.detail.clone(),
+                }],
+                no_content(tenant),
+                tenant,
+            );
+        }
     }
     if not_updated.is_empty() {
         return no_content(tenant);
@@ -665,12 +679,7 @@ async fn update_attrs_inner(
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
             Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(
-                &tenant,
-                updated.clone(),
-                not_updated.clone(),
-                &parsed.ctx,
-            )),
+            Some(Ok(())) => Ok(update_result(&tenant, updated.clone(), not_updated.clone())),
         })
     };
     if regs.is_empty() {
@@ -680,10 +689,7 @@ async fn update_attrs_inner(
             .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
     let local_outcome = classify_local(&local_resp);
-    let mut query = Vec::new();
-    if let Some(o) = params.get("options") {
-        query.push(("options".to_string(), o.clone()));
-    }
+    let query = fwd_query(params, &["options", "type"]);
     let fed_parts = crate::federation::fed_attr_parts(
         st,
         headers,
@@ -692,7 +698,7 @@ async fn update_attrs_inner(
         &regs,
         "updateEntity",
         reqwest::Method::PATCH,
-        &format!("/entities/{id}/attrs/"),
+        &format!("/entities/{}/attrs/", path_segment(id)),
         &query,
         Some(Value::Object(without_context_map(obj))),
     )
@@ -865,8 +871,12 @@ async fn partial_update_inner(
         &regs,
         "updateAttrs",
         reqwest::Method::PATCH,
-        &format!("/entities/{id}/attrs/{attr}"),
-        &[],
+        &format!(
+            "/entities/{}/attrs/{}",
+            path_segment(id),
+            path_segment(attr)
+        ),
+        &fwd_query(params, &["type"]),
         Some(Value::Object(without_context_map(obj))),
     )
     .await;
@@ -901,16 +911,18 @@ pub async fn replace_attr(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_attr_name(&attr)?;
-        // 5.6.19.4: "If the target Attribute is scope, then an error of type
-        // BadRequestData shall be raised."
-        if attr == "scope" {
+        check_params(&params, &["local", "type"])?;
+        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
+        // 5.5.7 term expansion first, then 5.6.19.4: "If the target Attribute
+        // is scope, then an error of type BadRequestData shall be raised" —
+        // the target is the expanded name, so the IRI spelling counts too.
+        let attr_iri = parsed.ctx.expand_key(&attr);
+        if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
             return Err(NgsiError::BadRequestData(
                 "scope cannot be the target of a replace attribute (5.6.19)".into(),
             )
             .into());
         }
-        check_params(&params, &["local", "type"])?;
-        let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed
             .value
             .as_object()
@@ -927,7 +939,6 @@ pub async fn replace_attr(
                 ..Default::default()
             },
         )?;
-        let attr_iri = parsed.ctx.expand_key(&attr);
         let incoming_arr = fragment
             .get(&attr_iri)
             .cloned()
@@ -1032,8 +1043,12 @@ pub async fn replace_attr(
             &regs,
             "replaceAttrs",
             reqwest::Method::PUT,
-            &format!("/entities/{id}/attrs/{attr}"),
-            &[],
+            &format!(
+                "/entities/{}/attrs/{}",
+                path_segment(&id),
+                path_segment(&attr)
+            ),
+            &fwd_query(&params, &["type"]),
             Some(Value::Object(without_context_map(obj))),
         )
         .await;
@@ -1146,15 +1161,19 @@ async fn delete_attr_inner(
             Ok::<(), NgsiError>(())
         })?;
         // The temporal representation records the deletion (4.8 deletedAt) — and
-        // the entity may exist ONLY temporally (created via 5.6.11).
-        let temporal_had = crate::entities::mirror_delete_attr(
-            st,
-            &tenant,
-            id,
-            &attr_iri,
-            want_ds.as_deref(),
-            &ts,
-        );
+        // the entity may exist ONLY temporally (created via 5.6.11), so a
+        // missing current-state entity still records. A REFUSED delete (the
+        // 5.6.5.4 type selector did not match) deleted nothing and must leave
+        // the attribute history untouched.
+        let temporal_had = !matches!(res, Some(Err(_)))
+            && crate::entities::mirror_delete_attr(
+                st,
+                &tenant,
+                id,
+                &attr_iri,
+                want_ds.as_deref(),
+                &ts,
+            );
         Some(match res {
             None if temporal_had => Ok(no_content(&tenant)),
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
@@ -1183,10 +1202,7 @@ async fn delete_attr_inner(
     } else {
         Vec::new()
     };
-    let query: Vec<(String, String)> = ["datasetId", "deleteAll"]
-        .iter()
-        .filter_map(|k| params.get(*k).map(|v| (k.to_string(), v.clone())))
-        .collect();
+    let query = fwd_query(params, &["datasetId", "deleteAll", "type"]);
     let fed_parts = crate::federation::fed_attr_parts(
         st,
         headers,
@@ -1195,7 +1211,11 @@ async fn delete_attr_inner(
         &regs,
         "deleteAttrs",
         reqwest::Method::DELETE,
-        &format!("/entities/{id}/attrs/{attr}"),
+        &format!(
+            "/entities/{}/attrs/{}",
+            path_segment(id),
+            path_segment(attr)
+        ),
         &query,
         None,
     )
@@ -1219,29 +1239,43 @@ mod attr_name_and_via_paths {
     use axum::http::{Request, StatusCode};
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
     const ALIAS: &str = "antares1";
 
-    /// A Context Source answering 204 to everything, counting the hits.
-    fn mock_source() -> (u16, Arc<AtomicUsize>) {
+    /// A Context Source answering 204 to everything, counting the hits and
+    /// recording the request-target of each one (the wire truth a forwarded
+    /// operation is judged on).
+    fn mock_source() -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let hits: Arc<AtomicUsize> = Arc::default();
         let seen = hits.clone();
+        let targets: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen_targets = targets.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { continue };
                 seen.fetch_add(1, Ordering::SeqCst);
                 let mut buf = [0u8; 8192];
-                let _ = s.read(&mut buf);
+                let n = s.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let line = head.lines().next().unwrap_or_default().to_owned();
+                if let Some(t) = line.split_whitespace().nth(1) {
+                    seen_targets.lock().expect("targets").push(t.to_owned());
+                }
                 let _ = s.write_all(
                     b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
                 );
             }
         });
-        (port, hits)
+        (port, hits, targets)
+    }
+
+    /// The request-targets the mock has seen so far, in arrival order.
+    fn seen(targets: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        targets.lock().expect("targets").clone()
     }
 
     fn state() -> AppState {
@@ -1251,7 +1285,10 @@ mod attr_name_and_via_paths {
     }
 
     async fn send(st: &AppState, req: Request<Body>) -> axum::http::Response<Body> {
-        crate::router(st.clone()).oneshot(req).await.expect("response")
+        crate::router(st.clone())
+            .oneshot(req)
+            .await
+            .expect("response")
     }
 
     async fn post(st: &AppState, uri: &str, body: String) -> StatusCode {
@@ -1275,7 +1312,7 @@ mod attr_name_and_via_paths {
             "id": format!("urn:ngsi-ld:ContextSourceRegistration:{id}"),
             "type": "ContextSourceRegistration",
             "mode": mode,
-            "operations": ["updateAttrs", "replaceAttrs", "deleteAttrs", "appendAttrs"],
+            "operations": ["updateEntity", "updateAttrs", "replaceAttrs", "deleteAttrs", "appendAttrs"],
             "information": [{"entities": [{"type": "Vehicle", "id": entity}]}],
             "endpoint": format!("http://127.0.0.1:{port}"),
         });
@@ -1307,7 +1344,7 @@ mod attr_name_and_via_paths {
     async fn dot_segment_attribute_name_is_refused_and_never_forwarded() {
         const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-traversal";
         let st = state();
-        let (port, hits) = mock_source();
+        let (port, hits, targets) = mock_source();
         register(&st, port, "csr-traversal", ENTITY, "redirect").await;
         let frag = r#"{"type":"Property","value":1}"#;
         // raw, decoded once by this broker, and decoded once more by the peer
@@ -1345,15 +1382,222 @@ mod attr_name_and_via_paths {
             ))
             .body(Body::empty())
             .expect("request");
-        assert_ne!(
+        assert_eq!(
             send(&st, req).await.status(),
-            StatusCode::BAD_REQUEST,
+            StatusCode::NO_CONTENT,
             "an absolute IRI is a valid attribute name"
         );
-        assert!(
-            hits.load(Ordering::SeqCst) >= 1,
+        // ':' is a legal path character (RFC 3986 clause 3.3 pchar), '/' is not
+        assert_eq!(
+            seen(&targets),
+            vec![format!(
+                "/ngsi-ld/v1/entities/{ENTITY}/attrs/https:%2F%2Fexample.org%2Fv1.0%2Fspeed"
+            )],
+            "the peer is asked for that attribute of that entity, nothing else"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
             "a valid attribute name is still forwarded"
         );
+    }
+
+    /// Tables 6.6.3.1-1/6.6.3.2-1/6.7.3.1-1 make the entity id and the
+    /// attribute name single URI path variables, so a forwarded attribute
+    /// operation must address the SAME resource at the registered source.
+    /// RFC 3986 clause 3.3 ends a path segment at `#`, `?` or `/`: spliced
+    /// raw, an id carrying `#` truncates the forwarded path and Delete
+    /// Attribute (5.6.5) reaches the peer as Delete Entity (5.6.6).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forwarded_attribute_path_keeps_the_whole_id_and_name() {
+        // both delimiters an id may legally carry (RFC 3986 clause 3.3)
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-frag#1?x";
+        const ID: &str = "urn:ngsi-ld:Vehicle:attrs-frag%231%3Fx";
+        // an absolute IRI is a legal Attribute name (4.6.2) and carries '/'
+        const ATTR: &str = "https%3A%2F%2Fexample.org%2Fv1.0%2Fspeed";
+        // ':' is a legal path character (RFC 3986 clause 3.3 pchar), '/' is not
+        const SEG: &str = "https:%2F%2Fexample.org%2Fv1.0%2Fspeed";
+        let st = state();
+        let (port, hits, targets) = mock_source();
+        register(&st, port, "csr-frag", ENTITY, "redirect").await;
+        let multi = r#"{"speed":{"type":"Property","value":1}}"#;
+        let single = r#"{"type":"Property","value":2}"#;
+        let single_tail = format!("/attrs/{ATTR}");
+        let cases = [
+            ("POST", "/attrs".to_owned(), Some(multi), "/attrs/"),
+            ("PATCH", "/attrs".to_owned(), Some(multi), "/attrs/"),
+            ("PATCH", single_tail.clone(), Some(single), "single"),
+            ("PUT", single_tail.clone(), Some(single), "single"),
+            ("DELETE", single_tail.clone(), None, "single"),
+        ];
+        for (method, tail, body, want_tail) in cases {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(format!("/ngsi-ld/v1/entities/{ID}{tail}"));
+            if let Some(b) = body {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", b.len());
+            }
+            let req = req
+                .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+                .expect("request");
+            assert_eq!(
+                send(&st, req).await.status(),
+                StatusCode::NO_CONTENT,
+                "{method} {tail}"
+            );
+            let want = if want_tail == "single" {
+                format!("/ngsi-ld/v1/entities/{ID}/attrs/{SEG}")
+            } else {
+                format!("/ngsi-ld/v1/entities/{ID}{want_tail}")
+            };
+            let got = seen(&targets).pop().unwrap_or_default();
+            assert_eq!(got, want, "{method} {tail} forwarded target");
+            // the id must not have been cut short at its '#' or '?', and no
+            // delimiter may survive undecoded inside a segment
+            assert!(
+                !got.contains('#') && !got.contains('?'),
+                "{method} {tail}: raw delimiter in the forwarded path {got}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 5, "one forward per operation");
+    }
+
+    /// `type` is a shall-support URL parameter of every attribute write
+    /// (Tables 6.6.3.1-1, 6.6.3.2-1, 6.7.3.1-1, 6.7.3.2-1, 6.7.3.3-1) and
+    /// 5.6.5.4 identifies the target by its "id (URI), and where specified
+    /// type" — so the selector has to travel with the forwarded operation,
+    /// or the registered source writes on entities the client scoped out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn type_selector_travels_with_the_forwarded_attribute_write() {
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-typesel";
+        let st = state();
+        let (port, hits, targets) = mock_source();
+        register(&st, port, "csr-typesel", ENTITY, "redirect").await;
+        let multi = r#"{"speed":{"type":"Property","value":1}}"#;
+        let single = r#"{"type":"Property","value":2}"#;
+        let cases = [
+            ("POST", "/attrs?type=Vehicle", Some(multi)),
+            ("PATCH", "/attrs?type=Vehicle", Some(multi)),
+            ("PATCH", "/attrs/speed?type=Vehicle", Some(single)),
+            ("PUT", "/attrs/speed?type=Vehicle", Some(single)),
+            ("DELETE", "/attrs/speed?type=Vehicle", None),
+        ];
+        for (method, tail, body) in cases {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(format!("/ngsi-ld/v1/entities/{ENTITY}{tail}"));
+            if let Some(b) = body {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", b.len());
+            }
+            let req = req
+                .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+                .expect("request");
+            assert_eq!(
+                send(&st, req).await.status(),
+                StatusCode::NO_CONTENT,
+                "{method} {tail}"
+            );
+            let got = seen(&targets).pop().unwrap_or_default();
+            assert!(
+                got.contains("type=Vehicle"),
+                "{method} {tail} forwarded without the type selector: {got}"
+            );
+            assert!(
+                !got.contains("local="),
+                "{method} {tail}: local is never forwarded"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 5, "one forward per operation");
+    }
+
+    /// 5.6.5.4: with a `?type` selector that the target Entity does not
+    /// match, the entity is "not known" for this operation and
+    /// ResourceNotFound is raised — nothing is deleted, so the temporal
+    /// representation must not gain a 4.8 `deletedAt` instance either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refused_delete_writes_no_temporal_deletion() {
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-refused";
+        let st = state();
+        create_entity(&st, ENTITY).await;
+        // 5.6.11: the temporal representation of the same entity
+        let history = serde_json::json!({
+            "id": ENTITY, "type": "Vehicle",
+            "speed": [{"type": "Property", "value": 1,
+                       "observedAt": "2026-01-01T00:00:00Z"}],
+        });
+        assert_eq!(
+            post(&st, "/ngsi-ld/v1/temporal/entities", history.to_string()).await,
+            StatusCode::CREATED,
+            "temporal create"
+        );
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!(
+                "/ngsi-ld/v1/entities/{ENTITY}/attrs/speed?type=Building"
+            ))
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(send(&st, req).await.status(), StatusCode::NOT_FOUND);
+        let doc = st
+            .store
+            .get(&tenant, antares_sql::store::Kind::Temporal, ENTITY)
+            .expect("store read")
+            .expect("temporal doc");
+        assert!(
+            !doc.to_string().contains("deletedAt"),
+            "a refused delete must not tombstone the attribute history: {doc}"
+        );
+        assert!(
+            !doc.to_string().contains("urn:ngsi-ld:null"),
+            "nor write a deletion instance"
+        );
+    }
+
+    /// 5.6.19.4: "If the target Attribute is scope, then an error of type
+    /// BadRequestData shall be raised" — the target is the expanded name
+    /// (5.5.7), so the IRI spelling of scope is refused just like the term.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replace_attr_refuses_the_scope_iri_spelling() {
+        const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-scope-iri";
+        let st = state();
+        create_entity(&st, ENTITY).await;
+        let frag = r#"{"type":"Property","value":"/Madrid"}"#;
+        for attr in ["scope", "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fscope"] {
+            let req = Request::builder()
+                .method("PUT")
+                .uri(format!("/ngsi-ld/v1/entities/{ENTITY}/attrs/{attr}"))
+                .header("Content-Type", "application/json")
+                .header("Content-Length", frag.len())
+                .body(Body::from(frag))
+                .expect("request");
+            let resp = send(&st, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "scope target {attr}"
+            );
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .expect("body")
+                .to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(
+                body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+                "scope target {attr}"
+            );
+            // the 5.6.19.4 guard, not an incidental fragment-shape rejection
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("scope cannot be the target")),
+                "scope target {attr}: {body}"
+            );
+        }
     }
 
     /// 6.3.17/6.3.18 (Table 6.3.18-2): a Via chain naming this broker leaves
@@ -1365,7 +1609,7 @@ mod attr_name_and_via_paths {
         const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-via";
         let st = state();
         create_entity(&st, ENTITY).await;
-        let (port, hits) = mock_source();
+        let (port, hits, _targets) = mock_source();
         register(&st, port, "csr-via-a", ENTITY, "inclusive").await;
         register(&st, port, "csr-via-b", ENTITY, "inclusive").await;
         let via = format!("1.1 {ALIAS}");
@@ -1539,6 +1783,91 @@ mod update_result_tests {
         assert!(body["notUpdated"][0]["reason"].is_string());
         assert!(body.get("success").is_none(), "not the batch shape");
         assert!(body.get("errors").is_none(), "not the batch shape");
+    }
+
+    /// 6.3.17: "In the case of an exclusive or redirect registration, where
+    /// all of the data is held outside of the Context Broker and held in a
+    /// single registered source, the following errors shall be returned: 508
+    /// Loop Detected … 504 Gateway Timeout … 404 Not Found … 502 Bad
+    /// Gateway." 207 Multi-Status is reserved for an entity distributed over
+    /// multiple endpoints, so a single proxied source's failure passes
+    /// through as itself.
+    #[tokio::test]
+    async fn single_proxied_source_error_passes_through_instead_of_207() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed".to_owned();
+        for mode in ["exclusive", "redirect"] {
+            for (status, etype) in [
+                (404u16, "ResourceNotFound"),
+                (504, "InternalError"),
+                (502, "InternalError"),
+            ] {
+                let regs = vec![FedReg {
+                    mode: mode.into(),
+                    ..reg("urn:ngsi-ld:ContextSourceRegistration:csr1", None)
+                }];
+                let parts = vec![Part {
+                    status,
+                    detail: "distributed operation to registration csr1 failed".into(),
+                }];
+                let resp = combine_attr_parts(
+                    &tenant,
+                    std::slice::from_ref(&speed),
+                    &[],
+                    // every attribute is held by the proxy: no local half ran
+                    LocalOutcome::Skipped,
+                    Vec::new(),
+                    Vec::new(),
+                    &regs,
+                    &parts,
+                );
+                assert_eq!(resp.status().as_u16(), status, "{mode} part {status}");
+                let body = body_of(resp).await;
+                assert_eq!(
+                    body["type"],
+                    format!("https://uri.etsi.org/ngsi-ld/errors/{etype}"),
+                    "{mode} part {status}"
+                );
+                assert_eq!(body["status"], status);
+                assert!(
+                    body.get("updated").is_none() && body.get("notUpdated").is_none(),
+                    "a single-source failure is ProblemDetails, not an UpdateResult"
+                );
+            }
+        }
+    }
+
+    /// The same single-source rule must not swallow a MULTI-endpoint failure:
+    /// two inclusive registrations over one entity stay 207 (6.3.17).
+    #[tokio::test]
+    async fn two_registrations_still_answer_207() {
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed".to_owned();
+        let regs = vec![
+            reg("urn:ngsi-ld:ContextSourceRegistration:csr1", None),
+            reg("urn:ngsi-ld:ContextSourceRegistration:csr2", None),
+        ];
+        let parts = vec![
+            Part {
+                status: 204,
+                detail: "ok".into(),
+            },
+            Part {
+                status: 404,
+                detail: "not found".into(),
+            },
+        ];
+        let resp = combine_attr_parts(
+            &tenant,
+            std::slice::from_ref(&speed),
+            &[],
+            LocalOutcome::Skipped,
+            Vec::new(),
+            Vec::new(),
+            &regs,
+            &parts,
+        );
+        assert_eq!(resp.status().as_u16(), 207);
     }
 
     /// All halves succeeded → 204; everything missing → 404.
