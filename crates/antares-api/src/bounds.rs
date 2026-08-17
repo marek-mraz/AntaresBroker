@@ -61,6 +61,13 @@ pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
+/// Entity lookups one `q=` expression may buy while resolving 4.9
+/// linked-entity terms (`attr{…}`, EXAMPLE 13/14). The hop count is capped
+/// by the query language itself, but each hop fans out over every object of
+/// a Relationship, so the walk costs fan-out^hops store reads. Exhausting
+/// the budget yields no further target — the same outcome an unresolvable
+/// linked entity already has — instead of a store scan per candidate entity.
+pub const MAX_Q_LINK_LOOKUPS: usize = 512;
 
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
@@ -83,6 +90,7 @@ impl LimitStats {
             "maxJoinLevel": MAX_JOIN_LEVEL,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
+            "maxQLinkLookups": MAX_Q_LINK_LOOKUPS,
             "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
             "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
             "rejectedBodyTooDeep": self.body_too_deep.load(Ordering::Relaxed),
@@ -162,11 +170,14 @@ pub async fn bounds_layer(
             return StatusCode::PAYLOAD_TOO_LARGE.into_response(); // bare 413
         }
     };
+    // An absent (or unreadable) Content-Type is parsed as JSON downstream —
+    // 6.3.4 mandates Content-Length, not Content-Type — so it is scanned
+    // here too, or the nesting cap has a hole exactly where the parser has
+    // none. A header that names another media type keeps its 415.
     let is_json = parts
         .headers
         .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("json"));
+        .is_none_or(|v| v.to_str().is_ok_and(|ct| ct.contains("json")));
     if is_json && json_depth(&bytes) > MAX_JSON_DEPTH {
         st.limits.body_too_deep.fetch_add(1, Ordering::Relaxed);
         return crate::negotiate::ApiError::from(antares_model::NgsiError::BadRequestData(
@@ -235,6 +246,7 @@ mod tests {
                 "maxGeoVertices",
                 "maxJoinLevel",
                 "maxJsonDepth",
+                "maxQLinkLookups",
                 "maxQNodes",
                 "maxUriBytes",
                 "rejectedBodyTooDeep",
@@ -248,6 +260,40 @@ mod tests {
             obj.values().all(|v| v.is_number()),
             "every member is a number — no strings to leak paths through"
         );
+    }
+
+    /// The nesting cap is checked BEFORE any parse — including on the path
+    /// that carries no Content-Type header at all, which the body parser
+    /// accepts and parses as JSON (6.3.4 only mandates Content-Length).
+    /// An unparseable Content-Type follows the same rule.
+    #[tokio::test]
+    async fn over_depth_body_without_content_type_is_still_rejected() {
+        use tower::ServiceExt;
+        let st = crate::AppState::new("http://localhost:0".into());
+        let app = axum::Router::new()
+            .route(
+                "/x",
+                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(axum::middleware::from_fn_with_state(st, bounds_layer));
+        let deep = "[".repeat(MAX_JSON_DEPTH + 5) + &"]".repeat(MAX_JSON_DEPTH + 5);
+        for ct in [None, Some("application/json")] {
+            let mut req = Request::post("/x")
+                .header(axum::http::header::CONTENT_LENGTH, deep.len().to_string());
+            if let Some(ct) = ct {
+                req = req.header(axum::http::header::CONTENT_TYPE, ct);
+            }
+            let resp = app
+                .clone()
+                .oneshot(req.body(Body::from(deep.clone())).expect("req"))
+                .await
+                .expect("resp");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "an over-deep body must not reach the handler (content-type {ct:?})"
+            );
+        }
     }
 
     #[test]

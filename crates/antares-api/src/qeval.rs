@@ -4,6 +4,7 @@
 use antares_jsonld::Context;
 use antares_ql::{CmpOp, QNode, QPath, QValue};
 use serde_json::Value;
+use std::cell::Cell;
 
 /// Entity resolver for 4.9 linked-entity subqueries (`attr{path}`,
 /// EXAMPLE 13/14). Returns the expanded entity for a URI, or None when the
@@ -11,12 +12,34 @@ use serde_json::Value;
 /// linked term then simply does not match.
 pub type EntityLookup<'a> = &'a dyn Fn(&str) -> Option<Value>;
 
+/// One q expression buys `bounds::MAX_Q_LINK_LOOKUPS` entity lookups for its
+/// 4.9 linked-entity terms, shared by every term and every recursion branch.
 pub fn eval_q(node: &QNode, entity: &Value, ctx: &Context, lookup: EntityLookup) -> bool {
+    eval_node(
+        node,
+        entity,
+        ctx,
+        lookup,
+        &Cell::new(crate::bounds::MAX_Q_LINK_LOOKUPS),
+    )
+}
+
+fn eval_node(
+    node: &QNode,
+    entity: &Value,
+    ctx: &Context,
+    lookup: EntityLookup,
+    budget: &Cell<usize>,
+) -> bool {
     match node {
-        QNode::And(items) => items.iter().all(|n| eval_q(n, entity, ctx, lookup)),
-        QNode::Or(items) => items.iter().any(|n| eval_q(n, entity, ctx, lookup)),
+        QNode::And(items) => items
+            .iter()
+            .all(|n| eval_node(n, entity, ctx, lookup, budget)),
+        QNode::Or(items) => items
+            .iter()
+            .any(|n| eval_node(n, entity, ctx, lookup, budget)),
         QNode::Exists { path, negated } => {
-            let found = !resolve_qpath(entity, path, ctx, lookup, 0).is_empty();
+            let found = !resolve_qpath(entity, path, ctx, lookup, budget).is_empty();
             found != *negated
         }
         // 4.9: "If the target element corresponds to a Relationship or
@@ -33,7 +56,7 @@ pub fn eval_q(node: &QNode, entity: &Value, ctx: &Context, lookup: EntityLookup)
                 (CmpOp::Pattern | CmpOp::NotPattern, QValue::Str(s)) => regex::Regex::new(s).ok(),
                 _ => None,
             };
-            resolve_qpath(entity, path, ctx, lookup, 0)
+            resolve_qpath(entity, path, ctx, lookup, budget)
                 .iter()
                 .any(|(kind, v)| kind_allows(*kind, *op) && compare(v, *op, value, re.as_ref()))
         }
@@ -99,19 +122,22 @@ fn kind_allows(kind: TargetKind, op: CmpOp) -> bool {
 
 /// Resolve a 4.9 attribute path — linked-entity hops first (EXAMPLE 13/14),
 /// then the dotted path with its optional trailing bracket.
+///
+/// The hop count is capped by the query language, but each hop fans out over
+/// every object of the Relationship, so the walk is bounded by WORK: the
+/// shared `budget` counts entity lookups across every branch, and an
+/// exhausted budget resolves to no target — the outcome an unresolvable
+/// linked entity already has.
 fn resolve_qpath(
     entity: &Value,
     qp: &QPath,
     ctx: &Context,
     lookup: EntityLookup,
-    depth: usize,
+    budget: &Cell<usize>,
 ) -> Vec<(TargetKind, Value)> {
     let Some(link) = qp.links.first() else {
         return resolve_targets(entity, qp, ctx);
     };
-    if depth > 8 {
-        return vec![];
-    }
     let iri = ctx.expand_key(&link.attr);
     let Some(instances) = entity.get(&iri).and_then(Value::as_array) else {
         return vec![];
@@ -134,6 +160,10 @@ fn resolve_qpath(
     };
     let mut out = Vec::new();
     for uri in uris {
+        let Some(left) = budget.get().checked_sub(1) else {
+            break;
+        };
+        budget.set(left);
         let Some(linked) = lookup(uri) else { continue };
         // EXAMPLE 14 type hint: only consider target entities of these types
         if !link.types.is_empty() {
@@ -146,7 +176,7 @@ fn resolve_qpath(
                 continue;
             }
         }
-        out.extend(resolve_qpath(&linked, &rest, ctx, lookup, depth + 1));
+        out.extend(resolve_qpath(&linked, &rest, ctx, lookup, budget));
     }
     out
 }
@@ -692,9 +722,11 @@ mod bounds_and_patterns {
         let ast = parse_q(&q).expect(&q);
         assert_eq!(ast.max_link_depth(), 8);
         assert!(eval_q(&ast, &a, &ctx, &lookup), "the cycle resolves");
-        // 2 objects per hop over 8 hops: 2 + 4 + … + 2^8. Bounded, but
-        // exponential in the fan-out — the hop cap is the only limit.
+        // 2 objects per hop over 8 hops: 2 + 4 + … + 2^8 — exponential in
+        // the fan-out, which is why the work budget, not the hop cap, is
+        // what bounds this walk.
         assert_eq!(calls.get(), 510, "resolver lookups per query term");
+        assert!(calls.get() <= crate::bounds::MAX_Q_LINK_LOOKUPS);
 
         // one hop deeper is refused before any entity is touched
         let deep = format!("{}v{}==1", "r{".repeat(9), "}".repeat(9));
@@ -704,6 +736,41 @@ mod bounds_and_patterns {
                 Err(antares_model::NgsiError::TooComplexQuery(_))
             ),
             "the 9th hop must be rejected"
+        );
+    }
+
+    /// 4.9 linked-entity resolution is bounded by WORK, not only by hops:
+    /// a wide Relationship fan-out costs F^hops entity lookups, so one q
+    /// term may only buy `bounds::MAX_Q_LINK_LOOKUPS` of them.
+    #[test]
+    fn linked_walk_lookups_are_capped_by_the_work_budget() {
+        let ctx = ctx();
+        let fan: Vec<Value> = (0..40)
+            .map(|i| {
+                json!({"type": "Relationship", "object": "urn:A",
+                       "datasetId": format!("urn:ngsi-ld:Dataset:{i}")})
+            })
+            .collect();
+        let a = json!({
+            "id": "urn:A",
+            "type": [format!("{DC}Node")],
+            format!("{DC}r"): fan,
+            format!("{DC}v"): [{"type": "Property", "value": 1}],
+        });
+        let calls = Cell::new(0usize);
+        let lookup = |id: &str| {
+            calls.set(calls.get() + 1);
+            (id == "urn:A").then(|| a.clone())
+        };
+        let ast = parse_q("r{r{r{v}}}==1").expect("q");
+        assert!(
+            eval_q(&ast, &a, &ctx, &lookup),
+            "a target reachable inside the budget still matches"
+        );
+        assert!(
+            calls.get() <= crate::bounds::MAX_Q_LINK_LOOKUPS,
+            "one q term bought {} entity lookups",
+            calls.get()
         );
     }
 

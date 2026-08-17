@@ -49,7 +49,9 @@ fn ds_put(st: &AppState, tenant: &TenantId, own_id: &str, doc: Value) {
         .flatten()
         .is_some();
     if !updated {
-        let _ = st.store.create(tenant, Kind::DistSub, own_id, doc);
+        if let Err(e) = st.store.create(tenant, Kind::DistSub, own_id, doc) {
+            tracing::warn!("subscription {own_id}: distributed mapping not stored: {e}");
+        }
     }
 }
 
@@ -80,7 +82,12 @@ fn ds_remotes(doc: &Value) -> Vec<(String, (String, String))> {
 /// would drop a sibling registration's mapping, and a Delete Subscription
 /// (5.8.5.4) that lands mid-forward would be undone by a write that
 /// resurrects the deleted document. `false` = the Subscription's mapping
-/// document is gone.
+/// document is gone, or the registration already holds a remote subscription
+/// — 5.8.1.4 stores ONE subscriptionId per Context Source Registration, and
+/// two notifications racing for the same pair would otherwise each create a
+/// remote copy and orphan the loser's at the source. That check runs inside
+/// the closure the store executes under its write lock, so the same lock
+/// decides and acts.
 fn ds_set_remote(
     st: &AppState,
     tenant: &TenantId,
@@ -97,6 +104,9 @@ fn ds_set_remote(
                             o.insert("remotes".into(), json!({}));
                         }
                         if let Some(m) = o.get_mut("remotes").and_then(Value::as_object_mut) {
+                            if m.contains_key(reg_id) {
+                                return Err(());
+                            }
                             m.insert(reg_id.to_owned(), v.clone());
                         }
                     }
@@ -107,21 +117,28 @@ fn ds_set_remote(
                     }
                 }
             }
-            Ok::<_, std::convert::Infallible>(())
+            Ok(())
         })
         .ok()
         .flatten()
-        .is_some()
+        .is_some_and(|r: Result<(), ()>| r.is_ok())
 }
 
 fn inbound_put(st: &AppState, remote_id: &str, tenant: &TenantId, own_id: &str) {
     if let Some(idx) = ds_index_tenant() {
-        let _ = st.store.create(
+        // Without this index every notification the source sends is answered
+        // 404 and the subscription silently never notifies — a store failure
+        // here has to be visible to an operator.
+        if let Err(e) = st.store.create(
             &idx,
             Kind::DistSub,
             remote_id,
             json!({"tenant": tenant.as_str(), "own": own_id}),
-        );
+        ) {
+            tracing::warn!(
+                "subscription {own_id}: inbound mapping for {remote_id} not stored: {e}"
+            );
+        }
     }
 }
 
@@ -148,6 +165,19 @@ fn distributed(sub: &Value) -> bool {
     sub.get("localOnly").and_then(Value::as_bool) != Some(true)
 }
 
+/// The Subscription members 5.11.2.4 matches a Context Source Registration
+/// on, plus the @context the internal Registration Subscription is read
+/// under. Kept in one place: create and update must offer the very same
+/// document, or an update silently widens which sources are matched.
+const CSR_MATCH_MEMBERS: [&str; 6] = [
+    "entities",
+    "watchedAttributes",
+    "csf",
+    "geoQ",
+    "scopeQ",
+    "temporalQ",
+];
+
 /// 5.8.1.4: "Based on the content of the Subscription, a Context Source
 /// Registration Subscription shall be created (clause 5.11.2)" — internal,
 /// with the urn:antares:distsub endpoint handled in-process by notify.
@@ -173,16 +203,29 @@ pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Va
         "notification": {"endpoint": {"uri":
             format!("urn:antares:distsub:{}\n{own_id}", tenant.as_str())}},
     });
-    for k in ["entities", "watchedAttributes", "__context"] {
+    // 5.11.2.4 matches a registration on all of these, so the Registration
+    // Subscription carries every member that decides the match — a copy
+    // built from the entity selectors alone offers the Subscription to
+    // sources the subscriber's csf, geoQ, scopeQ or temporalQ excluded.
+    // `q` is deliberately absent: on a Context Source Registration
+    // Subscription it would filter registration properties, not Entity
+    // Attributes.
+    for k in CSR_MATCH_MEMBERS.iter().chain(["__context"].iter()) {
         if let Some(v) = sub.get(k) {
-            doc[k] = v.clone();
+            doc[*k] = v.clone();
         }
     }
-    if st
+    if let Some(a) = sub.get("notification").and_then(|n| n.get("attributes")) {
+        doc["notification"]["attributes"] = a.clone();
+    }
+    let created = st
         .store
         .create(tenant, Kind::CSourceSubscription, &csr_id, doc)
-        .unwrap_or(false)
-    {
+        .unwrap_or_else(|e| {
+            tracing::warn!("subscription {own_id}: Registration Subscription not created: {e}");
+            false
+        });
+    if created {
         let mut doc = ds_get(st, tenant, own_id);
         doc["csr_sub"] = Value::String(csr_id.clone());
         ds_put(st, tenant, own_id, doc);
@@ -206,6 +249,14 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
     else {
         return;
     };
+    // 5.8.1.4 gates the distributed half on "If localOnly=false": a
+    // Subscription updated to localOnly=true is torn down like a deleted
+    // one — the internal Registration Subscription goes, and every remote
+    // copy already created is deleted at its source.
+    if !distributed(&sub) {
+        on_subscription_deleted(st, tenant, own_id);
+        return;
+    }
     let csr_id = ds_get(st, tenant, own_id)
         .get("csr_sub")
         .and_then(Value::as_str)
@@ -219,12 +270,20 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
             let _ = st
                 .store
                 .mutate(tenant, Kind::CSourceSubscription, &csr_id, |doc| {
-                    for k in ["entities", "watchedAttributes"] {
+                    for k in CSR_MATCH_MEMBERS {
                         match sub.get(k) {
                             Some(v) => doc[k] = v.clone(),
                             None => {
                                 doc.as_object_mut().map(|o| o.remove(k));
                             }
+                        }
+                    }
+                    match sub.get("notification").and_then(|n| n.get("attributes")) {
+                        Some(a) => doc["notification"]["attributes"] = a.clone(),
+                        None => {
+                            doc["notification"]
+                                .as_object_mut()
+                                .map(|n| n.remove("attributes"));
                         }
                     }
                     doc["modifiedAt"] = Value::String(now_iso());
@@ -245,10 +304,14 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
         if !crate::federation::doc_supports(&reg, "updateSubscription") {
             continue;
         }
-        let mut copy = reduced_copy(st, &sub, &reg, &remote_id);
-        copy.as_object_mut().map(|o| o.remove("id"));
-        let (st2, t2) = (st.clone(), tenant.clone());
+        let (st2, t2, sub2) = (st.clone(), tenant.clone(), sub.clone());
+        let ctx_url = sub_ctx_url(st, &sub);
         crate::spawn(async move {
+            let ctx = crate::notify::sub_context(&st2, &sub2).await;
+            let Some(mut copy) = reduced_copy(&st2, &sub2, &reg, &remote_id, &ctx) else {
+                return;
+            };
+            copy.as_object_mut().map(|o| o.remove("id"));
             forward_sub(
                 &st2,
                 &t2,
@@ -256,6 +319,7 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
                 format!("{endpoint}/ngsi-ld/v1/subscriptions/{remote_id}"),
                 &reg_id,
                 &reg,
+                &ctx_url,
                 Some(copy),
             )
             .await;
@@ -280,18 +344,21 @@ pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: 
         let _ = st.store.delete(tenant, Kind::CSourceSubscription, &csr_id);
     }
     for (reg_id, (endpoint, remote_id)) in remotes {
-        let supported = st
+        let stored = st
             .store
             .get(tenant, Kind::Registration, &reg_id)
             .ok()
-            .flatten()
-            .is_none_or(|reg| crate::federation::doc_supports(&reg, "deleteSubscription"));
-        if !supported {
+            .flatten();
+        if stored
+            .as_ref()
+            .is_some_and(|reg| !crate::federation::doc_supports(reg, "deleteSubscription"))
+        {
             continue;
         }
         let (st2, t2) = (st.clone(), tenant.clone());
+        let ctx_url = sub_ctx_url(st, &Value::Null);
         crate::spawn(async move {
-            let reg = json!({"id": reg_id, "endpoint": endpoint});
+            let reg = forward_reg(stored, &reg_id, &endpoint);
             forward_sub(
                 &st2,
                 &t2,
@@ -299,11 +366,34 @@ pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: 
                 format!("{endpoint}/ngsi-ld/v1/subscriptions/{remote_id}"),
                 &reg_id,
                 &reg,
+                &ctx_url,
                 None,
             )
             .await;
         });
     }
+}
+
+/// 4.14 / 5.8.5.4: the document a forwarded delete travels with. The stored
+/// Context Source Registration carries the tenant, the contextSourceInfo and
+/// the timeout/cooldown the forward needs; the id/endpoint pair is the
+/// fallback for a registration that is already gone.
+fn forward_reg(stored: Option<Value>, reg_id: &str, endpoint: &str) -> Value {
+    stored.unwrap_or_else(|| json!({"id": reg_id, "endpoint": endpoint}))
+}
+
+/// 5.8.1.4: "The @context to be used for sending Notifications related to
+/// this Subscription shall be the one specified in the jsonldContext field."
+/// The forwarded copy carries the subscriber's own terms, so it is shipped
+/// under the Subscription's @context, falling back to the core context.
+fn sub_ctx_url(st: &AppState, sub: &Value) -> String {
+    let source = sub
+        .get("jsonldContext")
+        .or_else(|| sub.get("__context"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or_else(|| st.loader.core().source.clone());
+    crate::federation::ctx_link_url(&HeaderMap::new(), &source)
 }
 
 /// The 5.8.1.4 localOnly=false block: one CSource notification for the
@@ -323,6 +413,14 @@ pub(crate) async fn on_csource_notification(
     else {
         return;
     };
+    // 5.8.1.4: "If localOnly=false, each time a Context Source Notification
+    // … is received" — a Subscription that has since been flipped to
+    // localOnly creates no further remote copy.
+    if !distributed(&sub) {
+        return;
+    }
+    let ctx = crate::notify::sub_context(st, &sub).await;
+    let ctx_url = sub_ctx_url(st, &sub);
     let reason = reason.unwrap_or("updated");
     for reg in regs {
         let Some(reg_id) = reg.get("id").and_then(Value::as_str) else {
@@ -353,7 +451,11 @@ pub(crate) async fn on_csource_notification(
             {
                 let remote_id =
                     format!("urn:ngsi-ld:Subscription:distsub:{}", uuid::Uuid::new_v4());
-                let copy = reduced_copy(st, &sub, reg, &remote_id);
+                let Some(copy) = reduced_copy(st, &sub, reg, &remote_id, &ctx) else {
+                    // nothing this registration covers is watched — there is
+                    // no reduced copy to forward to it
+                    continue;
+                };
                 // 5.8.1.4/5.8.5.4: the mapping is stored BEFORE the forward —
                 // the remote id is broker-generated, and a delete Subscription
                 // arriving while the create-forward's response is still in
@@ -380,6 +482,7 @@ pub(crate) async fn on_csource_notification(
                     format!("{endpoint}/ngsi-ld/v1/subscriptions"),
                     reg_id,
                     reg,
+                    &ctx_url,
                     Some(copy),
                 )
                 .await;
@@ -391,7 +494,9 @@ pub(crate) async fn on_csource_notification(
             ("updated", Some((_, remote_id)))
                 if crate::federation::doc_supports(reg, "updateSubscription") =>
             {
-                let mut copy = reduced_copy(st, &sub, reg, &remote_id);
+                let Some(mut copy) = reduced_copy(st, &sub, reg, &remote_id, &ctx) else {
+                    continue;
+                };
                 copy.as_object_mut().map(|o| o.remove("id"));
                 forward_sub(
                     st,
@@ -400,6 +505,7 @@ pub(crate) async fn on_csource_notification(
                     format!("{endpoint}/ngsi-ld/v1/subscriptions/{remote_id}"),
                     reg_id,
                     reg,
+                    &ctx_url,
                     Some(copy),
                 )
                 .await;
@@ -414,6 +520,7 @@ pub(crate) async fn on_csource_notification(
                     format!("{endpoint}/ngsi-ld/v1/subscriptions/{remote_id}"),
                     reg_id,
                     reg,
+                    &ctx_url,
                     None,
                 )
                 .await;
@@ -429,10 +536,23 @@ pub(crate) async fn on_csource_notification(
 /// is matched by the registration information"; with splitEntities the
 /// q/geoQ/scopeQ members are removed; the notification attributes/pick/omit
 /// members are removed; the endpoint is set to the local broker.
-fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Value {
+///
+/// 5.5.7 Term to URI expansion: the Subscription comes out of the store with
+/// its names and types EXPANDED, while a registration delivered by a Context
+/// Source Notification carries them COMPACTED. Every registration-derived
+/// name is expanded against `ctx` before it is compared or inserted, so the
+/// reduction happens in one representation — `expand_key` is idempotent on
+/// an absolute IRI, which is what the stored registration already holds.
+fn reduced_copy(
+    st: &AppState,
+    sub: &Value,
+    reg: &Value,
+    remote_id: &str,
+    ctx: &antares_jsonld::Context,
+) -> Option<Value> {
     let mut copy = sub.clone();
     let Some(o) = copy.as_object_mut() else {
-        return copy;
+        return Some(copy);
     };
     for k in [
         "status",
@@ -467,6 +587,9 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
             {
                 e["type"] = t.clone();
             }
+            if let Some(t) = e.get("type").and_then(Value::as_str) {
+                e["type"] = Value::String(ctx.expand_key(t));
+            }
             e
         })
         .collect();
@@ -474,7 +597,7 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
         o.insert("entities".into(), Value::Array(reg_entities));
     }
     // watchedAttributes ∩ the registration's attribute scope
-    let reg_attrs: Vec<&str> = reg
+    let reg_attrs: Vec<String> = reg
         .get("information")
         .and_then(Value::as_array)
         .into_iter()
@@ -485,34 +608,29 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
                 .filter_map(|k| i.get(k).and_then(Value::as_array))
                 .flatten()
                 .filter_map(Value::as_str)
+                .map(|n| ctx.expand_key(n))
         })
         .collect();
     if !reg_attrs.is_empty() {
-        match o.get("watchedAttributes").and_then(Value::as_array) {
-            Some(w) => {
-                let kept: Vec<Value> = w
-                    .iter()
-                    .filter(|a| a.as_str().is_some_and(|a| reg_attrs.contains(&a)))
-                    .cloned()
-                    .collect();
-                o.insert("watchedAttributes".into(), Value::Array(kept));
-            }
+        let watch: Vec<Value> = match o.get("watchedAttributes").and_then(Value::as_array) {
+            Some(w) => w
+                .iter()
+                .filter(|a| a.as_str().is_some_and(|a| reg_attrs.iter().any(|r| r == a)))
+                .cloned()
+                .collect(),
             // 5.8.1.4 "reduced to what is matched by the registration
             // information": a watch-everything Subscription still only
             // watches the registered names at the source — otherwise an
             // unregistered attribute change notifies through the chain.
-            None => {
-                o.insert(
-                    "watchedAttributes".into(),
-                    Value::Array(
-                        reg_attrs
-                            .iter()
-                            .map(|a| Value::String((*a).to_owned()))
-                            .collect(),
-                    ),
-                );
-            }
+            None => reg_attrs.iter().map(|a| Value::String(a.clone())).collect(),
+        };
+        // Nothing the subscriber watches is matched by this registration
+        // information: there is no reduced copy to forward — and an empty
+        // watchedAttributes is a payload 5.2.12 forbids.
+        if watch.is_empty() {
+            return None;
         }
+        o.insert("watchedAttributes".into(), Value::Array(watch));
     }
     // 5.8.1.4: with splitEntities the remote sees only fragments — the
     // q/geoQ/scopeQ conditions are evaluated LOCALLY after the 5.8.6 merge
@@ -531,11 +649,12 @@ fn reduced_copy(st: &AppState, sub: &Value, reg: &Value, remote_id: &str) -> Val
             json!({"uri": format!("{}/ngsi-ld/ex/remote-notify", st.public_url)}),
         );
     }
-    copy
+    Some(copy)
 }
 
 /// One forwarded subscription operation, through the shared federation
 /// forward (egress policy, Via, contextSourceInfo, tenant mapping).
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 async fn forward_sub(
     st: &AppState,
     tenant: &TenantId,
@@ -543,10 +662,10 @@ async fn forward_sub(
     url: String,
     reg_id: &str,
     reg: &Value,
+    ctx_url: &str,
     body: Option<Value>,
 ) -> (u16, Value) {
     let fed = crate::federation::fed_reg_of(reg_id, reg);
-    let ctx_url = crate::federation::ctx_link_url(&HeaderMap::new(), &st.loader.core().source);
     let (status, body, _) = crate::federation::forward(
         st,
         method,
@@ -555,7 +674,7 @@ async fn forward_sub(
         &HeaderMap::new(),
         tenant,
         &fed,
-        &ctx_url,
+        ctx_url,
         body,
     )
     .await;
@@ -756,6 +875,12 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
 mod tests {
     use super::*;
 
+    /// The default @context prefix every Term expands to (5.5.7).
+    const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+
+    /// A registration exactly as `on_csource_notification` receives it: out
+    /// of a Context Source Notification, whose names and types
+    /// `present_registration` has COMPACTED.
     fn reg_doc() -> Value {
         json!({
             "id": "urn:ngsi-ld:ContextSourceRegistration:r1",
@@ -768,12 +893,14 @@ mod tests {
         })
     }
 
+    /// A Subscription exactly as the store holds it: names and types
+    /// EXPANDED by `normalize_subscription` (5.5.7).
     fn sub_doc() -> Value {
         json!({
             "id": "urn:ngsi-ld:Subscription:own",
             "type": "Subscription",
-            "entities": [{"type": "Vehicle"}, {"type": "Device"}],
-            "watchedAttributes": ["speed", "brand"],
+            "entities": [{"type": format!("{DC}Vehicle")}, {"type": format!("{DC}Device")}],
+            "watchedAttributes": [format!("{DC}speed"), format!("{DC}brand")],
             "q": "speed>10",
             "geoQ": {"georel": "near;maxDistance==1000"},
             "scopeQ": "/A",
@@ -784,7 +911,7 @@ mod tests {
             "modifiedAt": "2026-01-02T00:00:00Z",
             "__context": "http://example.org/ctx.jsonld",
             "notification": {
-                "attributes": ["speed"],
+                "attributes": [format!("{DC}speed")],
                 "pick": ["speed"],
                 "omit": ["brand"],
                 "endpoint": {"uri": "http://subscriber.example.org/cb"},
@@ -807,7 +934,9 @@ mod tests {
             &sub_doc(),
             &reg_doc(),
             "urn:ngsi-ld:Subscription:remote1",
-        );
+            &st.loader.core(),
+        )
+        .expect("a copy the registration covers");
         assert_eq!(copy["id"], json!("urn:ngsi-ld:Subscription:remote1"));
         assert_ne!(
             copy["id"],
@@ -816,14 +945,14 @@ mod tests {
         );
         let ents = copy["entities"].as_array().expect("entities");
         assert_eq!(ents.len(), 1, "{copy}");
-        assert_eq!(ents[0]["type"], json!("Vehicle"));
+        assert_eq!(ents[0]["type"], json!(format!("{DC}Vehicle")));
         assert!(
-            !copy.to_string().contains("Device"),
+            !copy.to_string().contains(&format!("{DC}Device")),
             "a selector the registration does not cover must NOT be forwarded: {copy}"
         );
         assert_eq!(
             copy["watchedAttributes"],
-            json!(["speed"]),
+            json!([format!("{DC}speed")]),
             "watchedAttributes are intersected with the registered names"
         );
         // local-only bookkeeping never leaves the broker
@@ -867,7 +996,14 @@ mod tests {
         let st = AppState::new("antares-ds-split".into());
         let mut sub = sub_doc();
         sub["splitEntities"] = json!(true);
-        let copy = reduced_copy(&st, &sub, &reg_doc(), "urn:ngsi-ld:Subscription:remote2");
+        let copy = reduced_copy(
+            &st,
+            &sub,
+            &reg_doc(),
+            "urn:ngsi-ld:Subscription:remote2",
+            &st.loader.core(),
+        )
+        .expect("copy");
         for k in ["q", "geoQ", "scopeQ"] {
             assert!(
                 copy.get(k).is_none(),
@@ -884,12 +1020,252 @@ mod tests {
             &watch_all,
             &reg_doc(),
             "urn:ngsi-ld:Subscription:remote3",
-        );
+            &st.loader.core(),
+        )
+        .expect("copy");
         assert_eq!(
             copy["watchedAttributes"],
-            json!(["speed"]),
+            json!([format!("{DC}speed")]),
             "a watch-everything Subscription still only watches the \
              registered names at the source"
+        );
+    }
+
+    /// 5.8.1.4 "reduced to what is matched by the registration information",
+    /// with 5.5.7 Term to URI expansion: the registration arrives through a
+    /// Context Source Notification (names COMPACTED), the Subscription comes
+    /// out of the store (names EXPANDED). The intersection must be taken in
+    /// ONE representation — an empty `watchedAttributes` is a payload 5.2.12
+    /// forbids, and it narrows the forwarded copy to nothing.
+    #[test]
+    fn clause_5_8_1_reduced_copy_intersects_across_representations() {
+        let st = AppState::new("antares-ds-expand".into());
+        let copy = reduced_copy(
+            &st,
+            &sub_doc(),
+            &reg_doc(),
+            "urn:ngsi-ld:Subscription:remote4",
+            &st.loader.core(),
+        )
+        .expect("a copy the registration covers");
+        assert_eq!(
+            copy["watchedAttributes"],
+            json!([format!("{DC}speed")]),
+            "the compacted registered name must be expanded before the \
+             intersection: {copy}"
+        );
+        assert_ne!(
+            copy["watchedAttributes"],
+            json!([]),
+            "5.2.12: watchedAttributes, when present, is a non-empty array"
+        );
+        assert!(
+            !copy.to_string().contains(&format!("{DC}brand")),
+            "an unregistered watched name must not be forwarded: {copy}"
+        );
+        assert_eq!(
+            copy["entities"],
+            json!([{"type": format!("{DC}Vehicle"), "id": "urn:ngsi-ld:Vehicle:1"}]),
+            "the registration's selector travels in the Subscription's own \
+             representation: {copy}"
+        );
+    }
+
+    /// 5.8.1.4: "Based on the content of the Subscription, a Context Source
+    /// Registration Subscription shall be created (clause 5.11.2)" — 5.11.2.4
+    /// matches registrations on csf, geoQ, scopeQ, temporalQ and the
+    /// notification attributes as well, so a Registration Subscription built
+    /// from entities and watchedAttributes alone offers the Subscription to
+    /// sources the subscriber excluded.
+    #[tokio::test]
+    async fn clause_5_8_1_csr_subscription_carries_every_matching_member() {
+        let st = AppState::new("antares-ds-csr".into());
+        let t = TenantId::default();
+        let mut sub = sub_doc();
+        sub["csf"] = json!("name==\"SourceA\"");
+        sub["temporalQ"] = json!({"timerel": "before", "timeAt": "2026-01-01T00:00:00Z"});
+        let own = sub["id"].as_str().expect("id").to_owned();
+        st.store
+            .create(&t, Kind::Subscription, &own, sub.clone())
+            .expect("create");
+        on_subscription_created(&st, &t, &sub);
+        let csr_id = ds_get(&st, &t, &own)["csr_sub"]
+            .as_str()
+            .expect("csr_sub")
+            .to_owned();
+        let csr = st
+            .store
+            .get(&t, Kind::CSourceSubscription, &csr_id)
+            .ok()
+            .flatten()
+            .expect("csr subscription");
+        for k in [
+            "entities",
+            "watchedAttributes",
+            "csf",
+            "geoQ",
+            "scopeQ",
+            "temporalQ",
+        ] {
+            assert!(
+                csr.get(k).is_some(),
+                "{k} decides which registrations match: {csr}"
+            );
+        }
+        assert_eq!(
+            csr["notification"]["attributes"],
+            json!([format!("{DC}speed")]),
+            "5.11.2.4 unions notification.attributes into the match spec: {csr}"
+        );
+        assert!(
+            csr.get("q").is_none(),
+            "q filters Entity Attributes, not registration properties: {csr}"
+        );
+    }
+
+    /// 5.8.1.4 gates the whole distributed block on "If localOnly=false": a
+    /// Subscription updated to localOnly=true forwards no further copy, and
+    /// the internal Context Source Registration Subscription plus the
+    /// mappings it already holds are torn down.
+    #[tokio::test]
+    async fn clause_5_8_1_local_only_flip_tears_the_distributed_half_down() {
+        let st = AppState::new("antares-ds-local".into());
+        let t = TenantId::default();
+        let mut sub = sub_doc();
+        sub["localOnly"] = json!(true);
+        let own = sub["id"].as_str().expect("id").to_owned();
+        let csr_id = "urn:ngsi-ld:CSourceSubscription:distsub:x";
+        st.store
+            .create(&t, Kind::Subscription, &own, sub.clone())
+            .expect("create");
+        st.store
+            .create(&t, Kind::CSourceSubscription, csr_id, json!({"id": csr_id}))
+            .expect("create");
+        ds_put(&st, &t, &own, json!({"csr_sub": csr_id}));
+        // a Context Source Notification arriving after the flip creates
+        // nothing at the source
+        on_csource_notification(&st, &t, &own, Some("newlyMatching"), &[reg_doc()]).await;
+        assert!(
+            ds_remotes(&ds_get(&st, &t, &own)).is_empty(),
+            "a local-only Subscription forwards no copy"
+        );
+        on_subscription_updated(&st, &t, &own);
+        assert!(
+            st.store
+                .get(&t, Kind::CSourceSubscription, csr_id)
+                .ok()
+                .flatten()
+                .is_none(),
+            "the internal Registration Subscription must not survive the flip"
+        );
+        assert!(
+            st.store
+                .get(&t, Kind::DistSub, &own)
+                .ok()
+                .flatten()
+                .is_none(),
+            "the mapping document must not survive the flip"
+        );
+    }
+
+    /// 5.8.1.4 stores ONE remote subscriptionId per (Subscription,
+    /// registration) pair. Two Context Source Notifications for the same pair
+    /// interleave at their forward, so the second insert is refused under the
+    /// store's own lock instead of overwriting — an overwritten mapping
+    /// orphans a live remote subscription at the source and doubles every
+    /// notification the subscriber receives.
+    #[test]
+    fn clause_5_8_1_second_mapping_for_a_registration_is_refused() {
+        let st = AppState::new("antares-ds-cas".into());
+        let t = TenantId::default();
+        let own = "urn:ngsi-ld:Subscription:own";
+        ds_put(&st, &t, own, json!({"csr_sub": "urn:csr:1"}));
+        assert!(ds_set_remote(
+            &st,
+            &t,
+            own,
+            "urn:reg:1",
+            Some(json!(["http://s", "urn:remote:1"]))
+        ));
+        assert!(
+            !ds_set_remote(
+                &st,
+                &t,
+                own,
+                "urn:reg:1",
+                Some(json!(["http://s", "urn:remote:2"]))
+            ),
+            "the registration already has a remote subscription"
+        );
+        let got = ds_remotes(&ds_get(&st, &t, own));
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].1 .1, "urn:remote:1",
+            "the first mapping survives — the loser rolls its own copy back"
+        );
+    }
+
+    /// 4.14: "the Tenant information from the Context Source Registration has
+    /// to be used" — the 5.8.5.4 delete-forward must travel with the stored
+    /// registration, not a synthetic id/endpoint pair, or it lands in the
+    /// peer's default tenant and the remote subscription is never deleted.
+    /// The synthetic fallback stays for the already-deleted registration.
+    #[test]
+    fn clause_5_8_5_delete_forward_carries_the_stored_registration() {
+        let stored = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:r1",
+            "endpoint": "http://source.example.org",
+            "tenant": "cityB",
+            "contextSourceInfo": [{"key": "Authorization", "value": "Bearer t"}],
+        });
+        let reg = forward_reg(
+            Some(stored.clone()),
+            "urn:ngsi-ld:ContextSourceRegistration:r1",
+            "http://source.example.org",
+        );
+        assert_eq!(reg["tenant"], json!("cityB"), "{reg}");
+        assert_eq!(reg["contextSourceInfo"], stored["contextSourceInfo"]);
+        let gone = forward_reg(
+            None,
+            "urn:ngsi-ld:ContextSourceRegistration:r1",
+            "http://source.example.org",
+        );
+        assert_eq!(gone["endpoint"], json!("http://source.example.org"));
+        assert!(
+            gone.get("tenant").is_none(),
+            "a deleted registration carries nothing to forward with: {gone}"
+        );
+    }
+
+    /// 5.8.1.4: "The @context to be used for sending Notifications related to
+    /// this Subscription shall be the one specified in the jsonldContext
+    /// field." The forwarded copy carries the subscriber's own terms (`q` is
+    /// stored verbatim), so it must be shipped under the Subscription's
+    /// @context — under the core context those terms name Attributes that do
+    /// not exist at the source.
+    #[test]
+    fn clause_5_8_1_forwarded_copy_is_shipped_under_the_subscription_context() {
+        let st = AppState::new("antares-ds-ctx".into());
+        let core = st.loader.core().source.clone();
+        let hosted = json!({"jsonldContext": "http://broker.example.org/jsonldContexts/abc",
+                            "__context": "http://example.org/ctx.jsonld"});
+        assert_eq!(
+            sub_ctx_url(&st, &hosted),
+            "http://broker.example.org/jsonldContexts/abc",
+            "jsonldContext wins — it is the member 5.8.1.4 names"
+        );
+        let own = json!({"__context": "http://example.org/ctx.jsonld"});
+        assert_eq!(sub_ctx_url(&st, &own), "http://example.org/ctx.jsonld");
+        assert_ne!(
+            sub_ctx_url(&st, &own),
+            crate::federation::ctx_link_url(&HeaderMap::new(), &core),
+            "a Subscription with its own vocabulary is not forwarded under \
+             the core context"
+        );
+        assert_eq!(
+            sub_ctx_url(&st, &json!({})),
+            crate::federation::ctx_link_url(&HeaderMap::new(), &core),
+            "with no context of its own the core context is the fallback"
         );
     }
 
