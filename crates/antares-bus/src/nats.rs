@@ -361,7 +361,6 @@ mod tests {
     use crate::ChangeOp;
     use antares_model::{EntityId, TenantId};
 
-    #[test]
     /// Config fatality: a typo'd replica count must never silently run a
     /// 3-node deployment at replicas=1 — that is a durability downgrade
     /// nobody chose. Absent stays 1; whitespace is tolerated; garbage and
@@ -372,7 +371,10 @@ mod tests {
         assert_eq!(replicas_from(Some("3")).map_err(|e| e.0), Ok(3));
         assert_eq!(replicas_from(Some(" 3 ")).map_err(|e| e.0), Ok(3));
         for bad in ["three", "", "0", "-1", "1.5", "3 nodes"] {
-            let err = replicas_from(Some(bad)).map(|_| ()).unwrap_err().0;
+            let err = replicas_from(Some(bad))
+                .map(|_| ())
+                .expect_err("garbage must be refused")
+                .0;
             assert!(
                 err.contains("ANTARES_NATS_REPLICAS") && err.contains(bad.trim()),
                 "the error must name the key and the value: {err}"
@@ -380,6 +382,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn subject_tenant_reverification_drops_mismatches() {
         let ev = ChangeEvent {
             tenant: TenantId::new("acme").expect("tenant"),
