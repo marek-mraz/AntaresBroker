@@ -807,6 +807,49 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A change hook that PANICS must cost only its own caller: the panic
+    /// unwinds through that writer, and every later writer finds the store
+    /// usable — locks recover from the poisoning instead of turning one bad
+    /// hook into a dead store.
+    #[test]
+    fn a_panicking_hook_leaves_the_store_usable() {
+        use std::sync::Arc;
+        let s = Arc::new(Store::default());
+        s.set_change_hook(Box::new(|_t, _b, after| {
+            if after.as_ref().and_then(|a| a.get("boom")).is_some() {
+                panic!("hook panic");
+            }
+        }));
+        let t = TenantId::new("hook-panic").expect("tenant");
+        let s2 = s.clone();
+        let t2 = t.clone();
+        let poisoned = std::thread::spawn(move || {
+            s2.upsert(
+                &t2,
+                Kind::Entity,
+                "urn:x:boom",
+                json!({"id": "urn:x:boom", "type": ["T"], "boom": true}),
+            );
+        })
+        .join();
+        assert!(poisoned.is_err(), "the hook's panic reaches its own caller");
+        // the NEXT writer and reader are untouched
+        assert!(s.create(
+            &t,
+            Kind::Entity,
+            "urn:x:after",
+            json!({"id": "urn:x:after", "type": ["T"]})
+        ));
+        assert!(
+            s.get(&t, Kind::Entity, "urn:x:after").is_some(),
+            "one panicking hook must not take the store down"
+        );
+        assert!(
+            s.get(&t, Kind::Entity, "urn:x:boom").is_some(),
+            "the write that triggered the panic still committed — the hook runs after the commit"
+        );
+    }
+
     /// Two writers to the same entity: the change hook fires in COMMIT
     /// order. The first writer's hook is gated open only after the second
     /// writer has had every chance to overtake it — if the second commit may

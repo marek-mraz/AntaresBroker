@@ -117,10 +117,10 @@ impl NatsBus {
         // Production runs replicas=3 on a 3-node JetStream cluster. Stream
         // replication is a CLIENT-side stream setting, so the deployment
         // manifests set ANTARES_NATS_REPLICAS=3; single-node dev/CI keeps 1.
-        let replicas: usize = std::env::var("ANTARES_NATS_REPLICAS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
+        // Garbage is FATAL like every other config value: a typo silently
+        // running replicas=1 on a 3-node cluster is a durability downgrade
+        // nobody chose.
+        let replicas = replicas_from(std::env::var("ANTARES_NATS_REPLICAS").ok().as_deref())?;
         self.js
             .get_or_create_stream(stream::Config {
                 name: CHANGES_STREAM.into(),
@@ -279,6 +279,23 @@ impl NatsBus {
 /// the alternative). Defence in depth: the subject's tenant segment must agree with
 /// the event body — consumers re-verify so a subject-mapping bug can never
 /// route one tenant's change into another tenant's processing.
+/// `ANTARES_NATS_REPLICAS`: absent = 1; present must be a positive integer.
+fn replicas_from(v: Option<&str>) -> Result<usize, BusError> {
+    match v {
+        None => Ok(1),
+        Some(raw) => raw
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| {
+                BusError(format!(
+                    "ANTARES_NATS_REPLICAS must be a positive integer, got {raw:?}"
+                ))
+            }),
+    }
+}
+
 pub fn decode(msg: &async_nats::jetstream::Message) -> Option<ChangeEvent> {
     let ev: ChangeEvent = serde_json::from_slice(&msg.payload).ok()?;
     if !subject_tenant_agrees(msg.subject.as_str(), &ev) {
@@ -345,6 +362,24 @@ mod tests {
     use antares_model::{EntityId, TenantId};
 
     #[test]
+    /// Config fatality: a typo'd replica count must never silently run a
+    /// 3-node deployment at replicas=1 — that is a durability downgrade
+    /// nobody chose. Absent stays 1; whitespace is tolerated; garbage and
+    /// zero name the key in the error.
+    #[test]
+    fn replica_count_garbage_is_fatal_not_a_silent_default() {
+        assert_eq!(replicas_from(None).map_err(|e| e.0), Ok(1));
+        assert_eq!(replicas_from(Some("3")).map_err(|e| e.0), Ok(3));
+        assert_eq!(replicas_from(Some(" 3 ")).map_err(|e| e.0), Ok(3));
+        for bad in ["three", "", "0", "-1", "1.5", "3 nodes"] {
+            let err = replicas_from(Some(bad)).map(|_| ()).unwrap_err().0;
+            assert!(
+                err.contains("ANTARES_NATS_REPLICAS") && err.contains(bad.trim()),
+                "the error must name the key and the value: {err}"
+            );
+        }
+    }
+
     fn subject_tenant_reverification_drops_mismatches() {
         let ev = ChangeEvent {
             tenant: TenantId::new("acme").expect("tenant"),
