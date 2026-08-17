@@ -1,0 +1,187 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HSL live vehicles — Antares NGSI-LD</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  #hud {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(255,255,255,.92); padding: 8px 12px; border-radius: 6px;
+    font: 13px/1.5 system-ui, sans-serif; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  }
+  #hud b { font-size: 15px; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">
+  <b id="count">…</b> vehicles in view<br>
+  <span id="status">connecting</span>
+  <div class="legend" id="legend"></div>
+  <small>click a vehicle for its trail (up to 10 min)</small>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const COLORS = { bus: "#1c7ed6", tram: "#2f9e44", train: "#9c36b5", metro: "#e8590c", ferry: "#0b7285", ubus: "#1c7ed6" };
+const map = L.map("map").setView([60.192, 24.945], 12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  { attribution: "&copy; OpenStreetMap" }).addTo(map);
+
+document.getElementById("legend").innerHTML =
+  Object.entries({bus:"#1c7ed6",tram:"#2f9e44",train:"#9c36b5",metro:"#e8590c",ferry:"#0b7285"})
+    .map(([k,c]) => `<span style="background:${c}"></span>${k} `).join("");
+
+const markers = new Map();   // id -> L.circleMarker
+let trail = null;
+
+// Fleet ~1200 > broker max_limit 1000, so the offset loop is load-bearing.
+// Only vehicles inside the current viewport: georel=within over the bounds polygon.
+async function fetchAll() {
+  const b = map.getBounds();
+  const [w, s, e, n] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  const poly = encodeURIComponent(JSON.stringify([[[w, s], [e, s], [e, n], [w, n], [w, s]]]));
+  const out = [];
+  for (let offset = 0; ; offset += 1000) {
+    const r = await fetch(`/api/entities?type=Vehicle&format=keyValues&limit=1000&offset=${offset}` +
+      `&geometry=Polygon&georel=within&coordinates=${poly}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const page = await r.json();
+    out.push(...page);
+    if (page.length < 1000) return out;
+  }
+}
+
+async function tick() {
+  try {
+    const vehicles = await fetchAll();
+    const seen = new Set();
+    for (const v of vehicles) {
+      const c = v.location && v.location.coordinates;
+      if (!c) continue;
+      seen.add(v.id);
+      const ll = [c[1], c[0]];
+      let m = markers.get(v.id);
+      if (!m) {
+        m = L.circleMarker(ll, {
+          radius: 5, weight: 1, color: "#fff", fillOpacity: .9,
+          fillColor: COLORS[v.transportMode] || "#868e96",
+        }).addTo(map).on("click", () => showHistory(v.id, m));
+        markers.set(v.id, m);
+      } else {
+        m.setLatLng(ll);
+      }
+      m._info = `<b>${v.transportMode || "?"} ${v.route || ""}</b> · ` +
+        `${v.id.replace("urn:ngsi-ld:Vehicle:HSL:", "")}<br>` +
+        `speed ${v.speed != null ? (v.speed * 3.6).toFixed(0) : "?"} km/h · ` +
+        `delay ${v.delay != null ? v.delay + " s" : "?"}`;
+    }
+    for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
+    document.getElementById("count").textContent = seen.size;
+    document.getElementById("status").textContent = "live · " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("status").textContent = "error: " + e.message;
+  }
+  setTimeout(tick, 1000);
+}
+
+// Small time-true line chart: vals = [[number, isoTs], ...] ascending.
+// One series per chart (no dual axis); crosshair + readout on hover.
+function spark(title, vals, color, unit, includeZero) {
+  const wrap = document.createElement("div");
+  if (!vals.length) return wrap;
+  const step = Math.ceil(vals.length / 250);          // downsample for the 250px plot
+  const v = vals.filter((_, i) => i % step === 0 || i === vals.length - 1);
+  const W = 252, H = 76, PL = 4, PR = 4, PT = 18, PB = 6;
+  const t0 = new Date(v[0][1]).getTime();
+  const t1 = Math.max(new Date(v[v.length - 1][1]).getTime(), t0 + 1);
+  let lo = Math.min(...v.map(p => p[0])), hi = Math.max(...v.map(p => p[0]));
+  if (includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const X = t => PL + (W - PL - PR) * (t - t0) / (t1 - t0);
+  const Y = n => PT + (H - PT - PB) * (1 - (n - lo) / (hi - lo));
+  const pts = v.map(([n, ts]) => `${X(new Date(ts).getTime()).toFixed(1)},${Y(n).toFixed(1)}`).join(" ");
+  const zero = lo < 0 && hi > 0
+    ? `<line x1="${PL}" x2="${W - PR}" y1="${Y(0)}" y2="${Y(0)}" stroke="#dee2e6" stroke-width="1"/>` : "";
+  const last = v[v.length - 1];
+  wrap.innerHTML =
+    `<div style="font:11px system-ui;color:#495057;margin-top:8px">${title}</div>` +
+    `<svg width="${W}" height="${H}" style="display:block">${zero}` +
+    `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>` +
+    `<circle cx="${X(new Date(last[1]).getTime())}" cy="${Y(last[0])}" r="3" fill="${color}" stroke="#fff"/>` +
+    `<line class="ch" y1="${PT}" y2="${H - PB}" stroke="#adb5bd" stroke-width="1" visibility="hidden"/>` +
+    `<circle class="chd" r="3" fill="#fff" stroke="${color}" stroke-width="2" visibility="hidden"/>` +
+    `<text class="ro" x="${W - PR}" y="12" text-anchor="end" ` +
+    `font-size="11" font-family="system-ui" fill="#868e96">` +
+    `now · ${last[0].toFixed(0)} ${unit}</text>` +
+    `<rect width="${W}" height="${H}" fill="transparent"/></svg>`;
+  const svg = wrap.querySelector("svg");
+  const [ch, chd, ro] = ["line.ch", "circle.chd", "text.ro"].map(s => svg.querySelector(s));
+  svg.addEventListener("mousemove", ev => {
+    const t = t0 + (t1 - t0) * Math.min(1, Math.max(0, (ev.offsetX - PL) / (W - PL - PR)));
+    let best = 0;
+    for (let i = 1; i < v.length; i++)
+      if (Math.abs(new Date(v[i][1]).getTime() - t) < Math.abs(new Date(v[best][1]).getTime() - t)) best = i;
+    const [n, ts] = v[best];
+    const x = X(new Date(ts).getTime());
+    ch.setAttribute("x1", x); ch.setAttribute("x2", x); ch.setAttribute("visibility", "visible");
+    chd.setAttribute("cx", x); chd.setAttribute("cy", Y(n)); chd.setAttribute("visibility", "visible");
+    ro.textContent = `${new Date(ts).toLocaleTimeString()} · ${n.toFixed(0)} ${unit}`;
+  });
+  svg.addEventListener("mouseleave", () => {
+    ch.setAttribute("visibility", "hidden"); chd.setAttribute("visibility", "hidden");
+    ro.textContent = `now · ${last[0].toFixed(0)} ${unit}`;
+  });
+  return wrap;
+}
+
+async function showHistory(id, marker) {
+  marker.bindPopup(marker._info + "<br><i>loading history…</i>", { maxWidth: 290 }).openPopup();
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const r = await fetch(`/api/temporal/entities/${encodeURIComponent(id)}` +
+    `?attrs=location,speed,delay&timerel=after&timeAt=${since}&format=temporalValues`);
+  if (!r.ok) { marker.setPopupContent(marker._info + `<br><i>history: HTTP ${r.status}</i>`); return; }
+  const e = await r.json();
+
+  // trail from location values = [geometry, observedAt] pairs
+  const loc = (e.location && e.location.values) || [];
+  if (loc.length) {
+    const pts = loc.map(([g]) => {
+      const c = Array.isArray(g) ? g : g.coordinates;
+      return [c[1], c[0]];
+    });
+    if (trail) trail.remove();
+    trail = L.polyline(pts, { color: "#e03131", weight: 3, opacity: .8 }).addTo(map);
+  }
+
+  const speed = ((e.speed && e.speed.values) || []).map(([n, t]) => [n * 3.6, t]);
+  const delay = (e.delay && e.delay.values) || [];
+  const mins = loc.length
+    ? ((new Date(loc[loc.length - 1][1]) - new Date(loc[0][1])) / 60000).toFixed(0) : 0;
+
+  const el = document.createElement("div");
+  el.innerHTML = marker._info + `<br><b>${speed.length}</b> observations, last ${mins} min`;
+  el.appendChild(spark("speed (km/h)", speed, "#1c7ed6", "km/h", false));
+  el.appendChild(spark("delay (s) — negative = late", delay, "#e8590c", "s", true));
+
+  // accessible raw-data view behind a toggle
+  const delayByTs = new Map(delay.map(([n, t]) => [t, n]));
+  const det = document.createElement("details");
+  det.innerHTML = `<summary style="font-size:11px;color:#868e96;cursor:pointer">data table</summary>` +
+    `<div style="max-height:140px;overflow:auto"><table style="font-size:11px;border-spacing:6px 0">` +
+    `<tr><th>time</th><th>km/h</th><th>delay s</th></tr>` +
+    speed.slice().reverse().map(([n, t]) =>
+      `<tr><td>${new Date(t).toLocaleTimeString()}</td><td align="right">${n.toFixed(0)}</td>` +
+      `<td align="right">${delayByTs.has(t) ? delayByTs.get(t).toFixed(0) : ""}</td></tr>`).join("") +
+    `</table></div>`;
+  el.appendChild(det);
+  marker.setPopupContent(el);
+}
+
+tick();
+</script>
+</body>
+</html>

@@ -9,7 +9,8 @@ services:
       POSTGRES_USER: antares
       POSTGRES_PASSWORD: antares
       POSTGRES_DB: antares
-      NO_TS_TUNE: "true"   # tune panics without a memory cgroup (this sandbox)
+      TS_TUNE_MEMORY: 4GB
+      TS_TUNE_NUM_CPUS: "4"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U antares"]
       interval: 5s
@@ -19,13 +20,12 @@ services:
     # cpuset/cpu/pids (threaded-mode), so the memory controller is absent
 
   antares:
-    image: debian:12-slim
-    command: ["/antares"]
-    volumes:
-      - ../../target/release/antares:/antares:ro
+    image: ghcr.io/marek-mraz/antares-broker:latest
     environment:
       ANTARES_HTTP_PORT: "9090"
       ANTARES_STORE: timescale
+      # Single broker process against this database.
+      ANTARES_ALLOW_SHARED_LOCAL: "1"
       ANTARES_DATABASE_URL: postgres://antares:antares@timescale:5432/antares
       ANTARES_SWEEP_SECS: "10"        # 4.22 GC flush every 10 s
       ANTARES_TELEMETRY: "1"          # /q/metrics Prometheus render
@@ -44,7 +44,7 @@ services:
       BROKER: http://antares:9090/ngsi-ld/v1
       MQTT_HOST: mqtt.hsl.fi
       MQTT_TOPIC: /hfp/v2/journey/ongoing/vp/#
-      TTL_SECS: "180"                 # entity expiresAt = now + 3 min
+      TTL_SECS: "600"                 # entity expiresAt = now + 10 min
       ATTR_TTL_SECS: "600"            # attribute expiresAt = now + 10 min (rolling history window)
       FLUSH_MS: "1000"
       BATCH_LIMIT: "5000"             # matches ANTARES_MAX_BATCH_ITEMS
