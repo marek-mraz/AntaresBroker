@@ -23,8 +23,9 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
     "ANTARES_DATA_DIR",
-    // Egress: private-range destinations are denied by default; the
-    // ETSI/IOP stacks (mock servers on localhost) set this to true.
+    // Egress: private-range destinations are ALLOWED by default (ADR-0010 —
+    // brokers federate inside private networks); a hardened deployment sets
+    // this to false to arm the SSRF wall.
     "ANTARES_EGRESS_ALLOW_PRIVATE",
     // Refuse to start when the DB role bypasses RLS (production gate;
     // default off so the dev/ETSI superuser stack still boots).
