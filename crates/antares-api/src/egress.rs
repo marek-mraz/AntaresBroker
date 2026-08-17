@@ -81,7 +81,7 @@ impl Egress {
     pub fn reg_in_cooldown(&self, reg_id: &str, cooldown_ms: u64) -> bool {
         self.reg_failures
             .lock()
-            .expect("reg_failures lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(reg_id)
             .is_some_and(|t| t.elapsed() < Duration::from_millis(cooldown_ms))
     }
@@ -89,7 +89,10 @@ impl Egress {
     /// 5.2.34 cooldown bookkeeping: a failed forward stamps the window, a
     /// successful one clears it.
     pub fn reg_record(&self, reg_id: &str, ok: bool) {
-        let mut m = self.reg_failures.lock().expect("reg_failures lock");
+        let mut m = self
+            .reg_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if ok {
             m.remove(reg_id);
         } else {
@@ -130,7 +133,10 @@ impl Egress {
     /// Is this destination currently open-circuit? A tripped destination
     /// admits ONE probe per cooldown window (half-open).
     pub fn is_open(&self, url: &str) -> bool {
-        let mut map = self.breakers.lock().expect("breaker lock");
+        let mut map = self
+            .breakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(b) = map.get_mut(&Self::key(url)) else {
             return false;
         };
@@ -147,12 +153,15 @@ impl Egress {
     pub fn record_success(&self, url: &str) {
         self.breakers
             .lock()
-            .expect("breaker lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&Self::key(url));
     }
 
     pub fn record_failure(&self, url: &str) {
-        let mut map = self.breakers.lock().expect("breaker lock");
+        let mut map = self
+            .breakers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let k = Self::key(url);
         if !map.contains_key(&k) {
             evict_oldest(&mut map, |b: &Breaker| b.touched_at);

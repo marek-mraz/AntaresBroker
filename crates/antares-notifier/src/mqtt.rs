@@ -452,12 +452,18 @@ impl MqttSink {
     }
 
     fn checkout(&self, key: &str) -> Option<Conn> {
-        self.pool.lock().expect("mqtt pool lock").remove(key)
+        self.pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key)
     }
 
     fn checkin(&self, key: String, mut conn: Conn) {
         conn.last_used = Instant::now();
-        let mut pool = self.pool.lock().expect("mqtt pool lock");
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pool.retain(|_, c| !c.pump.is_finished());
         pool.insert(key, conn);
         // bounded with eviction: drop the least-recently-used overflow.

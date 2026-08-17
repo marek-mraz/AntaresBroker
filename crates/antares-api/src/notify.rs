@@ -173,7 +173,10 @@ impl SubMirror {
     /// Apply one KV delta: `None` doc = deleted. Rekeys the index from the
     /// old doc before inserting the new one.
     pub fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
-        let mut map = self.map.write().expect("sub mirror lock");
+        let mut map = self
+            .map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let t = map.entry(tenant.to_owned()).or_default();
         if let Some(old) = t.docs.remove(id) {
             match index_keys(&old) {
@@ -237,7 +240,10 @@ impl SubMirror {
     /// the type hits, the attr hits and the broad bucket — a superset of
     /// the firing set, never a subset.
     pub fn candidates(&self, tenant: &str, types: &[&str], changed_attrs: &[&str]) -> Vec<Value> {
-        let map = self.map.read().expect("sub mirror lock");
+        let map = self
+            .map
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(t) = map.get(tenant) else {
             return Vec::new();
         };
@@ -260,7 +266,7 @@ impl SubMirror {
     pub fn docs(&self, tenant: &str) -> Vec<Value> {
         self.map
             .read()
-            .expect("sub mirror lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(tenant)
             .map(|t| t.docs.values().cloned().collect())
             .unwrap_or_default()
@@ -273,7 +279,7 @@ impl SubMirror {
     fn periodic_docs(&self, tenant: &str) -> Vec<Value> {
         self.map
             .read()
-            .expect("sub mirror lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(tenant)
             .map(|t| {
                 t.docs
@@ -288,7 +294,7 @@ impl SubMirror {
     pub fn tenants(&self) -> Vec<String> {
         self.map
             .read()
-            .expect("sub mirror lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
             .cloned()
             .collect()
@@ -304,7 +310,10 @@ impl Mirror for SubMirror {
 impl DocMirror {
     /// Apply one KV delta: `None` doc = deleted.
     pub fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
-        let mut map = self.map.write().expect("sub mirror lock");
+        let mut map = self
+            .map
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match doc {
             Some(d) => {
                 map.entry(tenant.to_owned())
@@ -325,7 +334,7 @@ impl DocMirror {
     pub fn docs(&self, tenant: &str) -> Vec<Value> {
         self.map
             .read()
-            .expect("sub mirror lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(tenant)
             .map(|t| t.values().cloned().collect())
             .unwrap_or_default()
@@ -334,7 +343,7 @@ impl DocMirror {
     pub fn tenants(&self) -> Vec<String> {
         self.map
             .read()
-            .expect("sub mirror lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
             .cloned()
             .collect()

@@ -624,7 +624,10 @@ impl Loader {
     }
 
     pub fn set_cache_writer(&self, w: CacheWriter) {
-        *self.cache_writer.write().expect("writer lock") = Some(w);
+        *self
+            .cache_writer
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
     }
 
     /// Wire the shared-store usage bump (5.13.3.5): called on every
@@ -632,7 +635,10 @@ impl Loader {
     /// `false` means another instance deleted the @context, and this
     /// instance must drop its warm copies so the delete is honoured here.
     pub fn set_usage_bump(&self, f: UsageBump) {
-        *self.usage_bump.write().expect("bump lock") = Some(f);
+        *self
+            .usage_bump
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
     }
 
     /// Boot preload: re-seed a Cached entry persisted by the writer —
@@ -708,7 +714,12 @@ impl Loader {
                 );
             }
         }
-        let row_exists = match self.usage_bump.read().expect("bump lock").as_ref() {
+        let row_exists = match self
+            .usage_bump
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             Some(f) => f(url),
             None => true,
         };
