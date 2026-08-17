@@ -184,6 +184,7 @@ pub fn normalize_subscription(
                 // ones are ignored, never stored.
                 for k in [
                     "timesSent",
+                    "timesFailed",
                     "lastNotification",
                     "lastSuccess",
                     "lastFailure",
@@ -458,14 +459,8 @@ pub fn normalize_subscription(
             // body or a patch fragment — so dropping the member here stops a
             // subscriber both from seeding it and from replacing it later.
             "__context" => continue,
-            "scopeQ"
-            | "lang"
-            | "subscriptionName"
-            | "name"
-            | "description"
-            | "jsonldContext"
-            | "ngsildConformance"
-            | "datasetId" => {
+            "scopeQ" | "lang" | "subscriptionName" | "name" | "description" | "jsonldContext"
+            | "ngsildConformance" | "datasetId" => {
                 out.insert(k.clone(), v.clone());
             }
             // tolerant reader: keep unknown members

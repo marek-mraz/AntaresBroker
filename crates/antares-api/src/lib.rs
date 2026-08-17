@@ -4016,6 +4016,7 @@ mod clause_5_2_14_2 {
             "notification": {
                 "endpoint": {"uri": "http://client.example.org/cb"},
                 "timesSent": 999,
+                "timesFailed": 999,
                 "lastNotification": "1999-01-01T00:00:00Z",
                 "lastSuccess": "1999-01-01T00:00:00Z",
                 "lastFailure": "1999-01-01T00:00:00Z"
@@ -4047,6 +4048,7 @@ mod clause_5_2_14_2 {
         let n = &doc["notification"];
         for k in [
             "timesSent",
+            "timesFailed",
             "lastNotification",
             "lastSuccess",
             "lastFailure",
