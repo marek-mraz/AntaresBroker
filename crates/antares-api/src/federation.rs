@@ -456,6 +456,45 @@ fn outbound_via(headers: &HeaderMap, alias: &str) -> String {
     }
 }
 
+/// Percent-encode one client-controlled value for use as a single path
+/// segment of a forwarded URL (RFC 3986 clause 3.3: a segment is made of
+/// `pchar`, and `/`, `?`, `#` end it). Entity ids and attribute names arrive
+/// already percent-decoded from the request path, so splicing them raw would
+/// let `#` or `?` truncate the forwarded path and re-target the peer's
+/// resource — `.../entities/urn:x%23/attrs/speed` would reach the peer as
+/// Delete Entity (5.6.6) instead of Delete Attribute (5.6.5).
+pub(crate) fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            );
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// The @context URL to advertise on forwarded requests.
 pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
     if let Some(url) = link_context(headers) {
@@ -1260,7 +1299,11 @@ pub async fn fed_retrieve_temporal(
         let (status, body, peer_warns) = forward(
             st,
             reqwest::Method::GET,
-            format!("{}/ngsi-ld/v1/temporal/entities/{id}", reg.endpoint),
+            format!(
+                "{}/ngsi-ld/v1/temporal/entities/{}",
+                reg.endpoint,
+                path_segment(id)
+            ),
             &query,
             headers,
             tenant,
@@ -1456,7 +1499,7 @@ pub async fn fed_retrieve(
                 forward(
                     st,
                     reqwest::Method::GET,
-                    format!("{}/ngsi-ld/v1/entities/{id}", reg.endpoint),
+                    format!("{}/ngsi-ld/v1/entities/{}", reg.endpoint, path_segment(id)),
                     &query,
                     headers,
                     tenant,
@@ -2294,6 +2337,28 @@ mod tests {
             h.insert("via", v.parse().expect("via"));
         }
         h
+    }
+
+    /// RFC 3986 clause 3.3: `#`, `?` and `/` end a path segment, so a client
+    /// id carrying one would re-target the peer's resource. The characters an
+    /// NGSI-LD id legitimately uses (`urn:`, `:`, `-`) must survive unchanged
+    /// or every forward would address a different entity than the client did.
+    #[test]
+    fn path_segment_encodes_what_would_end_the_segment() {
+        assert_eq!(
+            path_segment("urn:ngsi-ld:Vehicle:A4567-W"),
+            "urn:ngsi-ld:Vehicle:A4567-W"
+        );
+        assert_eq!(path_segment("urn:x#"), "urn:x%23");
+        assert_eq!(path_segment("urn:x?q=1"), "urn:x%3Fq=1");
+        assert_eq!(path_segment("a/b"), "a%2Fb");
+        // an id already carrying a percent must not decode twice at the peer
+        assert_eq!(path_segment("a%2Fb"), "a%252Fb");
+        // `.` is unreserved, so dot segments pass through unchanged here —
+        // they are refused at the door instead (EntityId::new, check_attr_name)
+        assert_eq!(path_segment(".."), "..");
+        // non-ASCII is percent-encoded per its UTF-8 bytes
+        assert_eq!(path_segment("é"), "%C3%A9");
     }
 
     /// RFC 7230 received-by is a TOKEN compared for equality:
