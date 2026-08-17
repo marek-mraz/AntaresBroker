@@ -3,6 +3,7 @@ name = "antares-wasm"
 description = "The Antares broker compiled to WebAssembly: the same router, fed by a Service Worker instead of a TCP listener."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

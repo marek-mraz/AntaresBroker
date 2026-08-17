@@ -3,6 +3,7 @@ name = "antares-ql"
 description = "NGSI-LD query language parsers (q=, scopeQ, geoQ) -> typed AST. Publishable as ngsild-ql."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

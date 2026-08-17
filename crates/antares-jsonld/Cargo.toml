@@ -3,6 +3,7 @@ name = "antares-jsonld"
 description = "JSON-LD layer: caching Loader, pinned core contexts, NGSI-LD expansion/compaction + structural validation."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

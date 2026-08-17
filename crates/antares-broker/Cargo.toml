@@ -3,6 +3,7 @@ name = "antares-broker"
 description = "The Antares NGSI-LD context broker binary."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

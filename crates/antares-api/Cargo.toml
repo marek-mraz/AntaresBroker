@@ -3,6 +3,7 @@ name = "antares-api"
 description = "NGSI-LD HTTP binding (TS 104 176 shape): axum routers. Thin handlers; no business logic."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

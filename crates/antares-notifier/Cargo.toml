@@ -3,6 +3,7 @@ name = "antares-notifier"
 description = "Notification delivery: NotificationSink trait keyed by endpoint.uri scheme; http sink; mqtt behind feature."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 
@@ -11,10 +12,14 @@ antares-model = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 rumqttc = { workspace = true, optional = true }
+# the crypto provider for mqtts: rumqttc is built provider-less
+# (use-rustls-no-provider) so the workspace stays on ONE rustls stack with
+# ring only — aws-lc-sys (C + cmake) never enters the build.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 
 [features]
 default = ["mqtt"]
-mqtt = ["dep:rumqttc"]
+mqtt = ["dep:rumqttc", "dep:rustls"]
 
 [lints]
 workspace = true

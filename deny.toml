@@ -25,10 +25,10 @@ ignore = [
     # upstream main. Drops only when upstream migrates off it.
     { id = "RUSTSEC-2025-0134", reason = "via rumqttc (all versions incl. upstream main); no fixed release exists" },
     # rustls-webpki 0.102.x (no fixed 0.102 exists): rumqttc pins ^0.102.8
-    # DIRECTLY on every release and on upstream main (verified 2026-08-07) —
-    # a 0.25 bump does NOT remove it, and use-rustls on 0.25 additionally
-    # drags in aws-lc-sys (C/cmake, against the rustls+ring-only rule; a future
-    # bump must use use-rustls-no-provider + ring). Scope: mqtts notification
+    # DIRECTLY on every release and on upstream main. The 0.25 bump is DONE
+    # (use-rustls-no-provider + an explicit ring provider in antares-notifier,
+    # so the workspace runs ONE rustls 0.23 stack and aws-lc-sys never enters
+    # the build) — but the webpki pin survives it. Scope: mqtts notification
     # egress server-cert checks only; the CRL-parsing panic needs CRLs
     # configured (rumqttc configures none) and the name-constraint bypasses
     # need constrained CAs. Exit: upstream bumps to webpki 0.103, or the
@@ -42,6 +42,9 @@ ignore = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# internal path dependencies carry no version by design; the wildcard wall
+# is for registry deps, where a `*` really is unpinned drift
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

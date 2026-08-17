@@ -3,6 +3,7 @@ name = "antares-model"
 description = "NGSI-LD data model types (CIM 009 V1.9.1). Publishable as ngsild-model."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

@@ -3,6 +3,7 @@ name = "antares-sql"
 description = "AST -> SQL compiler + schema migrations, plus the sqlx store implementations."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

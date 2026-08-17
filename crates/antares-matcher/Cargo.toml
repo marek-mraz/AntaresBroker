@@ -3,6 +3,7 @@ name = "antares-matcher"
 description = "Subscription matching: compiled subscriptions, candidate index, in-memory evaluation."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 

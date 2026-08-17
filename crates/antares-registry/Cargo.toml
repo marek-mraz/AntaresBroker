@@ -3,6 +3,7 @@ name = "antares-registry"
 description = "Context Source Registrations, distributed operations, federation."
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
 rust-version.workspace = true
 
