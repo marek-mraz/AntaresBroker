@@ -247,11 +247,15 @@ impl AppState {
     }
 
     /// 5.2.34: stamp the per-registration cooldown locally AND on the other
-    /// api pods (no-op half in local mode).
-    pub fn reg_cooldown_stamp(&self, reg_id: &str, ok: bool) {
-        self.egress.reg_record(reg_id, ok);
+    /// api pods (no-op half in local mode). Keyed per tenant — the id alone
+    /// is client-chosen per tenant (5.5.10) and must not gate a neighbour.
+    pub fn reg_cooldown_stamp(&self, tenant: &antares_model::TenantId, reg_id: &str, ok: bool) {
+        let key = crate::egress::reg_key(tenant.as_str(), reg_id);
+        self.egress.reg_record(&key, ok);
         if let Some(h) = &self.reg_fail_sync {
-            h(reg_id, ok);
+            // the broadcast carries the COMPOSED key; receiving pods stamp it
+            // verbatim, so their lookups agree without re-deriving anything
+            h(&key, ok);
         }
     }
 

@@ -65,6 +65,15 @@ impl Default for Egress {
     }
 }
 
+/// The 5.2.34 cooldown key. The registration id is client-chosen PER TENANT
+/// (5.5.10), so the bare id would let one tenant's failing registration put
+/// another tenant's same-id registration into timeout. The unit separator
+/// cannot appear in either part (TenantId and EntityId both refuse C0
+/// controls).
+pub fn reg_key(tenant: &str, reg_id: &str) -> String {
+    format!("{tenant}\u{1f}{reg_id}")
+}
+
 impl Egress {
     pub fn new(policy: antares_jsonld::EgressPolicy) -> Self {
         Self {
@@ -78,28 +87,28 @@ impl Egress {
     /// period has expired, a timeout error response for the registration is
     /// automatically returned." True while the per-registration window is
     /// still open.
-    pub fn reg_in_cooldown(&self, reg_id: &str, cooldown_ms: u64) -> bool {
+    pub fn reg_in_cooldown(&self, reg_key: &str, cooldown_ms: u64) -> bool {
         self.reg_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(reg_id)
+            .get(reg_key)
             .is_some_and(|t| t.elapsed() < Duration::from_millis(cooldown_ms))
     }
 
     /// 5.2.34 cooldown bookkeeping: a failed forward stamps the window, a
     /// successful one clears it.
-    pub fn reg_record(&self, reg_id: &str, ok: bool) {
+    pub fn reg_record(&self, reg_key: &str, ok: bool) {
         let mut m = self
             .reg_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if ok {
-            m.remove(reg_id);
+            m.remove(reg_key);
         } else {
-            if !m.contains_key(reg_id) {
+            if !m.contains_key(reg_key) {
                 evict_oldest(&mut m, |t: &Instant| Some(*t));
             }
-            m.insert(reg_id.to_owned(), Instant::now());
+            m.insert(reg_key.to_owned(), Instant::now());
         }
     }
 
@@ -195,6 +204,30 @@ mod tests {
         });
         assert!(allow.check_url("http://127.0.0.1:9090/x").await.is_ok());
         assert!(allow.check_url("mqtt://localhost:1883/t").await.is_ok());
+    }
+
+    /// 5.2.34 + 5.5.10: the cooldown a failing registration earns belongs to
+    /// ITS tenant. Another tenant's registration under the same client-chosen
+    /// id keeps being contacted.
+    #[test]
+    fn cooldown_is_scoped_to_the_tenant_that_earned_it() {
+        let e = Egress::default();
+        let id = "urn:ngsi-ld:ContextSourceRegistration:shared";
+        e.reg_record(&reg_key("tenant-a", id), false);
+        assert!(
+            e.reg_in_cooldown(&reg_key("tenant-a", id), 60_000),
+            "the failing tenant's registration is in its window"
+        );
+        assert!(
+            !e.reg_in_cooldown(&reg_key("tenant-b", id), 60_000),
+            "one tenant's failing registration must not put another tenant's \
+             same-id registration into timeout"
+        );
+        // and a success clears only its own tenant's stamp
+        e.reg_record(&reg_key("tenant-b", id), false);
+        e.reg_record(&reg_key("tenant-a", id), true);
+        assert!(!e.reg_in_cooldown(&reg_key("tenant-a", id), 60_000));
+        assert!(e.reg_in_cooldown(&reg_key("tenant-b", id), 60_000));
     }
 
     #[test]
