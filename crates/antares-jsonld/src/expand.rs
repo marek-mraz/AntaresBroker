@@ -254,9 +254,15 @@ pub fn expand_entity(
     // `expires_at` column extraction and temporal `meta_of` all expect. Missing
     // this made 4.22 dead code on every backend.
     if let Some(v) = doc.get("expiresAt") {
-        // In a merge/partial fragment an NGSI-LD Null asks for the expiry's
-        // removal (5.5.12) — pass it through for merge_into to act on.
-        let is_null_removal = opts.allow_null && v.as_str() == Some("urn:ngsi-ld:null");
+        // In a merge/partial FRAGMENT an NGSI-LD Null asks for the expiry's
+        // removal (5.5.12) — pass it through for merge_into to act on. 5.5.4
+        // limits the marker to those fragments, so on a whole-Entity input it
+        // stays BadRequestData: a temporal import allows nulls for its 4.5.7
+        // tombstones, and storing the marker as a lifetime there poisons every
+        // later read of the tenant.
+        let is_null_removal = opts.allow_null
+            && (opts.fragment || opts.merge)
+            && v.as_str() == Some("urn:ngsi-ld:null");
         let s = v
             .as_str()
             .filter(|s| is_null_removal || parse_datetime(s))
@@ -2396,6 +2402,47 @@ mod clause_5_2_1 {
             is_deletion_instance(inst),
             "the marker must remain recognizable: {inst}"
         );
+    }
+
+    /// 5.5.4: the marker is legal only in a Fragment used in a partial update
+    /// or merge. A temporal import allows nulls for 4.5.7 tombstones, but its
+    /// document is a whole Entity — an entity-level expiresAt carrying the
+    /// marker there is BadRequestData, not a stored lifetime of
+    /// "urn:ngsi-ld:null".
+    #[test]
+    fn the_entity_expires_at_marker_is_only_a_fragment_form() {
+        let doc = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": "Vehicle",
+            "expiresAt": "urn:ngsi-ld:null",
+            "speed": [{"type": "Property", "value": 1}]
+        });
+        let e = expand_entity(
+            doc.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts {
+                allow_null: true,
+                temporal: true,
+                sys: true,
+                ..ExpandOpts::default()
+            },
+        )
+        .expect_err("a whole entity cannot ask for the removal");
+        assert!(matches!(e, NgsiError::BadRequestData(_)), "{e:?}");
+
+        // the fragment form still asks for the removal
+        let frag = json!({"expiresAt": "urn:ngsi-ld:null"});
+        let out = expand_entity(
+            frag.as_object().expect("obj"),
+            &Loader::new().core(),
+            ExpandOpts {
+                fragment: true,
+                allow_null: true,
+                ..ExpandOpts::default()
+            },
+        )
+        .expect("merge fragment expands");
+        assert_eq!(out["expiresAt"], "urn:ngsi-ld:null");
     }
 }
 
