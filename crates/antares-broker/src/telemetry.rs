@@ -25,12 +25,12 @@ use std::sync::Arc;
 /// identically with and without the `telemetry` feature.
 pub type MetricsRender = Arc<dyn Fn() -> String + Send + Sync>;
 
-/// Is the observability stack switched on for this process?
+/// Is the observability stack switched on for this process? The default is
+/// off, so ANY value that is not an explicit off spelling arms it — a knob
+/// that recognized only `1|true|on` disabled the whole stack on `TRUE`
+/// without a word.
 pub fn enabled() -> bool {
-    matches!(
-        std::env::var("ANTARES_TELEMETRY").as_deref(),
-        Ok("1" | "true" | "on")
-    )
+    std::env::var("ANTARES_TELEMETRY").is_ok_and(|v| !crate::is_off(&v))
 }
 
 /// Strip `user:password@` userinfo (RFC 3986 clause 3.2.1) out of a URL before
@@ -102,6 +102,16 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
         .init();
 
     if !enabled() {
+        // An endpoint without the switch is a configuration the operator
+        // believes is exporting: say so rather than drop it silently. Logged
+        // here because the subscriber above is what makes a log visible.
+        if let Ok(endpoint) = std::env::var("ANTARES_OTLP_ENDPOINT") {
+            tracing::warn!(
+                endpoint = redact_url(&endpoint),
+                "ANTARES_OTLP_ENDPOINT is set but ANTARES_TELEMETRY is off — \
+                 no spans are exported"
+            );
+        }
         return Ok(None); // the recorder, registry and sampler are never built
     }
     let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
@@ -174,18 +184,19 @@ mod tests {
     use super::*;
 
     /// The switch is the whole stack's gate, and the environment is
-    /// process-global — every spelling is asserted in ONE test.
-    /// Only the documented truthy spellings arm it; everything else leaves
-    /// the process with no recorder, no sampler and a 404 on /q/metrics.
+    /// process-global — every spelling is asserted in ONE test. The DEFAULT
+    /// is off, so only an explicit off value may keep it off: a knob that
+    /// recognized `1|true|on` alone disabled the whole observability stack on
+    /// `TRUE` without a word.
     #[test]
-    fn telemetry_switch_arms_only_on_the_documented_spellings() {
+    fn telemetry_switch_is_off_by_default_and_tolerant_of_spelling() {
         std::env::remove_var("ANTARES_TELEMETRY");
         assert!(!enabled(), "the default must allocate nothing");
-        for on in ["1", "true", "on"] {
+        for on in ["1", "true", "on", "TRUE", "On", "yes", "1 ", " 1"] {
             std::env::set_var("ANTARES_TELEMETRY", on);
-            assert!(enabled(), "ANTARES_TELEMETRY={on} must arm the stack");
+            assert!(enabled(), "ANTARES_TELEMETRY={on:?} must arm the stack");
         }
-        for off in ["0", "false", "off", "", "TRUE", "On", "yes", "1 ", " 1"] {
+        for off in ["0", "false", "off", "", " ", "FALSE", "Off", "no", " 0 "] {
             std::env::set_var("ANTARES_TELEMETRY", off);
             assert!(
                 !enabled(),

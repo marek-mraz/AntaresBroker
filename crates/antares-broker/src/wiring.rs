@@ -89,7 +89,9 @@ pub fn outbox_drain_enabled() -> Result<bool, String> {
         Ok(v) => match v.as_str() {
             "on" => Ok(true),
             "off" => Ok(false),
-            other => Err(format!("ANTARES_OUTBOX_DRAIN must be on|off, got {other:?}")),
+            other => Err(format!(
+                "ANTARES_OUTBOX_DRAIN must be on|off, got {other:?}"
+            )),
         },
     }
 }
@@ -178,9 +180,25 @@ pub async fn wire_nats(
             });
             tokio::spawn(async move {
                 let bytes = serde_json::to_vec(&value).unwrap_or_default();
-                if let Err(e) = kv.put(key, bytes.into()).await {
-                    tracing::warn!("sub KV sync failed: {e}");
+                // The store row is already committed. A lost put leaves this
+                // subscription invisible to every matcher pod — silently, and
+                // until the next restart, because mirrors hydrate from the
+                // store only at process start. So retry rather than warn once.
+                // Named ceiling: after the last attempt the divergence stands
+                // until a restart; closing that needs periodic reconciliation.
+                for attempt in 0..MIRROR_SYNC_ATTEMPTS {
+                    match kv.put(key.clone(), bytes.clone().into()).await {
+                        Ok(_) => return,
+                        Err(e) => {
+                            tracing::warn!("sub KV sync attempt {} failed: {e}", attempt + 1);
+                            tokio::time::sleep(mirror_sync_backoff(attempt)).await;
+                        }
+                    }
                 }
+                tracing::error!(
+                    "sub KV sync gave up for {key} — this subscription is not mirrored \
+                     until the next restart"
+                );
             });
         }));
 
@@ -192,10 +210,27 @@ pub async fn wire_nats(
                 "tenant": tenant.as_str(), "id": id, "doc": doc,
             });
             let tenant = tenant.as_str().to_owned();
+            let id = id.to_owned();
             tokio::spawn(async move {
-                if let Err(e) = bus.publish_registry(&tenant, &delta).await {
-                    tracing::warn!("registry delta publish failed: {e}");
+                // Same contract as the subscription mirror: the row is
+                // committed, so a lost delta makes the registration invisible
+                // to every federation path until a restart re-hydrates.
+                for attempt in 0..MIRROR_SYNC_ATTEMPTS {
+                    match bus.publish_registry(&tenant, &delta).await {
+                        Ok(()) => return,
+                        Err(e) => {
+                            tracing::warn!(
+                                "registry delta publish attempt {} failed: {e}",
+                                attempt + 1
+                            );
+                            tokio::time::sleep(mirror_sync_backoff(attempt)).await;
+                        }
+                    }
                 }
+                tracing::error!(
+                    "registry delta publish gave up for {id} — this registration is not \
+                     mirrored until the next restart"
+                );
             });
         }));
 
@@ -222,25 +257,39 @@ pub async fn wire_nats(
         hydrate(reg_mirror.as_ref(), &state.store, Kind::Registration);
         state.reg_mirror = Some(reg_mirror.clone());
         let egress_for_cool = state.egress.clone();
+        let store_for_reg = state.store.clone();
         tokio::spawn(async move {
-            let mut msgs = match reg_consumer.messages().await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("registry broadcast consumer died at start: {e}");
-                    return;
+            // The consumer is ephemeral, so a NATS restart or an inactivity
+            // gap deletes it server-side and the next pull errors. Ending the
+            // task there froze this pod's registration mirror — and with it
+            // all federation matching — for the process lifetime, while
+            // /q/health still reported the bus connected. Re-open instead,
+            // and re-hydrate from the store because a fresh consumer starts
+            // at NEW and never replays what the gap dropped.
+            loop {
+                let mut msgs = match reg_consumer.messages().await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("registry broadcast consumer stream failed: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+                while let Some(delta) = nats::next_delta(&mut msgs).await {
+                    // 5.2.34 read side: a cooldown stamp updates this pod's
+                    // map (a marker delta has no tenant/id — apply_delta
+                    // ignores it on pods that predate the member).
+                    if let Some(rid) = delta.get("cooldownReg").and_then(serde_json::Value::as_str)
+                    {
+                        egress_for_cool.reg_record(rid, delta["ok"].as_bool().unwrap_or(false));
+                        continue;
+                    }
+                    apply_delta(reg_mirror.as_ref(), &delta);
                 }
-            };
-            while let Some(delta) = nats::next_delta(&mut msgs).await {
-                // 5.2.34 read side: a cooldown stamp updates this pod's map
-                // (a marker delta has no tenant/id — apply_delta ignores it
-                // on pods that predate the member).
-                if let Some(rid) = delta.get("cooldownReg").and_then(serde_json::Value::as_str) {
-                    egress_for_cool.reg_record(rid, delta["ok"].as_bool().unwrap_or(false));
-                    continue;
-                }
-                apply_delta(reg_mirror.as_ref(), &delta);
+                tracing::warn!("registry broadcast consumer stream ended — reopening");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                hydrate(reg_mirror.as_ref(), &store_for_reg, Kind::Registration);
             }
-            tracing::warn!("registry broadcast consumer stream ended");
         });
 
         // The outbox drain. Runs on every api pod; concurrent drains are
@@ -315,14 +364,27 @@ pub async fn wire_nats(
         hydrate(sub_mirror.as_ref(), &state.store, Kind::Subscription);
         state.sub_mirror = Some(sub_mirror.clone());
         tokio::spawn(async move {
+            // Same restart contract as the registry consumer: the watch ends
+            // on a NATS restart, and a task that returns there stops seeing
+            // every subscription change — i.e. this pod silently stops
+            // notifying — for the process lifetime. `watch_all` replays the
+            // bucket's current values, so re-opening also re-converges the
+            // mirror over the gap.
             let mut watch = watch;
-            while let Some(entry) = watch.next().await {
-                let Ok(entry) = entry else { continue };
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&entry.value) {
-                    apply_delta(sub_mirror.as_ref(), &v);
+            loop {
+                while let Some(entry) = watch.next().await {
+                    let Ok(entry) = entry else { continue };
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&entry.value) {
+                        apply_delta(sub_mirror.as_ref(), &v);
+                    }
+                }
+                tracing::warn!("subscription KV watch ended — reopening");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                match kv.watch_all().await {
+                    Ok(w) => watch = w,
+                    Err(e) => tracing::warn!("subscription KV watch reopen failed: {e}"),
                 }
             }
-            tracing::warn!("subscription KV watch ended");
         });
 
         // The balanced matcher durable: decode → process_change → ack AFTER.
@@ -384,6 +446,16 @@ pub async fn wire_nats(
 }
 
 /// Hydrate a mirror from the system of record (Postgres) at startup.
+/// Attempts a mirror write gets before the divergence is logged as an error.
+const MIRROR_SYNC_ATTEMPTS: u32 = 5;
+
+/// Exponential backoff between mirror-sync attempts: 0.2 s doubling to 3.2 s,
+/// so the whole ladder outlives a bus reconnect without holding a task for
+/// minutes.
+fn mirror_sync_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(200u64 << attempt.min(4))
+}
+
 fn hydrate(
     mirror: &dyn antares_api::notify::Mirror,
     store: &antares_sql::store::any::AnyStore,
@@ -460,7 +532,10 @@ mod tests {
         assert!(Roles::parse("all").expect("all").all());
         let r = Roles::parse("api").expect("api");
         assert!(r.api && !r.matcher && !r.notifier && !r.temporal && !r.registry);
-        assert!(!r.all(), "a single role must never claim to be the full set");
+        assert!(
+            !r.all(),
+            "a single role must never claim to be the full set"
+        );
         let r = Roles::parse(" matcher , notifier ").expect("padded list");
         assert!(r.matcher && r.notifier && !r.api);
         // The enumerated full set is the same thing as "all" — a role split
@@ -504,11 +579,17 @@ mod tests {
     #[test]
     fn apply_delta_ignores_malformed_and_hostile_deltas() {
         let m = DocMirror::default();
-        apply_delta(&m, &json!({"tenant": "default", "id": "urn:x:1", "doc": {"id": "urn:x:1"}}));
+        apply_delta(
+            &m,
+            &json!({"tenant": "default", "id": "urn:x:1", "doc": {"id": "urn:x:1"}}),
+        );
         assert_eq!(m.docs("default").len(), 1, "a good delta must apply");
 
         // tombstone
-        apply_delta(&m, &json!({"tenant": "default", "id": "urn:x:1", "doc": null}));
+        apply_delta(
+            &m,
+            &json!({"tenant": "default", "id": "urn:x:1", "doc": null}),
+        );
         assert!(m.docs("default").is_empty(), "null doc must delete");
         assert!(m.tenants().is_empty(), "an emptied tenant must not linger");
 
@@ -531,8 +612,16 @@ mod tests {
 
         // Hostile tenants: not addressable by any request (the header is
         // validated to [A-Za-z0-9_-]{1,64}), so they may not take memory.
-        for hostile in ["a".repeat(4096), "../../etc".into(), "a b".into(), "".into()] {
-            apply_delta(&m, &json!({"tenant": hostile, "id": "urn:x:1", "doc": {"id": "urn:x:1"}}));
+        for hostile in [
+            "a".repeat(4096),
+            "../../etc".into(),
+            "a b".into(),
+            "".into(),
+        ] {
+            apply_delta(
+                &m,
+                &json!({"tenant": hostile, "id": "urn:x:1", "doc": {"id": "urn:x:1"}}),
+            );
         }
         assert!(
             m.tenants().is_empty(),

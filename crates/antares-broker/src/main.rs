@@ -75,6 +75,17 @@ const KNOWN_KEYS: &[&str] = &[
     // Ceiling on concurrently served connections (default 10000);
     // connections accepted above it are dropped immediately.
     "ANTARES_MAX_CONNECTIONS",
+    // 5.7.2.4 fan-out ceiling: how many matching registrations one
+    // distributed operation may contact.
+    "ANTARES_FED_FANOUT",
+    // Ceiling on the body this broker will read back from a forwarded
+    // request.
+    "ANTARES_MAX_FED_RESPONSE_BYTES",
+    // 5.7.5/5.7.6 discovery scan ceiling (types/attributes listing).
+    "ANTARES_DISCOVERY_SCAN_MAX",
+    // Run the DDL on this process; off keeps replicas from racing the
+    // migration on boot.
+    "ANTARES_MIGRATE",
 ];
 
 /// Jemalloc with decay-based purging — RSS returns to ~live×1.2 when idle;
@@ -127,10 +138,24 @@ fn parse_sweep_secs(raw: Option<&str>) -> Result<u64, String> {
     }
 }
 
+/// An explicitly-off switch value, whatever the operator's spelling. Used by
+/// the knobs where the DEFAULT is off, so that only an off value keeps them
+/// off and a typo cannot silently disable a security control.
+fn is_off(v: &str) -> bool {
+    let v = v.trim();
+    v.is_empty()
+        || v == "0"
+        || v.eq_ignore_ascii_case("false")
+        || v.eq_ignore_ascii_case("off")
+        || v.eq_ignore_ascii_case("no")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --version answers without starting anything (a bare `antares
     // --version` used to boot a server).
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    // `args()`/`vars()` PANIC on non-UTF-8; the *_os variants do not, and a
+    // stray byte in the environment or argv must not kill the process.
+    if std::env::args_os().any(|a| a == "--version" || a == "-V") {
         println!(
             "antares {} ({})",
             env!("CARGO_PKG_VERSION"),
@@ -148,16 +173,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // …) — CI exports those for the integration tests, and they land in the env of
     // any broker a test spawns. Reserving the prefix here beats making every
     // spawn site remember an env_remove allowlist.
-    for (key, _) in std::env::vars() {
+    for (key, _) in std::env::vars_os() {
+        let key = key.to_string_lossy();
         if unknown_config_key(&key) {
             return Err(format!("unknown config key {key} (known: {KNOWN_KEYS:?})").into());
         }
     }
 
     let port_raw = std::env::var("ANTARES_HTTP_PORT").unwrap_or_else(|_| "9090".into());
-    let port: u16 = port_raw
-        .parse()
-        .map_err(|e| format!("ANTARES_HTTP_PORT must be a port number 0-65535, got {port_raw:?} ({e})"))?;
+    let port: u16 = port_raw.parse().map_err(|e| {
+        format!("ANTARES_HTTP_PORT must be a port number 0-65535, got {port_raw:?} ({e})")
+    })?;
     // Every remaining config value is parsed HERE, before the runtime starts,
     // so a garbage window, cadence or switch fails the process instead of
     // silently running at its default.
@@ -318,8 +344,13 @@ async fn build_store(
                         // the warning into a hard refusal so a superuser DSN can
                         // never silently ship (dev/ETSI stacks leave it unset).
                         if antares_sql::pg::role_bypasses_rls(&pool).await {
-                            let strict = std::env::var("ANTARES_REQUIRE_RLS")
-                                .is_ok_and(|v| matches!(v.as_str(), "1" | "true"));
+                            // A gate that only understands two spellings
+                            // fails OPEN on `TRUE`/`yes`/`on`: the operator
+                            // believes RLS is enforced and the broker serves
+                            // with a BYPASSRLS role. Anything but an explicit
+                            // off value turns it on.
+                            let strict =
+                                std::env::var("ANTARES_REQUIRE_RLS").is_ok_and(|v| !is_off(&v));
                             if strict {
                                 return Err(
                                     "ANTARES_REQUIRE_RLS=1 but the database role bypasses \
@@ -596,8 +627,8 @@ async fn run(
     // Manual serve loop: the ETSI suite reads response headers case-sensitively
     // ("Location"), so HTTP/1 responses are written with title-case headers.
     loop {
-        let (stream, _) = tokio::select! {
-            r = listener.accept() => r?,
+        let stream = tokio::select! {
+            s = accept(&listener) => s,
             _ = &mut sigterm => {
                 // 1+2: unhealthy FIRST, then keep serving for the LB's notice
                 // window — still inside this select, so connections arriving
@@ -606,8 +637,7 @@ async fn run(
                 let until = tokio::time::Instant::now() + drain_delay;
                 loop {
                     tokio::select! {
-                        r = listener.accept() => {
-                            let (stream, _) = r?;
+                        stream = accept(&listener) => {
                             serve(stream, app.clone(), inflight.clone(), drain_rx.clone(),
                                   conn_permits.clone(), header_read_timeout);
                         }
@@ -632,6 +662,38 @@ async fn run(
             header_read_timeout,
         );
     }
+}
+
+/// Accept the next connection. There is no failure value: `accept()`
+/// propagates every non-`WouldBlock` errno from the syscall, and an
+/// `ECONNABORTED` (a client resetting between SYN and accept), `EMFILE`/
+/// `ENFILE` (the fd ceiling — the connection cap defaults above many
+/// containers' `nofile`) or `ENOBUFS` must never take the broker down.
+async fn accept(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => return stream,
+            Err(e) => {
+                tracing::warn!("accept failed, retrying: {e}");
+                if accept_backoff(&e) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Whether an `accept()` error warrants a pause before the next attempt.
+/// The per-connection failures retry at once (the next connection is
+/// unaffected); a resource exhaustion would otherwise spin the loop at full
+/// speed until the pressure clears. Neither is fatal.
+fn accept_backoff(e: &std::io::Error) -> bool {
+    !matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
+    )
 }
 
 /// The served app: the router under trailing-slash normalization.
@@ -755,6 +817,126 @@ mod config_key_tests {
         }
         for k in ["PATH", "HOME", "antares_store", "ANTARE_STORE", ""] {
             assert!(!unknown_config_key(k), "{k} is not broker config");
+        }
+    }
+
+    /// Unknown keys are FATAL, so every ANTARES_* variable the workspace
+    /// actually reads has to be accepted — otherwise setting a documented
+    /// deployment knob is a CrashLoopBackOff and the knob cannot be used at
+    /// all. Scans the sources rather than restating the list, so the check
+    /// keeps holding as crates add knobs.
+    #[test]
+    fn known_keys_cover_every_variable_the_workspace_reads() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .to_path_buf();
+        let needles = [
+            concat!("var(", "\"ANTARES_"),
+            concat!("var_os(", "\"ANTARES_"),
+        ];
+        let mut missing: Vec<String> = Vec::new();
+        let mut stack = vec![crates];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap_or_default();
+                for needle in needles {
+                    for (i, _) in src.match_indices(needle) {
+                        let rest = &src[i + needle.len() - "\"ANTARES_".len() + 1..];
+                        let Some(end) = rest.find('"') else { continue };
+                        let key = &rest[..end];
+                        if unknown_config_key(key) {
+                            missing.push(format!("{key} (read in {})", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "KNOWN_KEYS is missing variables the workspace reads: {missing:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod accept_loop_tests {
+    use super::{accept, accept_backoff};
+
+    /// An accept() error must never end the serve loop: tokio propagates
+    /// every non-WouldBlock errno straight from the syscall, so ECONNABORTED
+    /// (a client resetting between SYN and accept), EMFILE/ENFILE (the fd
+    /// ceiling) and ENOBUFS all used to take the whole broker down. `accept`
+    /// has no failure value at all — the only decision left is whether to
+    /// pause before retrying.
+    #[test]
+    fn no_accept_error_is_fatal_and_resource_errors_back_off() {
+        use std::io::ErrorKind::*;
+        for kind in [ConnectionAborted, ConnectionReset, Interrupted] {
+            assert!(
+                !accept_backoff(&std::io::Error::new(kind, "x")),
+                "{kind:?} is per-connection — the next accept must run at once"
+            );
+        }
+        for kind in [
+            Other,
+            OutOfMemory,
+            PermissionDenied,
+            InvalidInput,
+            NotConnected,
+        ] {
+            assert!(
+                accept_backoff(&std::io::Error::new(kind, "x")),
+                "{kind:?} would spin the loop without a pause"
+            );
+        }
+    }
+
+    /// …and the healthy path still hands the loop its connection.
+    #[tokio::test]
+    async fn accept_yields_the_next_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await });
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(5), accept(&listener))
+            .await
+            .expect("a connection is accepted");
+        assert!(stream.peer_addr().is_ok());
+        let _ = client.await;
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::is_off;
+
+    /// The knobs whose default is OFF (ANTARES_REQUIRE_RLS, ANTARES_TELEMETRY)
+    /// must fail SAFE on a spelling they do not know: recognizing only
+    /// `1|true` turned the RLS gate off on `TRUE`/`yes`/`on` while the
+    /// operator believed it was enforced.
+    #[test]
+    fn only_an_explicit_off_value_reads_as_off() {
+        for off in [
+            "0", "false", "FALSE", "False", "off", "OFF", "no", "", " ", " 0\t",
+        ] {
+            assert!(is_off(off), "{off:?} must read as off");
+        }
+        for on in [
+            "1", "true", "TRUE", "True", "on", "On", "yes", "YES", " 1 ", "enabled",
+        ] {
+            assert!(!is_off(on), "{on:?} must NOT read as off");
         }
     }
 }

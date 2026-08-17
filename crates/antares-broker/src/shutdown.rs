@@ -102,20 +102,22 @@ pub async fn drain(
     // so a rolling update does not leave events sitting in the table until
     // another pod's fallback poll finds them. Stores without an outbox
     // (memory, file) answer an empty page and fall straight through.
-    while flush_outbox {
-        match store.outbox_peek(1) {
-            Ok(rows) if rows.is_empty() => break,
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("outbox flush gave up: {e}");
+    if flush_outbox {
+        loop {
+            match store.outbox_peek(1) {
+                Ok(rows) if rows.is_empty() => break,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("outbox flush gave up: {e}");
+                    break;
+                }
+            }
+            if started.elapsed() >= deadline {
+                tracing::warn!("drain deadline {deadline:?} hit with outbox rows still pending");
                 break;
             }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        if started.elapsed() >= deadline {
-            tracing::warn!("drain deadline {deadline:?} hit with outbox rows still pending");
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     store.close().await;
     tracing::info!("drain complete in {:?}", started.elapsed());
@@ -127,9 +129,7 @@ pub fn begin(draining: &Arc<AtomicBool>, delay: Duration) {
     // Immediate, not sampler-paced — a roll must be visible on a
     // dashboard for its whole (short) duration.
     metrics::gauge!("antares_draining").set(1.0);
-    tracing::info!(
-        "draining: /q/health now 503 for {delay:?} before the listener closes"
-    );
+    tracing::info!("draining: /q/health now 503 for {delay:?} before the listener closes");
 }
 
 #[cfg(test)]
@@ -161,10 +161,18 @@ mod tests {
         assert_eq!(drain_delay().expect("zero"), Duration::ZERO);
         assert_eq!(drain_deadline().expect("zero"), Duration::ZERO);
 
-        for bad in ["soon", "", "-1", "2.5", "500ms", "99999999999999999999999", " 5"] {
+        for bad in [
+            "soon",
+            "",
+            "-1",
+            "2.5",
+            "500ms",
+            "99999999999999999999999",
+            " 5",
+        ] {
             std::env::set_var("ANTARES_DRAIN_DELAY_MS", bad);
-            let err = drain_delay()
-                .expect_err(&format!("ANTARES_DRAIN_DELAY_MS={bad:?} must be fatal"));
+            let err =
+                drain_delay().expect_err(&format!("ANTARES_DRAIN_DELAY_MS={bad:?} must be fatal"));
             assert!(
                 err.contains("ANTARES_DRAIN_DELAY_MS"),
                 "the error must name the key: {err}"
@@ -173,8 +181,9 @@ mod tests {
         std::env::set_var("ANTARES_DRAIN_DELAY_MS", "500");
         for bad in ["soon", "", "-1", "20.0"] {
             std::env::set_var("ANTARES_DRAIN_DEADLINE_SECS", bad);
-            let err = drain_deadline()
-                .expect_err(&format!("ANTARES_DRAIN_DEADLINE_SECS={bad:?} must be fatal"));
+            let err = drain_deadline().expect_err(&format!(
+                "ANTARES_DRAIN_DEADLINE_SECS={bad:?} must be fatal"
+            ));
             assert!(err.contains("ANTARES_DRAIN_DEADLINE_SECS"), "{err}");
         }
         std::env::remove_var("ANTARES_DRAIN_DELAY_MS");
