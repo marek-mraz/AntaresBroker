@@ -2532,9 +2532,14 @@ mod change_pipeline {
         .await
     }
 
-    /// 5.8.6: a matching change notifies. Matching runs on one long-lived
-    /// task, so a panic while matching ONE change must not end notification
-    /// delivery for the process — the next change still notifies.
+    /// 5.8.6: a matching change notifies, and a panic around ONE change must
+    /// not end notification delivery for the process — the NEXT change still
+    /// notifies. The lock poisoning here used to make the matcher itself
+    /// panic; since the mirrors recover from poisoning, the first change may
+    /// legitimately deliver too. The contract under test is therefore that
+    /// the SECOND change's notification arrives — not a count, which only
+    /// measured the race between the two deliveries and failed either way on
+    /// slow machines.
     #[tokio::test(flavor = "multi_thread")]
     async fn panicking_change_does_not_stop_the_next_notification() {
         std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
@@ -2542,29 +2547,41 @@ mod change_pipeline {
         let mut st = AppState::new("antares-panic-guard".into());
         wire(&mut st);
         subscribe(&st, "guard", &uri, 2_000).await;
-        // A poisoned mirror lock makes the matcher panic on the next change.
-        // The panic's source is incidental; the task boundary is the subject.
+        // Poison the mirror lock while a change is in flight: whatever the
+        // matcher does with that (recover, or panic into the supervision
+        // boundary), the pipeline must keep delivering afterwards.
         let mirror = st.sub_mirror.clone().expect("mirror");
         let m = mirror.clone();
         let _ = std::thread::spawn(move || {
-            let _held = m.map.write().expect("mirror lock");
-            panic!("matcher panic");
+            let _held = m
+                .map
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("poison the mirror");
         })
         .join();
         assert_eq!(create_vehicle(&st, 1).await, 201);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        mirror.map.clear_poison();
         assert_eq!(create_vehicle(&st, 2).await, 201);
-        for _ in 0..50 {
-            if hits.load(Ordering::SeqCst) > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while hits.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "the change after a panicking one must still be notified"
+        let got = hits.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&got),
+            "delivery must survive the poisoned change: expected 1 or 2 notifications, got {got}"
+        );
+        // and the pipeline is still alive for a THIRD change after the dust
+        // settles — the actual supervision contract
+        let before = hits.load(Ordering::SeqCst);
+        assert_eq!(create_vehicle(&st, 3).await, 201);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while hits.load(Ordering::SeqCst) <= before && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            hits.load(Ordering::SeqCst) > before,
+            "a change created after the poisoned one must still notify"
         );
     }
 

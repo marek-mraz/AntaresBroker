@@ -8,9 +8,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-antares-model = { workspace = true }
-antares-ql = { workspace = true }
-antares-bus = { workspace = true }
 
 [lints]
 workspace = true

@@ -107,7 +107,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -143,11 +142,6 @@ dependencies = [
 [[package]]
 name = "antares-matcher"
 version = "0.1.0"
-dependencies = [
- "antares-bus",
- "antares-model",
- "antares-ql",
-]
 
 [[package]]
 name = "antares-model"
