@@ -20,7 +20,22 @@ async fn send(
     path: &str,
     body: Option<String>,
 ) -> (StatusCode, Value) {
-    let b = Request::builder().method(method).uri(path);
+    send_via(st, method, path, body, None).await
+}
+
+/// Same as [`send`], with an inbound `Via` header — the shape of a request
+/// arriving from a peer broker (6.3.17/6.3.18).
+async fn send_via(
+    st: &AppState,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    via: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder().method(method).uri(path);
+    if let Some(v) = via {
+        b = b.header("Via", v);
+    }
     let req = match body {
         Some(body) => b
             .header("Content-Type", "application/json")
@@ -48,13 +63,23 @@ async fn send(
 /// Recording remote broker: stores "METHOD PATH\n\nBODY" per request,
 /// answers 201.
 fn recording_mock() -> (u16, Arc<Mutex<Vec<String>>>) {
-    recording_mock_with_delay(0)
+    recording_mock_opts(0, false)
+}
+
+/// Same, but each record keeps the FULL request head (all header lines), so
+/// a test can assert on the `Via` chain a forward travelled with.
+fn recording_mock_head() -> (u16, Arc<Mutex<Vec<String>>>) {
+    recording_mock_opts(0, true)
 }
 
 /// Same, but holds the 201 for `delay_ms` after recording the request —
 /// models an httpctrl-style mock (ETSI TP 5814_01) whose reply waits for
 /// the test's assertions.
 fn recording_mock_with_delay(delay_ms: u64) -> (u16, Arc<Mutex<Vec<String>>>) {
+    recording_mock_opts(delay_ms, false)
+}
+
+fn recording_mock_opts(delay_ms: u64, record_head: bool) -> (u16, Arc<Mutex<Vec<String>>>) {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -97,9 +122,8 @@ fn recording_mock_with_delay(delay_ms: u64) -> (u16, Arc<Mutex<Vec<String>>>) {
                 }
                 let first = headers.lines().next().unwrap_or("").to_owned();
                 let body = String::from_utf8_lossy(&buf[header_end..]).to_string();
-                sink.lock()
-                    .expect("sink")
-                    .push(format!("{first}\n\n{body}"));
+                let head = if record_head { headers.clone() } else { first };
+                sink.lock().expect("sink").push(format!("{head}\n\n{body}"));
                 if delay_ms > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
@@ -852,5 +876,266 @@ async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
         orig_seen.lock().expect("seen").len(),
         before,
         "a notification with no selector-matching entity is not forwarded"
+    );
+}
+
+/// 6.3.17: "the Context Broker shall add itself to the Via header" — the
+/// forwarded Subscription copy (5.8.1.4) travels with the inbound chain
+/// EXTENDED by this broker's alias, so downstream brokers can detect loops.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_6_3_18_forwarded_copy_extends_the_via_chain() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-via-ext".into());
+    antares_api::notify::wire(&mut st);
+    let (remote_port, remote_seen) = recording_mock_head();
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:viaext",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // the Subscription itself arrives as a forwarded copy: one upstream hop
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:viaext",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send_via(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+        Some("1.1 peer-upstream"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let head = {
+        let seen = remote_seen.lock().expect("seen");
+        seen.iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .to_ascii_lowercase()
+    };
+    let via_line = head
+        .lines()
+        .find(|l| l.starts_with("via:"))
+        .expect("the forwarded copy must carry a Via header")
+        .to_owned();
+    let up = via_line.find("peer-upstream");
+    let own = via_line.find("antares-via-ext");
+    assert!(
+        up.is_some() && own.is_some() && up < own,
+        "the chain must keep the upstream hop and append this broker: {via_line}"
+    );
+}
+
+/// 6.3.18: the Via header exists "to avoid infinite loops". A forwarded
+/// Subscription copy whose chain already names THIS broker has looped back
+/// (two mutually registered brokers, 5.8.1.4): it is stored and serves
+/// locally, but produces NO further forwarded copy — otherwise each round
+/// trip creates two more Subscriptions without bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_6_3_18_a_looped_copy_is_not_reforwarded() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-via-loop".into());
+    antares_api::notify::wire(&mut st);
+    let (remote_port, remote_seen) = recording_mock();
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:vialoop",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // the chain already names this broker: the copy has come full circle
+    let looped = json!({
+        "id": "urn:ngsi-ld:Subscription:vialoop",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send_via(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(looped.to_string()),
+        Some("1.1 antares-via-loop"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the looped copy still serves locally: {body}"
+    );
+    // positive control second: a fresh Subscription with no chain forwards,
+    // which also brackets the wait — by the time the control's copy arrives,
+    // a copy of the looped one would have arrived too
+    let fresh = json!({
+        "id": "urn:ngsi-ld:Subscription:vialoop-fresh",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(fresh.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    wait_for("the control subscription's forwarded copy", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let posts: Vec<String> = remote_seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .filter(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+        .cloned()
+        .collect();
+    assert!(
+        !posts.iter().any(|r| r.contains("Vehicle")) || posts.len() == 1,
+        "only the control may forward: {posts:?}"
+    );
+    assert!(
+        !posts.iter().any(|r| {
+            r.split("\n\n").nth(1).is_some_and(|b| {
+                serde_json::from_str::<Value>(b).is_ok_and(|v| {
+                    v["notification"]["endpoint"]["uri"]
+                        .as_str()
+                        .is_some_and(|u| u.contains("9999"))
+                        && posts.len() > 1
+                })
+            })
+        }),
+        "the looped copy must not re-forward: {posts:?}"
+    );
+    assert_eq!(posts.len(), 1, "exactly the control's copy: {posts:?}");
+}
+
+/// Table 6.3.18-2: the Via listing "is used when determining matching
+/// registrations" — a registration whose contextSourceAlias is already in
+/// the chain the Subscription travelled through receives no copy, while a
+/// registration naming a different source still does.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_6_3_18_registration_already_in_the_via_chain_receives_no_copy() {
+    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-via-reg".into());
+    antares_api::notify::wire(&mut st);
+    let (origin_port, origin_seen) = recording_mock();
+    let (other_port, other_seen) = recording_mock_head();
+    for (id, port, alias) in [
+        (
+            "urn:ngsi-ld:ContextSourceRegistration:viareg-origin",
+            origin_port,
+            Some("peer-origin"),
+        ),
+        (
+            "urn:ngsi-ld:ContextSourceRegistration:viareg-other",
+            other_port,
+            None,
+        ),
+    ] {
+        let mut reg = json!({
+            "id": id,
+            "type": "ContextSourceRegistration",
+            "information": [{"entities": [{"type": "Vehicle"}]}],
+            "operations": ["federationOps"],
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        });
+        if let Some(a) = alias {
+            reg["contextSourceAlias"] = json!(a);
+        }
+        let (status, body) = send(
+            &st,
+            "POST",
+            "/ngsi-ld/v1/csourceRegistrations",
+            Some(reg.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:viareg",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send_via(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+        Some("1.1 peer-origin"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    wait_for("the other registration's forwarded copy", || {
+        other_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    assert!(
+        !origin_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions")),
+        "the source the copy came through must not receive it back"
+    );
+    // and the copy the other registration received extends the chain
+    let head = {
+        let seen = other_seen.lock().expect("seen");
+        seen.iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .to_ascii_lowercase()
+    };
+    let via_line = head
+        .lines()
+        .find(|l| l.starts_with("via:"))
+        .expect("the forwarded copy must carry a Via header")
+        .to_owned();
+    assert!(
+        via_line.contains("peer-origin") && via_line.contains("antares-via-reg"),
+        "the chain keeps the inbound hop and appends this broker: {via_line}"
     );
 }

@@ -165,6 +165,22 @@ fn distributed(sub: &Value) -> bool {
     sub.get("localOnly").and_then(Value::as_bool) != Some(true)
 }
 
+/// 6.3.17/6.3.18: the Via chain the Subscription arrived with, rebuilt as
+/// the header the outbound forward extends (`federation::forward` appends
+/// this broker's alias). Stored on the Subscription as the broker-internal
+/// `__via` member (`__context` is the precedent) by create.
+fn sub_via_headers(sub: &Value) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    if let Some(v) = sub
+        .get("__via")
+        .and_then(Value::as_str)
+        .and_then(|v| axum::http::HeaderValue::from_str(v).ok())
+    {
+        h.insert("via", v);
+    }
+    h
+}
+
 /// The Subscription members 5.11.2.4 matches a Context Source Registration
 /// on, plus the @context the internal Registration Subscription is read
 /// under. Kept in one place: create and update must offer the very same
@@ -183,6 +199,17 @@ const CSR_MATCH_MEMBERS: [&str; 6] = [
 /// with the urn:antares:distsub endpoint handled in-process by notify.
 pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Value) {
     if !distributed(sub) {
+        return;
+    }
+    // 6.3.18 ("to avoid infinite loops"): a forwarded copy whose Via chain
+    // already names this broker has come full circle — it serves locally,
+    // and the distributed half is not created, so mutually registered
+    // brokers cannot re-forward copies of copies without bound. via_loop
+    // also enforces the MAX_VIA_HOPS ceiling on a forged chain.
+    if crate::federation::via_loop(
+        &sub_via_headers(sub),
+        &crate::federation::alias_for(&st.host_alias, tenant),
+    ) {
         return;
     }
     let Some(own_id) = sub.get("id").and_then(Value::as_str) else {
@@ -320,6 +347,7 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
                 &reg_id,
                 &reg,
                 &ctx_url,
+                &sub_via_headers(&sub2),
                 Some(copy),
             )
             .await;
@@ -359,6 +387,9 @@ pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: 
         let ctx_url = sub_ctx_url(st, &Value::Null);
         crate::spawn(async move {
             let reg = forward_reg(stored, &reg_id, &endpoint);
+            // the Subscription is already deleted, so its stored chain is
+            // gone — a delete-forward cannot create a copy, so a fresh
+            // one-hop chain is loop-safe
             forward_sub(
                 &st2,
                 &t2,
@@ -367,6 +398,7 @@ pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: 
                 &reg_id,
                 &reg,
                 &ctx_url,
+                &HeaderMap::new(),
                 None,
             )
             .await;
@@ -421,6 +453,8 @@ pub(crate) async fn on_csource_notification(
     }
     let ctx = crate::notify::sub_context(st, &sub).await;
     let ctx_url = sub_ctx_url(st, &sub);
+    let via = sub_via_headers(&sub);
+    let seen = crate::federation::via_tokens(&via);
     let reason = reason.unwrap_or("updated");
     for reg in regs {
         let Some(reg_id) = reg.get("id").and_then(Value::as_str) else {
@@ -429,6 +463,16 @@ pub(crate) async fn on_csource_notification(
         // auxiliary registrations take no part (5.8.1.4 lists exclusive,
         // redirect and inclusive only)
         if reg.get("mode").and_then(Value::as_str) == Some("auxiliary") {
+            continue;
+        }
+        // Table 6.3.18-2: the Via listing "is used when determining matching
+        // registrations" — a Context Source the Subscription already
+        // travelled through must not receive a copy of it back.
+        if reg
+            .get("contextSourceAlias")
+            .and_then(Value::as_str)
+            .is_some_and(|a| seen.iter().any(|t| t == a))
+        {
             continue;
         }
         let Some(endpoint) = reg.get("endpoint").and_then(Value::as_str).map(|e| {
@@ -483,6 +527,7 @@ pub(crate) async fn on_csource_notification(
                     reg_id,
                     reg,
                     &ctx_url,
+                    &via,
                     Some(copy),
                 )
                 .await;
@@ -506,6 +551,7 @@ pub(crate) async fn on_csource_notification(
                     reg_id,
                     reg,
                     &ctx_url,
+                    &via,
                     Some(copy),
                 )
                 .await;
@@ -521,6 +567,7 @@ pub(crate) async fn on_csource_notification(
                     reg_id,
                     reg,
                     &ctx_url,
+                    &via,
                     None,
                 )
                 .await;
@@ -554,6 +601,8 @@ fn reduced_copy(
     let Some(o) = copy.as_object_mut() else {
         return Some(copy);
     };
+    // __via travels as the Via HTTP header the forward extends (6.3.17),
+    // never as a body member
     for k in [
         "status",
         "timesSent",
@@ -563,6 +612,7 @@ fn reduced_copy(
         "createdAt",
         "modifiedAt",
         "__context",
+        "__via",
         "localOnly",
     ] {
         o.remove(k);
@@ -654,6 +704,9 @@ fn reduced_copy(
 
 /// One forwarded subscription operation, through the shared federation
 /// forward (egress policy, Via, contextSourceInfo, tenant mapping).
+/// `via` is the chain the Subscription arrived with ([`sub_via_headers`]);
+/// the forward appends this broker's alias to it (6.3.17), so downstream
+/// brokers see the full path and can cut a loop.
 #[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 async fn forward_sub(
     st: &AppState,
@@ -663,21 +716,12 @@ async fn forward_sub(
     reg_id: &str,
     reg: &Value,
     ctx_url: &str,
+    via: &HeaderMap,
     body: Option<Value>,
 ) -> (u16, Value) {
     let fed = crate::federation::fed_reg_of(reg_id, reg);
-    let (status, body, _) = crate::federation::forward(
-        st,
-        method,
-        url,
-        &[],
-        &HeaderMap::new(),
-        tenant,
-        &fed,
-        ctx_url,
-        body,
-    )
-    .await;
+    let (status, body, _) =
+        crate::federation::forward(st, method, url, &[], via, tenant, &fed, ctx_url, body).await;
     (status, body)
 }
 
@@ -910,6 +954,7 @@ mod tests {
             "createdAt": "2026-01-01T00:00:00Z",
             "modifiedAt": "2026-01-02T00:00:00Z",
             "__context": "http://example.org/ctx.jsonld",
+            "__via": "1.1 upstream-broker",
             "notification": {
                 "attributes": [format!("{DC}speed")],
                 "pick": ["speed"],
@@ -955,7 +1000,8 @@ mod tests {
             json!([format!("{DC}speed")]),
             "watchedAttributes are intersected with the registered names"
         );
-        // local-only bookkeeping never leaves the broker
+        // local-only bookkeeping never leaves the broker — the Via chain
+        // travels as the HTTP header the forward extends, never in the body
         for k in [
             "status",
             "timesSent",
@@ -965,6 +1011,7 @@ mod tests {
             "createdAt",
             "modifiedAt",
             "__context",
+            "__via",
             "localOnly",
         ] {
             assert!(copy.get(k).is_none(), "{k} must not be forwarded: {copy}");
@@ -1120,6 +1167,49 @@ mod tests {
         assert!(
             csr.get("q").is_none(),
             "q filters Entity Attributes, not registration properties: {csr}"
+        );
+    }
+
+    /// 6.3.18: the Via header exists "to avoid infinite loops". A forwarded
+    /// Subscription copy (5.8.1.4) arrives with the Via chain of the brokers
+    /// it has already passed through; a chain that names THIS broker means
+    /// the copy has looped back, so the Subscription serves locally and the
+    /// distributed half is NOT created — otherwise two mutually registered
+    /// brokers re-forward copies of copies without bound.
+    #[tokio::test]
+    async fn clause_6_3_18_looping_via_chain_suppresses_the_distributed_half() {
+        let st = AppState::new("antares-ds-viahost".into());
+        let t = TenantId::default();
+        // the copy's chain already names this broker's own alias
+        let mut looped = sub_doc();
+        looped["__via"] = json!("1.1 sourceX, 1.1 antares-ds-viahost");
+        let own = looped["id"].as_str().expect("id").to_owned();
+        st.store
+            .create(&t, Kind::Subscription, &own, looped.clone())
+            .expect("create");
+        on_subscription_created(&st, &t, &looped);
+        assert!(
+            ds_get(&st, &t, &own).get("csr_sub").is_none(),
+            "a looped copy must not create the internal Registration Subscription"
+        );
+        // positive control: a chain naming only OTHER brokers is not a loop
+        let mut chained = sub_doc();
+        chained["id"] = json!("urn:ngsi-ld:Subscription:chained");
+        chained["__via"] = json!("1.1 sourceX");
+        st.store
+            .create(
+                &t,
+                Kind::Subscription,
+                "urn:ngsi-ld:Subscription:chained",
+                chained.clone(),
+            )
+            .expect("create");
+        on_subscription_created(&st, &t, &chained);
+        assert!(
+            ds_get(&st, &t, "urn:ngsi-ld:Subscription:chained")
+                .get("csr_sub")
+                .is_some(),
+            "a pass-through chain (A->B->C) must keep the distributed half"
         );
     }
 

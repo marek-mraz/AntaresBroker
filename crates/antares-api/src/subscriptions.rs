@@ -470,7 +470,9 @@ pub fn normalize_subscription(
             // member. This function only ever sees client input — a create
             // body or a patch fragment — so dropping the member here stops a
             // subscriber both from seeding it and from replacing it later.
-            "__context" => continue,
+            // __via is the same class: the 6.3.18 chain comes from the Via
+            // HTTP header of the creating request, never from the body.
+            "__context" | "__via" => continue,
             "scopeQ" | "lang" | "subscriptionName" | "name" | "description" | "jsonldContext"
             | "ngsildConformance" | "datasetId" => {
                 out.insert(k.clone(), v.clone());
@@ -519,7 +521,7 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
     let mut out = Map::new();
     for (k, v) in obj {
         match k.as_str() {
-            "__context" => continue,
+            "__context" | "__via" => continue,
             "createdAt" | "modifiedAt" if !sys_attrs => continue,
             "entities" => {
                 let entities: Vec<Value> = v
@@ -653,6 +655,13 @@ pub async fn create(
     // notification @context = the creating request's context (5.8.6),
     // stored as its own column — internal member, stripped on output.
     norm.insert("__context".into(), parsed.ctx.source.clone());
+    // 6.3.17/6.3.18: a Subscription arriving as a forwarded copy (5.8.1.4)
+    // carries the Via chain of the brokers it has passed through — kept on
+    // the stored document so the distributed half can extend the chain
+    // outbound and refuse to re-forward a copy that has looped back.
+    if let Some(via) = crate::federation::inbound_via(headers) {
+        norm.insert("__via".into(), Value::String(via));
+    }
     // Array @context (>1 entry): the broker must host it at its own URL as an
     // ImplicitlyCreated @context, surfaced via jsonldContext (5.13.1, 050_03)
     if !norm.contains_key("jsonldContext") {
@@ -1109,16 +1118,26 @@ mod tests {
     /// 5.8.4 serve the 5.2.12 data type, which has no such member.
     #[test]
     fn clause_5_8_6_internal_context_member_is_client_proof() {
-        let hostile = json!({"__context": "http://attacker.invalid/ctx.jsonld"});
+        let hostile = json!({"__context": "http://attacker.invalid/ctx.jsonld",
+                             "__via": "1.1 forged-alias"});
         let created = norm(&sub(hostile.clone())).expect("valid subscription");
         assert!(
             !created.contains_key("__context"),
             "a client-supplied __context must not reach storage: {created:?}"
         );
+        assert!(
+            !created.contains_key("__via"),
+            "a body member must not forge the Via chain — the chain comes \
+             from the HTTP header only: {created:?}"
+        );
         let patched = frag(&hostile).expect("valid fragment");
         assert!(
             !patched.contains_key("__context"),
             "a patch fragment must not replace the notification @context: {patched:?}"
+        );
+        assert!(
+            !patched.contains_key("__via"),
+            "a patch fragment must not rewrite the stored Via chain: {patched:?}"
         );
         let ctx = Loader::new().core();
         let stored = json!({
@@ -1127,6 +1146,7 @@ mod tests {
             "entities": [{"type": "Building"}],
             "notification": {"endpoint": {"uri": "http://localhost:1111/notify"}},
             "__context": "https://example.org/private-ctx.jsonld",
+            "__via": "1.1 upstream-broker",
         });
         for csource in [false, true] {
             for sys in [false, true] {
@@ -1138,6 +1158,11 @@ mod tests {
                 assert!(
                     !out.to_string().contains("private-ctx"),
                     "served representation leaked the internal @context value: {out}"
+                );
+                assert!(
+                    !out.to_string().contains("__via")
+                        && !out.to_string().contains("upstream-broker"),
+                    "5.8.3/5.8.4 serve the 5.2.12 data type, which has no Via member: {out}"
                 );
             }
         }
