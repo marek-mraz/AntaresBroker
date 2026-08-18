@@ -184,12 +184,18 @@ const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
-    const request = new Request(`http://localhost:${port}${req.url}`, {
+    const rawUrl = `http://localhost:${port}${req.url}`;
+    const request = new Request(rawUrl, {
       method: req.method,
       headers: req.headers,
       body: body.length ? body : undefined,
       duplex: "half",
     });
+    // WHATWG URL parsing inside Request normalizes percent-encoded dot
+    // segments (/attrs/%2e%2e re-targets the parent resource). Natively
+    // hyper hands the router the wire path untouched; restore it the same
+    // way the egress fetch restores Response.url above.
+    Object.defineProperty(request, "url", { value: rawUrl });
     const resp = await broker.fetch(request);
     const headers = {};
     resp.headers.forEach((v, k) => {
