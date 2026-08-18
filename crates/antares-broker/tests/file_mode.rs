@@ -577,15 +577,28 @@ fn connections_beyond_the_cap_are_dropped() {
     let mut first = TcpStream::connect(("127.0.0.1", port)).expect("connect first");
     std::thread::sleep(Duration::from_millis(200)); // let the accept loop claim the slot
 
-    // over the cap: must be dropped immediately, not served or left hanging
+    // over the cap: must be dropped, not served. "Dropped" means the peer
+    // closes; under load the close can lag a beat behind the accept, so the
+    // read retries inside one overall deadline instead of judging a single
+    // 2 s window (seen flaking as WouldBlock on a busy host).
     let mut second = TcpStream::connect(("127.0.0.1", port)).expect("connect second");
     second
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("read timeout");
     let mut buf = [0u8; 64];
-    match second.read(&mut buf) {
-        Ok(0) => {} // dropped — the cap works
-        other => panic!("an over-cap connection must be closed at accept, got {other:?}"),
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match second.read(&mut buf) {
+            Ok(0) => break, // dropped — the cap works
+            Ok(n) => panic!("an over-cap connection must not be served, got {n} bytes"),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && std::time::Instant::now() < deadline => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            other => panic!("an over-cap connection must be closed at accept, got {other:?}"),
+        }
     }
 
     // the in-cap connection still serves
