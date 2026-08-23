@@ -115,4 +115,4 @@ is refused at startup rather than partially served.
 | Role-pair exactly-once semantics (duplicated matcher/notifier/temporal/registry pods) | ci.yml nats job (`nats_e2e::role_pairs_exactly_once_semantics`, live PG + NATS) |
 | NATS bus + role split e2e | ci.yml nats job (`nats_e2e`, live PG + NATS) |
 | k8s manifests boot | k8s-smoke.yml kind smoke (dispatch) |
-| Coverage | strict.yml coverage job (daily line-coverage floor). The merged lcov/html page came from etsi-coverage.yml, removed 2026-08; the report-page coverage badge reads "no recent run" until a producer of the `etsi-coverage-merged` artifact returns |
+| Coverage | strict.yml coverage job (daily line-coverage floor) + etsi-coverage.yml (Mon 04:41 UTC) → merged lcov/html on the report page |
