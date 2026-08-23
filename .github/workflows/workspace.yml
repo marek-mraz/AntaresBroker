@@ -6,7 +6,7 @@ name: workspace
 # (workflow_call): ci.yml (every push) and full.yml (twice a week +
 # tags/dispatch) both gate on THIS job, so the graph is identical
 # everywhere: workspace -> builds (image ‖ wasm) -> the cell matrix.
-# Extracted 2026-08-16 from the two drifting copies in ci.yml and full.yml.
+# Extracted from the two drifting copies in ci.yml and full.yml.
 
 on:
   workflow_call:

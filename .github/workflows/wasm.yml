@@ -16,7 +16,7 @@ name: wasm
 # and repo Settings → Pages → Custom domain + Enforce HTTPS.
 
 on:
-  # Manual only (decision 2026-08-07): no push trigger. Deploying the
+  # Manual only (standing decision): no push trigger. Deploying the
   # playground is always an explicit `Run workflow` with deploy_pages ticked —
   # so remember the live site trails master until someone dispatches this.
   workflow_dispatch:
@@ -85,11 +85,11 @@ jobs:
           # custom domain: the CNAME file travels with every deploy
           echo "$PAGES_DOMAIN" > site/CNAME
       - name: Fold the latest ETSI conformance report into the site
-        # Backlog 08-14 item 1: the ONE Pages deployment carries the
+        # The ONE Pages deployment carries the
         # playground AND /reports/ — the newest ETSI-matrix-results bundle is
         # rendered to a static page + shields badges (combined + per-cell).
         # The fold lives in dev/fold-reports.sh, SHARED with pages.yml
-        # (08-15b item 7) so the two Pages paths cannot drift; a missing
+        # so the two Pages paths cannot drift; a missing
         # bundle renders a placeholder instead of failing the site deploy.
         continue-on-error: true
         env:

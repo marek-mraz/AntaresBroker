@@ -1,7 +1,8 @@
 name: advisories
 
 # Weekly cargo-deny sweep; a new advisory auto-files an
-# issue instead of silently reddening a badge nobody watches.
+# issue instead of silently reddening a badge nobody watches (the shared
+# .github/actions/failure-issue — its dedupe/file logic started here).
 on:
   schedule:
     - cron: "23 4 * * 1"
@@ -28,10 +29,9 @@ jobs:
           exit "${PIPESTATUS[0]}"
       - name: File an issue on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title="Security advisory sweep failed ($(date -u +%F))"
-          gh issue list --state open --search "\"Security advisory sweep failed\"" --json number -q '.[0].number' | /usr/bin/grep -q . && exit 0
-          gh issue create --title "$title" --label security \
-            --body "$(printf 'Weekly cargo-deny advisories run went red.\n\n```\n%s\n```\nRun: %s' "$(tail -40 deny.log)" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+        uses: ./.github/actions/failure-issue
+        with:
+          title: Security advisory sweep failed
+          label: security
+          body: Weekly cargo-deny advisories run went red.
+          log-file: deny.log

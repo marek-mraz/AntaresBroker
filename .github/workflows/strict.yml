@@ -154,3 +154,23 @@ jobs:
           components: miri
       - uses: Swatinem/rust-cache@v2
       - run: cargo +nightly miri test -p antares-model -p antares-ql -p antares-matcher
+
+  alarm:
+    # A red scheduled wall auto-files a deduped issue (the shared
+    # failure-issue action) — dispatch runs are watched by the dispatcher.
+    name: File an issue on a red scheduled run
+    if: failure() && github.event_name == 'schedule'
+    needs: [hygiene, fuzz-regression, coverage, tsan, miri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/failure-issue
+        with:
+          title: strict wall failed
+          body: >-
+            A scheduled strict run went red — doc/machete hygiene, the
+            fuzz-regression replay, the coverage floor, TSan or Miri.
+            The run log names the job.

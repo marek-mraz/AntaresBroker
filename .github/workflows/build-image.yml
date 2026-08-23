@@ -1,14 +1,14 @@
 name: build-image
 
 # Reusable (workflow_call only): the ONE definition of "build the broker
-# image and hand it downstream as an artifact". Extracted 2026-08-23 from
+# image and hand it downstream as an artifact". Extracted from
 # five drifting copies. Callers:
 #   arch: amd64 — etsi-matrix.yml (feeds the cells), roll-weekly.yml,
 #                 k8s-smoke.yml. Tag antares-local:latest, artifact
 #                 antares-image (antares-image.tgz inside — downstream
 #                 `docker load` and the kind smoke depend on that filename).
 #   arch: arm64 — ci.yml and full.yml: the arm64 half of the published
-#                 manifest, BUILT never tested (decision 2026-08-07: every
+#                 manifest, BUILT never tested (standing decision: every
 #                 ETSI/RSS gate runs amd64 only; the arm signal is the
 #                 workspace job testing natively on arm). Tag
 #                 antares-local:arm64, artifact antares-image-arm64.

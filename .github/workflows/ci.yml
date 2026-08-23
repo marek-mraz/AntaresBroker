@@ -5,7 +5,7 @@ name: ci
 #   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
 #                   └──→ build arm64 image ──────────────→ publish :dev (master, all green)
 #
-# No wasm here (decision 2026-08-16): the browser bundle is built, ETSI-
+# No wasm here: the browser bundle is built, ETSI-
 # tested (wasm-file cell) and published as antares-wasm-broker:dev by
 # full.yml — publish follows proof, and a commit that only touches
 # native code doesn't pay a wasm toolchain.
@@ -42,8 +42,7 @@ jobs:
   matrix:
     # The per-commit ETSI gate: the QUICK preset (file postgres timescale).
     # The full seven-cell matrix runs twice a week, on v* tags and by manual
-    # dispatch — all in full.yml (cadence decision 2026-08-16, retimed
-    # 2026-08-23 from every-3-days to twice a week).
+    # dispatch — all in full.yml.
     name: ETSI cell matrix
     # GATE: no image build / ETSI run unless the workspace suite is green.
     needs: workspace

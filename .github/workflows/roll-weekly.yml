@@ -5,7 +5,7 @@ name: roll-weekly
 # replicas underneath it, postgres mode (shared state + bus=nats) — runs
 # weekly so the "zero-downtime rolling update" README claim is continuously
 # proven, and its badge goes red the week it stops being true. This is the
-# roll job's ONLY home since 2026-08-17 (full.yml's copy was removed);
+# roll job's ONLY home (full.yml's copy was removed);
 # the image build is the shared build-image.yml and shares its type=gha
 # layer cache, so a quiet week rebuilds only the antares-* crates.
 
@@ -86,3 +86,23 @@ jobs:
           echo "K8 roll gate = $gate"
           cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
+
+  alarm:
+    # The week the zero-downtime claim stops being true, an issue says so —
+    # not just a badge (the shared failure-issue action, deduped).
+    name: File an issue on a red scheduled run
+    if: failure() && github.event_name == 'schedule'
+    needs: [build, etsi-roll]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/failure-issue
+        with:
+          title: roll-under-suite drill failed
+          body: >-
+            The weekly rolling-update drill went red — the suite has no
+            retries, so this is a real drain/exactly-once bug. Start with
+            failures.csv and roll-loop.log in the ETSI-roll-weekly artifact.

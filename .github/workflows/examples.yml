@@ -18,6 +18,9 @@ jobs:
     name: Run every example
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write # the drift alarm
     steps:
       - uses: actions/checkout@v5
 
@@ -84,3 +87,14 @@ jobs:
             localhost:9090/ngsi-ld/v1/entities -H 'Content-Type: application/ld+json' \
             -d '{"id":"urn:ngsi-ld:Test:ci:1","type":"Test","@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
           kill $shim
+
+      - name: File an issue on scheduled drift
+        # tag runs are the release process — whoever tagged is watching
+        if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/failure-issue
+        with:
+          title: examples drifted red
+          body: >-
+            The weekly examples run went red — a documented example no
+            longer works against the current image. The run log names the
+            example step.

@@ -1,6 +1,6 @@
 name: k8s-smoke
 
-# The k8s reference-manifest smoke, parked out of full.yml (2026-08-17):
+# The k8s reference-manifest smoke, parked out of full.yml:
 # dispatch-only for now. Builds the image via the shared build-image.yml
 # (shares the type=gha layer cache), lints every reference manifest, then
 # kind-deploys the self-contained subset.

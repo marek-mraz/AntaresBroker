@@ -5,9 +5,9 @@ name: full
 # both runtimes, the wasm Node tier, and the reusable cell matrix at the
 # FULL preset (all seven cells — memory/file/postgres/timescale, both
 # rolling -nats fleets, wasm-file — each serial-all-suites against one
-# stack; the former etsi-serial job duplicated this, removed 2026-08-16).
+# stack; the former etsi-serial job duplicated this and was removed).
 #
-# etsi-full.yml was folded in HERE 2026-08-23: it duplicated this exact
+# etsi-full.yml was folded in HERE: it duplicated this exact
 # workspace→matrix graph on a 3-day cron. The schedule (now 2×/week) and
 # the antares-wasm-broker:dev publish live here since; pages.yml listens to
 # THIS workflow, so the README badges + /reports/ page always render a full
@@ -17,7 +17,7 @@ name: full
 # Publishing: a green v* tag mints the release image (:<version> +
 # :latest); schedule/dispatch runs publish only the ETSI-proven wasm dev
 # image (the native :dev ships per-commit from ci.yml).
-# Moved out 2026-08-17: the roll-under-suite drill lives in roll-weekly.yml
+# Moved out: the roll-under-suite drill lives in roll-weekly.yml
 # (weekly + dispatch), the k8s manifest smoke in k8s-smoke.yml (dispatch).
 
 on:
@@ -100,7 +100,7 @@ jobs:
       contents: read
       actions: write # the summary job deletes the merged per-cell artifacts
 
-  # etsi-serial was REMOVED 2026-08-16: it duplicated the matrix exactly.
+  # etsi-serial was REMOVED: it duplicated the matrix exactly.
   # Its comment claimed the matrix cells got a fresh stack per suite — true
   # in the 32-cell era, stale since the matrix became all-suites-per-cell:
   # every cell now runs the suites IN ORDER against ONE stack with the
@@ -161,6 +161,28 @@ jobs:
           cat results/wasm-node/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
 
+  alarm:
+    # A red scheduled matrix must not wait for someone to notice the badge:
+    # file a deduped issue (shared failure-issue action). Tag and dispatch
+    # runs are watched by whoever started them.
+    name: File an issue on a red scheduled run
+    if: failure() && github.event_name == 'schedule'
+    needs: [workspace, wasm, matrix, etsi-wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/failure-issue
+        with:
+          title: full matrix scheduled run failed
+          body: >-
+            The twice-a-week full run went red — workspace tests, a matrix
+            cell, or a wasm tier. The Pages report and badges will show the
+            red cells; the run's ETSI-matrix-results bundle has every
+            failure with expected-vs-got.
+
   build-arm:
     # The arm64 half of the released manifest — BUILT, never tested; the
     # rationale lives in the shared build-image.yml. Tag runs only.
@@ -171,7 +193,7 @@ jobs:
       arch: arm64
 
   publish-wasm:
-    # The wasm broker dev image (folded in from etsi-full.yml 2026-08-23):
+    # The wasm broker dev image (folded in from etsi-full.yml):
     # publishes AFTER the wasm-file cell ran the full ETSI suite against
     # these exact bytes and the browser/Node tiers passed — publish follows
     # proof. Schedule + dispatch runs only; a v* tag ships the same bundle

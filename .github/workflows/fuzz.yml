@@ -5,10 +5,16 @@ name: fuzz
 # input path. Any crash/panic fails the job and uploads the artifact input.
 # Found a crash? Commit the input to fuzz/regressions/<target>/ with the
 # fix — strict.yml replays that corpus daily so it can never regress.
+# A crash also auto-files a security-labeled issue (per target, deduped) —
+# a red twice-a-week run must not sit unnoticed.
 on:
   schedule:
     - cron: "17 3 * * 1,4" # twice a week, Mon + Thu 03:17 UTC
   workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # the crash alarm
 
 jobs:
   fuzz:
@@ -33,3 +39,16 @@ jobs:
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
+      - name: File an issue on a crash
+        # dispatch runs file too — a crash is a real bug worth tracking
+        # either way, and the open issue dedupes repeats
+        if: failure()
+        uses: ./.github/actions/failure-issue
+        with:
+          title: "Fuzz crash in ${{ matrix.target }}"
+          label: security
+          body: >-
+            The fuzz run crashed the `${{ matrix.target }}` target. The crash
+            input is uploaded as the `fuzz-artifacts-${{ matrix.target }}`
+            artifact — commit it to `fuzz/regressions/${{ matrix.target }}/`
+            with the fix so strict.yml's daily replay pins it.

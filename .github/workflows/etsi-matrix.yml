@@ -1,7 +1,7 @@
 name: etsi-matrix
 
 # Reusable (workflow_call only): ONE image build feeding the cell matrix.
-# Two presets (cadence decision 2026-08-16):
+# Two presets:
 #   quick — file, postgres, timescale. The per-commit gate (ci.yml).
 #   full  — those PLUS memory, postgres-nats/timescale-nats (the 5-role ×
 #           2-replica fleet behind the LB, ANTARES_BUS=nats, CONTINUOUSLY
@@ -17,8 +17,8 @@ on:
   workflow_call:
     inputs:
       preset:
-        # quick = the per-commit gate (file/postgres/timescale — decision
-        #         2026-08-16: memory/nats-roll/wasm move to the full run);
+        # quick = the per-commit gate (file/postgres/timescale —
+        #         memory/nats-roll/wasm live in the full run);
         # full  = all seven cells (full.yml: twice-a-week schedule, v* tags,
         #         manual dispatches).
         description: "quick (3 cells, per commit) or full (all 7 cells)"

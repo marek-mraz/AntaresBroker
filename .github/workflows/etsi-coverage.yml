@@ -144,3 +144,23 @@ jobs:
             merged.info
             html
           retention-days: 90
+
+  alarm:
+    # Report-only workflow, but a silently-dead weekly report is how the
+    # coverage page rots — a red scheduled run files a deduped issue.
+    name: File an issue on a red scheduled run
+    if: failure() && github.event_name == 'schedule'
+    needs: [cover, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/failure-issue
+        with:
+          title: ETSI coverage run failed
+          body: >-
+            The weekly ETSI-driven coverage run went red — a per-store
+            instrumented run failed, or the merged ratchet dropped more than
+            1pt against the published badge.

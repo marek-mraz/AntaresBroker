@@ -1,12 +1,12 @@
 name: pages
 
-# Auto-redeploy of the Pages site after every FULL matrix run (backlog
-# 08-15b item 7; retargeted 2026-08-16 with the quick/full preset split) —
+# Auto-redeploy of the Pages site after every FULL matrix run
+# (retargeted with the quick/full preset split) —
 # the README's seven per-cell ETSI badges and the /reports/ page always
 # describe a full 7-cell run. Per-commit ci runs gate on the quick preset
 # and upload ETSI-quick-results, which the fold deliberately ignores.
 #
-# This OVERTURNS the 2026-08-07 "Pages deploys are manual-only" decision for
+# This OVERTURNS the earlier "Pages deploys are manual-only" decision for
 # the REPORTS half of the site. The playground half is REUSED from the
 # newest antares-www artifact (produced by a wasm.yml run) — this workflow
 # never rebuilds wasm; wasm.yml's manual dispatch keeps working and remains
@@ -14,7 +14,7 @@ name: pages
 
 on:
   workflow_run:
-    # full.yml absorbed etsi-full 2026-08-23 — the twice-a-week schedule
+    # full.yml absorbed etsi-full — its twice-a-week schedule
     # (and dispatches) fire this; tag runs don't (head_branch is the tag,
     # which the master filter rejects).
     workflows: [full]
@@ -46,6 +46,7 @@ jobs:
       actions: read
       pages: write
       id-token: write
+      issues: write # the deploy alarm
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -90,3 +91,14 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: File an issue on a failed auto-deploy
+        # a broken auto-deploy means the public report goes silently stale
+        if: failure() && github.event_name == 'workflow_run'
+        uses: ./.github/actions/failure-issue
+        with:
+          title: Pages report deploy failed
+          body: >-
+            The automatic Pages redeploy after a full matrix run went red —
+            the /reports/ page and badges are now stale. Rerun via dispatch
+            once fixed.

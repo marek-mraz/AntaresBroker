@@ -1,0 +1,45 @@
+name: failure-issue
+description: >
+  File a deduplicated GitHub issue when a scheduled run goes red — the
+  advisories.yml pattern, extracted so every scheduled workflow
+  (advisories, fuzz, strict, full, roll-weekly, etsi-coverage, examples,
+  pages) can alarm instead of silently reddening a badge nobody watches.
+  One open issue per title stem: while it stays open, later red runs file
+  nothing. The caller needs `issues: write` and a checked-out repo (this is
+  a local composite action).
+
+inputs:
+  title:
+    description: "Stable title stem — the dedupe key; the date is appended"
+    required: true
+  label:
+    description: "Issue label (created if missing)"
+    required: false
+    default: ci-alarm
+  body:
+    description: "Body text above the run link"
+    required: false
+    default: "A scheduled run went red."
+  log-file:
+    description: "Optional file whose last 40 lines are appended to the body"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TITLE: ${{ inputs.title }}
+        LABEL: ${{ inputs.label }}
+        BODY: ${{ inputs.body }}
+        LOG: ${{ inputs.log-file }}
+      run: |
+        gh issue list --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' | /usr/bin/grep -q . && exit 0
+        gh label create "$LABEL" --color B60205 --description "auto-filed by a red scheduled run" 2>/dev/null || true
+        if [ -n "$LOG" ] && [ -f "$LOG" ]; then
+          BODY="$(printf '%s\n\n```\n%s\n```' "$BODY" "$(tail -40 "$LOG")")"
+        fi
+        gh issue create --title "$TITLE ($(date -u +%F))" --label "$LABEL" \
+          --body "$(printf '%s\n\nRun: %s' "$BODY" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
