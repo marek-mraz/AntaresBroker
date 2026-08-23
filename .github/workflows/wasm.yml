@@ -18,7 +18,7 @@ name: wasm
 on:
   # Manual only (standing decision): no push trigger. Deploying the
   # playground is always an explicit `Run workflow` with deploy_pages ticked —
-  # so remember the live site trails master until someone dispatches this.
+  # so remember the live site trails dev until someone dispatches this.
   workflow_dispatch:
     inputs:
       deploy_pages:

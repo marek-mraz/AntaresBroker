@@ -3,7 +3,12 @@ name: ci
 # The DEV pipeline — workspace tests GATE everything downstream:
 #
 #   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
-#                   └──→ build arm64 image ──────────────→ publish :dev (master, all green)
+#                   └──→ build arm64 image ──────────────→ publish :dev (dev branch, all green)
+#
+# Branch model: feature branches PR into `dev` (this workflow is the
+# required check), promotion PRs `dev` → `main` are gated by full.yml.
+# Both branches are merge-only — protection lives in GitHub rulesets
+# (dev/branch-protection.sh), not here.
 #
 # No wasm here: the browser bundle is built, ETSI-
 # tested (wasm-file cell) and published as antares-wasm-broker:dev by
@@ -20,11 +25,13 @@ name: ci
 # k8s-smoke.yml. Shared pieces: workspace.yml (the test gate),
 # etsi-matrix.yml (the cell matrix), build-image.yml (image builds).
 
-# Runs on push to master, on pull requests, and on manual dispatch.
+# Runs on merges to dev, on PRs targeting dev, and on manual dispatch.
+# PRs into main run full.yml instead — the promotion gate.
 on:
   push:
-    branches: [master]
+    branches: [dev]
   pull_request:
+    branches: [dev]
   workflow_dispatch:
 
 # A newer commit supersedes a running pipeline.
@@ -59,21 +66,21 @@ jobs:
     name: Build the arm64 image (untested)
     # GATE: only build after the workspace suite passes.
     needs: workspace
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/dev'
     uses: ./.github/workflows/build-image.yml
     with:
       arch: arm64
 
   publish-dev:
-    # Every green commit on master ships a DEV image: the sha and a moving
+    # Every green merge to dev ships a DEV image: the sha and a moving
     # `dev` tag. Never `latest` — that belongs to a released version, so
-    # `docker pull …:latest` can't silently land on an untagged master build.
+    # `docker pull …:latest` can't silently land on an unreleased build.
     # The wasm broker image publishes from full.yml, after its cell.
     name: Publish the dev image to GHCR
-    # Master pushes/dispatches publish :dev; PRs never do. All signals —
-    # workspace tests, the cell matrix (quick preset, all 8 suites incl.
-    # IOP per cell) and the arm build — must be green.
-    if: github.ref == 'refs/heads/master' && success()
+    # Merges to dev publish :dev; PRs never do. All signals — workspace
+    # tests, the cell matrix (quick preset, all 8 suites incl. IOP per
+    # cell) and the arm build — must be green.
+    if: github.ref == 'refs/heads/dev' && success()
     needs: [workspace, matrix, build-arm]
     runs-on: ubuntu-latest
     permissions:
