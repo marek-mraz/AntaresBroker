@@ -1,15 +1,30 @@
 name: full
 
-# The EVERYTHING pipeline — manual dispatch, or automatically on a v* tag:
-# workspace tests, the browser/wasm artifact + wasm Node tier, the reusable
-# cell matrix (FULL preset: all seven cells, each already serial-all-suites
-# against one stack — the former etsi-serial job duplicated this and was
-# removed 2026-08-16). A green v* tag publishes the release image
-# (:<version> + :latest); manual dispatches publish nothing.
+# The EVERYTHING pipeline — twice a week on schedule, on every v* tag, and
+# on manual dispatch: workspace tests, the browser/wasm artifact proven in
+# both runtimes, the wasm Node tier, and the reusable cell matrix at the
+# FULL preset (all seven cells — memory/file/postgres/timescale, both
+# rolling -nats fleets, wasm-file — each serial-all-suites against one
+# stack; the former etsi-serial job duplicated this, removed 2026-08-16).
+#
+# etsi-full.yml was folded in HERE 2026-08-23: it duplicated this exact
+# workspace→matrix graph on a 3-day cron. The schedule (now 2×/week) and
+# the antares-wasm-broker:dev publish live here since; pages.yml listens to
+# THIS workflow, so the README badges + /reports/ page always render a full
+# 7-cell run (per-commit quick bundles are named ETSI-quick-results and
+# never folded).
+#
+# Publishing: a green v* tag mints the release image (:<version> +
+# :latest); schedule/dispatch runs publish only the ETSI-proven wasm dev
+# image (the native :dev ships per-commit from ci.yml).
 # Moved out 2026-08-17: the roll-under-suite drill lives in roll-weekly.yml
 # (weekly + dispatch), the k8s manifest smoke in k8s-smoke.yml (dispatch).
 
 on:
+  schedule:
+    # Wed + Sat 03:23 UTC — the twice-a-week full proof, offset from
+    # strict's daily 02:41, fuzz's Mon+Thu 03:17 and roll-weekly's Tue 04:17.
+    - cron: "23 3 * * 3,6"
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -24,7 +39,7 @@ env:
 jobs:
   workspace:
     # The shared workspace-test gate (workflow_call) — one definition for
-    # ci/full/etsi-full, see .github/workflows/workspace.yml.
+    # ci and full, see .github/workflows/workspace.yml.
     name: Workspace tests
     uses: ./.github/workflows/workspace.yml
 
@@ -65,11 +80,11 @@ jobs:
           npm run build
       - name: Node tier smoke + browser tier
         run: ./dev/wasm-test.sh
-      - name: Upload the wasm bundle (release asset source)
-        uses: actions/upload-artifact@v6
-        with:
-          name: antares-wasm-pkg
-          path: www/pkg
+      # NO bundle upload here: the run's ONE antares-wasm-pkg artifact comes
+      # from the matrix's build-wasm job — the bytes the wasm-file cell
+      # ETSI-tested — and that is what publish-wasm and the release ship.
+      # (Uploading a second bundle under the same name would collide: v4+
+      # artifacts are immutable.)
 
   matrix:
     # The reusable cell matrix at the FULL preset (default): all seven cells
@@ -96,8 +111,8 @@ jobs:
     # artifact: five node shims serving the same .wasm a page loads
     # (WASM=1 in the one pipeline). MQTT stays excluded (no MQTT sink in a
     # browser build) and there is no RSS gate (the wasm size budget is the
-    # artifact's own gate). Serial-tier cadence: tags,
-    # nightly, manual.
+    # artifact's own gate). Cadence: this workflow's — twice a week, tags,
+    # manual.
     name: wasm Node tier (serial suites)
     needs: [workspace, wasm]
     runs-on: ubuntu-24.04-arm
@@ -147,35 +162,53 @@ jobs:
           [ "$gate" = PASS ]
 
   build-arm:
-    # The arm64 half of the released manifest — BUILT, never tested
-    # (decision 2026-08-07): all gates run amd64 only; the arm signal is
-    # ci.yml's workspace job testing natively on arm. No QEMU.
+    # The arm64 half of the released manifest — BUILT, never tested; the
+    # rationale lives in the shared build-image.yml. Tag runs only.
     name: Build the arm64 image (untested)
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    uses: ./.github/workflows/build-image.yml
+    with:
+      arch: arm64
+
+  publish-wasm:
+    # The wasm broker dev image (folded in from etsi-full.yml 2026-08-23):
+    # publishes AFTER the wasm-file cell ran the full ETSI suite against
+    # these exact bytes and the browser/Node tiers passed — publish follows
+    # proof. Schedule + dispatch runs only; a v* tag ships the same bundle
+    # as a release asset instead.
+    name: Publish the wasm dev image to GHCR
+    if: success() && !startsWith(github.ref, 'refs/tags/')
+    needs: [matrix, wasm, etsi-wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
     steps:
       - uses: actions/checkout@v5
 
+      - name: Download the ETSI-tested wasm bundle (the matrix's build-wasm)
+        uses: actions/download-artifact@v7
+        with:
+          name: antares-wasm-pkg
+          path: www/pkg
+
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build antares-local:arm64 (own cache scope)
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push antares-wasm-broker:dev (multi-arch — the .wasm bytes are arch-neutral)
         uses: docker/build-push-action@v6
         with:
           context: .
-          tags: antares-local:arm64
-          load: true
-          cache-from: type=gha,scope=arm64
-          cache-to: type=gha,mode=max,scope=arm64
-
-      - name: Export it for the publish job
-        run: docker save antares-local:arm64 | gzip > antares-image-arm64.tgz
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: antares-image-arm64
-          path: antares-image-arm64.tgz
-          retention-days: 3
+          file: Dockerfile.wasm
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/antares-wasm-broker:dev
+            ghcr.io/${{ github.repository_owner }}/antares-wasm-broker:dev-${{ github.run_number }}
 
   publish-release:
     # A version tag is the only thing that mints a production image, and it
@@ -268,6 +301,7 @@ jobs:
         with:
           pattern: release-bin-*
           merge-multiple: true
+      # the matrix's build-wasm bundle — the ETSI-tested bytes
       - uses: actions/download-artifact@v7
         with:
           name: antares-wasm-pkg

@@ -5,7 +5,7 @@ releases"). Each criterion is checked off only with evidence: run links or
 commit hashes recorded next to it.
 
 - [ ] **R1 — Three consecutive green full matrices.** Three back-to-back
-      `etsi-full` runs on master with every cell green (all seven,
+      `full` runs on master with every cell green (all seven,
       including `wasm-file`), no suite-fork or broker changes between
       them other than unrelated docs.
 - [ ] **R2 — HA soak test.** The role-split fleet (10 pods, NATS,

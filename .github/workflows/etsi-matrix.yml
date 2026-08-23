@@ -8,8 +8,7 @@ name: etsi-matrix
 #           rolling for the whole suite) and wasm-file (the BROWSER
 #           artifact: five dockerized node shims over the redb file store —
 #           the same .wasm a page loads, MQTT structurally excluded there).
-#           Runs every 3 days (etsi-full.yml), on v* tags (full.yml)
-#           and on manual dispatch.
+#           Runs twice a week + on v* tags + on manual dispatch (full.yml).
 # Each cell runs ALL 8 suites through the one pipeline, folded into the
 # per-cell summary tables + one bundle (quick bundles are named
 # ETSI-quick-results so the Pages fold only ever renders full runs).
@@ -19,8 +18,8 @@ on:
     inputs:
       preset:
         # quick = the per-commit gate (file/postgres/timescale — decision
-        #         2026-08-16: memory/nats-roll/wasm move to the 3-day full run);
-        # full  = all seven cells (the 3-day etsi-full schedule, full.yml tags,
+        #         2026-08-16: memory/nats-roll/wasm move to the full run);
+        # full  = all seven cells (full.yml: twice-a-week schedule, v* tags,
         #         manual dispatches).
         description: "quick (3 cells, per commit) or full (all 7 cells)"
         type: string
@@ -31,43 +30,14 @@ env:
 
 jobs:
   build:
-    # ONE image for the whole run. Every store mode tests the SAME bytes, and
-    # the image that ships is the image the suites ran against. Runs alongside
-    # the workspace job (one runner, no fan-out) — only the store matrix
-    # waits for tests to be green.
+    # ONE image for the whole run (the shared build-image.yml). Every store
+    # mode tests the SAME bytes, and the image that ships is the image the
+    # suites ran against. Runs alongside the workspace job (one runner, no
+    # fan-out) — only the store matrix waits for tests to be green.
     name: Build the image under test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build antares-local:latest (dep layer cached across runs)
-        # cargo-chef in the Dockerfile isolates the ~400 dependency crates in
-        # their own layer; type=gha persists it between runs, so a source-only
-        # commit rebuilds just the antares-* crates (~10 min → ~3).
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: antares-local:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Export it for the mode jobs
-        run: docker save antares-local:latest | gzip > antares-image.tgz
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: antares-image
-          path: antares-image.tgz
-          retention-days: 3
-
-      - name: Report image size
-        run: |
-          echo "## Image under test" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`antares-local:latest\` — $(docker image inspect antares-local:latest --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m antares-image.tgz | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"
+    uses: ./.github/workflows/build-image.yml
+    with:
+      arch: amd64
 
   build-wasm:
     # The browser artifact for the wasm-file cell — built ONCE in parallel

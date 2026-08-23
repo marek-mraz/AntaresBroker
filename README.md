@@ -271,8 +271,8 @@ STORE=postgres STOP_ON_ERROR=1 dev/etsi-pipeline.sh   # single suite/mode while 
 cells serially, so every mode costs its own wall-clock for a signal CI
 already produces. **CI gates every commit on the QUICK preset** — file,
 postgres, timescale (`ci.yml` → `etsi-matrix.yml`, one image build feeding
-the cells) — and **runs the FULL seven-cell matrix every 3 days**
-(`etsi-full.yml`, also on `v*` tags and manual dispatch): those three plus
+the cells) — and **runs the FULL seven-cell matrix twice a week**
+(`full.yml`, also on `v*` tags and manual dispatch): those three plus
 memory, `postgres-nats`/`timescale-nats` — the 10-container role-split
 fleet rolling continuously under the whole suite — and `wasm-file`: the
 BROWSER artifact, five dockerized Node shims over the redb file store,

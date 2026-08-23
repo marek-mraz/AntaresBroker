@@ -109,10 +109,10 @@ is refused at startup rather than partially served.
 | Claim | Workflow |
 |---|---|
 | ETSI conformance, per-commit gate (file/postgres/timescale × 8 suites) | ci.yml → etsi-matrix.yml `preset: quick` (every push) |
-| ETSI conformance, FULL seven cells (memory/file/postgres/timescale + the two rolling role-fleet cells + wasm-file) × 8 suites | etsi-full.yml (every 3 days + dispatch) and full.yml (`v*` tags); its bundle feeds [the report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) + per-cell badges |
+| ETSI conformance, FULL seven cells (memory/file/postgres/timescale + the two rolling role-fleet cells + wasm-file) × 8 suites | full.yml (twice a week + `v*` tags + dispatch); its bundle feeds [the report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) + per-cell badges |
 | The browser artifact serves the full API from a container (file store, serial suites + IOP) | the `wasm-file` matrix cell (`WASM=1 WASM_DOCKER=1 STORE=file` through the one pipeline — Dockerfile.wasm, the same www/pkg bytes a page loads) |
-| Zero-downtime rolling update | `roll-weekly` (Tue 04:17 UTC + dispatch) + the per-push `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
+| Zero-downtime rolling update | `roll-weekly` (Tue 04:17 UTC + dispatch) + the full-run `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
 | Role-pair exactly-once semantics (duplicated matcher/notifier/temporal/registry pods) | ci.yml nats job (`nats_e2e::role_pairs_exactly_once_semantics`, live PG + NATS) |
 | NATS bus + role split e2e | ci.yml nats job (`nats_e2e`, live PG + NATS) |
 | k8s manifests boot | k8s-smoke.yml kind smoke (dispatch) |
-| Coverage | etsi-coverage.yml (Mon 04:41 UTC) → merged lcov/html on the report page |
+| Coverage | strict.yml coverage job (daily line-coverage floor). The merged lcov/html page came from etsi-coverage.yml, removed 2026-08; the report-page coverage badge reads "no recent run" until a producer of the `etsi-coverage-merged` artifact returns |

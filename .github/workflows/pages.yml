@@ -14,7 +14,10 @@ name: pages
 
 on:
   workflow_run:
-    workflows: [etsi-full]
+    # full.yml absorbed etsi-full 2026-08-23 — the twice-a-week schedule
+    # (and dispatches) fire this; tag runs don't (head_branch is the tag,
+    # which the master filter rejects).
+    workflows: [full]
     types: [completed]
     branches: [master]
   workflow_dispatch:
@@ -29,7 +32,7 @@ env:
 jobs:
   publish:
     name: Fold reports + deploy Pages
-    # Deploy on a RED etsi-full run too: the badges and report page must
+    # Deploy on a RED full run too: the badges and report page must
     # turn red, not silently go stale on the last green numbers. Only
     # cancellation and skipping are non-events.
     if: >

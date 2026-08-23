@@ -3,11 +3,10 @@ name: workspace
 # The ONE workspace-test gate — fmt, clippy wall, the full cargo suite
 # across the feature matrix with live PostGIS/TimescaleDB/mosquitto/NATS,
 # cargo-deny, the ledger check and the SQL-injection guard. Reusable
-# (workflow_call): ci.yml (every push), full.yml (tags/dispatch) and
-# etsi-full.yml (the 3-day full matrix) all gate on THIS job, so the
-# graph is identical everywhere: workspace -> builds (image ‖ wasm) ->
-# the cell matrix. Extracted 2026-08-16 from the two drifting copies in
-# ci.yml and full.yml.
+# (workflow_call): ci.yml (every push) and full.yml (twice a week +
+# tags/dispatch) both gate on THIS job, so the graph is identical
+# everywhere: workspace -> builds (image ‖ wasm) -> the cell matrix.
+# Extracted 2026-08-16 from the two drifting copies in ci.yml and full.yml.
 
 on:
   workflow_call:

@@ -6,13 +6,13 @@ name: roll-weekly
 # weekly so the "zero-downtime rolling update" README claim is continuously
 # proven, and its badge goes red the week it stops being true. This is the
 # roll job's ONLY home since 2026-08-17 (full.yml's copy was removed);
-# the image build is the etsi-matrix build job shape and shares its
-# type=gha layer cache, so a quiet week rebuilds only the antares-* crates.
+# the image build is the shared build-image.yml and shares its type=gha
+# layer cache, so a quiet week rebuilds only the antares-* crates.
 
 on:
   schedule:
-    # Tue 04:17 UTC — offset from etsi-coverage's Mon 04:41 so the two
-    # weekly walls never queue on the same day.
+    # Tue 04:17 UTC — offset from full's Wed+Sat 03:23 and fuzz's Mon+Thu
+    # 03:17 so the scheduled walls never queue on the same day.
     - cron: "17 4 * * 2"
   workflow_dispatch:
 
@@ -26,30 +26,9 @@ env:
 jobs:
   build:
     name: Build the image under test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build antares-local:latest (dep layer cached across runs)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: antares-local:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Export it for the roll job
-        run: docker save antares-local:latest | gzip > antares-image.tgz
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: antares-image
-          path: antares-image.tgz
-          retention-days: 3
+    uses: ./.github/workflows/build-image.yml
+    with:
+      arch: amd64
 
   etsi-roll:
     # The suite has no retries and asserts exact single responses, so ANY

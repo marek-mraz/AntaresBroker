@@ -1,0 +1,63 @@
+name: build-image
+
+# Reusable (workflow_call only): the ONE definition of "build the broker
+# image and hand it downstream as an artifact". Extracted 2026-08-23 from
+# five drifting copies. Callers:
+#   arch: amd64 — etsi-matrix.yml (feeds the cells), roll-weekly.yml,
+#                 k8s-smoke.yml. Tag antares-local:latest, artifact
+#                 antares-image (antares-image.tgz inside — downstream
+#                 `docker load` and the kind smoke depend on that filename).
+#   arch: arm64 — ci.yml and full.yml: the arm64 half of the published
+#                 manifest, BUILT never tested (decision 2026-08-07: every
+#                 ETSI/RSS gate runs amd64 only; the arm signal is the
+#                 workspace job testing natively on arm). Tag
+#                 antares-local:arm64, artifact antares-image-arm64.
+# Native-arch runners, no QEMU. cargo-chef in the Dockerfile isolates the
+# ~400 dependency crates in their own layer; type=gha persists it between
+# runs (default scope for amd64 — unchanged so existing caches survive —
+# scope=arm64 for arm), so a source-only commit rebuilds just the
+# antares-* crates (~10 min → ~3).
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: "amd64 (default) or arm64"
+        type: string
+        default: amd64
+
+jobs:
+  build:
+    name: Build the ${{ inputs.arch }} image
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.arch == 'arm64' && 'arm64' || 'latest' }}
+      ART: ${{ inputs.arch == 'arm64' && 'antares-image-arm64' || 'antares-image' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build antares-local:${{ env.TAG }} (dep layer cached across runs)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: antares-local:${{ env.TAG }}
+          load: true
+          cache-from: type=gha${{ inputs.arch == 'arm64' && ',scope=arm64' || '' }}
+          cache-to: type=gha,mode=max${{ inputs.arch == 'arm64' && ',scope=arm64' || '' }}
+
+      - name: Export it for the downstream jobs
+        run: docker save "antares-local:$TAG" | gzip > "$ART.tgz"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ART }}
+          path: ${{ env.ART }}.tgz
+          retention-days: 3
+
+      - name: Report image size
+        run: |
+          echo "## Image built (${{ inputs.arch }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`antares-local:$TAG\` — $(docker image inspect "antares-local:$TAG" --format '{{.Size}}' | awk '{printf "%.0f MB uncompressed", $1/1024/1024}'), $(du -m "$ART.tgz" | cut -f1) MB compressed" >> "$GITHUB_STEP_SUMMARY"

@@ -7,18 +7,18 @@ name: ci
 #
 # No wasm here (decision 2026-08-16): the browser bundle is built, ETSI-
 # tested (wasm-file cell) and published as antares-wasm-broker:dev by
-# etsi-full.yml — publish follows proof, and a commit that only touches
+# full.yml — publish follows proof, and a commit that only touches
 # native code doesn't pay a wasm toolchain.
 #
 # fmt + clippy + the full workspace suite run FIRST (the shared
 # workspace.yml). If any of them fail no image or bundle is built and the
 # ETSI matrix never runs — the whole pipeline stops at the gate.
 #
-# Nothing else lives here. The full seven-cell matrix runs in etsi-full.yml
-# (every 3 days) and full.yml (v* tags); the browser-tier wasm proof and
-# the wasm Node tier are full.yml; the roll-under-suite drill is
-# roll-weekly.yml and the k8s manifest smoke is k8s-smoke.yml. The matrix
-# itself is the reusable etsi-matrix.yml, shared by all three pipelines.
+# Nothing else lives here. The full seven-cell matrix, the wasm proofs and
+# the releases live in full.yml (twice a week + v* tags + dispatch); the
+# roll-under-suite drill is roll-weekly.yml and the k8s manifest smoke is
+# k8s-smoke.yml. Shared pieces: workspace.yml (the test gate),
+# etsi-matrix.yml (the cell matrix), build-image.yml (image builds).
 
 # Runs on push to master, on pull requests, and on manual dispatch.
 on:
@@ -35,14 +35,15 @@ concurrency:
 jobs:
   workspace:
     # The shared workspace-test gate (workflow_call) — one definition for
-    # ci/full/etsi-full, see .github/workflows/workspace.yml.
+    # ci and full, see .github/workflows/workspace.yml.
     name: Workspace tests
     uses: ./.github/workflows/workspace.yml
 
   matrix:
     # The per-commit ETSI gate: the QUICK preset (file postgres timescale).
-    # The full seven-cell matrix runs every 3 days in etsi-full.yml, on v*
-    # tags in full.yml, and by manual dispatch — cadence decision 2026-08-16.
+    # The full seven-cell matrix runs twice a week, on v* tags and by manual
+    # dispatch — all in full.yml (cadence decision 2026-08-16, retimed
+    # 2026-08-23 from every-3-days to twice a week).
     name: ETSI cell matrix
     # GATE: no image build / ETSI run unless the workspace suite is green.
     needs: workspace
@@ -54,44 +55,21 @@ jobs:
       actions: write # the summary job deletes the merged per-cell artifacts
 
   build-arm:
-    # The arm64 half of the published manifest — BUILT, never tested
-    # (decision 2026-08-07): the ETSI matrix + RSS gates run amd64 only.
-    # The only arm signal is the workspace job, which compiles and tests the
-    # same code natively on ubuntu-24.04-arm. Native-arch runner, no QEMU.
+    # The arm64 half of the published manifest — BUILT, never tested; the
+    # rationale lives in the shared build-image.yml.
     name: Build the arm64 image (untested)
     # GATE: only build after the workspace suite passes.
     needs: workspace
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build antares-local:arm64 (own cache scope)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: antares-local:arm64
-          load: true
-          cache-from: type=gha,scope=arm64
-          cache-to: type=gha,mode=max,scope=arm64
-
-      - name: Export it for the publish job
-        run: docker save antares-local:arm64 | gzip > antares-image-arm64.tgz
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: antares-image-arm64
-          path: antares-image-arm64.tgz
-          retention-days: 3
+    uses: ./.github/workflows/build-image.yml
+    with:
+      arch: arm64
 
   publish-dev:
     # Every green commit on master ships a DEV image: the sha and a moving
     # `dev` tag. Never `latest` — that belongs to a released version, so
     # `docker pull …:latest` can't silently land on an untagged master build.
-    # The wasm broker image publishes from etsi-full.yml, after its cell.
+    # The wasm broker image publishes from full.yml, after its cell.
     name: Publish the dev image to GHCR
     # Master pushes/dispatches publish :dev; PRs never do. All signals —
     # workspace tests, the cell matrix (quick preset, all 8 suites incl.
