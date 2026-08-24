@@ -52,6 +52,29 @@ jobs:
           filter_mode: added
           fail_on_error: false
 
+  openapi:
+    # The vendored ETSI spec is the contract; a PR touching it must not
+    # introduce breaking API changes silently. Lenient tooling on purpose:
+    # the v1.8.1 file itself fails strict OAS validation (upstream defect,
+    # docs/openapi/README.md).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: oasdiff breaking against the base branch
+        run: |
+          git fetch -q origin "${{ github.base_ref }}"
+          if git diff --quiet "origin/${{ github.base_ref }}" -- docs/openapi/ngsi-ld-api.yaml; then
+            echo "vendored spec untouched"; exit 0
+          fi
+          git show "origin/${{ github.base_ref }}:docs/openapi/ngsi-ld-api.yaml" > /tmp/base.yaml
+          docker run --rm -v /tmp/base.yaml:/base.yaml \
+            -v "$PWD/docs/openapi/ngsi-ld-api.yaml:/rev.yaml" \
+            tufin/oasdiff breaking --fail-on ERR /base.yaml /rev.yaml
+
   links-external:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -186,3 +186,21 @@ version the pro forma was authored against (V1.6.1 per clause 2) and
 V1.9.1. Suggest correcting the citation to 5.14.5 in the next CIM 029
 revision, and re-checking the neighbouring temporal tables for the same
 drift.
+
+## 8. [openapi] v1.8.1 temporal GET operations declare the `options` parameter twice
+
+**Title:** ngsi-ld-openapi v1.8.1: `GET /temporal/entities` and
+`GET /temporal/entities/{entityId}` carry two parameter components both
+named `options`
+
+**Body:**
+
+In `openapi-3.1.0/ngsi-ld-api.yaml` at tag v1.8.1, the operations
+`GET /temporal/entities` and `GET /temporal/entities/{entityId}` each
+list two `$ref`s to parameter components that resolve to the same
+parameter name `options` (in the same `query` location). The OpenAPI 3.1
+specification requires parameter uniqueness by name+location, so strict
+validators (e.g. openapi-spec-validator) reject the document with
+"Duplicate parameter 'options'". Suggest merging the two component
+definitions (their enum sets appear to have been split between temporal
+and non-temporal option values) or renaming one.
