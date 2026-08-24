@@ -173,3 +173,28 @@ jobs:
       # resolve older dependency versions and the MSRV claim would be proven
       # against a lockfile nothing else uses.
       - run: cargo check --locked --workspace -j 2
+
+  shared-crates:
+    # The reusable crates stand alone: each builds and tests by itself and
+    # its dependency tree never reaches the broker, the api or a storage
+    # backend — a workspace build would unify features and hide exactly
+    # that breakage.
+    name: Shared crates standalone
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [antares-model, antares-ql, antares-jsonld, antares-matcher, antares-store]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p ${{ matrix.crate }} -j 2
+      - run: cargo test --locked -p ${{ matrix.crate }} -j 2
+      - name: Dependency direction
+        run: |
+          if cargo tree --locked -p ${{ matrix.crate }} -e normal --prefix none \
+             | grep -E '^(antares-api|antares-broker|antares-sql|sqlx|axum|redb) '; then
+            echo "::error::${{ matrix.crate }} depends on the broker or a storage backend"; exit 1
+          fi
