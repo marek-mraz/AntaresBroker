@@ -1,6 +1,7 @@
 # ADR-0005: AnyStore enum + synchronous Pg facade
 
-Date: 2026-08-04 · Status: accepted
+Date: 2026-08-04 · Status: accepted · enum seam superseded by ADR-0013
+(the sync facade and the mutate transaction rule stand)
 
 The store seam is a closed enum, not a trait object: `AnyStore { Mem, Pg }`
 in `antares-sql`, exposing the v0 memory store's 12-method surface with
