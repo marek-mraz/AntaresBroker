@@ -664,7 +664,7 @@ against those clauses.
 | A.5.1.6/17 | NOTIFICATIONS_SUB | Y | 5.8.6: implemented | 046_01, 046_02, 046_03, 046_04, 046_05, 046_06 … |
 | A.5.1.6/18 | NOTIFICATIONS_CSR | Y | 5.11.7: implemented | 047_01, 047_02, 047_03, 047_04, 047_05, 047_06 … |
 | A.5.1.7/1 | HTTP_RESOURCES | Y | 6.2: implemented | — |
-| A.5.1.7/2 | HTTP_ERROR_TYPES | Y | 6.3.2: implemented | 046_01 |
+| A.5.1.7/2 | HTTP_ERROR_TYPES | Y | 6.3.2: implemented | 046_01, 632_01 |
 | A.5.1.7/3 | HTTP_ERRORS | Y | 6.3.3: implemented | D001_02_inc, D001_03_01_inc, D001_03_02_inc, D001_03_03_inc, D002_02_01_inc, D002_02_02_inc |
 | A.5.1.7/4 | HTTP_PRECOND | Y | 6.3.4: implemented | 044_01, 044_02, 045_01, 045_02, 045_03, 045_04 … |
 | A.5.1.7/5 | HTTP_CONTEXT_RESOLV | Y | 6.3.5: implemented | 001_04, 001_05, 001_06, 001_07, 001_08, 001_09 … |
