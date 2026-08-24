@@ -1,0 +1,57 @@
+name: perf-janitor
+
+# The delete job in perf-weekly cannot be trusted alone: `if: always()`
+# does not survive GitHub's force-termination window, and a create job
+# that provisions before failing to emit its output leaks a paid server.
+# Every perf server carries role=perf-runner + an expiry epoch label; this
+# sweep deletes any that outlived its TTL and goes red so the scheduled-
+# failure issue flags it — a leak found here means the primary teardown
+# failed and deserves eyes.
+
+on:
+  schedule:
+    - cron: "43 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete expired perf-runner servers
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          NOW=$(date +%s)
+          LEAKED=0
+          curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers?label_selector=role=perf-runner" \
+            | jq -r '.servers[] | "\(.id) \(.labels.expiry // 0) \(.name)"' \
+            | while read -r id expiry name; do
+                if [ "$expiry" -lt "$NOW" ]; then
+                  echo "leaked server $name ($id, expired $expiry) — deleting"
+                  curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+                    "https://api.hetzner.cloud/v1/servers/$id"
+                  echo "$id" >> leaked.txt
+                fi
+              done
+          if [ -s leaked.txt ]; then
+            echo "leaked servers were swept — the primary teardown failed"
+            exit 1
+          fi
+
+  alarm:
+    if: failure() && github.event_name == 'schedule'
+    needs: sweep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/failure-issue
+        with:
+          title: perf-runner server leaked past its TTL
+          body: >-
+            The perf janitor found and deleted a Hetzner server that
+            outlived its TTL — the perf-weekly delete job failed to tear it
+            down. Check the last perf-weekly run.

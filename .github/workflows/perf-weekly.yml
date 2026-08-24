@@ -1,0 +1,129 @@
+name: perf-weekly
+
+# Weekly benchmark on dedicated hardware. Shared GitHub runners swing
+# 20-30% run to run, so nothing measured there is a number; this rents one
+# Hetzner dedicated-vCPU machine, registers it as an ephemeral self-hosted
+# runner, benchmarks, and deletes it. perf-janitor.yml sweeps leaks.
+#
+# Report-only by design: NO regression gate exists until the noise profile
+# (repeated same-commit passes on this exact instance type) has been
+# measured and published — a threshold picked before the variance is known
+# is a guess. The gate shape to adopt then: per-benchmark IQR fencing
+# against its own history (fail above Q3 + 3*IQR), plus significance AND a
+# separate noise threshold for micro-benchmarks.
+#
+# The instance type is pinned. CX/CPX/CAX share CPU between co-tenants
+# with burst credits; CCX gives one vCPU = one physical thread (L3, memory
+# bandwidth, network and disk remain shared). Changing the type
+# invalidates the entire recorded history — treat a change as a history
+# reset, never a tweak.
+#
+# Secrets: HCLOUD_TOKEN (Hetzner project API token), RUNNER_PAT (repo-admin
+# PAT for the runner registration token).
+
+on:
+  schedule:
+    - cron: "17 3 * * 6"
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: benchmark passes (>=10 for a noise-profile run)
+        default: "10"
+
+env:
+  SERVER_TYPE: ccx23
+  SERVER_IMAGE: ubuntu-24.04
+  SERVER_LOCATION: hel1
+  TTL_HOURS: 3
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.mk.outputs.label }}
+      server_id: ${{ steps.mk.outputs.server_id }}
+    steps:
+      - name: Create server + register ephemeral runner
+        id: mk
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+        run: |
+          LABEL="perf-${{ github.run_id }}"
+          REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
+            | jq -r .token)
+          EXPIRY=$(( $(date +%s) + TTL_HOURS * 3600 ))
+          USERDATA=$(cat <<EOF
+          #cloud-config
+          runcmd:
+            - |
+              mkdir -p /opt/runner && cd /opt/runner
+              curl -sL https://github.com/actions/runner/releases/download/v2.321.0/actions-runner-linux-x64-2.321.0.tar.gz | tar xz
+              export RUNNER_ALLOW_RUNASROOT=1
+              ./config.sh --url https://github.com/${{ github.repository }} \
+                --token $REG --ephemeral --unattended --labels $LABEL --name $LABEL
+              nohup ./run.sh >/var/log/runner.log 2>&1 &
+          EOF
+          )
+          RESP=$(jq -n --arg name "$LABEL" --arg type "$SERVER_TYPE" \
+            --arg image "$SERVER_IMAGE" --arg loc "$SERVER_LOCATION" \
+            --arg ud "$USERDATA" --arg exp "$EXPIRY" \
+            '{name:$name, server_type:$type, image:$image, location:$loc,
+              user_data:$ud,
+              labels:{role:"perf-runner", expiry:$exp}}' \
+            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" \
+              -H "Content-Type: application/json" -d @- \
+              https://api.hetzner.cloud/v1/servers)
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "server_id=$(echo "$RESP" | jq -r .server.id)" >> "$GITHUB_OUTPUT"
+          # Expected cost for this run, from the price list, at the TTL cap.
+          PRICE=$(curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            https://api.hetzner.cloud/v1/server_types \
+            | jq -r ".server_types[] | select(.name==\"$SERVER_TYPE\") | .prices[] | select(.location==\"$SERVER_LOCATION\") | .price_hourly.gross")
+          echo "cost cap: $SERVER_TYPE at $PRICE/h x ${TTL_HOURS}h" >> "$GITHUB_STEP_SUMMARY"
+
+  bench:
+    needs: create
+    runs-on: ${{ needs.create.outputs.label }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install k6
+        run: |
+          curl -sL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
+            | tar xz --strip-components=1
+          sudo mv k6 /usr/local/bin/ 2>/dev/null || mv k6 /usr/local/bin/
+      - name: Benchmark passes
+        run: REPEATS=${{ inputs.repeats || 10 }} ./dev/perf/run-bench.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Weekly perf (${{ env.SERVER_TYPE }})"
+            echo '```'
+            cat results/perf/run-metadata.txt
+            [ -f results/perf/noise-profile.txt ] && cat results/perf/noise-profile.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-weekly-results
+          path: results/perf
+          retention-days: 90
+
+  delete:
+    needs: [create, bench]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the runner server
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          ID="${{ needs.create.outputs.server_id }}"
+          [ -n "$ID" ] && [ "$ID" != "null" ] || exit 0
+          curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers/$ID" || true
