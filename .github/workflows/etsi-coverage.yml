@@ -79,15 +79,26 @@ jobs:
       - name: Step summary
         if: always()
         run: |
+          R=results/coverage-${{ matrix.store }}
+          pct() { awk '/^TOTAL/ {print $(NF-3)}' "$1" 2>/dev/null || true; }
           {
             echo "## ETSI coverage — ${{ matrix.store }}"
+            echo "- unit (Rust tests only): $(pct "$R/unit/summary.txt")"
+            echo "- robot (ETSI suite only): $(pct "$R/robot/summary.txt")"
+            echo "- combined: $(pct "$R/summary.txt")"
             echo '```'
-            cat results/coverage-${{ matrix.store }}/summary.txt
+            cat "$R/summary.txt"
             echo '```'
+            echo "<details><summary>Attribution — which kind of test covers what</summary>"
+            echo
+            echo '```'
+            head -20 "$R/attribution.txt"
+            echo '```'
+            echo "</details>"
             echo "<details><summary>First 50 functions no test ran</summary>"
             echo
             echo '```'
-            head -50 results/coverage-${{ matrix.store }}/uncovered-functions.txt
+            head -50 "$R/uncovered-functions.txt"
             echo '```'
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY" || true
@@ -109,21 +120,36 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
           pattern: etsi-coverage-*
           path: cells
-      - name: Merge lcov across stores
+      - name: Merge lcov across stores — per test kind and combined
         run: |
           sudo apt-get install -y -qq lcov
-          ARGS=()
-          for f in cells/etsi-coverage-*/lcov.info; do ARGS+=(-a "$f"); done
-          lcov "${ARGS[@]}" -o merged.info --ignore-errors inconsistent
+          merge() { # $1 = glob suffix under each cell, $2 = output
+            ARGS=()
+            for f in cells/etsi-coverage-*/$1; do [ -f "$f" ] && ARGS+=(-a "$f"); done
+            [ ${#ARGS[@]} -gt 0 ] && lcov "${ARGS[@]}" -o "$2" --ignore-errors inconsistent
+          }
+          merge lcov.info merged.info
+          merge unit/lcov.info merged-unit.info || true
+          merge robot/lcov.info merged-robot.info || true
+          if [ -f merged-unit.info ] && [ -f merged-robot.info ]; then
+            python3 dev/coverage-attribution.py merged-unit.info merged-robot.info .
+          fi
           {
             echo "## Merged coverage (memory ∪ file ∪ postgres ∪ timescale)"
             echo '```'
             lcov --list merged.info --ignore-errors inconsistent
             echo '```'
+            if [ -f attribution.txt ]; then
+              echo "### Attribution (unit vs robot, all stores)"
+              echo '```'
+              head -20 attribution.txt
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Coverage ratchet — fail on a >1pt drop vs the published run
         run: |
@@ -134,14 +160,24 @@ jobs:
             python3 -c "import sys; n, o = float(sys.argv[1]), float(sys.argv[2]); print(f'delta: {n-o:+.1f}pt'); sys.exit(1 if o - n > 1.0 else 0)" "$new" "$old"
           fi
 
-      - name: Render the merged HTML report
-        # published under /reports/coverage/ by the Pages deploy (item 8)
-        run: genhtml merged.info -o html --ignore-errors inconsistent
+      - name: Render the merged HTML reports
+        # The Pages deploy copies html/ to /reports/coverage/ verbatim, so
+        # the combined tree stays at the root (today's URLs keep working)
+        # and the per-kind trees land at /reports/coverage/{unit,robot}/.
+        run: |
+          genhtml merged.info -o html --ignore-errors inconsistent
+          [ -f merged-unit.info ] && genhtml merged-unit.info -o html/unit --ignore-errors inconsistent
+          [ -f merged-robot.info ] && genhtml merged-robot.info -o html/robot --ignore-errors inconsistent
+          true
       - uses: actions/upload-artifact@v4
         with:
           name: etsi-coverage-merged
           path: |
             merged.info
+            merged-unit.info
+            merged-robot.info
+            attribution.txt
+            uncovered-lines.txt
             html
           retention-days: 90
 

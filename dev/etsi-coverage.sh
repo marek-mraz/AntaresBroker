@@ -6,8 +6,12 @@
 # instruments the BROKER BINARY itself (cargo llvm-cov / LLVM
 # -C instrument-coverage), optionally runs the workspace tests under the same
 # instrumentation, then drives the broker with the same Robot suites as
-# dev/etsi-run.sh. All profiles merge into ONE report, so a zero-count line
-# means: no Rust test and no ETSI TP ever ran it. Per store mode, identical
+# dev/etsi-run.sh. The two profile sets are kept apart and reported three
+# ways: $RESULTS_DIR/unit/ (Rust tests only), $RESULTS_DIR/robot/ (ETSI TPs
+# only), and the combined report at $RESULTS_DIR top level — where a
+# zero-count line means: no Rust test and no ETSI TP ever ran it.
+# dev/coverage-attribution.py cross-classifies the two sets per line
+# (both / only-unit / only-robot / uncovered). Per store mode, identical
 # locally and in CI (.github/workflows/etsi-coverage.yml is a thin wrapper).
 #
 # Env knobs:
@@ -21,9 +25,11 @@
 #                          CI sets 1 (rule 8: MQTT is CI-only)
 #   RESULTS_DIR            default results/coverage-$STORE
 #
-# Output under $RESULTS_DIR: lcov.info, html/ (line-level drill-down),
-# coverage.json, summary.txt, uncovered-functions.txt (the point of it all),
-# plus the per-suite Robot logs. Report-only — no floor here; ratchet gates
+# Output under $RESULTS_DIR (and mirrored in unit/ and robot/ for the
+# per-kind sets): lcov.info, html/ (line-level drill-down), coverage.json,
+# summary.txt, uncovered-functions.txt (the point of it all), plus
+# attribution.txt + uncovered-lines.txt (per-line cross-view) and the
+# per-suite Robot logs. Report-only — no floor here; ratchet gates
 # belong in strict.yml once numbers stabilise.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -58,11 +64,29 @@ case "$CLEAN_OUT" in *"cannot clean"*)
   echo "clean failed — stale uninstrumented artifacts would corrupt the report"; exit 1;;
 esac
 
+# The unit and robot profile sets are stashed separately so each can be
+# reported alone as well as merged. Profraw filenames carry %p/%m, so a
+# flat stash cannot collide.
+PROFRAW_STASH="${TMPDIR:-/tmp}/coverage-profraw-$STORE"
+rm -rf "$PROFRAW_STASH"
+stash_profraw() { # move every accumulated .profraw into $PROFRAW_STASH/$1
+  mkdir -p "$PROFRAW_STASH/$1"
+  find "$CARGO_LLVM_COV_TARGET_DIR" -name '*.profraw' \
+    -exec mv {} "$PROFRAW_STASH/$1/" \;
+}
+restore_profraw() { # copy the named sets back for the next report
+  find "$CARGO_LLVM_COV_TARGET_DIR" -name '*.profraw' -delete
+  for set in "$@"; do
+    cp "$PROFRAW_STASH/$set"/*.profraw "$CARGO_LLVM_COV_TARGET_DIR"/ 2>/dev/null || true
+  done
+}
+
 if [ "${UNIT_TESTS:-0}" = 1 ]; then
   echo "=== workspace tests (instrumented) ==="
   # Failures don't abort: coverage measures what ran, the per-push gate for
   # test green is ci.yml. -j 2: default parallelism OOM-kills the linker here.
   cargo test --workspace -j 2 || true
+  stash_profraw unit
 fi
 
 echo "=== build instrumented broker ==="
@@ -98,19 +122,16 @@ MQTT="${MQTT:-0}" STOP_ON_ERROR=0 RESULTS_DIR="$RESULTS_DIR" \
 kill -TERM "$BROKER_PID"
 wait "$BROKER_PID" || true
 trap - EXIT
+stash_profraw robot
 
 echo "=== reports ==="
-mkdir -p "$RESULTS_DIR"
-cargo llvm-cov report --lcov --output-path "$RESULTS_DIR/lcov.info"
-cargo llvm-cov report --html --output-dir "$RESULTS_DIR/html"
-cargo llvm-cov report --json --output-path "$RESULTS_DIR/coverage.json"
-cargo llvm-cov report --summary-only | tee "$RESULTS_DIR/summary.txt"
-
-# The list this exercise exists for: functions with execution count 0 —
-# code neither the Rust tests (UNIT_TESTS=1) nor any ETSI TP ever ran.
-# Names are mangled unless rustfilt is installed; html/ has the demangled
+# One full report tree per profile selection. uncovered-functions.txt is the
+# list this exercise exists for: functions with execution count 0 — for the
+# combined tree that means no Rust test AND no ETSI TP ever ran them. Names
+# are mangled unless rustfilt is installed; html/ has the demangled
 # line-level view either way.
-python3 - "$RESULTS_DIR/coverage.json" <<'PY' > "$RESULTS_DIR/uncovered-functions.txt"
+uncovered_functions() { # $1 = coverage.json path
+  python3 - "$1" <<'PY'
 import json, shutil, subprocess, sys
 data = json.load(open(sys.argv[1]))
 rows = []
@@ -125,6 +146,36 @@ if shutil.which("rustfilt"):
     out = subprocess.run(["rustfilt"], input=out, capture_output=True, text=True).stdout
 print(out)
 PY
+}
+emit_reports() { # $1 = output dir; reports whatever profraws are restored
+  mkdir -p "$1"
+  cargo llvm-cov report --lcov --output-path "$1/lcov.info"
+  cargo llvm-cov report --html --output-dir "$1/html"
+  cargo llvm-cov report --json --output-path "$1/coverage.json"
+  cargo llvm-cov report --summary-only | tee "$1/summary.txt"
+  uncovered_functions "$1/coverage.json" > "$1/uncovered-functions.txt"
+}
+
+mkdir -p "$RESULTS_DIR"
+if [ "${UNIT_TESTS:-0}" = 1 ]; then
+  restore_profraw unit
+  emit_reports "$RESULTS_DIR/unit"
+fi
+restore_profraw robot
+emit_reports "$RESULTS_DIR/robot"
+if [ "${UNIT_TESTS:-0}" = 1 ]; then
+  restore_profraw unit robot
+fi
+emit_reports "$RESULTS_DIR"
+
+if [ "${UNIT_TESTS:-0}" = 1 ]; then
+  # Per-line cross-view over the two sets: which kind of test covers what,
+  # and the lines neither kind runs.
+  python3 dev/coverage-attribution.py \
+    "$RESULTS_DIR/unit/lcov.info" "$RESULTS_DIR/robot/lcov.info" "$RESULTS_DIR"
+  echo "=== attribution ($STORE) ==="
+  head -20 "$RESULTS_DIR/attribution.txt"
+fi
 echo "=== functions no test ran ($STORE): $(grep -c . "$RESULTS_DIR/uncovered-functions.txt" || true) ==="
 head -30 "$RESULTS_DIR/uncovered-functions.txt"
 echo "full list: $RESULTS_DIR/uncovered-functions.txt — line level: $RESULTS_DIR/html/index.html"
