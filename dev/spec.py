@@ -18,10 +18,15 @@ Commands:
     python3 dev/spec.py robot     # refresh the robot: field from suite tags
     python3 dev/spec.py status    # counts + per-chapter rollup
     python3 dev/spec.py gaps      # leaves with status not-implemented and no TPs
+    python3 dev/spec.py ics       # render docs/src/conformance-ics.md — the
+                                  #   completed ETSI GS CIM 029 V2.1.1 annex A
+                                  #   ICS pro forma, support column derived
+                                  #   from this ledger (see dev/cim029-proforma.yaml)
     python3 dev/spec.py check     # ledger integrity gate (exit 1 on violation):
                                   #   every clause file parses, status is in the
                                   #   enum, partial/staged carry notes, robot
-                                  #   lists match the suite tags
+                                  #   lists match the suite tags, and the
+                                  #   committed ICS matches a fresh render
 """
 
 import re
@@ -34,6 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PDF = ROOT / "etsi-cim-specs/gs_cim009v010901p.pdf"
 SUITE = ROOT / "ngsi-ld-test-suite/TP"
 SPEC = ROOT / "docs/spec"
+PROFORMA = ROOT / "dev/cim029-proforma.yaml"
+ICS_OUT = ROOT / "docs/src/conformance-ics.md"
 
 CLAUSE_RE = re.compile(r"^(\d+(?:\.\d+)*|[A-Z]\.\d+(?:\.\d+)*)\s+(.*)$")
 ANNEX_RE = re.compile(r"^Annex ([A-Z])\s*\(?(normative|informative)?\)?:?\s*(.*)$")
@@ -213,6 +220,230 @@ def cmd_gaps():
             print(f"{m['clause']:14} {m['title']}  (p.{m['pages']})")
 
 
+def ledger():
+    """clause -> frontmatter, for every section file that parses."""
+    out = {}
+    for path in all_sections():
+        meta = read_frontmatter(path)
+        if meta and meta.get("clause"):
+            out[meta["clause"]] = meta
+    return out
+
+
+def proforma():
+    return yaml.safe_load(PROFORMA.read_text())
+
+
+def scored_clauses(row):
+    """The clauses a row is scored against.
+
+    CIM 029 V2.1.1 cites CIM 009 V1.6.1; the ledger carries V1.9.1. Where a
+    published citation did not survive renumbering, `clauses_v191` names the
+    V1.9.1 clause and is scored instead. The published `clauses` are what the
+    rendered Clauses column shows, so the table stays as in Annex A.
+    """
+    return row.get("clauses_v191") or row["clauses"]
+
+
+def citation_leaves(clause, led):
+    """The ledger clauses that carry the implementation of a citation.
+
+    A cited clause is often a heading whose substance lives in its
+    sub-clauses (5.6.1 "Create Entity" is marked informative and delegates to
+    5.6.1.1 onwards). Scoring the heading alone would report support for a
+    resource whose sub-clauses are unimplemented, so a citation resolves to
+    the leaves beneath it whenever it has any.
+    """
+    kids = [c for c in led if c.startswith(clause + ".")]
+    if not kids:
+        return [clause]
+    return [c for c in kids if not any(o != c and o.startswith(c + ".") for o in kids)]
+
+
+def row_support(row, led):
+    """(support, deciding) for one ICS row.
+
+    ISO/IEC 9646-7 allows only Y or N in the support column, so a row whose
+    clauses cannot all be shown implemented is N. A leaf marked informative
+    has nothing to implement and does not hold a row down. A cited clause
+    absent from the ledger is reported separately: a renumbered clause is a
+    mapping defect, never evidence of support.
+    """
+    deciding = []
+    supported = True
+    for clause in scored_clauses(row):
+        if clause not in led:
+            deciding.append((clause, "ABSENT"))
+            supported = False
+            continue
+        leaves_ = citation_leaves(clause, led)
+        bad = [c for c in leaves_ if led[c].get("status") not in ("implemented", "informative")]
+        if bad:
+            supported = False
+            worst = sorted({led[c].get("status", "?") for c in bad})
+            deciding.append((clause, f"{'/'.join(worst)} in {len(bad)}/{len(leaves_)} leaves"))
+        elif len(leaves_) == 1:
+            deciding.append((clause, "implemented"))
+        else:
+            deciding.append((clause, f"implemented (all {len(leaves_)} sub-clauses)"))
+    return ("Y" if supported else "N"), deciding
+
+
+def unresolved_clauses(led):
+    """[(table, item, clause)] cited by the pro forma but absent from the ledger."""
+    missing = []
+    for table in proforma()["tables"]:
+        for row in table["rows"]:
+            for clause in scored_clauses(row):
+                if clause not in led:
+                    missing.append((table["id"], row["item"], clause))
+    return missing
+
+
+def render_ics():
+    """(text, items, supported, unresolved) — the completed ICS pro forma.
+
+    Annex A.0 grants the right to reproduce the pro forma and publish it
+    completed. Clause 4 requires the result to be technically equivalent to
+    Annex A and to preserve the numbering and ordering of its items, so the
+    tables are emitted in file order with their published item numbers and
+    the six published columns. The support column is derived from the
+    ledger, never hand-written; the evidence behind each verdict is carried
+    in a separate annex so the pro forma tables stay as published.
+    """
+    pf = proforma()
+    led = ledger()
+    ident = pf["identification"]
+    version = "unknown"
+    for line in (ROOT / "Cargo.toml").read_text().splitlines():
+        if line.startswith("version"):
+            version = line.split('"')[1]
+            break
+
+    verdicts = {}
+    out = [
+        "# NGSI-LD Implementation Conformance Statement",
+        "",
+        "Completed ICS pro forma of **ETSI GS CIM 029 V2.1.1 (2025-07)**,",
+        "Annex A (normative), whose clause A.0 grants the right to reproduce the",
+        "pro forma and to publish it completed.",
+        "",
+        "Generated by `dev/spec.py ics` from the clause ledger in `docs/spec/`.",
+        "The support column is derived, never hand-written: a row is `Y` only",
+        "when every CIM 009 clause it cites is recorded as implemented, with",
+        "the deciding clauses listed in annex ANT-1 below.",
+        "",
+        "> **Version note.** CIM 029 V2.1.1 cites ETSI GS CIM 009 **V1.6.1**,",
+        "> while this implementation targets **V1.9.1** and the ledger carries",
+        "> that text. The pro forma's own feature tables already run ahead of",
+        "> its normative reference. It is therefore a conformance scaffold, not",
+        "> a complete checklist of V1.9.1 behaviour.",
+        "",
+        "## A.2 Identification of the implementation",
+        "",
+        f"- IUT name: {ident['iut_name']}",
+        f"- IUT version: {version}",
+        f"- SUT hardware configuration: {ident['sut_hardware'] or '(not stated)'}",
+        f"- SUT operating system: {ident['sut_operating_system'] or '(not stated)'}",
+        f"- Product supplier: {ident['supplier_name'] or '(not stated)'}",
+        f"- Supplier address: {ident['supplier_address'] or '(not stated)'}",
+        f"- Supplier e-mail: {ident['supplier_email'] or '(not stated)'}",
+        f"- ICS contact person: {ident['contact_name'] or '(not stated)'}",
+        f"- Contact e-mail: {ident['contact_email'] or '(not stated)'}",
+        "",
+        "## A.3 Identification of the reference specifications",
+        "",
+        "This ICS pro forma applies to ETSI GS CIM 009.",
+        "",
+        "## A.4 Global statement of conformance",
+        "",
+    ]
+    declared = str(pf.get("global_statement_of_conformance", "unset"))
+    if declared.lower() in ("yes", "no"):
+        out += [f"Are all mandatory capabilities implemented? **{declared}**", ""]
+    else:
+        out += [
+            "Are all mandatory capabilities implemented? **(not declared)**",
+            "",
+            "This answer is a supplier declaration and is deliberately not",
+            "derived: the A.5.1 tables carry no mandatory/optional status",
+            "column, and several features are optional by architecture. Set",
+            "`global_statement_of_conformance` in `dev/cim029-proforma.yaml`",
+            "to publish a signed claim.",
+            "",
+        ]
+
+    section = None
+    for table in pf["tables"]:
+        head = "A.5.1 Features" if table["id"].startswith("A.5.1") else "A.5.2 API Operation"
+        if head != section:
+            section = head
+            out += [f"## {head}", ""]
+        out += [
+            f"### {table['id']} {table['title']}",
+            "",
+            "| Item | Feature | Subfeature | Clauses | Mnemonic | Support |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in table["rows"]:
+            support, deciding = row_support(row, led)
+            verdicts[(table["id"], row["item"])] = (row, support, deciding)
+            clauses = "; ".join(row["clauses"])
+            out.append(
+                f"| {row['item']} | {row['feature']} | {row.get('subfeature', '')} "
+                f"| {clauses} | {row['mnemonic']} | {support} |"
+            )
+        out.append("")
+
+    out += ["## A.6 Mnemonics for PICS", "", "| Mnemonic | PICS Item |", "|---|---|"]
+    seen = {}
+    for (tid, item), (row, _s, _d) in verdicts.items():
+        seen.setdefault(row["mnemonic"], []).append(f"{tid}/{item}")
+    for mnemonic in sorted(seen):
+        out.append(f"| {mnemonic} | {', '.join(seen[mnemonic])} |")
+    out.append("")
+
+    out += [
+        "## Annex ANT-1: evidence behind each verdict",
+        "",
+        "Not part of the ETSI pro forma. Every row above with the ledger",
+        "status of each clause it cites, and the Robot test purposes tagged",
+        "against those clauses.",
+        "",
+        "| Item | Mnemonic | Support | Clause statuses | Robot TPs |",
+        "|---|---|---|---|---|",
+    ]
+    for (tid, item), (row, support, deciding) in verdicts.items():
+        statuses = "; ".join(f"{c}: {s}" for c, s in deciding)
+        tps = sorted({t for c, _ in deciding for t in led.get(c, {}).get("robot", [])})
+        shown = ", ".join(tps[:6]) + (" …" if len(tps) > 6 else "") or "—"
+        out.append(f"| {tid}/{item} | {row['mnemonic']} | {support} | {statuses} | {shown} |")
+    out.append("")
+
+    missing = unresolved_clauses(led)
+    if missing:
+        out += [
+            "## Annex ANT-2: pro forma clauses absent from the ledger",
+            "",
+            "Cited by CIM 029 V2.1.1 against CIM 009 V1.6.1 but not present in",
+            "the V1.9.1 ledger — a renumbering to map, not a missing feature.",
+            "These rows are scored `N` until mapped.",
+            "",
+            "| Item | Clause |",
+            "|---|---|",
+        ] + [f"| {t}/{i} | {c} |" for t, i, c in missing] + [""]
+
+    ys = sum(1 for _k, (_r, s, _d) in verdicts.items() if s == "Y")
+    return "\n".join(out), len(verdicts), ys, missing
+
+
+def cmd_ics():
+    text, items, supported, missing = render_ics()
+    ICS_OUT.write_text(text)
+    print(f"{ICS_OUT}: {items} items, {supported} Y / {items - supported} N")
+    print(f"unresolved clause references: {len(missing)}")
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -241,6 +472,17 @@ def cmd_check():
             errors.append(f"{path}: implemented without evidence")
         if meta.get("robot") != tps.get(meta.get("clause"), []):
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
+
+    # The ICS is generated from the ledger it is published beside; a stale one
+    # is a conformance claim that no longer matches the evidence.
+    text, _items, _supported, missing = render_ics()
+    for tid, item, clause in missing:
+        errors.append(f"{PROFORMA.name}: {tid}/{item} cites {clause}, absent from the ledger")
+    if not ICS_OUT.exists():
+        errors.append(f"{ICS_OUT}: missing — run `dev/spec.py ics`")
+    elif ICS_OUT.read_text() != text:
+        errors.append(f"{ICS_OUT}: stale — run `dev/spec.py ics` and commit the result")
+
     for e in errors:
         print(f"CHECK {e}")
     print(f"check: {n} files, {len(errors)} violations")
@@ -255,5 +497,6 @@ if __name__ == "__main__":
         "robot": cmd_robot,
         "status": cmd_status,
         "gaps": cmd_gaps,
+        "ics": cmd_ics,
         "check": cmd_check,
     }.get(cmd, cmd_status)()

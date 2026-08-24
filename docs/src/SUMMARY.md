@@ -9,4 +9,5 @@
 - [Browser & WebAssembly](wasm.md)
 - [Operations](operations.md)
 - [Conformance](conformance.md)
+  - [ICS pro forma (CIM 029)](conformance-ics.md)
 - [Ecosystem & positioning](ecosystem.md)

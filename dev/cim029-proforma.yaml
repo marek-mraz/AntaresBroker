@@ -1,0 +1,367 @@
+# ETSI GS CIM 029 V2.1.1 (2025-07), Annex A (normative): ICS Pro forma.
+#
+# Annex A.0 grants the right to reproduce this pro forma and to publish the
+# completed form. Clause 4 requires a conforming pro forma to be technically
+# equivalent to Annex A and to PRESERVE THE NUMBERING AND ORDERING of its
+# items, so table ids, item numbers and row order below are verbatim and must
+# not be re-sorted or renumbered.
+#
+# The `clauses` of each row cite ETSI GS CIM 009. CIM 029 V2.1.1 references
+# CIM 009 V1.6.1 while the ledger in docs/spec/ carries V1.9.1, so a cited
+# clause can be renumbered or absent; `spec.py ics` reports such rows rather
+# than scoring them.
+
+# Supplier declaration (A.2, A.4). Answering A.4 is the supplier's statement,
+# not a derived value: many A.5.1 features are optional by architecture.
+identification:
+  iut_name: Antares
+  # iut_version is read from Cargo.toml at render time.
+  sut_hardware: ""
+  sut_operating_system: ""
+  supplier_name: ""
+  supplier_address: ""
+  supplier_email: ""
+  contact_name: ""
+  contact_email: ""
+# Yes | No | unset. Left unset until a supplier signs the claim.
+global_statement_of_conformance: unset
+
+tables:
+  # ---- A.5.1 Features ----
+  - id: A.5.1.1
+    title: Architecture
+    rows:
+      - {item: 1, feature: Centralized architecture, clauses: ["4.3.2"], mnemonic: CENTRALIZED}
+      - {item: 2, feature: Distributed architecture, clauses: ["4.3.3"], mnemonic: DISTRIBUTED}
+      - {item: 3, feature: Federated architecture, clauses: ["4.3.4"], mnemonic: FEDERATED}
+      - {item: 4, feature: Inclusive context source registrations, clauses: ["4.3.6.2"], mnemonic: INCLUSIVECSR}
+      - {item: 5, feature: Auxiliary context source registrations, clauses: ["4.3.6.2"], mnemonic: AUXILIARYCSR}
+      - {item: 6, feature: Exclusive context source registrations, clauses: ["4.3.6.3"], mnemonic: EXCLUSIVECSR}
+      - {item: 7, feature: Redirect context source registrations, clauses: ["4.3.6.3"], mnemonic: REDIRECTCSR}
+      - {item: 8, feature: Limit to local requests, clauses: ["4.3.6.4"], mnemonic: LOCAL}
+      - {item: 9, feature: Extra information to provide when contacting Context Source, clauses: ["4.3.6.5"], mnemonic: EXTRACS}
+      - {item: 10, feature: Additional pre- and post-processing of extra information when contacting Context Source, clauses: ["4.3.6.6"], mnemonic: PROCESSCS}
+      - {item: 11, feature: Querying with entityMap for consistent entity set, clauses: ["4.3.6.7"], mnemonic: ENTITYMAP_QUERY}
+
+  - id: A.5.1.2
+    title: Core NGSI-LD @context
+    rows:
+      - {item: 1, feature: Core and user NGSI-LD @context, clauses: ["4.4"], mnemonic: USERCONTEXT}
+
+  - id: A.5.1.3
+    title: NGSI-LD Data Representation
+    rows:
+      - {item: 1, feature: Support for NGSI-LD Null, clauses: ["4.5.0", "5.4"], mnemonic: NGSILDNULL}
+      - {item: 2, feature: Entity - base representation, clauses: ["4.5.1"], mnemonic: E_BASE}
+      - {item: 3, feature: Entity - Properties, clauses: ["4.5.1"], mnemonic: E_PROPS}
+      - {item: 4, feature: Entity - Relationships, clauses: ["4.5.1"], mnemonic: E_RELS}
+      - {item: 5, feature: Entity - location, clauses: ["4.7.1"], mnemonic: E_LOCATION}
+      - {item: 6, feature: Entity - operationSpace, clauses: ["4.7.1"], mnemonic: E_OPSPACE}
+      - {item: 7, feature: Entity - observationSpace, clauses: ["4.7.1"], mnemonic: E_OBSVSPACE}
+      - {item: 8, feature: Entity - Simplified representation, clauses: ["4.5.4"], mnemonic: E_SIMPLIFIED}
+      - {item: 9, feature: Property - base representation, clauses: ["4.5.2"], mnemonic: P_BASE}
+      - {item: 10, feature: Property - createdAt / modifiedAt / deletedAt, clauses: ["4.5.2"], mnemonic: P_SYSPROPS}
+      - {item: 11, feature: Property - observedAt, clauses: ["4.5.2"], mnemonic: P_OBSVAT}
+      - {item: 12, feature: Property - unitCode, clauses: ["4.5.2"], mnemonic: P_UNITCODE}
+      - {item: 13, feature: Property - Properties, clauses: ["4.5.2"], mnemonic: P_PROPS}
+      - {item: 14, feature: Property - Relationships, clauses: ["4.5.2"], mnemonic: P_RELS}
+      - {item: 15, feature: Property - datasetId, clauses: ["4.5.2", "4.5.5"], mnemonic: P_DATASETID}
+      - {item: 16, feature: Property - instanceId, clauses: ["4.5.2"], mnemonic: P_INSTANCEID}
+      - {item: 17, feature: Property - Temporal representation, clauses: ["4.5.7"], mnemonic: P_TEMPORAL_REP}
+      - {item: 18, feature: Property - Simplified temporal representation, clauses: ["4.5.9"], mnemonic: P_SIMPTEMPORAL_REP}
+      - {item: 19, feature: Relationship - base representation, clauses: ["4.5.3"], mnemonic: R_BASE}
+      - {item: 20, feature: Relationship - createdAt / modifiedAt / deletedAt, clauses: ["4.5.3"], mnemonic: R_SYSPROPS}
+      - {item: 21, feature: Relationship - observedAt, clauses: ["4.5.3"], mnemonic: R_OBSVAT}
+      - {item: 22, feature: Relationship - Properties, clauses: ["4.5.3"], mnemonic: R_PROPS}
+      - {item: 23, feature: Relationship - Relationships, clauses: ["4.5.3"], mnemonic: R_RELS}
+      - {item: 24, feature: Relationship - datasetId, clauses: ["4.5.3", "4.5.5"], mnemonic: R_DATASETID}
+      - {item: 25, feature: Relationship - instanceId, clauses: ["4.5.3"], mnemonic: R_INSTANCEID}
+      - {item: 26, feature: Relationship - Temporal representation, clauses: ["4.5.8"], mnemonic: R_TEMPORAL_REP}
+      - {item: 27, feature: Relationship - Simplified temporal representation, clauses: ["4.5.9"], mnemonic: R_SIMPTEMPORAL_REP}
+      - {item: 28, feature: GeoJSON representation of entities, clauses: ["4.5.16"], mnemonic: GEOJSON_REP}
+      - {item: 29, feature: Simplified GeoJSON representation of entities, clauses: ["4.5.17"], mnemonic: SIMPGEOJSON_REP}
+      - {item: 30, feature: LanguageProperty, clauses: ["4.5.18"], mnemonic: LANG}
+      - {item: 31, feature: Aggregated Temporal Representation of an Entity, clauses: ["4.5.19"], mnemonic: AGGRTEMPORAL}
+      - {item: 32, feature: VocabProperty, clauses: ["4.5.20"], mnemonic: VOCAB}
+      - {item: 33, feature: ListProperty, clauses: ["4.5.21"], mnemonic: LISTP}
+      - {item: 34, feature: ListRelationship, clauses: ["4.5.22"], mnemonic: LISTR}
+      - {item: 35, feature: LinkedEntityRetrieval representation, clauses: ["4.5.23"], mnemonic: LINKED_RETRIEVAL}
+      - {item: 36, feature: JsonProperty, clauses: ["4.5.24"], mnemonic: JSONP}
+      - {item: 37, feature: EntityMap representation, clauses: ["4.5.25"], mnemonic: ENTITYMAP_REP}
+
+  - id: A.5.1.4
+    title: Data Representation Restrictions
+    rows:
+      - {item: 1, feature: Supported text encodings (UTF-8), clauses: ["4.6.1"], mnemonic: TEXTENCODING}
+      - {item: 2, feature: Supported names, clauses: ["4.6.2"], mnemonic: NAMES}
+      - {item: 3, feature: JSON native data type, clauses: ["4.6.3"], mnemonic: JSONNATIVE}
+      - {item: 4, feature: GeoJSON geometry (except Geometry collection), clauses: ["4.6.3"], mnemonic: GEOJSONGEOM}
+      - {item: 5, feature: DateTime type, clauses: ["4.6.3"], mnemonic: DATETIME}
+      - {item: 6, feature: Date type, clauses: ["4.6.3"], mnemonic: DATE}
+      - {item: 7, feature: Time type, clauses: ["4.6.3"], mnemonic: TIME}
+      - {item: 8, feature: URI type, clauses: ["4.6.3"], mnemonic: URI}
+      - {item: 9, feature: Supported entity content, clauses: ["4.6.4"], mnemonic: CONTENT}
+
+  - id: A.5.1.5
+    title: Other CIM transversal features
+    rows:
+      - {item: 1, feature: Supporting Multiple Entity Types, clauses: ["4.16"], mnemonic: MULTITYPING}
+      - {item: 2, feature: NGSI-LD Entity Type Selection Language, clauses: ["4.17"], mnemonic: TYPESELECTLANG}
+      - {item: 3, feature: NGSI-LD Scopes, clauses: ["4.18"], mnemonic: SCOPES}
+      - {item: 4, feature: NGSI-LD Scope Query Language, clauses: ["4.19"], mnemonic: SCOPESELECTLANG}
+      - {item: 5, feature: NGSI-LD Language Filter, clauses: ["4.15"], mnemonic: LANGFILTER}
+      - {item: 6, feature: NGSI-LD Attribute Projection Language, clauses: ["4.21"], mnemonic: PROJECTIONLANG}
+
+  - id: A.5.1.6
+    title: API Operation Definition
+    rows:
+      - {item: 1, feature: Ignore createdAt / modifiedAt from context producers, clauses: ["5.2.2"], mnemonic: IGNORESYSPROPS}
+      - {item: 2, feature: Only return createdAt / modifiedAt if asked by consumers, clauses: ["5.2.2"], mnemonic: SYSPROPS_IFASKED}
+      - {item: 3, feature: Use of the common error types, clauses: ["5.5.2"], mnemonic: COMMONERRTYPES}
+      - {item: 4, feature: Error response payload body, clauses: ["5.5.3"], mnemonic: ERROR_PAYLOAD}
+      - {item: 5, feature: General NGSI-LD validation, clauses: ["5.5.4"], mnemonic: NGSILD_VALIDATION}
+      - {item: 6, feature: Default @context assignment, clauses: ["5.5.5"], mnemonic: DEFAULT_CONTEXT}
+      - {item: 7, feature: Term to URI expansion or compaction, clauses: ["5.5.7"], mnemonic: EXPAND_COMPACT}
+      - {item: 8, feature: JSON-LD merge patch behavior, clauses: ["5.5.8"], mnemonic: JSONLD_MERGE_PATCH}
+      - {item: 9, feature: Pagination behavior, clauses: ["5.5.9"], mnemonic: PAGINATION}
+      - {item: 10, feature: Multi-tenant behavior, clauses: ["5.5.10"], mnemonic: MULTITENANT}
+      - {item: 11, feature: More than one instance of the same Entity in an Entity array, clauses: ["5.5.11"], mnemonic: SAME_ENTITY_IN_ARRAY}
+      - {item: 12, feature: MergePatch Behaviour, clauses: ["5.5.12"], mnemonic: MERGE_PATCH}
+      - {item: 13, feature: Allow broader local queries (query, subscription), clauses: ["5.5.13"], mnemonic: BROADER_QUERIES}
+      - {item: 14, feature: Storing, managing and serving @contexts, clauses: ["5.13"], mnemonic: SERVING_CONTEXTS}
+      - {item: 15, feature: Context Source Entity Mapping (EntityMap), clauses: ["5.14"], mnemonic: ENTITYMAP_OP}
+      - {item: 16, feature: Context Source Identity Information (for loop detection), clauses: ["5.15"], mnemonic: LOOP_DETECTION}
+      - {item: 17, feature: Notification behaviour of Subscriptions, clauses: ["5.8.6"], mnemonic: NOTIFICATIONS_SUB}
+      - {item: 18, feature: Notification behaviour of CSRs, clauses: ["5.11.7"], mnemonic: NOTIFICATIONS_CSR}
+
+  - id: A.5.1.7
+    title: API HTTP Binding
+    rows:
+      - {item: 1, feature: Global definitions and resources structure, clauses: ["6.2"], mnemonic: HTTP_RESOURCES}
+      - {item: 2, feature: Error types, clauses: ["6.3.2"], mnemonic: HTTP_ERROR_TYPES}
+      - {item: 3, feature: Reporting errors, clauses: ["6.3.3"], mnemonic: HTTP_ERRORS}
+      - {item: 4, feature: HTTP request preconditions, clauses: ["6.3.4"], mnemonic: HTTP_PRECOND}
+      - {item: 5, feature: JSON-LD @context resolution, clauses: ["6.3.5"], mnemonic: HTTP_CONTEXT_RESOLV}
+      - {item: 6, feature: HTTP response common requirements, clauses: ["6.3.6"], mnemonic: HTTP_COMMON}
+      - {item: 7, feature: Simplified representation of entities, clauses: ["6.3.7"], mnemonic: HTTP_SIMP_REPR}
+      - {item: 8, feature: Counting number of results, clauses: ["6.3.13"], mnemonic: HTTP_COUNT_RESULTS}
+      - {item: 9, feature: GeoJSON representation of spatially bound entities, clauses: ["6.3.15"], mnemonic: HTTP_GEOJSON_BOUND}
+      - {item: 10, feature: Limiting Distributed Operations (local, loops), clauses: ["6.3.18"], mnemonic: HTTP_LOOP_DETECTION}
+      - {item: 11, feature: Extra information to provide when contacting Context Source, clauses: ["6.3.19"], mnemonic: HTTP_EXTRA_INFO}
+      - {item: 12, feature: Invalid parameters, clauses: ["6.3.20"], mnemonic: HTTP_INVALID_PARAMS}
+      - {item: 13, feature: HTTP limit number of results, clauses: ["6.3.10"], mnemonic: HTTP_PAGINATION_LIMIT}
+
+  # ---- A.5.2 API Operation ----
+  - id: A.5.2.1
+    title: Entity List
+    rows:
+      - {item: 1, feature: /entities/, subfeature: POST, clauses: ["5.6.1", "6.4.3.1"], mnemonic: EntCre}
+      - {item: 2, feature: /entities/, subfeature: GET, clauses: ["5.7.2", "6.4.3.2"], mnemonic: QueEnt}
+      - {item: 3, feature: /entities/, subfeature: DELETE, clauses: ["5.6.21", "6.4.3.3"], mnemonic: PurEnt}
+
+  - id: A.5.2.2
+    title: Entity by id
+    rows:
+      - {item: 1, feature: "/entities/{entityId}", subfeature: GET, clauses: ["5.7.1", "6.5.3.1"], mnemonic: EntRet}
+      - {item: 2, feature: "/entities/{entityId}", subfeature: DELETE, clauses: ["5.6.6", "6.5.3.2"], mnemonic: EntDel}
+      - {item: 3, feature: "/entities/{entityId}", subfeature: PATCH, clauses: ["5.6.17", "6.5.3.4"], mnemonic: EntMer}
+      - {item: 4, feature: "/entities/{entityId}", subfeature: PUT, clauses: ["5.6.18", "6.5.3.3"], mnemonic: EntRep}
+
+  - id: A.5.2.3
+    title: Attribute List
+    rows:
+      - {item: 1, feature: "/entities/{entityId}/attrs/", subfeature: POST, clauses: ["5.6.3", "6.6.3.1"], mnemonic: AppAttEnt}
+      - {item: 2, feature: "/entities/{entityId}/attrs/", subfeature: PATCH, clauses: ["5.6.2", "6.6.3.2"], mnemonic: UpdAttEnt}
+
+  - id: A.5.2.4
+    title: Attribute by id
+    rows:
+      - {item: 1, feature: "/entities/{entityId}/attrs/{attrId}", subfeature: PATCH, clauses: ["5.6.4", "6.7.3.1"], mnemonic: ParAttUpd}
+      - {item: 2, feature: "/entities/{entityId}/attrs/{attrId}", subfeature: DELETE, clauses: ["5.6.5", "6.7.3.2"], mnemonic: AttDel}
+      - {item: 3, feature: "/entities/{entityId}/attrs/{attrId}", subfeature: PUT, clauses: ["5.6.19", "6.7.3.3"], mnemonic: AttRep}
+
+  - id: A.5.2.5
+    title: Subscriptions List
+    rows:
+      - {item: 1, feature: /subscriptions/, subfeature: POST, clauses: ["5.8.1", "6.10.3.1"], mnemonic: CreSub}
+      - {item: 2, feature: /subscriptions/, subfeature: GET, clauses: ["5.8.4", "6.10.3.2"], mnemonic: RetLisSub}
+
+  - id: A.5.2.6
+    title: Subscription by Id
+    rows:
+      - {item: 1, feature: "/subscriptions/{subscriptionId}", subfeature: GET, clauses: ["5.8.3", "6.11.3.1"], mnemonic: SubRet}
+      - {item: 2, feature: "/subscriptions/{subscriptionId}", subfeature: PATCH, clauses: ["5.8.2", "6.11.3.2"], mnemonic: SubUpd}
+      - {item: 3, feature: "/subscriptions/{subscriptionId}", subfeature: DELETE, clauses: ["5.8.5", "6.11.3.3"], mnemonic: SubDel}
+
+  - id: A.5.2.7
+    title: Entity Types
+    rows:
+      - {item: 1, feature: /types/, subfeature: GET, clauses: ["5.7.5", "5.7.6", "6.25.3.1"], mnemonic: RetAvaEntTyp}
+
+  - id: A.5.2.8
+    title: Entity Type
+    rows:
+      - {item: 1, feature: "/types/{type}", subfeature: GET, clauses: ["5.7.7", "6.26.3.1"], mnemonic: DetAvaEntTyp}
+
+  - id: A.5.2.9
+    title: Attributes
+    rows:
+      - {item: 1, feature: /attributes/, subfeature: GET, clauses: ["5.7.8", "5.7.9", "6.27.3.1"], mnemonic: AvaAtt}
+
+  - id: A.5.2.10
+    title: Attribute
+    rows:
+      - {item: 1, feature: "/attributes/{attrId}", subfeature: GET, clauses: ["5.7.10", "6.28.3.1"], mnemonic: DetAvaAtt}
+
+  - id: A.5.2.11
+    title: Context source registration list
+    rows:
+      - {item: 1, feature: /csourceRegistrations/, subfeature: POST, clauses: ["5.9.2", "6.8.3.1"], mnemonic: CsoRegCre}
+      - {item: 2, feature: /csourceRegistrations/, subfeature: GET, clauses: ["5.10.2", "6.8.3.2"], mnemonic: DisCsoReg}
+
+  - id: A.5.2.12
+    title: Context source registration by Id
+    rows:
+      - {item: 1, feature: "/csourceRegistrations/{registrationId}", subfeature: GET, clauses: ["5.10.1", "6.9.3.1"], mnemonic: CsoRegRet}
+      - {item: 2, feature: "/csourceRegistrations/{registrationId}", subfeature: PATCH, clauses: ["5.9.3", "6.9.3.2"], mnemonic: CsoRegUpd}
+      - {item: 3, feature: "/csourceRegistrations/{registrationId}", subfeature: DELETE, clauses: ["5.9.4", "6.9.3.3"], mnemonic: CsoRegDel}
+
+  - id: A.5.2.13
+    title: Context source registration subscription list
+    rows:
+      - {item: 1, feature: /csourceSubscriptions/, subfeature: POST, clauses: ["5.11.2", "6.12.3.1"], mnemonic: CreSubCsoReg}
+      - {item: 2, feature: /csourceSubscriptions/, subfeature: GET, clauses: ["5.11.5", "6.12.3.2"], mnemonic: RetLisSubCsoReg}
+
+  - id: A.5.2.14
+    title: Context source registration subscription by Id
+    rows:
+      - {item: 1, feature: "/csourceSubscriptions/{subscriptionId}", subfeature: GET, clauses: ["5.11.4", "6.13.3.1"], mnemonic: CsoRegSubRet}
+      - {item: 2, feature: "/csourceSubscriptions/{subscriptionId}", subfeature: PATCH, clauses: ["5.11.3", "6.13.3.2"], mnemonic: CsoRegSubUpd}
+      - {item: 3, feature: "/csourceSubscriptions/{subscriptionId}", subfeature: DELETE, clauses: ["5.11.6", "6.13.3.3"], mnemonic: CsoRegSubDel}
+
+  - id: A.5.2.15
+    title: Entity Operations. Create
+    rows:
+      - {item: 1, feature: /entityOperations/create, subfeature: POST, clauses: ["5.6.7", "6.14.3.1"], mnemonic: BatEntCre}
+
+  - id: A.5.2.16
+    title: Entity Operations. Upsert
+    rows:
+      - {item: 1, feature: /entityOperations/upsert, subfeature: POST, clauses: ["5.6.8", "6.15.3.1"], mnemonic: BatEntCreUpdUps}
+
+  - id: A.5.2.17
+    title: Entity Operations. Update
+    rows:
+      - {item: 1, feature: /entityOperations/update, subfeature: POST, clauses: ["5.6.9", "6.16.3.1"], mnemonic: BatEntUpd}
+
+  - id: A.5.2.18
+    title: Entity Operations. Delete
+    rows:
+      - {item: 1, feature: /entityOperations/delete, subfeature: POST, clauses: ["5.6.10", "6.17.3.1"], mnemonic: BatEntDel}
+
+  - id: A.5.2.19
+    title: Entity Operations. Query
+    rows:
+      - {item: 1, feature: /entityOperations/query, subfeature: POST, clauses: ["5.7.2", "6.23.3.1"], mnemonic: QueEntPos}
+
+  - id: A.5.2.20
+    title: Entity Operations
+    rows:
+      - {item: 1, feature: /entityOperations/merge, subfeature: POST, clauses: ["5.6.20", "6.31.3.1"], mnemonic: BatEntMer}
+
+  - id: A.5.2.21
+    title: Temporal Evolution of Entities
+    rows:
+      - {item: 1, feature: /temporal/entities/, subfeature: POST, clauses: ["5.6.11", "6.18.3.1"], mnemonic: TemEvoEntCre}
+      - {item: 2, feature: /temporal/entities/, subfeature: GET, clauses: ["5.7.4", "6.18.3.2"], mnemonic: QueTemEvoEnt}
+
+  - id: A.5.2.22
+    title: Temporal Evolution of an Entity by id
+    rows:
+      - {item: 1, feature: "/temporal/entities/{entityId}", subfeature: GET, clauses: ["5.7.3", "6.19.3.1"], mnemonic: TemEvoEntRet}
+      - {item: 2, feature: "/temporal/entities/{entityId}", subfeature: DELETE, clauses: ["5.6.16", "6.18.3.2"], mnemonic: TemEvoEntDel}
+
+  - id: A.5.2.23
+    title: Temporal Representation of Attribute List
+    rows:
+      - {item: 1, feature: "/temporal/entities/{entityId}/attrs/", subfeature: POST, clauses: ["5.6.12", "6.20.3.1"], mnemonic: TemEvoAttEntIns}
+
+  - id: A.5.2.24
+    title: Temporal Representation of Attribute by id
+    rows:
+      - {item: 1, feature: "/temporal/entities/{entityId}/attrs/{attrId}", subfeature: DELETE, clauses: ["5.6.13", "6.21.3.1"], mnemonic: AttTemEvoEntDel}
+
+  - id: A.5.2.25
+    title: Temporal Representation of Attribute Instance by id
+    rows:
+      - {item: 1, feature: "/temporal/entities/{entityId}/attrs/{attrId}/{instanceId}", subfeature: PATCH, clauses: ["5.6.14", "6.22.3.1"], mnemonic: AttInsTemEvoEnt}
+      - {item: 2, feature: "/temporal/entities/{entityId}/attrs/{attrId}/{instanceId}", subfeature: DELETE, clauses: ["5.6.15", "6.22.3.2"], mnemonic: AttInsTemEvoEnt}
+
+  # CIM 029 V2.1.1 cites 5.15.4 for this resource. Under CIM 009 V1.9.1 that
+  # number does not exist (5.15 is Context Source Identity Information, whose
+  # only sub-clause is 5.15.1); the clause carrying this table's own title,
+  # "Create EntityMap for Query Temporal Evolution of Entities", is 5.14.5,
+  # with the HTTP binding at 6.35.3.1 (GET) and 6.35.3.2 (POST). The published
+  # citation stays in `clauses` so the rendered column matches Annex A;
+  # `clauses_v191` is what the ledger is scored against.
+  - id: A.5.2.26
+    title: Create EntityMap for Query Temporal Evolution of Entities
+    rows:
+      - {item: 1, feature: /temporal/entityMaps/, subfeature: GET, clauses: ["5.15.4"], clauses_v191: ["5.14.5", "6.35.3.1"], mnemonic: QueTemEvoEntFor}
+      - {item: 2, feature: /temporal/entityMaps/, subfeature: POST, clauses: ["5.15.4"], clauses_v191: ["5.14.5", "6.35.3.2"], mnemonic: QueTemEvoEntFor}
+
+  - id: A.5.2.27
+    title: Temporal Query Operation
+    rows:
+      - {item: 1, feature: /temporal/entityOperations/query, subfeature: POST, clauses: ["5.7.4", "6.24.3.1"], mnemonic: QueTemEvoEntPos}
+
+  - id: A.5.2.28
+    title: Add and List @context
+    rows:
+      - {item: 1, feature: /jsonldContexts, subfeature: POST, clauses: ["5.13.2", "6.29.3.1"], mnemonic: AddUse@coTheInt}
+      - {item: 2, feature: /jsonldContexts, subfeature: GET, clauses: ["5.13.3", "6.29.3.2"], mnemonic: LisAllCac@co}
+
+  - id: A.5.2.29
+    title: Serve, Delete and Reload @context
+    rows:
+      - {item: 1, feature: "/jsonldContexts/{contextId}", subfeature: GET, clauses: ["5.13.4", "6.30.3.1"], mnemonic: SerOneSpeUse@co}
+      - {item: 2, feature: "/jsonldContexts/{contextId}", subfeature: DELETE, clauses: ["5.13.5", "6.30.3.2"], mnemonic: DelOneSpe@coInt}
+
+  - id: A.5.2.30
+    title: Create EntityMap for Query Entities
+    rows:
+      - {item: 1, feature: /entityMaps/, subfeature: GET, clauses: ["5.14.4"], mnemonic: QueEntForCreEnt}
+      - {item: 2, feature: /entityMaps/, subfeature: POST, clauses: ["5.14.4"], mnemonic: QueEntForCreEnt}
+
+  # A.5.2.31 reuses the EntRet/EntUpd/EntDel mnemonics already bound to
+  # A.5.2.2 in A.6.1. Reproduced as published (clause 4: preserve numbering
+  # and ordering); the mnemonic index reports the collision.
+  - id: A.5.2.31
+    title: Retrieve, Update and Delete Entity Maps
+    rows:
+      - {item: 1, feature: "/entityMaps/{entityMapId}", subfeature: GET, clauses: ["5.14.1", "6.32.3.1"], mnemonic: EntRet}
+      - {item: 2, feature: "/entityMaps/{entityMapId}", subfeature: PATCH, clauses: ["5.14.2", "6.32.3.2"], mnemonic: EntUpd}
+      - {item: 3, feature: "/entityMaps/{entityMapId}", subfeature: DELETE, clauses: ["5.14.3", "6.32.3.3"], mnemonic: EntDel}
+
+  - id: A.5.2.32
+    title: Retrieve Context Source Identity Information
+    rows:
+      - {item: 1, feature: /info/sourceIdentity, subfeature: GET, clauses: ["5.15.1", "6.33.3.1"], mnemonic: ConSouIdeRet}
+
+  - id: A.5.2.33
+    title: Create Snapshot or Purge Snapshots
+    rows:
+      - {item: 1, feature: /snapshots/, subfeature: POST, clauses: ["5.16.1"], mnemonic: CreSna}
+      - {item: 2, feature: /snapshots/, subfeature: DELETE, clauses: ["5.16.7"], mnemonic: PurSna}
+
+  - id: A.5.2.34
+    title: Retrieve and Update Snapshot Status or Delete Snapshot
+    rows:
+      - {item: 1, feature: "/snapshots/{snapshotId}", subfeature: GET, clauses: ["5.16.3"], mnemonic: RetSnaSta}
+      - {item: 2, feature: "/snapshots/{snapshotId}", subfeature: PATCH, clauses: ["5.16.4"], mnemonic: UpdSnaSta}
+      - {item: 3, feature: "/snapshots/{snapshotId}", subfeature: DELETE, clauses: ["5.16.5"], mnemonic: DelSna}
+
+  - id: A.5.2.35
+    title: Clone Snapshot
+    rows:
+      - {item: 1, feature: "/snapshots/{snapshotId}/clone", subfeature: POST, clauses: ["5.16.2"], mnemonic: CloSna}
