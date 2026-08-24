@@ -661,8 +661,7 @@ impl AnyStore {
                     .entities
                     .batch_upsert_replace(tenant, &items)
                     .map_err(db)?;
-                for ((id, doc), (_, prev)) in items.iter().zip(&out) {
-                    let _ = id;
+                for ((_, doc), (_, prev)) in items.iter().zip(&out) {
                     p.emit(tenant, prev.clone(), Some(doc.clone()));
                 }
                 Ok(out.into_iter().map(|(created, _)| created).collect())
