@@ -38,6 +38,15 @@ fn db(e: sqlx::Error) -> NgsiError {
             }
         };
     }
+    // 5.5.2: "database timeouts" are InternalError. SQLSTATE 57014 is the
+    // session's statement_timeout firing — named in the detail so a wall hit
+    // reads differently from a broken query in the operator's log.
+    if let sqlx::Error::Database(d) = &e {
+        if d.code().as_deref() == Some("57014") {
+            tracing::warn!("database statement timeout: {d}");
+            return NgsiError::InternalError("database statement timeout".into());
+        }
+    }
     tracing::error!("database error: {e}");
     NgsiError::InternalError("database error".into())
 }

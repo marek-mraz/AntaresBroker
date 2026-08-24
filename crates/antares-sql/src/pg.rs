@@ -27,19 +27,34 @@ fn migrate_enabled(v: Option<&str>) -> bool {
 /// recycled; and each session carries `statement_timeout`/`lock_timeout` so
 /// a runaway query or lost lock can never wedge a pooled connection.
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
+    connect_with(url, max_connections, std::time::Duration::from_secs(30)).await
+}
+
+/// [`connect`] with the per-session `statement_timeout` chosen by the
+/// deployment (`ANTARES_PG_STATEMENT_TIMEOUT_MS`).
+pub async fn connect_with(
+    url: &str,
+    max_connections: u32,
+    statement_timeout: std::time::Duration,
+) -> Result<PgPool, sqlx::Error> {
     use std::time::Duration;
+    let session = format!(
+        "SET statement_timeout = '{}ms'; SET lock_timeout = '5s'",
+        statement_timeout.as_millis()
+    );
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
-        .after_connect(|conn, _meta| {
+        .after_connect(move |conn, _meta| {
+            let session = session.clone();
             Box::pin(async move {
                 use sqlx::Executor;
-                conn.execute(sqlx::raw_sql(
-                    "SET statement_timeout = '30s'; SET lock_timeout = '5s'",
-                ))
-                .await?;
+                // the only interpolated value is a validated integer of
+                // milliseconds (parsed by the broker), never client text
+                conn.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(session)))
+                    .await?;
                 Ok(())
             })
         })

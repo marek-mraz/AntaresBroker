@@ -71,6 +71,7 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_OUTBOX_DRAIN",
     // Postgres pool size (max connections); default 20.
     "ANTARES_PG_POOL",
+    "ANTARES_PG_STATEMENT_TIMEOUT_MS",
     // bus=local over a shared postgres/timescale store is refused — every
     // replica would run its own matcher and fire its own copy of each
     // notification. This opt-in states the deployment runs exactly ONE
@@ -268,6 +269,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
 }
 
+/// ANTARES_PG_STATEMENT_TIMEOUT_MS → the per-session `statement_timeout`
+/// every pooled connection carries (a runaway query is cancelled, 5.5.2
+/// InternalError); absent = 30 000; not a positive integer = fatal.
+fn parse_pg_statement_timeout(raw: Option<&str>) -> Result<std::time::Duration, String> {
+    match raw {
+        None => Ok(std::time::Duration::from_secs(30)),
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 => Ok(std::time::Duration::from_millis(n)),
+            _ => Err(format!(
+                "ANTARES_PG_STATEMENT_TIMEOUT_MS must be a positive integer (got {v:?})"
+            )),
+        },
+    }
+}
+
 /// ANTARES_PG_POOL → pool size: absent defaults to 20; anything that is not
 /// a positive integer is fatal (a misread size must never silently run with
 /// a default, matching the unknown-key policy).
@@ -380,10 +396,15 @@ async fn build_store(
             let url = std::env::var("ANTARES_DATABASE_URL")
                 .map_err(|_| format!("ANTARES_STORE={mode} requires ANTARES_DATABASE_URL"))?;
             let pool_size = parse_pg_pool(std::env::var("ANTARES_PG_POOL").ok().as_deref())?;
+            let statement_timeout = parse_pg_statement_timeout(
+                std::env::var("ANTARES_PG_STATEMENT_TIMEOUT_MS")
+                    .ok()
+                    .as_deref(),
+            )?;
             // The DB container may still be booting — bounded retry, then die.
             let mut last = String::new();
             for _ in 0..30 {
-                match antares_sql::pg::connect(&url, pool_size).await {
+                match antares_sql::pg::connect_with(&url, pool_size, statement_timeout).await {
                     Ok(pool) => {
                         // The temporal backend is what the migrations actually
                         // BUILT, detected once from the catalog and pinned —
@@ -1098,13 +1119,23 @@ mod driver_registry_tests {
 
 #[cfg(test)]
 mod pg_pool_tests {
-    use super::parse_pg_pool;
+    use super::{parse_pg_pool, parse_pg_statement_timeout};
 
     /// ANTARES_PG_POOL: absent defaults to 20; a value that is not a
     /// positive integer is fatal — misconfiguration must never silently
     /// run with a default.
     #[test]
     fn pg_pool_parse_defaults_and_rejects() {
+        assert_eq!(
+            parse_pg_statement_timeout(None).expect("default"),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_pg_statement_timeout(Some("1500")).expect("explicit"),
+            std::time::Duration::from_millis(1500)
+        );
+        assert!(parse_pg_statement_timeout(Some("0")).is_err());
+        assert!(parse_pg_statement_timeout(Some("30s")).is_err());
         assert_eq!(parse_pg_pool(None).expect("default"), 20);
         assert_eq!(parse_pg_pool(Some("7")).expect("explicit"), 7);
         assert!(
