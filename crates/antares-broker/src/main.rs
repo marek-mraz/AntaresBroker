@@ -250,12 +250,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(async {
-            let (store, backend) = build_store(mode).await?;
+            let (store, temporal, backend) = build_drivers(mode).await?;
             run(
                 port,
                 host_alias,
                 roles,
                 store,
+                temporal,
                 mode,
                 backend,
                 metrics_render,
@@ -280,6 +281,71 @@ fn parse_pg_pool(raw: Option<&str>) -> Result<u32, String> {
             )),
         },
     }
+}
+
+/// What ANTARES_TEMPORAL resolved to, before anything is built.
+#[derive(Debug, PartialEq, Eq)]
+enum TemporalChoice {
+    /// The current-state store records and serves history too (default).
+    SameAsStore,
+    /// History off: `NoTemporal`.
+    None,
+    /// A second store instance of this mode, used only through its
+    /// temporal half.
+    Second(antares_sql::StoreMode),
+}
+
+/// The shelf this binary was built with — every store mode is compiled in,
+/// so the listing is static; a feature-gated backend would drop out here.
+const BUILT_WITH: &str = "memory|file|postgres|timescale (temporal also: none)";
+
+/// ANTARES_TEMPORAL → driver choice. Absent or the store's own mode = one
+/// instance for both seams; `none` = no history; any other backend name =
+/// a second store. An unknown name is fatal and names the shelf.
+fn temporal_choice(
+    store_mode: antares_sql::StoreMode,
+    raw: Option<&str>,
+) -> Result<TemporalChoice, String> {
+    match raw {
+        None => Ok(TemporalChoice::SameAsStore),
+        Some(m) if m == store_mode.as_str() => Ok(TemporalChoice::SameAsStore),
+        Some("none") => Ok(TemporalChoice::None),
+        Some(other) => other.parse().map(TemporalChoice::Second).map_err(|_| {
+            format!("ANTARES_TEMPORAL: unknown backend {other:?}; built with {BUILT_WITH}")
+        }),
+    }
+}
+
+/// The backend registry: the two driver seams from their configured names.
+/// Every backend is one arm of `build_store`; the temporal driver is by
+/// default the same instance (history recorded and served by the
+/// current-state store), `none` turns history off (temporal reads answer
+/// OperationNotSupported 422, Table 6.3.2-1; the recorder produces
+/// nothing), and a different backend name builds a second store used only
+/// through its temporal half.
+async fn build_drivers(
+    store_mode: antares_sql::StoreMode,
+) -> Result<
+    (
+        std::sync::Arc<antares_sql::store::any::AnyStore>,
+        std::sync::Arc<dyn antares_store::TemporalDriver>,
+        Option<antares_sql::maintenance::TemporalBackend>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (store, backend) = build_store(store_mode).await?;
+    let store = std::sync::Arc::new(store);
+    let raw = std::env::var("ANTARES_TEMPORAL").ok();
+    let temporal: std::sync::Arc<dyn antares_store::TemporalDriver> =
+        match temporal_choice(store_mode, raw.as_deref())? {
+            TemporalChoice::SameAsStore => store.clone(),
+            TemporalChoice::None => std::sync::Arc::new(antares_store::NoTemporal),
+            TemporalChoice::Second(mode) => {
+                let (second, _) = build_store(mode).await?;
+                std::sync::Arc::new(second)
+            }
+        };
+    Ok((store, temporal, backend))
 }
 
 /// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
@@ -421,7 +487,10 @@ async fn run(
     port: u16,
     host_alias: String,
     roles: String,
-    store: antares_sql::store::any::AnyStore,
+    // the concrete handle stays for the backend-specific jobs; the
+    // AppState carries only the driver seam
+    store: std::sync::Arc<antares_sql::store::any::AnyStore>,
+    temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
     store_mode: antares_sql::StoreMode,
     temporal_backend: Option<antares_sql::maintenance::TemporalBackend>,
     metrics_render: Option<telemetry::MetricsRender>,
@@ -460,28 +529,6 @@ async fn run(
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
-    // the concrete handle stays for the backend-specific jobs below; the
-    // AppState carries only the driver seam
-    let store = std::sync::Arc::new(store);
-    // Temporal driver selection: by default the current-state store also
-    // records and serves history (one instance, both seams). `none` turns
-    // history off — temporal reads answer OperationNotSupported (422,
-    // Table 6.3.2-1) and the recorder produces nothing. Any other backend
-    // name builds a second store instance used only through its temporal
-    // half.
-    let temporal: std::sync::Arc<dyn antares_store::TemporalDriver> =
-        match std::env::var("ANTARES_TEMPORAL").ok().as_deref() {
-            None => store.clone(),
-            Some(m) if m == store_mode.as_str() => store.clone(),
-            Some("none") => std::sync::Arc::new(antares_store::NoTemporal),
-            Some(other) => {
-                let mode: antares_sql::StoreMode = other
-                    .parse()
-                    .map_err(|e| format!("ANTARES_TEMPORAL: {e} — or `none`"))?;
-                let (second, _) = build_store(mode).await?;
-                std::sync::Arc::new(second)
-            }
-        };
     let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
     state.record_observed_only = match std::env::var("ANTARES_TEMPORAL_RECORD").as_deref() {
         Err(_) | Ok("all") => false,
@@ -1001,6 +1048,51 @@ mod sweep_secs_tests {
                 parse_sweep_secs(Some(bad)).expect_err(&format!("SWEEP_SECS={bad:?} is fatal"));
             assert!(err.contains("ANTARES_SWEEP_SECS"), "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod driver_registry_tests {
+    use super::{temporal_choice, TemporalChoice, BUILT_WITH};
+    use antares_sql::StoreMode;
+
+    /// Absent, or the store's own name, means one instance serves both
+    /// seams — no second store is ever built for the default.
+    #[test]
+    fn absent_or_same_name_shares_the_store() {
+        assert_eq!(
+            temporal_choice(StoreMode::Postgres, None).expect("ok"),
+            TemporalChoice::SameAsStore
+        );
+        assert_eq!(
+            temporal_choice(StoreMode::Postgres, Some("postgres")).expect("ok"),
+            TemporalChoice::SameAsStore
+        );
+    }
+
+    #[test]
+    fn none_turns_history_off_and_other_names_build_a_second_store() {
+        assert_eq!(
+            temporal_choice(StoreMode::Memory, Some("none")).expect("ok"),
+            TemporalChoice::None
+        );
+        assert_eq!(
+            temporal_choice(StoreMode::Memory, Some("timescale")).expect("ok"),
+            TemporalChoice::Second(StoreMode::Timescale)
+        );
+    }
+
+    /// An unknown backend is fatal at startup and the message names the
+    /// shelf this binary was built with — never a silent default.
+    #[test]
+    fn unknown_backend_is_fatal_and_lists_the_shelf() {
+        let err = temporal_choice(StoreMode::Memory, Some("mongo")).expect_err("must fail");
+        assert!(err.contains("mongo"), "{err}");
+        assert!(err.contains(BUILT_WITH), "{err}");
+        assert!(
+            temporal_choice(StoreMode::Memory, Some("")).is_err(),
+            "an empty name is not a default"
+        );
     }
 }
 
