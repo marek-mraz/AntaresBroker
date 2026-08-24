@@ -29,21 +29,7 @@ fn is_meta(k: &str) -> bool {
     )
 }
 
-/// Entity Type Selection Language (4.17) match against expanded type IRIs:
-/// `,`/`|` = OR of alternatives, `(a;b)` = AND within one alternative.
-pub(crate) fn type_selection_matches(
-    sel: &str,
-    types: &[&str],
-    ctx: &antares_jsonld::Context,
-) -> bool {
-    sel.split([',', '|']).any(|alt| {
-        alt.trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .split(';')
-            .all(|t| types.contains(&ctx.expand_key(t.trim()).as_str()))
-    })
-}
+pub(crate) use antares_ql::type_selection_matches;
 
 /// Inject server-managed timestamps into a freshly expanded doc.
 pub fn stamp_new(doc: &mut Value, ts: &str) {

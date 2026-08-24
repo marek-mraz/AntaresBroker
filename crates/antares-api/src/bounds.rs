@@ -24,7 +24,7 @@ pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData
 /// per candidate entity, so the work a single request can buy is capped
 /// here: 1024 positions describe an administrative boundary at street
 /// resolution, and are already more than the 8 KiB URI ceiling can carry.
-pub const MAX_GEO_VERTICES: usize = 1024;
+pub use antares_ql::geo::MAX_GEO_VERTICES;
 /// → 400 BadRequestData. Deployment knob (ANTARES_MAX_BATCH_ITEMS): the
 /// spec sets no batch ceiling — 1000 is this broker's DoS-bounds default,
 /// raised where a trusted producer legitimately batches larger (e.g. a
@@ -61,25 +61,10 @@ pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
-/// Entity lookups one `q=` expression may buy while resolving 4.9
-/// linked-entity terms (`attr{…}`, EXAMPLE 13/14). The hop count is capped
-/// by the query language itself, but each hop fans out over every object of
-/// a Relationship, so the walk costs fan-out^hops store reads. Exhausting
-/// the budget yields no further target — the same outcome an unresolvable
-/// linked entity already has — instead of a store scan per candidate entity.
-pub const MAX_Q_LINK_LOOKUPS: usize = 512;
-/// Compiled regular expressions the process retains (see `regexcache`). The
-/// pattern is client input — the `patternOp`/`notPatternOp` operand of a
-/// query term (4.9) and the `idPattern` of an EntitySelector (5.2.33), an
-/// EntityInfo (5.2.8) or a query parameter (Table 6.4.3.2-1) — so retention
-/// is capped in BOTH dimensions: at most this many distinct patterns, each
-/// compiled to at most `MAX_REGEX_PROGRAM_BYTES`. The worst case a client mix
-/// can reach is therefore 32 MiB of compiled programs, whatever patterns are
-/// sent. Nothing is rejected by these caps: a pattern whose program does not
-/// fit is still compiled (acceptance stays exactly `Regex::new`'s), it is
-/// only not retained.
-pub const MAX_REGEX_CACHE: usize = 1024;
-pub const MAX_REGEX_PROGRAM_BYTES: usize = 32 * 1024;
+/// Linked-entity lookup budget per `q=`, owned by the shared evaluator.
+pub use antares_ql::eval::MAX_Q_LINK_LOOKUPS;
+/// Regex retention caps, owned by the shared cache (`antares_ql::regex`).
+pub use antares_ql::regex::{MAX_REGEX_CACHE, MAX_REGEX_PROGRAM_BYTES};
 
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]

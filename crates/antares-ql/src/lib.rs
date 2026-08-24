@@ -1,23 +1,82 @@
-//! NGSI-LD Query Language (CIM 009 clause 4.9) — parser seed.
+//! NGSI-LD Query Language (CIM 009 clause 4.9): one AST, two backends.
 //!
-//! v0 grammar subset: comparisons over dotted attribute paths, `;` (AND) and
-//! `|` (OR), parentheses. This is a high-risk crate: it grows test-first
-//! against the CI/Cons TPs.
+//! [`parse_q`] turns a `q=` expression into a [`QNode`]; [`eval`] evaluates
+//! it against an in-memory expanded entity (the broker's query path and its
+//! subscription matcher share this evaluator), [`sql`] lowers it to a
+//! bind-parameter jsonpath predicate for Postgres. The AST is `Serialize`
+//! and `Clone`, and renders back to `q=` syntax through `Display`, so a
+//! gateway can inspect or rewrite a query (strip an attribute, AND in an
+//! authorization predicate) and forward it with the broker's own semantics.
+
+#![deny(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
+pub mod eval;
+pub mod geo;
+pub mod regex;
+mod render;
+pub mod scope;
+pub mod sql;
 
 use antares_model::NgsiError;
 
-#[derive(Debug, Clone, PartialEq)]
+/// Entity Type Selection Language (4.17) match against expanded type IRIs:
+/// `,`/`|` = OR of alternatives, `(a;b)` = AND within one alternative.
+pub fn type_selection_matches(sel: &str, types: &[&str], ctx: &antares_jsonld::Context) -> bool {
+    sel.split([',', '|']).any(|alt| {
+        alt.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(';')
+            .all(|t| types.contains(&ctx.expand_key(t.trim()).as_str()))
+    })
+}
+
+/// RFC 3986 percent-decoding of a query value (`q`, `scopeQ` in a
+/// subscription body may arrive encoded, 4.9).
+pub fn percent_decode(input: &[u8]) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            // from_str_radix accepts a leading sign, so "%+1" would decode as
+            // 0x01. RFC 3986 clause 2.1 admits two hex digits and nothing else.
+            let hex = std::str::from_utf8(&input[i + 1..i + 3])
+                .ok()
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One parsed 4.9 query expression.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum QNode {
+    /// `a;b` — every operand must hold.
     And(Vec<QNode>),
+    /// `a|b` — any operand holds.
     Or(Vec<QNode>),
+    /// `path op value` — one comparison term.
     Cmp {
+        /// The attribute (path) the term targets.
         path: QPath,
+        /// The comparison operator.
         op: CmpOp,
+        /// The literal compared against.
         value: QValue,
     },
     /// Bare attribute path = existence check (`q=temperature`).
     Exists {
+        /// The attribute (path) whose presence is tested.
         path: QPath,
+        /// `!path` — the attribute must be absent.
         negated: bool,
     },
 }
@@ -27,17 +86,23 @@ pub enum QNode {
 /// a dotted path plus an optional single trailing bracket that is either a
 /// compound-value member path (EXAMPLE 9/10/11) or a language filter
 /// (`[en]` / `[*]`, Equal/Unequal languageMap semantics).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct QPath {
+    /// Linked-entity hops (`attr{…}`) preceding the path, outermost first.
     pub links: Vec<Link>,
+    /// The dotted attribute path (terms, expanded at evaluation time).
     pub path: Vec<String>,
+    /// The optional trailing `[…]`: a compound-value member path, or a
+    /// language filter (`[en]`, `[*]`).
     pub bracket: Option<Vec<String>>,
 }
 
 /// One `attr{…}` linked-entity hop with its optional EntityType hints.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Link {
+    /// The Relationship followed.
     pub attr: String,
+    /// EntityType hints (`attr{T1,T2:…}`), empty when none.
     pub types: Vec<String>,
 }
 
@@ -126,22 +191,35 @@ pub fn is_non_system_attr(name: &str) -> bool {
     !SYSTEM_ATTRS.contains(&name)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The 4.9 comparison operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum CmpOp {
-    Eq,         // ==
-    Ne,         // !=
-    Gt,         // >
-    Ge,         // >=
-    Lt,         // <
-    Le,         // <=
-    Pattern,    // ~=
-    NotPattern, // !~= (4.9 notPatternOp)
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `~=` (patternOp)
+    Pattern,
+    /// `!~=` (notPatternOp)
+    NotPattern,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A query term literal.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum QValue {
+    /// A string (quoted, or an unquoted non-numeric token such as a date).
     Str(String),
+    /// A number.
     Num(f64),
+    /// `true` / `false`.
     Bool(bool),
     /// 4.9 `ValueList = Value 1*(, Value)` — scalars only, `==`/`!=` only.
     List(Vec<QValue>),

@@ -5,32 +5,7 @@
 
 use serde_json::Value;
 
-/// The default GeoProperty — the only one backends extract a column for.
-pub const LOCATION_IRI: &str = "https://uri.etsi.org/ngsi-ld/location";
-
-/// `georel` as the API already parsed it (CIM 009 clause 4.10).
-pub enum Rel {
-    /// metres; either bound may be absent
-    Near {
-        max: Option<f64>,
-        min: Option<f64>,
-    },
-    Within,
-    Contains,
-    Intersects,
-    Disjoint,
-    Overlaps,
-    Equals,
-}
-
-/// A geoquery as the API already validated it (4.10 params).
-pub struct GeoSpec<'a> {
-    pub rel: Rel,
-    pub geometry: &'a str,
-    pub coordinates: &'a Value,
-    /// EXPANDED `geoproperty`; empty means the default (`location`).
-    pub geoproperty_iri: &'a str,
-}
+pub use antares_ql::geo::{GeoSpec, Rel, LOCATION_IRI};
 
 /// The 4.11 temporal window as the API already validated it.
 pub struct InstanceRange<'a> {

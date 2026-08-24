@@ -39,27 +39,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
     }
 }
 
-pub(crate) fn percent_decode(input: &[u8]) -> String {
-    let mut out = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == b'%' && i + 2 < input.len() {
-            // from_str_radix accepts a leading sign, so "%+1" would decode as
-            // 0x01. RFC 3986 clause 2.1 admits two hex digits and nothing else.
-            let hex = std::str::from_utf8(&input[i + 1..i + 3])
-                .ok()
-                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
-            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(input[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+pub(crate) use antares_ql::percent_decode;
 
 /// Handler-level error: an NGSI-LD ProblemDetails or a bare status (6.3.4).
 #[derive(Debug)]

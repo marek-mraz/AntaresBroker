@@ -50,6 +50,7 @@ name = "antares-api"
 version = "0.1.0"
 dependencies = [
  "antares-jsonld",
+ "antares-matcher",
  "antares-model",
  "antares-notifier",
  "antares-ql",
@@ -58,9 +59,6 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
- "geo",
- "geo-types",
- "geojson",
  "gloo-timers",
  "http-body-util",
  "icu_collator",
@@ -144,6 +142,13 @@ dependencies = [
 [[package]]
 name = "antares-matcher"
 version = "0.1.0"
+dependencies = [
+ "antares-jsonld",
+ "antares-model",
+ "antares-ql",
+ "chrono",
+ "serde_json",
+]
 
 [[package]]
 name = "antares-model"
@@ -170,7 +175,14 @@ dependencies = [
 name = "antares-ql"
 version = "0.1.0"
 dependencies = [
+ "antares-jsonld",
  "antares-model",
+ "geo",
+ "geo-types",
+ "geojson",
+ "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
