@@ -288,3 +288,78 @@ async fn a_failing_drain_keeps_the_2xx_and_is_counted() {
     );
 }
 
+/// Gate 2 (ANTARES_TEMPORAL_RECORD=observed): the instance with observedAt
+/// enters history, the one without does not — while current state keeps
+/// both and its modifiedAt still moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn observed_mode_records_only_observed_instances() {
+    let (mut st, c) = counting_state();
+    st.record_observed_only = true;
+    let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(11))).await;
+    assert_eq!(status, 201);
+    assert_eq!(
+        c.events.load(Ordering::SeqCst),
+        1,
+        "heading carries no observedAt and is gated out before the driver"
+    );
+    let (status, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:D:11",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["speed"][0]["value"], 11, "{body}");
+    assert!(
+        body.get("heading").is_none(),
+        "no history for a never-observed attribute: {body}"
+    );
+    // a metadata-only change still updates current state, still no history
+    let (status, _) = req(
+        &st,
+        "PATCH",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:D:11/attrs/heading",
+        Some(json!({"type": "Property", "value": 999})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:D:11?options=sysAttrs",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["heading"]["value"], 999, "current state moved: {body}");
+    assert!(body["heading"]["modifiedAt"].is_string(), "{body}");
+    assert_eq!(c.events.load(Ordering::SeqCst), 1, "still gated out");
+    let (_, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:D:11",
+        None,
+    )
+    .await;
+    assert!(body.get("heading").is_none(), "{body}");
+}
+
+/// The default (`all`) records both instances — the gate is off, not
+/// merely lenient.
+#[tokio::test(flavor = "multi_thread")]
+async fn all_mode_records_unobserved_instances_too() {
+    let (st, c) = counting_state();
+    assert!(!st.record_observed_only, "all is the default");
+    let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(12))).await;
+    assert_eq!(status, 201);
+    assert_eq!(c.events.load(Ordering::SeqCst), 2);
+    let (_, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:D:12",
+        None,
+    )
+    .await;
+    assert_eq!(body["heading"][0]["value"], 120, "{body}");
+}

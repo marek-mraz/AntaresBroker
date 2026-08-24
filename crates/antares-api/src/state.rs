@@ -90,6 +90,10 @@ pub struct AppState {
     /// claim there would disturb the 046_12 bookkeeping ordering for
     /// nothing.
     pub nats: bool,
+    /// History gate 2 (ANTARES_TEMPORAL_RECORD=observed): only attribute
+    /// instances carrying `observedAt` are recorded. Default `false` = every
+    /// changed instance, which the ETSI temporal suites assume.
+    pub record_observed_only: bool,
     /// The base URL remote Context Sources reach THIS broker at — used as
     /// the notification endpoint of forwarded subscription copies
     /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to
@@ -240,6 +244,7 @@ impl AppState {
             reg_mirror: None,
             metrics_render: None,
             nats: false,
+            record_observed_only: false,
             public_url,
             snapshot_cap: 1024,
         }

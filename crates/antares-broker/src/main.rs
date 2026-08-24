@@ -26,6 +26,9 @@ const KNOWN_KEYS: &[&str] = &[
     // reads answer OperationNotSupported, Table 6.3.2-1). Defaults to the
     // current-state store, so one instance serves both seams.
     "ANTARES_TEMPORAL",
+    // History gate: `all` (default) records every changed instance;
+    // `observed` records only instances carrying observedAt.
+    "ANTARES_TEMPORAL_RECORD",
     "ANTARES_DATA_DIR",
     // Egress: private-range destinations are ALLOWED by default (ADR-0010 —
     // brokers federate inside private networks); a hardened deployment sets
@@ -480,6 +483,15 @@ async fn run(
             }
         };
     let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
+    state.record_observed_only = match std::env::var("ANTARES_TEMPORAL_RECORD").as_deref() {
+        Err(_) | Ok("all") => false,
+        Ok("observed") => true,
+        Ok(other) => {
+            return Err(
+                format!("ANTARES_TEMPORAL_RECORD: unknown mode {other} (all|observed)").into(),
+            )
+        }
+    };
     // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.

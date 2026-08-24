@@ -54,8 +54,25 @@ pub(crate) fn push(st: &AppState, ev: TemporalEvent) {
     drain(st, vec![ev]);
 }
 
+/// The gate chain: an event enters history only if every gate admits it.
+/// Gate 1 (value-change) runs in the producer — an unchanged instance never
+/// becomes an event (`changed_instances`). Adding a gate = one more entry
+/// here; producers and drivers stay untouched.
+const GATES: &[fn(&AppState, &TemporalEvent) -> bool] = &[observed_gate];
+
+/// Gate 2: ANTARES_TEMPORAL_RECORD=observed keeps only instances that carry
+/// `observedAt` — the spec's own measurement axis (4.5.7: observedAt is
+/// the default timeproperty); metadata-shaped writes leave no history.
+fn observed_gate(st: &AppState, ev: &TemporalEvent) -> bool {
+    !st.record_observed_only || ev.instance.get("observedAt").is_some()
+}
+
 /// The consumer side: one `event_list` call per drained batch.
 pub(crate) fn drain(st: &AppState, evs: Vec<TemporalEvent>) {
+    let evs: Vec<TemporalEvent> = evs
+        .into_iter()
+        .filter(|ev| GATES.iter().all(|gate| gate(st, ev)))
+        .collect();
     if evs.is_empty() {
         return;
     }

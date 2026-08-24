@@ -28,6 +28,7 @@ here).
 | `ANTARES_PG_POOL` | `20` | Connection-pool size for `postgres`/`timescale`. Unparsable value = fatal. Sessions carry `statement_timeout` 30 s / `lock_timeout` 5 s. |
 | `ANTARES_MIGRATE` | on | `0`/`false` skips running migrations from this process, so serving replicas do not race the DDL — run them once from a job or init container instead. |
 | `ANTARES_ALLOW_SHARED_LOCAL` | unset | `1` permits `bus=local` with a `postgres`/`timescale` store — safe ONLY for a strictly single-process deployment; two such processes double-fire notifications. |
+| `ANTARES_TEMPORAL_RECORD` | `all` | History gate. `all`: every changed attribute instance is recorded. `observed`: only instances carrying `observedAt` enter history — a metadata-only write (no `observedAt`) updates current state and its `modifiedAt` but leaves no history, so `timeproperty=modifiedAt`/`createdAt` temporal queries return nothing for never-observed attributes. The ETSI temporal suites assume `all`, which is why it stays the default. Unknown value = fatal. |
 | `ANTARES_TEMPORAL_RETENTION_DAYS` | unset (keep forever) | Temporal history retention; the sweep job prunes older attribute instances. |
 | `ANTARES_SWEEP_SECS` | `900` | Cadence of the background GC sweep (expired entities/registrations, 4.22) — identical across store modes. |
 
