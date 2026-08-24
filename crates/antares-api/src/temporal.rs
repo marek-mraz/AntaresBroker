@@ -433,21 +433,42 @@ const TEMPORAL_INSTANCE_LIMIT: usize = 9;
 /// and what caps a request naming no temporal window at all. Aggregated
 /// representations (5.7.4.4) are computed over the whole evolution and are
 /// complete by construction, so they are never cut.
-fn truncate(w: &mut Windowed, timeprop: &str) {
+///
+/// The cut is ONE time boundary for the whole entity, not a per-attribute
+/// count: the partial content "shall" be the representation the
+/// Content-Range describes, so every attribute is trimmed to the tightest
+/// ceiling instant among the over-full ones (ties at that instant kept),
+/// and a client continuing from the advertised range-end misses no instance
+/// of any attribute. An attribute lying entirely beyond the boundary comes
+/// back empty on this page.
+fn truncate(w: &mut Windowed, timeprop: &str, descending: bool) {
     if w.max_per_attr <= TEMPORAL_INSTANCE_LIMIT {
         return;
     }
     w.truncated = true;
     w.max_per_attr = TEMPORAL_INSTANCE_LIMIT;
+    let key = |inst: &Value| inst.get(timeprop).and_then(Value::as_str).map(dt_key);
+    // the tightest ceiling instant: earliest forwards, latest backwards
+    let boundary = w
+        .attrs
+        .values()
+        .filter(|insts| insts.len() > TEMPORAL_INSTANCE_LIMIT)
+        .filter_map(|insts| key(&insts[TEMPORAL_INSTANCE_LIMIT - 1]))
+        .reduce(|a, b| if (b < a) != descending { b } else { a });
     let (mut ts_min, mut ts_max) = (None::<String>, None::<String>);
     for instances in w.attrs.values_mut() {
-        instances.truncate(TEMPORAL_INSTANCE_LIMIT);
+        match &boundary {
+            Some(bd) => instances.retain(|inst| {
+                key(inst).is_none_or(|k| if descending { k >= *bd } else { k <= *bd })
+            }),
+            None => instances.truncate(TEMPORAL_INSTANCE_LIMIT),
+        }
         for inst in instances.iter() {
             if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
-                if ts_min.as_deref().is_none_or(|m| t < m) {
+                if ts_min.as_deref().is_none_or(|m| dt_key(t) < dt_key(m)) {
                     ts_min = Some(t.to_owned());
                 }
-                if ts_max.as_deref().is_none_or(|m| t > m) {
+                if ts_max.as_deref().is_none_or(|m| dt_key(t) > dt_key(m)) {
                     ts_max = Some(t.to_owned());
                 }
             }
@@ -611,70 +632,6 @@ fn window(
         w.attrs.insert(k.clone(), instances);
     }
     w
-}
-
-/// 6.3.10 attribute-gap cut (retrieve only): in the truncation regime, when
-/// attributes occupy disjoint time ranges, keep the attribute whose range is
-/// first in the query direction and empty the ones entirely beyond it.
-fn gap_cut(w: &mut Windowed, timeprop: &str, descending: bool) {
-    if !w.truncated || w.attrs.len() < 2 {
-        return;
-    }
-    let mut ranges: Vec<(String, String, String)> = Vec::new(); // (attr, min, max)
-    for (k, instances) in &w.attrs {
-        let mut min: Option<&str> = None;
-        let mut max: Option<&str> = None;
-        for inst in instances {
-            if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
-                if min.is_none_or(|m| t < m) {
-                    min = Some(t);
-                }
-                if max.is_none_or(|m| t > m) {
-                    max = Some(t);
-                }
-            }
-        }
-        if let (Some(min), Some(max)) = (min, max) {
-            ranges.push((k.clone(), min.to_owned(), max.to_owned()));
-        }
-    }
-    if ranges.len() < 2 {
-        return;
-    }
-    let keep = ranges
-        .iter()
-        .min_by(|a, b| {
-            if descending {
-                b.2.cmp(&a.2)
-            } else {
-                a.1.cmp(&b.1)
-            }
-        })
-        .cloned()
-        .expect("nonempty");
-    let mut new_min: Option<String> = None;
-    let mut new_max: Option<String> = None;
-    for (attr, min, max) in &ranges {
-        let cut = if descending {
-            max < &keep.1
-        } else {
-            min > &keep.2
-        };
-        if *attr != keep.0 && cut {
-            if let Some(list) = w.attrs.get_mut(attr) {
-                list.clear();
-            }
-        } else {
-            if new_min.as_deref().is_none_or(|m| min.as_str() < m) {
-                new_min = Some(min.clone());
-            }
-            if new_max.as_deref().is_none_or(|m| max.as_str() > m) {
-                new_max = Some(max.clone());
-            }
-        }
-    }
-    w.ts_min = new_min;
-    w.ts_max = new_max;
 }
 
 /// Content-Range: date-time <start>-<end>/<size> (Scorpio-parity semantics).
@@ -1967,7 +1924,7 @@ pub(crate) async fn query_temporal_inner(
             &timeprop,
         );
         if !trepr.aggregated {
-            truncate(&mut w, &timeprop);
+            truncate(&mut w, &timeprop, last_n.is_some());
         }
         g_trunc |= w.truncated;
         if let Some(m) = &w.ts_min {
@@ -2261,9 +2218,8 @@ async fn retrieve_temporal_inner(
             &timeprop,
         );
         if !trepr.aggregated {
-            truncate(&mut w, &timeprop);
+            truncate(&mut w, &timeprop, last_n.is_some());
         }
-        gap_cut(&mut w, &timeprop, last_n.is_some());
         let cr = if trepr.aggregated {
             None
         } else {
@@ -3196,7 +3152,7 @@ mod clause_6_3_10 {
 
     fn windowed(doc: &Value, tq: Option<&TemporalQ>, last_n: Option<usize>) -> Windowed {
         let mut w = window(doc, tq, last_n, None, None, None, "observedAt");
-        truncate(&mut w, "observedAt");
+        truncate(&mut w, "observedAt", last_n.is_some());
         w
     }
 
@@ -3244,6 +3200,65 @@ mod clause_6_3_10 {
                 "date-time 2019-01-01T00:00:00Z-{}/*",
                 at(TEMPORAL_INSTANCE_LIMIT - 1)
             ))
+        );
+    }
+
+    /// Two attributes, `speed` minutes 0..n and `heading` minutes 5..m.
+    fn evolution2(n: usize, m: usize) -> Value {
+        let mut doc = evolution(n);
+        doc["heading"] = (5..m)
+            .map(|i| json!({"type": "Property", "value": i, "observedAt": at(i)}))
+            .collect();
+        doc
+    }
+
+    fn last_observed(w: &Windowed, attr: &str) -> Option<String> {
+        w.attrs[attr]
+            .iter()
+            .filter_map(|i| i["observedAt"].as_str().map(str::to_owned))
+            .max()
+    }
+
+    /// 6.3.10: the partial content IS the representation the Content-Range
+    /// describes — so the cut is one time boundary for the whole entity.
+    /// With `speed` over-full first, `heading` is trimmed to the same last
+    /// instant, and nothing of either attribute lies past the advertised
+    /// range-end (a client continuing from it misses no instance).
+    #[test]
+    fn the_cut_is_one_time_boundary_across_attributes() {
+        let w = windowed(&evolution2(21, 31), None, None);
+        assert!(w.truncated);
+        let end = at(TEMPORAL_INSTANCE_LIMIT - 1);
+        assert_eq!(w.attrs["speed"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert_eq!(last_observed(&w, "speed").as_deref(), Some(end.as_str()));
+        assert_eq!(
+            last_observed(&w, "heading").as_deref(),
+            Some(end.as_str()),
+            "heading must stop at speed's boundary, not at its own ninth instance"
+        );
+        assert_eq!(w.attrs["heading"].len(), TEMPORAL_INSTANCE_LIMIT - 5);
+        assert_eq!(w.ts_max.as_deref(), Some(end.as_str()));
+        for inst in w.attrs["heading"].iter().chain(w.attrs["speed"].iter()) {
+            assert!(
+                inst["observedAt"].as_str().expect("t") <= end.as_str(),
+                "no instance may lie past the advertised range-end: {inst}"
+            );
+        }
+        // backwards (lastN): the boundary is the LATEST ninth instant, so the
+        // page covers [heading's ninth-newest, newest] and `speed`, which ends
+        // before that, is empty on this page rather than incoherently present
+        let w = windowed(&evolution2(21, 31), None, Some(20));
+        assert!(w.truncated);
+        assert_eq!(w.attrs["heading"].len(), TEMPORAL_INSTANCE_LIMIT);
+        assert_eq!(w.attrs["heading"][0]["observedAt"], json!(at(30)));
+        assert_eq!(
+            w.ts_min.as_deref(),
+            Some(at(30 - TEMPORAL_INSTANCE_LIMIT + 1).as_str())
+        );
+        assert!(
+            w.attrs["speed"].is_empty(),
+            "speed lies entirely before the page boundary: {:?}",
+            w.attrs["speed"]
         );
     }
 
@@ -3663,83 +3678,5 @@ mod clause_4_6_3 {
             dt_key("2026-05-01T00:00:00,5Z"),
             "2026-05-01T00:00:00.500000"
         );
-    }
-}
-
-#[cfg(test)]
-mod clause_6_3_10_gaps {
-    use super::*;
-    use serde_json::json;
-
-    fn windowed(a: &[&str], b: &[&str]) -> Windowed {
-        let mut attrs = std::collections::BTreeMap::new();
-        for (name, times) in [("a", a), ("b", b)] {
-            attrs.insert(
-                name.to_owned(),
-                times
-                    .iter()
-                    .map(|t| json!({"type": "Property", "value": 1, "observedAt": t}))
-                    .collect::<Vec<Value>>(),
-            );
-        }
-        Windowed {
-            attrs,
-            max_per_attr: a.len().max(b.len()),
-            ts_min: Some("2020-01-01T00:00:00Z".to_owned()),
-            ts_max: Some("2020-01-01T10:02:00Z".to_owned()),
-            truncated: true,
-        }
-    }
-
-    const EARLY: [&str; 2] = ["2020-01-01T00:00:00Z", "2020-01-01T00:02:00Z"];
-    const LATE: [&str; 2] = ["2020-01-01T10:00:00Z", "2020-01-01T10:02:00Z"];
-
-    /// 6.3.10: partial content must BE the representation the Content-Range
-    /// describes. When two Attributes hold disjoint time ranges under
-    /// truncation, the one first in the query direction is served and the
-    /// other is emptied — and the advertised range then covers only the
-    /// instances actually returned.
-    #[test]
-    fn a_disjoint_attribute_is_emptied_and_leaves_the_range() {
-        // ascending (no lastN): the earlier range is the one served
-        let mut w = windowed(&EARLY, &LATE);
-        gap_cut(&mut w, "observedAt", false);
-        assert_eq!(w.attrs["a"].len(), 2);
-        assert!(w.attrs["b"].is_empty(), "the later attribute is emptied");
-        let cr = content_range(
-            w.truncated,
-            w.ts_min.as_deref(),
-            w.ts_max.as_deref(),
-            None,
-            None,
-        )
-        .expect("content-range");
-        assert_eq!(cr, "date-time 2020-01-01T00:00:00Z-2020-01-01T00:02:00Z/*");
-        assert!(
-            !cr.contains("10:0"),
-            "an emptied attribute's instants must not be advertised: {cr}"
-        );
-
-        // descending (lastN): the direction reverses, so the later range wins
-        let mut w = windowed(&EARLY, &LATE);
-        gap_cut(&mut w, "observedAt", true);
-        assert!(w.attrs["a"].is_empty(), "the earlier attribute is emptied");
-        assert_eq!(w.attrs["b"].len(), 2);
-        assert_eq!(w.ts_min.as_deref(), Some("2020-01-01T10:00:00Z"));
-        assert_eq!(w.ts_max.as_deref(), Some("2020-01-01T10:02:00Z"));
-    }
-
-    /// The cut is conditional on truncation and on a real gap: overlapping
-    /// ranges, or a complete (200) result, keep every instance.
-    #[test]
-    fn overlapping_ranges_and_complete_results_are_untouched() {
-        let mut w = windowed(&EARLY, &["2020-01-01T00:01:00Z", "2020-01-01T10:00:00Z"]);
-        gap_cut(&mut w, "observedAt", false);
-        assert_eq!(w.attrs["b"].len(), 2, "overlapping ranges are not cut");
-
-        let mut w = windowed(&EARLY, &LATE);
-        w.truncated = false;
-        gap_cut(&mut w, "observedAt", false);
-        assert_eq!(w.attrs["b"].len(), 2, "a complete result is not cut");
     }
 }
