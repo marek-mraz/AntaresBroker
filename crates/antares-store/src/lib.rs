@@ -9,6 +9,7 @@
 //! that does not support an operation answers with an error (or a benign
 //! no-op for internal bookkeeping), never a panic — `NoTemporal` is the
 //! canonical instance.
+#![deny(missing_docs)]
 
 pub mod filter;
 
@@ -22,10 +23,15 @@ pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send
 /// Which resource family an operation touches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// 5.2.4 Entity current-state documents.
     Entity,
+    /// 5.2.12 Subscription documents.
     Subscription,
+    /// 5.2.9 Context Source Registration documents.
     Registration,
+    /// Context Source Registration Subscription documents (5.11).
     CSourceSubscription,
+    /// Temporal Representation documents (5.2.5).
     Temporal,
     /// 5.16 Snapshot status documents (+ the internal synth-tenant index).
     Snapshot,
@@ -40,14 +46,19 @@ pub enum Kind {
 /// wrong mode is unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StoreMode {
+    /// In-process maps; nothing survives a restart.
     #[default]
     Memory,
+    /// Embedded single-file store on local disk.
     File,
+    /// PostgreSQL with PostGIS.
     Postgres,
+    /// PostgreSQL with PostGIS and TimescaleDB hypertables for history.
     Timescale,
 }
 
 impl StoreMode {
+    /// The mode name as accepted by `FromStr` (`memory|file|postgres|timescale`).
     pub fn as_str(self) -> &'static str {
         match self {
             StoreMode::Memory => "memory",
@@ -109,6 +120,7 @@ pub trait CurrentStateDriver: Send + Sync {
     }
     /// Drain: finish in-flight work and disconnect cleanly.
     fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    /// Installs the (tenant, before, after) hook called on every entity write.
     fn set_change_hook(&self, h: ChangeHook);
     /// Turn the same-transaction outbox producer on (bus=nats).
     fn set_outbox(&self, on: bool) {
@@ -125,6 +137,7 @@ pub trait CurrentStateDriver: Send + Sync {
         Ok(0)
     }
 
+    /// Insert a document; `false` if the id already exists (nothing written).
     fn create(
         &self,
         tenant: &TenantId,
@@ -148,6 +161,7 @@ pub trait CurrentStateDriver: Send + Sync {
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError>;
+    /// Insert or replace a document; `true` if it was created.
     fn upsert(
         &self,
         tenant: &TenantId,
@@ -155,8 +169,11 @@ pub trait CurrentStateDriver: Send + Sync {
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError>;
+    /// Read one document; `None` if absent.
     fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError>;
+    /// Delete one document; `false` if it was absent.
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError>;
+    /// Every document of this kind in the tenant.
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError>;
     /// Registrations that can match these ids/types (a backend may narrow;
     /// returning the full tenant list is always correct).
@@ -201,8 +218,11 @@ pub trait CurrentStateDriver: Send + Sync {
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
     /// 5.13 @context documents, shared across tenants by design.
     fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError>;
+    /// Read a stored @context document by id; `None` if absent.
     fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError>;
+    /// Delete a stored @context document; `false` if it was absent.
     fn context_delete(&self, id: &str) -> Result<bool, NgsiError>;
+    /// Every stored @context document.
     fn context_list(&self) -> Result<Vec<Value>, NgsiError>;
 }
 
@@ -210,6 +230,8 @@ pub trait CurrentStateDriver: Send + Sync {
 /// `Result<T, E>` closures; the value crosses the object boundary in a
 /// side slot.
 pub trait CurrentStateDriverExt {
+    /// Typed read-modify-write: `None` = absent, `Some(Err(e))` = the closure
+    /// rejected and nothing was committed.
     fn mutate<T, E>(
         &self,
         tenant: &TenantId,
@@ -217,6 +239,7 @@ pub trait CurrentStateDriverExt {
         id: &str,
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, NgsiError>;
+    /// Typed batch read-modify-write (entities only); results align with `ids`.
     fn batch_mutate<E>(
         &self,
         tenant: &TenantId,
@@ -297,8 +320,11 @@ pub enum TemporalOp {
 /// both work per instance) and drained per request, in order.
 #[derive(Clone, Debug)]
 pub struct TemporalEvent {
+    /// What the event records.
     pub op: TemporalOp,
+    /// Owning tenant.
     pub tenant: TenantId,
+    /// Id of the entity whose history this instance belongs to.
     pub entity_id: String,
     /// The entity's meta shell (id, type, createdAt, modifiedAt, scope) as
     /// it stood after the write — what `temporal_append` creates on first
@@ -369,6 +395,7 @@ pub trait TemporalDriver: Send + Sync {
     fn supported(&self) -> bool {
         true
     }
+    /// Readiness of the temporal backend; the default is always ready.
     fn ping(&self) -> Result<(), NgsiError> {
         Ok(())
     }
@@ -399,10 +426,16 @@ pub trait TemporalDriver: Send + Sync {
     /// Raw temporal document access (the 5.6.11-5.6.16 edit/delete paths
     /// and internal copies).
     fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError>;
+    /// Insert a temporal document; `false` if the id already exists.
     fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
+    /// Insert or replace a temporal document; `true` if it was created.
     fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
+    /// Delete an entity's whole history; `false` if it had none.
     fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError>;
+    /// Every temporal document in the tenant.
     fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError>;
+    /// Read-modify-write of one temporal document under its row lock;
+    /// `None` = absent (never an insert), `Some(Err)` = rejected, not committed.
     fn mutate_boxed<'a>(
         &self,
         tenant: &TenantId,
@@ -414,6 +447,8 @@ pub trait TemporalDriver: Send + Sync {
 /// Typed mutate sugar for the temporal seam, same slot trick as
 /// [`CurrentStateDriverExt`].
 pub trait TemporalDriverExt {
+    /// Typed read-modify-write of one temporal document: `None` = absent,
+    /// `Some(Err(e))` = the closure rejected and nothing was committed.
     fn mutate<T, E>(
         &self,
         tenant: &TenantId,

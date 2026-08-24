@@ -6,32 +6,46 @@
 use serde::Serialize;
 use thiserror::Error;
 
+/// Base of every NGSI-LD error type URI (Table 5.5.2-1, https in V1.9.1).
 pub const ERROR_TYPE_BASE: &str = "https://uri.etsi.org/ngsi-ld/errors/";
 
+/// NGSI-LD error types of Table 5.5.2-1; the payload is the `detail` text.
 #[derive(Debug, Error)]
 pub enum NgsiError {
+    /// The referred element already exists (409).
     #[error("{0}")]
     AlreadyExists(String),
+    /// The request or its content is incorrect (400).
     #[error("{0}")]
     BadRequestData(String),
+    /// Registration-vs-entity or proxied-mode registration conflict (409).
     #[error("{0}")]
     Conflict(String),
+    /// The request is not valid (400).
     #[error("{0}")]
     InvalidRequest(String),
+    /// An unexpected internal error (500).
     #[error("{0}")]
     InternalError(String),
+    /// A remote JSON-LD @context could not be retrieved (504).
     #[error("{0}")]
     LdContextNotAvailable(String),
+    /// Multi-tenancy is not supported by this broker (501).
     #[error("{0}")]
     NoMultiTenantSupport(String),
+    /// The tenant named in `NGSILD-Tenant` does not exist (404).
     #[error("{0}")]
     NonexistentTenant(String),
+    /// The operation is not supported (422).
     #[error("{0}")]
     OperationNotSupported(String),
+    /// The referred resource has not been found (404).
     #[error("{0}")]
     ResourceNotFound(String),
+    /// The query is too complex to be processed (403).
     #[error("{0}")]
     TooComplexQuery(String),
+    /// The query would return too many results (403).
     #[error("{0}")]
     TooManyResults(String),
 }
@@ -72,6 +86,7 @@ impl NgsiError {
         }
     }
 
+    /// Renders this error as the RFC 7807 body of 6.3.6.
     pub fn to_problem_details(&self) -> ProblemDetails {
         ProblemDetails {
             r#type: format!("{ERROR_TYPE_BASE}{}", self.kind()),
@@ -85,9 +100,13 @@ impl NgsiError {
 /// RFC 7807 body (always `application/json`, fully-qualified names — 6.3.6).
 #[derive(Debug, Serialize)]
 pub struct ProblemDetails {
+    /// Error type URI: `ERROR_TYPE_BASE` + error name.
     pub r#type: String,
+    /// Short summary — the error name.
     pub title: String,
+    /// HTTP status per Table 6.3.2-1.
     pub status: u16,
+    /// Human-readable explanation of this occurrence.
     pub detail: String,
 }
 

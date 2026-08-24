@@ -15,8 +15,10 @@ pub const DEFAULT_VOCAB: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
 /// NGSI-LD core vocabulary base (terms like location, observedAt, …).
 pub const NGSI_LD_BASE: &str = "https://uri.etsi.org/ngsi-ld/";
 
+/// One term definition of a processed @context.
 #[derive(Debug, Clone, Default)]
 pub struct TermDef {
+    /// The absolute IRI the term expands to.
     pub iri: String,
     /// `@type: @id` — values are IRIs (compact them on output).
     pub type_is_id: bool,
@@ -29,11 +31,14 @@ pub struct TermDef {
     pub prefix_ok: bool,
 }
 
+/// A processed (merged, frozen) JSON-LD @context: term map, its inverse for
+/// compaction, and the `@vocab` fallback.
 #[derive(Debug, Default)]
 pub struct Context {
     terms: HashMap<String, TermDef>,
     /// IRI → term for compaction (built after merge; shortest term wins).
     inverse: HashMap<String, String>,
+    /// `@vocab`: the base unknown terms expand against.
     pub vocab: String,
     /// The @context value to hand back in responses (Link header / body):
     /// what the client sent, before the implicit core merge.
@@ -198,6 +203,7 @@ impl Context {
         self.inverse = inv;
     }
 
+    /// The definition of `term`, if the context defines it.
     pub fn term(&self, term: &str) -> Option<&TermDef> {
         self.terms.get(term)
     }

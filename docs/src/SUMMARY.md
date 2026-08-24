@@ -7,6 +7,7 @@
 - [Deployment](deployment.md)
 - [Federation](federation.md)
 - [Browser & WebAssembly](wasm.md)
+- [Shared crates](shared-crates.md)
 - [Operations](operations.md)
 - [Conformance](conformance.md)
   - [ICS pro forma (CIM 029)](conformance-ics.md)

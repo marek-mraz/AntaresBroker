@@ -1,6 +1,7 @@
 //! JSON-LD layer — hand-rolled NGSI-LD-subset processor: context processing,
 //! expansion with structural validation, compaction, caching loader with
 //! pinned core contexts.
+#![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compact;

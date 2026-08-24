@@ -9,12 +9,19 @@ pub use antares_ql::geo::{GeoSpec, Rel, LOCATION_IRI};
 
 /// The 4.11 temporal window as the API already validated it.
 pub struct InstanceRange<'a> {
+    /// `timerel`: `before`, `after` or `between`.
     pub timerel: &'a str,
+    /// `timeAt` as a DateTime string.
     pub time_at: &'a str,
+    /// `endTimeAt`, present only for `between`.
     pub end_time_at: Option<&'a str>,
+    /// The instance timestamp the window applies to (`observedAt`,
+    /// `modifiedAt`, `createdAt` or `deletedAt`), expanded.
     pub timeproperty: &'a str,
 }
 
+/// Query Entities (5.7.2) predicates as the store seam receives them —
+/// every member is optional and already validated by the API layer.
 pub struct EntityFilter<'a> {
     /// exact entity ids (`id=` / the ids of a batch query)
     pub ids: Option<&'a [&'a str]>,
@@ -66,7 +73,9 @@ impl Default for EntityFilter<'_> {
 /// One page: OFFSET/LIMIT in row units, ORDER BY id (the store's stable
 /// default order, same as the memory snapshot).
 pub struct Page {
+    /// Rows to skip.
     pub offset: i64,
+    /// Maximum rows to return.
     pub limit: i64,
 }
 
@@ -74,12 +83,18 @@ pub struct Page {
 /// exactly, so re-evaluation cannot drop a row; `paged` = LIMIT/OFFSET
 /// happened in SQL (implies `decided`), `total` = the pre-LIMIT match count.
 pub struct QueryOutcome {
+    /// Matching entity documents.
     pub rows: Vec<Value>,
+    /// Every present predicate was applied exactly; no re-check needed.
     pub decided: bool,
+    /// LIMIT/OFFSET already applied (implies `decided`).
     pub paged: bool,
+    /// Pre-LIMIT match count, when the backend computed it.
     pub total: Option<i64>,
 }
 
+/// Query Temporal Evolution (5.7.4) predicates as the store seam receives
+/// them — every member is optional and already validated by the API layer.
 pub struct TemporalFilter<'a> {
     /// exact entity ids
     pub ids: Option<&'a [&'a str]>,
@@ -184,8 +199,11 @@ pub fn strip_expired(doc: &mut Value, now: &str) -> bool {
 /// What a temporal query produced. `paged` = LIMIT/OFFSET (and the
 /// entity-qualification EXISTS) ran in SQL; `total` = pre-LIMIT match count.
 pub struct TemporalOutcome {
+    /// Matching temporal documents.
     pub rows: Vec<Value>,
+    /// LIMIT/OFFSET already applied.
     pub paged: bool,
+    /// Pre-LIMIT match count, when the backend computed it.
     pub total: Option<i64>,
 }
 

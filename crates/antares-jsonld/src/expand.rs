@@ -14,6 +14,7 @@ use crate::context::Context;
 use antares_model::NgsiError;
 use serde_json::{json, Map, Value};
 
+/// The NGSI-LD Attribute type names (Table 5.2.4-1 and 4.5.x).
 pub const ATTR_TYPES: &[&str] = &[
     "Property",
     "Relationship",
@@ -114,6 +115,8 @@ const GEO_ENTITY_MEMBERS: &[&str] = &[
     "https://uri.etsi.org/ngsi-ld/operationSpace",
 ];
 
+/// Switches for [`expand_entity`] that depend on which operation the input
+/// payload belongs to.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExpandOpts {
     /// Fragment mode: id/type not required (append/update/partial inputs).
@@ -161,6 +164,8 @@ fn has_object_member_null(v: &Value) -> bool {
     }
 }
 
+/// Expand an Entity (or fragment) against `ctx` and validate its structure
+/// per 4.5.x/5.2.4; violations are `BadRequestData`.
 pub fn expand_entity(
     doc: &Map<String, Value>,
     ctx: &Context,
@@ -332,6 +337,8 @@ pub fn expand_entity(
     Ok(Value::Object(out))
 }
 
+/// Expand a `type` member (string or array) to absolute IRIs; a name that
+/// does not expand to one is `BadRequestData` (5.5.4, 4.6.2).
 pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
     let bad = |m: &str| NgsiError::BadRequestData(m.to_owned());
     // 5.5.4/4.6.2: an Entity Type must expand to an absolute IRI; a name that

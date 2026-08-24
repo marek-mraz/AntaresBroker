@@ -59,10 +59,15 @@ pub const CORE_CONTEXT: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-con
 /// localId, createdAt, numberOfHits, lastUsage of "Cached" entries).
 #[derive(Clone, Debug)]
 pub struct CtxUsage {
+    /// The @context URL as the client referenced it.
     pub url: String,
+    /// Broker-generated `localId` for the Cached entry.
     pub local_id: String,
+    /// First reference (`createdAt`).
     pub created_at: String,
+    /// Most recent reference (`lastUsage`).
     pub last_usage: String,
+    /// Number of references (`numberOfHits`).
     pub hits: u64,
 }
 
@@ -83,6 +88,7 @@ const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// are `PolicyResolver` / `client_builder` below.
 #[derive(Clone, Copy, Debug)]
 pub struct EgressPolicy {
+    /// Whether fetches to private/loopback/link-local ranges are allowed.
     pub allow_private: bool,
 }
 
@@ -99,6 +105,7 @@ pub fn allow_private_egress(v: bool) {
 }
 
 impl EgressPolicy {
+    /// Policy from `ANTARES_EGRESS_ALLOW_PRIVATE` or the programmatic override.
     pub fn from_env() -> Self {
         Self {
             allow_private: Self::allow_private_from(
@@ -233,6 +240,7 @@ pub type HttpClient = reqwest::Client;
 #[cfg(target_arch = "wasm32")]
 pub type HttpClient = send_wrapper::SendWrapper<reqwest::Client>;
 
+/// Wrap a reqwest client as [`HttpClient`] (identity natively).
 pub fn wrap_client(c: reqwest::Client) -> HttpClient {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -540,6 +548,8 @@ impl FetchedDoc {
     }
 }
 
+/// The @context loader: fetches, caches and merges @contexts under the
+/// egress policy, with the core context pinned.
 pub struct Loader {
     http: HttpClient,
     policy: EgressPolicy,
@@ -592,10 +602,12 @@ impl Default for Loader {
 }
 
 impl Loader {
+    /// A loader with the policy from the environment and default timeouts.
     pub fn new() -> Self {
         Self::with_policy(EgressPolicy::from_env())
     }
 
+    /// A loader with an explicit policy over a freshly built HTTP client.
     pub fn with_policy(policy: EgressPolicy) -> Self {
         Self::with_client(
             policy,
@@ -632,6 +644,7 @@ impl Loader {
         }
     }
 
+    /// Install the hook that persists a fetched @context (url, document).
     pub fn set_cache_writer(&self, w: CacheWriter) {
         *self
             .cache_writer
@@ -740,6 +753,7 @@ impl Loader {
         true
     }
 
+    /// Usage entries of every external @context referenced so far.
     pub async fn usage_list(&self) -> Vec<CtxUsage> {
         self.usage.read().await.values().cloned().collect()
     }
@@ -752,6 +766,7 @@ impl Loader {
             .cloned()
     }
 
+    /// Drop a URL's usage entry and evict it from the caches.
     pub async fn usage_remove(&self, url: &str) {
         self.usage.write().await.remove(url);
         self.evict(url).await;
@@ -1205,6 +1220,7 @@ impl Loader {
         })
     }
 
+    /// Drop the fetched document for `url` and every merged context using it.
     pub async fn evict(&self, url: &str) {
         self.fetched.invalidate(url);
         self.invalidate_merged_using(url);

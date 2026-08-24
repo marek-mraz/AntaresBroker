@@ -55,6 +55,8 @@ pub fn compact_entity(internal: &Value, ctx: &Context) -> Value {
     Value::Object(out)
 }
 
+/// Compact an expanded `@type` value: each IRI to its term, a one-element
+/// array unwrapped to a string.
 pub fn compact_types(v: &Value, ctx: &Context) -> Value {
     match v {
         Value::Array(items) => unwrap_single(Value::Array(

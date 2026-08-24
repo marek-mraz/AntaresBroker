@@ -14,8 +14,10 @@ use std::fmt;
 pub struct TenantId(String);
 
 impl TenantId {
+    /// The default tenant name, used when no `NGSILD-Tenant` header is sent.
     pub const DEFAULT: &'static str = "default";
 
+    /// Validates a tenant name: `[A-Za-z0-9_-]{1,64}`, else BadRequestData.
     pub fn new(raw: &str) -> Result<Self, NgsiError> {
         let ok = !raw.is_empty()
             && raw.len() <= 64
@@ -31,6 +33,7 @@ impl TenantId {
         }
     }
 
+    /// The tenant name as sent in the header.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -118,6 +121,8 @@ fn is_id_char(c: char) -> bool {
 pub struct EntityId(String);
 
 impl EntityId {
+    /// Validates an entity id as a URI/IRI (4.5.1, 5.2.1): a non-empty scheme,
+    /// only URI-legal characters and no `.`/`..` path segment; else BadRequestData.
     pub fn new(raw: &str) -> Result<Self, NgsiError> {
         // Lazy URI check: a scheme followed by ':', over characters a URI or
         // IRI is allowed to contain. Full IRI validation happens during
@@ -155,6 +160,7 @@ impl EntityId {
         }
     }
 
+    /// The id as its original URI string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
