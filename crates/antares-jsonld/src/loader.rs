@@ -597,20 +597,29 @@ impl Loader {
     }
 
     pub fn with_policy(policy: EgressPolicy) -> Self {
+        Self::with_client(
+            policy,
+            with_timeouts(
+                client_builder(policy),
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(10),
+            )
+            .build()
+            .expect("reqwest client"),
+        )
+    }
+
+    /// A loader over the caller's own HTTP client — a gateway with its own
+    /// proxy, allowlist or TLS setup fetches @contexts through it. `policy`
+    /// still governs the private-range deny and the redirect cap; every
+    /// cache is per instance, nothing here is process-global.
+    pub fn with_client(policy: EgressPolicy, client: reqwest::Client) -> Self {
         let mut core = Context::default();
         merge_context_value(&mut core, &pinned(CORE_CONTEXT).expect("pinned core"));
         core.freeze();
         core.source = Value::String(CORE_CONTEXT.to_owned());
         Self {
-            http: wrap_client(
-                with_timeouts(
-                    client_builder(policy),
-                    std::time::Duration::from_secs(5),
-                    std::time::Duration::from_secs(10),
-                )
-                .build()
-                .expect("reqwest client"),
-            ),
+            http: wrap_client(client),
             policy,
             fetched: fetched_cache(),
             merged: BoundedCache::new(256),
