@@ -655,139 +655,18 @@ fn sub_str<'a>(sub: &'a Value, key: &str) -> Option<&'a str> {
     sub.get(key).and_then(Value::as_str)
 }
 
-fn is_active(sub: &Value) -> bool {
-    if sub.get("isActive") == Some(&Value::Bool(false)) {
-        return false;
-    }
-    // 5.8.1.4 auto-expiry; dt_key so fraction spellings cannot misorder
-    // around the boundary second (4.11)
-    !sub.get("expiresAt")
-        .and_then(Value::as_str)
-        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(&now_iso()))
+/// 4.9 EXAMPLE 13/14: linked-entity q terms (`attr{path}`) resolve through
+/// the local store, same tenant.
+pub(crate) fn store_lookup<'a>(
+    st: &'a AppState,
+    tenant: &'a TenantId,
+) -> impl Fn(&str) -> Option<Value> + 'a {
+    move |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten()
 }
 
-/// entities selector (5.2.33) against an internal entity doc.
-pub(crate) fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
-    let Some(sel) = sub.get("entities").and_then(Value::as_array) else {
-        return true; // watchedAttributes-only subscription
-    };
-    let types: Vec<&str> = doc
-        .get("type")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let id = doc.get("id").and_then(Value::as_str).unwrap_or("");
-    sel.iter().any(|e| {
-        let t_ok = e.get("type").and_then(Value::as_str).is_none_or(|t| {
-            if t.contains(['|', ',', ';', '(']) {
-                crate::entities::type_selection_matches(t, &types, ctx)
-            } else {
-                types.contains(&t)
-            }
-        });
-        // Table 5.2.33-1: id is String or String[]; "id takes precedence
-        // over idPattern" — a selector carrying id ignores its idPattern.
-        let id_ok = match e.get("id") {
-            None => true,
-            Some(Value::String(i)) => i == id,
-            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).any(|i| i == id),
-            Some(_) => false,
-        };
-        let pat_ok = e.get("id").is_some()
-            || e.get("idPattern").and_then(Value::as_str).is_none_or(|p| {
-                crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some())
-            });
-        t_ok && id_ok && pat_ok
-    })
-}
-
-/// A subscription's `geoQ` (Table 5.2.13-1) in the parameter shape the 4.10
-/// GeoQuery parser takes.
-fn geo_params(g: &Map<String, Value>) -> std::collections::HashMap<String, String> {
-    let mut params: std::collections::HashMap<String, String> = Default::default();
-    for k in ["georel", "geometry", "geoproperty"] {
-        if let Some(s) = g.get(k).and_then(Value::as_str) {
-            params.insert(k.into(), s.to_owned());
-        }
-    }
-    if let Some(c) = g.get("coordinates") {
-        params.insert(
-            "coordinates".into(),
-            match c {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            },
-        );
-    }
-    params
-}
-
-/// q / scopeQ / geoQ conditions against an internal entity doc.
-pub(crate) fn conditions_match(
-    st: &AppState,
-    tenant: &TenantId,
-    sub: &Value,
-    doc: &Value,
-    ctx: &Context,
-) -> bool {
-    if let Some(q) = sub_str(sub, "q") {
-        // q values in subscription bodies may be percent-encoded (4.9, 046_05)
-        let q = crate::negotiate::percent_decode(q.as_bytes());
-        // parsed once per distinct q text, not once per event per candidate
-        match crate::regexcache::q_node(&q) {
-            Some(node) => {
-                // 4.9 EXAMPLE 13/14: linked-entity q terms (attr{path})
-                // resolve through the local store, same tenant
-                let lookup = |uri: &str| st.store.get(tenant, Kind::Entity, uri).ok().flatten();
-                if !crate::qeval::eval_q(&node, doc, ctx, &lookup) {
-                    return false;
-                }
-            }
-            None => return false,
-        }
-    }
-    if let Some(sq) = sub_str(sub, "scopeQ") {
-        if !crate::scope_matches(sq, doc) {
-            return false;
-        }
-    }
-    if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
-        // the geometry parse is shared per distinct geoQ member; the
-        // serialization of the stored member is the key
-        let key = serde_json::to_string(g).unwrap_or_default();
-        let gq = crate::regexcache::geo_query(&key, || {
-            crate::geo::GeoQuery::from_params(&geo_params(g))
-                .ok()
-                .flatten()
-        });
-        match gq {
-            Some(gq) => {
-                if !gq.matches(doc, ctx) {
-                    return false;
-                }
-            }
-            None => return false,
-        }
-    }
-    true
-}
-
-fn throttled(sub: &Value) -> bool {
-    let Some(secs) = sub.get("throttling").and_then(Value::as_f64) else {
-        return false;
-    };
-    let Some(last) = sub
-        .get("notification")
-        .and_then(|n| n.get("lastNotification"))
-        .and_then(Value::as_str)
-    else {
-        return false;
-    };
-    chrono::DateTime::parse_from_rfc3339(last).is_ok_and(|t| {
-        (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_milliseconds()
-            < (secs * 1000.0) as i64
-    })
-}
+pub(crate) use antares_matcher::{
+    conditions_match, geo_params, is_active, selector_match, throttled,
+};
 
 /// The @context governing a subscription's notifications (5.8.6): the
 /// jsonldContext member if set, else the @context of the creating request.
@@ -1204,7 +1083,7 @@ pub async fn process_change(
         if !selector_match(&sub, eval_doc, &ctx) {
             continue;
         }
-        if !conditions_match(st, &tenant, &sub, eval_doc, &ctx) {
+        if !conditions_match(&sub, eval_doc, &ctx, &store_lookup(st, &tenant)) {
             continue;
         }
         if throttled(&sub) {
@@ -1432,7 +1311,8 @@ pub async fn interval_tick(st: &AppState) {
             let matching: Vec<Value> = rows
                 .into_iter()
                 .filter(|d| {
-                    selector_match(&sub, d, &ctx) && conditions_match(st, &tenant, &sub, d, &ctx)
+                    selector_match(&sub, d, &ctx)
+                        && conditions_match(&sub, d, &ctx, &store_lookup(st, &tenant))
                 })
                 .flat_map(|d| build_data(st, &tenant, &sub, &ctx, None, Some(&d), &[], false, &now))
                 .collect();

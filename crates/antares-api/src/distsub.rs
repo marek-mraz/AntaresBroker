@@ -775,7 +775,12 @@ async fn split_merge(
                 }
             }
         }
-        if crate::notify::conditions_match(st, tenant, sub, &merged, &ctx) {
+        if crate::notify::conditions_match(
+            sub,
+            &merged,
+            &ctx,
+            &crate::notify::store_lookup(st, tenant),
+        ) {
             // 5.3.1/5.8.6: notification data carries Entities in their
             // API representation — shape and compact the merged storage
             // form exactly like the local notify path.

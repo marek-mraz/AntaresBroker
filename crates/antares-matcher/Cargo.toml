@@ -1,6 +1,6 @@
 [package]
 name = "antares-matcher"
-description = "Subscription matching: compiled subscriptions, candidate index, in-memory evaluation."
+description = "Subscription matching against an in-memory entity: selector, q/scopeQ/geoQ conditions, activity and throttling."
 version.workspace = true
 edition.workspace = true
 publish = false
@@ -8,6 +8,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+antares-jsonld = { workspace = true }
+antares-model = { workspace = true }
+antares-ql = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
