@@ -36,3 +36,4 @@ results*/
 
 # mdbook build output
 /book
+.vale/

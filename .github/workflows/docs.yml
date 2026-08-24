@@ -1,0 +1,77 @@
+name: docs
+
+# Documentation gates. Executable examples are the one mechanism with hard
+# enforcement — mdbook test drives rustdoc over every rust fence in the
+# book, so prose examples cannot silently rot (doctests for the library
+# crates are gated in workspace.yml next to the other cargo tests).
+#
+# Links are split two ways on purpose: --offline on every push/PR checks
+# only what the repo controls (internal links, anchors); the full external
+# sweep runs on a schedule and files an issue instead of failing a build —
+# ETSI and registry URLs go down for reasons unrelated to any PR, and a
+# gate that cries wolf trains people to ignore it.
+
+on:
+  pull_request:
+    paths: ["docs/**", "book.toml", "*.md", ".vale.ini"]
+  push:
+    branches: [master, dev]
+    paths: ["docs/**", "book.toml", "*.md", ".vale.ini"]
+  schedule:
+    - cron: "23 5 * * 3"
+  workflow_dispatch:
+
+jobs:
+  book:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: mdbook test
+        run: |
+          curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.4.44/mdbook-v0.4.44-x86_64-unknown-linux-musl.tar.gz | tar xz
+          ./mdbook test
+      - name: Internal links (offline)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --no-progress docs/ README.md
+          fail: true
+
+  prose:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Vale on the diff
+        uses: errata-ai/vale-action@v2
+        with:
+          # only the lines this PR adds — never relitigate the whole repo
+          filter_mode: added
+          fail_on_error: false
+
+  links-external:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: External links (full sweep)
+        id: lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress docs/ README.md
+          fail: true
+      - name: File an issue on dead external links
+        if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/failure-issue
+        with:
+          title: External documentation links are dead
+          body: >-
+            The scheduled external link sweep found unreachable URLs in the
+            documentation. See the links-external job log for the list.
