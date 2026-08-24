@@ -95,10 +95,10 @@ project does not have yet.
 | Tenants | 10,000 — **one shared schema**, `tenant_id` + Row-Level Security |
 | Subscriptions | 100,000 per broker (HTTP + MQTT delivery) |
 | CSource registrations | 100,000+ per broker — matching stays index-shaped, fan-out bounded |
-| Broker memory | < 500 MB RSS at full load (CI gate: 350 MiB during the ETSI suite) |
-| Postgres memory | < 16 GB, PostGIS required, **TimescaleDB optional** (two temporal modes) |
+| Broker memory | < 500 MB RSS at full load (100,000,000 entities, 10,000 tenants, 100,000 subscriptions, 100,000 CSource registrations) |
+| Postgres memory | < 16 GB, PostGIS required, **TimescaleDB optional** (two temporal modes) at the same full load |
 | Compliance | full NGSI-LD (ETSI CIM 009 V1.9.1), gated on the ETSI Robot suite + this repo's extension TPs |
-| HA | stateless broker pods, NATS JetStream, Postgres primary/replica — the rolling-update drill runs weekly (`roll-weekly`) |
+| HA | stateless broker pods, NATS JetStream, Postgres primary/replica |
 
 ## Architecture in one paragraph
 
