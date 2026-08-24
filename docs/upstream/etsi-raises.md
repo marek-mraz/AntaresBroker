@@ -165,3 +165,24 @@ S4" (which matches the S-chain's structure — none of S1-S4 mentions
 lastN). Until then, implementations differ silently; ours applies lastN
 after all S-filters (API-side presentation cap) and withholds any
 store-level lastN optimization when q/geoQ/scopeQ is present.
+
+## 7. [spec] CIM 029 A.5.2.26 cites clause 5.15.4, which does not exist in CIM 009 V1.9.1
+
+**Title:** GS CIM 029 V2.1.1 annex A table A.5.2.26 (`/temporal/entityMaps/`)
+cites a non-existent CIM 009 clause
+
+**Body:**
+
+Table A.5.2.26 of GS CIM 029 V2.1.1 (the ICS pro forma table for the
+`/temporal/entityMaps/` resource) cites clause **5.15.4** as its CIM 009
+reference. In GS CIM 009 V1.9.1 clause 5.15 is "Context Source Identity
+Information" and contains only 5.15.1 — there is no 5.15.4. The clause
+that carries the table's own subject (entity-map retrieval/deletion for
+temporal queries) is **5.14.5**, with the HTTP binding in 6.35.3.1 /
+6.35.3.2.
+
+Presumably the citation predates a renumbering between the CIM 009
+version the pro forma was authored against (V1.6.1 per clause 2) and
+V1.9.1. Suggest correcting the citation to 5.14.5 in the next CIM 029
+revision, and re-checking the neighbouring temporal tables for the same
+drift.
