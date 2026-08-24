@@ -926,13 +926,20 @@ pub(crate) fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
     if let Some(attrs) = names("attributes") {
         repr.attrs = Some(attrs.iter().map(|a| ctx.expand_key(a)).collect());
     }
+    // 4.21 NGSI-LD Attribute Projection Language: pick/omit values are
+    // projection language strings, which Table 5.2.14.1-1 requires for the
+    // notification members too ("a valid attribute projection language string
+    // as per clause 4.21"). Each term may carry a LinkedEntityTerm
+    // (`ProjectionTerm = AttrName *1(LinkedEntityTerm)`), which is what
+    // constrains an Attribute inside a Linked Entity retrieved by join. Building
+    // the nodes by hand here degraded `refDevice{type}` to a literal Attribute
+    // name matching nothing, so the term was dropped instead of applied.
+    // A term that fails to parse is dropped rather than kept flat: for pick that
+    // withholds the Attribute, which is the safe direction.
     let nodes = |list: Vec<String>| -> Vec<crate::repr::ProjNode> {
-        list.into_iter()
-            .map(|raw| crate::repr::ProjNode {
-                iri: ctx.expand_key(&raw),
-                raw,
-                children: None,
-            })
+        list.iter()
+            .filter_map(|term| crate::repr::parse_projection(term, ctx).ok())
+            .flatten()
             .collect()
     };
     if let Some(pick) = names("pick") {
@@ -2282,6 +2289,32 @@ mod endpoint_tests {
         );
         // an '@' beyond the authority is path data, not userinfo
         assert_eq!(redact_userinfo("http://h/p@x"), "http://h/p@x");
+    }
+
+    /// Clause 4.21 + Table 5.2.14.1-1: notification `pick`/`omit` are
+    /// "a valid attribute projection language string as per clause 4.21", so a
+    /// LinkedEntityTerm (`ProjectionTerm = AttrName *1(LinkedEntityTerm)`) must
+    /// constrain the Linked Entity, exactly as it does on the query path.
+    #[test]
+    fn notification_projection_parses_linked_entity_terms() {
+        let ctx = antares_jsonld::Loader::new().core();
+        let sub = json!({
+            "notification": { "pick": ["id", "type", "refDevice{type}"] }
+        });
+        let shape = notif_shape(&sub, &ctx);
+        let pick = shape.repr.pick.expect("pick parsed");
+
+        let linked = pick.iter().find(|n| n.raw == "refDevice").expect(
+            "refDevice must survive as its own term, not as the literal \"refDevice{type}\"",
+        );
+        let children = linked
+            .children
+            .as_ref()
+            .expect("the {…} term must become children so the Linked Entity is constrained");
+        assert!(
+            children.iter().any(|c| c.raw == "type"),
+            "refDevice{{type}} must select `type` inside the Linked Entity"
+        );
     }
 
     /// Table 5.2.15-1 `timeout`: honored, clamped, defaulted.
