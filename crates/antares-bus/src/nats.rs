@@ -242,6 +242,15 @@ impl NatsBus {
         .map_err(err)
     }
 
+    /// Drop a consumer of the registry stream, the way a server restart or an
+    /// inactivity gap drops an ephemeral one. The watcher's reopen path is
+    /// only exercisable if that gap can be produced on demand.
+    pub async fn delete_registry_consumer(&self, name: &str) -> Result<(), BusError> {
+        let s = self.js.get_stream(REGISTRY_STREAM).await.map_err(err)?;
+        s.delete_consumer(name).await.map_err(err)?;
+        Ok(())
+    }
+
     /// The KV bucket holding the compiled-subscription mirror.
     pub async fn subs_kv(&self) -> Result<async_nats::jetstream::kv::Store, BusError> {
         self.js.get_key_value(SUBS_BUCKET).await.map_err(err)

@@ -211,3 +211,138 @@ async fn msg_id_dedup_absorbs_republish() {
         "duplicate-window dedup must swallow the republish"
     );
 }
+
+/// The recovery contract the registry mirror depends on.
+///
+/// `consume_registry_broadcast` builds an EPHEMERAL consumer, which a NATS
+/// restart or an inactivity gap deletes server-side. When that happens the
+/// message stream must END rather than hang, because that is the signal the
+/// broker's watcher loop reopens and re-hydrates on; a stream that blocks
+/// forever would freeze this pod's registration mirror — and with it all
+/// federation matching — while /q/health still reported the bus connected.
+/// The second half asserts the other side of the contract: a freshly built
+/// consumer really does receive what is published after the gap.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleted_broadcast_consumer_ends_its_stream_and_a_fresh_one_resumes() {
+    let url = require_nats!();
+    let bus = NatsBus::connect(&url).await.expect("connect");
+    let n = nonce();
+    let tenant = format!("reopen{n}");
+
+    let consumer = bus
+        .consume_registry_broadcast()
+        .await
+        .expect("broadcast consumer");
+    let name = consumer.cached_info().name.clone();
+    let mut msgs = antares_bus::nats::messages(&consumer)
+        .await
+        .expect("stream");
+
+    bus.publish_registry(&tenant, &serde_json::json!({"id": "urn:reg:before"}))
+        .await
+        .expect("publish before");
+    let got = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(d) = antares_bus::nats::next_delta(&mut msgs).await {
+                if d["id"] == "urn:reg:before" {
+                    return d;
+                }
+            } else {
+                panic!("stream ended before the first delta arrived");
+            }
+        }
+    })
+    .await
+    .expect("first delta within 10s");
+    assert_eq!(got["id"], "urn:reg:before");
+
+    // The gap: delete the consumer exactly as a server restart would.
+    bus.delete_registry_consumer(&name)
+        .await
+        .expect("delete consumer");
+
+    // Contract: the stream terminates. A hang here is the freeze bug.
+    let ended = tokio::time::timeout(
+        Duration::from_secs(15),
+        antares_bus::nats::next_delta(&mut msgs),
+    )
+    .await
+    .expect("stream must end within 15s after its consumer is deleted, not hang");
+    assert!(
+        ended.is_none(),
+        "a deleted consumer must end the stream so the watcher reopens"
+    );
+
+    // Recovery: a new consumer sees traffic published after the gap.
+    let fresh = bus
+        .consume_registry_broadcast()
+        .await
+        .expect("fresh consumer");
+    let mut fresh_msgs = antares_bus::nats::messages(&fresh).await.expect("stream");
+    bus.publish_registry(&tenant, &serde_json::json!({"id": "urn:reg:after"}))
+        .await
+        .expect("publish after");
+    let got = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(d) = antares_bus::nats::next_delta(&mut fresh_msgs).await {
+                if d["id"] == "urn:reg:after" {
+                    return d;
+                }
+            } else {
+                panic!("fresh stream ended instead of delivering");
+            }
+        }
+    })
+    .await
+    .expect("delta after recovery within 10s");
+    assert_eq!(got["id"], "urn:reg:after");
+}
+
+/// The subscription mirror's other half: the KV watch is reopenable, and a
+/// reopened watch sees writes made while nothing was watching. The broker's
+/// watcher reopens on end-of-watch and re-reads the bucket, so a write that
+/// lands in the gap must not be lost to a pod that reconnects.
+#[tokio::test(flavor = "multi_thread")]
+async fn subscription_kv_survives_a_watch_gap() {
+    let url = require_nats!();
+    let bus = NatsBus::connect(&url).await.expect("connect");
+    let kv = bus.subs_kv().await.expect("kv bucket");
+    let n = nonce();
+    let key = format!("sub.gap.{n}");
+
+    let watch = kv.watch(&key).await.expect("watch");
+    kv.put(
+        &key,
+        serde_json::to_vec(&serde_json::json!({"v": 1}))
+            .expect("encode")
+            .into(),
+    )
+    .await
+    .expect("put v1");
+    drop(watch);
+
+    // Written with nobody watching — the gap.
+    kv.put(
+        &key,
+        serde_json::to_vec(&serde_json::json!({"v": 2}))
+            .expect("encode")
+            .into(),
+    )
+    .await
+    .expect("put v2");
+
+    // A reopened watch replays current state, so the gap write is not lost.
+    let mut reopened = kv.watch_with_history(&key).await.expect("reopen watch");
+    let seen = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(entry)) = reopened.next().await {
+            let doc: serde_json::Value = serde_json::from_slice(&entry.value).expect("decode");
+            if doc["v"] == 2 {
+                return doc;
+            }
+        }
+        panic!("watch ended without replaying the gap write");
+    })
+    .await
+    .expect("reopened watch replays within 10s");
+    assert_eq!(seen["v"], 2, "a reopened watch must see the gap write");
+}
