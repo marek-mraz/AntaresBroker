@@ -1,0 +1,166 @@
+# Helsinki HFP -> NGSI-LD, change-only updates, plus derived arrival events.
+#
+# Two rules the naive ingester breaks:
+#   1. Only attributes whose VALUE ACTUALLY CHANGED are written. A tram sitting
+#      at a stop re-sends identical lat/long/speed every second; upserting all of
+#      it bumps modifiedAt on unchanged attributes and writes junk history.
+#   2. expiresAt is set PER ATTRIBUTE, on the changed ones only (CIM 009 clause
+#      4.22: expiresAt is a system temporal Property of "a certain Entity,
+#      Property or Relationship"). Static context is written once, without expiry.
+#
+# The change detection then earns a second keep: a vehicle whose nextStop
+# CHANGES has just left the previous stop, which is a real arrival event. That
+# is what makes headway measurable — differencing snapshot timestamps does not.
+
+input:
+  mqtt:
+    urls: ["tls://mqtt.hsl.fi:8883"]
+    topics: ["/hfp/v2/journey/ongoing/vp/tram/#"]
+    clean_session: true
+    # A distinct client_id is load-bearing, not cosmetic. Two connections
+    # sharing one id make the broker evict the older session, and the two
+    # clients then kick each other in a loop — which shows up in the log as
+    # "pingresp not received" and "Connection lost for unknown reasons", and
+    # ends with the feed silently dead while stale entities linger.
+    client_id: antares-demo-kpi-tram
+    keepalive: 30
+    connect_timeout: 30s
+
+pipeline:
+  processors:
+    # HFP VP -> flat sample. Topic layout:
+    # /hfp/v2/journey/ongoing/vp/<mode>/<oper>/<veh>/<route>/<dir>/<headsign>/<start>/<nextStop>/...
+    - mapping: |
+        let p = meta("mqtt_topic").split("/")
+        let vp = this.VP
+        root = if $vp == null || $vp.lat == null || $vp.long == null || $vp.tst == null {
+          deleted()
+        } else {
+          {
+            "id": "urn:ngsi-ld:Vehicle:HSL:" + $p.index(7) + "-" + $p.index(8),
+            "tst": $vp.tst,
+            "route": $p.index(9),
+            "dyn": {
+              "location": [$vp.long, $vp.lat],
+              "speed": $vp.spd,
+              "heading": $vp.hdg,
+              "delay": $vp.dl,
+              "occupancy": $vp.occu,
+              "nextStop": $p.index(13),
+              # Topic segment 11 is the headsign (destination), which is what a
+              # passenger actually reads on the front of the tram.
+              "headsign": $p.index(11),
+            }.filter(kv -> kv.value != null)
+          }
+        }
+
+    # Previous dynamic state. A cache miss is normal (first sighting of a tram),
+    # so it must not fail the message: catch turns it into "{}".
+    - branch:
+        request_map: 'root = this'
+        processors:
+          - try:
+              - cache:
+                  resource: laststate
+                  operator: get
+                  key: '${! json("id") }'
+          - catch:
+              - mapping: 'root = "{}"'
+        result_map: 'root.prev = content().string().parse_json()'
+
+    # THE SQUASH: drop attributes identical to last time, drop the message
+    # entirely when nothing moved.
+    - mapping: |
+        let changed = this.dyn.filter(kv -> this.prev.get(kv.key) != kv.value)
+        root = if $changed.length() == 0 { deleted() } else { this.merge({"changed": $changed}) }
+
+    # Remember the FULL dynamic state, not just the delta, so the next
+    # comparison is against reality.
+    - branch:
+        request_map: 'root = {"id": this.id, "dyn": this.dyn}'
+        processors:
+          - cache:
+              resource: laststate
+              operator: set
+              key: '${! json("id") }'
+              value: '${! json("dyn").string() }'
+
+output:
+  broker:
+    pattern: fan_out
+    outputs:
+      # ── 1. Vehicle state: changed attributes only, each with its own expiry ──
+      - http_client:
+          url: http://localhost:42020/ngsi-ld/v1/entityOperations/upsert?options=update
+          verb: POST
+          headers: { Content-Type: application/json, NGSILD-Tenant: helsinki }
+          batching:
+            count: 250
+            period: 2s
+            processors:
+              - mapping: |
+                  let exp = now().ts_add_iso8601("PT5M").ts_format("2006-01-02T15:04:05Z", "UTC")
+                  root = {"id": this.id, "type": "Vehicle"}.merge(
+                    this.changed.map_each(kv -> if kv.key == "location" {
+                      {"type": "GeoProperty", "value": {"type": "Point", "coordinates": kv.value}, "observedAt": this.tst, "expiresAt": $exp}
+                    } else {
+                      {"type": "Property", "value": kv.value, "observedAt": this.tst, "expiresAt": $exp}
+                    })
+                  )
+                  root = if this.prev.length() == 0 {
+                    root.merge({"route": {"type": "Property", "value": this.route}, "transportMode": {"type": "Property", "value": "tram"}})
+                  } else { root }
+              - archive: { format: json_array }
+
+      # ── 2. Arrival events: emitted only when nextStop actually changed ──
+      - http_client:
+          url: http://localhost:42020/ngsi-ld/v1/entityOperations/upsert?options=update
+          verb: POST
+          headers: { Content-Type: application/json, NGSILD-Tenant: helsinki }
+          batching:
+            count: 100
+            period: 2s
+            processors:
+              - mapping: |
+                  root = if this.changed.exists("nextStop") && this.prev.nextStop != null && this.prev.nextStop != "" {
+                    {
+                      "id": "urn:ngsi-ld:StopArrival:" + this.id.slice(22) + ":" + this.tst.ts_unix().string(),
+                      "type": "StopArrival",
+                      "line": {"type": "Property", "value": this.route},
+                      "stop": {"type": "Property", "value": this.prev.nextStop},
+                      "vehicle": {"type": "Relationship", "object": this.id},
+                      "arrivedAt": {"type": "Property", "value": this.tst},
+                      "expiresAt": now().ts_add_iso8601("PT30M").ts_format("2006-01-02T15:04:05Z", "UTC"),
+                      "dedupeKey": this.id + "@" + this.prev.nextStop
+                    }
+                  } else { deleted() }
+              # HFP nextStop FLAPS: it oscillates between the current and next
+              # stop, so a naive change-detector emitted ~80 "arrivals" per
+              # vehicle per stop, one a second, which read as extreme bunching.
+              # `add` fails when the key exists, so the first arrival of this
+              # vehicle at this stop wins and the rest are dropped for the TTL.
+              # Dedupe is per VEHICLE per stop, so other vehicles still register
+              # and headway between them stays measurable.
+              - cache:
+                  resource: arrivals
+                  operator: add
+                  key: '${! json("dedupeKey") }'
+                  value: "1"
+              - mapping: 'root = if errored() { deleted() } else { this.without("dedupeKey") }'
+              - archive: { format: json_array }
+
+cache_resources:
+  - label: laststate
+    memory:
+      default_ttl: 10m
+  # One arrival per vehicle per stop per 10 min. A tram's round trip is far
+  # longer than that, so a genuine second visit still registers.
+  - label: arrivals
+    memory:
+      default_ttl: 10m
+
+logger:
+  level: INFO
+
+http:
+  address: 0.0.0.0:42021

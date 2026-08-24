@@ -1,0 +1,482 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HSL live vehicles + wasm KPIs — Antares NGSI-LD</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; grid-template-columns: 1fr 500px; font: 13px/1.5 system-ui, sans-serif; }
+  #map { height: 100vh; }
+  #hud {
+    position: absolute; top: 10px; left: 10px; z-index: 1000;
+    background: rgba(255,255,255,.92); padding: 8px 12px; border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  }
+  #hud b { font-size: 15px; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+
+  aside { border-left: 1px solid #dee2e6; overflow-y: auto; padding: 14px 16px 40px; background: #fff; }
+  h1 { font-size: 14px; margin: 0 0 2px; }
+  .sub { color: #868e96; font-size: 11px; margin-bottom: 12px; }
+  .flow { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 10px;
+          color: #868e96; margin-bottom: 14px; }
+  .chip { background: #f1f3f5; border: 1px solid #dee2e6; border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
+  .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; margin-bottom: 14px; }
+  .stat { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 7px 9px; }
+  .stat .n { font-size: 19px; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 9px; color: #868e96; text-transform: uppercase; letter-spacing: .5px; }
+  table.kpi { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  table.kpi th { text-align: right; font-size: 9px; color: #868e96; text-transform: uppercase;
+                 letter-spacing: .5px; padding: 0 0 5px; }
+  table.kpi th:first-child, table.kpi td:first-child { text-align: left; }
+  table.kpi td { padding: 5px 0; border-top: 1px solid #f1f3f5; text-align: right; }
+  td.line { font-weight: 600; }
+  .bar { height: 3px; background: #1c7ed6; border-radius: 2px; display: inline-block;
+         vertical-align: middle; margin-right: 5px; opacity: .45; }
+  .none { color: #ced4da; }
+  .hot { color: #e03131; font-weight: 600; }
+  @keyframes flash { from { background: #d0ebff; } to { background: transparent; } }
+  tr.changed td { animation: flash 1.2s ease-out; }
+  footer { margin-top: 16px; font-size: 10px; color: #868e96; border-top: 1px solid #e9ecef; padding-top: 10px; }
+  code { color: #1c7ed6; }
+  .sub2 { font-size: 9px; color: #adb5bd; font-weight: 400; display: block; }
+  details.explain { margin-top: 16px; border-top: 1px solid #e9ecef; padding-top: 10px; }
+  details.explain summary { font-size: 11px; color: #495057; cursor: pointer; font-weight: 600; }
+  details.explain dl { margin: 8px 0 0; font-size: 11px; line-height: 1.5; }
+  details.explain dt { font-weight: 700; color: #212529; margin-top: 8px; }
+  details.explain dd { margin: 1px 0 0; color: #666e78; }
+  details.explain dd i { color: #212529; font-style: normal; font-weight: 500; }
+  .tech { display: block; margin-top: 2px; color: #adb5bd; font-size: 10px; }
+  .plain { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px;
+           padding: 9px 11px; font-size: 11px; line-height: 1.55; color: #495057;
+           margin-bottom: 14px; }
+  .good { color: #2f9e44; font-weight: 600; }
+  .warn { color: #e8590c; font-weight: 600; }
+  /* Units belong in the header, not in a legend the reader has to hunt for. */
+  table.kpi th .u { display: block; font-size: 8px; color: #ced4da; font-weight: 400;
+                    text-transform: none; letter-spacing: 0; margin-top: 1px; }
+  table.kpi tbody tr { cursor: pointer; }
+  table.kpi tbody tr:hover td { background: #f8f9fa; }
+  table.kpi tbody tr.sel td { background: #e7f5ff; }
+  table.kpi tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 #1c7ed6; }
+  #selbar { display: none; align-items: center; justify-content: space-between; gap: 8px;
+            background: #e7f5ff; border: 1px solid #a5d8ff; border-radius: 6px;
+            padding: 6px 10px; font-size: 11px; margin-bottom: 10px; }
+  #selbar button { font: inherit; border: 1px solid #74c0fc; background: #fff;
+                   border-radius: 4px; padding: 2px 8px; cursor: pointer; color: #1971c2; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">
+  <b id="count">…</b> vehicles in view<br>
+  <span id="status">connecting</span>
+  <div class="legend" id="legend"></div>
+  <small>click a vehicle for its trail (up to 10 min)</small>
+</div>
+
+<aside>
+  <h1>wasm KPIs — tenant <code>helsinki-kpi</code></h1>
+  <div class="sub">computed from tenant <code>helsinki</code>, via the NGSI-LD API only</div>
+  <div class="flow">
+    <span class="chip">HFP MQTT</span>→<span class="chip">bento squash</span>→
+    <span class="chip">helsinki</span>→<span class="chip">wasm</span>→
+    <span class="chip">helsinki-kpi</span>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="n" id="s-veh">–</div><div class="l">vehicles</div></div>
+    <div class="stat"><div class="n" id="s-arr">–</div><div class="l">arrivals</div></div>
+    <div class="stat"><div class="n" id="s-kpi">–</div><div class="l">KPI lines</div></div>
+  </div>
+  <div class="plain">
+    <b>What am I looking at?</b>
+    Every tram in Helsinki reports where it is about once a second. This page turns
+    that firehose into a few numbers per line that answer one question:
+    <b>is this line running well right now?</b>
+    <br><br>
+    <br><br>
+    <b>“On time” means</b> the tram is within <b>one minute</b> of its timetable,
+    either early or late. The column shows what <b>percentage of that line's trams</b>
+    are currently within that minute — so <span class="good">78%</span> means roughly
+    8 trams in 10 are running to schedule. <span class="good">80%+ is healthy</span>,
+    <span class="warn">60–80% is slipping</span>, <span class="hot">below 60%</span>
+    means something is wrong on that line.
+    <br><br>
+    <b>Units are in the column headers.</b> delay and gap are in <b>minutes</b>,
+    speed in <b>km/h</b>, on time in <b>percent</b>. In the delay column
+    <span class="hot">late</span> = behind timetable, <span class="warn">early</span> =
+    ahead of it, <span class="good">±0</span> = within half a minute either way.
+    <b>bunch</b> should be 0: two trams nose to tail means a long wait behind them.
+    <br><br>
+    <b>Click any line</b> in the table to highlight just those trams on the map;
+    click it again, or “show all”, to bring the rest back.
+  </div>
+
+  <div id="selbar">
+    <span>showing only line <b id="selname"></b> on the map</span>
+    <button id="selclear">show all</button>
+  </div>
+
+  <table class="kpi">
+    <thead><tr>
+      <th title="public line number (HSL route id underneath)">line</th>
+      <th title="trams running on this line right now">trams<span class="u">count</span></th>
+      <th title="share of trams within 1 minute of timetable">on time<span class="u">% of trams</span></th>
+      <th title="typical schedule deviation of a tram on this line">delay<span class="u">minutes</span></th>
+      <th title="95th percentile of current speeds">speed<span class="u">km/h</span></th>
+      <th title="typical wait between trams at the same stop">gap<span class="u">minutes</span></th>
+      <th title="arrivals under 2 min apart at the same stop">bunch<span class="u">count</span></th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="none">waiting for the first KPI pass…</td></tr></tbody>
+  </table>
+
+  <details class="explain" open>
+    <summary>what these columns mean</summary>
+    <dl>
+      <dt>line</dt>
+      <dd><i>Which tram route this row is about.</i><br>
+          The public line number. Underneath it: HSL's internal <b>route id</b> and
+          today's destination. <b>15</b> is Raide-Jokeri — it runs on its own track
+          rather than through traffic, which is why it is always the fastest line here.
+          <span class="tech">route id → line: <code>1001T</code>→1T, <code>2015</code>→15.</span></dd>
+
+      <dt>trams</dt>
+      <dd><i>How many trams are out on this line right now.</i><br>
+          A tram that stops reporting disappears on its own after 5 minutes, so this
+          is a live count, not a registry.
+          <span class="tech">Vehicle entities with a per-attribute <code>expiresAt</code>.</span></dd>
+
+      <dt>on time</dt>
+      <dd><i>What share of the trams are running to timetable.</i><br>
+          Counts a tram as on time if it is within one minute of schedule, either
+          way. <b>80% or more is healthy</b>; below 60% something is wrong on that
+          line — traffic, a blocked junction, or a gap in the service.</dd>
+
+      <dt>delay</dt>
+      <dd><i>How late the typical tram on this line is.</i><br>
+          The middle value, so one badly stuck tram does not distort it. Negative
+          means <b>behind</b> timetable, positive means running early. Hover a row
+          to see the worst single tram on that line.
+          <span class="tech">Median of HFP <code>dl</code>; worst = most negative, shown positive.</span></dd>
+
+      <dt>speed</dt>
+      <dd><i>How fast this line actually moves when it is moving.</i><br>
+          Not an average: roughly a third of any tram fleet is standing still at any
+          moment, so an average would just measure how often trams stop. This takes
+          the fast end (95th percentile) of current speeds, which answers "what is
+          this line capable of right now".
+          <span class="tech">Percentiles are not in the NGSI-LD aggregation vocabulary —
+          this is why the wasm module exists.</span></dd>
+
+      <dt>gap</dt>
+      <dd><i>How long you wait at a stop between trams.</i><br>
+          Measured between trams actually arriving at the same stop, averaged across
+          the line. 7–20 minutes is normal for Helsinki. A dash means we have not yet
+          seen the same stop served twice, which needs about 15 minutes of running.
+          <span class="tech">Crosses entities and depends on ordering, so no per-entity
+          aggregation can express it.</span></dd>
+
+      <dt>bunch</dt>
+      <dd><i>How often two trams arrive nose to tail.</i><br>
+          Counts arrivals less than 2 minutes apart at the same stop. This is the
+          classic failure where trams catch each other up: passengers behind the pair
+          then wait double. <b>0 is what you want.</b>
+          <span class="tech">Caveat: HFP flaps <code>nextStop</code>, so arrivals are
+          debounced per vehicle per stop; a residue survives on vehicles alternating
+          between two stops, which can inflate this on the busiest line.</span></dd>
+    </dl>
+  </details>
+
+  <footer>
+    <b>p95</b> and <b>headway</b> are precisely what CIM 009 §4.5.19.1 aggregation
+    cannot express (its eight methods are avg/distinctCount/max/min/stddev/sum/sumsq/totalCount,
+    per entity per attribute per time bucket), which is why they live in an 82 KB
+    wasm module called by Bento — and nothing else does.
+  </footer>
+</aside>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const T = "helsinki", TK = "helsinki-kpi";        // the two tenants
+const COLORS = { bus: "#1c7ed6", tram: "#2f9e44", train: "#9c36b5", metro: "#e8590c", ferry: "#0b7285", ubus: "#1c7ed6" };
+const map = L.map("map").setView([60.175, 24.94], 13);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  { attribution: "&copy; OpenStreetMap" }).addTo(map);
+
+document.getElementById("legend").innerHTML =
+  Object.entries({bus:"#1c7ed6",tram:"#2f9e44",train:"#9c36b5",metro:"#e8590c",ferry:"#0b7285"})
+    .map(([k,c]) => `<span style="background:${c}"></span>${k} `).join("");
+
+const markers = new Map();   // id -> L.circleMarker
+const prevKpi = new Map();   // line -> last p95, to flash the row on change
+const destOf = new Map();    // route id -> most recent headsign seen live
+let trail = null;
+
+// HSL route ids encode the public line number: <mode digit><3-digit line><variant>.
+// 1001T -> 1T, 1010 -> 10, 2015 -> 15 (Raide-Jokeri light rail).
+function lineLabel(route) {
+  const m = String(route).match(/^\d(\d{3})([A-Z]*)$/);
+  return m ? String(parseInt(m[1], 10)) + m[2] : String(route);
+}
+
+// ── Click a KPI row to isolate that line on the map ────────────────────────
+let selected = null;   // route id, or null for "show everything"
+
+// Restyle one marker for the current selection. Non-selected trams stay on the
+// map but fade back, so you keep the context of the whole network.
+function styleMarker(m) {
+  const on = !selected || m._route === selected;
+  m.setStyle({
+    radius: on ? (selected ? 7 : 5) : 3,
+    fillOpacity: on ? .95 : .12,
+    opacity: on ? 1 : .15,
+    weight: on && selected ? 2 : 1,
+    color: on && selected ? "#1c7ed6" : "#fff",
+  });
+  if (on && selected) m.bringToFront();
+}
+
+function select(route) {
+  selected = (selected === route) ? null : route;   // clicking again clears it
+  for (const m of markers.values()) styleMarker(m);
+
+  const bar = document.getElementById("selbar");
+  bar.style.display = selected ? "flex" : "none";
+  if (selected) {
+    document.getElementById("selname").textContent =
+      lineLabel(selected) + (destOf.get(selected) ? " → " + destOf.get(selected) : "");
+    // Frame the selected line, but only if we can see where it is.
+    const pts = [...markers.values()].filter(m => m._route === selected).map(m => m.getLatLng());
+    if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.15), { animate: true });
+  }
+  for (const tr of document.querySelectorAll("table.kpi tbody tr"))
+    tr.classList.toggle("sel", tr.dataset.route === selected);
+}
+
+document.getElementById("selclear").onclick = () => select(selected);
+document.getElementById("rows").addEventListener("click", ev => {
+  const tr = ev.target.closest("tr[data-route]");
+  if (tr) select(tr.dataset.route);
+});
+
+// Fleet can exceed the broker max_limit of 1000, so the offset loop is
+// load-bearing. Only vehicles inside the current viewport: georel=within over
+// the bounds polygon.
+async function fetchAll() {
+  const b = map.getBounds();
+  const [w, s, e, n] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  const poly = encodeURIComponent(JSON.stringify([[[w, s], [e, s], [e, n], [w, n], [w, s]]]));
+  const out = [];
+  for (let offset = 0; ; offset += 1000) {
+    const r = await fetch(`/api/${T}/entities?type=Vehicle&format=keyValues&limit=1000&offset=${offset}` +
+      `&geometry=Polygon&georel=within&coordinates=${poly}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const page = await r.json();
+    out.push(...page);
+    if (page.length < 1000) return out;
+  }
+}
+
+async function tick() {
+  try {
+    const vehicles = await fetchAll();
+    const seen = new Set();
+    for (const v of vehicles) {
+      const c = v.location && v.location.coordinates;
+      if (!c) continue;
+      seen.add(v.id);
+      const ll = [c[1], c[0]];
+      let m = markers.get(v.id);
+      if (!m) {
+        m = L.circleMarker(ll, {
+          radius: 5, weight: 1, color: "#fff", fillOpacity: .9,
+          fillColor: COLORS[v.transportMode] || "#868e96",
+        }).addTo(map).on("click", () => showHistory(v.id, m));
+        markers.set(v.id, m);
+      } else {
+        m.setLatLng(ll);
+      }
+      // Route is needed for the highlight, and it can change when a vehicle
+      // starts a new journey, so refresh it every tick rather than at creation.
+      m._route = v.route != null ? String(v.route) : null;
+      styleMarker(m);
+      if (v.route && v.headsign) destOf.set(String(v.route), v.headsign);
+      m._info = `<b>${v.transportMode || "?"} ${v.route || ""}</b> · ` +
+        `${v.id.replace("urn:ngsi-ld:Vehicle:HSL:", "")}<br>` +
+        `speed ${v.speed != null ? (v.speed * 3.6).toFixed(0) : "?"} km/h · ` +
+        `delay ${v.delay != null ? v.delay + " s" : "?"}`;
+    }
+    for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
+    document.getElementById("count").textContent = seen.size;
+    document.getElementById("s-veh").textContent = seen.size;
+    document.getElementById("status").textContent = "live · " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("status").textContent = "error: " + e.message;
+  }
+  setTimeout(tick, 1000);
+}
+
+// ── KPI panel: polls the SECOND tenant, which the wasm pipeline writes ──────
+async function tickKpi() {
+  try {
+    const ar = await fetch(`/api/${T}/entities?type=StopArrival&format=keyValues&limit=1000`);
+    if (ar.ok) document.getElementById("s-arr").textContent = (await ar.json()).length;
+
+    const r = await fetch(`/api/${TK}/entities?type=TransportKPI&format=keyValues&limit=200`);
+    const body = document.getElementById("rows");
+    if (!r.ok) {
+      body.innerHTML = `<tr><td colspan="5" class="none">tenant ${TK} not created yet…</td></tr>`;
+    } else {
+      const rows = (await r.json()).filter(x => x.line != null)
+                     .sort((a, b) => (b.p95SpeedKmh ?? 0) - (a.p95SpeedKmh ?? 0));
+      document.getElementById("s-kpi").textContent = rows.length;
+      const max = Math.max(...rows.map(x => x.p95SpeedKmh ?? 0), 1);
+      body.innerHTML = rows.map(x => {
+        const key = String(x.line);
+        const before = prevKpi.get(key);
+        const moved = before !== undefined && before !== x.p95SpeedKmh;
+        prevKpi.set(key, x.p95SpeedKmh);
+        const p95 = x.p95SpeedKmh != null ? x.p95SpeedKmh.toFixed(1) : "–";
+        const hw = x.meanHeadwaySeconds != null
+          ? `${(x.meanHeadwaySeconds / 60).toFixed(1)} m` : `<span class="none">–</span>`;
+        const bunch = x.bunchingIncidents
+          ? `<span class="hot">${x.bunchingIncidents}</span>` : `<span class="none">0</span>`;
+        const w = Math.round(34 * (x.p95SpeedKmh ?? 0) / max);
+        const dest = destOf.get(key);
+
+        // On time: green at 80%+, amber 60-80, red below. Plain thresholds so a
+        // non-technical reader can scan the column without a legend.
+        const ot = x.onTimePercent;
+        const otCell = ot == null ? `<span class="none">–</span>`
+          : `<span class="${ot >= 80 ? "good" : ot >= 60 ? "warn" : "hot"}">${ot.toFixed(0)}%</span>`;
+
+        // Delay in minutes, signed, with "late"/"early" spelled out.
+        const md = x.medianDelaySeconds;
+        // Always numeric with a unit. "on time" as a word here would collide with
+        // the on-time column next to it.
+        const dCell = md == null ? `<span class="none">–</span>`
+          : md < -30 ? `<span class="hot">${(-md / 60).toFixed(1)} late</span>`
+          : md > 30  ? `<span class="warn">${(md / 60).toFixed(1)} early</span>`
+          : `<span class="good">±0</span>`;
+
+        const worst = x.worstLateSeconds != null
+          ? `worst tram ${(x.worstLateSeconds / 60).toFixed(1)} min late` : "no tram late";
+        const stopped = x.stoppedPercent != null
+          ? `${x.stoppedPercent.toFixed(0)}% standing still` : "";
+        const tip = `${x.arrivalCount ?? 0} arrivals · ${worst}${stopped ? " · " + stopped : ""}`;
+
+        return `<tr class="${moved ? "changed" : ""}${selected === key ? " sel" : ""}"` +
+          ` data-route="${key}" title="${tip}">` +
+          `<td class="line" style="color:${COLORS.tram}">${lineLabel(key)}` +
+            `<span class="sub2">${key}${dest ? " · " + dest : ""}</span></td>` +
+          `<td>${x.vehicleCount ?? "–"}</td>` +
+          `<td>${otCell}</td>` +
+          `<td>${dCell}</td>` +
+          `<td><span class="bar" style="width:${w}px"></span>${p95}</td>` +
+          `<td>${hw}</td><td>${bunch}</td></tr>`;
+      }).join("");
+    }
+  } catch (e) { /* transient: the next poll retries */ }
+  setTimeout(tickKpi, 4000);
+}
+
+// Small time-true line chart: vals = [[number, isoTs], ...] ascending.
+// One series per chart (no dual axis); crosshair + readout on hover.
+function spark(title, vals, color, unit, includeZero) {
+  const wrap = document.createElement("div");
+  if (!vals.length) return wrap;
+  const step = Math.ceil(vals.length / 250);          // downsample for the 250px plot
+  const v = vals.filter((_, i) => i % step === 0 || i === vals.length - 1);
+  const W = 252, H = 76, PL = 4, PR = 4, PT = 18, PB = 6;
+  const t0 = new Date(v[0][1]).getTime();
+  const t1 = Math.max(new Date(v[v.length - 1][1]).getTime(), t0 + 1);
+  let lo = Math.min(...v.map(p => p[0])), hi = Math.max(...v.map(p => p[0]));
+  if (includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const X = t => PL + (W - PL - PR) * (t - t0) / (t1 - t0);
+  const Y = n => PT + (H - PT - PB) * (1 - (n - lo) / (hi - lo));
+  const pts = v.map(([n, ts]) => `${X(new Date(ts).getTime()).toFixed(1)},${Y(n).toFixed(1)}`).join(" ");
+  const zero = lo < 0 && hi > 0
+    ? `<line x1="${PL}" x2="${W - PR}" y1="${Y(0)}" y2="${Y(0)}" stroke="#dee2e6" stroke-width="1"/>` : "";
+  const last = v[v.length - 1];
+  wrap.innerHTML =
+    `<div style="font:11px system-ui;color:#495057;margin-top:8px">${title}</div>` +
+    `<svg width="${W}" height="${H}" style="display:block">${zero}` +
+    `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>` +
+    `<circle cx="${X(new Date(last[1]).getTime())}" cy="${Y(last[0])}" r="3" fill="${color}" stroke="#fff"/>` +
+    `<line class="ch" y1="${PT}" y2="${H - PB}" stroke="#adb5bd" stroke-width="1" visibility="hidden"/>` +
+    `<circle class="chd" r="3" fill="#fff" stroke="${color}" stroke-width="2" visibility="hidden"/>` +
+    `<text class="ro" x="${W - PR}" y="12" text-anchor="end" ` +
+    `font-size="11" font-family="system-ui" fill="#868e96">` +
+    `now · ${last[0].toFixed(0)} ${unit}</text>` +
+    `<rect width="${W}" height="${H}" fill="transparent"/></svg>`;
+  const svg = wrap.querySelector("svg");
+  const [ch, chd, ro] = ["line.ch", "circle.chd", "text.ro"].map(s => svg.querySelector(s));
+  svg.addEventListener("mousemove", ev => {
+    const t = t0 + (t1 - t0) * Math.min(1, Math.max(0, (ev.offsetX - PL) / (W - PL - PR)));
+    let best = 0;
+    for (let i = 1; i < v.length; i++)
+      if (Math.abs(new Date(v[i][1]).getTime() - t) < Math.abs(new Date(v[best][1]).getTime() - t)) best = i;
+    const [n, ts] = v[best];
+    const x = X(new Date(ts).getTime());
+    ch.setAttribute("x1", x); ch.setAttribute("x2", x); ch.setAttribute("visibility", "visible");
+    chd.setAttribute("cx", x); chd.setAttribute("cy", Y(n)); chd.setAttribute("visibility", "visible");
+    ro.textContent = `${new Date(ts).toLocaleTimeString()} · ${n.toFixed(0)} ${unit}`;
+  });
+  svg.addEventListener("mouseleave", () => {
+    ch.setAttribute("visibility", "hidden"); chd.setAttribute("visibility", "hidden");
+    ro.textContent = `now · ${last[0].toFixed(0)} ${unit}`;
+  });
+  return wrap;
+}
+
+async function showHistory(id, marker) {
+  marker.bindPopup(marker._info + "<br><i>loading history…</i>", { maxWidth: 290 }).openPopup();
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const r = await fetch(`/api/${T}/temporal/entities/${encodeURIComponent(id)}` +
+    `?attrs=location,speed,delay&timerel=after&timeAt=${since}&format=temporalValues`);
+  if (!r.ok) { marker.setPopupContent(marker._info + `<br><i>history: HTTP ${r.status}</i>`); return; }
+  const e = await r.json();
+
+  // trail from location values = [geometry, observedAt] pairs
+  const loc = (e.location && e.location.values) || [];
+  if (loc.length) {
+    const pts = loc.map(([g]) => {
+      const c = Array.isArray(g) ? g : g.coordinates;
+      return [c[1], c[0]];
+    });
+    if (trail) trail.remove();
+    trail = L.polyline(pts, { color: "#e03131", weight: 3, opacity: .8 }).addTo(map);
+  }
+
+  const speed = ((e.speed && e.speed.values) || []).map(([n, t]) => [n * 3.6, t]);
+  const delay = (e.delay && e.delay.values) || [];
+  const mins = loc.length
+    ? ((new Date(loc[loc.length - 1][1]) - new Date(loc[0][1])) / 60000).toFixed(0) : 0;
+
+  const el = document.createElement("div");
+  el.innerHTML = marker._info + `<br><b>${speed.length}</b> observations, last ${mins} min`;
+  el.appendChild(spark("speed (km/h)", speed, "#1c7ed6", "km/h", false));
+  el.appendChild(spark("delay (s) — negative = late", delay, "#e8590c", "s", true));
+
+  // accessible raw-data view behind a toggle
+  const delayByTs = new Map(delay.map(([n, t]) => [t, n]));
+  const det = document.createElement("details");
+  det.innerHTML = `<summary style="font-size:11px;color:#868e96;cursor:pointer">data table</summary>` +
+    `<div style="max-height:140px;overflow:auto"><table style="font-size:11px;border-spacing:6px 0">` +
+    `<tr><th>time</th><th>km/h</th><th>delay s</th></tr>` +
+    speed.slice().reverse().map(([n, t]) =>
+      `<tr><td>${new Date(t).toLocaleTimeString()}</td><td align="right">${n.toFixed(0)}</td>` +
+      `<td align="right">${delayByTs.has(t) ? delayByTs.get(t).toFixed(0) : ""}</td></tr>`).join("") +
+    `</table></div>`;
+  el.appendChild(det);
+  marker.setPopupContent(el);
+}
+
+tick();
+tickKpi();
+</script>
+</body>
+</html>

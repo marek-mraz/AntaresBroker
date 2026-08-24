@@ -1,0 +1,101 @@
+# tenant helsinki  ->  wasm  ->  tenant helsinki-kpi
+#
+# Everything crosses the tenant boundary through the NGSI-LD API: no SQL, no
+# second data plane, no privileged database reader.
+#
+# The module computes only what CIM 009 clause 4.5.19.1 cannot. The aggrMethods
+# vocabulary is avg/distinctCount/max/min/stddev/sum/sumsq/totalCount, applied
+# per Entity per Attribute per time bucket. p95 is not in that list, and headway
+# is a gap between consecutive arrivals of DIFFERENT vehicles at the same stop,
+# which no per-entity aggregation can express.
+#
+# Two reads feed one module: Vehicle carries speed, StopArrival carries the
+# arrival times. The Sample struct tolerates both shapes.
+
+input:
+  generate:
+    interval: 15s
+    mapping: 'root = {}'
+
+pipeline:
+  processors:
+    - branch:
+        request_map: 'root = ""'
+        processors:
+          - http:
+              url: http://localhost:42020/ngsi-ld/v1/entities?type=Vehicle&limit=1000
+              verb: GET
+              headers: { NGSILD-Tenant: helsinki, Accept: application/json }
+        result_map: 'root.vehicles = this'
+
+    - branch:
+        request_map: 'root = ""'
+        processors:
+          - http:
+              url: http://localhost:42020/ngsi-ld/v1/entities?type=StopArrival&limit=1000
+              verb: GET
+              headers: { NGSILD-Tenant: helsinki, Accept: application/json }
+        result_map: 'root.arrivals = this'
+
+    # Both entity types -> the flat sample shape the module expects.
+    # HFP spd is metres/second; convert here so the KPI name stays honest.
+    - mapping: |
+        let speeds = this.vehicles.map_each(e -> {
+          "line": if e.route == null { "unknown" } else { e.route.value.string() },
+          "speed": if e.speed == null { null } else { e.speed.value * 3.6 },
+          "observed": null,
+          "at_stop": null,
+          "delay": if e.delay == null { null } else { e.delay.value }
+        })
+        let arrivals = this.arrivals.map_each(a -> {
+          "line": if a.line == null { "unknown" } else { a.line.value.string() },
+          "speed": null,
+          "delay": null,
+          "observed": if a.arrivedAt == null { null } else { a.arrivedAt.value.ts_unix() },
+          "at_stop": if a.stop == null { null } else { a.stop.value.string() }
+        })
+        root = $speeds.concat($arrivals)
+
+    - wasm:
+        module_path: ./wasm-kpi/target/wasm32-unknown-unknown/release/wasm_kpi.wasm
+        function: process
+
+    # KPI records -> NGSI-LD entities. Nulls are dropped: NGSI-LD has no null
+    # value, and a line with one arrival has no headway to report.
+    - mapping: |
+        let ts = now().ts_format("2006-01-02T15:04:05Z", "UTC")
+        root = this.map_each(k -> {
+          "id": "urn:ngsi-ld:TransportKPI:HSL:tram:" + k.line,
+          "type": "TransportKPI"
+        }.merge(
+          {
+            "line": k.line,
+            "vehicleCount": k.vehicleCount,
+            "arrivalCount": k.arrivalCount,
+            "p95SpeedKmh": k.p95SpeedKmh,
+            "meanHeadwaySeconds": k.meanHeadwaySeconds,
+            "minHeadwaySeconds": k.minHeadwaySeconds,
+            "bunchingIncidents": k.bunchingIncidents,
+            "onTimePercent": k.onTimePercent,
+            "medianDelaySeconds": k.medianDelaySeconds,
+            "worstLateSeconds": k.worstLateSeconds,
+            "stoppedPercent": k.stoppedPercent
+          }.filter(kv -> kv.value != null).map_each(kv -> {"type": "Property", "value": kv.value, "observedAt": $ts})
+        ))
+
+output:
+  # No archive/batching: the mapping already emits ONE message whose content is
+  # the JSON array the batch upsert endpoint expects. Wrapping it again would
+  # POST [[...]] and earn a 400.
+  http_client:
+    url: http://localhost:42020/ngsi-ld/v1/entityOperations/upsert?options=update
+    verb: POST
+    headers:
+      Content-Type: application/json
+      NGSILD-Tenant: helsinki-kpi
+
+logger:
+  level: INFO
+
+http:
+  enabled: false
