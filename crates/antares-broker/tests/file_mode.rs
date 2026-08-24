@@ -586,7 +586,9 @@ fn connections_beyond_the_cap_are_dropped() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("read timeout");
     let mut buf = [0u8; 64];
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // 30 s: while this binary runs, cargo may still be LINKING sibling test
+    // binaries — a starved broker child can lag the close well past 10 s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         match second.read(&mut buf) {
             Ok(0) => break, // dropped — the cap works
