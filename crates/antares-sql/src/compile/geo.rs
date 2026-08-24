@@ -41,32 +41,7 @@ pub struct CompiledGeo {
     pub num_binds: Vec<f64>,
 }
 
-/// The default GeoProperty — the only one with an extracted column.
-pub const LOCATION_IRI: &str = "https://uri.etsi.org/ngsi-ld/location";
-
-/// `georel` as the API already parsed it.
-pub enum Rel {
-    /// metres; either bound may be absent
-    Near {
-        max: Option<f64>,
-        min: Option<f64>,
-    },
-    Within,
-    Contains,
-    Intersects,
-    Disjoint,
-    Overlaps,
-    Equals,
-}
-
-/// A geoquery as the API already validated it (4.10 params).
-pub struct GeoSpec<'a> {
-    pub rel: Rel,
-    pub geometry: &'a str,
-    pub coordinates: &'a Value,
-    /// EXPANDED `geoproperty`; empty means the default (`location`).
-    pub geoproperty_iri: &'a str,
-}
+pub use antares_store::filter::{GeoSpec, Rel, LOCATION_IRI};
 
 /// Compile a geoquery over `col` (a `geometry(Geometry,4326)`).
 ///

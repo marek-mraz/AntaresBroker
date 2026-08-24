@@ -10,6 +10,7 @@ use crate::negotiate::{ApiError, ApiResult};
 use crate::state::{now_iso, AppState};
 use antares_model::{NgsiError, TenantId};
 use antares_sql::store::Kind;
+use antares_store::CurrentStateDriverExt;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

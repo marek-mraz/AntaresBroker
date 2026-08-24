@@ -7,6 +7,7 @@ use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
 use antares_model::NgsiError;
 use antares_sql::store::Kind;
+use antares_store::CurrentStateDriverExt;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};

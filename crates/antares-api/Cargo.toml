@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 antares-model = { workspace = true }
+antares-store = { workspace = true }
 antares-jsonld = { workspace = true }
 antares-ql = { workspace = true }
 antares-sql = { workspace = true, default-features = false }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/antares-model",
+    "crates/antares-store",
     "crates/antares-jsonld",
     "crates/antares-ql",
     "crates/antares-sql",
@@ -26,6 +27,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 antares-model = { path = "crates/antares-model" }
+antares-store = { path = "crates/antares-store" }
 antares-jsonld = { path = "crates/antares-jsonld" }
 antares-ql = { path = "crates/antares-ql" }
 antares-sql = { path = "crates/antares-sql", default-features = false }

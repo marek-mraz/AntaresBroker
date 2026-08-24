@@ -62,6 +62,9 @@ EXTRA=()
 # they run wherever docker works. MQTT=0 excludes them on
 # dockerless boxes; the CI definition of green INCLUDES them.
 [ "${MQTT:-1}" = 1 ] || EXTRA+=(--exclude '*mqtt*')
+# TPs needing a specially-configured broker (ANTARES_TEMPORAL=none) never
+# belong in a default conformance run — they get their own harness.
+EXTRA+=(--exclude config_no_temporal)
 
 status=0
 for s in $SUITES; do

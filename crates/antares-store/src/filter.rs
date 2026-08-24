@@ -1,11 +1,44 @@
-//! Query-filter shapes shared by every backend (the pushdown contract).
-//!
-//! Pure data — no sqlx, no I/O — split out of `pg_entity`/`pg_temporal`
-//! so the wasm32 build (no `postgres` feature) keeps the same `AnyStore`
-//! query surface: the memory arm consumes these filters too, it just never
-//! gets a `decided` outcome.
+//! Query-filter shapes shared by every backend (the pushdown contract),
+//! plus the pure pieces of the geo and temporal query shapes the filters
+//! reference. Pure data — no SQL, no I/O; the memory arm consumes these
+//! filters too, it just never gets a `decided` outcome.
 
 use serde_json::Value;
+
+/// The default GeoProperty — the only one backends extract a column for.
+pub const LOCATION_IRI: &str = "https://uri.etsi.org/ngsi-ld/location";
+
+/// `georel` as the API already parsed it (CIM 009 clause 4.10).
+pub enum Rel {
+    /// metres; either bound may be absent
+    Near {
+        max: Option<f64>,
+        min: Option<f64>,
+    },
+    Within,
+    Contains,
+    Intersects,
+    Disjoint,
+    Overlaps,
+    Equals,
+}
+
+/// A geoquery as the API already validated it (4.10 params).
+pub struct GeoSpec<'a> {
+    pub rel: Rel,
+    pub geometry: &'a str,
+    pub coordinates: &'a Value,
+    /// EXPANDED `geoproperty`; empty means the default (`location`).
+    pub geoproperty_iri: &'a str,
+}
+
+/// The 4.11 temporal window as the API already validated it.
+pub struct InstanceRange<'a> {
+    pub timerel: &'a str,
+    pub time_at: &'a str,
+    pub end_time_at: Option<&'a str>,
+    pub timeproperty: &'a str,
+}
 
 pub struct EntityFilter<'a> {
     /// exact entity ids (`id=` / the ids of a batch query)
@@ -20,7 +53,7 @@ pub struct EntityFilter<'a> {
     pub scope_q: Option<&'a str>,
     /// `georel`/`geometry`/`coordinates`/`geoproperty` (4.10), compiled over
     /// the extracted `location` column
-    pub geo: Option<&'a crate::compile::geo::GeoSpec<'a>>,
+    pub geo: Option<&'a GeoSpec<'a>>,
     /// term → IRI, the request context's expander (the AST holds terms)
     pub expand: &'a dyn Fn(&str) -> String,
     /// Pagination pushdown: applied ONLY when every present predicate
@@ -80,7 +113,7 @@ pub struct TemporalFilter<'a> {
     /// `attrs=`: the entity must carry at least one, expanded IRIs
     pub attrs: Option<&'a [String]>,
     /// the 4.11 window; `None` = no instance pruning
-    pub range: Option<crate::compile::temporal::InstanceRange<'a>>,
+    pub range: Option<InstanceRange<'a>>,
     /// `lastN`: per-(attr, datasetId) RANK() cap — ties all kept, so the
     /// per-attr lastN the API applies afterwards always finds its instances
     pub last_n: Option<i64>,
@@ -107,7 +140,7 @@ pub struct TemporalFilter<'a> {
     /// extracted geometries for EVERY geoproperty, not just `location`).
     /// Superset like `q` — `GeoQuery::matches` stays the arbiter; rows with
     /// an unextracted `geo_value` always survive.
-    pub geo: Option<(&'a crate::compile::geo::GeoSpec<'a>, &'a str)>,
+    pub geo: Option<(&'a GeoSpec<'a>, &'a str)>,
 }
 
 impl Default for TemporalFilter<'_> {

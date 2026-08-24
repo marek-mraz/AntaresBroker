@@ -11,6 +11,8 @@ use antares_jsonld::{
 use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
 use antares_sql::store::Kind;
+use antares_store::CurrentStateDriverExt;
+use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -100,10 +102,10 @@ pub fn compact_for(
 /// representation too (suite configuration parity). Skipped on bus=nats
 /// api pods — the recorder applies the entityDeleted fence instead.
 pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
-    if !st.record_locally {
+    if !st.record_locally() {
         return;
     }
-    if let Err(e) = st.store.delete(tenant, Kind::Temporal, id) {
+    if let Err(e) = st.temporal.delete(tenant, id) {
         tracing::warn!("temporal mirror delete failed: {e}");
     }
 }
@@ -123,7 +125,7 @@ pub fn mirror_delete_attr(
     ts: &str,
 ) -> bool {
     let mut had = false;
-    let r = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+    let r = st.temporal.mutate(tenant, id, |doc| {
         let target = doc.as_object_mut().expect("temporal doc");
         if attr_iri == "scope" {
             // scope deletion: temporal scope becomes an instance array with

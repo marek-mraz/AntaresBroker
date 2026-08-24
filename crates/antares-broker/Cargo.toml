@@ -20,6 +20,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 antares-bus = { workspace = true }
 antares-model = { workspace = true }
+antares-store = { workspace = true }
 antares-sql = { workspace = true, features = ["postgres"] }
 futures-util = { workspace = true }
 tokio = { workspace = true }

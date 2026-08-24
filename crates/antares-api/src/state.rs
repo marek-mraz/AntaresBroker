@@ -3,6 +3,7 @@
 use antares_jsonld::Loader;
 use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
+use antares_store::{CurrentStateDriver, TemporalDriver};
 use std::sync::Arc;
 // Clock rule: std Instant panics on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
@@ -12,7 +13,10 @@ use web_time::Instant;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<AnyStore>,
+    pub store: Arc<dyn CurrentStateDriver>,
+    /// The temporal driver — by default the same backend instance as
+    /// `store`; a deployment may load a different one (or none).
+    pub temporal: Arc<dyn TemporalDriver>,
     /// Active store backend — reported by `/q/health` (NOT in
     /// `/info/sourceIdentity`, which is a spec resource). A typed value so
     /// mode-gated sections switch on an enum, never on strings.
@@ -76,11 +80,6 @@ pub struct AppState {
     /// registry stream, deliberately not persisted. `None` in local mode.
     #[allow(clippy::type_complexity)]
     pub reg_fail_sync: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
-    /// Temporal auto-recording happens synchronously in the write path in
-    /// EVERY bus mode (read-your-writes; the bus recorder
-    /// consumer is gone). The flag stays as the tests' lever for exercising
-    /// the no-local-recording shape.
-    pub record_locally: bool,
     /// Renders the Prometheus text format for /q/metrics. Installed by
     /// the broker (the only crate that knows an exporter exists);
     /// `None` = 404, the facade calls elsewhere stay no-ops.
@@ -113,9 +112,21 @@ impl AppState {
         )
     }
 
+    /// Convenience over the built-in backends: one `AnyStore` serves as
+    /// both drivers.
     pub fn with_store(
         host_alias: String,
         store: Arc<AnyStore>,
+        store_mode: antares_sql::StoreMode,
+    ) -> Self {
+        let temporal: Arc<dyn TemporalDriver> = store.clone();
+        Self::with_drivers(host_alias, store, temporal, store_mode)
+    }
+
+    pub fn with_drivers(
+        host_alias: String,
+        store: Arc<dyn CurrentStateDriver>,
+        temporal: Arc<dyn TemporalDriver>,
         store_mode: antares_sql::StoreMode,
     ) -> Self {
         // One policy value, read once, shared by every outbound path —
@@ -131,7 +142,7 @@ impl AppState {
         {
             let store = store.clone();
             loader.set_cache_writer(Box::new(move |url, ctx_value| {
-                if hosted_row_id(&store, url).is_some() {
+                if hosted_row_id(&*store, url).is_some() {
                     return; // broker-local (Hosted/Implicit) URLs are not Cached entries
                 }
                 let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
@@ -174,7 +185,7 @@ impl AppState {
                 if Loader::is_pinned_core(url) {
                     return true;
                 }
-                let id = hosted_row_id(&store, url).unwrap_or_else(|| {
+                let id = hosted_row_id(&*store, url).unwrap_or_else(|| {
                     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
                 });
                 match store.context_get(&id) {
@@ -205,6 +216,7 @@ impl AppState {
             });
         Self {
             store,
+            temporal,
             store_mode,
             loader,
             started: Instant::now(),
@@ -226,12 +238,18 @@ impl AppState {
             reg_sync: None,
             reg_fail_sync: None,
             reg_mirror: None,
-            record_locally: true,
             metrics_render: None,
             nats: false,
             public_url,
             snapshot_cap: 1024,
         }
+    }
+
+    /// Temporal auto-recording happens synchronously in the write path in
+    /// EVERY bus mode (read-your-writes) — but only when the loaded
+    /// temporal driver actually records anything.
+    pub fn record_locally(&self) -> bool {
+        self.temporal.supported()
     }
 
     /// Fire the subscription-sync hook (no-op in local mode).
@@ -297,7 +315,7 @@ fn outbound_client(
 /// an attacker can serve a document under the same resource path, and such a
 /// URL is external to us (a Cached entry). Returns the local row id when the
 /// trailing path segment names a stored @context.
-fn hosted_row_id(store: &AnyStore, url: &str) -> Option<String> {
+fn hosted_row_id(store: &dyn CurrentStateDriver, url: &str) -> Option<String> {
     let (_, seg) = url.rsplit_once("/ngsi-ld/v1/jsonldContexts/")?;
     let seg = seg.split(['?', '#']).next().unwrap_or(seg);
     if seg.is_empty() || seg.contains('/') {

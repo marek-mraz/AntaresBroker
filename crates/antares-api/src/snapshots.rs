@@ -26,6 +26,7 @@ use crate::negotiate::{
 use crate::state::{now_iso, AppState};
 use antares_model::{NgsiError, TenantId, API_ROOT};
 use antares_sql::store::Kind;
+use antares_store::CurrentStateDriverExt;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -168,7 +169,6 @@ fn synth_tenant(meta: &Value) -> Option<TenantId> {
 fn purge_synth(st: &AppState, synth: &TenantId) {
     for kind in [
         Kind::Entity,
-        Kind::Temporal,
         Kind::Subscription,
         Kind::Registration,
         Kind::CSourceSubscription,
@@ -179,6 +179,12 @@ fn purge_synth(st: &AppState, synth: &TenantId) {
             if let Some(id) = doc.get("id").and_then(Value::as_str) {
                 let _ = st.store.delete(synth, kind, id);
             }
+        }
+    }
+    // history lives behind its own driver seam
+    for doc in st.temporal.list(synth).unwrap_or_default() {
+        if let Some(id) = doc.get("id").and_then(Value::as_str) {
+            let _ = st.temporal.delete(synth, id);
         }
     }
 }
@@ -625,12 +631,12 @@ async fn run_temporal_query(
             let Some(eid) = d.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if let Ok(Some(doc)) = st.store.get_temporal(
+            if let Ok(Some(doc)) = st.temporal.get_temporal(
                 tenant,
                 eid,
                 &antares_sql::store::filter::TemporalFilter::default(),
             ) {
-                let _ = st.store.create(synth, Kind::Temporal, eid, doc);
+                let _ = st.temporal.create(synth, eid, doc);
                 n += 1;
             }
         }
@@ -959,21 +965,33 @@ async fn clone_fill(st: &AppState, tenant: &TenantId, src_id: &str, new_id: &str
     };
     let mut failed = false;
     let mut copied = 0usize;
-    for kind in [Kind::Entity, Kind::Temporal] {
-        match st.store.list(&from, kind) {
-            Ok(docs) => {
-                for doc in docs {
-                    if let Some(id) = doc.get("id").and_then(Value::as_str) {
-                        if st.store.create(&to, kind, id, doc.clone()).is_err() {
-                            failed = true;
-                        } else {
-                            copied += 1;
-                        }
+    match st.store.list(&from, Kind::Entity) {
+        Ok(docs) => {
+            for doc in docs {
+                if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                    if st.store.create(&to, Kind::Entity, id, doc.clone()).is_err() {
+                        failed = true;
+                    } else {
+                        copied += 1;
                     }
                 }
             }
-            Err(_) => failed = true,
         }
+        Err(_) => failed = true,
+    }
+    match st.temporal.list(&from) {
+        Ok(docs) => {
+            for doc in docs {
+                if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                    if st.temporal.create(&to, id, doc.clone()).is_err() {
+                        failed = true;
+                    } else {
+                        copied += 1;
+                    }
+                }
+            }
+        }
+        Err(_) => failed = true,
     }
     if fill_cancelled(st, tenant, new_id, &to) {
         return;

@@ -54,6 +54,7 @@ dependencies = [
  "antares-notifier",
  "antares-ql",
  "antares-sql",
+ "antares-store",
  "axum",
  "chrono",
  "futures-util",
@@ -87,6 +88,7 @@ dependencies = [
  "antares-bus",
  "antares-model",
  "antares-sql",
+ "antares-store",
  "axum",
  "console-subscriber",
  "futures-util",
@@ -181,6 +183,7 @@ version = "0.1.0"
 dependencies = [
  "antares-model",
  "antares-ql",
+ "antares-store",
  "chrono",
  "futures-util",
  "redb",
@@ -188,6 +191,16 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "antares-store"
+version = "0.1.0"
+dependencies = [
+ "antares-model",
+ "antares-ql",
+ "chrono",
+ "serde_json",
 ]
 
 [[package]]

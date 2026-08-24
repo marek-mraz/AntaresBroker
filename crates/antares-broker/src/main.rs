@@ -22,6 +22,10 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_ROLES",
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
+    // Temporal driver: a store mode, or `none` — history off (temporal
+    // reads answer OperationNotSupported, Table 6.3.2-1). Defaults to the
+    // current-state store, so one instance serves both seams.
+    "ANTARES_TEMPORAL",
     "ANTARES_DATA_DIR",
     // Egress: private-range destinations are ALLOWED by default (ADR-0010 —
     // brokers federate inside private networks); a hardened deployment sets
@@ -453,7 +457,29 @@ async fn run(
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
-    let mut state = AppState::with_store(host_alias, std::sync::Arc::new(store), store_mode);
+    // the concrete handle stays for the backend-specific jobs below; the
+    // AppState carries only the driver seam
+    let store = std::sync::Arc::new(store);
+    // Temporal driver selection: by default the current-state store also
+    // records and serves history (one instance, both seams). `none` turns
+    // history off — temporal reads answer OperationNotSupported (422,
+    // Table 6.3.2-1) and the recorder produces nothing. Any other backend
+    // name builds a second store instance used only through its temporal
+    // half.
+    let temporal: std::sync::Arc<dyn antares_store::TemporalDriver> =
+        match std::env::var("ANTARES_TEMPORAL").ok().as_deref() {
+            None => store.clone(),
+            Some(m) if m == store_mode.as_str() => store.clone(),
+            Some("none") => std::sync::Arc::new(antares_store::NoTemporal),
+            Some(other) => {
+                let mode: antares_sql::StoreMode = other
+                    .parse()
+                    .map_err(|e| format!("ANTARES_TEMPORAL: {e} — or `none`"))?;
+                let (second, _) = build_store(mode).await?;
+                std::sync::Arc::new(second)
+            }
+        };
+    let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
     // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.
@@ -507,10 +533,7 @@ async fn run(
     // the Mem/file sweep loop and the Pg/Timescale maintenance job below both
     // tick on it (the ETSI stack runs at 2 s so transient TPs observe GC, not
     // just the read filter); parsed at startup, default 15 min.
-    if matches!(
-        state.store.as_ref(),
-        antares_sql::store::any::AnyStore::Mem(_)
-    ) {
+    if matches!(store.as_ref(), antares_sql::store::any::AnyStore::Mem(_)) {
         let store = state.store.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
@@ -528,7 +551,7 @@ async fn run(
     // The branch is PINNED to the detected backend (never re-probed): memory
     // and file modes have no backend and get no job, for sure.
     if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
-        (state.store.as_ref(), temporal_backend)
+        (store.as_ref(), temporal_backend)
     {
         let pool = p.docs.pool().clone();
         let retention: Option<i64> = std::env::var("ANTARES_TEMPORAL_RETENTION_DAYS")
@@ -657,7 +680,7 @@ async fn run(
                 // requests finish), in-flight drained, pools closed.
                 drop(listener);
                 let _ = drain_tx.send(true);
-                shutdown::drain(&inflight, &store_for_drain, drain_deadline, flush_outbox).await;
+                shutdown::drain(&inflight, &*store_for_drain, drain_deadline, flush_outbox).await;
                 tracing::info!("shutting down");
                 return Ok(());
             }

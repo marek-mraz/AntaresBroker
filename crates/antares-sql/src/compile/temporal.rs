@@ -17,12 +17,7 @@
 
 /// The 4.11 window, as the API layer parsed it. `timerel` ∈
 /// before|after|between|any ("any" = bare timeproperty: presence filter).
-pub struct InstanceRange<'a> {
-    pub timerel: &'a str,
-    pub time_at: &'a str,
-    pub end_time_at: Option<&'a str>,
-    pub timeproperty: &'a str,
-}
+pub use antares_store::filter::InstanceRange;
 
 /// SQL predicate over one jsonb instance (`el`) + its binds, numbered from
 /// `first_bind`. Bind 0 is always the timeproperty name.

@@ -829,3 +829,178 @@ mod db_error_tests {
         }
     }
 }
+
+// The driver seam: `AnyStore` carries both driver interfaces, delegating to
+// the inherent methods above. New backends implement the traits directly —
+// this enum stays an implementation detail of the built-in backends, no
+// longer the API surface.
+impl antares_store::CurrentStateDriver for AnyStore {
+    fn ping(&self) -> Result<(), NgsiError> {
+        AnyStore::ping(self)
+    }
+    fn commit_queue(&self) -> Option<(usize, usize)> {
+        AnyStore::commit_queue(self)
+    }
+    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(AnyStore::close(self))
+    }
+    fn set_change_hook(&self, h: super::ChangeHook) {
+        AnyStore::set_change_hook(self, h);
+    }
+    fn set_outbox(&self, on: bool) {
+        AnyStore::set_outbox(self, on);
+    }
+    fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+        AnyStore::outbox_peek(self, limit)
+    }
+    fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
+        AnyStore::outbox_ack(self, seqs)
+    }
+    fn create(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        doc: Value,
+    ) -> Result<bool, NgsiError> {
+        AnyStore::create(self, tenant, kind, id, doc)
+    }
+    fn batch_create(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        AnyStore::batch_create(self, tenant, items)
+    }
+    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
+        AnyStore::batch_delete(self, tenant, ids)
+    }
+    fn batch_upsert(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        AnyStore::batch_upsert(self, tenant, items)
+    }
+    fn upsert(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        doc: Value,
+    ) -> Result<bool, NgsiError> {
+        AnyStore::upsert(self, tenant, kind, id, doc)
+    }
+    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+        AnyStore::get(self, tenant, kind, id)
+    }
+    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::delete(self, tenant, kind, id)
+    }
+    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::list(self, tenant, kind)
+    }
+    fn matching_registrations(
+        &self,
+        tenant: &TenantId,
+        ids: Option<&[String]>,
+        types: Option<&[String]>,
+    ) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::matching_registrations(self, tenant, ids, types)
+    }
+    fn query_entities(
+        &self,
+        tenant: &TenantId,
+        f: &crate::store::filter::EntityFilter<'_>,
+    ) -> Result<crate::store::filter::QueryOutcome, NgsiError> {
+        AnyStore::query_entities(self, tenant, f)
+    }
+    fn mutate_boxed<'a>(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        f: antares_store::MutateFn<'a>,
+    ) -> Result<Option<Result<(), ()>>, NgsiError> {
+        AnyStore::mutate(self, tenant, kind, id, f)
+    }
+    fn batch_mutate_boxed<'a>(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+        mut f: antares_store::BatchMutateFn<'a>,
+    ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
+        AnyStore::batch_mutate(self, tenant, ids, |id, v| f(id, v))
+    }
+    fn sweep_expired(&self) -> usize {
+        AnyStore::sweep_expired(self)
+    }
+    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        AnyStore::tenant_exists(self, tenant)
+    }
+    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+        AnyStore::subscription_tenants(self)
+    }
+    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
+        AnyStore::context_put(self, id, doc)
+    }
+    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
+        AnyStore::context_get(self, id)
+    }
+    fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::context_delete(self, id)
+    }
+    fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::context_list(self)
+    }
+}
+
+impl antares_store::TemporalDriver for AnyStore {
+    fn temporal_append(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        shell: &Value,
+        additions: &Value,
+    ) -> Result<(), NgsiError> {
+        AnyStore::temporal_append(self, tenant, id, shell, additions)
+    }
+    fn query_temporal(
+        &self,
+        tenant: &TenantId,
+        f: &crate::store::filter::TemporalFilter<'_>,
+    ) -> Result<crate::store::filter::TemporalOutcome, NgsiError> {
+        AnyStore::query_temporal(self, tenant, f)
+    }
+    fn get_temporal(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        f: &crate::store::filter::TemporalFilter<'_>,
+    ) -> Result<Option<Value>, NgsiError> {
+        AnyStore::get_temporal(self, tenant, id, f)
+    }
+    fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError> {
+        AnyStore::get(self, tenant, Kind::Temporal, id)
+    }
+    fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        AnyStore::create(self, tenant, Kind::Temporal, id, doc)
+    }
+    fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError> {
+        AnyStore::upsert(self, tenant, Kind::Temporal, id, doc)
+    }
+    fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::delete(self, tenant, Kind::Temporal, id)
+    }
+    fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::list(self, tenant, Kind::Temporal)
+    }
+    fn mutate_boxed<'a>(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        f: antares_store::MutateFn<'a>,
+    ) -> Result<Option<Result<(), ()>>, NgsiError> {
+        AnyStore::mutate(self, tenant, Kind::Temporal, id, f)
+    }
+}

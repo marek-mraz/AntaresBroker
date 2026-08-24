@@ -13,7 +13,8 @@
 pub mod any;
 #[cfg(feature = "postgres")]
 pub mod entity_map;
-pub mod filter;
+pub use antares_store::filter;
+pub use antares_store::{ChangeHook, Kind};
 #[cfg(feature = "postgres")]
 pub mod outbox;
 #[cfg(feature = "postgres")]
@@ -234,10 +235,6 @@ impl Shadow {
     }
 }
 
-/// Called with (tenant, before, after) on every entity write — the local-mode
-/// change feed: create ⇒ (None, Some), delete ⇒ (Some, None).
-pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send + Sync>;
-
 #[derive(Default)]
 pub struct Store {
     inner: RwLock<Inner>,
@@ -274,22 +271,6 @@ struct Inner {
     temporal: HashMap<String, BTreeMap<String, Value>>,
     /// hosted/cached @context documents, shared across tenants by design.
     contexts: BTreeMap<String, Value>,
-}
-
-/// Which resource family an operation touches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Entity,
-    Subscription,
-    Registration,
-    CSourceSubscription,
-    Temporal,
-    /// 5.16 Snapshot status documents (+ the internal synth-tenant index).
-    Snapshot,
-    /// 5.14 EntityMap API documents.
-    EntityMap,
-    /// 5.8.1.4 distributed-subscription mappings (remote ids per CSR).
-    DistSub,
 }
 
 impl Store {

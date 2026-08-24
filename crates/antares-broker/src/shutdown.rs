@@ -92,7 +92,7 @@ pub async fn signal() {
 /// config value once, at startup, so a garbage window fails before serving.
 pub async fn drain(
     inflight: &Arc<AtomicUsize>,
-    store: &antares_sql::store::any::AnyStore,
+    store: &dyn antares_store::CurrentStateDriver,
     deadline: Duration,
     flush_outbox: bool,
 ) {

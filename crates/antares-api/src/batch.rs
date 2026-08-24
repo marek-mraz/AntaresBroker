@@ -7,6 +7,7 @@ use crate::repr::{apply, parse_repr};
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, ExpandOpts};
 use antares_model::NgsiError;
+use antares_store::CurrentStateDriverExt;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

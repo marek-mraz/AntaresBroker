@@ -254,7 +254,7 @@ pub async fn wire_nats(
         // delta can fall between them; last-writer-wins per key converges.
         let reg_mirror = Arc::new(antares_api::notify::DocMirror::default());
         let reg_consumer = bus.consume_registry_broadcast().await?;
-        hydrate(reg_mirror.as_ref(), &state.store, Kind::Registration);
+        hydrate(reg_mirror.as_ref(), &*state.store, Kind::Registration);
         state.reg_mirror = Some(reg_mirror.clone());
         let egress_for_cool = state.egress.clone();
         let store_for_reg = state.store.clone();
@@ -288,7 +288,7 @@ pub async fn wire_nats(
                 }
                 tracing::warn!("registry broadcast consumer stream ended — reopening");
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                hydrate(reg_mirror.as_ref(), &store_for_reg, Kind::Registration);
+                hydrate(reg_mirror.as_ref(), &*store_for_reg, Kind::Registration);
             }
         });
 
@@ -361,7 +361,7 @@ pub async fn wire_nats(
         let sub_mirror = Arc::new(antares_api::notify::SubMirror::default());
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
-        hydrate(sub_mirror.as_ref(), &state.store, Kind::Subscription);
+        hydrate(sub_mirror.as_ref(), &*state.store, Kind::Subscription);
         state.sub_mirror = Some(sub_mirror.clone());
         tokio::spawn(async move {
             // Same restart contract as the registry consumer: the watch ends
@@ -458,7 +458,7 @@ fn mirror_sync_backoff(attempt: u32) -> std::time::Duration {
 
 fn hydrate(
     mirror: &dyn antares_api::notify::Mirror,
-    store: &antares_sql::store::any::AnyStore,
+    store: &dyn antares_store::CurrentStateDriver,
     kind: Kind,
 ) {
     // subscription_tenants lists ALL tenants on the Pg arm — serves both kinds

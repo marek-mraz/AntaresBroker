@@ -6,7 +6,7 @@ use antares_jsonld::compact::compact_instance;
 use antares_jsonld::{expand_entity, parse_datetime, Context, ExpandOpts};
 use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
-use antares_sql::store::Kind;
+use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -182,9 +182,9 @@ fn upsert_temporal_local(
         if attempts > 16 {
             return Err(NgsiError::InternalError("upsert retry storm".into()).into());
         }
-        let existed = st.store.get(tenant, Kind::Temporal, id)?.is_some();
+        let existed = st.temporal.get(tenant, id)?.is_some();
         if existed {
-            let res = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+            let res = st.temporal.mutate(tenant, id, |doc| {
                 let target = doc.as_object_mut().expect("temporal object");
                 // 5.6.11.4: new Entity Type names are added to the target
                 if let Some(new_types) = expanded.get("type").and_then(Value::as_array) {
@@ -253,7 +253,7 @@ fn upsert_temporal_local(
                 o.insert("createdAt".into(), Value::String(ts.clone()));
                 o.insert("modifiedAt".into(), Value::String(ts.clone()));
             }
-            if st.store.create(tenant, Kind::Temporal, id, doc)? {
+            if st.temporal.create(tenant, id, doc)? {
                 return Ok(StatusCode::CREATED);
             }
             // lost the create race - the doc exists now; retry as a merge
@@ -1791,7 +1791,7 @@ pub(crate) async fn query_temporal_inner(
             expand: &expand,
             geo: geo_pre.as_ref().map(|(s, iri)| (s, iri.as_str())),
         };
-        st.store.query_temporal(&tenant, &tf)?
+        st.temporal.query_temporal(&tenant, &tf)?
     };
     let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
     // 5.7.4.4: fan the query out to matching queryTemporal registrations
@@ -2105,7 +2105,7 @@ async fn retrieve_temporal_outer(
     if want_map && resp.status().is_success() {
         let ctx = request_context(&st.loader, headers).await?;
         let local_held = st
-            .store
+            .temporal
             .get_temporal(
                 &tenant,
                 id,
@@ -2203,7 +2203,7 @@ async fn retrieve_temporal_inner(
             .as_ref()
             .map_or("observedAt", |t| t.timeproperty.as_str())
             .to_owned();
-        let local = st.store.get_temporal(&tenant, id, &tf)?;
+        let local = st.temporal.get_temporal(&tenant, id, &tf)?;
         // 5.7.3.4: forward to matching retrieveTemporal registrations and
         // merge the remote instance data (4.5.5; auxiliary instances only
         // fill timestamps absent elsewhere)
@@ -2406,7 +2406,7 @@ pub async fn delete_temporal(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
-        let deleted = st.store.delete(&tenant, Kind::Temporal, &id)?;
+        let deleted = st.temporal.delete(&tenant, &id)?;
         // 5.6.16.4: forward to registrations supporting the operation;
         // unsupported proxy modes are Conflict.
         let ctx = st.loader.core();
@@ -2522,7 +2522,7 @@ pub async fn add_temporal_attrs(
                 )?;
                 let ts = now_iso();
                 stamp_instances(&mut local, &ts);
-                let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+                let res = st.temporal.mutate(&tenant, &id, |doc| {
                     add_temporal_instances(doc, &local, &ts);
                     Ok::<(), NgsiError>(())
                 })?;
@@ -2566,7 +2566,7 @@ pub async fn add_temporal_attrs(
         }
         let ts = now_iso();
         stamp_instances(&mut expanded, &ts);
-        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+        let res = st.temporal.mutate(&tenant, &id, |doc| {
             add_temporal_instances(doc, &expanded, &ts);
             Ok::<(), NgsiError>(())
         })?;
@@ -2626,7 +2626,7 @@ pub async fn delete_temporal_attr(
         let want_ds = params.get("datasetId").cloned();
         let mut found = false;
         let ts = now_iso();
-        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+        let res = st.temporal.mutate(&tenant, &id, |doc| {
             let target = doc.as_object_mut().expect("temporal object");
             if delete_all
                 || (want_ds.is_none()
@@ -2818,7 +2818,7 @@ pub async fn modify_temporal_instance(
             .ok_or_else(|| NgsiError::BadRequestData("invalid instance fragment".into()))?;
         let ts = now_iso();
         let mut found = false;
-        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+        let res = st.temporal.mutate(&tenant, &id, |doc| {
             let target = doc.as_object_mut().expect("temporal object");
             if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 if let Some(inst) = arr.iter_mut().find(|i| {
@@ -2903,7 +2903,7 @@ pub async fn delete_temporal_instance(
         let attr_iri = ctx.expand_key(&attr);
         let mut found = false;
         let ts = now_iso();
-        let res = st.store.mutate(&tenant, Kind::Temporal, &id, |doc| {
+        let res = st.temporal.mutate(&tenant, &id, |doc| {
             let target = doc.as_object_mut().expect("temporal object");
             if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 let before = arr.len();

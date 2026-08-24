@@ -18,6 +18,8 @@ use crate::state::{now_iso, AppState};
 use antares_jsonld::Context;
 use antares_model::TenantId;
 use antares_sql::store::Kind;
+use antares_store::CurrentStateDriverExt;
+use antares_store::TemporalDriverExt as _;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -560,7 +562,7 @@ pub fn record_temporal_change(
     before: Option<&Value>,
     after: Option<&Value>,
 ) {
-    if !st.record_locally {
+    if !st.record_locally() {
         return;
     }
     let Some(after) = after else {
@@ -587,7 +589,7 @@ pub fn record_temporal_change(
                 "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
                 "createdAt": ts, "modifiedAt": ts, "observedAt": ts,
             });
-            let r = st.store.mutate(tenant, Kind::Temporal, id, |doc| {
+            let r = st.temporal.mutate(tenant, id, |doc| {
                 let target = doc.as_object_mut().ok_or(())?;
                 match target.get_mut("scope").and_then(Value::as_array_mut) {
                     Some(arr) if arr.first().is_some_and(Value::is_object) => {
@@ -633,7 +635,7 @@ pub fn record_temporal_change(
         }
     }
     if let Err(e) =
-        st.store
+        st.temporal
             .temporal_append(tenant, id, &Value::Object(shell), &Value::Object(additions))
     {
         tracing::warn!("temporal auto-record failed: {e}");
