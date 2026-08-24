@@ -64,6 +64,10 @@ pub struct AppState {
     /// reads, so the hot path never touches Postgres. `None` in local
     /// mode (the matcher reads the store directly).
     pub sub_mirror: Option<Arc<crate::notify::SubMirror>>,
+    /// bus=local: takes the entity changes one request buffered (the history
+    /// layer hands them over after the handler) so the matcher sees a batch
+    /// request as one unit. `None` until the local pipeline is wired.
+    pub change_flush: Option<Arc<dyn Fn(Vec<crate::notify::Change>) + Send + Sync>>,
     /// bus=nats: called after every Registration CUD so the wiring can
     /// publish the delta on `ANTARES_REGISTRY`. `None` in local mode.
     #[allow(clippy::type_complexity)]
@@ -239,6 +243,7 @@ impl AppState {
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sub_sync: None,
             sub_mirror: None,
+            change_flush: None,
             reg_sync: None,
             reg_fail_sync: None,
             reg_mirror: None,

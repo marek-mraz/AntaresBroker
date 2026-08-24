@@ -394,8 +394,14 @@ pub fn wire(state: &mut AppState) {
     // inline delivery at a time, so behind one slow subscriber an unbounded
     // queue grows until the process dies. Bounded instead: a full queue drops
     // the change and counts it.
-    let (tx, mut rx) =
-        tokio::sync::mpsc::channel::<(String, Option<Value>, Option<Value>)>(CHANGE_QUEUE);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Change>>(CHANGE_QUEUE);
+    let flush_tx = tx.clone();
+    state.change_flush = Some(Arc::new(move |changes: Vec<Change>| {
+        if flush_tx.try_send(changes).is_err() {
+            CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics::counter!("antares_notification_changes_dropped_total").increment(1);
+        }
+    }));
     // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
     // the ETSI suite queries history immediately after a write); the matcher
     // work is handed to the async task below. One choke point for every write.
@@ -404,19 +410,30 @@ pub fn wire(state: &mut AppState) {
         .store
         .set_change_hook(Box::new(move |tenant, before, after| {
             record_temporal_change(&st_rec, tenant, before.as_ref(), after.as_ref());
-            if tx
-                .try_send((tenant.as_str().to_owned(), before, after))
-                .is_err()
-            {
+            // inside a request the change rides the request's buffer and
+            // reaches the matcher with the rest of that request's changes
+            let Some(change) =
+                crate::history::buffer_change((tenant.as_str().to_owned(), before, after))
+            else {
+                return;
+            };
+            if tx.try_send(vec![change]).is_err() {
                 CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 metrics::counter!("antares_notification_changes_dropped_total").increment(1);
             }
         }));
     let st = state.clone();
     crate::spawn(async move {
-        while let Some((tenant, before, after)) = rx.recv().await {
+        while let Some(mut batch) = rx.recv().await {
+            // everything already queued behind it rides the same pass
+            while batch.len() < CHANGE_BATCH {
+                match rx.try_recv() {
+                    Ok(c) => batch.extend(c),
+                    Err(_) => break,
+                }
+            }
             let st = st.clone();
-            guarded(async move { process_change(&st, &tenant, before, after).await }).await;
+            guarded(async move { process_changes(&st, batch).await }).await;
         }
     });
     let st = state.clone();
@@ -1023,14 +1040,64 @@ fn triggers_of(sub: &Value) -> Vec<String> {
     triggers
 }
 
+/// One change queue event: tenant, before-image, after-image.
+pub type Change = (String, Option<Value>, Option<Value>);
+
+/// Changes one drain of the queue folds into one delivery pass — a batch
+/// request's N writes arrive as N events back to back and leave as ONE
+/// notification per matching subscription. Bounded so a flood cannot hold
+/// the first notification back indefinitely.
+const CHANGE_BATCH: usize = 256;
+
+/// One matched (subscription, entity) pair before delivery.
+struct Matched {
+    tenant: TenantId,
+    sub: Value,
+    ctx: Arc<Context>,
+    data: Vec<Value>,
+}
+
 pub async fn process_change(
     st: &AppState,
     tenant_str: &str,
     before: Option<Value>,
     after: Option<Value>,
 ) {
+    process_changes(st, vec![(tenant_str.to_owned(), before, after)]).await;
+}
+
+/// 5.8.6: "the Notification ... data ... shall contain the Entities that
+/// match" — every change of one drain that matches the same subscription
+/// travels in one notification, so a batch of N entities is one POST with N
+/// data entries (and timesSent moves by one), never N POSTs.
+pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
+    let mut groups: Vec<Matched> = Vec::new();
+    for (tenant_str, before, after) in changes {
+        for m in matches_for(st, &tenant_str, before, after).await {
+            let sub_id = m.sub.get("id").and_then(Value::as_str);
+            match groups
+                .iter_mut()
+                .find(|g| g.tenant == m.tenant && g.sub.get("id").and_then(Value::as_str) == sub_id)
+            {
+                Some(g) => g.data.extend(m.data),
+                None => groups.push(m),
+            }
+        }
+    }
+    for g in groups {
+        deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
+    }
+}
+
+async fn matches_for(
+    st: &AppState,
+    tenant_str: &str,
+    before: Option<Value>,
+    after: Option<Value>,
+) -> Vec<Matched> {
+    let mut out = Vec::new();
     let Ok(tenant) = TenantId::new(tenant_str) else {
-        return;
+        return out;
     };
     let changes = diff(before.as_ref(), after.as_ref());
     let entity_trigger = match (&before, &after) {
@@ -1039,7 +1106,7 @@ pub async fn process_change(
         _ => "entityUpdated",
     };
     let eval_doc = after.as_ref().or(before.as_ref());
-    let Some(eval_doc) = eval_doc else { return };
+    let Some(eval_doc) = eval_doc else { return out };
     // Candidate lookup by the entity's types and the changed attribute
     // IRIs — no linear scan over all subscriptions.
     let types: Vec<&str> = eval_doc
@@ -1049,9 +1116,6 @@ pub async fn process_change(
         .unwrap_or_default();
     let changed_keys: Vec<&str> = changes.iter().map(|(k, _)| k.as_str()).collect();
     let subs = subs_for(st, &tenant, &types, &changed_keys);
-    if subs.is_empty() {
-        return;
-    }
     for sub in subs {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
@@ -1111,8 +1175,14 @@ pub async fn process_change(
             entity_deleted_fired,
             &now,
         );
-        deliver(st, &tenant, &sub, data, &ctx).await;
+        out.push(Matched {
+            tenant: tenant.clone(),
+            sub,
+            ctx,
+            data,
+        });
     }
+    out
 }
 
 /// When an interval subscription is next due, in epoch millis: one
@@ -3424,5 +3494,120 @@ mod clause_5_8_6_periodic_sweep {
             mirror.next_sub_sweep_ms.load(Relaxed) > chrono::Utc::now().timestamp_millis(),
             "after firing, the clock points at the next due instant"
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_5_8_6_grouped_delivery {
+    use super::*;
+    use serde_json::json;
+    use tower::ServiceExt as _;
+
+    async fn post(st: &AppState, uri: &str, body: Value) -> u16 {
+        let body = body.to_string();
+        crate::router(st.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status()
+            .as_u16()
+    }
+
+    async fn recording_endpoint() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+        let sink = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move |body: String| {
+                let sink = sink.clone();
+                async move {
+                    if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                        sink.lock().expect("recorded bodies").push(v);
+                    }
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (format!("http://{addr}/notify"), seen)
+    }
+
+    /// 5.8.6: one batch request writing N matching entities is ONE
+    /// notification whose `data` carries the N entities — not N
+    /// notifications — and Table 5.2.14.2-1 `timesSent` moves by one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_of_matching_entities_is_one_notification() {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, seen) = recording_endpoint().await;
+        let mut st = AppState::new("antares-grouped-delivery".into());
+        wire(&mut st);
+        assert_eq!(
+            post(
+                &st,
+                "/ngsi-ld/v1/subscriptions",
+                json!({
+                    "id": "urn:ngsi-ld:Subscription:grouped",
+                    "type": "Subscription",
+                    "entities": [{"type": "Vehicle"}],
+                    "notification": {"endpoint": {"uri": uri, "accept": "application/json"}},
+                }),
+            )
+            .await,
+            201
+        );
+        let batch: Vec<Value> = (1..=3)
+            .map(|i| {
+                json!({"id": format!("urn:ngsi-ld:Vehicle:{i}"), "type": "Vehicle",
+                       "speed": {"type": "Property", "value": i}})
+            })
+            .collect();
+        assert_eq!(
+            post(&st, "/ngsi-ld/v1/entityOperations/create", json!(batch)).await,
+            201
+        );
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !seen.lock().expect("bodies").is_empty() {
+                break;
+            }
+        }
+        // settle: a second POST, if the broker were still splitting, lands here
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let bodies = seen.lock().expect("bodies").clone();
+        assert_eq!(bodies.len(), 1, "one POST for the batch, got {bodies:?}");
+        let data = bodies[0]["data"].as_array().expect("data array");
+        let mut ids: Vec<&str> = data.iter().filter_map(|e| e["id"].as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            [
+                "urn:ngsi-ld:Vehicle:1",
+                "urn:ngsi-ld:Vehicle:2",
+                "urn:ngsi-ld:Vehicle:3"
+            ]
+        );
+        let tenant = TenantId::new("default").expect("tenant");
+        let sub = st
+            .store
+            .get(
+                &tenant,
+                Kind::Subscription,
+                "urn:ngsi-ld:Subscription:grouped",
+            )
+            .expect("store")
+            .expect("row");
+        assert_eq!(sub["notification"]["timesSent"], json!(1));
     }
 }

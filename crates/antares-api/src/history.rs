@@ -28,6 +28,25 @@ pub fn drain_errors() -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static BUFFER: std::cell::RefCell<Vec<TemporalEvent>>;
+    static CHANGES: std::cell::RefCell<Vec<crate::notify::Change>>;
+}
+
+/// Buffer one entity change for the request in flight so the matcher
+/// receives the whole request at once. Handed back when no request is in
+/// flight — the caller then gives it to the matcher on the spot.
+pub(crate) fn buffer_change(change: crate::notify::Change) -> Option<crate::notify::Change> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut slot = Some(change);
+        let _ = CHANGES.try_with(|b| {
+            if let Some(c) = slot.take() {
+                b.borrow_mut().push(c);
+            }
+        });
+        slot
+    }
+    #[cfg(target_arch = "wasm32")]
+    Some(change)
 }
 
 /// Hand one event to the seam: buffered when a request is in flight,
@@ -93,13 +112,22 @@ pub(crate) async fn layer(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let (resp, evs) = BUFFER
+    let (resp, evs, changes) = BUFFER
         .scope(std::cell::RefCell::new(Vec::new()), async {
-            let resp = next.run(req).await;
-            (resp, BUFFER.with(|b| b.take()))
+            CHANGES
+                .scope(std::cell::RefCell::new(Vec::new()), async {
+                    let resp = next.run(req).await;
+                    (resp, BUFFER.with(|b| b.take()), CHANGES.with(|c| c.take()))
+                })
+                .await
         })
         .await;
     drain(&st, evs);
+    if !changes.is_empty() {
+        if let Some(flush) = &st.change_flush {
+            flush(changes);
+        }
+    }
     resp
 }
 
