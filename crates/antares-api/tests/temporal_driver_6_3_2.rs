@@ -12,7 +12,7 @@
 use antares_api::AppState;
 use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
-use antares_store::{NoTemporal, TemporalDriver};
+use antares_store::NoTemporal;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;

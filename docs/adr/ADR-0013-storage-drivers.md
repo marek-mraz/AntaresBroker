@@ -112,6 +112,14 @@ invisible at HTTP round-trip granularity. A driver error in the drain is
 logged and counted (visible in /q/health), never converted into a late
 error for a response already sent.
 
+Implementation note (`antares-api/src/history.rs`): the drain sits in a
+router layer and runs after the handler returned its response but before
+that response leaves the process. The batch shape is exactly the one above
+— one `event_list` per request — while the read-your-writes window is
+closed by construction rather than by timing, which keeps the temporal
+tests deterministic at any store latency. Moving the drain past the
+response flush is a one-line change to make on a measured latency need.
+
 ## Non-goals
 
 - No runtime .so loading, no wasm host for drivers.

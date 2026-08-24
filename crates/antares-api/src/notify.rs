@@ -19,7 +19,7 @@ use antares_jsonld::Context;
 use antares_model::TenantId;
 use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
-use antares_store::TemporalDriverExt as _;
+use antares_store::{TemporalEvent, TemporalOp};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -571,6 +571,21 @@ pub fn record_temporal_change(
     let Some(id) = after.get("id").and_then(Value::as_str) else {
         return;
     };
+    let mut shell = Map::new();
+    for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
+        if let Some(v) = after.get(k) {
+            shell.insert(k.to_string(), v.clone());
+        }
+    }
+    let shell = Value::Object(shell);
+    let event = |op, attr: &str, instance| TemporalEvent {
+        op,
+        tenant: tenant.clone(),
+        entity_id: id.to_owned(),
+        shell: shell.clone(),
+        attr: attr.to_owned(),
+        instance,
+    };
     // 4.5.6: the Scope of a Temporal Evolution is represented as a temporal
     // Property whose only sub-properties are the non-reified createdAt,
     // modifiedAt, deletedAt and observedAt; when it "is updated as the result
@@ -589,56 +604,25 @@ pub fn record_temporal_change(
                 "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
                 "createdAt": ts, "modifiedAt": ts, "observedAt": ts,
             });
-            let r = st.temporal.mutate(tenant, id, |doc| {
-                let target = doc.as_object_mut().ok_or(())?;
-                match target.get_mut("scope").and_then(Value::as_array_mut) {
-                    Some(arr) if arr.first().is_some_and(Value::is_object) => {
-                        arr.push(inst.clone());
-                    }
-                    _ => {
-                        target.insert("scope".into(), Value::Array(vec![inst.clone()]));
-                    }
-                }
-                Ok::<(), ()>(())
-            });
-            if let Err(e) = r {
-                tracing::warn!("temporal scope mirror failed: {e}");
-            }
+            crate::history::push(st, event(TemporalOp::ScopeChanged, "scope", inst));
         }
     }
-    let mut additions = Map::new();
     for (k, class) in diff(before, Some(after)) {
-        if !matches!(class, ChangeClass::Created | ChangeClass::Updated) {
-            continue; // attribute deletion — handled by mirror_delete_attr
-        }
+        let op = match class {
+            ChangeClass::Created => TemporalOp::AttrCreated,
+            ChangeClass::Updated => TemporalOp::AttrModified,
+            ChangeClass::Deleted => continue, // handled by mirror_delete_attr
+        };
         let Some(av) = after.get(&k) else { continue };
-        let mut incoming = changed_instances(before.and_then(|b| b.get(&k)), av);
-        if incoming.is_empty() {
-            continue;
-        }
-        for inst in &mut incoming {
+        // gate 1, value-change: an unchanged instance produces no event
+        for mut inst in changed_instances(before.and_then(|b| b.get(&k)), av) {
             if let Some(o) = inst.as_object_mut() {
                 o.entry("instanceId".to_owned()).or_insert_with(|| {
                     Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
                 });
             }
+            crate::history::push(st, event(op, &k, inst));
         }
-        additions.insert(k, Value::Array(incoming));
-    }
-    if additions.is_empty() {
-        return;
-    }
-    let mut shell = Map::new();
-    for k in ["id", "type", "createdAt", "modifiedAt", "scope"] {
-        if let Some(v) = after.get(k) {
-            shell.insert(k.to_string(), v.clone());
-        }
-    }
-    if let Err(e) =
-        st.temporal
-            .temporal_append(tenant, id, &Value::Object(shell), &Value::Object(additions))
-    {
-        tracing::warn!("temporal auto-record failed: {e}");
     }
 }
 

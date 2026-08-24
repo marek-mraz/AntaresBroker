@@ -280,6 +280,36 @@ impl<S: CurrentStateDriver + ?Sized> CurrentStateDriverExt for S {
     }
 }
 
+/// What a temporal event records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporalOp {
+    /// An Attribute the entity did not carry before (one event per instance).
+    AttrCreated,
+    /// A changed instance of an existing Attribute (4.5.6 append).
+    AttrModified,
+    /// 4.5.6: the Scope changed through the Core API — recorded as a scope
+    /// instance whose observedAt copies modifiedAt.
+    ScopeChanged,
+}
+
+/// One change the write path hands to the temporal seam. Events are
+/// produced per attribute INSTANCE (the gate chain and a columnar writer
+/// both work per instance) and drained per request, in order.
+#[derive(Clone, Debug)]
+pub struct TemporalEvent {
+    pub op: TemporalOp,
+    pub tenant: TenantId,
+    pub entity_id: String,
+    /// The entity's meta shell (id, type, createdAt, modifiedAt, scope) as
+    /// it stood after the write — what `temporal_append` creates on first
+    /// touch.
+    pub shell: Value,
+    /// Expanded Attribute name, or `scope`.
+    pub attr: String,
+    /// The instance snapshot: value, datasetId, observedAt, instanceId…
+    pub instance: Value,
+}
+
 /// Temporal storage: the entity history (Temporal Evolution) plus the raw
 /// temporal documents the 5.6.13-5.6.16 edit paths operate on.
 ///
@@ -288,6 +318,52 @@ impl<S: CurrentStateDriver + ?Sized> CurrentStateDriverExt for S {
 /// operations answer `OperationNotSupported` (422 per CIM 009
 /// Table 6.3.2-1) instead.
 pub trait TemporalDriver: Send + Sync {
+    /// The drain: one call carries a whole request's events, in production
+    /// order. The default folds consecutive events of one entity into a
+    /// single `temporal_append` (scope changes go through `mutate`, as
+    /// 4.5.6 shapes them); a bulk writer overrides this and sees the batch.
+    fn event_list(&self, evs: &[TemporalEvent]) -> Result<(), NgsiError> {
+        let mut i = 0;
+        while i < evs.len() {
+            let (tenant, id) = (&evs[i].tenant, evs[i].entity_id.as_str());
+            let mut additions = serde_json::Map::new();
+            let mut shell = &evs[i].shell;
+            let mut j = i;
+            while j < evs.len() && evs[j].tenant == *tenant && evs[j].entity_id == id {
+                let ev = &evs[j];
+                shell = &ev.shell;
+                if ev.op == TemporalOp::ScopeChanged {
+                    let inst = ev.instance.clone();
+                    self.mutate(tenant, id, |doc| {
+                        let target = doc.as_object_mut().ok_or(())?;
+                        match target.get_mut("scope").and_then(Value::as_array_mut) {
+                            Some(arr) if arr.first().is_some_and(Value::is_object) => {
+                                arr.push(inst);
+                            }
+                            _ => {
+                                target.insert("scope".into(), Value::Array(vec![inst]));
+                            }
+                        }
+                        Ok::<(), ()>(())
+                    })?;
+                } else {
+                    if let Some(arr) = additions
+                        .entry(ev.attr.clone())
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()
+                    {
+                        arr.push(ev.instance.clone());
+                    }
+                }
+                j += 1;
+            }
+            if !additions.is_empty() {
+                self.temporal_append(tenant, id, shell, &Value::Object(additions))?;
+            }
+            i = j;
+        }
+        Ok(())
+    }
     /// `false` = this deployment records no history (`NoTemporal`); the
     /// write path skips recording entirely.
     fn supported(&self) -> bool {
@@ -593,6 +669,147 @@ mod tests {
             d.get(&t, Kind::Entity, "x").expect("get").expect("doc")["n"],
             2,
             "a rejecting closure must not commit"
+        );
+    }
+
+    /// A temporal driver that only records what the seam hands it: appends
+    /// as (id, additions) in call order, scope mutations on a held doc.
+    #[derive(Default)]
+    struct Recorder {
+        appends: std::sync::Mutex<Vec<(String, Value)>>,
+        doc: std::sync::Mutex<Option<Value>>,
+    }
+    impl TemporalDriver for Recorder {
+        fn temporal_append(
+            &self,
+            _t: &TenantId,
+            id: &str,
+            _shell: &Value,
+            additions: &Value,
+        ) -> Result<(), NgsiError> {
+            self.appends
+                .lock()
+                .expect("lock")
+                .push((id.to_owned(), additions.clone()));
+            Ok(())
+        }
+        fn query_temporal(
+            &self,
+            _t: &TenantId,
+            _f: &filter::TemporalFilter<'_>,
+        ) -> Result<filter::TemporalOutcome, NgsiError> {
+            unimplemented!()
+        }
+        fn get_temporal(
+            &self,
+            _t: &TenantId,
+            _id: &str,
+            _f: &filter::TemporalFilter<'_>,
+        ) -> Result<Option<Value>, NgsiError> {
+            unimplemented!()
+        }
+        fn get(&self, _t: &TenantId, _id: &str) -> Result<Option<Value>, NgsiError> {
+            Ok(self.doc.lock().expect("lock").clone())
+        }
+        fn create(&self, _t: &TenantId, _id: &str, doc: Value) -> Result<bool, NgsiError> {
+            *self.doc.lock().expect("lock") = Some(doc);
+            Ok(true)
+        }
+        fn upsert(&self, _t: &TenantId, _id: &str, _doc: Value) -> Result<bool, NgsiError> {
+            unimplemented!()
+        }
+        fn delete(&self, _t: &TenantId, _id: &str) -> Result<bool, NgsiError> {
+            unimplemented!()
+        }
+        fn list(&self, _t: &TenantId) -> Result<Vec<Value>, NgsiError> {
+            unimplemented!()
+        }
+        fn mutate_boxed<'a>(
+            &self,
+            _t: &TenantId,
+            _id: &str,
+            f: MutateFn<'a>,
+        ) -> Result<Option<Result<(), ()>>, NgsiError> {
+            let mut guard = self.doc.lock().expect("lock");
+            match guard.as_mut() {
+                None => Ok(None),
+                Some(v) => Ok(Some(f(v))),
+            }
+        }
+    }
+
+    fn ev(op: TemporalOp, id: &str, attr: &str, n: u32) -> TemporalEvent {
+        TemporalEvent {
+            op,
+            tenant: TenantId::new("t").expect("tenant"),
+            entity_id: id.into(),
+            shell: serde_json::json!({"id": id, "type": ["T"]}),
+            attr: attr.into(),
+            instance: serde_json::json!({"type": "Property", "value": n}),
+        }
+    }
+
+    /// The drain folds one request's events into ONE append per entity run
+    /// — a 2-attribute entity is one call carrying both, not two — and
+    /// keeps production order across entities.
+    #[test]
+    fn event_list_folds_a_request_into_one_append_per_entity_run() {
+        let d = Recorder::default();
+        d.event_list(&[
+            ev(TemporalOp::AttrCreated, "urn:a", "speed", 1),
+            ev(TemporalOp::AttrCreated, "urn:a", "speed", 2),
+            ev(TemporalOp::AttrModified, "urn:a", "heading", 3),
+            ev(TemporalOp::AttrModified, "urn:b", "speed", 4),
+            ev(TemporalOp::AttrModified, "urn:a", "speed", 5),
+        ])
+        .expect("drain ok");
+        let appends = d.appends.lock().expect("lock").clone();
+        let ids: Vec<&str> = appends.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["urn:a", "urn:b", "urn:a"],
+            "one append per entity run, in order"
+        );
+        let first = &appends[0].1;
+        assert_eq!(first["speed"].as_array().map(Vec::len), Some(2), "{first}");
+        assert_eq!(
+            first["heading"].as_array().map(Vec::len),
+            Some(1),
+            "{first}"
+        );
+        assert!(
+            first.get("value").is_none(),
+            "instances live under their attribute: {first}"
+        );
+        assert_eq!(appends[2].1["speed"][0]["value"], 5);
+    }
+
+    /// 4.5.6: a scope change becomes a scope instance on the held temporal
+    /// doc (array-of-instances form), not an attribute append.
+    #[test]
+    fn event_list_records_scope_changes_as_scope_instances() {
+        let t = TenantId::new("t").expect("tenant");
+        let d = Recorder::default();
+        d.create(
+            &t,
+            "urn:a",
+            serde_json::json!({"id": "urn:a", "scope": "/old"}),
+        )
+        .expect("create");
+        let mut scope = ev(TemporalOp::ScopeChanged, "urn:a", "scope", 0);
+        scope.instance = serde_json::json!({"type": "Property", "value": "/new",
+                                            "observedAt": "2026-01-01T00:00:00Z"});
+        d.event_list(&[scope]).expect("drain ok");
+        assert!(
+            d.appends.lock().expect("lock").is_empty(),
+            "no attribute append for a scope change"
+        );
+        let doc = d.get(&t, "urn:a").expect("get").expect("doc");
+        assert_eq!(doc["scope"][0]["value"], "/new", "{doc}");
+        assert_eq!(
+            doc["scope"].as_array().map(Vec::len),
+            Some(1),
+            "the plain scope became an instance array: {doc}"
         );
     }
 

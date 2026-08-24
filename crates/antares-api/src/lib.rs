@@ -14,6 +14,7 @@ pub mod entities;
 pub mod entity_maps;
 pub mod federation;
 pub mod geo;
+pub mod history;
 pub mod negotiate;
 pub mod notify;
 pub mod qeval;
@@ -345,6 +346,12 @@ pub fn router(state: AppState) -> Router {
         .nest(
             API_ROOT,
             api.layer(axum::middleware::from_fn(conformance::prefer_version_layer))
+                // The temporal seam's drain: every write's history events
+                // land in one driver call once the handler is done.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    history::layer,
+                ))
                 // 5.5.10: non-create operations targeting a non-existing
                 // Tenant answer NonexistentTenant 404; create operations
                 // implicitly create the Tenant.
@@ -577,6 +584,8 @@ async fn health(
     }
     // Configured caps + rejection counters, for observability.
     body["limits"] = state.limits.snapshot();
+    // History events a driver failed to record after the write stood.
+    body["temporalDrainErrors"] = history::drain_errors().into();
     // Jemalloc heap stats (RSS ≈ live×1.2 is the target).
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
