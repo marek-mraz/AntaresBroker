@@ -238,6 +238,7 @@ impl EgressPolicy {
 #[cfg(not(target_arch = "wasm32"))]
 pub type HttpClient = reqwest::Client;
 #[cfg(target_arch = "wasm32")]
+#[allow(missing_docs)] // documented on the native arm above
 pub type HttpClient = send_wrapper::SendWrapper<reqwest::Client>;
 
 /// Wrap a reqwest client as [`HttpClient`] (identity natively).
@@ -260,6 +261,7 @@ pub fn http_interaction<F: std::future::Future>(fut: F) -> F {
     fut
 }
 #[cfg(target_arch = "wasm32")]
+#[allow(missing_docs)] // documented on the native arm above
 pub fn http_interaction<F: std::future::Future>(fut: F) -> send_wrapper::SendWrapper<F> {
     send_wrapper::SendWrapper::new(fut)
 }
@@ -386,6 +388,7 @@ pub fn with_timeouts(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(missing_docs)] // documented on the native arm above
 pub fn with_timeouts(
     b: reqwest::ClientBuilder,
     _connect: std::time::Duration,
@@ -408,6 +411,7 @@ pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, _ms: u32)
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(missing_docs)] // documented on the native arm above
 pub async fn io_deadline<T>(fut: impl std::future::Future<Output = T>, ms: u32) -> Option<T> {
     use futures_util::future::{select, Either};
     use futures_util::pin_mut;
