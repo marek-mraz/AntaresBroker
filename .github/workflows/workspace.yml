@@ -86,7 +86,20 @@ jobs:
       # --locked everywhere below: the image builds with it (Dockerfile), so
       # without it CI would gate on a dependency set the shipped binary never
       # used, and an out-of-date Cargo.lock would pass here and fail there.
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The step has died with a bare SIGTERM (exit 143, no rustc error, no
+      # post-steps) on both runner archs. The sampler streams the machine's
+      # memory, disk and top processes into the log every 15 s so the last
+      # lines before a kill say what was being exhausted.
+      - name: cargo clippy (with a resource sampler)
+        run: |
+          ( while sleep 15; do
+              echo "--- $(date -u +%T) $(free -m | awk '/Mem:/{print "mem used "$3" free "$4" avail "$7" MB"}') $(df -h / | awk 'NR==2{print "disk used "$5}')"
+              ps -eo rss,comm --sort=-rss | head -4 | tail -3 | awk '{printf "  %s MB %s\n", int($1/1024), $2}'
+              docker stats --no-stream --format '  {{.Name}} {{.MemUsage}}' 2>/dev/null
+            done ) &
+          SAMPLER=$!
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          kill $SAMPLER
       - run: dev/unit-junit.sh default --workspace
       # nextest cannot execute doctests. They stay gated here (a broken doc
       # example is still a red build) but contribute no JUnit, which the
