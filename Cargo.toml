@@ -128,3 +128,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+# clippy 1.98.0 runs this lint into >14 GB on the antares-api test target
+# (the CI runner dies with a bare SIGTERM); every other style lint stays on.
+needless_borrows_for_generic_args = "allow"
