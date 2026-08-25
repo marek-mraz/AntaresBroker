@@ -634,13 +634,36 @@ pub fn record_temporal_change(
         // gate 1, value-change: an unchanged instance produces no event
         for mut inst in changed_instances(before.and_then(|b| b.get(&k)), av) {
             if let Some(o) = inst.as_object_mut() {
-                o.entry("instanceId".to_owned()).or_insert_with(|| {
-                    Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()))
-                });
+                let iid = instance_id(id, &k, &*o);
+                o.entry("instanceId".to_owned())
+                    .or_insert_with(|| Value::String(iid));
             }
             crate::history::push(st, event(op, &k, inst));
         }
     }
+}
+
+/// 4.5.7: an instance is the Attribute "at a particular point in time",
+/// recorded as its observedAt. The id of an observed instance is therefore
+/// derived from (entity, attribute, datasetId, observedAt), so a re-send for
+/// the same instant lands on the same row — the temporal store's upsert key —
+/// and corrects it instead of appending a duplicate. Without observedAt there
+/// is no instant to key on: a fresh random id, append-only.
+fn instance_id(entity: &str, attr: &str, inst: &serde_json::Map<String, Value>) -> String {
+    let u = match inst.get("observedAt").and_then(Value::as_str) {
+        Some(at) => {
+            let ds = inst
+                .get("datasetId")
+                .and_then(Value::as_str)
+                .unwrap_or("@none");
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{entity}\n{attr}\n{ds}\n{at}").as_bytes(),
+            )
+        }
+        None => uuid::Uuid::new_v4(),
+    };
+    format!("urn:ngsi-ld:Instance:{u}")
 }
 
 /// The instances in `after` that are new or changed vs `before` — matched by

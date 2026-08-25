@@ -17,3 +17,4 @@ commit, large stays on the list until measured.
   written past the API. Note only.
 - [x] any.rs batch_upsert: `let _ = id;` leftover replaced by `_` in the
   pattern (fixed in the same commit that added this file).
+- [B] 5814_01_02 / 5814_02_02 (local-fork DistributedOperations TPs): one rule-8 run on the memory broker saw "Timeout: request was not received" on the second test of each file at 05:41 UTC 2026-08-25 (no build, pull or sweep running); 4/4 green in isolation on the same broker and 132/132 on the clean DistributedOperations re-run. Suspect: the httpctrl mock restarting on the same port between the two tests. Watch for recurrence in CI before touching either side.

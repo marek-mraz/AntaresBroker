@@ -550,7 +550,17 @@ impl AnyStore {
                         for (k, v) in adds {
                             let incoming: Vec<Value> = v.as_array().cloned().unwrap_or_default();
                             match target.get_mut(k).and_then(Value::as_array_mut) {
-                                Some(cur) => cur.extend(incoming),
+                                // same instanceId = the same instance corrected
+                                // (the pg arm's ON CONFLICT DO UPDATE)
+                                Some(cur) => {
+                                    for inst in incoming {
+                                        let iid = inst.get("instanceId");
+                                        match cur.iter_mut().find(|c| c.get("instanceId") == iid) {
+                                            Some(slot) => *slot = inst,
+                                            None => cur.push(inst),
+                                        }
+                                    }
+                                }
                                 None => {
                                     target.insert(k.clone(), Value::Array(incoming));
                                 }
