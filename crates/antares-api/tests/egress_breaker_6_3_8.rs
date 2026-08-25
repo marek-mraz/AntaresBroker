@@ -46,8 +46,7 @@ fn mock_counting(reply: &'static str) -> (u16, Arc<AtomicUsize>) {
 fn read_request(s: &mut std::net::TcpStream) -> String {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
-    loop {
-        let Ok(n) = s.read(&mut chunk) else { break };
+    while let Ok(n) = s.read(&mut chunk) {
         if n == 0 {
             break;
         }

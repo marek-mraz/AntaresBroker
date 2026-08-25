@@ -79,7 +79,9 @@ jobs:
       # --locked everywhere below: the image builds with it (Dockerfile), so
       # without it CI would gate on a dependency set the shipped binary never
       # used, and an out-of-date Cargo.lock would pass here and fail there.
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # -j 2: at the default parallelism the 4-vCPU arm runner OOMs on the
+      # test targets (the step dies with 143, no rustc error), same as msrv.
+      - run: cargo clippy --locked --workspace --all-targets -j 2 -- -D warnings
       - run: dev/unit-junit.sh default --workspace
       # nextest cannot execute doctests. They stay gated here (a broken doc
       # example is still a red build) but contribute no JUnit, which the
