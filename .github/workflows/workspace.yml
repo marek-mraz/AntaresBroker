@@ -17,7 +17,11 @@ jobs:
     # live PostGIS / TimescaleDB / mosquitto so no integration test skips
     # vacuously.
     name: Workspace tests
-    runs-on: ubuntu-24.04-arm
+    # x86, not the arm runner: a COLD workspace clippy there dies with a bare
+    # SIGTERM (exit 143) after 3-10 min — no rustc error, no cancel, and the
+    # same cold job peaks at 1.2 GB locally. The msrv and shared-crate jobs
+    # keep the arm runner, they run fine there.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Live PostGIS for the antares-sql integration tests — without this
@@ -55,6 +59,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          # a red job still saves its target dir, so the retry is warm
+          cache-on-failure: true
       # The whole cargo suite runs under nextest so every config emits JUnit
       # (.config/nextest.toml, profile `ci`) — dev/unit-report-site.py folds
       # those into the /reports/unit/ page. Plain `cargo test` leaves no
@@ -79,9 +86,7 @@ jobs:
       # --locked everywhere below: the image builds with it (Dockerfile), so
       # without it CI would gate on a dependency set the shipped binary never
       # used, and an out-of-date Cargo.lock would pass here and fail there.
-      # -j 2: at the default parallelism the 4-vCPU arm runner OOMs on the
-      # test targets (the step dies with 143, no rustc error), same as msrv.
-      - run: cargo clippy --locked --workspace --all-targets -j 2 -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: dev/unit-junit.sh default --workspace
       # nextest cannot execute doctests. They stay gated here (a broken doc
       # example is still a red build) but contribute no JUnit, which the
@@ -107,7 +112,7 @@ jobs:
         env:
           ANTARES_TEST_DATABASE_URL: postgresql://antares:antares@localhost:15433/antares
         run: |
-          # psql is not preinstalled on the arm runner image (exit 127)
+          # psql may not be preinstalled on the runner image (exit 127)
           which psql >/dev/null || sudo apt-get install -y -qq postgresql-client
           PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
@@ -122,12 +127,12 @@ jobs:
           path: unit-junit/
           if-no-files-found: warn
       # License gate (nothing links TSL — Timescale is talked to
-      # over SQL only) + advisories. Not the cargo-deny-action: its docker
-      # image ships an x86_64 binary — Exec format error on this arm runner.
+      # over SQL only) + advisories. A pinned release binary, not the
+      # cargo-deny-action, so the job stays portable across runner archs.
       - name: cargo-deny (licenses + advisories)
         run: |
           V=0.20.2
-          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-aarch64-unknown-linux-musl.tar.gz" \
+          curl -sSfL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-$(uname -m)-unknown-linux-musl.tar.gz" \
             | tar xz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
           cargo deny --log-level warn check licenses advisories
       # The ETSI resource sampler + its sample↔TP join fail silently when
