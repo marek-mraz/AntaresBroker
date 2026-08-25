@@ -1,0 +1,38 @@
+# Maven / Java build
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# IDE / editors
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+
+# Logs
+*.log
+*.tmp
+reports
+
+# Git
+.git/
+.gitignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db

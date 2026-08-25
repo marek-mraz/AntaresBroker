@@ -1,0 +1,22 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "https://ngsi-ld-test-suite/context#Building",
+    "https://ngsi-ld-test-suite/context#name": {
+        "type": "Property",
+        "value": "Eiffel Tower"
+    },
+    "https://ngsi-ld-test-suite/context#airQualityLevel": {
+        "type": "Property",
+        "value": 4,
+        "observedAt": "2020-09-09T16:40:00.000Z",
+        "unitCode": "C62"
+    },
+    "https://ngsi-ld-test-suite/context#almostFull": {
+        "type": "Property",
+        "value": false
+    },
+    "https://ngsi-ld-test-suite/context#subCategory": {
+        "type": "Property",
+        "value": "tourism"
+    }
+}

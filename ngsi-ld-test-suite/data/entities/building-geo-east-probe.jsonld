@@ -1,0 +1,18 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "name": {
+        "type": "Property",
+        "value": "East End Probe"
+    },
+    "location": {
+        "type": "GeoProperty",
+        "value": {
+            "type": "Point",
+            "coordinates": [10.0, 60.009]
+        }
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

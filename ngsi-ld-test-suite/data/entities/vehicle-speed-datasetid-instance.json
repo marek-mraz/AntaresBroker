@@ -1,0 +1,10 @@
+{
+    "type": "Property",
+    "value": 70,
+    "source": {
+        "type": "Property",
+        "value": "GPS"
+    },
+    "observedAt": "2017-07-29T11:00:04Z",
+    "datasetId": "urn:ngsi-ld:Property:gpsBxyz123-speed"
+}

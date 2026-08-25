@@ -1,0 +1,22 @@
+{
+    "id": "RandomUuidToBeReplaced",
+    "type": "Building",
+    "name": {
+        "type": "Property",
+        "value": "Eiffel Tower"
+    },
+    "subCategory": {
+        "type": "Property",
+        "value": "tourism"
+    },
+    "airQualityLevel": {
+        "type": "Property",
+        "value": 4,
+        "unitCode": "C62",
+        "observedAt": "2020-09-09T16:40:00.000Z"
+    },
+    "almostFull": {
+        "type": "Property",
+        "value": false
+    }
+}

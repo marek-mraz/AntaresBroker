@@ -1,0 +1,27 @@
+{
+    "id": "urn:ngsi-ld:Subscription:randomUUID",
+    "type": "Subscription",
+    "entities": [
+        {
+            "type": "Building"
+        }
+    ],
+    "notificationTrigger": [
+        "attributeCreated",
+        "attributeUpdated"
+    ],
+    "notification": {
+        "format": "normalized",
+        "endpoint": {
+            "uri": "http://localhost:1111/notify",
+            "accept": "application/ld+json"
+        }
+    },
+    "datasetId": [
+        "urn:ngsi-ld:Dataset:french-name"
+    ],
+    "status": "active",
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite id="${dynamicSuiteName}" xmlns="http://www.gitb.com/tdl/v1/" xmlns:gitb="http://www.gitb.com/core/v1/">
+	<metadata>
+		<gitb:name>${dynamicSuiteName}</gitb:name>
+		<gitb:version>1.0</gitb:version>
+        <gitb:documentation><![CDATA[
+            <p>This test suite packages all the tests in the ${dynamicSuiteName} folder of the <a href="https://forge.etsi.org/rep/cim/ngsi-ld-test-suite"><b>NGSI-LD Robot Framework</b></a> repository </p>
+        ]]></gitb:documentation>
+	</metadata>
+	<actors>
+		<gitb:actor id="ContextConsumer">
+			<gitb:name>ContextConsumer</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="DefaultActor">
+			<gitb:name>DefaultActor</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="ContextProducer">
+			<gitb:name>ContextProducer</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="ContextSubscriber">
+			<gitb:name>ContextSubscriber</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="RemoteBroker">
+			<gitb:name>RemoteBroker</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="NotificationReceiver">
+			<gitb:name>NotificationReceiver</gitb:name>
+		</gitb:actor>
+		<gitb:actor id="ContextBroker">
+			<gitb:name>ContextBroker</gitb:name>
+		</gitb:actor>
+	</actors>
+	

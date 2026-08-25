@@ -1,0 +1,18 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "name": {
+    "dataset": {
+      "urn:ngsi-ld:Dataset:german-name": "Eiffelturm",
+      "@none": "Eiffel Tower",
+      "urn:ngsi-ld:Dataset:french-name": "urn:ngsi-ld:null"
+    }
+  },
+  "locatedAt": {
+    "dataset": {
+      "urn:ngsi-ld:Dataset:french-name": "urn:ngsi-ld:Ville:Paris",
+      "urn:ngsi-ld:Dataset:spanish-name": "urn:ngsi-ld:Ciudad:Par\u00c3\u00ads",
+      "@none": "urn:ngsi-ld:City:Paris"
+    }
+  }
+}

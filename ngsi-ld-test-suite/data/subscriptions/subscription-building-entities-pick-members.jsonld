@@ -1,0 +1,22 @@
+{
+    "id": "urn:ngsi-ld:Subscription:randomUUID",
+    "type": "Subscription",
+    "entities": [
+        {
+            "type": "Building"
+        }
+    ],
+    "notification": {
+        "endpoint": {
+            "uri": "http://localhost:1111/notify",
+            "accept": "application/json"
+        },
+        "pick": [
+            "id",
+            "name"
+        ]
+    },
+    "@context": [
+        "https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld"
+    ]
+}

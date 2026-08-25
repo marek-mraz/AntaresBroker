@@ -1,0 +1,25 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "name": {
+        "type": "Property",
+        "value": "Hole Probe"
+    },
+    "location": {
+        "type": "GeoProperty",
+        "value": {
+            "type": "Point",
+            "coordinates": [5, 5]
+        }
+    },
+    "observationSpace": {
+        "type": "GeoProperty",
+        "value": {
+            "type": "Point",
+            "coordinates": [8, 40]
+        }
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

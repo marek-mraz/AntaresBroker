@@ -1,0 +1,76 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:019-21-1",
+        "type": "Building",
+        "location": {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": [
+                    -8.5,
+                    41.2
+                ]
+            }
+        },
+        "street": {
+            "type": "LanguageProperty",
+            "languageMap": {
+                "fr": "Grand Place",
+                "nl": "Grote Markt"
+            }
+        },
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-21-1",
+            "entity": {
+                "id": "urn:ngsi-ld:City:019-21-1",
+                "type": "City",
+                "description": {
+                    "type": "Property",
+                    "value": "Paris is the capital and largest city of France"
+                },
+                "isInCountry": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:Country:France"
+                }
+            }
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Building:019-21-2",
+        "type": "Building",
+        "location": {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": [
+                    -8.5,
+                    41.2
+                ]
+            }
+        },
+        "street": {
+            "type": "LanguageProperty",
+            "languageMap": {
+                "fr": "Grand Place",
+                "nl": "Grote Markt"
+            }
+        },
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-21-2",
+            "entity": {
+                "id": "urn:ngsi-ld:City:019-21-2",
+                "type": "City",
+                "description": {
+                    "type": "Property",
+                    "value": "Paris is the capital and largest city of France"
+                },
+                "isInCountry": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:Country:France"
+                }
+            }
+        }
+    }
+]

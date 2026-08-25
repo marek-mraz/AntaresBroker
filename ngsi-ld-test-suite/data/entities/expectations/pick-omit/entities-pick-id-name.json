@@ -1,0 +1,19 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:019-17-1",
+        "name": {
+            "type": "Property",
+            "value": "Eiffel Tower"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:019-17-2"
+    },
+    {
+        "id": "urn:ngsi-ld:Building:019-17-3",
+        "name": {
+            "type": "Property",
+            "value": "Pisa Tower"
+        }
+    }
+]

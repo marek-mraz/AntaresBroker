@@ -1,0 +1,16 @@
+[
+  {
+    "id": "urn:ngsi-ld:Building:018-13",
+    "type": "Building",
+    "locatedAt": "urn:ngsi-ld:City:Paris"
+  },
+  {
+    "id": "urn:ngsi-ld:City:Paris",
+    "type": "City",
+    "locatedAt": "urn:ngsi-ld:Country:France"
+  },
+  {
+    "id": "urn:ngsi-ld:Country:France",
+    "type": "Country"
+  }
+]

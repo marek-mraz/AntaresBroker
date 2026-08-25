@@ -1,0 +1,30 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "address": {
+        "type": "Property",
+        "value": {
+            "city": "Berlin",
+            "street": "Ulrich Strasse"
+        }
+    },
+    "color": {
+        "type": "LanguageProperty",
+        "languageMap": {
+            "fr": "rouge",
+            "en": "red",
+            "de": "rot"
+        }
+    },
+    "category": {
+        "type": "VocabProperty",
+        "vocab": "commercial"
+    },
+    "managedBy": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:Building:qlTarget019x29"
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

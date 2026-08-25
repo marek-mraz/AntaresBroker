@@ -1,0 +1,8 @@
+{
+    "id": "urn:ngsi-ld:EntityTypeList:randomUUID",
+    "type": "EntityTypeList",
+    "typeList": [
+        "https://ngsi-ld-test-suite/context#Building",
+        "https://ngsi-ld-test-suite/context#Vehicle"
+    ]
+}

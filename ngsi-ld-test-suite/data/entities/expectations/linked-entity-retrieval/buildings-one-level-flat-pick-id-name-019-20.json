@@ -1,0 +1,16 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:019-20-1",
+        "name": {
+            "type": "Property",
+            "value": "Eiffel Tower"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Building:019-20-2",
+        "name": {
+            "type": "Property",
+            "value": "Eiffel Tower"
+        }
+    }
+]

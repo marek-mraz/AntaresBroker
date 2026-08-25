@@ -1,0 +1,12 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_39",
+        "type": "Building",
+        "deletedAt": "2025-08-22T19:49:49.491466Z",
+        "vocabProperty": {
+            "type": "VocabProperty",
+            "previousVocab": "monument",
+            "vocab": "urn:ngsi-ld:null"
+        }
+    }
+]

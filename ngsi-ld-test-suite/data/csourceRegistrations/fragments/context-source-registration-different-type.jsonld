@@ -1,0 +1,40 @@
+{
+    "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+    "type": "building",
+    "information": [
+        {
+        "entities": [
+            {
+            "id": "urn:ngsi-ld:Vehicle:A456",
+            "type": "Vehicle"
+            }
+        ],
+        "propertyNames": ["brandName","speed"],
+        "relationshipNames": ["isParked"]
+        },
+        {
+        "entities": [
+            {
+                "idPattern": ".*downtown$",
+                "type": "OffStreetParking"
+            },
+            {
+                "idPattern": ".*47$",
+                "type": "OffStreetParking"
+            }
+        ],
+        "propertyNames": ["availableSpotNumber","totalSpotNumber"],
+        "relationshipNames": ["isNextToBuilding"]
+        }
+    ],
+    "endpoint": "http://my.csource.org:1026", 
+    "location": {
+        "type": "Polygon",
+        "coordinates": [
+            [ [100.0, 0.0], [101.0, 0.0], [101.0, 1.0],
+            [100.0, 1.0], [100.0, 0.0]] ]
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

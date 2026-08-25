@@ -1,0 +1,14 @@
+[
+    {
+        "name": {
+            "type": "Property",
+            "value": "Eiffel Tower"
+        }
+    },
+    {
+        "name": {
+            "type": "Property",
+            "value": "Pisa Tower"
+        }
+    }
+]

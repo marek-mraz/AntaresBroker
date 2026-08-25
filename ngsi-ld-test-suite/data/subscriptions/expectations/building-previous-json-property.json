@@ -1,0 +1,19 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_32",
+        "type": "Building",
+        "jsonProperty": {
+            "type": "JsonProperty",
+            "json": {
+                "city": "Nantes",
+                "street": "Place Royale"
+            },
+            "previousJson": {
+                "id": "some-id",
+                "null": null,
+                "type": "some-type",
+                "anythingElse": "anything-else"
+            }
+        }
+    }
+]

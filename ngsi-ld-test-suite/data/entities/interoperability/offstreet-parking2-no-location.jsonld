@@ -1,0 +1,22 @@
+{
+  "id": "urn:ngsi-ld:OffStreetParking:2",
+  "type": "OffStreetParking",
+  "name": {
+    "type": "Property",
+    "value": "Downtown Two"
+  },
+  "availableSpotsNumber": {
+    "type": "Property",
+    "value": 87,
+    "observedAt": "2017-07-29T12:10:02Z",
+    "reliability": {
+      "type": "Property",
+      "value": 0.55
+    }
+  },
+  "totalSpotsNumber": {
+    "type": "Property",
+    "value": 150
+  },
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

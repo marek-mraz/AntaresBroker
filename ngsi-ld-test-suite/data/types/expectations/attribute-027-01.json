@@ -1,0 +1,12 @@
+{
+   "id":"https://ngsi-ld-test-suite/context#airQualityLevel",
+   "type":"Attribute",
+   "attributeName":"airQualityLevel",
+   "attributeCount":1,
+   "attributeTypes":[
+      "Property"
+   ],
+   "typeNames":[
+      "Building"
+   ]
+}

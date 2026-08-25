@@ -1,0 +1,39 @@
+[
+  {
+    "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+    "type": "ContextSourceRegistration",
+    "endpoint": "http://my.csource.org:1026",
+    "information": [
+      {
+        "entities": [
+          {
+            "type": "Building"
+          }
+        ],
+        "propertyNames": [
+          "name",
+          "subCategory"
+        ],
+        "relationshipNames": [
+          "locatedAt"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+    "type": "ContextSourceRegistration",
+    "endpoint": "http://my.csource.org:1026",
+    "csourceProperty1": "aValue",
+    "csourceProperty2": "anotherValue",
+    "information": [
+      {
+        "entities": [
+          {
+            "type": "Building"
+          }
+        ]
+      }
+    ]
+  }
+]

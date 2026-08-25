@@ -1,0 +1,2 @@
+testrunner:
+  default-repo-url: "https://github.com/marek-mraz/ngsi-ld-test-suite.git"

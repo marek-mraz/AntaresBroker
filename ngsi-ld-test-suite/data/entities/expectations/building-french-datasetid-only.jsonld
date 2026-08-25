@@ -1,0 +1,17 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "name": {
+    "type": "Property",
+    "value": "Tour Eiffel",
+    "datasetId": "urn:ngsi-ld:Dataset:french-name"
+  },
+  "locatedAt": {
+    "type": "Relationship",
+    "object": "urn:ngsi-ld:Ville:Paris",
+    "datasetId": "urn:ngsi-ld:Dataset:french-name"
+  },
+  "@context": [
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

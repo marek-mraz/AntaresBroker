@@ -1,0 +1,30 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:randomUUID",
+  "type": "Vehicle",
+  "vocabProperty": {
+    "type": "VocabProperty",
+    "vocabs": [
+      [
+        {
+          "vocab": "monument"
+        },
+        "2020-08-01T12:03:00Z"
+      ],
+      [
+        {
+          "vocab": "sightseeing"
+        },
+        "2020-08-01T12:05:00Z"
+      ],
+      [
+        {
+          "vocab": [
+            "monument",
+            "sightseeing"
+          ]
+        },
+        "2020-08-01T12:07:00Z"
+      ]
+    ]
+  }
+}

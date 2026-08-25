@@ -1,0 +1,5 @@
+{
+    "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+    "type": "ContextSourceRegistration",,
+    "endpoint": "http://my.new.csource.org:1026"
+}

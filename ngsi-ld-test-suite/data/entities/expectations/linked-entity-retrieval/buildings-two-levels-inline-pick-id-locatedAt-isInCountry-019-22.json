@@ -1,0 +1,52 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:019-22-1",
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-22-1",
+            "entity": {
+                "id": "urn:ngsi-ld:City:019-22-1",
+                "name": {
+                    "type": "Property",
+                    "value": "Paris"
+                },
+                "isInCountry": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:Country:019-22-1",
+                    "entity": {
+                        "id": "urn:ngsi-ld:Country:019-22-1",
+                        "description": {
+                            "type": "Property",
+                            "value": "France is an European country"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Building:019-22-2",
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-22-2",
+            "entity": {
+                "id": "urn:ngsi-ld:City:019-22-2",
+                "name": {
+                    "type": "Property",
+                    "value": "Paris"
+                },
+                "isInCountry": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:Country:019-22-2",
+                    "entity": {
+                        "id": "urn:ngsi-ld:Country:019-22-2",
+                        "description": {
+                            "type": "Property",
+                            "value": "France is an European country"
+                        }
+                    }
+                }
+            }
+        }
+    }
+]

@@ -1,0 +1,12 @@
+{
+    "type": "Query",
+    "entities": [{
+        "type": "Vehicle"
+    }],
+    "temporalQ": {
+        "timerel": "after",
+        "timeAt": "2020-08-01T12:00:00Z",
+        "aggrMethods": ["avg"],
+        "aggrPeriodDuration": "bogus"
+    }
+}

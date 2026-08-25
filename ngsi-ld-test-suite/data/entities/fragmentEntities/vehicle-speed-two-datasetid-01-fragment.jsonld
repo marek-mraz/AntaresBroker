@@ -1,0 +1,13 @@
+{
+    "speed": {
+        "type": "Property",
+        "value": 99,
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        }
+    }, 
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

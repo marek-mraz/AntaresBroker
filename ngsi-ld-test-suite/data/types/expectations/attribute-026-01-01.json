@@ -1,0 +1,34 @@
+[
+   {
+      "id":"https://ngsi-ld-test-suite/context#name",
+      "type":"Attribute",
+      "attributeName":"https://ngsi-ld-test-suite/context#name",
+      "typeNames":[
+         "https://ngsi-ld-test-suite/context#Building"
+      ]
+   },
+   {
+      "id":"https://ngsi-ld-test-suite/context#subCategory",
+      "type":"Attribute",
+      "attributeName":"https://ngsi-ld-test-suite/context#subCategory",
+      "typeNames":[
+         "https://ngsi-ld-test-suite/context#Building"
+      ]
+   },
+   {
+      "id":"https://ngsi-ld-test-suite/context#airQualityLevel",
+      "type":"Attribute",
+      "attributeName":"https://ngsi-ld-test-suite/context#airQualityLevel",
+      "typeNames":[
+         "https://ngsi-ld-test-suite/context#Building"
+      ]
+   },
+   {
+      "id":"https://ngsi-ld-test-suite/context#almostFull",
+      "type":"Attribute",
+      "attributeName":"https://ngsi-ld-test-suite/context#almostFull",
+      "typeNames":[
+         "https://ngsi-ld-test-suite/context#Building"
+      ]
+   }
+]

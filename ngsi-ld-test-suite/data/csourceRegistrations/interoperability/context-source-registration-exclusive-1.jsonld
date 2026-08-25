@@ -1,0 +1,21 @@
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:Exclusive:1",
+  "type": "ContextSourceRegistration",
+  "information": [
+    {
+      "entities": [
+        {
+          "id": "urn:ngsi-ld:OffStreetParking:2"
+        }
+      ],
+      "propertyNames": [
+        "totalSpotsNumber"		
+      ]
+    }
+  ],
+  "mode": "exclusive",
+  "endpoint": "xxx",
+  "@context":[
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

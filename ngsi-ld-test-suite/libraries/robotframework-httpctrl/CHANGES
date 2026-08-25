@@ -1,0 +1,262 @@
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.3.1 (RELEASED: Dec 3, 2022)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Fixed bug in function `Send HTTPS Request Async` when HTTP protocol was used instead of HTTPS.
+  See: https://github.com/annoviko/robotframework-httpctrl/pull/39
+
+- Fixed bug with response header types when `HTTPMessage` object was returned instead of `dict`.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/40
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.3.0 (RELEASED: Jul 4, 2022)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Introduce new argument `resp_body_to_file` for functions `Send HTTP Request`, `Send HTTP Request Async`, 
+    `Send Https Request`, `Send Https Request Async` to write response body to a file that is specified
+    by the argument.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/36
+
+- Changed return type for `Get Body From Response` and `Get Response Body` from `string` to `bytes`.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/37
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.7 (RELEASED: Jun 30, 2022)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Introduce the limit for body size to log and corresponding library `HttpCtrl.Logging` to configure it.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/34
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.6 (RELEASED: Apr 26, 2022)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Fixed bug with Flask based server that reply by 404.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/33
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.5 (RELEASED: Dec 24, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Update meta-information (CHANGE file).
+  See: no reference
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.4 (RELEASED: Dec 24, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Introduced new keyword `Set Stub Reply` to create server stub functions.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/30
+
+- Introduced new keyword `Get Stub Count` to get server stub statistic.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/30
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.2 (RELEASED: Oct 18, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Fixes bug with pypi installer 0.2.1.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/27
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.1 (RELEASED: Oct 8, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Change license to The 3-Clause BSD License.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/26
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.2.0 (RELEASED: Oct 8, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES
+
+- Change license to The 3-Clause BSD License.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/26
+
+- Feature to release the library automatically.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/14
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.10 (RELEASED: Oct 7, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Fixed bug where body was not provided for HEAD, OPTION, DELETE and GET methods (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/24
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.9 (RELEASED: Sep 29, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Support bytes body type for `Reply By` (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/17
+
+CORRECTED MAJOR BUGS:
+
+- Fixed bug where response server body was used as a response reason (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/19
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.8 (RELEASED: Sep 28, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Option to bind client to the specific address only without port (HttpCtrl.Client).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/21
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.7 (RELEASED: Sep 27, 2021)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Option to bind client to the specific address and port (HttpCtrl.Client).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/21
+
+- Supported IPv6 address (HttpCtrl.Client, HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/15
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.6 (RELEASED: Jan 13, 2020)
+
+------------------------------------------------------------------------
+
+CORRECTED MAJOR BUGS:
+
+- Fixed bug where function `Get Async Response` hangs when timeout is specified and message is not received (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/13
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.5 (RELEASED: Jan 13, 2020)
+
+------------------------------------------------------------------------
+
+CORRECTED MAJOR BUGS:
+
+- Missing package in setup.py.
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/10
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.4 (RELEASED: Jan 13, 2020)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Introduced argument `timeout` for function `Wait For Request` to specify waiting time (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/11
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.3 (RELEASED: Oct 25, 2019)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Function `Wait And Ingore Request` to ignore incoming request by closing connection (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/8
+
+- Optimized termination of the HTTP(S) server - problem with up-to 5 seconds delay (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/7
+
+- Functions to work with async. received responses are introduced (HttpCtrl.Client).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/5
+
+- Functions `Send HTTPS Request Async` and `Send HTTP Request Async` must returns connection (HttpCtrl.Client).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/5
+
+CORRECTED MAJOR BUGS:
+
+- Fixed bug where function `Wait For No Requests` ignored input timeout and always uses 5 seconds (HttpCtrl.Server).
+  See: https://github.com/annoviko/robotframework-httpctrl/issues/6
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.2 (RELEASED: Sep 10, 2019)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Built-in documentation is updated.
+  See: no reference
+
+
+------------------------------------------------------------------------
+
+CHANGE NOTES FOR 0.1.1 (RELEASED: Sep 9, 2019)
+
+------------------------------------------------------------------------
+
+GENERAL CHANGES:
+
+- Bug correction for HttpCtrl.Server when client close connection after sending request.
+  See: no reference

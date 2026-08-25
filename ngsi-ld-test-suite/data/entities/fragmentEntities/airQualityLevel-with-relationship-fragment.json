@@ -1,0 +1,12 @@
+{
+    "airQualityLevel": {
+        "type": "Property",
+        "value": 4,
+        "unitCode": "C62",
+        "observedAt": "2020-09-09T16:40:00.000Z",
+        "hasWeatherObserved": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Sensor:43a1af27-4aa7-44fe-bee9-fe76d56978a4"
+        }
+    }
+}

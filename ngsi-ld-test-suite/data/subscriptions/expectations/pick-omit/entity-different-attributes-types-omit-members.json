@@ -1,0 +1,26 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_43",
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:Paris"
+        },
+        "location": {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": [
+                    -8.5,
+                    41.2
+                ]
+            }
+        },
+        "street": {
+            "type": "LanguageProperty",
+            "languageMap": {
+                "fr": "Grand Place",
+                "nl": "Grote Markt"
+            }
+        }
+    }
+]

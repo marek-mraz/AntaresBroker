@@ -1,0 +1,43 @@
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+  "type": "ContextSourceRegistration",
+  "endpoint": "http://my.csource.org:1026",
+  "information": [
+    {
+      "entities": [
+        {
+          "id": "urn:ngsi-ld:Vehicle:A456",
+          "type": "https://ngsi-ld-test-suite/context#Vehicle"
+        }
+      ],
+      "propertyNames": [
+        "https://ngsi-ld-test-suite/context#brandName",
+        "https://ngsi-ld-test-suite/context#speed"
+      ],
+      "relationshipNames": [
+        "isParked"
+      ]
+    },
+    {
+      "entities": [
+        {
+          "type": "https://ngsi-ld-test-suite/context#OffStreetParking",
+          "idPattern": ".*downtown$"
+        },
+        {
+          "type": "https://ngsi-ld-test-suite/context#OffStreetParking",
+          "idPattern": ".*47$"
+        }
+      ],
+      "propertyNames": [
+        "availableSpotNumber",
+        "totalSpotNumber"
+      ],
+      "relationshipNames": [
+        "isNextToBuilding"
+      ]
+    }
+  ],
+  "mode": "inclusive",
+  "operations": ["federationOps"]
+}

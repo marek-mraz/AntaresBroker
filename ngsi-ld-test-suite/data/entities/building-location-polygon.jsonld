@@ -1,0 +1,45 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "name": {
+    "type": "Property",
+    "value": "Eiffel Tower"
+  },
+  "location": {
+    "type": "GeoProperty",
+    "value": {
+      "type": "Polygon",
+      "coordinates": [
+        [
+          [
+            13.2865906,
+            52.5648645
+          ],
+          [
+            13.2879639,
+            52.5648645
+          ],
+          [
+            13.2797241,
+            52.4988679
+          ],
+          [
+            13.477478,
+            52.4712703
+          ],
+          [
+            13.5049438,
+            52.5373084
+          ],
+          [
+            13.2865906,
+            52.5648645
+          ]
+        ]
+      ]
+    }
+  },
+  "@context": [
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

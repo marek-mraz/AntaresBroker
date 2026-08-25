@@ -1,0 +1,14 @@
+{
+    "id": "urn:ngsi-ld:Building:018-20",
+    "locatedAt": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:City:Paris",
+        "entity": {
+            "id": "urn:ngsi-ld:City:Paris",
+            "name": {
+                "type": "Property",
+                "value": "Paris"
+            }
+        }
+    }
+}

@@ -1,0 +1,18 @@
+{
+    "speed": {
+        "type": "Property",
+        "value": 56,
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        },
+        "datasetId": "urn:ngsi-ld:Property:speedometer" 
+    },
+    "attribute_to_be_added": {
+        "type": "Property",
+        "value": 23
+    }, 
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

@@ -1,0 +1,11 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_33",
+        "type": "Building",
+        "vocabProperty": {
+            "type": "VocabProperty",
+            "vocab": "museum",
+            "previousVocab": "monument"
+        }
+    }
+]

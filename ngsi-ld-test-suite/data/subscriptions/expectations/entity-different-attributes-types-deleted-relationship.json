@@ -1,0 +1,32 @@
+[
+   {
+      "id": "urn:ngsi-ld:Building:046_34",
+      "type": "Building",
+      "name": {
+         "type": "Property",
+         "value": "Eiffel Tower"
+      },
+      "location": {
+         "type": "GeoProperty",
+         "value": {
+            "type": "Point",
+            "coordinates": [
+               -8.5,
+               41.2
+            ]
+         }
+      },
+      "street": {
+         "type": "LanguageProperty",
+         "languageMap": {
+            "fr": "Grand Place",
+            "nl": "Grote Markt"
+         }
+      },
+      "locatedAt": {
+         "type": "Relationship",
+         "previousObject": "urn:ngsi-ld:City:Paris",
+         "object": "urn:ngsi-ld:null"
+      }
+   }
+]

@@ -51,13 +51,6 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v5
-      # The ledger check (dev/spec.py check) resolves robot: lists against
-      # the suite's TP tree — an empty submodule reads as 100% robot drift.
-      - name: Fetch the ETSI test suite (submodule)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync
-          git submodule update --init --depth 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

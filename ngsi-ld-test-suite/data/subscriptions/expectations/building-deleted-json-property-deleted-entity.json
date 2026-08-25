@@ -1,0 +1,17 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_38",
+        "type": "Building",
+        "deletedAt": "2025-08-22T19:48:35.450282Z",
+        "jsonProperty": {
+            "type": "JsonProperty",
+            "previousJson": {
+                "id": "some-id",
+                "null": null,
+                "type": "some-type",
+                "anythingElse": "anything-else"
+            },
+            "json": "urn:ngsi-ld:null"
+        }
+    }
+]

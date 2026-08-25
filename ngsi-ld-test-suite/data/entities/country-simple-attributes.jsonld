@@ -1,0 +1,15 @@
+{
+    "id": "urn:ngsi-ld:Country:randomUUID",
+    "type": "Country",
+    "name": {
+        "type": "Property",
+        "value": "France"
+    },
+    "description": {
+        "type": "Property",
+        "value": "France is an European country"
+    },
+    "@context": [
+      "https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld"
+    ]
+}

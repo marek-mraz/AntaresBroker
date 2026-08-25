@@ -1,0 +1,17 @@
+{
+   "type":"Subscription",
+   "isActive": true,
+   "expiresAt": null,
+   "entities":[
+      {
+         "type":"Building"
+      }
+   ],
+   "notification":{
+      "format":"keyValues",
+      "endpoint":{
+         "uri":"http://localhost:1111/notify",
+         "accept":"application/json"
+      }
+   }
+}

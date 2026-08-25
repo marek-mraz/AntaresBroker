@@ -1,0 +1,12 @@
+{
+  "location": {
+    "type": "GeoProperty",
+    "value": {
+      "type": "Point",
+      "coordinates": [
+        13.3986,
+        52.5547
+      ]
+    }
+  }
+}

@@ -1,0 +1,56 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:019-23-1",
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-23-1"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Building:019-23-2",
+        "locatedAt": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:019-23-2"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:City:019-23-2",
+        "type": "City",
+        "description": {
+            "type": "Property",
+            "value": "Paris is the capital and largest city of France"
+        },
+        "isInCountry": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Country:019-23-2"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:City:019-23-1",
+        "type": "City",
+        "description": {
+            "type": "Property",
+            "value": "Paris is the capital and largest city of France"
+        },
+        "isInCountry": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Country:019-23-1"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Country:019-23-2",
+        "type": "Country",
+        "name": {
+            "type": "Property",
+            "value": "France"
+        }
+    },
+    {
+        "id": "urn:ngsi-ld:Country:019-23-1",
+        "type": "Country",
+        "name": {
+            "type": "Property",
+            "value": "France"
+        }
+    }
+]

@@ -1,0 +1,22 @@
+	</steps>
+    <output>
+        <success>
+			<default>"The test session completed successfully."</default>
+        </success>
+        <failure>
+            <case>
+                <cond>$STEP_STATUS{actualTest} = 'ERROR'</cond>
+                <message>"The external app that runs the test is not reachable."</message>
+            </case>
+            <case>
+                <cond>$skipTest</cond>
+                <message>"The test session could not take place because something went wrong during SETUP."</message>
+            </case>
+            <case>
+                <cond>not($testSuccess)</cond>
+                <message>"The SUT failed the test session."</message>
+            </case>
+			<default>"Something went wrong, please check the logs."</default>
+        </failure>
+    </output>
+</testcase>

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "urn:ngsi-ld:Vehicle:021-18-A",
+    "type": "Vehicle",
+    "fuelLevel": {
+      "type": "Property",
+      "datasetId": "urn:ngsi-ld:Dataset:fuel",
+      "values": [
+        [
+          40,
+          "2020-09-01T14:07:00Z"
+        ]
+      ]
+    }
+  }
+]

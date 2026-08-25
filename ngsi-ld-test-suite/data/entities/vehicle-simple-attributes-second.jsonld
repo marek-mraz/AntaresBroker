@@ -1,0 +1,20 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "brandName": {
+        "type": "Property",
+        "value": "BMW"
+    },
+    "isParked2": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:OffStreetParking:Downtown2",
+        "observedAt": "2017-07-29T12:00:04Z",
+        "providedBy": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:Person:Alice"
+        }
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+} 

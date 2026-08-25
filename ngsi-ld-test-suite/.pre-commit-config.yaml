@@ -1,0 +1,6 @@
+repos:
+  - repo: https://github.com/MarketSquare/robotframework-robocop
+    rev: v6.9.2
+    hooks:
+      - id: robocop-format
+        additional_dependencies: [typing_extensions]

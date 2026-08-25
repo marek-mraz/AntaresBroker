@@ -1,0 +1,9 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "deletedAt": "2025-04-13T14:06:03.199101Z",
+  "name": {
+    "type": "Property",
+    "value": "urn:ngsi-ld:null"
+  }
+}

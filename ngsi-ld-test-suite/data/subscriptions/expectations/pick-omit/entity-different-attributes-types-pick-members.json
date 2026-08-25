@@ -1,0 +1,9 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_42",
+        "name": {
+            "type": "Property",
+            "value": "Tour Eiffel"
+        }
+    }
+]

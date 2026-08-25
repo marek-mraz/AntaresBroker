@@ -1,0 +1,18 @@
+{
+  "id": "urn:ngsi-ld:subscriptions:01",
+  "type": "Subscription",
+  "entities": [
+    {
+      "type": "T1"
+    }
+  ],
+  "notification": {
+    "endpoint": {
+      "uri": "http://a.b.c/123"
+    }
+  },
+  "@context": [
+    "https://fiware.github.io/NGSI-LD_TestSuite/ldContext/testContext.jsonld",
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite.jsonld"
+  ]
+}

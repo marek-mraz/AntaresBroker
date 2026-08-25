@@ -1,0 +1,600 @@
+#!/usr/bin/env python
+
+# Documentation
+#    https://kislyuk.github.io/argcomplete/
+#
+#
+
+#
+# Installation
+#    pip install argcomplete
+#    activate-global-python-argcomplete
+#
+#
+#    In global completion mode, you don’t have to register each argcomplete-capable executable separately.
+#    Instead, the shell will look for the string PYTHON_ARGCOMPLETE_OK in the first 1024 bytes of any
+#    executable that it’s running completion for, and if it’s found, follow the rest of the argcomplete
+#    protocol as described above.
+#
+#    Additionally, completion is activated for scripts run as python <script> and python -m <module>.
+#    If you’re using multiple Python versions on the same system, the version being used to run the
+#    script must have argcomplete installed.
+
+#
+# Register your Python application with your shell’s completion framework by running register-python-argcomplete
+#    eval "$(register-python-argcomplete tsm)"
+# write the line on .bashrc
+#
+
+#
+# .tsm.pkl format
+#    (switch, running status, test case long name)
+#    switch: ON, OFF, MISSING, NEW
+#    status: PASSED, FAILED, PENDING
+#    test case long name: the test case long name set by robot framework based on the suite tree and the test case name
+#
+
+import argcomplete, argparse
+import pickle
+from robot.api import TestSuiteBuilder, TestSuite
+import os
+import sys
+sys.path.append('libraries')
+from ErrorListener import ErrorListener
+
+############################################
+# Global variables
+
+NGSITEST_PKL='.tsm.pkl'
+
+############################################
+# Helpers
+
+class CustomConsoleListener:
+    ROBOT_LISTENER_API_VERSION = 3
+
+
+    def start_test(self, test, result):
+        msg = f"Test: {result.longname}"
+        print("\n\n")
+        print("*" * len(msg))
+        print_cyan(msg)
+        print("." * len(msg))
+
+    
+    def end_test(self, test, result):
+        print("result.status", result.longname, result.status)
+        msg = f"[{result.status}] Test: {result.longname}"
+        print("\n")
+        print("." * len(msg))
+        if result.status == 'PASS':
+            print_green(msg)
+        else:
+            print_red(msg)
+        print("*" * len(msg))
+        print("\n\n")
+
+
+def print_green(text):
+    print(f"\033[32m{text}\033[0m")
+
+def print_orange(text):
+    print(f"\033[33m{text}\033[0m")
+
+def print_dark_gray(text):
+    print(f"\033[90m{text}\033[0m")
+
+def print_red(text):
+    print(f"\033[91m{text}\033[0m")
+
+def print_blue(text):
+    print(f"\033[94m{text}\033[0m")
+
+def print_magenta(text):
+    print(f"\033[95m{text}\033[0m")
+    
+def print_cyan(text):
+    print(f"\033[96m{text}\033[0m")
+
+def print_bright_white(text):
+    print(f"\033[97m{text}\033[0m")
+    
+def get_suite(directory):
+    all_suites = TestSuite("NGSILD")
+
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.robot'):
+                file_path = os.path.join(root, file)
+                suite = TestSuiteBuilder().build(file_path)
+                all_suites.suites.append(suite)
+
+    return all_suites
+
+
+def get_test_cases(suite):
+    test_cases = []
+    test_cases.extend(suite.tests)
+    
+    for subsuite in suite.suites:
+        test_cases.extend(get_test_cases(subsuite))
+
+    return test_cases
+
+
+def get_test_cases_by_directory(directory):
+    suites = get_suite(directory)
+    test_cases = get_test_cases(suites)
+
+    return test_cases
+
+
+def save_list_to_file(data, file_path):
+    with open(file_path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load_list_from_file(file_path):
+    try:
+        # Check if the file exists
+        if not os.path.exists(file_path):
+            # If the file does not exist, create an empty file
+            with open(file_path, 'wb'):
+                pass
+            print(f"Creating pinkle data file at '{file_path}'.")
+
+        # Check if the file is empty
+        if os.path.getsize(file_path) == 0:
+            return []
+
+        # Load data from the file
+        with open(file_path, 'rb') as file:
+            data = pickle.load(file)
+        return data
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"The file '{file_path}' does not exist.")
+    except ValueError:
+        print(f"The file '{file_path}' is empty.")
+        return []
+    except pickle.UnpicklingError as e:
+        print(f"Error unpickling data from '{file_path}': {e}")
+        return []
+
+
+def filter_test_cases(fltr):
+    try:
+        test_cases  = load_list_from_file(NGSITEST_PKL)
+        fltr_test_cases  = [test for sw, st, test in test_cases if (sw.upper() in fltr) or (st.upper() in fltr)]
+
+        return fltr_test_cases
+
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+
+
+def filter_tuples(fltr):
+    try:
+        test_cases  = load_list_from_file(NGSITEST_PKL)
+        fltr_tups  = [(sw,st, ln) for sw, st, ln in test_cases if sw in fltr]
+
+        return fltr_tups
+
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+        
+def get_suite_code(str):
+    parts = str.split('.')
+    if len(parts) >= 2:
+        return '.'.join(parts[:2])
+    else:
+        return str
+
+def filter_test_suites(fltr):
+    try:
+        test_cases  = load_list_from_file(NGSITEST_PKL)
+        fltr_tups  = [(sw, st, ln) for sw, st, ln in test_cases if sw in fltr]
+
+        suites_codes_dict = {get_suite_code(ln) for sw, st, ln in fltr_tups}
+
+        return list(suites_codes_dict)
+
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+    
+        
+def print_test_case(tup):
+    sw, st, test = tup
+    if sw == 'ON' and st == 'PASSED':
+        print_green(tup)
+    elif sw == 'ON' and st == 'FAILED':
+        print_red(tup)
+    elif sw == 'ON':
+        print_bright_white(tup)
+    elif sw == 'OFF':
+        print_dark_gray(tup)
+    elif sw == 'NEW':
+        print_orange(tup)
+    elif sw == 'MISSING':
+        print_blue(tup)
+    else:
+        print(f"Unknow switch '{sw}'")
+    
+
+############################################
+# Command Handlers
+
+def on_cases(args):
+    all_test_cases    = load_list_from_file(NGSITEST_PKL)
+    onable_switches   = ['OFF','NEW']
+    result_test_cases = []
+    
+    if 'iterative' in args.test_cases:
+        print('Entering iterative mode...')
+        for tup in all_test_cases:
+            sw, st, test = tup
+            if sw in onable_switches:
+                print_test_case(tup)
+                choice = input("Switch on (Y)es, (n)o: ").upper() or 'Y'
+                if choice == 'N':
+                    result_test_cases.append(tup)
+                else:
+                    result_test_cases.append(('ON', st, test))
+            else:
+                result_test_cases.append(tup)
+
+    elif 'all' in args.test_cases:
+        print('Switching on all onable test cases')
+        for tup in all_test_cases:
+            sw, st, test = tup
+            if sw in onable_switches:
+                print_test_case(tup)
+                result_test_cases.append(('ON', st, test))
+            else:
+                result_test_cases.append(tup)
+                
+    else:
+        for tc_to_switch_on in args.test_cases:
+            print_dark_gray(f"Switching on: {tc_to_switch_on}")
+
+            result_test_cases = all_test_cases
+            for i, (sw, st, test) in enumerate(result_test_cases):
+                if test == tc_to_switch_on:
+                    # Update the switch state to "ON"
+                    result_test_cases[i] = ('ON', st, test)
+                    print_green(f"Test case {test} switched on.")
+
+    # Save the updated list back to the file
+    save_list_to_file(result_test_cases, NGSITEST_PKL)
+
+
+def off_cases(args):
+    all_test_cases    = load_list_from_file(NGSITEST_PKL)
+    result_test_cases = []
+    
+    if 'iterative' in args.test_cases:
+        print('Entering iterative mode...')
+        for tup in all_test_cases:
+            sw, st, test = tup
+            if sw in ['ON','NEW']:
+                print_test_case(tup)
+                choice = input("Switch off (Y)es, (n)o: ").upper() or 'Y'
+                if choice == 'N':
+                    result_test_cases.append(tup)
+                else:
+                    result_test_cases.append(('OFF', st, test))
+            else:
+                result_test_cases.append(tup)
+
+    elif 'all' in args.test_cases:
+        print('Switching off all offable test cases')
+        for tup in all_test_cases:
+            sw, st, test = tup
+            if sw in ['ON','NEW']:
+                print_test_case(tup)
+                result_test_cases.append(('OFF', st, test))
+            else:
+                result_test_cases.append(tup)
+
+    else:
+        for tc_to_switch_off in args.test_cases:
+            print_green(f"Switching on: {tc_to_switch_off}")
+
+            for i, (sw, st, test) in enumerate(all_test_cases):
+                if test == tc_to_switch_off:
+                    # Update the switch state to "ON"
+                    all_test_cases[i] = ('OFF', st, test)
+                    print_dark_gray(f"Test case {test} switched off.")
+
+        result_test_cases = all_test_cases
+
+        
+    # Save the updated list back to the file
+    save_list_to_file(result_test_cases, NGSITEST_PKL)
+
+
+def on_suites(args):
+    tups = load_list_from_file(NGSITEST_PKL)
+
+    result = []
+
+    for suite in args.suites:
+        for index, value in enumerate(tups):
+            sw, st, ln = value
+            if suite in ln:
+                tups[index] = ('ON', st, ln)
+
+    # Save the updated list back to the file
+    save_list_to_file(tups, NGSITEST_PKL)
+
+
+def off_suites(args):
+    tups = load_list_from_file(NGSITEST_PKL)
+
+    result = []
+    
+    for suite in args.suites:
+        for index, value in enumerate(tups):
+            sw, st, ln = value
+            if suite in ln:
+                tups[index] = ('OFF', st, ln)
+
+    # Save the updated list back to the file
+    save_list_to_file(tups, NGSITEST_PKL)
+
+
+def on_collections(args):
+    # Get a list with test cases for each collection to on
+    test_cases=[]
+    
+    for collection in args.collections:
+        test_cases.extend(get_test_cases_by_directory(collection))
+
+    test_cases_longname = [tc.longname for tc in test_cases]
+
+    tups = load_list_from_file(NGSITEST_PKL)
+
+    result = []
+    for sw, st, ln in tups:
+        if ln in test_cases_longname:
+            result.append(('ON', st, ln))
+        else:
+            result.append((sw, st, ln))
+
+    # Save the updated list back to the file
+    save_list_to_file(result, NGSITEST_PKL)
+            
+
+def off_collections(args):
+    # Get a list with test cases for each collection to off
+    test_cases=[]
+    
+    for collection in args.collections:
+        test_cases.extend(get_test_cases_by_directory(collection))
+
+    test_cases_longname = [tc.longname for tc in test_cases]
+        
+    tups = load_list_from_file(NGSITEST_PKL)
+
+    result = []
+    for sw, st, ln in tups:
+        if ln in test_cases_longname:
+            result.append(('OFF', st, ln))
+        else:
+            result.append((sw, st, ln))
+
+    # Save the updated list back to the file
+    save_list_to_file(result, NGSITEST_PKL)
+
+def update_cases(args):
+    try:
+        directory_path = './'
+        all_test_cases = get_test_cases_by_directory(directory_path)
+        all_test_cases = [test.longname for test in all_test_cases]
+        registered_test_cases = load_list_from_file(NGSITEST_PKL)
+        updated_test_cases = []
+
+        for tup in registered_test_cases:
+            sw, st, test = tup
+            if test in all_test_cases:
+                if sw == 'MISSING':
+                    updated_test_cases.append(('NEW', 'PENDING', test))
+                else:
+                    updated_test_cases.append(tup)
+                all_test_cases.remove(test)
+            else:
+                updated_test_cases.append(('MISSING', st, test))
+                                              
+        for test in all_test_cases:
+            updated_test_cases.append(('NEW', 'PENDING', test))
+
+        # Save the updated list back to the file
+        save_list_to_file(updated_test_cases, NGSITEST_PKL)
+        
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+
+
+def clean_cases(args):
+    try:
+        test_cases  = load_list_from_file(NGSITEST_PKL)
+        missing_test_cases = [(sw, st, test) for sw, st, test in test_cases if sw == 'MISSING']
+        test_cases  = [(sw, st, test) for sw, st, test in test_cases if sw != 'MISSING']
+
+        for tup in missing_test_cases:
+            print_test_case(tup)
+
+        save_list_to_file(test_cases, NGSITEST_PKL)
+
+
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+
+
+def list_cases(args):
+    try:
+        tups = load_list_from_file(NGSITEST_PKL)
+
+        args.flags = [flag.upper() for flag in args.flags]
+
+        if 'ALL' in args.flags:
+            for tup in tups:
+                    print_test_case(tup)
+        else:    
+            for sw, st, ln in tups:
+                if sw in args.flags or st in args.flags:
+                    print_test_case((sw, st, ln))
+        
+    except FileNotFoundError as e:
+        previous_test_cases = []
+        print_red(f"Error: {e}")
+
+
+def run_cases(args):
+    def set_suite(suite, include):
+        suite.tests = [test for test in suite.tests if test.longname in include]
+        suite.suites = [set_suite(subsuite, include) for subsuite in suite.suites]
+
+        return suite
+
+
+    runnable_test_cases = []
+
+    #print(args.test_cases)
+    
+    for tc in args.test_cases:
+        if tc.upper() in ['ON', 'OFF', 'NEW', 'MISSING', 'FAILED', 'PASSED', 'PENDING']:
+            runnable_test_cases += filter_test_cases([tc.upper()])
+        else:
+            runnable_test_cases.append(tc)
+    
+    suite = get_suite('./')
+
+    suite = set_suite(suite, runnable_test_cases)
+
+    suites_with_tests = [s for s in suite.suites if s.test_count > 0]
+
+    suite.suites = suites_with_tests
+
+    result = suite.run(console='quiet', listener=[CustomConsoleListener(), ErrorListener()])
+
+    # Update test state for tests at NGSITEST_PKL
+    tups = load_list_from_file(NGSITEST_PKL)
+
+    def passed_tests(suite):
+        for test in suite.tests:
+            print(test.longname, test.status)
+            
+        filtered_tests = [test.longname for test in suite.tests if test.passed]
+        for subsuite in suite.suites:
+            filtered_tests.extend(passed_tests(subsuite))
+
+        return filtered_tests
+    
+    passed_tests = passed_tests(result.suite)
+    print(passed_tests)
+
+    tups = [(sw, ('PASSED' if ln in passed_tests else 'FAILED') if ln in runnable_test_cases else st, ln) for sw, st, ln in tups]
+
+    # Save the updated list back to the file
+    save_list_to_file(tups, NGSITEST_PKL)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='ngsitest command-line utility')
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    # Subparser for the 'cases' command
+    cases_parser        = subparsers.add_parser('cases', help='Test Cases Command')
+    cases_subparsers    = cases_parser.add_subparsers(dest='command', help='Available commands')
+
+    on_cases_parser     = cases_subparsers.add_parser('on', help='Switch on test cases')
+    on_cases_parser.add_argument('test_cases',
+                                 nargs='*', choices=['iterative', 'all'] + filter_test_cases(['OFF', 'NEW']) + [None],
+                                 help='Test cases to switch on')
+    on_cases_parser.set_defaults(handler=on_cases)
+    
+    off_cases_parser    = cases_subparsers.add_parser('off', help='Switch off test cases')
+    off_cases_parser.add_argument('test_cases',
+                                  nargs='*', choices=['iterative', 'all'] + filter_test_cases(['ON', 'NEW']) + [None],
+                                  help='Test cases to switch off')
+    off_cases_parser.set_defaults(handler=off_cases)
+
+    list_cases_parser  = cases_subparsers.add_parser('list', help='List on(green/red/white), off(dark_gray), new(orange) and missing(blue) test cases')
+    list_cases_parser.add_argument('flags',
+                                   nargs='*', choices=['all', 'on', 'off', 'new', 'missing', 'passed', 'failed', 'pending'],
+                                   help='Test cases to switch off')
+    list_cases_parser.set_defaults(handler=list_cases)
+
+    run_cases_parser  = cases_subparsers.add_parser('run', help='Run all ON test cases')
+    run_cases_parser.add_argument('test_cases', nargs='*',
+                                  choices=['on', 'off', 'new', 'passed', 'failed', 'pending'] + filter_test_cases(['ON', 'OFF', 'NEW']) + [None],
+                                  help='Test cases to run')
+    run_cases_parser.set_defaults(handler=run_cases)
+
+    update_cases_parser   = cases_subparsers.add_parser('update', help='List state of all available test cases')
+    update_cases_parser.set_defaults(handler=update_cases)
+    
+    clean_cases_parser  = cases_subparsers.add_parser('clean', help='Remove missing (red) test cases')
+    clean_cases_parser.set_defaults(handler=clean_cases)
+
+    
+
+    # Subparser for the 'suites' command
+    suites_parser        = subparsers.add_parser('suites', help='Test Suites Command')
+    suites_subparsers    = suites_parser.add_subparsers(dest='command', help='Available commands')
+
+    on_suites_parser     = suites_subparsers.add_parser('on', help='Switch on test suites')
+    on_suites_parser.add_argument('suites',
+                                  nargs='*', choices=['iterative', 'all'] + filter_test_suites(['OFF', 'NEW']) + [None],
+                                  help='Test suites to switch on')
+    on_suites_parser.set_defaults(handler=on_suites)
+    
+    off_suites_parser    = suites_subparsers.add_parser('off', help='Switch off test suites')
+    off_suites_parser.add_argument('suites',
+                                   nargs='*', choices=['iterative', 'all'] + filter_test_suites(['ON', 'NEW']) + [None],
+                                   help='Test suites to switch off')
+    off_suites_parser.set_defaults(handler=off_suites)
+
+
+    
+    # Subparser for the 'collections' command
+    collections_parser  = subparsers.add_parser('collections', help='Test Collections Command')
+    collections_subparsers    = collections_parser.add_subparsers(dest='command', help='Available commands')
+
+    on_collections_parser     = collections_subparsers.add_parser('on', help='Switch on test collections')
+    on_collections_parser.add_argument('collections',
+                                  nargs='*', 
+                                  help='Test collections to switch on')
+    on_collections_parser.set_defaults(handler=on_collections)
+    
+    off_collections_parser    = collections_subparsers.add_parser('off', help='Switch off test collections')
+    off_collections_parser.add_argument('collections',
+                                   nargs='*',
+                                   help='Test collections to switch off')
+    off_collections_parser.set_defaults(handler=off_collections)
+
+
+    
+    # Enable argcomplete for the parser
+    argcomplete.autocomplete(parser)
+
+    args = parser.parse_args()
+
+    if args.command:
+        handler = getattr(args, 'handler', None)
+        if handler:
+            handler(args)
+    else:
+        print("No command specified.")
+
+if __name__ == '__main__':
+    main()
+
+

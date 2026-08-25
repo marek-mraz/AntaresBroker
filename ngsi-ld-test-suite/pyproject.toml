@@ -1,0 +1,27 @@
+[tool.robocop]
+exclude = ["libraries/"]
+include = ["TP/", "resources/"]
+
+[tool.robocop.format]
+configure = [
+    "IndentNestedKeywords.enabled=True",
+    # Implies to rename keywords in doc/analysis files... - To be done later
+    "RenameKeywords.enabled=False",
+    "RenameTestCases.enabled=True",
+    "RenameTestCases.capitalize_each_word=True",
+    # Nice but has side effects (like renaming endTimeAt to end_time_at) - To be investigated
+    "RenameVariables.enabled=False",
+    # Nice but requires Robot 7.x - To be enabled later once the upgrade is done
+    "ReplaceWithVAR.enabled=False"
+]
+line_length = 120
+reruns = 3
+
+# It currently raises thousands of errors and modifies almost all the files
+# So not to be done now while there is a lot of progress going on
+#[tool.robocop.lint]
+#configure = []
+#reports = [
+#    "text_file",
+#    "all"
+#]

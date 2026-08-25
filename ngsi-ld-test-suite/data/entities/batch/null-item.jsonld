@@ -1,0 +1,10 @@
+[
+   {
+      "id": "urn:ngsi-ld:Building:randomUUID",
+      "type": "Building",
+      "@context": [
+         "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+      ]
+   },
+   null
+]

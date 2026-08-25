@@ -1,0 +1,12 @@
+{
+	"id": "urn:ngsi-ld:Building:randomUUID",
+	"type": "Building",
+	"name": {
+		"type": "Property",
+		"value": "Pisa Tower"
+	},
+	"locatedAt": {
+		"type": "Relationship",
+		"object": "urn:ngsi-ld:City:Pisa"
+	}
+}

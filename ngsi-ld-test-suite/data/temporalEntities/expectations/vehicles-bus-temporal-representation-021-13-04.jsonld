@@ -1,0 +1,46 @@
+[
+  {
+    "id": "urn:ngsi-ld:Vehicle:021-13-B",
+    "type": "Vehicle",
+    "speed": [
+      {
+        "type": "Property",
+        "value": 120,
+        "instanceId": "urn:ngsi-ld:Instance:d014dcc4-7a02-4c8d-82f6-60abb1ce93b4",
+        "observedAt": "2020-09-01T12:03:00Z"
+      },
+      {
+        "type": "Property",
+        "value": 80,
+        "instanceId": "urn:ngsi-ld:Instance:a335ad40-631a-4b60-a100-02baeefd23ba",
+        "observedAt": "2020-09-01T12:05:00Z"
+      },
+      {
+        "type": "Property",
+        "value": 100,
+        "instanceId": "urn:ngsi-ld:Instance:65708f24-ac8f-4f37-992a-50359278595d",
+        "observedAt": "2020-09-01T12:07:00Z"
+      }
+    ],
+    "fuelLevel": [
+      {
+        "type": "Property",
+        "value": 67,
+        "instanceId": "urn:ngsi-ld:Instance:deb11936-e5a4-493a-9b67-47d554842474",
+        "observedAt": "2020-09-01T12:03:00Z"
+      },
+      {
+        "type": "Property",
+        "value": 53,
+        "instanceId": "urn:ngsi-ld:Instance:92b5097a-2c98-48f9-b910-73899e1b2751",
+        "observedAt": "2020-09-01T13:05:00Z"
+      },
+      {
+        "type": "Property",
+        "value": 40,
+        "instanceId": "urn:ngsi-ld:Instance:6ebcf109-a31e-4b7c-a6c3-f614d6a6d278",
+        "observedAt": "2020-09-01T14:07:00Z"
+      }
+    ]
+  }
+]

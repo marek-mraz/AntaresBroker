@@ -1,0 +1,8 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "almostFull": false,
+  "subCategory": "tourism",
+  "airQualityLevel": 4,
+  "name": "urn:ngsi-ld:null"
+}

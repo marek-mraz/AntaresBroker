@@ -1,0 +1,4 @@
+		<log>"----- START TEARDOWN -----"</log>
+
+        <group title="TEARDOWN" desc="Operations that need to take place after the test itself. It will be run anyway">
+

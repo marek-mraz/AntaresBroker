@@ -1,0 +1,10 @@
+# python3.12 project
+robotframework==7.4.1
+robotframework-jsonlibrary==0.5
+robotframework-requests==0.9.7
+deepdiff==8.6.1
+prettydiff==0.1.0
+paho-mqtt==1.6.1
+-e ./libraries/robotframework-httpctrl
+robotframework-robocop==7.2.0
+robotframework-mqttlibrary==0.7.1.post3

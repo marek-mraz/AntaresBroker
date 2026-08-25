@@ -1,0 +1,9 @@
+{
+    "type": "Relationship",
+    "object": "urn:ngsi-ld:OffStreetParking:Downtown2",
+    "observedAt": "2017-07-29T15:00:04Z",
+    "providedBy": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:Person:Bob"
+    }
+}

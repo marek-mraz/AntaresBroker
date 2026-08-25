@@ -1,0 +1,12 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:6684954483670853",
+  "type": "Vehicle",
+  "fuelLevel": [
+    {
+      "type": "Property",
+      "value": "urn:ngsi-ld:null",
+      "instanceId": "urn:ngsi-ld:Instance:901883e6-3c93-4a2f-8099-da1d72151f2a",
+      "deletedAt": "2024-12-09T17:16:12.031483Z"
+    }
+  ]
+}

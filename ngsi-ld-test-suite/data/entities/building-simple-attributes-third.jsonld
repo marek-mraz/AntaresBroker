@@ -1,0 +1,29 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "name": {
+        "type": "Property",
+        "value": "Pisa Tower"
+    },
+    "subCategory": {
+        "type": "Property",
+        "value": "sightseeing"
+    },
+    "airQualityLevel": {
+        "type": "Property",
+        "value": 7,
+        "unitCode": "C62",
+        "observedAt": "2023-10-10T16:40:00.000Z"
+    },
+    "almostFull": {
+        "type": "Property",
+        "value": false
+    },
+    "locatedIn": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:City:Pisa"
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

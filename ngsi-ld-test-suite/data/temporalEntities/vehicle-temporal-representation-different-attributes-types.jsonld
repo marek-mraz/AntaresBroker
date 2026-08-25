@@ -1,0 +1,49 @@
+{
+   "id":"urn:ngsi-ld:Vehicle:randomUUID",
+   "type":"Vehicle",
+   "isParkedIn":[
+      {
+         "type":"Relationship",
+         "object":"urn:ngsi-ld:OffStreetParking:Commerce",
+         "observedAt":"2024-12-01T12:00:00Z"
+      },
+      {
+         "type":"Relationship",
+         "object":"urn:ngsi-ld:OffStreetParking:Graslin",
+         "observedAt":"2024-12-05T12:00:00Z"
+      }
+   ],
+   "name":[
+      {
+         "type":"LanguageProperty",
+          "languageMap": {
+            "fr": "Ma voiture",
+            "en": "My vehicle"
+          },
+         "observedAt":"2024-12-01T12:00:00Z"
+      },
+      {
+         "type":"LanguageProperty",
+          "languageMap": {
+            "fr": "Ma jolie voiture",
+            "en": "My pretty vehicle"
+          },
+         "observedAt":"2024-12-05T12:00:00Z"
+      }
+   ],
+   "fuelLevel":[
+      {
+         "type":"Property",
+         "value":67,
+         "observedAt":"2020-08-01T12:03:00Z"
+      },
+      {
+         "type":"Property",
+         "value":53,
+         "observedAt":"2020-08-01T13:05:00Z"
+      }
+   ],
+   "@context":[
+      "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

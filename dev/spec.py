@@ -132,9 +132,9 @@ def write_section(path, meta, body):
 
 
 def robot_map():
-    # An absent/empty submodule would read as 100% robot drift — fail loudly.
+    # An absent/empty suite tree would read as 100% robot drift — fail loudly.
     if not SUITE.is_dir():
-        sys.exit(f"{SUITE}: test-suite submodule not checked out (git submodule update --init)")
+        sys.exit(f"{SUITE}: test-suite tree missing")
     mapping = {}
     for f in SUITE.rglob("*.robot"):
         for line in f.read_text(errors="replace").splitlines():

@@ -1,0 +1,24 @@
+{
+    "id": "urn:ngsi-ld:Building:3009ef20-9f62-41f5-bd66-92f041b428b9",
+    "type": "Feature",
+    "geometry": {
+        "type": "Point",
+        "coordinates": [13.3986, 52.5547]
+    },
+    "properties": {
+        "type": "Building",
+        "name": "Eiffel Tower",
+        "subCategory": "tourism",
+        "location": {
+            "type": "Point",
+            "coordinates": [13.3986, 52.5547]
+        },
+        "observationSpace": {
+             "type": "Point",
+             "coordinates": [11.1111, 11.1111]
+        }
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

@@ -1,0 +1,186 @@
+{
+  "tp_id": "TP/NGSI-LD/CI/Cons/E/019_19",
+  "test_objective": "Check that one can query entities with orderBy",
+  "reference": "ETSI GS CIM 009 V1.9.1 [], clauses 4.23, 5.7.2",
+  "config_id": "",
+  "parent_release": "v1.9.1",
+  "clauses": [
+    "4.23",
+    "5.7.2"
+  ],
+  "pics_selection": "",
+  "keywords": [
+    "Query Entities With OrderBy",
+    "Setup Initial Entities",
+    "Delete Entities"
+  ],
+  "teardown": "Delete Entities",
+  "initial_condition": "with {\n   the SUT containing an initial state\n}",
+  "test_cases": [
+    {
+      "name": "019_19_01 QueryWithOrderByAttribute",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_01",
+      "doc": "Check that one can query entities with orderBy on an attribute",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_02 QueryWithOrderById",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_02",
+      "doc": "Check that one can query entities with orderBy on id",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_03 QueryWithOrderByCreatedAt",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_03",
+      "doc": "Check that one can query entities with orderBy on createdAt",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_04 QueryWithOrderByNameCreatedAt",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_04",
+      "doc": "Check that one can query entities with orderBy on an attribute createdAt",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_05 QueryWithOrderBySubAttribute",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_05",
+      "doc": "Check that one can query entities with orderBy an attribute subproperty",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_06 QueryWithOrderByAscending",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_06",
+      "doc": "Check that one can query entities with orderBy on a name ascending",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_07 QueryWithOrderByDescending",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_07",
+      "doc": "Check that one can query entities with orderBy on a name descending",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_08 QueryWithMultipleOrderBy",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_08",
+      "doc": "Check that one can query entities with orderBy on multiple members",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    },
+    {
+      "name": "019_19_09 QueryWithComplexOrderBy",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/E/019_19_09",
+      "doc": "Check that one can query entities with a complex orderBy",
+      "tags": [
+        "4_23",
+        "5_7_2",
+        "e-query",
+        "since_v1.9.1"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Entities with Response Status Code set to 200     and\n        Query Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/entities/'\n        method set to 'GET'\n        Get Entities Request: and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: Link set to '<$https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\";type=\"application/ld+json\"'\n}",
+      "http_verb": "GET",
+      "endpoint": "entities/"
+    }
+  ],
+  "permutations": [],
+  "robotpath": "ContextInformation/Consumption/Entity/QueryEntities",
+  "robotfile": "019_19"
+}

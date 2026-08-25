@@ -1,0 +1,30 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "name": {
+    "type": "Property",
+    "value": "Eiffel Tower"
+  },
+  "locatedAt": {
+    "type": "Relationship",
+    "object": "urn:ngsi-ld:City:Paris"
+  },
+  "location": {
+    "type": "GeoProperty",
+    "value": {
+      "type": "Point",
+      "coordinates": [
+        -8.5,
+        41.2
+      ]
+    }
+  },
+  "street": {
+    "type": "LanguageProperty",
+    "languageMap": {
+      "fr": "Grand Place",
+      "nl": "Grote Markt"
+    }
+  },
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

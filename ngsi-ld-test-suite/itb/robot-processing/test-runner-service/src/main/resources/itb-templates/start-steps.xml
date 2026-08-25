@@ -1,0 +1,31 @@
+    </actors>
+	<steps logLevel="DEBUG">
+    
+        <assign to="parameters{testName}">"${dynamicTestName}"</assign>
+
+        <assign to="parameters{url}">$SYSTEM{endpointAddress}</assign>
+        <assign to="parameters{temporalApiUrl}">$SYSTEM{temporalApiUrl}</assign>
+        <assign to="parameters{ngsildTestSuiteContext}">$DOMAIN{ngsildTestSuiteContext}</assign>
+        <assign to="parameters{notificationServerHost}">$DOMAIN{notificationServerHost}</assign>
+        <assign to="parameters{notificationServerPort}">$DOMAIN{notificationServerPort}</assign>
+        <assign to="parameters{mqttBrokerHost}">$DOMAIN{mqttBrokerHost}</assign>
+        <assign to="parameters{mqttBrokerNonDefaultPort}">$DOMAIN{mqttBrokerNonDefaultPort}</assign>
+        <assign to="parameters{contextSourceHost}">$DOMAIN{contextSourceHost}</assign>
+        <assign to="parameters{contextSourcePort}">$DOMAIN{contextSourcePort}</assign>
+        <assign to="parameters{contextServerHost}">$DOMAIN{contextServerHost}</assign>
+        <assign to="parameters{contextServerPort}">$DOMAIN{contextServerPort}</assign>
+        <assign to="parameters{coreContext}">$DOMAIN{coreContext}</assign>
+        <assign to="parameters{deleteTemporalOnCoreDelete}">$DOMAIN{deleteTemporalOnCoreDelete}</assign>
+        
+        <assign to="params{Content-Type}">'application/json'</assign>
+    
+        <process output="body" handler="TemplateProcessor">
+            <input name="parameters">$parameters</input>
+            <input name="template">$freemarkerTemplateFile</input>
+            <input name="syntax">'freemarker'</input>
+        </process>
+
+        <process stopOnError="true" hidden="false" desc="ITB prepares for the test sessions" id="actualTest" handler="http://robot-processing:8080/services/process?wsdl" actor="ContextBroker">
+            <input name="parameters">$body</input>
+        </process>
+

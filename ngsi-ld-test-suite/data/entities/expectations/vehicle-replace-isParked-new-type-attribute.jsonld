@@ -1,0 +1,31 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "scope": "/Madrid/Centro",
+    "isParked": {
+        "type": "Property",
+        "value": true
+    },
+    "speed": [
+        {
+            "type": "Property",
+            "value": 55,
+            "source": {
+                "type": "Property",
+                "value": "Speedometer"
+            }
+        },
+        {
+            "type": "Property",
+            "value": 54.5,
+            "source": {
+                "type": "Property",
+                "value": "GPS"
+            },
+            "datasetId": "urn:ngsi-ld:Property:gpsBxyz123-speed"
+        }
+    ],
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

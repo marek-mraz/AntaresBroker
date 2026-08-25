@@ -1,0 +1,10 @@
+{
+    "id": "urn:ngsi-ld:AttributeList:randomUUID",
+    "type": "AttributeList",
+    "attributeList": [
+        "name",
+        "subCategory",
+        "airQualityLevel",
+        "almostFull"
+    ]
+}

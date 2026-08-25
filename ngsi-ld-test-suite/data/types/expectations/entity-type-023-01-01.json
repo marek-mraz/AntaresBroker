@@ -1,0 +1,22 @@
+[
+   {
+      "id":"https://ngsi-ld-test-suite/context#Building",
+      "type":"EntityType",
+      "typeName":"https://ngsi-ld-test-suite/context#Building",
+      "attributeNames":[
+         "https://ngsi-ld-test-suite/context#name",
+         "https://ngsi-ld-test-suite/context#subCategory",
+         "https://ngsi-ld-test-suite/context#airQualityLevel",
+         "https://ngsi-ld-test-suite/context#almostFull"
+      ]
+   },
+   {
+      "id":"https://ngsi-ld-test-suite/context#Vehicle",
+      "type":"EntityType",
+      "typeName":"https://ngsi-ld-test-suite/context#Vehicle",
+      "attributeNames":[
+         "https://ngsi-ld-test-suite/context#brandName",
+         "isParked"
+      ]
+   }
+]

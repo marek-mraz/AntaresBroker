@@ -1,0 +1,18 @@
+{
+   "id":"urn:ngsi-ld:Subscription:randomUUID",
+   "type":"Subscription",
+   "timeInterval": 10,
+   "entities":[
+      {
+         "type":"Building"
+      }
+   ],
+   "notification":{
+      "format":"keyValues",
+      "endpoint":{
+         "uri":"http://localhost:1111/notify",
+         "accept":"application/json"
+      }
+   },
+   "throttling" : 30
+}

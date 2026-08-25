@@ -1,0 +1,53 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "brandName": {
+        "type": "Property",
+        "value": "Mercedes"
+    },
+    "speed": [
+        {
+            "type": "Property",
+            "source": {
+                "type": "Property",
+                "value": "Speedometer"
+            },
+            "datasetId": "urn:ngsi-ld:Property:speedometerA4567-speed2",
+            "value": 56
+        },
+        {
+            "type": "Property",
+            "source": {
+                "type": "Property",
+                "value": "GPS"
+            },
+            "datasetId": "urn:ngsi-ld:Property:gpsBxyz123-speed",
+            "value": 54.5
+        },
+        {
+            "type": "Property",
+            "source": {
+                "type": "Property",
+                "value": "Speedometer"
+            },
+            "datasetId": "urn:ngsi-ld:Property:speedometer",
+            "value": 55
+        }
+    ],
+    "attribute_to_be_added": {
+        "type": "Property",
+        "value": 23
+    },
+    "isParked": {
+        "type": "Relationship",
+        "providedBy": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Person:Bob"
+        },
+        "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+        "observedAt": "2017-07-29T12:00:04Z"
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

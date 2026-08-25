@@ -1,0 +1,15 @@
+[
+  {
+    "id": "urn:ngsi-ld:Vehicle:021-18-A",
+    "type": "Vehicle",
+    "speed": {
+      "type": "Property",
+      "values": [
+        [
+          120,
+          "2020-09-01T12:03:00Z"
+        ]
+      ]
+    }
+  }
+]

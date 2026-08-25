@@ -1,0 +1,8 @@
+		<log>"----- START TEST -----"</log>
+
+        <process handler="VariableUtils" operation="exists" input="actualTest{response}{test0}" output="testHappened"/>
+
+        <assign to="skipTest">not($testHappened)</assign>
+
+        <group title="TEST" skipped="$skipTest">
+

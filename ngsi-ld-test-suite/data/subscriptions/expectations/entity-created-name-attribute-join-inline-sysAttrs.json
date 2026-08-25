@@ -1,0 +1,26 @@
+[
+  {
+    "id": "urn:ngsi-ld:Building:046_28:EiffelTower",
+    "type": "Building",
+    "createdAt": "2025-05-19T14:50:30.958947Z",
+    "name": {
+      "type": "Property",
+      "value": "Tour Eiffel",
+      "createdAt": "2025-05-19T14:50:31.117947Z",
+      "modifiedAt": "2025-05-19T14:50:31.117947Z"
+    },
+    "modifiedAt": "2025-05-19T14:50:31.117947Z",
+    "locatedAt": {
+      "type": "Relationship",
+      "createdAt": "2025-05-19T14:50:30.958947Z",
+      "object": "urn:ngsi-ld:City:Paris",
+      "modifiedAt": "2025-05-19T14:50:30.958947Z",
+      "entity": {
+        "id": "urn:ngsi-ld:City:Paris",
+        "type": "City",
+        "createdAt": "2025-05-19T14:50:31.023683Z",
+        "modifiedAt": "2025-05-19T14:50:31.023683Z"
+      }
+    }
+  }
+]

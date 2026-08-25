@@ -1,0 +1,24 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "fuelLevel": [
+        {
+            "type": "Property",
+            "value": 67,
+            "instanceId": "urn:ngsi-ld:Instance:7f53145a-998e-4e0b-89fa-62c10be17ffe",
+            "observedAt": "2020-08-01T12:03:00Z"
+        },
+        {
+            "type": "Property",
+            "value": 53,
+            "instanceId": "urn:ngsi-ld:Instance:8563626a-402e-44b2-9756-218a702d5bfd",
+            "observedAt": "2020-08-01T13:05:00Z"
+        },
+        {
+            "type": "Property",
+            "value": 40,
+            "instanceId": "urn:ngsi-ld:Instance:4b750757-3894-433e-a2f2-c95d20076385",
+            "observedAt": "2020-08-01T14:07:00Z"
+        }
+    ]
+}

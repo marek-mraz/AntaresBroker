@@ -1,0 +1,33 @@
+{
+   "id":"urn:ngsi-ld:Vehicle:randomUUID",
+   "type":"Vehicle",
+   "street":[
+      {
+         "type": "LanguageProperty",
+         "languageMap": {
+            "fr": "Grand Place",
+            "nl": "Grote Markt"
+         },
+         "observedAt":"2020-08-01T12:03:00Z"
+      },
+      {
+         "type": "LanguageProperty",
+         "languageMap": {
+            "fr": "Grand Place",
+            "nl": "Grote Markt",
+            "es": "Gran Mercado"
+         },
+         "observedAt":"2020-08-01T12:05:00Z"
+      },
+      {
+         "type": "LanguageProperty",
+         "languageMap": {
+            "fr": "Grand Marché",
+            "nl": "Grote Markt",
+            "es": "Gran Lugar",
+            "it": "Grande Mercato"
+         },
+         "observedAt":"2020-08-01T12:07:00Z"
+      }
+   ]
+}

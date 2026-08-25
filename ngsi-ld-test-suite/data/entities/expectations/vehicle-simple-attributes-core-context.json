@@ -1,0 +1,17 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:3542857210001312",
+  "type": "https://ngsi-ld-test-suite/context#Vehicle",
+  "https://ngsi-ld-test-suite/context#brandName": {
+    "type": "Property",
+    "value": "Mercedes"
+  },
+  "isParked": {
+    "type": "Relationship",
+    "providedBy": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:Person:Bob"
+    },
+    "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+    "observedAt": "2017-07-29T12:00:04Z"
+  }
+}

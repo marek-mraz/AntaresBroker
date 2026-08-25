@@ -1,0 +1,7 @@
+{
+    "@context": {
+        "C1": "urn:ngsi-ld:attributes:C1",
+        "C2": "urn:ngsi-ld:attributes:C2",
+        "C3": "urn:ngsi-ld:attributes:C3"
+    }
+}

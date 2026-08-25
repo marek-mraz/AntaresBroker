@@ -1,0 +1,38 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:7622668541444466",
+  "type": "Vehicle",
+  "speed": [
+    {
+      "type": "Property",
+      "value": 54.5,
+      "datasetId": "urn:ngsi-ld:Property:gpsBxyz123-speed",
+      "source": {
+        "type": "Property",
+        "value": "GPS"
+      }
+    },
+    {
+      "type": "Property",
+      "value": 55,
+      "source": {
+        "type": "Property",
+        "value": "Speedometer"
+      }
+    }
+  ],
+  "brandName": {
+    "type": "Relationship",
+    "object": "urn:ngsi-ld:Brand:01"
+  },
+  "isParked": {
+    "type": "Relationship",
+    "datasetId": "urn:ngsi-ld:Relationship:parked12345",
+    "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+    "observedAt": "2017-07-29T12:00:04Z",
+    "providedBy": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:Person:Bob"
+    }
+  },
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

@@ -1,0 +1,19 @@
+{
+   "id":"urn:ngsi-ld:Subscription:randomUUID",
+   "type":"Subscription",
+   "entities":[
+      {
+         "type":"Building"
+      }
+   ],
+   "notification":{
+      "format":"keyValues",
+      "endpoint":{
+         "uri":"http://localhost:1111/notify",
+         "accept":"application/json"
+      }
+   },
+   "@context":[
+      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-non-existing.jsonld"
+   ]
+}

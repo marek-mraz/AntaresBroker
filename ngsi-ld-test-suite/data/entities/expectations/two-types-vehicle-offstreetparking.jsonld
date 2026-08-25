@@ -1,0 +1,60 @@
+[
+    {
+        "id": "urn:ngsi-ld:Vehicle:8012188779712372",
+        "type": "https://ngsi-ld-test-suite/context#Vehicle",
+        "https://ngsi-ld-test-suite/context#brandName": {
+            "type": "Property",
+            "value": "Mercedes"
+        },
+        "isParked": {
+            "type": "Relationship",
+            "providedBy": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Person:Bob"
+            },
+            "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+            "observedAt": "2017-07-29T12:00:04Z"
+        },
+        "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
+        ]
+    },
+    {
+        "id": "urn:ngsi-ld:OffStreetParking:8309214349077321",
+        "type": "https://ngsi-ld-test-suite/context#OffStreetParking",
+        "availableSpotNumber": {
+            "type": "Property",
+            "providedBy": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Camera:C1"
+            },
+            "reliability": {
+                "type": "Property",
+                "value": 0.7
+            },
+            "value": 121,
+            "observedAt": "2017-07-29T12:05:02Z"
+        },
+        "totalSpotNumber": {
+            "type": "Property",
+            "value": 200
+        },
+        "location": {
+            "type": "GeoProperty",
+            "value": {
+                "type": "Point",
+                "coordinates": [
+                    -8.5,
+                    41.2
+                ]
+            }
+        },
+        "https://ngsi-ld-test-suite/context#name": {
+            "type": "Property",
+            "value": "Downtown One"
+        },
+        "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
+        ]
+    }
+]

@@ -1,0 +1,21 @@
+{
+   "id": "urn:ngsi-ld:Subscription:randomUUID",
+   "type": "Subscription",
+   "entities": [
+      {
+         "type": "Building"
+      }
+   ],
+   "notificationTrigger": [
+      "entityDeleted"
+   ],
+   "notification": {
+      "endpoint": {
+         "uri": "http://localhost:1111/notify"
+      },
+      "showChanges": true
+   },
+   "@context": [
+      "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+   ]
+}

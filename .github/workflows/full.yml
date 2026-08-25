@@ -125,11 +125,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-      - name: Fetch the ETSI test suite (submodule)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule sync
-          git submodule update --init --depth 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

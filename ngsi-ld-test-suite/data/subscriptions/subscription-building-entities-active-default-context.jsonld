@@ -1,0 +1,20 @@
+{
+   "id":"urn:ngsi-ld:Subscription:randomUUID",
+   "type":"Subscription",
+   "isActive": true,
+   "entities":[
+      {
+         "type":"https://ngsi-ld-test-suite/context#Building"
+      }
+   ],
+   "notification":{
+      "attributes": ["https://ngsi-ld-test-suite/context#airQualityLevel"],
+      "endpoint":{
+         "uri":"http://localhost:1111/notify",
+         "accept":"application/json"
+      }
+   },
+   "@context":[
+      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
+   ]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "street": {
+    "type": "LanguageProperty",
+    "languageMap": {
+      "fr": "Grand Place",
+      "es": "Gran Lugar"
+    },
+    "providedBy": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:Person:JohnDoe"
+    },
+    "source": {
+      "type": "Property",
+      "value": "Speedometer"
+    }
+  },
+  "@context": [
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

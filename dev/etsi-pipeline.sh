@@ -292,7 +292,7 @@ teardown() {
   kill "$MONITOR_PID" 2>/dev/null || true
   [ -n "$ROLL_PID" ] && { kill "$ROLL_PID" 2>/dev/null || true; }
   rm -f "$PHASE_FILE"
-  # Leave the suite submodule clean — the IOP step seds variables.py and
+  # Leave the suite tree clean — the IOP step seds variables.py and
   # the MQTT step overlays MqttUtils.resource.
   git -C ngsi-ld-test-suite checkout -- resources/variables.py \
     resources/mqttUtils/MqttUtils.resource 2>/dev/null || true

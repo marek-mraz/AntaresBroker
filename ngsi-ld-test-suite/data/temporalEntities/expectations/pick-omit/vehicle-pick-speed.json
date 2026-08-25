@@ -1,0 +1,22 @@
+{
+    "speed": [
+        {
+            "type": "Property",
+            "value": 120,
+            "instanceId": "urn:ngsi-ld:Instance:5bd19b87-a1a0-4f7f-8589-be5a09d16107",
+            "observedAt": "2020-08-01T12:03:00Z"
+        },
+        {
+            "type": "Property",
+            "value": 80,
+            "instanceId": "urn:ngsi-ld:Instance:ef62bfcf-637b-4d22-a9be-f04bc88cf539",
+            "observedAt": "2020-08-01T12:05:00Z"
+        },
+        {
+            "type": "Property",
+            "value": 100,
+            "instanceId": "urn:ngsi-ld:Instance:a9f9e65f-0503-44fe-93c8-2c44b4484ad6",
+            "observedAt": "2020-08-01T12:07:00Z"
+        }
+    ]
+}

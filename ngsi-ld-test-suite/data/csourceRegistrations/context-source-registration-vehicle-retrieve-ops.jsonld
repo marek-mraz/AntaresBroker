@@ -1,0 +1,18 @@
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+  "type": "ContextSourceRegistration",
+  "information": [
+    {
+      "entities": [
+        {
+          "type": "Vehicle"
+        }
+      ]
+    }
+  ],
+  "operations": ["retrieveOps"],
+  "endpoint": "http://my.csource.org:1026",
+  "@context":[
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+ ]
+}

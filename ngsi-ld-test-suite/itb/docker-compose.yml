@@ -1,0 +1,83 @@
+services:
+   # Cache server used to record and verify user sessions.
+   gitb-redis:
+      image: isaitb/gitb-redis:1.25.2
+      container_name: itb-redis
+      restart: unless-stopped
+      networks:
+         - default
+
+   # Database used for data persistence (besides files stored in the gitb-repo volume).
+   gitb-mysql:
+      image: isaitb/gitb-mysql:1.25.2
+      container_name: itb-mysql
+      restart: unless-stopped
+      volumes:
+         - gitb-dbdata:/var/lib/mysql
+      healthcheck:
+         # The primary reason for defining a health check is to ensure that the gitb-ui component starts up only when the
+         # database is ready to receive connections.
+         test: "/usr/bin/mysql --user=root --password=$$MYSQL_ROOT_PASSWORD --execute
+            \"SHOW DATABASES;\""
+         interval: 3s
+         retries: 50
+      networks:
+         - default
+
+   # The test engine component used to execute test sessions.
+   gitb-srv:
+      image: isaitb/gitb-srv:nightly
+      container_name: itb-srv
+      restart: unless-stopped
+      environment:
+         # The root URL at which callbacks are made from custom test services or when receiving calls using
+         # built-in messaging handlers.
+         - CALLBACK_ROOT_URL=http://localhost:8082/itbsrv
+      ports:
+         - "8082:8080"
+      networks:
+         - default
+
+   # The frontend component used to realise all management operations and serve the test bed's UI and APIs.
+   gitb-ui:
+      image: isaitb/gitb-ui:nightly
+      container_name: itb-ui
+      restart: unless-stopped
+      ports:
+         - "9000:9000"
+      environment:
+         - THEME=ec
+         - AUTOMATION_API_ENABLED=true
+         - DATA_ARCHIVE_KEY=archive
+      volumes:
+         - gitb-repo:/gitb-repository
+         - ./data:/gitb-repository/data/in/:rw
+      depends_on:
+         gitb-redis:
+            condition: service_started
+         gitb-mysql:
+            condition: service_healthy
+         gitb-srv:
+            condition: service_started
+      networks:
+         - default
+
+   robot-processing:
+      build:
+         context: ..
+         dockerfile: itb/robot-processing/Dockerfile
+      container_name: robot-processing
+      ports:
+         - "8080:8080"
+      networks:
+         - default
+
+networks:
+   default:
+      name: itb
+
+volumes:
+   # Persistent volume to store files.
+   gitb-repo: # Persistent volume to store the database's data.
+
+   gitb-dbdata:

@@ -1,0 +1,22 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "speed": {
+        "type": "Property",
+        "value": 56,
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        },
+        "datasetId": "urn:ngsi-ld:Property:speedometerA4567-speed2" 
+    },
+    "isParked2": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:OffStreetParking:Downtown2",
+        "observedAt": "2017-07-29T12:00:04Z",
+        "providedBy": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:Person:Alice"
+        }
+    }
+} 

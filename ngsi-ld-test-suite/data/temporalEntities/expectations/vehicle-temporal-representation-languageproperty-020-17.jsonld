@@ -1,0 +1,14 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:7802230401235560",
+  "type": "Vehicle",
+  "name": [
+    {
+      "type": "LanguageProperty",
+      "instanceId": "urn:ngsi-ld:Instance:ad40c1f5-9995-408a-8651-51be67124a4d",
+      "languageMap": {
+        "@none": "urn:ngsi-ld:null"
+      },
+      "deletedAt": "2024-12-11T15:01:49.723294Z"
+    }
+  ]
+}

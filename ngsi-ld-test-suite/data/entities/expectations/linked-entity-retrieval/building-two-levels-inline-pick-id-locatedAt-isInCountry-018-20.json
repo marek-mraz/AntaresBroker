@@ -1,0 +1,25 @@
+{
+    "id": "urn:ngsi-ld:Building:018-20",
+    "locatedAt": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:City:Paris",
+        "entity": {
+            "id": "urn:ngsi-ld:City:Paris",
+            "name": {
+                "type": "Property",
+                "value": "Paris"
+            },
+            "isInCountry": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Country:France",
+                "entity": {
+                    "id": "urn:ngsi-ld:Country:France",
+                    "description": {
+                        "type": "Property",
+                        "value": "France is an European country"
+                    }
+                }
+            }
+        }
+    }
+}

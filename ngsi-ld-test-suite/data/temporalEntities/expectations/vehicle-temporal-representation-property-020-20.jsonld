@@ -1,0 +1,13 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:3998258693070791",
+  "type": "Vehicle",
+  "scope": {
+    "type": "Property",
+    "values": [
+      [
+        [],
+        "2024-12-19T08:48:50.936936Z"
+      ]
+    ]
+  }
+}

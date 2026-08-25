@@ -1,0 +1,61 @@
+{
+  "id": "urn:ngsi-ld:Building:6038695373002945",
+  "type": "Building",
+  "location": [
+    {
+      "type": "GeoProperty",
+      "value": {
+        "type": "Point",
+        "coordinates": [
+          2.3514,
+          48.8575
+        ]
+      },
+      "datasetId": "urn:ngsi-ld:Dataset:01"
+    },
+    {
+      "type": "GeoProperty",
+      "value": {
+        "type": "Point",
+        "coordinates": [
+          2.2944,
+          48.8585
+        ]
+      }
+    }
+  ],
+  "name": [
+    {
+      "type": "Property",
+      "value": "Eiffel Tower",
+      "datasetId": "urn:ngsi-ld:Dataset:01"
+    },
+    {
+      "type": "Property",
+      "value": "The iron lady"
+    }
+  ],
+  "street": [
+    {
+      "type": "LanguageProperty",
+      "datasetId": "urn:ngsi-ld:Dataset:01",
+      "languageMap": {
+        "fr": "Jardin de la Tour Eiffel",
+        "en": "Eiffel Tower Garden"
+      }
+    },
+    {
+      "type": "LanguageProperty",
+      "languageMap": {
+        "fr": "Avenue Gustave Eiffel",
+        "en": "Avenue Gustave Eiffel"
+      }
+    }
+  ],
+  "locatedAt": {
+    "type": "Relationship",
+    "datasetId": "urn:ngsi-ld:Dataset:01",
+    "object": "urn:ngsi-ld:City:Paris"
+  },
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

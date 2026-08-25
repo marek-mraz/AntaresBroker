@@ -1,0 +1,10 @@
+{
+   "format": "keyValues",
+   "endpoint": {
+      "uri": "http://localhost:1111/notify",
+      "accept": "application/json"
+   },
+   "status": "failed",
+   "timesSent": 1,
+   "timesFailed": 1
+}

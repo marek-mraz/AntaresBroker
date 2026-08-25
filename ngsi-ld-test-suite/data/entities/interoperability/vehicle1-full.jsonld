@@ -1,0 +1,32 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:1",
+  "type": "Vehicle",
+  "brandName": {
+    "type": "Property",
+    "value": "Brand1"
+  },
+  "speed": {
+    "type": "Property",
+    "value": 0,
+    "source": {
+      "type": "Property",
+      "value": "Speedometer"
+    }
+  },
+  "isParked": {
+    "type": "Relationship",
+    "object": "urn:ngsi-ld:OffStreetParking:1",
+    "observedAt": "2017-07-29T12:00:04Z"
+  },
+  "location": {
+    "type": "GeoProperty",
+    "value": {
+      "type": "Point",
+      "coordinates": [
+        -8.45,
+        41.2
+      ]
+    }
+  },
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

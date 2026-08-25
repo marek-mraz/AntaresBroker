@@ -1,0 +1,14 @@
+{
+    "jsonProperty": {
+        "type": "JsonProperty",
+        "json": {
+            "id": "some-id",
+            "type": "some-type",
+            "null": null,
+            "anythingElse": "anything-else"
+        }
+    }, 
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

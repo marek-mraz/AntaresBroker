@@ -1,0 +1,23 @@
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:Redirect:3",
+  "type": "ContextSourceRegistration",
+  "information": [
+    {
+      "entities": [
+        {
+          "type": "OffStreetParking",
+          "id": "urn:ngsi-ld:OffStreetParking:2"
+        }
+      ],
+      "propertyNames": [
+        "location"		
+      ]
+    }
+  ],
+  "mode": "redirect",
+  "operations": ["redirectionOps"],
+  "endpoint": "xxx",
+  "@context":[
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

@@ -1,0 +1,4 @@
+		<log>"----- START SETUP -----"</log>
+
+        <group title="SETUP" desc="Operations that need to take place before the test itself.">
+

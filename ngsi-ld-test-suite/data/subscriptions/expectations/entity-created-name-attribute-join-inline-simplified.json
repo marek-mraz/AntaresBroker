@@ -1,0 +1,14 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_29:EiffelTower",
+        "type": "Building",
+        "name": "Tour Eiffel",
+        "locatedAt": {
+            "id": "urn:ngsi-ld:City:Paris",
+            "type": "City",
+            "description": "Paris is the capital and largest city of France",
+            "name": "Paris",
+            "isInCountry": "urn:ngsi-ld:Country:France"
+        }
+    }
+]

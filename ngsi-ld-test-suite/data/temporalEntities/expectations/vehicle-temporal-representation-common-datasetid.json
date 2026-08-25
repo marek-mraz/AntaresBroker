@@ -1,0 +1,30 @@
+[
+  {
+    "id": "urn:ngsi-ld:Vehicle:021-18-A",
+    "type": "Vehicle",
+    "speed": {
+      "type": "Property",
+      "datasetId": "urn:ngsi-ld:Dataset:Common",
+      "values": [
+        [
+          80.0,
+          "2020-09-01T12:05:00Z"
+        ],
+        [
+          90.0,
+          "2020-09-01T13:05:00Z"
+        ]
+      ]
+    },
+    "fuelLevel": {
+      "type": "Property",
+      "datasetId": "urn:ngsi-ld:Dataset:Common",
+      "values": [
+        [
+          53.0,
+          "2020-09-01T13:05:00Z"
+        ]
+      ]
+    }
+  }
+]

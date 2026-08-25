@@ -1,0 +1,27 @@
+{
+   "id":"urn:ngsi-ld:Vehicle:randomUUID",
+   "type":"Vehicle",
+   "speed":[
+      {
+         "type":"JsonProperty",
+         "json": {
+            "value": 120
+         },
+         "observedAt":"2020-08-01T12:03:00Z"
+      },
+      {
+         "type":"JsonProperty",
+         "json": {
+            "value": 80
+         },
+         "observedAt":"2020-08-01T12:05:00Z"
+      },
+      {
+         "type":"JsonProperty",
+         "json": {
+            "value": 100
+         },
+         "observedAt":"2020-08-01T12:07:00Z"
+      }
+   ]
+}

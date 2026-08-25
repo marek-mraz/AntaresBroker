@@ -1,0 +1,6 @@
+            <send id="SimulatedMessaging" desc="The ${dynamicActor} sends a ${dynamicKeyword} request to the SUT" from="${dynamicActor}" to="ContextBroker" handler="SimulatedMessaging">
+                <input name="parameters">${r'$actualTest'}{response}{${dynamicIndentation}}{args}</input>
+                <input name="result">${r'$actualTest'}{response}{${dynamicIndentation}}{status}</input>
+            </send>
+
+         

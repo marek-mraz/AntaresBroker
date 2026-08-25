@@ -1,0 +1,7 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "name": {
+        "type": "Property",
+        "value": "Eiffel Tower"
+    }
+}

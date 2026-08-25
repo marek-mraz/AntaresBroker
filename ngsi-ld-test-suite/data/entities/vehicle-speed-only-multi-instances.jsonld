@@ -1,0 +1,35 @@
+{
+    "id": "urn:ngsi-ld:Vehicle:randomUUID",
+    "type": "Vehicle",
+    "speed": [
+        {
+            "type": "Property",
+            "value": 55,
+            "source": {
+                "type": "Property",
+                "value": "Feeling"
+            }
+        },
+        {
+            "type": "Property",
+            "value": 57,
+            "source": {
+                "type": "Property",
+                "value": "Speedometer"
+            },
+            "datasetId": "urn:ngsi-ld:Dataset:speedometer"
+        },
+        {
+            "type": "Property",
+            "value": 54.5,
+            "source": {
+                "type": "Property",
+                "value": "GPS"
+            },
+            "datasetId": "urn:ngsi-ld:Dataset:gps"
+        }
+    ],
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

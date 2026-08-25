@@ -1,0 +1,186 @@
+{
+  "tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23",
+  "test_objective": "Check that one can query temporal evolution of entities with orderBy",
+  "reference": "ETSI GS CIM 009 V1.9.1 [], clauses 4.23, 5.7.4",
+  "config_id": "",
+  "parent_release": "v1.9.1",
+  "clauses": [
+    "4.23",
+    "5.7.4"
+  ],
+  "pics_selection": "",
+  "keywords": [
+    "Query Temporal Entities With OrderBy",
+    "Setup Initial Entities",
+    "Delete Entities"
+  ],
+  "teardown": "Delete Entities",
+  "initial_condition": "with {\n   the SUT containing an initial state\n}",
+  "test_cases": [
+    {
+      "name": "021_23_01 QueryWithOrderByAttribute",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_01",
+      "doc": "Check that one can query entities with orderBy on an attribute",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_02 QueryWithOrderById",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_02",
+      "doc": "Check that one can query entities with orderBy on id",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_03 QueryWithOrderByCreatedAt",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_03",
+      "doc": "Check that one can query entities with orderBy on createdAt",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_04 QueryWithOrderByNameCreatedAt",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_04",
+      "doc": "Check that one can query entities with orderBy on an attribute createdAt",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_05 QueryWithOrderBySubAttribute",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_05",
+      "doc": "Check that one can query entities with orderBy on an attribute subproperty",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_06 QueryWithOrderByAscending",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_06",
+      "doc": "Check that one can query entities with orderBy on a name ascending",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_07 QueryWithOrderByDescending",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_07",
+      "doc": "Check that one can query entities with orderBy on a name descending",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_08 QueryWithMultipleOrderBy",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_08",
+      "doc": "Check that one can query entities with orderBy on multiple members",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    },
+    {
+      "name": "021_23_09 QueryWithComplexOrderBy",
+      "permutation_tp_id": "TP/NGSI-LD/CI/Cons/TE/021_23_09",
+      "doc": "Check that one can query entities with a complex orderBy",
+      "tags": [
+        "4_23",
+        "5_7_4",
+        "since_v1.9.1",
+        "te-query"
+      ],
+      "setup": null,
+      "teardown": null,
+      "template": "Query Temporal Entities With OrderBy",
+      "then": "then {\n    the SUT sends a valid Response for the operations:\n        Query Temporal Representation Of Entities with Response Status Code set to 200     and\n        Query Temporal Representation Of Entities with Response Body contains entities ids\n}",
+      "when": "when {\n    the SUT receives a Request from the client containing:\n        URL set to '/ngsi-ld/v1/temporal/entities'\n        method set to 'GET'\n        Query Temporal Representation of Entities and\n    Query Parameter: entity_types set to 'Building' and\n    Query Parameter: orderBy set to '${orderBy}' and\n    Query Parameter: timerel set to 'after' and\n    Query Parameter: timeAt set to '1970-01-01T00:00:00Z' and\n    Query Parameter: timeproperty set to 'createdAt' and\n    Query Parameter: context set to 'https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld'\n}",
+      "http_verb": "GET",
+      "endpoint": "temporal/entities"
+    }
+  ],
+  "permutations": [],
+  "robotpath": "ContextInformation/Consumption/TemporalEntity/QueryTemporalEvolutionOfEntities",
+  "robotfile": "021_23"
+}

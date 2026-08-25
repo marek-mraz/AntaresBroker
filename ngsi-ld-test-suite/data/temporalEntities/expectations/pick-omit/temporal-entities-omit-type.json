@@ -1,0 +1,131 @@
+[
+    {
+        "id": "urn:ngsi-ld:Bus:021-21-C",
+        "speed": [
+            {
+                "type": "Property",
+                "value": 45,
+                "instanceId": "urn:ngsi-ld:Instance:5d6d7785-b5d1-44dd-b82f-c02556166c7d",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 25,
+                "instanceId": "urn:ngsi-ld:Instance:c62ccab7-59d9-4a74-86e6-38d891e9d4ba",
+                "observedAt": "2020-08-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 67,
+                "instanceId": "urn:ngsi-ld:Instance:8a1961b0-c20a-4e8f-9151-33da70ca507a",
+                "observedAt": "2020-08-01T12:07:00Z"
+            }
+        ],
+        "fuelLevel": [
+            {
+                "type": "Property",
+                "value": 210,
+                "instanceId": "urn:ngsi-ld:Instance:9e78ec30-778e-4d38-9f3b-d3260824cdf9",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 145,
+                "instanceId": "urn:ngsi-ld:Instance:791258d6-6ec8-4341-93e1-cb69b80b1c8c",
+                "observedAt": "2020-08-01T13:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 124,
+                "instanceId": "urn:ngsi-ld:Instance:bb657e0d-fed9-4d69-a42a-7f7ff11b0999",
+                "observedAt": "2020-08-01T14:07:00Z"
+            }
+        ]
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-A",
+        "fuelLevel": [
+            {
+                "type": "Property",
+                "value": 67,
+                "instanceId": "urn:ngsi-ld:Instance:e76aec35-e028-4f39-a71c-9ab87619c6f8",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 53,
+                "instanceId": "urn:ngsi-ld:Instance:ebaa174d-1b0a-4150-9efa-ebaece61ef1f",
+                "observedAt": "2020-08-01T13:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 40,
+                "instanceId": "urn:ngsi-ld:Instance:21073f3c-5635-4995-944a-54b2bec9924c",
+                "observedAt": "2020-08-01T14:07:00Z"
+            }
+        ],
+        "speed": [
+            {
+                "type": "Property",
+                "value": 120,
+                "instanceId": "urn:ngsi-ld:Instance:32428955-8177-4887-a914-f2cac9af8b6e",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 80,
+                "instanceId": "urn:ngsi-ld:Instance:14cb0355-7e11-4c27-9925-fb6037643f19",
+                "observedAt": "2020-08-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 100,
+                "instanceId": "urn:ngsi-ld:Instance:2578bb4d-7bb3-448c-998e-9a41d0cdfebd",
+                "observedAt": "2020-08-01T12:07:00Z"
+            }
+        ]
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-B",
+        "speed": [
+            {
+                "type": "Property",
+                "value": 120,
+                "instanceId": "urn:ngsi-ld:Instance:ded77aae-0edf-4ce2-9c36-5a4187012add",
+                "observedAt": "2020-09-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 80,
+                "instanceId": "urn:ngsi-ld:Instance:10d36809-9a64-490b-84bc-ef9473962836",
+                "observedAt": "2020-09-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 100,
+                "instanceId": "urn:ngsi-ld:Instance:5c69d3d8-d1f0-49f5-8a03-3bf24b8c23a3",
+                "observedAt": "2020-09-01T12:07:00Z"
+            }
+        ],
+        "fuelLevel": [
+            {
+                "type": "Property",
+                "value": 67,
+                "instanceId": "urn:ngsi-ld:Instance:74072f09-b040-4e71-bb63-eaff0ffab282",
+                "observedAt": "2020-09-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 53,
+                "instanceId": "urn:ngsi-ld:Instance:4252a42e-8da5-446b-b5b1-396c9cfc5941",
+                "observedAt": "2020-09-01T13:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 40,
+                "instanceId": "urn:ngsi-ld:Instance:87a1ed49-d71a-4eaa-b3f7-b82439288317",
+                "observedAt": "2020-09-01T14:07:00Z"
+            }
+        ]
+    }
+]

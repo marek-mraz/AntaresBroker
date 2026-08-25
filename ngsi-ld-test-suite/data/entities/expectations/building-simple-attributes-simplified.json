@@ -1,0 +1,8 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "https://ngsi-ld-test-suite/context#Building",
+    "https://ngsi-ld-test-suite/context#name": "Eiffel Tower",
+    "https://ngsi-ld-test-suite/context#airQualityLevel": 4,
+    "https://ngsi-ld-test-suite/context#almostFull": false,
+    "https://ngsi-ld-test-suite/context#subCategory": "tourism"
+}

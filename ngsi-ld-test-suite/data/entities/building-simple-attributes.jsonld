@@ -1,0 +1,25 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "name": {
+        "type": "Property",
+        "value": "Eiffel Tower"
+    },
+    "subCategory": {
+        "type": "Property",
+        "value": "tourism"
+    },
+    "airQualityLevel": {
+        "type": "Property",
+        "value": 4,
+        "unitCode": "C62",
+        "observedAt": "2020-09-09T16:40:00.000Z"
+    },
+    "almostFull": {
+        "type": "Property",
+        "value": false
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

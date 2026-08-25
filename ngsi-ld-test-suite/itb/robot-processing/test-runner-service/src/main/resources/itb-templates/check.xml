@@ -1,0 +1,5 @@
+            <process desc="${dynamicKeyword}" hidden="false" handler="DisplayProcessor" actor="${dynamicActor}">
+                <input name="parameters">${r'$actualTest'}{response}{${dynamicIndentation}}{args}</input>
+                <input name="result">${r'$actualTest'}{response}{${dynamicIndentation}}{status}</input>
+            </process>
+

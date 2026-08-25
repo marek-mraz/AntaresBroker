@@ -1,0 +1,71 @@
+[
+   {
+      "id":"urn:ngsi-ld:Subscription:randomUUID",
+      "type":"Subscription",
+      "timeInterval": 5,
+      "entities":[
+         {
+            "type":"Building"
+         }
+      ],
+      "notification":{
+         "format":"keyValues",
+         "endpoint":{
+            "uri":"http://localhost:1111/notify",
+            "accept":"application/json"
+         }
+      },
+      "status": "active",
+      "notificationTrigger": [
+         "attributeCreated",
+         "attributeUpdated"
+      ]
+   },
+   {
+      "id":"urn:ngsi-ld:Subscription:randomUUID",
+      "type":"Subscription",
+      "watchedAttributes":[
+         "name",
+         "subCategory"
+      ],
+      "entities":[
+         {
+            "type":"Building"
+         }
+      ],
+      "notification":{
+         "format":"keyValues",
+         "endpoint":{
+            "uri":"http://localhost:1111/notify",
+            "accept":"application/json"
+         }
+      },
+      "status": "active",
+      "notificationTrigger": [
+         "attributeCreated",
+         "attributeUpdated"
+      ]
+   },
+   {
+      "id":"urn:ngsi-ld:Subscription:randomUUID",
+      "type":"Subscription",
+      "entities":[
+         {
+            "type":"Building"
+         }
+      ],
+      "notification":{
+         "format":"keyValues",
+         "endpoint":{
+            "uri":"http://localhost:1111/notify",
+            "accept":"application/json"
+         }
+      },
+      "isActive": false,
+      "status": "paused",
+      "notificationTrigger": [
+         "attributeCreated",
+         "attributeUpdated"
+      ]
+   }
+]

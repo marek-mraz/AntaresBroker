@@ -1,0 +1,64 @@
+[
+    {
+        "type": "Building",
+        "name": {
+            "type": "Property",
+            "value": "Eiffel Tower"
+        },
+        "subCategory": {
+            "type": "Property",
+            "value": "tourism"
+        },
+        "airQualityLevel": {
+            "type": "Property",
+            "value": 4,
+            "unitCode": "C62",
+            "observedAt": "2020-09-09T16:40:00.000Z"
+        },
+        "almostFull": {
+            "type": "Property",
+            "value": false
+        }
+    },
+    {
+        "type": "Vehicle",
+        "brandName": {
+            "type": "Property",
+            "value": "Mercedes"
+        },
+        "isParked": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+            "observedAt": "2017-07-29T12:00:04Z",
+            "providedBy": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Person:Bob"
+            }
+        }
+    },
+    {
+        "type": "Building",
+        "name": {
+            "type": "Property",
+            "value": "Pisa Tower"
+        },
+        "subCategory": {
+            "type": "Property",
+            "value": "sightseeing"
+        },
+        "airQualityLevel": {
+            "type": "Property",
+            "value": 7,
+            "unitCode": "C62",
+            "observedAt": "2023-10-10T16:40:00.000Z"
+        },
+        "almostFull": {
+            "type": "Property",
+            "value": false
+        },
+        "locatedIn": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:City:Pisa"
+        }
+    }
+]

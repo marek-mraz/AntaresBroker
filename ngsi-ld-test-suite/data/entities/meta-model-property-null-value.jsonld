@@ -1,0 +1,8 @@
+{
+  "id":"urn:ngsi-ld:Building:randomUUID",
+  "type":"Building",
+  "name":{"type":"Property","value":null},
+  "@context":[
+    "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.6.jsonld"
+  ]
+}

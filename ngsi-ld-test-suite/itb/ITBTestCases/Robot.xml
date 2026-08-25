@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testcase id="Robot" xmlns="http://www.gitb.com/tdl/v1/" xmlns:gitb="http://www.gitb.com/core/v1/">
+	<metadata>
+ 		<gitb:name>Robot Tests</gitb:name>
+		<gitb:version>1.0</gitb:version>
+		<gitb:description>Run ETSI NGSI-LD Robot Tests</gitb:description>
+	</metadata>
+    <imports>
+        <artifact type="binary" encoding="UTF-8" name="freemarkerTemplateFile">ITBTestCases/resources/template.json</artifact>
+    </imports>
+	<actors>
+		<gitb:actor id="ITB" name="ITB" role="SUT"/>
+		<gitb:actor id="RobotTestsAPI" name="RobotTestsAPI" role="SIMULATED"/>
+	</actors>
+	<steps logLevel="DEBUG">
+    
+        <assign to="parameters{testFolder}">$SYSTEM{testFolder}</assign>
+        <assign to="parameters{testName}">$SYSTEM{testName}</assign>
+        <assign to="parameters{exclude}">$SYSTEM{exclude}</assign>
+
+        <assign to="parameters{url}">$SYSTEM{endpointAddress}</assign>
+        <assign to="parameters{temporalApiUrl}">$SYSTEM{temporalApiUrl}</assign>
+        <assign to="parameters{ngsildTestSuiteContext}">$SYSTEM{ngsildTestSuiteContext}</assign>
+        <assign to="parameters{notificationServerHost}">$SYSTEM{notificationServerHost}</assign>
+        <assign to="parameters{notificationServerPort}">$SYSTEM{notificationServerPort}</assign>
+        <assign to="parameters{mqttBrokerHost}">$SYSTEM{mqttBrokerHost}</assign>
+        <assign to="parameters{mqttBrokerNonDefaultPort}">$SYSTEM{mqttBrokerNonDefaultPort}</assign>
+        <assign to="parameters{contextSourceHost}">$SYSTEM{contextSourceHost}</assign>
+        <assign to="parameters{contextSourcePort}">$SYSTEM{contextSourcePort}</assign>
+        <assign to="parameters{contextServerHost}">$SYSTEM{contextServerHost}</assign>
+        <assign to="parameters{contextServerPort}">$SYSTEM{contextServerPort}</assign>
+        <assign to="parameters{coreContext}">$SYSTEM{coreContext}</assign>
+        <assign to="parameters{deleteTemporalOnCoreDelete}">$SYSTEM{deleteTemporalOnCoreDelete}</assign>
+        
+        <assign to="params{Content-Type}">'application/json'</assign>
+    
+        <process output="body" handler="TemplateProcessor">
+            <input name="parameters">$parameters</input>
+            <input name="template">$freemarkerTemplateFile</input>
+            <input name="syntax">'freemarker'</input>
+        </process>
+        
+        <send id="test" desc="call the API" from="ITB" to="RobotTestsAPI" handler="HttpMessagingV2">
+            <input name="method">"POST"</input>
+            <input name="uri">"http://robot-processing:8080/api/run-test"</input>
+            <input name="headers">$params</input>
+            <input name="body">$body</input>
+        </send>
+
+        <bptxn txnId="t1" handler="https://www.itb.ec.europa.eu/zip/api/processing?wsdl"/>
+
+            <process txnId="t1" id="unzip" operation="initialize">
+                <input name="zip">$test{response}{body}</input>
+            </process>
+
+            <process txnId="t1" output="report" operation="extract">
+                <input name="path">'report.html'</input>
+            </process>
+
+            <process txnId="t1" output="log" operation="extract">
+                <input name="path">'log.html'</input>
+            </process>
+
+        <eptxn txnId="t1"/>
+
+        <assign to="display{report}">$report{entry}{0}{content}</assign>
+        <assign to="display{log}">$log{entry}{0}{content}</assign>
+        <assign to="ctype{report}">'text/html'</assign>
+        <assign to="ctype{log}">'text/html'</assign>
+
+        <process desc="Download Robot report" hidden="false" handler="DisplayProcessor">
+            <input name="parameters">$display</input>
+            <input name="contentTypes">$ctype</input>
+        </process>
+
+	</steps>
+</testcase>

@@ -1,0 +1,18 @@
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:Auxiliary:3",
+  "type": "ContextSourceRegistration",
+  "information": [
+    {
+      "entities": [
+        {
+          "type": "Vehicle"
+        }
+      ]
+    }
+  ],
+  "mode": "auxiliary",
+  "endpoint": "xxx",
+  "@context":[
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

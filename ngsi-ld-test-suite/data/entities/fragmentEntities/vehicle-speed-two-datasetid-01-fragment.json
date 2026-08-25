@@ -1,0 +1,10 @@
+{
+    "speed": {
+        "type": "Property",
+        "value": 99,
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        }
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "isParked": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+        "observedAt": "2017-07-29T12:00:04Z",
+        "providedBy": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Person:JohnDoe"
+        },
+        "datasetId": "urn:ngsi-ld:Relationship:parked12345"
+    },
+    "speed": {
+        "type": "Property",
+        "value": 99,
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        },
+        "datasetId": "urn:ngsi-ld:Property:gpsBxyz123-speed" 
+    }, 
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

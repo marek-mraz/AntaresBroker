@@ -1,0 +1,10 @@
+{
+    "type": "Query",
+    "entities": [{
+        "type": "Vehicle"
+    }],
+    "temporalQ": {
+        "timerel": "between",
+        "timeAt": "2020-08-01T12:00:00Z"
+    }
+}

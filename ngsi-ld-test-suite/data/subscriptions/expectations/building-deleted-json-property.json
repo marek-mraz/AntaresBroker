@@ -1,0 +1,16 @@
+[
+    {
+        "id": "urn:ngsi-ld:Building:046_35",
+        "type": "Building",
+        "jsonProperty": {
+            "type": "JsonProperty",
+            "json": "urn:ngsi-ld:null",
+            "previousJson": {
+                "id": "some-id",
+                "null": null,
+                "type": "some-type",
+                "anythingElse": "anything-else"
+            }
+        }
+    }
+]

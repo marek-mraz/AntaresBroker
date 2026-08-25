@@ -1,0 +1,17 @@
+{
+   "id":"urn:ngsi-ld:ContextSourceRegistration:randomUUID",
+   "type":"ContextSourceRegistration",
+   "information":[
+      {
+         "entities":[
+            {
+               "type":"Building"
+            }
+         ]
+      }
+   ],
+   "endpoint":"http://my.csource.org:1026",
+   "@context":[
+      "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-non-existing.jsonld"
+   ]
+}

@@ -1,0 +1,10 @@
+{
+    "id": "urn:ngsi-ld:Testing:randomUUID",
+    "type": "Testing",
+    "A1": "value of A1",
+    "A2": "value of A2",
+    "A3": "value of A3",
+    "@context": [
+        "ContextURI"
+    ]
+}

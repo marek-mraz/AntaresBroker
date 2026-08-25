@@ -1,0 +1,18 @@
+[
+  {
+    "id": "urn:ngsi-ld:Building:046_27:EiffelTower",
+    "type": "Building",
+    "name": {
+      "type": "Property",
+      "value": "Tour Eiffel"
+    },
+    "locatedAt": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:City:Paris",
+      "entity": {
+        "id": "urn:ngsi-ld:City:Paris",
+        "type": "City"
+      }
+    }
+  }
+]

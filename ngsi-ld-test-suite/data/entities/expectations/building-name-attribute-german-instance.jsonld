@@ -1,0 +1,12 @@
+{
+  "id": "urn:ngsi-ld:Building:randomUUID",
+  "type": "Building",
+  "name": {
+    "type": "Property",
+    "value": "Eiffelturm",
+    "datasetId": "urn:ngsi-ld:Dataset:german-name"
+  },
+  "@context": [
+    "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+    "id": "urn:ngsi-ld:Country:randomUUID",
+    "type": "Country",
+    "@context": [
+      "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

@@ -1,0 +1,5 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "scope": "/CompanyA/OrganizationB/UnitC"
+}

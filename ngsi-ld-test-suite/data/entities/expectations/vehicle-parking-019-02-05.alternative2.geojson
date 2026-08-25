@@ -1,0 +1,74 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "id": "urn:ngsi-ld:Vehicle:019-02-05",
+      "type": "Feature",
+      "geometry": null,
+      "properties": {
+        "type": "Vehicle",
+        "brandName": {
+          "type": "Property",
+          "value": "Mercedes"
+        },
+        "isParked": {
+          "type": "Relationship",
+          "providedBy": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Person:Bob"
+          },
+          "object": "urn:ngsi-ld:OffStreetParking:Downtown1",
+          "observedAt": "2017-07-29T12:00:04Z"
+        }
+      },
+	  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    },
+    {
+      "id": "urn:ngsi-ld:OffStreetParking:019-02-05",
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -8.5,
+          41.2
+        ]
+      },
+      "properties": {
+        "type": "OffStreetParking",
+        "name": {
+          "type": "Property",
+          "value": "Downtown One"
+        },
+        "availableSpotNumber": {
+          "type": "Property",
+          "providedBy": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Camera:C1"
+          },
+          "reliability": {
+            "type": "Property",
+            "value": 0.7
+          },
+          "value": 121,
+          "observedAt": "2017-07-29T12:05:02Z"
+        },
+        "totalSpotNumber": {
+          "type": "Property",
+          "value": 200
+        },
+        "location": {
+          "type": "GeoProperty",
+          "value": {
+            "type": "Point",
+            "coordinates": [
+              -8.5,
+              41.2
+            ]
+          }
+        }
+      },
+	  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    }
+  ],
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

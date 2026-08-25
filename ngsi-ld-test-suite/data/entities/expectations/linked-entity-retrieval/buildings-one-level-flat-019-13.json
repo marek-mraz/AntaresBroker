@@ -1,0 +1,26 @@
+[
+  {
+    "id": "urn:ngsi-ld:Building:019-13-1",
+    "type": "Building",
+    "locatedAt": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:City:019-13-1"
+    }
+  },
+  {
+    "id": "urn:ngsi-ld:Building:019-13-2",
+    "type": "Building",
+    "locatedAt": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:City:019-13-2"
+    }
+  },
+  {
+    "id": "urn:ngsi-ld:City:019-13-1",
+    "type": "City"
+  },
+  {
+    "id": "urn:ngsi-ld:City:019-13-2",
+    "type": "City"
+  }
+]

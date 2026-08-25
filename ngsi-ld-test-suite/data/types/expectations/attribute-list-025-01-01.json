@@ -1,0 +1,10 @@
+{
+    "id": "urn:ngsi-ld:AttributeList:randomUUID",
+    "type": "AttributeList",
+    "attributeList": [
+        "https://ngsi-ld-test-suite/context#airQualityLevel",
+        "https://ngsi-ld-test-suite/context#almostFull",
+        "https://ngsi-ld-test-suite/context#name",
+        "https://ngsi-ld-test-suite/context#subCategory"
+    ]
+}

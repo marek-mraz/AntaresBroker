@@ -1,0 +1,25 @@
+{
+    "id": "urn:ngsi-ld:Subscription:randomUUID",
+    "type": "Subscription",
+    "entities": [
+        {
+            "type": "Building"
+        }
+    ],
+    "notification": {
+        "endpoint": {
+            "uri": "http://localhost:1111/notify",
+            "accept": "application/json"
+        },
+        "join": "flat",
+        "joinLevel": 1,
+        "pick": [
+            "id",
+            "name",
+            "locatedAt{id|name}"
+        ]
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

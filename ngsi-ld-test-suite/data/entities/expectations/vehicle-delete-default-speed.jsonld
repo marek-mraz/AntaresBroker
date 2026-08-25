@@ -1,0 +1,25 @@
+{
+  "id": "urn:ngsi-ld:Vehicle:2264127260420623",
+  "type": "Vehicle",
+  "speed": [
+    {
+      "type": "Property",
+      "value": 57,
+      "datasetId": "urn:ngsi-ld:Dataset:speedometer",
+      "source": {
+        "type": "Property",
+        "value": "Speedometer"
+      }
+    },
+    {
+      "type": "Property",
+      "value": 54.5,
+      "datasetId": "urn:ngsi-ld:Dataset:gps",
+      "source": {
+        "type": "Property",
+        "value": "GPS"
+      }
+    }
+  ],
+  "@context": "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+}

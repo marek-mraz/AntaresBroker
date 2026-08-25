@@ -1,0 +1,71 @@
+[
+    {
+        "id": "urn:ngsi-ld:Bus:021-21-C",
+        "speed": [
+            {
+                "type": "Property",
+                "value": 45,
+                "instanceId": "urn:ngsi-ld:Instance:332b51b5-3c0f-4eb9-b182-763bc067ad87",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 25,
+                "instanceId": "urn:ngsi-ld:Instance:53973016-c4d9-4e99-aaaf-e034ea8696d1",
+                "observedAt": "2020-08-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 67,
+                "instanceId": "urn:ngsi-ld:Instance:ba6a4771-1f49-40d8-9fc6-9ed6443d804f",
+                "observedAt": "2020-08-01T12:07:00Z"
+            }
+        ]
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-A",
+        "speed": [
+            {
+                "type": "Property",
+                "value": 120,
+                "instanceId": "urn:ngsi-ld:Instance:e41dc393-3b6b-4dfd-aec0-9f454f58968e",
+                "observedAt": "2020-08-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 80,
+                "instanceId": "urn:ngsi-ld:Instance:26fdb266-7657-4b1d-a45e-9e055ac061cd",
+                "observedAt": "2020-08-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 100,
+                "instanceId": "urn:ngsi-ld:Instance:9453dc90-eed4-455d-a167-2f32d7102d92",
+                "observedAt": "2020-08-01T12:07:00Z"
+            }
+        ]
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-B",
+        "speed": [
+            {
+                "type": "Property",
+                "value": 120,
+                "instanceId": "urn:ngsi-ld:Instance:a0c47ecb-87ab-4089-b8f2-3be35b2a9974",
+                "observedAt": "2020-09-01T12:03:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 80,
+                "instanceId": "urn:ngsi-ld:Instance:dfd58129-517f-4981-bd19-a59b750c9e74",
+                "observedAt": "2020-09-01T12:05:00Z"
+            },
+            {
+                "type": "Property",
+                "value": 100,
+                "instanceId": "urn:ngsi-ld:Instance:91e87c99-1a53-4852-8d87-62debadaa481",
+                "observedAt": "2020-09-01T12:07:00Z"
+            }
+        ]
+    }
+]

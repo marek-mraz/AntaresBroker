@@ -1,0 +1,11 @@
+[
+    {
+        "id": "urn:ngsi-ld:Bus:021-21-C"
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-A"
+    },
+    {
+        "id": "urn:ngsi-ld:Vehicle:021-21-B"
+    }
+]

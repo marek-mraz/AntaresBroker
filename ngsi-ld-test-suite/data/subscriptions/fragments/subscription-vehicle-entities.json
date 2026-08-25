@@ -1,0 +1,15 @@
+{
+   "type":"Subscription",
+   "entities":[
+      {
+         "type":"Vehicle"
+      }
+   ],
+   "notification":{
+      "format":"keyValues",
+      "endpoint":{
+         "uri":"http://localhost:1111/notify",
+         "accept":"application/json"
+      }
+   }
+}

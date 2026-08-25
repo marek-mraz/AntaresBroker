@@ -1,0 +1,13 @@
+{
+  "id": "urn:ngsi-ld:Building:1",
+  "type": "Building",
+  "name": {
+    "type": "Property",
+    "value": "A",
+    "subProperty": {
+      "type": "Property",
+      "value": 1
+    }
+  },
+  "@context": "https://easy-global-market.github.io/ngsild-api-data-models/ngsildTestSuite/ngsildTestSuiteV1.8-compound.jsonld"
+}

@@ -1,0 +1,4 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "https://ngsi-ld-test-suite/context#Building"
+}

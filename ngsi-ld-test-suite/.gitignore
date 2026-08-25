@@ -1,0 +1,10 @@
+resources/__pycache__
+results
+results-*/
+*.pyc
+*.http
+.vscode/
+.venv
+.DS_Store
+etsi-failures.md
+etsi-failures.md

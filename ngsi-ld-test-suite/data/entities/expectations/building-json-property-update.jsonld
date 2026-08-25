@@ -1,0 +1,23 @@
+{
+    "id": "urn:ngsi-ld:Building:randomUUID",
+    "type": "Building",
+    "jsonProperty": {
+        "type": "JsonProperty",
+        "json": {
+            "id": "another-id",
+            "type": "another-type",
+            "anythingElse": "another-anything-else"
+        },
+        "providedBy": {
+            "type": "Relationship",
+            "object": "urn:ngsi-ld:Person:JohnDoe"
+        },
+        "source": {
+            "type": "Property",
+            "value": "Speedometer"
+        }
+    },
+    "@context": [
+        "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}

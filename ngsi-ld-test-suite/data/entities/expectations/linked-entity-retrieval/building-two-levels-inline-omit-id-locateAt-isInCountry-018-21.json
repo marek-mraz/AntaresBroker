@@ -1,0 +1,27 @@
+{
+    "id": "urn:ngsi-ld:Building:018-21",
+    "locatedAt": {
+        "type": "Relationship",
+        "object": "urn:ngsi-ld:City:Paris",
+        "entity": {
+            "id": "urn:ngsi-ld:City:Paris",
+            "type": "City",
+            "description": {
+                "type": "Property",
+                "value": "Paris is the capital and largest city of France"
+            },
+            "isInCountry": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Country:France",
+                "entity": {
+                    "id": "urn:ngsi-ld:Country:France",
+                    "type": "Country",
+                    "name": {
+                        "type": "Property",
+                        "value": "France"
+                    }
+                }
+            }
+        }
+    }
+}

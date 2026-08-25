@@ -1,0 +1,19 @@
+{
+    "id": "urn:ngsi-ld:City:randomUUID",
+    "type": "City",
+    "name": {
+        "type": "Property",
+        "value": "Paris"
+    },
+    "description": {
+        "type": "Property",
+        "value": "Paris is the capital and largest city of France"
+    },
+    "isInCountry": {
+      "type": "Relationship",
+      "object": "urn:ngsi-ld:Country:France"
+    },
+    "@context": [
+      "https://raw.githubusercontent.com/marek-mraz/ngsi-ld-test-suite/main/resources/jsonld-contexts/ngsi-ld-test-suite-compound.jsonld"
+    ]
+}
