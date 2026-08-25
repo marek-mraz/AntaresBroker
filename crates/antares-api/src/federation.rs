@@ -651,7 +651,7 @@ pub fn matching_regs(
         return Vec::new();
     }
     let seen = via_tokens(headers);
-    reg_docs(st, tenant, spec, ctx)
+    let regs: Vec<FedReg> = reg_docs(st, tenant, spec, ctx)
         .iter()
         .filter_map(|doc| {
             let infos = reg_candidate(doc, spec, ctx, &seen)?;
@@ -765,7 +765,54 @@ pub fn matching_regs(
                     .and_then(Value::as_u64),
             })
         })
-        .collect()
+        .collect();
+    merge_same_source(regs)
+}
+
+/// Registrations naming the same Context Source (same endpoint, mode,
+/// tenant, contextSourceAlias, contextSourceInfo, localOnly) fold into ONE
+/// forwarded request (5.2.9: the alias identifies a source, so a different
+/// alias is a different source even behind one endpoint):
+/// attribute and entity scopes union (an unscoped one covers everything),
+/// operations union, the first registration's id and timing stay. Two calls
+/// to one source for one query would return the same data twice.
+fn merge_same_source(regs: Vec<FedReg>) -> Vec<FedReg> {
+    let mut out: Vec<FedReg> = Vec::new();
+    for r in regs {
+        let same = out.iter_mut().find(|o| {
+            o.endpoint == r.endpoint
+                && o.mode == r.mode
+                && o.tenant == r.tenant
+                && o.alias == r.alias
+                && o.csi == r.csi
+                && o.local_only == r.local_only
+        });
+        let Some(o) = same else {
+            out.push(r);
+            continue;
+        };
+        o.attrs = match (o.attrs.take(), r.attrs) {
+            (Some(mut a), Some(b)) => {
+                for x in b {
+                    if !a.contains(&x) {
+                        a.push(x);
+                    }
+                }
+                Some(a)
+            }
+            _ => None,
+        };
+        for x in r.ops {
+            if !o.ops.contains(&x) {
+                o.ops.push(x);
+            }
+        }
+        o.ent_ids.extend(r.ent_ids);
+        o.ent_types.extend(r.ent_types);
+        o.ent_patterns.extend(r.ent_patterns);
+        o.ent_unrestricted |= r.ent_unrestricted;
+    }
+    out
 }
 
 /// contextSourceInfo keys the forward must NOT copy into headers: the tenant
@@ -3395,5 +3442,59 @@ mod clause_4_20 {
                 "{group} does not include createEntityMapQueryTemporal"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod same_source_merge {
+    use super::*;
+
+    fn reg(id: &str, endpoint: &str, attrs: Option<&[&str]>, types: &[&str]) -> FedReg {
+        FedReg {
+            reg_id: id.into(),
+            endpoint: endpoint.into(),
+            mode: "inclusive".into(),
+            ops: vec!["federationOps".into()],
+            attrs: attrs.map(|a| a.iter().map(|s| (*s).to_owned()).collect()),
+            ent_types: types.iter().map(|s| (*s).to_owned()).collect(),
+            ..FedReg::default()
+        }
+    }
+
+    /// Two registrations for one Context Source become one forward whose
+    /// scopes are the union; a different endpoint or mode stays separate.
+    #[test]
+    fn registrations_of_one_source_fold_into_one_forward() {
+        let merged = merge_same_source(vec![
+            reg("urn:r:1", "http://a", Some(&["speed"]), &["Vehicle"]),
+            reg(
+                "urn:r:2",
+                "http://a",
+                Some(&["heading", "speed"]),
+                &["Bike"],
+            ),
+            reg("urn:r:3", "http://b", Some(&["speed"]), &["Vehicle"]),
+        ]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].reg_id, "urn:r:1");
+        assert_eq!(
+            merged[0].attrs.as_deref(),
+            Some(&["speed".to_owned(), "heading".to_owned()][..])
+        );
+        assert_eq!(merged[0].ent_types, ["Vehicle", "Bike"]);
+        assert_eq!(merged[1].endpoint, "http://b");
+
+        // an unscoped registration widens the merged one to everything
+        let merged = merge_same_source(vec![
+            reg("urn:r:1", "http://a", Some(&["speed"]), &["Vehicle"]),
+            reg("urn:r:2", "http://a", None, &[]),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].attrs.is_none());
+
+        let mut other_mode = reg("urn:r:2", "http://a", None, &[]);
+        other_mode.mode = "exclusive".into();
+        let merged = merge_same_source(vec![reg("urn:r:1", "http://a", None, &[]), other_mode]);
+        assert_eq!(merged.len(), 2, "a different mode is a different forward");
     }
 }

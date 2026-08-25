@@ -1480,17 +1480,43 @@ pub(crate) async fn deliver(
     data: Vec<Value>,
     ctx: &Context,
 ) {
-    deliver_as(
-        st,
-        tenant,
-        Kind::Subscription,
-        sub,
-        "Notification",
-        data,
-        ctx,
-        None,
-    )
-    .await
+    // a notification body is bounded the way an inbound body is (6.3.4 wall,
+    // MAX_BODY_BYTES): a grouped delivery over the cap leaves as several
+    // notifications, each whole entities, never one unbounded POST
+    for chunk in chunk_by_bytes(data, crate::bounds::MAX_BODY_BYTES) {
+        deliver_as(
+            st,
+            tenant,
+            Kind::Subscription,
+            sub,
+            "Notification",
+            chunk,
+            ctx,
+            None,
+        )
+        .await;
+    }
+}
+
+/// Split `data` into runs whose serialized sizes stay under `cap`, cutting
+/// only at whole items; one item alone over the cap still travels alone.
+fn chunk_by_bytes(data: Vec<Value>, cap: usize) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = Vec::new();
+    let mut size = 0usize;
+    for item in data {
+        let n = serde_json::to_vec(&item).map(|b| b.len()).unwrap_or(0);
+        match out.last_mut() {
+            Some(run) if size + n <= cap => {
+                run.push(item);
+                size += n;
+            }
+            _ => {
+                out.push(vec![item]);
+                size = n;
+            }
+        }
+    }
+    out
 }
 
 /// 5.11.7: which csource subs care about a registration change, and why.
@@ -3609,5 +3635,26 @@ mod clause_5_8_6_grouped_delivery {
             .expect("store")
             .expect("row");
         assert_eq!(sub["notification"]["timesSent"], json!(1));
+    }
+}
+
+#[cfg(test)]
+mod notification_body_bound {
+    use super::*;
+    use serde_json::json;
+
+    /// A grouped notification is cut into whole-entity runs under the byte
+    /// cap; nothing is split mid-entity and an oversize single entity still
+    /// travels (alone) instead of being dropped.
+    #[test]
+    fn chunks_cut_at_whole_items_under_the_cap() {
+        let item = |i: usize| json!({"id": format!("urn:ngsi-ld:V:{i}"), "v": "x".repeat(40)});
+        let one = serde_json::to_vec(&item(0)).expect("json").len();
+        let runs = chunk_by_bytes((0..5).map(item).collect(), one * 2);
+        assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2, 1]);
+        assert_eq!(runs[2][0]["id"], json!("urn:ngsi-ld:V:4"));
+        let runs = chunk_by_bytes(vec![item(0), item(1)], one / 2);
+        assert_eq!(runs.len(), 2, "an over-cap item is its own run, never lost");
+        assert!(chunk_by_bytes(Vec::new(), 1).is_empty());
     }
 }
