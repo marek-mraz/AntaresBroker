@@ -15,7 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Mock replying `reply` to every request, counting hits.
+/// Mock replying `reply` to every request; the counter is the number of
+/// DISTINCT Vehicle ids delivered so far — changes queued behind a slow
+/// endpoint travel grouped in one notification (5.8.6), so a delivered
+/// entity, not a POST, is the unit an attempt is measured in.
 fn mock_counting(reply: &'static str) -> (u16, Arc<AtomicUsize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -23,15 +26,49 @@ fn mock_counting(reply: &'static str) -> (u16, Arc<AtomicUsize>) {
     let seen = hits.clone();
     let reply = reply.replacen("\r\n", "\r\nConnection: close\r\n", 1);
     std::thread::spawn(move || {
+        let mut ids: std::collections::HashSet<String> = Default::default();
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
-            seen.fetch_add(1, Ordering::SeqCst);
-            let mut buf = [0u8; 8192];
-            let _ = s.read(&mut buf);
+            let body = read_request(&mut s);
+            for hit in body.match_indices("urn:ngsi-ld:Vehicle:") {
+                let rest = &body[hit.0..];
+                let end = rest.find('"').unwrap_or(rest.len());
+                ids.insert(rest[..end].to_owned());
+            }
+            seen.store(ids.len(), Ordering::SeqCst);
             let _ = s.write_all(reply.as_bytes());
         }
     });
     (port, hits)
+}
+
+/// Headers + the Content-Length'd body of one request, as text.
+fn read_request(s: &mut std::net::TcpStream) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let Ok(n) = s.read(&mut chunk) else { break };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&buf);
+        let Some(head_end) = text.find("\r\n\r\n") else {
+            continue;
+        };
+        let len = text[..head_end]
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("Content-Length: ")
+                    .or_else(|| l.strip_prefix("content-length: "))
+            })
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if buf.len() >= head_end + 4 + len {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Accepts, reads, never answers — the deadline-eater.
