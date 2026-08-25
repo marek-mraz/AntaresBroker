@@ -11,7 +11,7 @@ commit, large stays on the list until measured.
   tracked hosts, under the breaker lock, on every insert once full. Cost is
   microseconds per request at that size; an LRU (moka is already a dep) makes
   it O(1). Swap only on a measured stall — bench first.
-- [B] migrations/0011 `try_timestamptz`: plpgsql EXCEPTION block = one
+- [B] migrations/0001_init.sql `try_timestamptz`: plpgsql EXCEPTION block = one
   subtransaction per unparsable value. Acceptable: the API validates every
   datetime before it reaches the DB, so the fallback fires only on rows
   written past the API. Note only.
