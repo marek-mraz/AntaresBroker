@@ -178,22 +178,8 @@ pub use super::filter::{TemporalFilter, TemporalOutcome};
 /// `None` when a range is present but outside the compiler's exact subset —
 /// the caller then reconstructs unpruned and the window stays the arbiter.
 fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String, Vec<String>)> {
-    // $first_bind is always the timeproperty (predicate member / order key)
-    let mut binds = vec![f.timeproperty.to_owned()];
+    let (range_and, mut binds) = window_sql(f, first_bind)?;
     let tp = first_bind;
-    let mut range_and = String::new();
-    if let Some(r) = &f.range {
-        let c = crate::compile::temporal::compile_instance_range(r, "ai.data", first_bind)?;
-        range_and = format!(" AND {}", c.sql);
-        debug_assert_eq!(c.binds[0], f.timeproperty);
-        binds.extend(c.binds.into_iter().skip(1));
-        // widened COLUMN bound on the SAME binds ($first_bind+1 = timeAt):
-        // lets the (tenant, entity, attr, observed_at) btree serve the range;
-        // the byte-exact text predicate above still decides membership
-        if let Some(cb) = crate::compile::temporal::column_range_bound(r, "ai", first_bind + 1) {
-            range_and.push_str(&format!(" AND {cb}"));
-        }
-    }
     let expr = match f.last_n {
         Some(n) => {
             let n_bind = first_bind + binds.len();
@@ -221,6 +207,124 @@ fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String
                GROUP BY ai.attr_id) g), '{{}}'::jsonb)"
         ),
     };
+    Some((expr, binds))
+}
+
+/// The 4.11 window over the instance rows `ai` of the meta row `m`: the
+/// ` AND …` fragment plus its text binds — $first_bind is always the
+/// timeproperty (predicate member / order key), the range binds follow.
+/// `None` when the range is outside the compiler's exact subset.
+fn window_sql(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String, Vec<String>)> {
+    let mut binds = vec![f.timeproperty.to_owned()];
+    let mut range_and = String::new();
+    if let Some(r) = &f.range {
+        let c = crate::compile::temporal::compile_instance_range(r, "ai.data", first_bind)?;
+        range_and = format!(" AND {}", c.sql);
+        debug_assert_eq!(c.binds[0], f.timeproperty);
+        binds.extend(c.binds.into_iter().skip(1));
+        // widened COLUMN bound on the SAME binds ($first_bind+1 = timeAt):
+        // lets the (tenant, entity, attr, observed_at) btree serve the range;
+        // the byte-exact text predicate above still decides membership
+        if let Some(cb) = crate::compile::temporal::column_range_bound(r, "ai", first_bind + 1) {
+            range_and.push_str(&format!(" AND {cb}"));
+        }
+    }
+    Some((range_and, binds))
+}
+
+/// Timestamp text in the shape the API's aggregated rows carry.
+const BUCKET_TS: &str = r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')"#;
+
+/// 4.5.19 / 5.7.4.4 aggregated temporal representation computed in SQL for
+/// the meta row `m`: per attribute the bucket matrix of every requested
+/// method as `[value, start, end]` rows, in one object
+/// `{"bad": <any windowed value non-numeric>, "attrs": {iri: {"type":
+/// "Property", method: rows…}}}`. Only the numeric class (numbers and
+/// booleans, Table 4.5.19.1-1) is computed here; `bad` tells the caller to
+/// reconstruct instead so the API keeps every other class and the
+/// eligibility errors. Buckets: `period_secs` wide from the anchor (the
+/// request's timeAt, else the attribute's first instant); no period = one
+/// bucket from the anchor to the last instant + 1 s — the API's own rule.
+fn aggregate_expr(
+    f: &TemporalFilter<'_>,
+    agg: &super::filter::Aggregate<'_>,
+    first_bind: usize,
+) -> Option<(String, Vec<String>)> {
+    let (range_and, mut binds) = window_sql(f, first_bind)?;
+    let tp = first_bind;
+    let col = match f.timeproperty {
+        "observedAt" => "observed_at",
+        "createdAt" => "created_at",
+        "modifiedAt" => "modified_at",
+        _ => return None,
+    };
+    let anchor = match agg.anchor {
+        Some(a) => {
+            binds.push(a.to_owned());
+            format!("${}::timestamptz", first_bind + binds.len() - 1)
+        }
+        None => format!("min(ai.{col}) OVER (PARTITION BY ai.attr_id)"),
+    };
+    let (bs, be) = match agg.period_secs {
+        None => (
+            "s0.anchor".to_owned(),
+            "s0.last + interval '1 second'".to_owned(),
+        ),
+        Some(sc) => {
+            binds.push(sc.to_string());
+            let n = first_bind + binds.len() - 1;
+            let start = format!("date_bin(make_interval(secs => ${n}::bigint), s0.ts, s0.anchor)");
+            (
+                start.clone(),
+                format!("{start} + make_interval(secs => ${n}::bigint)"),
+            )
+        }
+    };
+    let mut aggs = String::new();
+    let mut rows = String::new();
+    let mut pairs = String::new();
+    for (i, m) in agg.methods.iter().enumerate() {
+        let sql = match m.as_str() {
+            "totalCount" => "count(*)",
+            "distinctCount" => "count(DISTINCT s.v)",
+            "min" => "min(s.v)",
+            "max" => "max(s.v)",
+            "sum" => "sum(s.v)",
+            "avg" => "avg(s.v)",
+            "stddev" => "stddev_pop(s.v)",
+            "sumsq" => "sum(s.v * s.v)",
+            _ => return None,
+        };
+        aggs.push_str(&format!(", {sql} AS m{i}"));
+        rows.push_str(&format!(
+            ", jsonb_agg(jsonb_build_array(g.m{i}, {}, {}) ORDER BY g.bs) AS r{i}",
+            BUCKET_TS.replace("{}", "g.bs"),
+            BUCKET_TS.replace("{}", "g.be")
+        ));
+        // method names are the allowlist above, never request text
+        pairs.push_str(&format!(", '{m}', b.r{i}"));
+    }
+    let expr = format!(
+        "(SELECT jsonb_build_object('bad', bool_or(b.bad), 'attrs', \
+            jsonb_object_agg(b.attr_id, jsonb_build_object('type', 'Property'{pairs}))) \
+          FROM (SELECT g.attr_id, bool_or(g.bad) AS bad{rows} \
+                FROM (SELECT s.attr_id, s.bs, s.be, bool_or(s.bad) AS bad{aggs} \
+                      FROM (SELECT s0.attr_id, s0.v, s0.bad, {bs} AS bs, {be} AS be \
+                            FROM (SELECT ai.attr_id, \
+                                   CASE WHEN jsonb_typeof(ai.data -> 'value') = 'boolean' \
+                                          THEN (CASE WHEN (ai.data ->> 'value')::boolean THEN 1 ELSE 0 END)::float8 \
+                                        WHEN jsonb_typeof(ai.data -> 'value') = 'number' \
+                                          THEN (ai.data ->> 'value')::float8 END AS v, \
+                                   jsonb_typeof(ai.data -> 'value') IS DISTINCT FROM 'number' \
+                                     AND jsonb_typeof(ai.data -> 'value') IS DISTINCT FROM 'boolean' AS bad, \
+                                   ai.{col} AS ts, {anchor} AS anchor, \
+                                   max(ai.{col}) OVER (PARTITION BY ai.attr_id) AS last \
+                                  FROM attr_instances ai \
+                                  WHERE ai.tenant_id = m.tenant_id AND ai.entity_id = m.id \
+                                    AND jsonb_typeof(ai.data -> ${tp}) = 'string'{range_and}) s0) s \
+                      GROUP BY s.attr_id, s.bs, s.be) g \
+                GROUP BY g.attr_id) b)"
+    );
     Some((expr, binds))
 }
 
@@ -365,6 +469,18 @@ impl PgTemporalStore {
         tenant: &TenantId,
         f: &TemporalFilter<'_>,
     ) -> Result<TemporalOutcome, sqlx::Error> {
+        self.query_inner(tenant, f, f.aggregate.is_some())
+    }
+
+    /// `push_agg`: compute the filter's 4.5.19 aggregation in SQL; a row
+    /// whose windowed values are not all numeric makes the whole query fall
+    /// back to instance reconstruction (one extra round trip, only then).
+    fn query_inner(
+        &self,
+        tenant: &TenantId,
+        f: &TemporalFilter<'_>,
+        push_agg: bool,
+    ) -> Result<TemporalOutcome, sqlx::Error> {
         enum B {
             Text(String),
             Arr(Vec<String>),
@@ -489,11 +605,22 @@ impl PgTemporalStore {
         }
         let n_where = binds.len();
         let where_sql = wheres.join(" AND ");
-        let (attr_expr, extra) = match attr_object_expr(f, n_where + 1) {
-            Some(v) => v,
-            // refused range shape: reconstruct unpruned, window arbitrates
-            None => attr_object_expr(&TemporalFilter::default(), n_where + 1)
-                .expect("no range/lastN always compiles"),
+        let agg = if push_agg {
+            f.aggregate
+                .as_ref()
+                .and_then(|a| aggregate_expr(f, a, n_where + 1))
+        } else {
+            None
+        };
+        let aggregated = agg.is_some();
+        let (attr_expr, extra) = match agg {
+            Some((e, b)) => (format!("jsonb_build_object('$agg', {e})"), b),
+            None => match attr_object_expr(f, n_where + 1) {
+                Some(v) => v,
+                // refused range shape: reconstruct unpruned, window arbitrates
+                None => attr_object_expr(&TemporalFilter::default(), n_where + 1)
+                    .expect("no range/lastN always compiles"),
+            },
         };
         binds.extend(extra.into_iter().map(B::Text));
         let mut select_total = String::new();
@@ -558,11 +685,33 @@ impl PgTemporalStore {
                 rows.len(),
                 super::pg_entity::MAX_UNDECIDED_ROWS,
             )?;
-            Ok(TemporalOutcome {
-                rows: rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
+            let mut docs: Vec<Value> = rows.into_iter().map(|r| r.get::<Value, _>(0)).collect();
+            if aggregated {
+                for d in &mut docs {
+                    let Some(o) = d.as_object_mut() else { continue };
+                    let Some(agg) = o.remove("$agg") else {
+                        continue;
+                    };
+                    if agg.get("bad").and_then(Value::as_bool) == Some(true) {
+                        return Ok(None);
+                    }
+                    if let Some(attrs) = agg.get("attrs").and_then(Value::as_object) {
+                        for (k, v) in attrs {
+                            o.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            Ok(Some(TemporalOutcome {
+                rows: docs,
                 paged,
                 total,
-            })
+                aggregated,
+            }))
+        })
+        .and_then(|out| match out {
+            Some(out) => Ok(out),
+            None => self.query_inner(tenant, f, false),
         })
     }
 

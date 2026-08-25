@@ -131,7 +131,38 @@ pub struct TemporalFilter<'a> {
     /// Superset like `q` — `GeoQuery::matches` stays the arbiter; rows with
     /// an unextracted `geo_value` always survive.
     pub geo: Option<(&'a GeoSpec<'a>, &'a str)>,
+    /// 4.5.19 aggregated representation computed by the backend: when a
+    /// driver can bucket and aggregate the windowed instances itself it
+    /// returns per-attribute aggregated objects instead of instance arrays
+    /// and sets `TemporalOutcome::aggregated`; a driver that cannot (or a
+    /// value class outside the numeric one) ignores this and the API
+    /// aggregates over the reconstructed instances as before.
+    pub aggregate: Option<Aggregate<'a>>,
 }
+
+/// 4.5.19.1: the bucket matrix a backend computes for the numeric value class.
+#[derive(Clone, Copy, Debug)]
+pub struct Aggregate<'a> {
+    /// aggregation methods, each one of [`AGGREGATE_METHODS`]
+    pub methods: &'a [String],
+    /// bucket width in seconds; `None` = one bucket over the whole range (PT0S)
+    pub period_secs: Option<i64>,
+    /// bucket origin (the request's timeAt); `None` = each attribute's first instant
+    pub anchor: Option<&'a str>,
+}
+
+/// Table 4.5.19.1-1: the methods every numeric Property is eligible for —
+/// the set a backend may compute in place of the API.
+pub const AGGREGATE_METHODS: [&str; 8] = [
+    "totalCount",
+    "distinctCount",
+    "min",
+    "max",
+    "sum",
+    "avg",
+    "stddev",
+    "sumsq",
+];
 
 impl Default for TemporalFilter<'_> {
     fn default() -> Self {
@@ -146,6 +177,7 @@ impl Default for TemporalFilter<'_> {
             q: None,
             expand: &|t: &str| t.to_owned(),
             geo: None,
+            aggregate: None,
         }
     }
 }
@@ -205,6 +237,9 @@ pub struct TemporalOutcome {
     pub paged: bool,
     /// Pre-LIMIT match count, when the backend computed it.
     pub total: Option<i64>,
+    /// The rows carry the 4.5.19 aggregated attribute objects the filter's
+    /// `aggregate` asked for (no instance arrays to window).
+    pub aggregated: bool,
 }
 
 #[cfg(test)]

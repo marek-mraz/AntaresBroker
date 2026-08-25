@@ -436,3 +436,135 @@ async fn append_for_a_deleted_entity_does_not_resurrect_its_history() {
         "and no instance rows either"
     );
 }
+
+/// 4.5.19 / 5.7.4.4 aggregation pushed into SQL: the numeric bucket matrix
+/// the API would compute over reconstructed instances comes back from the
+/// store already aggregated; a non-numeric windowed value makes the store
+/// fall back to instance rows so the API keeps its eligibility verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn aggregation_pushdown_buckets_like_the_api() {
+    use antares_sql::compile::temporal::InstanceRange;
+    use antares_sql::store::filter::{Aggregate, TemporalFilter};
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgTemporalStore::new(pool.clone());
+    let t = TenantId::new("pgaggr").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Vehicle:aggr1";
+    let _ = s.delete(&t, id);
+    let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let inst = |v: serde_json::Value, at: &str, n: u32| {
+        json!({"type": "Property", "value": v, "observedAt": at,
+               "instanceId": format!("urn:ngsi-ld:Instance:a{n}")})
+    };
+    let doc = json!({
+        "id": id, "type": "Vehicle",
+        "createdAt": "2026-01-01T00:00:00Z", "modifiedAt": "2026-01-01T00:00:00Z",
+        speed: [inst(json!(10), "2026-01-01T00:00:00Z", 1),
+                inst(json!(20), "2026-01-01T00:30:00Z", 2),
+                inst(json!(30), "2026-01-01T01:15:00Z", 3),
+                inst(json!(99), "2025-12-31T23:00:00Z", 4)]
+    });
+    assert!(s.create(&t, id, &doc).expect("create"));
+    let methods = ["avg".to_owned(), "max".to_owned(), "totalCount".to_owned()];
+    let expand = |t: &str| t.to_owned();
+    let range = InstanceRange {
+        timerel: "after",
+        time_at: "2026-01-01T00:00:00Z",
+        end_time_at: None,
+        timeproperty: "observedAt",
+    };
+    let f = TemporalFilter {
+        ids: Some(&[id]),
+        range: Some(range),
+        expand: &expand,
+        aggregate: Some(Aggregate {
+            methods: &methods,
+            period_secs: Some(3600),
+            anchor: Some("2026-01-01T00:00:00Z"),
+        }),
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&t, &f).expect("query");
+    assert!(out.aggregated, "the store aggregated");
+    assert_eq!(out.rows.len(), 1);
+    let a = &out.rows[0][speed];
+    assert_eq!(a["type"], "Property");
+    // [value, start, end] rows; the value compares as a number (SQL spells
+    // 15 where the API spells 15.0 — the same JSON number)
+    let rows = |v: &serde_json::Value| -> Vec<(f64, String, String)> {
+        v.as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| {
+                (
+                    r[0].as_f64().expect("number"),
+                    r[1].as_str().expect("start").to_owned(),
+                    r[2].as_str().expect("end").to_owned(),
+                )
+            })
+            .collect()
+    };
+    let b0 = (
+        "2026-01-01T00:00:00Z".to_owned(),
+        "2026-01-01T01:00:00Z".to_owned(),
+    );
+    let b1 = (
+        "2026-01-01T01:00:00Z".to_owned(),
+        "2026-01-01T02:00:00Z".to_owned(),
+    );
+    // hour buckets anchored at timeAt; the 23:00 instance is outside the window
+    assert_eq!(
+        rows(&a["avg"]),
+        vec![
+            (15.0, b0.0.clone(), b0.1.clone()),
+            (30.0, b1.0.clone(), b1.1.clone())
+        ]
+    );
+    assert_eq!(rows(&a["max"])[0].0, 20.0);
+    assert_eq!(
+        rows(&a["totalCount"]),
+        vec![(2.0, b0.0, b0.1), (1.0, b1.0, b1.1)]
+    );
+    assert!(
+        a.get("value").is_none(),
+        "no instance members leak into an aggregate: {a}"
+    );
+
+    // PT0S: one bucket from the first instant to the last + 1 s, no anchor
+    let f0 = TemporalFilter {
+        ids: Some(&[id]),
+        expand: &expand,
+        aggregate: Some(Aggregate {
+            methods: &methods,
+            period_secs: None,
+            anchor: None,
+        }),
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&t, &f0).expect("query");
+    assert!(out.aggregated);
+    assert_eq!(
+        rows(&out.rows[0][speed]["totalCount"]),
+        vec![(
+            4.0,
+            "2025-12-31T23:00:00Z".to_owned(),
+            "2026-01-01T01:15:01Z".to_owned()
+        )]
+    );
+
+    // a string-valued windowed instance: not the store's class to judge —
+    // plain instance rows come back and the API decides eligibility
+    let r = s.mutate(&t, id, |d| {
+        d[speed].as_array_mut().expect("arr").push(
+            json!({"type": "Property", "value": "fast", "observedAt": "2026-01-01T00:45:00Z",
+                   "instanceId": "urn:ngsi-ld:Instance:a5"}),
+        );
+        Ok::<(), ()>(())
+    });
+    assert!(matches!(r, Ok(Some(Ok(())))));
+    let out = s.query(&t, &f).expect("query");
+    assert!(!out.aggregated, "mixed classes fall back to instances");
+    assert!(out.rows[0][speed].is_array(), "{}", out.rows[0]);
+    assert!(s.delete(&t, id).expect("delete"));
+}

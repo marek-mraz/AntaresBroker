@@ -503,6 +503,7 @@ impl AnyStore {
                 rows: s.list(tenant, Kind::Temporal),
                 paged: false,
                 total: None,
+                aggregated: false,
             },
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.temporal.query(tenant, f).map_err(db)?,

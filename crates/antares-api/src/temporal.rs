@@ -1698,6 +1698,23 @@ pub(crate) async fn query_temporal_inner(
         && params.get("pick").is_none()
         && p_limit > 0
         && !crate::federation::would_federate(st, &tenant, &ctx, params, headers);
+    // 4.5.19 computed by the store: the numeric bucket matrix per attribute
+    // comes back aggregated when nothing after the store call could change
+    // the answer — every filter exact in SQL, the page pushed, no
+    // projection/lastN/month periods — otherwise the instances are
+    // aggregated here as before. A store that cannot (memory) or a
+    // non-numeric value class leaves `outcome.aggregated` false.
+    let push_agg = trepr.aggregated
+        && exact_push
+        && push_page
+        && trepr.omit.is_none()
+        && last_n.is_none()
+        && !matches!(trepr.aggr_period, AggrPeriod::Months(..))
+        && params.get("entityMap").map(String::as_str) != Some("true")
+        && trepr
+            .aggr_methods
+            .iter()
+            .all(|m| antares_sql::store::filter::AGGREGATE_METHODS.contains(&m.as_str()));
     // scoped: the &dyn expander must not live across an await (handler
     // futures are Send; the store call itself is synchronous)
     let outcome = {
@@ -1729,9 +1746,64 @@ pub(crate) async fn query_temporal_inner(
             q: q_ast.as_ref(),
             expand: &expand,
             geo: geo_pre.as_ref().map(|(s, iri)| (s, iri.as_str())),
+            aggregate: push_agg.then_some(antares_sql::store::filter::Aggregate {
+                methods: &trepr.aggr_methods,
+                period_secs: match trepr.aggr_period {
+                    AggrPeriod::Seconds(sc) => Some(sc),
+                    _ => None,
+                },
+                anchor: tq.as_ref().map(|t| t.time_at.as_str()),
+            }),
         };
         st.temporal.query_temporal(&tenant, &tf)?
     };
+    if outcome.aggregated {
+        let total = outcome
+            .total
+            .map(|t| t as usize)
+            .unwrap_or(outcome.rows.len());
+        let (page, count_hdr, links) = crate::entities::paginate_pre(
+            st,
+            params,
+            outcome.rows,
+            "/ngsi-ld/v1/temporal/entities",
+            total,
+        )?;
+        let timeprop = tq
+            .as_ref()
+            .map_or("observedAt", |t| t.timeproperty.as_str());
+        let none = Windowed {
+            attrs: Default::default(),
+            max_per_attr: 0,
+            ts_min: None,
+            ts_max: None,
+            truncated: false,
+        };
+        let mut payload: Vec<Value> = Vec::new();
+        for d in &page {
+            // core members exactly as the instance path presents them; the
+            // aggregated attribute objects are copied under compacted names
+            let mut presented = present_temporal(d, &none, &ctx, &trepr, tq.as_ref(), timeprop)?;
+            let Some(out) = presented.as_object_mut() else {
+                continue;
+            };
+            let mut any = false;
+            for (k, v) in d.as_object().into_iter().flatten() {
+                if is_meta(k) || attrs_filter.as_ref().is_some_and(|a| !a.contains(k)) {
+                    continue;
+                }
+                out.insert(ctx.compact_iri(k), v.clone());
+                any = true;
+            }
+            if any {
+                payload.push(presented);
+            }
+        }
+        let mut resp =
+            crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
+        attach_paging(&mut resp, count_hdr, &links);
+        return Ok(resp);
+    }
     let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
     // 5.7.4.4: fan the query out to matching queryTemporal registrations
     // and merge the remote Temporal Evolutions with the local set (4.5.5;
@@ -1973,16 +2045,7 @@ pub(crate) async fn query_temporal_inner(
             resp.headers_mut().insert("Content-Range", v);
         }
     }
-    if let Some(total) = count_hdr {
-        if let Ok(v) = total.to_string().parse() {
-            resp.headers_mut().insert("NGSILD-Results-Count", v);
-        }
-    }
-    for l in links {
-        if let Ok(v) = l.parse() {
-            resp.headers_mut().append(axum::http::header::LINK, v);
-        }
-    }
+    attach_paging(&mut resp, count_hdr, &links);
     // 6.18.3.2: entityMap=true — the temporal EntityMap for this query is
     // (re)created; the response carries NGSILD-EntityMap and 201 Created.
     if params.get("entityMap").map(String::as_str) == Some("true") {
@@ -1996,6 +2059,20 @@ pub(crate) async fn query_temporal_inner(
         }
     }
     Ok(resp)
+}
+
+/// 6.3.13 NGSILD-Results-Count + the 6.3.9 pagination Link headers.
+fn attach_paging(resp: &mut Response, count_hdr: Option<usize>, links: &[String]) {
+    if let Some(total) = count_hdr {
+        if let Ok(v) = total.to_string().parse() {
+            resp.headers_mut().insert("NGSILD-Results-Count", v);
+        }
+    }
+    for l in links {
+        if let Ok(v) = l.parse() {
+            resp.headers_mut().append(axum::http::header::LINK, v);
+        }
+    }
 }
 
 // ---------- GET /temporal/entities/{id} (5.7.3) ----------
