@@ -353,14 +353,9 @@ jobs:
             on && !/^## / { print }
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-      # The CIM 029 ICS pro forma (docs/src/conformance-ics.md, rendered by
-      # dev/spec.py ics and drift-gated by dev/spec.py check) ships with the
-      # release so a conformance claim can be filed against a tagged build.
-      - name: ICS pro forma artefact
-        run: cp docs/src/conformance-ics.md "antares-${GITHUB_REF#refs/tags/}-ics-cim029.md"
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VER="${GITHUB_REF#refs/tags/}"
-          gh release create "$VER"             --title "Antares $VER" --notes-file notes.md             antares-*.tar.gz "antares-wasm-$VER.zip" "antares-$VER.sbom.spdx.json" "antares-$VER-ics-cim029.md"
+          gh release create "$VER"             --title "Antares $VER" --notes-file notes.md             antares-*.tar.gz "antares-wasm-$VER.zip" "antares-$VER.sbom.spdx.json"

@@ -11,8 +11,8 @@ shares no code with Orion-LD, Scorpio or Stellio, follows their naming
 tradition, and federates with them over the standard distributed-
 operations API. A deployment can mix brokers per site and migrate
 between them by replaying declarative state; conformance is the
-contract, and Antares publishes its evidence continuously
-([conformance](conformance.md)).
+contract, and Antares publishes its evidence continuously on the
+[ETSI conformance report page](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/).
 
 ## Where Antares fits best
 
@@ -40,8 +40,8 @@ compliant broker, not just Antares.
 
 ## Standards posture
 
-Implementation is spec-first against CIM 009 V1.9.1 (per-clause ledger,
-[conformance](conformance.md)); suspected defects in the official test
+Implementation is spec-first against CIM 009 V1.9.1 (one ledger file per
+clause under `docs/spec/`); suspected defects in the official test
 suite are proven from the spec text and raised upstream at ETSI rather
 than worked around. Smart Data Models payloads work as-is — see the
 smart-city example dataset in the repository.

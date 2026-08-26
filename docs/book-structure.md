@@ -12,11 +12,10 @@ Current mapping of `docs/src`:
 | getting-started.md | tutorial |
 | configuration.md | reference |
 | deployment.md, operations.md, federation.md, wasm.md | how-to |
-| conformance.md, conformance-ics.md | reference |
 | ecosystem.md | explanation |
 | api.html (ReDoc, generated at deploy) + /api rustdoc | reference |
 
 Gap check when adding a feature: does it need a how-to (an operator can
-run it), and did the reference (configuration table, ICS, rustdoc) pick
+run it), and did the reference (configuration table, rustdoc) pick
 it up? A tutorial or explanation chapter is added only when a reader has
 actually asked for one.
