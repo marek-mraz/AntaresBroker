@@ -55,6 +55,7 @@ const T_JSONLD_CONTEXTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("j
 const T_SNAPSHOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapshots");
 const T_ENTITY_MAP_DOCS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("entity_map_docs");
 const T_DIST_SUBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dist_subs");
+const T_DEAD_LETTERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dead_letters");
 const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 /// On-disk format version: bump on any key/value shape change; an older
 /// or newer file refuses to load rather than being misread as valid data.
@@ -152,10 +153,11 @@ fn table_for(kind: Kind) -> TableDefinition<'static, &'static [u8], &'static [u8
         Kind::Snapshot => T_SNAPSHOTS,
         Kind::EntityMap => T_ENTITY_MAP_DOCS,
         Kind::DistSub => T_DIST_SUBS,
+        Kind::DeadLetter => T_DEAD_LETTERS,
     }
 }
 
-const ALL_KINDS: [Kind; 8] = [
+const ALL_KINDS: [Kind; 9] = [
     Kind::Entity,
     Kind::Subscription,
     Kind::Registration,
@@ -164,6 +166,7 @@ const ALL_KINDS: [Kind; 8] = [
     Kind::Snapshot,
     Kind::EntityMap,
     Kind::DistSub,
+    Kind::DeadLetter,
 ];
 
 /// Key = `tenant \0 id`. Unambiguous: TenantId is `[A-Za-z0-9_-]{1,64}`
@@ -267,6 +270,7 @@ struct Inner {
     snapshots: HashMap<String, BTreeMap<String, Value>>,
     entity_map_docs: HashMap<String, BTreeMap<String, Value>>,
     dist_subs: HashMap<String, BTreeMap<String, Value>>,
+    dead_letters: HashMap<String, BTreeMap<String, Value>>,
     /// tenant → entity id → temporal doc (attr IRI → instance array).
     temporal: HashMap<String, BTreeMap<String, Value>>,
     /// hosted/cached @context documents, shared across tenants by design.
@@ -353,6 +357,7 @@ impl Store {
                 Kind::Snapshot => &mut inner.snapshots,
                 Kind::EntityMap => &mut inner.entity_map_docs,
                 Kind::DistSub => &mut inner.dist_subs,
+                Kind::DeadLetter => &mut inner.dead_letters,
             };
             for row in redb::ReadableTable::iter(&table).map_err(|e| e.to_string())? {
                 let (k, v) = row.map_err(|e| e.to_string())?;
@@ -622,6 +627,7 @@ impl Store {
             Kind::Snapshot => &inner.snapshots,
             Kind::EntityMap => &inner.entity_map_docs,
             Kind::DistSub => &inner.dist_subs,
+            Kind::DeadLetter => &inner.dead_letters,
         }
     }
 
@@ -635,6 +641,7 @@ impl Store {
             Kind::Snapshot => &mut inner.snapshots,
             Kind::EntityMap => &mut inner.entity_map_docs,
             Kind::DistSub => &mut inner.dist_subs,
+            Kind::DeadLetter => &mut inner.dead_letters,
         }
     }
 

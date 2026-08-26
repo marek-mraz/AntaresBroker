@@ -235,6 +235,7 @@ async fn purge_tenant_empties_every_tenant_table() {
             Kind::Snapshot,
             Kind::EntityMap,
             Kind::DistSub,
+            Kind::DeadLetter,
         ] {
             let id = "urn:x:1";
             let d = if kind == Kind::Registration {
@@ -269,7 +270,7 @@ async fn purge_tenant_empties_every_tenant_table() {
         .await
         .expect("entity map row");
     }
-    const TABLES: [&str; 12] = [
+    const TABLES: [&str; 13] = [
         "entities",
         "subscriptions",
         "csource_subscriptions",
@@ -280,6 +281,7 @@ async fn purge_tenant_empties_every_tenant_table() {
         "snapshots",
         "entity_map_docs",
         "dist_subs",
+        "dead_letters",
         "temporal_entities",
         "attr_instances",
     ];

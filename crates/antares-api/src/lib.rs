@@ -26,6 +26,7 @@ pub mod subscriptions;
 pub mod temporal;
 pub mod types_attrs;
 
+pub use antares_notifier::DeliveryPolicy;
 pub use state::{AppState, TemporalRecord};
 
 /// Spawn for both targets — tokio natively, the JS microtask queue on
@@ -128,6 +129,9 @@ pub fn ops_router(state: AppState) -> Router {
         .route("/q/metrics", get(metrics_endpoint))
         .route("/q/tenants", get(tenants_list))
         .route("/q/tenants/{tenant}", delete(tenant_purge))
+        .route("/q/dead-letters", get(dead_letters_list))
+        .route("/q/dead-letters/{id}", delete(dead_letter_delete))
+        .route("/q/dead-letters/{id}/replay", post(dead_letter_replay))
         .with_state(state)
 }
 
@@ -300,6 +304,9 @@ pub fn router(state: AppState) -> Router {
         .route("/q/metrics", get(metrics_endpoint))
         .route("/q/tenants", get(tenants_list))
         .route("/q/tenants/{tenant}", delete(tenant_purge))
+        .route("/q/dead-letters", get(dead_letters_list))
+        .route("/q/dead-letters/{id}", delete(dead_letter_delete))
+        .route("/q/dead-letters/{id}/replay", post(dead_letter_replay))
         // 6.3.6/6.3.21: Prefer: ngsi-ld=<version> → 4.3.6.8 amendment +
         // Preference-Applied (+203 when altered) on every API response.
         // OPTIONS (2.0 #59 pre-adoption): axum's MethodRouter already
@@ -549,6 +556,8 @@ async fn health(
     body["limits"] = state.limits.snapshot();
     // History events a driver failed to record after the write stood.
     body["temporalDrainErrors"] = history::drain_errors().into();
+    // Notifications the delivery policy gave up on (this process, since start).
+    body["deadLetters"] = notify::dead_letters_written().into();
     // Jemalloc heap stats (RSS ≈ live×1.2 is the target).
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
@@ -566,6 +575,126 @@ async fn health(
 /// bus is connected. On a Postgres failover or a NATS partition the pod is
 /// still alive (liveness stays 200 — a restart fixes nothing) but must stop
 /// receiving traffic, so the readinessProbe points HERE.
+/// The tenant an admin dead-letter call addresses: `?tenant=` (default
+/// tenant when absent), grammar-checked, never a reserved internal one.
+fn admin_tenant(q: &std::collections::HashMap<String, String>) -> Result<TenantId, NgsiError> {
+    let raw = q.get("tenant").map_or(TenantId::DEFAULT, String::as_str);
+    let bad = || NgsiError::BadRequestData(format!("invalid tenant: {raw:?}"));
+    if reserved_tenant(raw) {
+        return Err(bad());
+    }
+    TenantId::new(raw).map_err(|_| bad())
+}
+
+/// Dead letters of one tenant, newest first; `subscription=` narrows to one
+/// subscription, `limit=` bounds the page (default 100). The endpoint URI
+/// is shown with its userinfo redacted.
+async fn dead_letters_list(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let tenant = match admin_tenant(&q) {
+        Ok(t) => t,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let limit = match q.get("limit") {
+        None => 100usize,
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return ApiError::from(NgsiError::BadRequestData(format!(
+                    "limit must be a positive integer, got {v:?}"
+                )))
+                .into_response()
+            }
+        },
+    };
+    let mut letters = match st.store.list(&tenant, antares_store::Kind::DeadLetter) {
+        Ok(l) => l,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    if let Some(sid) = q.get("subscription") {
+        letters.retain(|l| l["subscriptionId"].as_str() == Some(sid.as_str()));
+    }
+    letters.sort_by(|a, b| b["lastAt"].as_str().cmp(&a["lastAt"].as_str()));
+    letters.truncate(limit);
+    for l in &mut letters {
+        if let Some(u) = l["uri"].as_str() {
+            l["uri"] = serde_json::Value::String(notify::redact_userinfo(u));
+        }
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::Value::Array(letters)),
+    )
+        .into_response()
+}
+
+/// Re-deliver one dead letter once through its own binding: 204 and the
+/// letter is gone on success; 502 with the failure text and the letter
+/// kept (attempt history extended) otherwise.
+async fn dead_letter_replay(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use antares_store::{CurrentStateDriverExt as _, Kind};
+    let tenant = match admin_tenant(&q) {
+        Ok(t) => t,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let letter = match st.store.get(&tenant, Kind::DeadLetter, &id) {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return ApiError::from(NgsiError::ResourceNotFound(format!("dead letter {id}")))
+                .into_response()
+        }
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    match notify::replay_dead_letter(&st, &letter).await {
+        Ok(()) => match st.store.delete(&tenant, Kind::DeadLetter, &id) {
+            Ok(_) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => ApiError::from(e).into_response(),
+        },
+        Err(why) => {
+            let ts = state::now_iso();
+            let w = why.clone();
+            let _ = st.store.mutate(&tenant, Kind::DeadLetter, &id, move |d| {
+                d["attempts"] = (d["attempts"].as_u64().unwrap_or(0) + 1).into();
+                d["lastError"] = serde_json::Value::String(w);
+                d["lastAt"] = serde_json::Value::String(ts);
+                Ok::<(), NgsiError>(())
+            });
+            (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"detail": why, "id": id})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn dead_letter_delete(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let tenant = match admin_tenant(&q) {
+        Ok(t) => t,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    match st
+        .store
+        .delete(&tenant, antares_store::Kind::DeadLetter, &id)
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            ApiError::from(NgsiError::ResourceNotFound(format!("dead letter {id}"))).into_response()
+        }
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
 /// Tenant inventory: every tenant the backends know and what it holds.
 /// Admin surface, never under the API root.
 async fn tenants_list(axum::extract::State(st): axum::extract::State<AppState>) -> Response {

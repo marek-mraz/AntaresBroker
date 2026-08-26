@@ -51,6 +51,14 @@ here).
 | `ANTARES_MAX_BATCH_ITEMS` | `1000` | Batch entity-count cap (DoS bound; the spec sets none). Raise for trusted bulk producers. |
 | `ANTARES_EXTRA_CA_FILE` | unset | PEM bundle of ADDITIONAL trust anchors for egress TLS (private CAs). Verification itself is never disableable. |
 
+## Notification delivery
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ANTARES_NOTIFY_ATTEMPTS` | `1` | Delivery attempts per notification, first one included. `1` is 5.8.6 as written: one send, the outcome booked. Higher values retry on their own task with exponential backoff; the retries never move `timesSent` again. |
+| `ANTARES_NOTIFY_BACKOFF_MS` | `1000` | Delay before the first retry; doubles per retry (±20 % jitter, 60 s ceiling). |
+| `ANTARES_NOTIFY_MAX_AGE_SECS` | `300` | No retry starts later than this after the first attempt. When the attempts or the age run out the notification becomes a dead letter (`/q/dead-letters`, see [operations](operations.md#notification-delivery)). |
+
 ## Lifecycle & observability
 
 | Variable | Default | Effect |

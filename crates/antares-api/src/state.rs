@@ -138,6 +138,9 @@ pub struct AppState {
     /// themselves live in the store (Kind::Snapshot) so persistent modes
     /// survive restarts.
     pub snapshot_cap: usize,
+    /// How a notification is delivered: attempts, backoff, age ceiling.
+    /// Default = one attempt (5.8.6 as written).
+    pub delivery: antares_notifier::DeliveryPolicy,
 }
 
 impl AppState {
@@ -282,6 +285,7 @@ impl AppState {
             temporal_record: TemporalRecord::All,
             public_url,
             snapshot_cap: 1024,
+            delivery: antares_notifier::DeliveryPolicy::default(),
         }
     }
 

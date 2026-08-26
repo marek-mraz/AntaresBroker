@@ -70,6 +70,12 @@ const KNOWN_KEYS: &[&str] = &[
     // crash-drill lever (rows commit but this pod never publishes them —
     // another pod's drain must) and the knob for a dedicated-drainer split.
     "ANTARES_OUTBOX_DRAIN",
+    // Notification delivery policy: total attempts (default 1 = 5.8.6 as
+    // written), first-retry backoff, and the age after which no retry
+    // starts. An exhausted policy leaves a dead letter (/q/dead-letters).
+    "ANTARES_NOTIFY_ATTEMPTS",
+    "ANTARES_NOTIFY_BACKOFF_MS",
+    "ANTARES_NOTIFY_MAX_AGE_SECS",
     // Postgres pool size (max connections); default 20.
     "ANTARES_PG_POOL",
     "ANTARES_PG_STATEMENT_TIMEOUT_MS",
@@ -198,6 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so a garbage window, cadence or switch fails the process instead of
     // silently running at its default.
     let sweep_secs = parse_sweep_secs(std::env::var("ANTARES_SWEEP_SECS").ok().as_deref())?;
+    // Same: validated here, read again where the state is built.
+    antares_api::DeliveryPolicy::from_env()?;
     let drain_delay = shutdown::drain_delay()?;
     let drain_deadline = shutdown::drain_deadline()?;
     // Validated here so a typo fails startup; the value itself is read again
@@ -552,6 +560,7 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
+    state.delivery = antares_api::DeliveryPolicy::from_env().unwrap_or_default();
     state.temporal_record = std::env::var("ANTARES_TEMPORAL_RECORD")
         .as_deref()
         .unwrap_or("all")

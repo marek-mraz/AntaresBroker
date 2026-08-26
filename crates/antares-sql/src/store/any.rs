@@ -67,6 +67,7 @@ fn doc_kind(kind: Kind) -> Option<DocKind> {
         Kind::Snapshot => Some(DocKind::Snapshot),
         Kind::EntityMap => Some(DocKind::EntityMap),
         Kind::DistSub => Some(DocKind::DistSub),
+        Kind::DeadLetter => Some(DocKind::DeadLetter),
         Kind::Entity | Kind::Temporal => None,
     }
 }
@@ -831,6 +832,7 @@ impl AnyStore {
                     "snapshots",
                     "entity_map_docs",
                     "dist_subs",
+                    "dead_letters",
                 ] {
                     sqlx::query(sqlx::AssertSqlSafe(format!(
                         "DELETE FROM {table} WHERE tenant_id = $1"

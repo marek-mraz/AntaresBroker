@@ -65,6 +65,34 @@ ignored. Like the rest of `/q/*`, the routes sit outside `/ngsi-ld/v1` and
 belong behind the gateway. What the gateway owns instead: who may create a
 tenant, quotas and rate limits per tenant, authentication.
 
+## Notification delivery
+
+CIM 009 5.8.6 books every notification once: `timesSent` moves by one,
+`lastNotification` is stamped, then either `lastSuccess` or `lastFailure`
+plus `status: "failed"`. The broker sends once by default. Retries are an
+operator choice (`ANTARES_NOTIFY_ATTEMPTS`, `ANTARES_NOTIFY_BACKOFF_MS`,
+`ANTARES_NOTIFY_MAX_AGE_SECS`, [configuration](configuration.md#notification-delivery))
+and are transport under that one notification: the first attempt is booked
+as above the moment it resolves, the retries run on their own task (a slow
+endpoint never delays another subscription), a retry that succeeds sets
+`lastSuccess` and `status: "ok"` without touching `timesSent` or
+`timesFailed`, and an exhausted policy leaves a **dead letter**: the exact
+request (endpoint, headers, payload) plus the attempt history, stored under
+the subscription's tenant in every store mode.
+
+| Call | Effect |
+|---|---|
+| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (default tenant when `tenant` is absent), newest first, `limit` 100 by default. Endpoint userinfo is redacted in the listing. |
+| `POST /q/dead-letters/{id}/replay?tenant=` | One more attempt through the same binding under the egress policy of the moment: `204` and the letter is deleted, or `502` with the failure text and the letter kept (`attempts`, `lastError`, `lastAt` extended). |
+| `DELETE /q/dead-letters/{id}?tenant=` | Drop the letter. `404` when the tenant holds no such letter. |
+
+`/q/health` reports `deadLetters`, the letters this process wrote since
+start; the letters themselves are rows, so they survive restarts on the
+file, postgres and timescale stores and a tenant purge removes them with
+the rest of the tenant. Egress-policy refusals (private ranges, blocked
+schemes) are never retried and never dead-lettered: a policy verdict is
+not a transport failure.
+
 ## Backup, per store mode
 
 The README's store-mode table is the authority; the operational short form:

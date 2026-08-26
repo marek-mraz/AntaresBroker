@@ -39,6 +39,9 @@ pub enum Kind {
     EntityMap,
     /// 5.8.1.4 distributed-subscription mappings (remote ids per CSR).
     DistSub,
+    /// Notifications a delivery policy gave up on (dead letters), kept
+    /// under the subscription's tenant for replay.
+    DeadLetter,
 }
 
 /// The four store backends, decided ONCE at startup and threaded as a value —

@@ -1923,15 +1923,6 @@ async fn deliver_as(
 
     // Per-binding send, prepared BEFORE the bookkeeping writeback so the
     // optimistic stamp covers only the in-flight attempt (046_12_01 race).
-    enum Outbound {
-        Http(reqwest::RequestBuilder, Vec<u8>),
-        #[cfg(feature = "mqtt")]
-        Mqtt(
-            antares_notifier::mqtt::MqttEndpoint,
-            antares_notifier::mqtt::MqttParams,
-            Vec<u8>,
-        ),
-    }
     let outbound = if is_mqtt {
         #[cfg(feature = "mqtt")]
         {
@@ -1982,26 +1973,23 @@ async fn deliver_as(
             return; // no sink compiled: creation already answered 422
         }
     } else {
-        let mut req = st.http.post(uri);
+        let mut headers: Vec<(String, String)> = Vec::new();
         if accept == "application/ld+json" {
-            req = req.header("Content-Type", "application/ld+json");
+            headers.push(("Content-Type".into(), "application/ld+json".into()));
         } else {
             // application/json and application/geo+json (5.3.1) both carry
             // the @context via the Link header (6.3.5)
-            req = req
-                .header("Content-Type", accept)
-                .header("Link", link_header_value(ctx));
+            headers.push(("Content-Type".into(), accept.into()));
+            headers.push(("Link".into(), link_header_value(ctx)));
         }
-        for (k, v) in &receiver_info {
-            req = req.header(k, v);
-        }
+        headers.extend(receiver_info.iter().cloned());
         if hdr_tenant.as_str() != "default" {
-            req = req.header("NGSILD-Tenant", hdr_tenant.as_str());
+            headers.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().into()));
         }
         if let Some(sid) = &snapshot_id {
-            req = req.header("NGSILD-Snapshot", sid.as_str());
+            headers.push(("NGSILD-Snapshot".into(), sid.clone()));
         }
-        Outbound::Http(req, crate::negotiate::ordered_vec(&body))
+        Outbound::Http(headers, crate::negotiate::ordered_vec(&body))
     };
     // Bookkeeping BEFORE the send (5.8.6/5.2.14.2: lastNotification is the
     // instant the notification is sent). The ETSI mock unblocks the test the
@@ -2061,45 +2049,15 @@ async fn deliver_as(
     // that ANSWERS (any status) is alive, costs only its own response time,
     // and 6.3.8 says the notification shall be sent — suppressing sends to a
     // responding host:port starves unrelated subscriptions sharing it.
-    let (ok, timed_out) = if refused {
-        (false, false)
+    let timeout_ms = endpoint_timeout_ms(ep);
+    let first = if refused {
+        Err((false, "refused by egress policy".to_owned()))
     } else {
-        match outbound {
-            Outbound::Http(req, bytes) => {
-                // Wasm: the page sink takes matching endpoints — a page
-                // cannot listen on a socket, so this IS its delivery channel.
-                #[cfg(target_arch = "wasm32")]
-                let page_handled = crate::page_sink::try_deliver(uri, &bytes);
-                #[cfg(not(target_arch = "wasm32"))]
-                let page_handled = false;
-                if page_handled {
-                    (true, false)
-                } else {
-                    // endpoint.timeout (Table 5.2.15-1), clamped
-                    match antares_jsonld::io_deadline(
-                        req.body(bytes).send(),
-                        endpoint_timeout_ms(ep),
-                    )
-                    .await
-                    {
-                        Some(Ok(r)) => (r.status().is_success(), false),
-                        Some(Err(e)) => (false, e.is_timeout()),
-                        None => (false, true),
-                    }
-                }
-            }
-            #[cfg(feature = "mqtt")]
-            Outbound::Mqtt(endpoint, params, bytes) => {
-                match st.mqtt.deliver(&endpoint, params, &bytes).await {
-                    Ok(()) => (true, false),
-                    Err(e) => {
-                        tracing::warn!("mqtt delivery for {sub_id} failed: {e}");
-                        // broker/socket-level failure — keep the timeout guard
-                        (false, true)
-                    }
-                }
-            }
-        }
+        send_outbound(st, uri, timeout_ms, &outbound).await
+    };
+    let (ok, timed_out) = match &first {
+        Ok(()) => (true, false),
+        Err((t, _)) => (false, *t),
     };
     if !refused {
         if ok {
@@ -2154,13 +2112,254 @@ async fn deliver_as(
                 None
             });
         mirror_bookkeeping(st, tenant, kind, &sub_id);
+        // Retries are transport, not new notifications: they run on their
+        // own task (never on the request path, never delaying another
+        // subscription's delivery) and book only the final outcome — a
+        // success sets lastSuccess/status ok without touching timesSent;
+        // an exhausted policy leaves a dead letter.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !refused && st.delivery.attempts > 1 {
+            let first_err = first.err().map(|(_, e)| e).unwrap_or_default();
+            let (st, tenant, uri) = (st.clone(), tenant.clone(), uri.to_owned());
+            crate::spawn(async move {
+                retry_and_settle(
+                    &st, &tenant, kind, &sub_id, &uri, timeout_ms, outbound, first_err,
+                )
+                .await;
+            });
+        }
     }
+}
+
+/// One prepared notification, sendable any number of times: the HTTP form
+/// carries its headers as data so a retry or a dead-letter replay rebuilds
+/// the identical request.
+pub(crate) enum Outbound {
+    Http(Vec<(String, String)>, Vec<u8>),
+    #[cfg(feature = "mqtt")]
+    Mqtt(
+        antares_notifier::mqtt::MqttEndpoint,
+        antares_notifier::mqtt::MqttParams,
+        Vec<u8>,
+    ),
+}
+
+/// One attempt on the wire. `Err((timed_out, why))`: only a timeout-class
+/// failure feeds the breaker — an endpoint that answers is alive.
+async fn send_outbound(
+    st: &AppState,
+    uri: &str,
+    timeout_ms: u32,
+    outbound: &Outbound,
+) -> Result<(), (bool, String)> {
+    match outbound {
+        Outbound::Http(headers, bytes) => {
+            // Wasm: the page sink takes matching endpoints — a page
+            // cannot listen on a socket, so this IS its delivery channel.
+            #[cfg(target_arch = "wasm32")]
+            if crate::page_sink::try_deliver(uri, bytes) {
+                return Ok(());
+            }
+            let mut req = st.http.post(uri);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            // One Send unit so the admin replay handler stays Send on wasm32.
+            antares_jsonld::http_interaction(async move {
+                // endpoint.timeout (Table 5.2.15-1), clamped
+                match antares_jsonld::io_deadline(req.body(bytes.clone()).send(), timeout_ms).await
+                {
+                    Some(Ok(r)) if r.status().is_success() => Ok(()),
+                    Some(Ok(r)) => Err((false, format!("HTTP {}", r.status().as_u16()))),
+                    Some(Err(e)) => Err((e.is_timeout(), redact_userinfo(&e.to_string()))),
+                    None => Err((true, "timeout".into())),
+                }
+            })
+            .await
+        }
+        #[cfg(feature = "mqtt")]
+        Outbound::Mqtt(endpoint, params, bytes) => {
+            match st.mqtt.deliver(endpoint, *params, bytes).await {
+                Ok(()) => Ok(()),
+                // broker/socket-level failure — keep the timeout guard
+                Err(e) => Err((true, e.to_string())),
+            }
+        }
+    }
+}
+
+/// Dead letters written by this process since start (`/q/health`
+/// deadLetters); the letters themselves live in the store.
+static DEAD_LETTERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn dead_letters_written() -> u64 {
+    DEAD_LETTERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The retries the delivery policy grants after a failed first attempt,
+/// then the settlement: lastSuccess/status ok on success, a dead letter
+/// when the policy is exhausted.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+async fn retry_and_settle(
+    st: &AppState,
+    tenant: &TenantId,
+    kind: Kind,
+    sub_id: &str,
+    uri: &str,
+    timeout_ms: u32,
+    outbound: Outbound,
+    first_err: String,
+) {
+    let policy = st.delivery;
+    let started = std::time::Instant::now();
+    let first_at = now_iso();
+    let mut made = 1u32;
+    let mut last_err = first_err.clone();
+    while let Some(delay) = policy.next_delay(made, started.elapsed()) {
+        tokio::time::sleep(delay).await;
+        // the subscription may have gone, or its endpoint may have tripped
+        // the breaker meanwhile — a retry is still one more attempt
+        if st.store.get(tenant, kind, sub_id).ok().flatten().is_none() {
+            return;
+        }
+        made += 1;
+        match send_outbound(st, uri, timeout_ms, &outbound).await {
+            Ok(()) => {
+                st.egress.record_success(uri);
+                metrics::counter!("antares_notifications_retried_total", "outcome" => "ok")
+                    .increment(1);
+                let ts = now_iso();
+                st.store
+                    .mutate(tenant, kind, sub_id, |doc| {
+                        if let Some(o) = doc.as_object_mut() {
+                            o.remove("status");
+                        }
+                        if let Some(n) = doc
+                            .as_object_mut()
+                            .and_then(|o| o.get_mut("notification"))
+                            .and_then(Value::as_object_mut)
+                        {
+                            n.insert("lastSuccess".into(), Value::String(ts.clone()));
+                            n.insert("status".into(), Value::String("ok".into()));
+                        }
+                        Ok::<(), antares_model::NgsiError>(())
+                    })
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("retry bookkeeping writeback failed: {e}");
+                        None
+                    });
+                mirror_bookkeeping(st, tenant, kind, sub_id);
+                return;
+            }
+            Err((timed_out, e)) => {
+                if timed_out {
+                    st.egress.record_failure(uri);
+                } else {
+                    st.egress.record_success(uri);
+                }
+                last_err = e;
+            }
+        }
+    }
+    metrics::counter!("antares_notifications_retried_total", "outcome" => "dead").increment(1);
+    let letter = dead_letter(
+        sub_id, uri, timeout_ms, &outbound, made, &first_err, &last_err, &first_at,
+    );
+    let id = letter["id"].as_str().unwrap_or_default().to_owned();
+    match st.store.create(tenant, Kind::DeadLetter, &id, letter) {
+        Ok(_) => {
+            DEAD_LETTERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                "notification for {sub_id} to {} dead-lettered after {made} attempts: {last_err}",
+                redact_userinfo(uri)
+            );
+        }
+        Err(e) => tracing::error!("dead letter for {sub_id} could not be stored: {e}"),
+    }
+}
+
+/// The dead-letter document: everything a replay needs to send the very
+/// same request again, plus the attempt history.
+#[allow(clippy::too_many_arguments)]
+fn dead_letter(
+    sub_id: &str,
+    uri: &str,
+    timeout_ms: u32,
+    outbound: &Outbound,
+    attempts: u32,
+    first_err: &str,
+    last_err: &str,
+    first_at: &str,
+) -> Value {
+    let mut doc = json!({
+        "id": format!("urn:ngsi-ld:DeadLetter:{}", uuid::Uuid::new_v4()),
+        "type": "DeadLetter",
+        "subscriptionId": sub_id,
+        "uri": uri,
+        "timeoutMs": timeout_ms,
+        "attempts": attempts,
+        "firstError": first_err,
+        "lastError": last_err,
+        "firstAt": first_at,
+        "lastAt": now_iso(),
+    });
+    match outbound {
+        Outbound::Http(headers, bytes) => {
+            doc["binding"] = json!("http");
+            doc["headers"] = json!(headers);
+            doc["payload"] = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        }
+        #[cfg(feature = "mqtt")]
+        Outbound::Mqtt(_, params, bytes) => {
+            doc["binding"] = json!("mqtt");
+            doc["mqtt"] = json!({"qos": params.qos, "v5": params.v5});
+            doc["payload"] = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+        }
+    }
+    doc
+}
+
+/// Replay one dead letter through the same binding, once. `Ok` = delivered
+/// (the caller deletes the letter); `Err` carries the failure text.
+pub(crate) async fn replay_dead_letter(st: &AppState, letter: &Value) -> Result<(), String> {
+    let uri = letter["uri"].as_str().ok_or("dead letter without uri")?;
+    let bytes = crate::negotiate::ordered_vec(&letter["payload"]);
+    let timeout_ms = letter["timeoutMs"].as_u64().unwrap_or(5_000) as u32;
+    let outbound = match letter["binding"].as_str() {
+        Some("http") => {
+            let headers =
+                serde_json::from_value::<Vec<(String, String)>>(letter["headers"].clone())
+                    .map_err(|e| format!("dead letter headers unreadable: {e}"))?;
+            Outbound::Http(headers, bytes)
+        }
+        #[cfg(feature = "mqtt")]
+        Some("mqtt") => {
+            use antares_notifier::mqtt::{MqttEndpoint, MqttParams};
+            let endpoint = MqttEndpoint::parse(uri).map_err(|e| e.to_string())?;
+            let params = MqttParams {
+                qos: letter["mqtt"]["qos"].as_u64().unwrap_or(0) as u8,
+                v5: letter["mqtt"]["v5"].as_bool().unwrap_or(true),
+            };
+            Outbound::Mqtt(endpoint, params, bytes)
+        }
+        other => {
+            return Err(format!(
+                "dead letter binding {other:?} not deliverable here"
+            ))
+        }
+    };
+    // the egress policy of the moment applies, exactly as for a fresh send
+    st.egress.check_url(uri).await.map_err(|e| e.to_string())?;
+    send_outbound(st, uri, timeout_ms, &outbound)
+        .await
+        .map_err(|(_, e)| e)
 }
 
 /// Endpoint URIs may carry credentials in the authority's userinfo
 /// (mqtt[s]://username:password@host, clause 7.1) — strip everything
 /// between the `//` and the authority's `@` before the URI reaches a log.
-fn redact_userinfo(uri: &str) -> String {
+pub(crate) fn redact_userinfo(uri: &str) -> String {
     if let Some(scheme_end) = uri.find("//") {
         let rest = &uri[scheme_end + 2..];
         let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
@@ -3222,6 +3421,260 @@ mod clause_5_2_14_2_bookkeeping {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(n.get("timesSent"), Some(&json!(1)));
         assert!(n.get("lastNotification").is_some());
+    }
+}
+
+/// Delivery policy: retries are transport under one notification (5.8.6
+/// books the notification once), a success by retry sets lastSuccess and
+/// status ok, an exhausted policy leaves exactly one dead letter, and the
+/// default policy is the single attempt the clause describes.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod delivery_policy_tests {
+    use super::*;
+    use antares_notifier::DeliveryPolicy;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    const SUB_ID: &str = "urn:ngsi-ld:Subscription:policy";
+
+    fn policy(attempts: u32, backoff_ms: u64) -> DeliveryPolicy {
+        DeliveryPolicy {
+            attempts,
+            backoff: Duration::from_millis(backoff_ms),
+            jitter: 0.0,
+            max_age: Duration::from_secs(60),
+        }
+    }
+
+    /// Answers 500 to the first `fail_first` requests, 200 afterwards.
+    async fn flaky_endpoint(fail_first: usize) -> (String, Arc<AtomicUsize>) {
+        let hits: Arc<AtomicUsize> = Arc::default();
+        let seen = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move || {
+                let seen = seen.clone();
+                async move {
+                    let n = seen.fetch_add(1, Ordering::SeqCst);
+                    if n < fail_first {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (format!("http://{addr}/notify"), hits)
+    }
+
+    fn state(p: DeliveryPolicy) -> (AppState, TenantId) {
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let mut st = AppState::new("antares-policy".into());
+        st.delivery = p;
+        (st, TenantId::new("default").expect("tenant"))
+    }
+
+    fn subscribe(st: &AppState, tenant: &TenantId, id: &str, uri: &str) -> Value {
+        let sub = json!({
+            "id": id,
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {"uri": uri}},
+        });
+        st.store
+            .create(tenant, Kind::Subscription, id, sub.clone())
+            .expect("subscription row");
+        sub
+    }
+
+    async fn send(st: &AppState, tenant: &TenantId, sub: &Value) {
+        let ctx = antares_jsonld::Loader::new().core();
+        deliver_as(
+            st,
+            tenant,
+            Kind::Subscription,
+            sub,
+            "Notification",
+            vec![json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"})],
+            &ctx,
+            None,
+        )
+        .await;
+    }
+
+    fn notification(st: &AppState, tenant: &TenantId, id: &str) -> Value {
+        st.store
+            .get(tenant, Kind::Subscription, id)
+            .expect("store read")
+            .expect("subscription row")["notification"]
+            .clone()
+    }
+
+    fn letters(st: &AppState, tenant: &TenantId) -> Vec<Value> {
+        st.store.list(tenant, Kind::DeadLetter).expect("list")
+    }
+
+    async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+        for _ in 0..100 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_that_succeeds_is_one_notification() {
+        let (st, t) = state(policy(3, 50));
+        let (uri, hits) = flaky_endpoint(2).await;
+        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        send(&st, &t, &sub).await;
+        // the first attempt is booked at once, as 5.8.6 says
+        let n = notification(&st, &t, SUB_ID);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(n["timesSent"], json!(1));
+        assert_eq!(n["status"], json!("failed"));
+        assert!(n.get("lastSuccess").is_none());
+        wait_until(
+            || notification(&st, &t, SUB_ID)["status"] == json!("ok"),
+            "retry success",
+        )
+        .await;
+        let n = notification(&st, &t, SUB_ID);
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "two retries were made");
+        assert_eq!(
+            n["timesSent"],
+            json!(1),
+            "retries never count as a second notification"
+        );
+        assert_eq!(
+            n["timesFailed"],
+            json!(1),
+            "the failed first attempt was booked once"
+        );
+        assert!(n.get("lastSuccess").is_some());
+        assert!(
+            n.get("lastFailure").is_some(),
+            "the earlier failure stays recorded"
+        );
+        assert!(
+            letters(&st, &t).is_empty(),
+            "a delivered notification is no dead letter"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exhausted_policy_leaves_exactly_one_dead_letter() {
+        let (st, t) = state(policy(2, 50));
+        let (uri, hits) = flaky_endpoint(usize::MAX).await;
+        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        let before = dead_letters_written();
+        send(&st, &t, &sub).await;
+        wait_until(|| !letters(&st, &t).is_empty(), "dead letter").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let l = letters(&st, &t);
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "attempts = policy.attempts");
+        let l = &l[0];
+        assert_eq!(l["subscriptionId"], json!(SUB_ID));
+        assert_eq!(l["attempts"], json!(2));
+        assert_eq!(l["binding"], json!("http"));
+        assert_eq!(l["uri"], json!(uri));
+        assert_eq!(l["lastError"], json!("HTTP 500"));
+        assert_eq!(l["payload"]["type"], json!("Notification"));
+        assert_eq!(l["payload"]["subscriptionId"], json!(SUB_ID));
+        assert!(l["id"]
+            .as_str()
+            .is_some_and(|i| i.starts_with("urn:ngsi-ld:DeadLetter:")));
+        assert!(l["headers"]
+            .as_array()
+            .is_some_and(|h| h.iter().any(|kv| kv[0] == "Content-Type")));
+        assert!(dead_letters_written() > before);
+        let n = notification(&st, &t, SUB_ID);
+        assert_eq!(n["timesSent"], json!(1));
+        assert_eq!(n["timesFailed"], json!(1));
+        assert_eq!(n["status"], json!("failed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_default_policy_never_retries_and_never_dead_letters() {
+        let (st, t) = state(DeliveryPolicy::default());
+        let (uri, hits) = flaky_endpoint(usize::MAX).await;
+        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        send(&st, &t, &sub).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(letters(&st, &t).is_empty());
+        assert_eq!(notification(&st, &t, SUB_ID)["status"], json!("failed"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_backoff_on_one_subscription_does_not_delay_another() {
+        let (st, t) = state(policy(2, 3_000));
+        let (dead, _) = flaky_endpoint(usize::MAX).await;
+        let (live, live_hits) = flaky_endpoint(0).await;
+        let a = subscribe(&st, &t, "urn:ngsi-ld:Subscription:a", &dead);
+        let b = subscribe(&st, &t, "urn:ngsi-ld:Subscription:b", &live);
+        let started = std::time::Instant::now();
+        send(&st, &t, &a).await;
+        send(&st, &t, &b).await;
+        assert_eq!(live_hits.load(Ordering::SeqCst), 1, "B delivered");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "A's 3 s backoff must not sit on the delivery path: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retries_stop_when_the_subscription_is_deleted() {
+        let (st, t) = state(policy(4, 100));
+        let (uri, hits) = flaky_endpoint(usize::MAX).await;
+        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        send(&st, &t, &sub).await;
+        st.store
+            .delete(&t, Kind::Subscription, SUB_ID)
+            .expect("delete");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "no retry for a gone subscription"
+        );
+        assert!(
+            letters(&st, &t).is_empty(),
+            "no dead letter for a gone subscription"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_egress_refusal_is_never_retried() {
+        let (mut st, t) = state(policy(3, 50));
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "false");
+        st.egress = Arc::new(crate::egress::Egress::new(
+            antares_jsonld::EgressPolicy::from_env(),
+        ));
+        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        let (uri, hits) = flaky_endpoint(0).await;
+        let sub = subscribe(&st, &t, SUB_ID, &uri);
+        send(&st, &t, &sub).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "policy refusal: nothing leaves"
+        );
+        assert!(
+            letters(&st, &t).is_empty(),
+            "a policy verdict is not a transport failure"
+        );
+        assert_eq!(notification(&st, &t, SUB_ID)["status"], json!("failed"));
     }
 }
 

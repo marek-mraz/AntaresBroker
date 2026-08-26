@@ -1,6 +1,6 @@
 //! Durable state across restarts: snapshots (5.16), EntityMaps (5.14) and
 //! distributed-subscription mappings (5.8.1.4) live in the store
-//! (Kind::Snapshot / Kind::EntityMap / Kind::DistSub) — reopening a
+//! (Kind::Snapshot / Kind::EntityMap / Kind::DistSub / Kind::DeadLetter) — reopening a
 //! file-mode store serves them again (pg/timescale get the same via the
 //! shared doc-kind path, exercised by CI).
 #![allow(clippy::unwrap_used)]
@@ -293,5 +293,43 @@ fn dist_sub_mapping_survives_restart() {
         assert_eq!(status, StatusCode::NOT_FOUND);
     });
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A dead letter is durable state like the other doc kinds: a restart must
+/// not lose the notification an operator still wants to replay.
+#[test]
+fn dead_letter_survives_restart() {
+    let dir = scratch_dir("deadletter");
+    let first = rt();
+    first.block_on(async {
+        let st = file_state(&dir);
+        let t = antares_model::TenantId::new("acme").expect("tenant");
+        assert!(st
+            .store
+            .create(
+                &t,
+                antares_store::Kind::DeadLetter,
+                "urn:ngsi-ld:DeadLetter:1",
+                json!({"id": "urn:ngsi-ld:DeadLetter:1", "type": "DeadLetter",
+                       "subscriptionId": "urn:s:1", "uri": "http://127.0.0.1:9/n",
+                       "binding": "http", "headers": [], "payload": {}, "attempts": 3,
+                       "lastAt": "2026-01-01T00:00:00Z"}),
+            )
+            .expect("create"));
+        shutdown(st);
+    });
+    drop(first);
+    let second = rt();
+    second.block_on(async {
+        let st2 = file_state(&dir);
+        let (status, _, b) = send_h(&st2, "GET", "/q/dead-letters?tenant=acme", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        assert_eq!(b[0]["id"], "urn:ngsi-ld:DeadLetter:1", "{b}");
+        assert_eq!(b[0]["attempts"], 3);
+        let (status, _, b) = send_h(&st2, "GET", "/q/dead-letters?tenant=other", None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(b, json!([]), "tenant scoping survives too");
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }

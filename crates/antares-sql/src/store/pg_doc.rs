@@ -23,6 +23,7 @@ pub enum DocKind {
     Snapshot,
     EntityMap,
     DistSub,
+    DeadLetter,
 }
 
 impl DocKind {
@@ -34,13 +35,16 @@ impl DocKind {
             DocKind::Snapshot => "snapshots",
             DocKind::EntityMap => "entity_map_docs",
             DocKind::DistSub => "dist_subs",
+            DocKind::DeadLetter => "dead_letters",
         }
     }
     fn doc_column(self) -> &'static str {
         match self {
             DocKind::Subscription | DocKind::CSourceSubscription => "subscription",
             DocKind::Registration => "registration",
-            DocKind::Snapshot | DocKind::EntityMap | DocKind::DistSub => "doc",
+            DocKind::Snapshot | DocKind::EntityMap | DocKind::DistSub | DocKind::DeadLetter => {
+                "doc"
+            }
         }
     }
     fn has_bookkeeping(self) -> bool {
