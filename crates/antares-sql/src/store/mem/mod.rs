@@ -136,6 +136,9 @@ fn on_blocking<T>(f: impl FnOnce() -> T) -> T {
 pub struct Store {
     inner: RwLock<Inner>,
     hook: RwLock<Option<ChangeHook>>,
+    /// Set when this instance serves only the temporal seam: it never holds
+    /// the entities, so the append guard must not look for them here.
+    pub temporal_only: bool,
     /// `file` mode durability shadow; `None` = pure in-memory (`memory` mode).
     shadow: Option<Shadow>,
     /// Writers currently queued behind the single write-critical section
@@ -279,6 +282,7 @@ impl Store {
             hook: RwLock::new(None),
             emit_order: std::sync::Mutex::new(()),
             shadow: Some(Shadow { db }),
+            temporal_only: false,
             write_waiters: Default::default(),
             write_waiters_peak: Default::default(),
         })

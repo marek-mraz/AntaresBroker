@@ -529,7 +529,9 @@ impl AnyStore {
     /// Both arms record only for an entity that still exists: 5.6.6 deletes
     /// the entity and then the temporal evolution recorded for it, so an
     /// append overlapping the delete must not recreate history nothing will
-    /// ever clean again.
+    /// ever clean again. An instance marked `temporal_only` never holds the
+    /// entities (they live in another backend) and records unconditionally;
+    /// there the delete overlap stays a window the temporal delete closes.
     pub fn temporal_append(
         &self,
         tenant: &TenantId,
@@ -539,7 +541,7 @@ impl AnyStore {
     ) -> Result<(), NgsiError> {
         match self {
             AnyStore::Mem(s) => {
-                if s.get(tenant, Kind::Entity, id).is_none() {
+                if !s.temporal_only && s.get(tenant, Kind::Entity, id).is_none() {
                     return Ok(());
                 }
                 if s.get(tenant, Kind::Temporal, id).is_none() {
@@ -576,6 +578,17 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => p.temporal.append(tenant, id, shell, additions).map_err(db),
         }
+    }
+
+    /// Mark this instance as the temporal half of a mixed deployment: the
+    /// entities live in another backend, so appends never look for them here.
+    pub fn temporal_only(mut self) -> Self {
+        match &mut self {
+            AnyStore::Mem(s) => s.temporal_only = true,
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => p.temporal.temporal_only = true,
+        }
+        self
     }
 
     /// Retrieve Temporal Evolution with the same instance pruning.
@@ -1180,5 +1193,31 @@ impl antares_store::TemporalDriver for AnyStore {
         f: antares_store::MutateFn<'a>,
     ) -> Result<Option<Result<(), ()>>, NgsiError> {
         AnyStore::mutate(self, tenant, Kind::Temporal, id, f)
+    }
+}
+
+#[cfg(test)]
+mod temporal_only_tests {
+    use super::*;
+    use antares_model::TenantId;
+
+    fn append(store: &AnyStore) -> Option<Value> {
+        let t = TenantId::new("combo").expect("tenant");
+        let shell = serde_json::json!({"id": "urn:a", "type": ["T"]});
+        let adds = serde_json::json!({"speed": [{"instanceId": "urn:i:1", "value": 1}]});
+        store
+            .temporal_append(&t, "urn:a", &shell, &adds)
+            .expect("append");
+        store.get(&t, Kind::Temporal, "urn:a").expect("get")
+    }
+
+    /// A shared instance records only for an entity it holds (5.6.6 delete
+    /// overlap); the temporal half of a mixed deployment records
+    /// unconditionally, since the entities live elsewhere.
+    #[test]
+    fn a_temporal_only_instance_records_without_the_entity() {
+        assert!(append(&AnyStore::Mem(Store::default())).is_none());
+        let doc = append(&AnyStore::Mem(Store::default()).temporal_only()).expect("recorded");
+        assert_eq!(doc["speed"][0]["value"], 1);
     }
 }

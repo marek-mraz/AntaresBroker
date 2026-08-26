@@ -19,6 +19,9 @@ use super::entity::wait;
 
 pub struct PgTemporalStore {
     pool: PgPool,
+    /// Set when this instance serves only the temporal seam: it never holds
+    /// the entities, so the append guard must not look for them here.
+    pub temporal_only: bool,
 }
 
 /// 4.22: "expiresAt is defined as the system temporal Property at which a
@@ -330,7 +333,10 @@ fn aggregate_expr(
 
 impl PgTemporalStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            temporal_only: false,
+        }
     }
 
     /// `false` when the id already exists (create semantics, like the memory
@@ -390,16 +396,18 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let live = sqlx::query(
-                "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
-            )
-            .bind(tenant.as_str())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if live.is_none() {
-                tx.commit().await?;
-                return Ok(());
+            if !self.temporal_only {
+                let live = sqlx::query(
+                    "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
+                )
+                .bind(tenant.as_str())
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if live.is_none() {
+                    tx.commit().await?;
+                    return Ok(());
+                }
             }
             // DO NOTHING froze types/scopes at first touch — an
             // entity gaining a type stayed invisible to type-filtered

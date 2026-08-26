@@ -369,7 +369,7 @@ async fn build_drivers(
             TemporalChoice::None => (std::sync::Arc::new(antares_store::NoTemporal), None),
             TemporalChoice::Second(mode) => {
                 let (second, _) = build_store(mode).await?;
-                (std::sync::Arc::new(second), Some(mode))
+                (std::sync::Arc::new(second.temporal_only()), Some(mode))
             }
         };
     Ok((store, temporal, backend, temporal_mode))
