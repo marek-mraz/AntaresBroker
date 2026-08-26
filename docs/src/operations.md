@@ -106,15 +106,88 @@ the rest of the tenant. Egress-policy refusals (private ranges, blocked
 schemes) are never retried and never dead-lettered: a policy verdict is
 not a transport failure.
 
-## Backup, per store mode
-
-The README's store-mode table is the authority; the operational short form:
+## Backup and restore, per store mode
 
 | Mode | Backup |
 |---|---|
-| `memory` | nothing to back up |
-| `file` | **stop-copy only** — stop the broker, copy `antares.redb`, restart (redb holds an exclusive lock; a live copy can tear) |
-| `postgres` / `timescale` | ordinary Postgres backup/PITR; the outbox, docs and temporal tables all live in the one database |
+| `memory` | nothing to back up; the process is the data |
+| `file` | stop-copy only: stop the broker, copy `antares.redb`, restart |
+| `postgres` / `timescale` | ordinary Postgres backup or PITR; entities, subscriptions, registrations, outbox, dead letters, entity maps and the temporal tables all live in the one database |
+
+**postgres.** A custom-format dump restores with `--clean`, so the same
+command works on an empty and on a populated database:
+
+```bash
+pg_dump  -U postgres -Fc antares > antares.dump
+pg_restore -U postgres -d antares --clean --if-exists antares.dump
+```
+
+Drill on a database holding four entities: `SELECT count(*) FROM entities`
+answers 4, `DELETE FROM entities` brings it to 0, `pg_restore` exits 0 and
+the count is 4 again. Stop the brokers before restoring; they cache
+nothing, but a write during the restore lands in a table that is about to
+be replaced.
+
+**timescale.** The same tools; wrap the restore in TimescaleDB's
+`SELECT timescaledb_pre_restore();` and `SELECT timescaledb_post_restore();`
+so the hypertable catalog is restored with the data.
+
+**file.** redb holds an exclusive lock, so a copy of a running broker's
+file can tear. Stop, copy, restart:
+
+```bash
+kill -TERM $(pidof antares)          # drains, then exits
+cp -r "$ANTARES_DATA_DIR" /backup/antares-$(date +%F)
+```
+
+Drill: an entity created with an `observedAt`, broker stopped with SIGTERM,
+directory copied, a broker started on the copy answers
+`GET /entities/urn:ngsi-ld:Vehicle:f:1` and its temporal history. A second
+broker on a directory that is already open fails at startup:
+
+```text
+Error: "open …/antares.redb: Database already open. Cannot acquire lock."
+```
+
+## Background jobs
+
+One sweep loop per process, every `ANTARES_SWEEP_SECS` (default 900):
+
+- Expired entities and registrations (`expiresAt`, 4.22) are deleted.
+- Entity maps (5.14; one hour by default, a client-set `expiresAt`
+  capped at 24 hours) are not swept: an expired map is refused and
+  removed the next time anything touches it (5.5.14).
+- With `ANTARES_TEMPORAL_RETENTION_DAYS` set, attribute instances older
+  than the horizon are pruned from the postgres or timescale temporal
+  half, wherever that half lives (a `file` store with `postgres` history
+  runs the job too). Drill with `ANTARES_TEMPORAL_RETENTION_DAYS=30
+  ANTARES_SWEEP_SECS=2`: an entity with one instance observed seven
+  months back and one observed this hour shows both before the sweep and
+  only the recent one after it.
+
+The outbox drainer (`ANTARES_OUTBOX_DRAIN`) is the other loop; it hands
+committed changes to the matcher and can be moved to a dedicated process.
+
+## Egress breaker
+
+Every broker-initiated request (notification, forward, `@context` fetch)
+passes the egress policy: scheme allowlist, private-range rule
+(`ANTARES_EGRESS_ALLOW_PRIVATE`), redirect cap, DNS pinning and response
+size caps. On top of it a per-destination breaker tracks timeouts: five
+consecutive timeouts trip the destination open; while open, one probe per
+30 seconds is admitted (half-open) and a success closes it again. A
+destination that answers, even with an error status, never trips; only
+silence does. At most 4096 destinations are tracked. A refused or tripped
+delivery is booked on the subscription as a failure (`lastFailure`,
+`status: failed`) and, with a delivery policy configured, is not retried.
+
+## Drain
+
+On SIGTERM the broker flips `/q/health` to 503, keeps serving for
+`ANTARES_DRAIN_DELAY_MS` (default 500) so the load balancer notices, then
+waits up to `ANTARES_DRAIN_DEADLINE_SECS` (default 20) for in-flight
+requests before exiting. Set the container's stop grace period above the
+sum. The rolling-update section below relies on exactly this sequence.
 
 ## Bulk load (postgres, timescale)
 
