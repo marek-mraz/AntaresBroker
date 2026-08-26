@@ -1,0 +1,1 @@
+{{#include ../adr/README.md}}
