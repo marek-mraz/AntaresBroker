@@ -116,6 +116,77 @@ The README's store-mode table is the authority; the operational short form:
 | `file` | **stop-copy only** — stop the broker, copy `antares.redb`, restart (redb holds an exclusive lock; a live copy can tear) |
 | `postgres` / `timescale` | ordinary Postgres backup/PITR; the outbox, docs and temporal tables all live in the one database |
 
+## Bulk load (postgres, timescale)
+
+`dev/bulk-load.sh` loads entities straight into the `entities` table for
+initial loads and migrations. It bypasses the broker: no notification
+fires, no history is recorded, and the secondary indexes are dropped for
+the duration, so run it against a database no broker is serving.
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/antares \
+  dev/bulk-load.sh vehicles.ndjson            # tenant "default"
+DATABASE_URL=… dev/bulk-load.sh vehicles.ndjson odpady
+```
+
+Input is NDJSON, one entity per line in the store's internal form:
+attribute names as expanded IRIs, each attribute an array of instances,
+`id`/`type`/`scope` short. `type` and `scope` may be a string or an
+array; the loader stores both as arrays, which is the shape the query
+evaluator reads.
+
+```json
+{"id":"urn:ngsi-ld:Vehicle:bulk:1","type":"https://uri.etsi.org/ngsi-ld/default-context/Vehicle","https://uri.etsi.org/ngsi-ld/default-context/speed":[{"type":"Property","value":42}],"https://uri.etsi.org/ngsi-ld/location":[{"type":"GeoProperty","value":{"type":"Point","coordinates":[19.15,48.73]}}]}
+{"id":"urn:ngsi-ld:Vehicle:bulk:2","type":"https://uri.etsi.org/ngsi-ld/default-context/Vehicle","scope":"/city/east","https://uri.etsi.org/ngsi-ld/default-context/speed":[{"type":"Property","value":7}]}
+```
+
+The script, step by step:
+
+1. `\copy` the file into an `UNLOGGED` staging table; the `jsonb` cast is
+   the only parser the payload meets.
+2. Drop the five secondary indexes (`i_entities_location`,
+   `i_entities_jsonb`, `i_entities_types`, `i_entities_loc_ambiguous`,
+   `i_entities_expires`); the primary key stays because the insert needs
+   it.
+3. Derive the columns the store derives on write: `types`, `scopes`,
+   `created_at`/`modified_at` (the document's values, else `now()`),
+   `expires_at`, and `location` from the default GeoProperty when it has
+   exactly one instance holding a GeoJSON geometry; any other shape with
+   the GeoProperty present sets `location_ambiguous`, and geo queries
+   then judge that row in the broker instead of the index.
+4. `INSERT … ON CONFLICT (tenant_id, id) DO NOTHING`: a row that already
+   exists is left as it is, the loader never overwrites API-written data.
+5. Rebuild the five indexes and `ANALYZE entities`.
+
+Three lines offered, one of them an id the API had already created:
+
+```text
+COPY 3
+DROP INDEX
+INSERT 0 2
+DROP TABLE
+CREATE INDEX
+…
+ANALYZE
+bulk load done: 3 lines offered into tenant 'default'
+```
+
+Verify through the broker once it is back up; every query kind must see
+the loaded rows next to the API-written ones:
+
+```bash
+curl "$U/entities?type=Vehicle&q=speed>20&options=keyValues"
+curl "$U/entities?type=Vehicle&georel=near;maxDistance==1000&geometry=Point&coordinates=[19.15,48.73]&options=keyValues"
+curl "$U/entities?type=Vehicle&scopeQ=/city/%23&options=keyValues"
+```
+
+or in SQL, before restarting the broker:
+
+```sql
+SELECT id, types[1], scopes, ST_AsText(location), location_ambiguous
+FROM entities WHERE tenant_id = 'default' ORDER BY id;
+```
+
 ## Rolling update
 
 `dev/rolling-update.sh` — one instance at a time against the HA compose

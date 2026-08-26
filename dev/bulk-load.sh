@@ -5,9 +5,11 @@
 # is serving (index drops break live queries; the write path is not consulted,
 # so no notifications fire and no history is recorded).
 #
-# Input: NDJSON — one INTERNAL-form entity document per line (expanded
-# attribute IRIs, core members `id`/`type`/`scope`/`createdAt`/`modifiedAt`
-# short — the shape `GET /entities/{id}` returns with a core-only context).
+# Input: NDJSON — one entity document per line in the store's internal form:
+# attribute names as expanded IRIs, every attribute an ARRAY of instances,
+# core members `id`/`type`/`scope`/`createdAt`/`modifiedAt` short. `type` and
+# `scope` may be given as a string or an array; the stored document always
+# carries them as arrays, which is what the query evaluator reads.
 # Existing (tenant_id, id) rows are left untouched (ON CONFLICT DO NOTHING).
 #
 #   DATABASE_URL=postgres://… dev/bulk-load.sh entities.ndjson [tenant]
@@ -41,7 +43,12 @@ DROP INDEX IF EXISTS i_entities_location, i_entities_jsonb, i_entities_types,
 -- instance, a GeoJSON geometry (not a collection); anything else with the
 -- geoproperty present is location_ambiguous and judged by the evaluator
 WITH src AS (
-  SELECT doc,
+  SELECT jsonb_set(
+           CASE WHEN doc ? 'scope' AND jsonb_typeof(doc->'scope') <> 'array'
+                THEN jsonb_set(doc, '{scope}', jsonb_build_array(doc->'scope')) ELSE doc END,
+           '{type}',
+           CASE WHEN jsonb_typeof(doc->'type') = 'array' THEN doc->'type'
+                ELSE jsonb_build_array(doc->'type') END) AS doc,
          CASE WHEN jsonb_typeof(doc->'$LOC') = 'array' AND jsonb_array_length(doc->'$LOC') = 1
                 THEN COALESCE(doc->'$LOC'->0->'value', doc->'$LOC'->0->'object')
               WHEN jsonb_typeof(doc->'$LOC') = 'object'
@@ -59,13 +66,9 @@ INSERT INTO entities
   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
    location, location_ambiguous)
 SELECT :'tenant', doc->>'id', doc,
-       CASE WHEN jsonb_typeof(doc->'type') = 'array'
-            THEN ARRAY(SELECT jsonb_array_elements_text(doc->'type'))
-            ELSE ARRAY[doc->>'type'] END,
+       ARRAY(SELECT jsonb_array_elements_text(doc->'type')),
        CASE WHEN doc->'scope' IS NULL THEN NULL
-            WHEN jsonb_typeof(doc->'scope') = 'array'
-            THEN ARRAY(SELECT jsonb_array_elements_text(doc->'scope'))
-            ELSE ARRAY[doc->>'scope'] END,
+            ELSE ARRAY(SELECT jsonb_array_elements_text(doc->'scope')) END,
        COALESCE((doc->>'createdAt')::timestamptz, now()),
        COALESCE((doc->>'modifiedAt')::timestamptz, now()),
        (doc->>'expiresAt')::timestamptz,
