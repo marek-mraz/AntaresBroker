@@ -27,7 +27,8 @@ const KNOWN_KEYS: &[&str] = &[
     // current-state store, so one instance serves both seams.
     "ANTARES_TEMPORAL",
     // History gate: `all` (default) records every changed instance;
-    // `observed` records only instances carrying observedAt.
+    // `observed` records only instances carrying observedAt; `none`
+    // auto-records nothing (temporal API + reads stay on).
     "ANTARES_TEMPORAL_RECORD",
     "ANTARES_DATA_DIR",
     // Egress: private-range destinations are ALLOWED by default (ADR-0010 —
@@ -551,15 +552,10 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
-    state.record_observed_only = match std::env::var("ANTARES_TEMPORAL_RECORD").as_deref() {
-        Err(_) | Ok("all") => false,
-        Ok("observed") => true,
-        Ok(other) => {
-            return Err(
-                format!("ANTARES_TEMPORAL_RECORD: unknown mode {other} (all|observed)").into(),
-            )
-        }
-    };
+    state.temporal_record = std::env::var("ANTARES_TEMPORAL_RECORD")
+        .as_deref()
+        .unwrap_or("all")
+        .parse()?;
     // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.

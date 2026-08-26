@@ -26,7 +26,7 @@ pub mod subscriptions;
 pub mod temporal;
 pub mod types_attrs;
 
-pub use state::AppState;
+pub use state::{AppState, TemporalRecord};
 
 /// Spawn for both targets — tokio natively, the JS microtask queue on
 /// wasm32 (no tokio runtime exists in a browser). Call sites are identical;

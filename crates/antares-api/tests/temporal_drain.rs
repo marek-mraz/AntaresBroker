@@ -4,7 +4,7 @@
 //! driver failure in the drain is counted but never alters the response of
 //! a write that already committed.
 
-use antares_api::AppState;
+use antares_api::{AppState, TemporalRecord};
 use antares_model::{NgsiError, TenantId};
 use antares_sql::store::any::AnyStore;
 use antares_sql::store::Store;
@@ -294,7 +294,7 @@ async fn a_failing_drain_keeps_the_2xx_and_is_counted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn observed_mode_records_only_observed_instances() {
     let (mut st, c) = counting_state();
-    st.record_observed_only = true;
+    st.temporal_record = TemporalRecord::Observed;
     let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(11))).await;
     assert_eq!(status, 201);
     assert_eq!(
@@ -350,7 +350,11 @@ async fn observed_mode_records_only_observed_instances() {
 #[tokio::test(flavor = "multi_thread")]
 async fn all_mode_records_unobserved_instances_too() {
     let (st, c) = counting_state();
-    assert!(!st.record_observed_only, "all is the default");
+    assert_eq!(
+        st.temporal_record,
+        TemporalRecord::All,
+        "all is the default"
+    );
     let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(12))).await;
     assert_eq!(status, 201);
     assert_eq!(c.events.load(Ordering::SeqCst), 2);
@@ -362,4 +366,89 @@ async fn all_mode_records_unobserved_instances_too() {
     )
     .await;
     assert_eq!(body["heading"][0]["value"], 120, "{body}");
+}
+
+/// `none`: nothing the entity endpoints do reaches the driver — the
+/// observed instance included — while current state and the temporal
+/// API's own write path keep working.
+#[tokio::test(flavor = "multi_thread")]
+async fn none_mode_records_nothing() {
+    let (mut st, c) = counting_state();
+    st.temporal_record = TemporalRecord::None;
+    let (status, _) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(13))).await;
+    assert_eq!(status, 201);
+    let (status, _) = req(
+        &st,
+        "PATCH",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:D:13/attrs/speed",
+        Some(json!({"type": "Property", "value": 14, "observedAt": "2026-01-01T00:00:01Z"})),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, _) = req(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/entityOperations/upsert",
+        Some(json!([entity(15), entity(16)])),
+    )
+    .await;
+    assert!(status == 201 || status == 204, "{status}");
+    assert_eq!(
+        c.calls.load(Ordering::SeqCst),
+        0,
+        "the driver was never called"
+    );
+    assert_eq!(c.events.load(Ordering::SeqCst), 0);
+    let (status, body) = req(&st, "GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:D:13", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["speed"]["value"], 14, "current state moved: {body}");
+    let (status, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:D:13",
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "no history exists for an entity nobody recorded: {body}"
+    );
+    // the temporal API's own write path is not the gate's business
+    let (status, body) = req(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/temporal/entities",
+        Some(json!({
+            "id": "urn:ngsi-ld:D:14",
+            "type": "Device",
+            "speed": [{"type": "Property", "value": 1, "observedAt": "2026-01-01T00:00:00Z"}]
+        })),
+    )
+    .await;
+    assert!(status == 201 || status == 204, "{status} {body}");
+    let (status, body) = req(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:D:14",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["speed"][0]["value"], 1, "{body}");
+}
+
+/// The env spelling accepted by the broker — every mode, and a typo is a
+/// startup error rather than a silent `all`.
+#[test]
+fn temporal_record_parses_every_mode() {
+    assert_eq!("all".parse::<TemporalRecord>(), Ok(TemporalRecord::All));
+    assert_eq!(
+        "observed".parse::<TemporalRecord>(),
+        Ok(TemporalRecord::Observed)
+    );
+    assert_eq!("none".parse::<TemporalRecord>(), Ok(TemporalRecord::None));
+    let Err(err) = "observedAt".parse::<TemporalRecord>() else {
+        panic!("a typo must not parse")
+    };
+    assert!(err.contains("all|observed|none"), "{err}");
 }

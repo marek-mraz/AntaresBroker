@@ -11,6 +11,36 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+/// ANTARES_TEMPORAL_RECORD — the auto-recording gate on the write path.
+/// Direct temporal-API writes (POST /temporal/entities…) are never gated:
+/// this decides what the ENTITY endpoints leave behind as history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporalRecord {
+    /// `all` (default): every changed attribute instance.
+    All,
+    /// `observed`: only instances carrying `observedAt` — the spec's own
+    /// measurement axis (4.5.7); metadata-shaped writes leave no history.
+    Observed,
+    /// `none`: nothing is auto-recorded; the temporal endpoints still serve
+    /// what the temporal API was given directly (unlike ANTARES_TEMPORAL=none,
+    /// which turns the temporal seam off entirely).
+    None,
+}
+
+impl std::str::FromStr for TemporalRecord {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "all" => Ok(Self::All),
+            "observed" => Ok(Self::Observed),
+            "none" => Ok(Self::None),
+            other => Err(format!(
+                "ANTARES_TEMPORAL_RECORD: unknown mode {other} (all|observed|none)"
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn CurrentStateDriver>,
@@ -94,10 +124,10 @@ pub struct AppState {
     /// claim there would disturb the 046_12 bookkeeping ordering for
     /// nothing.
     pub nats: bool,
-    /// History gate 2 (ANTARES_TEMPORAL_RECORD=observed): only attribute
-    /// instances carrying `observedAt` are recorded. Default `false` = every
-    /// changed instance, which the ETSI temporal suites assume.
-    pub record_observed_only: bool,
+    /// History gate 2 (ANTARES_TEMPORAL_RECORD): which changed attribute
+    /// instances the write path records into history. Default `All`, which
+    /// the ETSI temporal suites assume.
+    pub temporal_record: TemporalRecord,
     /// The base URL remote Context Sources reach THIS broker at — used as
     /// the notification endpoint of forwarded subscription copies
     /// (5.8.1.4). ANTARES_PUBLIC_URL, defaulting to
@@ -249,7 +279,7 @@ impl AppState {
             reg_mirror: None,
             metrics_render: None,
             nats: false,
-            record_observed_only: false,
+            temporal_record: TemporalRecord::All,
             public_url,
             snapshot_cap: 1024,
         }

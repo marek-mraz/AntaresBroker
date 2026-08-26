@@ -79,11 +79,17 @@ pub(crate) fn push(st: &AppState, ev: TemporalEvent) {
 /// here; producers and drivers stay untouched.
 const GATES: &[fn(&AppState, &TemporalEvent) -> bool] = &[observed_gate];
 
-/// Gate 2: ANTARES_TEMPORAL_RECORD=observed keeps only instances that carry
-/// `observedAt` — the spec's own measurement axis (4.5.7: observedAt is
-/// the default timeproperty); metadata-shaped writes leave no history.
+/// Gate 2: ANTARES_TEMPORAL_RECORD. `all` admits everything; `observed`
+/// keeps only instances that carry `observedAt` — the spec's own
+/// measurement axis (4.5.7: observedAt is the default timeproperty), so
+/// metadata-shaped writes leave no history; `none` admits nothing.
 fn observed_gate(st: &AppState, ev: &TemporalEvent) -> bool {
-    !st.record_observed_only || ev.instance.get("observedAt").is_some()
+    use crate::state::TemporalRecord::*;
+    match st.temporal_record {
+        All => true,
+        Observed => ev.instance.get("observedAt").is_some(),
+        None => false,
+    }
 }
 
 /// The consumer side: one `event_list` call per drained batch.

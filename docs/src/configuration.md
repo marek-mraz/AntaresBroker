@@ -11,7 +11,7 @@ here).
 | Variable | Default | Effect |
 |---|---|---|
 | `ANTARES_STORE` | `memory` | Store mode: `memory`, `file`, `postgres`, `timescale`. Unknown value = fatal. |
-| `ANTARES_TEMPORAL` | follows `ANTARES_STORE` | Temporal driver: a store mode, or `none` — history off; temporal reads answer `OperationNotSupported` (422, CIM 009 Table 6.3.2-1) and nothing is recorded. A backend different from the store builds a second store instance used only for history. |
+| `ANTARES_TEMPORAL` | follows `ANTARES_STORE` | Temporal driver: a store mode, or `none` — history off. Mix freely with `ANTARES_STORE`, e.g. `file` current state with `timescale` history; temporal reads answer `OperationNotSupported` (422, CIM 009 Table 6.3.2-1) and nothing is recorded. A backend different from the store builds a second store instance used only for history. |
 | `ANTARES_HTTP_PORT` | `9090` | HTTP listen port. |
 | `ANTARES_ROLES` | `all` | Comma list of roles this process runs: `api`, `matcher`, `notifier`, `temporal`, `registry` — the role-split fleet shape. |
 | `ANTARES_BUS` | `local` | Change-event bus: `local` (in-process, single node) or `nats` (JetStream, multi-pod). Unknown value = fatal. |
@@ -29,7 +29,7 @@ here).
 | `ANTARES_PG_STATEMENT_TIMEOUT_MS` | `30000` | Per-session `statement_timeout` on every pooled connection: a query past it is cancelled and answered `InternalError` (500, "database statement timeout"; CIM 009 5.5.2 names database timeouts as InternalError). Migrations are exempt. Not a positive integer = fatal. |
 | `ANTARES_MIGRATE` | on | `0`/`false` skips running migrations from this process, so serving replicas do not race the DDL — run them once from a job or init container instead. |
 | `ANTARES_ALLOW_SHARED_LOCAL` | unset | `1` permits `bus=local` with a `postgres`/`timescale` store — safe ONLY for a strictly single-process deployment; two such processes double-fire notifications. |
-| `ANTARES_TEMPORAL_RECORD` | `all` | History gate. `all`: every changed attribute instance is recorded. `observed`: only instances carrying `observedAt` enter history — a metadata-only write (no `observedAt`) updates current state and its `modifiedAt` but leaves no history, so `timeproperty=modifiedAt`/`createdAt` temporal queries return nothing for never-observed attributes. The ETSI temporal suites assume `all`, which is why it stays the default. Unknown value = fatal. |
+| `ANTARES_TEMPORAL_RECORD` | `all` | History gate for the entity endpoints. `all`: every changed attribute instance is recorded. `observed`: only instances carrying `observedAt` enter history — a metadata-only write (no `observedAt`) updates current state and its `modifiedAt` but leaves no history, so `timeproperty=modifiedAt`/`createdAt` temporal queries return nothing for never-observed attributes. `none`: the entity endpoints record nothing; the temporal API still stores and serves what it is given directly (unlike `ANTARES_TEMPORAL=none`, which switches the temporal seam off). The ETSI temporal suites assume `all`, which is why it stays the default. Unknown value = fatal. |
 | `ANTARES_TEMPORAL_RETENTION_DAYS` | unset (keep forever) | Temporal history retention; the sweep job prunes older attribute instances. |
 | `ANTARES_SWEEP_SECS` | `900` | Cadence of the background GC sweep (expired entities/registrations, 4.22) — identical across store modes. |
 
