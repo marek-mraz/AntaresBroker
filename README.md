@@ -36,8 +36,9 @@ Three properties, each backed by a number CI reproduces on every full run:
 1. **Footprint** — ~35 MiB average RSS (45–64 MiB peak) while running the
    complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
    where a JVM broker's heap alone would not.
-2. **Conformance** — 1713/1713 ETSI CIM 009 V1.9.1 test procedures green in
-   all six native store cells, including the two cells where a 10-container
+2. **Conformance** — 1784/1784 ETSI CIM 009 V1.9.1 test cases green in
+   every cell of the seven-cell matrix (six native store cells and the
+   browser build), including the two cells where a 10-container
    role-split fleet rolls continuously under the suite
    ([per-store report with Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
    The methodology is a per-clause ledger over the whole spec text
@@ -79,8 +80,30 @@ No Docker? `cargo run -p antares-broker` serves the same API on :9090
 > federation and the security wall are implemented, with the ETSI Robot suite
 > green in every store mode ([the conformance report, per store, with each
 > run's Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
-> Docs index: [docs/README.md](docs/README.md) · operations runbook:
-> [docs/src/operations.md](docs/src/operations.md).
+> Documentation: the [book](https://antares-ngsi-ld-demo.marek-mraz.com/docs/),
+> sections listed below.
+
+## Documentation
+
+The book is published at <https://antares-ngsi-ld-demo.marek-mraz.com/docs/>
+and built from `docs/src`:
+
+| section | what it covers |
+|---|---|
+| [Getting started](docs/src/getting-started.md) | install, first entity, first subscription, first federation pair |
+| [Configuration](docs/src/configuration.md) | every `ANTARES_*` variable, with defaults |
+| [Deployment](docs/src/deployment.md) | Docker, compose stacks, Kubernetes manifests, the role split |
+| [Subscriptions and notifications](docs/src/subscriptions.md) | HTTP and MQTT delivery, formats, grouping, retries, dead letters |
+| [Temporal API](docs/src/temporal.md) | recording, querying, aggregation, pagination, retention |
+| [Federation](docs/src/federation.md) | registrations, forwarding, loop protection, partial failures |
+| [Operations](docs/src/operations.md) | health, observability, tenants, backup and restore, bulk load, rolling updates |
+| [Browser & WebAssembly](docs/src/wasm.md) | the in-page broker |
+| [Admin API](docs/src/admin-api.md) | the `/q/*` routes |
+| [Storage drivers](docs/src/storage.md) | the store ladder, the temporal driver, measured costs, migrations |
+| [Conformance](docs/src/conformance.md) | the ledger, the matrix, how to run a suite, upstream raises |
+| [Shared crates](docs/src/shared-crates.md) | the parser, query engine and matcher as libraries for a gateway |
+| [Extending Antares](docs/src/extending.md) | features, the driver registry, hooks, adding a backend |
+| [Decisions](docs/adr/README.md) | the architecture decision records |
 
 ## Targets (the design contract)
 
@@ -313,9 +336,9 @@ reporting.
 
 | | Antares | [Scorpio](https://github.com/ScorpioBroker/ScorpioBroker) | [Orion-LD](https://github.com/FIWARE/context.Orion-LD) | [Stellio](https://github.com/stellio-hub/stellio-context-broker) | [coraine](https://github.com/seamware/coraine) |
 |---|---|---|---|---|---|
-| Language / runtime | Rust, one native binary | Java (Quarkus, JVM) | C | Kotlin (Spring, JVM) | C, core + dlopen plugins |
-| Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS | MongoDB (+ PostgreSQL/TimescaleDB for temporal) | PostgreSQL + PostGIS + TimescaleDB | plugin: MongoDB or in-memory (+ TimescaleDB plugin for temporal) |
-| Message bus | none (`local`) or NATS JetStream | Kafka (distributed mode) | none | Kafka | none |
+| Language / runtime | Rust, one native binary | Java (Quarkus, JVM) | C | Kotlin (Spring, JVM) | C, core + `dlopen` plugins ([plugin-architecture.md](https://github.com/seamware/coraine/blob/main/doc/plugin-architecture.md)) |
+| Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS ([README](https://github.com/ScorpioBroker/ScorpioBroker/blob/development/README.md)) | MongoDB, with PostgreSQL+PostGIS+TimescaleDB as the temporal sink ([troe.md](https://github.com/FIWARE/context.Orion-LD/blob/develop/doc/manuals-ld/troe.md)) | PostgreSQL + PostGIS + TimescaleDB ([docker-compose.yml](https://github.com/stellio-hub/stellio-context-broker/blob/develop/docker-compose.yml)) | plugin: MongoDB (libmongoc) or in-memory, TimescaleDB plugin for temporal ([plugin-architecture.md](https://github.com/seamware/coraine/blob/main/doc/plugin-architecture.md)) |
+| Message bus | none (`local`) or NATS JetStream | Kafka ([README](https://github.com/ScorpioBroker/ScorpioBroker/blob/development/README.md)) | none | Kafka ([docker-compose.yml](https://github.com/stellio-hub/stellio-context-broker/blob/develop/docker-compose.yml)) | none |
 | Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka | broker + in-memory plugin (no persistence) |
 | Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized | — |
 | Browser/wasm build | yes — 3.99 MB artifact, full API in a Service Worker | no | no | no | no |
