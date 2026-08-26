@@ -8,7 +8,7 @@ repository before being committed.
 **Docker** (multi-arch, amd64 + arm64):
 
 ```bash
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
 ```
 
 **From source** (Rust toolchain per `rust-toolchain.toml`):

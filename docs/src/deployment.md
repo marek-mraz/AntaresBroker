@@ -22,13 +22,13 @@ CI resource gate enforces 350 MiB during the suite. Postgres sizing budget:
 
 ```bash
 # memory: state dies with the process — tests, demos
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
 
 # file: durable via redb, fsync-before-ack; the data dir MUST be a volume
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=file -e ANTARES_DATA_DIR=/data \
   -v antares-data:/data \
-  ghcr.io/marek-mraz/antares-broker:dev
+  ghcr.io/marek-mraz/antares-broker:latest
 ```
 
 `file` mode constraints (measured, documented in the README store table):

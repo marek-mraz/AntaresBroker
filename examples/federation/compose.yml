@@ -1,12 +1,12 @@
 services:
   broker-a:
-    image: ghcr.io/marek-mraz/antares-broker:dev
+    image: ghcr.io/marek-mraz/antares-broker:latest
     ports: ["9090:9090"]
     environment:
       ANTARES_HOST_ALIAS: broker-a
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"   # demo network — see the federation guide
   broker-b:
-    image: ghcr.io/marek-mraz/antares-broker:dev
+    image: ghcr.io/marek-mraz/antares-broker:latest
     ports: ["9091:9090"]
     environment:
       ANTARES_HOST_ALIAS: broker-b

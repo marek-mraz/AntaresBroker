@@ -51,7 +51,7 @@ Three properties, each backed by a number CI reproduces on every full run:
 ## 60-second quickstart
 
 ```bash
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
 ```
 
 Create an entity and query it back (no infrastructure — the default is the
@@ -130,7 +130,7 @@ subscription endpoint, `mqtt[s]://` URI). Operations detail:
 
 `file` mode notes: queries and subscription matching still run on the
 in-memory maps — redb is durability only, so working-set RAM grows with the
-dataset (measured 2026-08-04: ~19 KB RSS per typical entity — expanded doc +
+dataset (measured: ~19 KB RSS per typical entity — expanded doc +
 temporal mirror as `serde_json::Value` — rule of thumb: ~10k entities
 (~200 MB, comfortably inside the 350 MiB gate); beyond that, move up a rung to
 `postgres`). The on-disk file carries a format
@@ -143,7 +143,7 @@ ceiling.
 ## Run with Docker
 
 ```bash
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
 curl -s localhost:9090/q/health
 ```
 
@@ -155,13 +155,13 @@ Other store modes via env:
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=file -e ANTARES_DATA_DIR=/data \
   -v antares-data:/data \
-  ghcr.io/marek-mraz/antares-broker:dev
+  ghcr.io/marek-mraz/antares-broker:latest
 
 # postgres / timescale store
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=postgres \
   -e ANTARES_DATABASE_URL=postgresql://antares:antares@db:5432/antares \
-  ghcr.io/marek-mraz/antares-broker:dev
+  ghcr.io/marek-mraz/antares-broker:latest
 
 # the WASM broker — the same bytes the browser playground loads, served
 # by the Node shim (memory or file store; no NATS/MQTT/Postgres by design)
@@ -311,17 +311,17 @@ Antares numbers are measured by this repo's CI (links above). Conformance
 claims for other brokers are theirs to make — check each project's own
 reporting.
 
-| | Antares | [Scorpio](https://github.com/ScorpioBroker/ScorpioBroker) | [Orion-LD](https://github.com/FIWARE/context.Orion-LD) | [Stellio](https://github.com/stellio-hub/stellio-context-broker) |
-|---|---|---|---|---|
-| Language / runtime | Rust, one native binary | Java (Quarkus, JVM) | C | Kotlin (Spring, JVM) |
-| Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS | MongoDB (+ PostgreSQL/TimescaleDB for temporal) | PostgreSQL + PostGIS + TimescaleDB |
-| Message bus | none (`local`) or NATS JetStream | Kafka (distributed mode) | none | Kafka |
-| Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka |
-| Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized |
-| Browser/wasm build | yes — 3.99 MB artifact, full API in a Service Worker | no | no | no |
-| Conformance evidence | [public per-store matrix, Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) | see project | see project | see project |
+| | Antares | [Scorpio](https://github.com/ScorpioBroker/ScorpioBroker) | [Orion-LD](https://github.com/FIWARE/context.Orion-LD) | [Stellio](https://github.com/stellio-hub/stellio-context-broker) | [coraine](https://github.com/seamware/coraine) |
+|---|---|---|---|---|---|
+| Language / runtime | Rust, one native binary | Java (Quarkus, JVM) | C | Kotlin (Spring, JVM) | C, core + dlopen plugins |
+| Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS | MongoDB (+ PostgreSQL/TimescaleDB for temporal) | PostgreSQL + PostGIS + TimescaleDB | plugin: MongoDB or in-memory (+ TimescaleDB plugin for temporal) |
+| Message bus | none (`local`) or NATS JetStream | Kafka (distributed mode) | none | Kafka | none |
+| Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka | broker + in-memory plugin (no persistence) |
+| Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized | — |
+| Browser/wasm build | yes — 3.99 MB artifact, full API in a Service Worker | no | no | no | no |
+| Conformance evidence | [public per-store matrix, Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) | see project | see project | see project | see project |
 
-All four speak the same ETSI CIM 009 API — that is the point of the
+All five speak the same ETSI CIM 009 API — that is the point of the
 standard. Antares is a compliant peer of the FIWARE-ecosystem brokers, not
 a fork of any of them; pick per deployment constraints and verify with the
 suite.
