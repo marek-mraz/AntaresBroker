@@ -11,7 +11,7 @@ results/
 results-proc/
 .venv/
 
-# session notes / scratch dumps (agent transcripts, ad-hoc summaries)
+# scratch dumps and ad-hoc summaries
 /20[0-9][0-9]-*.txt
 
 # local env & logs
@@ -36,4 +36,4 @@ results*/
 
 # mdbook build output
 /book
-.vale/
+.vale/styles/write-good/
