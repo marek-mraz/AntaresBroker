@@ -536,3 +536,136 @@ fn file_timescale_without_the_extension_is_fatal() {
         "nothing may be listening after the refusal"
     );
 }
+
+// ---- ANTARES_TEMPORAL_RECORD read from the backend ---------------------------
+
+/// One observed attribute and one without `observedAt`.
+fn write_mixed(port: u16, row: &str) {
+    let id = id(row);
+    let entity = format!(
+        r#"{{"id":"{id}","type":"Combo","speed":{{"type":"Property","value":1,"observedAt":"2026-01-01T00:00:00Z"}},"name":{{"type":"Property","value":"x"}}}}"#
+    );
+    let resp = send(port, "POST", "/ngsi-ld/v1/entities", &entity);
+    assert!(resp.starts_with("HTTP/1.1 201"), "create: {resp}");
+}
+
+/// attr_instances rows per attribute for one entity: (speed, name).
+fn pg_attr_rows(url: &str, row: &str) -> (i64, i64) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt")
+        .block_on(async {
+            use antares_sql::sqlx;
+            let pool = antares_sql::store::pg::connect(url, 2)
+                .await
+                .expect("connect");
+            let mut tx = pool.begin().await.expect("tx");
+            let tenant =
+                antares_model::TenantId::new(antares_model::TenantId::DEFAULT).expect("tenant");
+            antares_sql::store::pg::set_tenant(&mut tx, &tenant)
+                .await
+                .expect("set_tenant");
+            let mut out = [0i64; 2];
+            for (i, attr) in ["%/speed", "%/name"].iter().enumerate() {
+                out[i] = sqlx::query_scalar(
+                    "SELECT count(*) FROM attr_instances WHERE entity_id = $1 AND attr_id LIKE $2",
+                )
+                .bind(id(row))
+                .bind(attr)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("count");
+            }
+            (out[0], out[1])
+        })
+}
+
+fn record_pg_row(url: &str, record: &str, expect: (i64, i64)) {
+    let row = format!("postgres-record-{record}");
+    let dir = tempdir(&row);
+    let port = free_port();
+    let _broker = start_with(
+        port,
+        &dir,
+        "postgres",
+        "postgres",
+        &[("ANTARES_TEMPORAL_RECORD", record)],
+    );
+    wait_healthy(port);
+    write_mixed(port, &row);
+    assert_eq!(
+        pg_attr_rows(url, &row),
+        expect,
+        "(speed, name) rows under {record}"
+    );
+    let resp = send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{}", id(&row)),
+        "",
+    );
+    assert!(resp.starts_with("HTTP/1.1 204"), "{resp}");
+}
+
+#[test]
+fn postgres_record_observed() {
+    let url = require_db!();
+    record_pg_row(&url, "observed", (1, 0));
+}
+
+#[test]
+fn postgres_record_none() {
+    let url = require_db!();
+    record_pg_row(&url, "none", (0, 0));
+}
+
+/// The temporal doc as redb holds it, read after `kill -9` through the
+/// crate's own file reader — no HTTP in the loop.
+fn redb_temporal_doc(dir: &Path, row: &str) -> Option<serde_json::Value> {
+    let store = antares_sql::store::Store::open_file(dir).expect("open redb");
+    let tenant = antares_model::TenantId::new(antares_model::TenantId::DEFAULT).expect("tenant");
+    store.get(&tenant, antares_store::Kind::Temporal, &id(row))
+}
+
+fn record_file_row(record: &str) -> Option<serde_json::Value> {
+    let row = format!("file-record-{record}");
+    let dir = tempdir(&row);
+    let port = free_port();
+    let mut broker = start_with(
+        port,
+        &dir,
+        "file",
+        "file",
+        &[("ANTARES_TEMPORAL_RECORD", record)],
+    );
+    wait_healthy(port);
+    write_mixed(port, &row);
+    broker.0.kill().expect("SIGKILL");
+    broker.0.wait().expect("reap");
+    redb_temporal_doc(&dir, &row)
+}
+
+#[test]
+fn file_record_observed() {
+    let doc = record_file_row("observed").expect("the observed instance is in redb");
+    let keys: Vec<&str> = doc
+        .as_object()
+        .expect("doc")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(keys.iter().any(|k| k.ends_with("/speed")), "keys: {keys:?}");
+    assert!(
+        !keys.iter().any(|k| k.ends_with("/name")),
+        "unobserved attribute recorded: {keys:?}"
+    );
+}
+
+#[test]
+fn file_record_none() {
+    assert!(
+        record_file_row("none").is_none(),
+        "nothing may reach redb under none"
+    );
+}
