@@ -10,21 +10,8 @@
 //! timestamps embedded (`createdAt`/`modifiedAt` at entity level and inside
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
-pub mod any;
-#[cfg(feature = "postgres")]
-pub mod entity_map;
-pub use antares_store::filter;
-pub use antares_store::{ChangeHook, Kind};
-#[cfg(feature = "postgres")]
-pub mod outbox;
-#[cfg(feature = "postgres")]
-pub mod pg_doc;
-#[cfg(feature = "postgres")]
-pub mod pg_entity;
-#[cfg(feature = "postgres")]
-pub mod pg_temporal;
-
 use antares_model::TenantId;
+use antares_store::{filter, ChangeHook, Kind};
 use redb::{Database, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};

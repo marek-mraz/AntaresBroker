@@ -12,7 +12,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::pg_entity::wait;
+use super::entity::wait;
 
 pub struct EntityMapStore {
     pool: PgPool,
@@ -70,7 +70,7 @@ impl EntityMapStore {
         let payload = put_payload(entries);
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             sqlx::query(CLEAR_SQL)
                 .bind(tenant.as_str())
                 .bind(map_id)
@@ -99,7 +99,7 @@ impl EntityMapStore {
     ) -> Result<Vec<(String, String)>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(PAGE_SQL)
                 .bind(tenant.as_str())
                 .bind(map_id)
@@ -128,7 +128,7 @@ impl EntityMapStore {
                     continue;
                 };
                 let mut tx = self.pool.begin().await?;
-                crate::pg::set_tenant(&mut tx, &tid).await?;
+                crate::store::pg::set_tenant(&mut tx, &tid).await?;
                 swept += sqlx::query(SWEEP_SQL)
                     .bind(&t)
                     .execute(&mut *tx)

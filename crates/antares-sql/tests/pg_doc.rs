@@ -2,8 +2,8 @@
 //! ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
-use antares_sql::pg;
-use antares_sql::store::pg_doc::{DocKind, PgDocStore};
+use antares_sql::store::pg;
+use antares_sql::store::pg::doc::{DocKind, PgDocStore};
 use serde_json::json;
 
 macro_rules! require_db {

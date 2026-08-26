@@ -13,7 +13,7 @@ use serde_json::Value;
 use sqlx::postgres::{PgConnection, PgPool};
 use sqlx::Row;
 
-use super::pg_entity::wait;
+use super::entity::wait;
 
 /// Every statement this module issues. Values are bound as `$n` — the strings
 /// are compile-time constants, so no request data ever reaches the parser.
@@ -64,7 +64,7 @@ pub async fn enqueue_many(
 pub fn peek(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String, Value)>, sqlx::Error> {
     wait(async {
         let mut tx = pool.begin().await?;
-        crate::pg::set_service(&mut tx).await?;
+        crate::store::pg::set_service(&mut tx).await?;
         let rows = sqlx::query(PEEK_SQL)
             .bind(limit)
             .fetch_all(&mut *tx)
@@ -88,7 +88,7 @@ pub fn ack(pool: &PgPool, seqs: &[i64]) -> Result<u64, sqlx::Error> {
     }
     wait(async {
         let mut tx = pool.begin().await?;
-        crate::pg::set_service(&mut tx).await?;
+        crate::store::pg::set_service(&mut tx).await?;
         let n = sqlx::query(ACK_SQL)
             .bind(seqs)
             .execute(&mut *tx)

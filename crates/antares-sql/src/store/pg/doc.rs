@@ -12,7 +12,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::pg_entity::{check_ceiling, wait, MAX_UNDECIDED_ROWS};
+use super::entity::{check_ceiling, wait, MAX_UNDECIDED_ROWS};
 
 /// Which doc table a resource kind lives in.
 #[derive(Clone, Copy, Debug)]
@@ -479,7 +479,7 @@ impl PgDocStore {
         let conflict = " ON CONFLICT (tenant_id, id) DO NOTHING RETURNING true AS created";
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
                 .await?
                 .is_some();
@@ -519,7 +519,7 @@ impl PgDocStore {
         };
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)
                 .await?
                 .expect("DO UPDATE always returns the row");
@@ -544,7 +544,7 @@ impl PgDocStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
                 .bind(id)
@@ -584,7 +584,7 @@ impl PgDocStore {
         };
         wait(async move {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(select.clone()))
                 .bind(tenant.as_str())
                 .bind(id)
@@ -639,7 +639,7 @@ impl PgDocStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
                 .bind(id)
@@ -666,7 +666,7 @@ impl PgDocStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
                 .bind(MAX_UNDECIDED_ROWS)
@@ -741,7 +741,7 @@ impl PgDocStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(tenant.as_str());
             if let Some(types) = types {
                 q = q.bind(types);
@@ -769,7 +769,7 @@ impl PgDocStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
                 .bind(id)

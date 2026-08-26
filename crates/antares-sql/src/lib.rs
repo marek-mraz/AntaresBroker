@@ -7,9 +7,7 @@
 
 pub mod compile;
 #[cfg(feature = "postgres")]
-pub mod maintenance;
 #[cfg(feature = "postgres")]
-pub mod pg;
 /// Re-export for integration tests that need raw SQL against the pool.
 #[cfg(feature = "postgres")]
 pub use sqlx;

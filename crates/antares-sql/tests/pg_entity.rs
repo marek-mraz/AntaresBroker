@@ -2,8 +2,8 @@
 //! Skips loudly without ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
-use antares_sql::pg;
-use antares_sql::store::pg_entity::PgEntityStore;
+use antares_sql::store::pg;
+use antares_sql::store::pg::entity::PgEntityStore;
 use serde_json::json;
 
 macro_rules! require_db {
@@ -272,10 +272,10 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     }
     let all: Vec<String> = seed.iter().map(|(id, ..)| (*id).to_owned()).collect();
 
-    let q = |f: &antares_sql::store::pg_entity::EntityFilter<'_>| {
+    let q = |f: &antares_sql::store::pg::entity::EntityFilter<'_>| {
         ids_of(&s.query(&t, f).expect("query").rows)
     };
-    let base = || antares_sql::store::pg_entity::EntityFilter {
+    let base = || antares_sql::store::pg::entity::EntityFilter {
         expand: &ex,
         ..Default::default()
     };
@@ -286,7 +286,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // ids
     let want = ["urn:ngsi-ld:Room:2"];
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             ids: Some(&want),
             ..base()
         }),
@@ -296,7 +296,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // type selection (OR of AND-groups, expanded IRIs)
     let groups = vec![vec![ex("Vehicle")]];
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             types: Some(&groups),
             ..base()
         }),
@@ -306,7 +306,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // attrs: carries at least one of them
     let attrs = vec![ex("speed"), ex("brandName")];
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             attrs: Some(&attrs),
             ..base()
         }),
@@ -316,7 +316,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // q=: numeric comparison over instance values
     let ast = antares_ql::parse_q("temperature>20").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -326,7 +326,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // q=: string equality, and the AND of two predicates
     let ast = antares_ql::parse_q("name==\"south\";speed==60").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -337,7 +337,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     // — the case a naive `NOT jsonb_path_exists` on the wrong path gets wrong)
     let ast = antares_ql::parse_q("brandName").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -345,7 +345,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     );
     let ast = antares_ql::parse_q("!name").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             ..base()
         }),
@@ -357,7 +357,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     for refused in ["address.city==\"Bonn\"", "name~=\"^so\"", "name>\"m\""] {
         let ast = antares_ql::parse_q(refused).expect("parse");
         assert_eq!(
-            q(&antares_sql::store::pg_entity::EntityFilter {
+            q(&antares_sql::store::pg::entity::EntityFilter {
                 q: Some(&ast),
                 ..base()
             }),
@@ -370,7 +370,7 @@ async fn query_pushdown_narrows_without_dropping_matches() {
     let groups = vec![vec![ex("Room")]];
     let ast = antares_ql::parse_q("temperature<20").expect("parse");
     assert_eq!(
-        q(&antares_sql::store::pg_entity::EntityFilter {
+        q(&antares_sql::store::pg::entity::EntityFilter {
             types: Some(&groups),
             q: Some(&ast),
             ..base()
@@ -407,7 +407,7 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
         }
     };
     clean().await;
-    let ceiling = antares_sql::store::pg_entity::MAX_UNDECIDED_ROWS;
+    let ceiling = antares_sql::store::pg::entity::MAX_UNDECIDED_ROWS;
     // One statement, ceiling+1 rows: one more than the safety LIMIT can ever
     // return, so the cut is provable rather than incidental.
     sqlx::query(
@@ -429,7 +429,7 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
     let ast = antares_ql::parse_q("address.city==\"Bonn\"").expect("parse");
     let err = match s.query(
         &t,
-        &antares_sql::store::pg_entity::EntityFilter {
+        &antares_sql::store::pg::entity::EntityFilter {
             q: Some(&ast),
             expand: &ex,
             ..Default::default()
@@ -444,7 +444,7 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
         Err(e) => e,
     };
     let ngsi =
-        antares_sql::store::pg_entity::ngsi_error(&err).expect("a spec error, not a driver error");
+        antares_sql::store::pg::entity::ngsi_error(&err).expect("a spec error, not a driver error");
     assert_eq!(ngsi.kind(), "TooManyResults");
     assert_eq!(
         ngsi.status(),
@@ -458,9 +458,9 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
     let out = s
         .query(
             &t,
-            &antares_sql::store::pg_entity::EntityFilter {
+            &antares_sql::store::pg::entity::EntityFilter {
                 types: Some(&groups),
-                page: Some(antares_sql::store::pg_entity::Page {
+                page: Some(antares_sql::store::pg::entity::Page {
                     offset: 0,
                     limit: 5,
                 }),

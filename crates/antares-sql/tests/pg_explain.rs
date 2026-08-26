@@ -9,7 +9,7 @@
 //! Literal values are inlined (EXPLAIN cannot carry extended-protocol binds);
 //! this is test-only SQL, never a pattern for request paths.
 
-use antares_sql::pg;
+use antares_sql::store::pg;
 
 macro_rules! require_db {
     () => {

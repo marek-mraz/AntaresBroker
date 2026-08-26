@@ -12,11 +12,11 @@ use antares_model::{NgsiError, TenantId};
 use serde_json::Value;
 
 #[cfg(feature = "postgres")]
-use super::pg_doc::{DocKind, PgDocStore};
+use super::pg::doc::{DocKind, PgDocStore};
 #[cfg(feature = "postgres")]
-use super::pg_entity::PgEntityStore;
+use super::pg::entity::PgEntityStore;
 #[cfg(feature = "postgres")]
-use super::pg_temporal::PgTemporalStore;
+use super::pg::temporal::PgTemporalStore;
 use super::{ChangeHook, Kind, Store};
 
 /// 5.5.6: unexpected failures (database errors, timeouts) surface as
@@ -24,7 +24,7 @@ use super::{ChangeHook, Kind, Store};
 /// driver internals (SQL text, constraint names, connection state) go to
 /// the server log only.
 #[cfg(feature = "postgres")]
-fn db(e: sqlx::Error) -> NgsiError {
+pub(crate) fn db(e: sqlx::Error) -> NgsiError {
     // The store's own spec errors travel out through the same sqlx channel
     // (the signature is fixed by the callers), so recover them — by VALUE, so
     // the variant and therefore the status survive — before the generic
@@ -127,7 +127,7 @@ impl AnyStore {
         match self {
             AnyStore::Mem(_) => Ok(()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 sqlx::query("SELECT 1")
                     .execute(p.docs.pool())
                     .await
@@ -193,7 +193,7 @@ impl AnyStore {
         match self {
             AnyStore::Mem(_) => Ok(Vec::new()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::outbox::peek(p.docs.pool(), limit).map_err(db),
+            AnyStore::Pg(p) => super::pg::outbox::peek(p.docs.pool(), limit).map_err(db),
         }
     }
 
@@ -206,15 +206,15 @@ impl AnyStore {
         match self {
             AnyStore::Mem(_) => Ok(0),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::outbox::ack(p.docs.pool(), seqs).map_err(db),
+            AnyStore::Pg(p) => super::pg::outbox::ack(p.docs.pool(), seqs).map_err(db),
         }
     }
 
     /// 6.3.14 implicit tenant creation on Pg write paths.
     #[cfg(feature = "postgres")]
     fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
-        super::pg_entity::wait(async {
-            crate::pg::ensure_tenant(p.docs.pool(), tenant)
+        super::pg::entity::wait(async {
+            crate::store::pg::ensure_tenant(p.docs.pool(), tenant)
                 .await
                 .map_err(db)
         })
@@ -737,7 +737,7 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.tenant_exists(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let row =
                     sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE tenant_id = $1")
                         .bind(tenant.as_str())
@@ -754,7 +754,7 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.tenant_stats()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let mut tx = p.docs.pool().begin().await.map_err(db)?;
                 let rows: Vec<(String, String)> =
                     sqlx::query_as("SELECT tenant_id, created_at::text FROM tenants ORDER BY 1")
@@ -807,9 +807,11 @@ impl AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.purge_tenant(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                crate::store::pg::set_tenant(&mut tx, tenant)
+                    .await
+                    .map_err(db)?;
                 let known = sqlx::query_scalar::<_, i32>(
                     "SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE",
                 )
@@ -861,7 +863,7 @@ impl AnyStore {
             // Pg: all known tenants (tenants table carries no RLS); the
             // interval scan lists per tenant under set_tenant anyway.
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let rows =
                     sqlx::query_scalar::<_, String>("SELECT tenant_id FROM tenants ORDER BY 1")
                         .fetch_all(p.docs.pool())
@@ -1092,9 +1094,11 @@ impl antares_store::TemporalDriver for AnyStore {
         match self {
             AnyStore::Mem(s) => Ok(s.attr_instance_count(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                crate::store::pg::set_tenant(&mut tx, tenant)
+                    .await
+                    .map_err(db)?;
                 let n: i64 =
                     sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = $1")
                         .bind(tenant.as_str())
@@ -1112,9 +1116,11 @@ impl antares_store::TemporalDriver for AnyStore {
                 Ok(())
             }
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => super::pg_entity::wait(async {
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                crate::store::pg::set_tenant(&mut tx, tenant)
+                    .await
+                    .map_err(db)?;
                 for table in ["attr_instances", "temporal_entities"] {
                     sqlx::query(sqlx::AssertSqlSafe(format!(
                         "DELETE FROM {table} WHERE tenant_id = $1"

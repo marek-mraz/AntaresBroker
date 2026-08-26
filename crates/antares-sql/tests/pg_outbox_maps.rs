@@ -2,9 +2,9 @@
 //! Skips loudly without ANTARES_TEST_DATABASE_URL.
 
 use antares_model::TenantId;
-use antares_sql::pg;
-use antares_sql::store::entity_map::EntityMapStore;
-use antares_sql::store::outbox;
+use antares_sql::store::pg;
+use antares_sql::store::pg::entity_map::EntityMapStore;
+use antares_sql::store::pg::outbox;
 
 macro_rules! require_db {
     () => {

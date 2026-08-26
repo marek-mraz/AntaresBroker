@@ -16,7 +16,7 @@ design sketch:
    timescale the other). Adding a backend = adding an arm, which the
    compiler then enforces everywhere.
 2. **Synchronous facade over sqlx.** `PgBackend` runs its async sqlx calls
-   under `block_in_place` (`store/pg_entity.rs::wait`), so all 60+ call
+   under `block_in_place` (`store/pg/entity.rs::wait`), so all 60+ call
    sites in `antares-api` kept their signatures at the Postgres cutover — no
    async-ification churn, and the closure-based `mutate` maps 1:1 onto the
    `SELECT … FOR UPDATE` → apply-in-Rust → version-bump transaction.

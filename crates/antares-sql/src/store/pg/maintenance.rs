@@ -119,7 +119,7 @@ pub async fn temporal_maintenance(
         return Ok("skipped: another instance holds the claim".into());
     }
     // retention DML is cross-tenant service work (see migration 0005)
-    crate::pg::set_service(&mut tx).await?;
+    crate::store::pg::set_service(&mut tx).await?;
     let mut done: Vec<String> = Vec::new();
     // The 4.22 reaps run in their own transactions AFTER this one commits: both
     // DELETEs grow with stored volume and can exceed the connection's
@@ -247,7 +247,7 @@ pub async fn temporal_maintenance(
 async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::Error> {
     let mut done: Vec<String> = Vec::new();
     let mut tx = pool.begin().await?;
-    crate::pg::set_service(&mut tx).await?;
+    crate::store::pg::set_service(&mut tx).await?;
     let parts = sqlx::query(
         "SELECT c.relname,
                 pg_get_expr(c.relpartbound, c.oid) AS bound
@@ -334,7 +334,7 @@ async fn default_partition_load(pool: &PgPool) -> Result<Option<String>, sqlx::E
 /// (RLS would hide other tenants' rows).
 async fn reap_expired_entities(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    crate::pg::set_service(&mut tx).await?;
+    crate::store::pg::set_service(&mut tx).await?;
     let n = sqlx::query("DELETE FROM entities WHERE expires_at IS NOT NULL AND expires_at < now()")
         .execute(&mut *tx)
         .await?
@@ -381,7 +381,7 @@ fn adopt_default_rows_sql(suffix: &str, lo: &str, hi: &str) -> [String; 3] {
 /// reap is cross-tenant work (RLS would hide other tenants' rows).
 async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    crate::pg::set_service(&mut tx).await?;
+    crate::store::pg::set_service(&mut tx).await?;
     let n = sqlx::query(
         // try_timestamptz (migration 0011), not a bare cast: `expiresAt` is
         // jsonb TEXT and a stamp PostgreSQL cannot parse would abort this

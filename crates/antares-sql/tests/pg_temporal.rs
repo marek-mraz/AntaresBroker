@@ -2,8 +2,8 @@
 //! loudly without ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 
 use antares_model::TenantId;
-use antares_sql::pg;
-use antares_sql::store::pg_temporal::PgTemporalStore;
+use antares_sql::store::pg;
+use antares_sql::store::pg::temporal::PgTemporalStore;
 use serde_json::json;
 
 macro_rules! require_db {
@@ -35,12 +35,16 @@ async fn maintenance_winning(
     pool: &sqlx::PgPool,
     retention_days: Option<i64>,
 ) -> Result<String, sqlx::Error> {
-    let backend = antares_sql::maintenance::detect_temporal_backend(pool)
+    let backend = antares_sql::store::pg::maintenance::detect_temporal_backend(pool)
         .await
         .expect("temporal backend");
     for _ in 0..50 {
-        let msg =
-            antares_sql::maintenance::temporal_maintenance(pool, backend, retention_days).await?;
+        let msg = antares_sql::store::pg::maintenance::temporal_maintenance(
+            pool,
+            backend,
+            retention_days,
+        )
+        .await?;
         if !msg.starts_with("skipped") {
             return Ok(msg);
         }
@@ -175,7 +179,7 @@ async fn attr_instances_decomposition_and_maintenance() {
     // maintenance: plain mode pre-creates weekly partitions, single-winner;
     // timescale mode has chunks instead and reports a no-op without a
     // retention horizon.
-    let ts = antares_sql::maintenance::timescale_present(&pool)
+    let ts = antares_sql::store::pg::maintenance::timescale_present(&pool)
         .await
         .expect("detect");
     let msg = maintenance_winning(&pool, None).await.expect("maintenance");
@@ -214,7 +218,7 @@ async fn occupied_range_is_skipped_without_poisoning_the_pass() {
     let url = require_db!();
     let _ddl = PARTITION_DDL.lock().await;
     let pool = pg::connect(&url, 5).await.expect("connect");
-    if antares_sql::maintenance::timescale_present(&pool)
+    if antares_sql::store::pg::maintenance::timescale_present(&pool)
         .await
         .expect("detect")
     {

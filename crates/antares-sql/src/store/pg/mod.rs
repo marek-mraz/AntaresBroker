@@ -1,6 +1,13 @@
 //! Postgres foundation: ONE shared pool, embedded migrations,
 //! transaction-scoped tenancy. Store implementations build on top.
 
+pub mod doc;
+pub mod entity;
+pub mod entity_map;
+pub mod maintenance;
+pub mod outbox;
+pub mod temporal;
+
 use antares_model::TenantId;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Transaction};

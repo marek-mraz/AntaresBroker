@@ -392,7 +392,7 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
         .build()
         .expect("rt");
     let pool = rt
-        .block_on(antares_sql::pg::connect(&db, 5))
+        .block_on(antares_sql::store::pg::connect(&db, 5))
         .expect("connect");
     let store =
         antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(pool));

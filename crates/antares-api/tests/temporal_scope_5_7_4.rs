@@ -351,7 +351,7 @@ async fn clause_5_7_4_4_scopeq_gates_the_sql_pushdown() {
         eprintln!("SKIP: ANTARES_TEST_DATABASE_URL not set");
         return;
     };
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
         pool.clone(),
     ));

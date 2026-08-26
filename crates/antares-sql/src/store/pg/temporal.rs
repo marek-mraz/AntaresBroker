@@ -15,7 +15,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use super::pg_entity::wait;
+use super::entity::wait;
 
 pub struct PgTemporalStore {
     pool: PgPool,
@@ -168,7 +168,7 @@ async fn insert_rows(
 }
 
 // TemporalFilter lives in `store::filter`; re-exported for path compat.
-pub use super::filter::{TemporalFilter, TemporalOutcome};
+pub use crate::store::filter::{TemporalFilter, TemporalOutcome};
 
 /// The correlated subquery reconstructing the attribute object for the meta
 /// row aliased `m`, with the 4.11 range and the lastN RANK() cap applied over
@@ -247,7 +247,7 @@ const BUCKET_TS: &str = r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:
 /// bucket from the anchor to the last instant + 1 s — the API's own rule.
 fn aggregate_expr(
     f: &TemporalFilter<'_>,
-    agg: &super::filter::Aggregate<'_>,
+    agg: &crate::store::filter::Aggregate<'_>,
     first_bind: usize,
 ) -> Option<(String, Vec<String>)> {
     let (range_and, mut binds) = window_sql(f, first_bind)?;
@@ -341,7 +341,7 @@ impl PgTemporalStore {
         let rows = decompose(doc);
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let n = sqlx::query(
                 "INSERT INTO temporal_entities
                    (tenant_id, id, types, scopes, meta, created_at, modified_at)
@@ -389,7 +389,7 @@ impl PgTemporalStore {
         let rows = decompose(additions);
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let live = sqlx::query(
                 "SELECT 1 FROM entities WHERE tenant_id = $1 AND id = $2 FOR KEY SHARE",
             )
@@ -441,7 +441,7 @@ impl PgTemporalStore {
     pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let n = sqlx::query("DELETE FROM temporal_entities WHERE tenant_id = $1 AND id = $2")
                 .bind(tenant.as_str())
                 .bind(id)
@@ -637,7 +637,7 @@ impl PgTemporalStore {
             // bound on this statement is the safety ceiling — without it a
             // bare `?timerel=…` reconstructs every temporal entity of the
             // tenant into one Vec.
-            binds.push(B::Num(super::pg_entity::MAX_UNDECIDED_ROWS));
+            binds.push(B::Num(super::entity::MAX_UNDECIDED_ROWS));
             tail.push_str(&format!(" LIMIT ${}", binds.len()));
         }
         let sql = format!(
@@ -646,7 +646,7 @@ impl PgTemporalStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // `sql` is compiler literals + $n placeholders only.
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
             for b in &binds {
@@ -680,11 +680,7 @@ impl PgTemporalStore {
                 total = Some(cq.fetch_one(&mut *tx).await?);
             }
             tx.commit().await?;
-            super::pg_entity::check_ceiling(
-                paged,
-                rows.len(),
-                super::pg_entity::MAX_UNDECIDED_ROWS,
-            )?;
+            super::entity::check_ceiling(paged, rows.len(), super::entity::MAX_UNDECIDED_ROWS)?;
             let mut docs: Vec<Value> = rows.into_iter().map(|r| r.get::<Value, _>(0)).collect();
             if aggregated {
                 for d in &mut docs {
@@ -735,7 +731,7 @@ impl PgTemporalStore {
         );
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
                 .bind(id);
@@ -765,7 +761,7 @@ impl PgTemporalStore {
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // the meta row is the serialization point (FOR UPDATE)
             let row = sqlx::query(
                 "SELECT meta FROM temporal_entities WHERE tenant_id = $1 AND id = $2 FOR UPDATE",

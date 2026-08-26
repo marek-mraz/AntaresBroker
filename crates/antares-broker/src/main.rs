@@ -354,7 +354,7 @@ async fn build_drivers(
     (
         std::sync::Arc<antares_sql::store::any::AnyStore>,
         std::sync::Arc<dyn antares_store::TemporalDriver>,
-        Option<antares_sql::maintenance::TemporalBackend>,
+        Option<antares_sql::store::pg::maintenance::TemporalBackend>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -382,11 +382,11 @@ async fn build_store(
 ) -> Result<
     (
         antares_sql::store::any::AnyStore,
-        Option<antares_sql::maintenance::TemporalBackend>,
+        Option<antares_sql::store::pg::maintenance::TemporalBackend>,
     ),
     Box<dyn std::error::Error>,
 > {
-    use antares_sql::maintenance::TemporalBackend;
+    use antares_sql::store::pg::maintenance::TemporalBackend;
     use antares_sql::store::any::{AnyStore, PgBackend};
     use antares_sql::store::Store;
     use antares_sql::StoreMode;
@@ -413,13 +413,13 @@ async fn build_store(
             // The DB container may still be booting — bounded retry, then die.
             let mut last = String::new();
             for _ in 0..30 {
-                match antares_sql::pg::connect_with(&url, pool_size, statement_timeout).await {
+                match antares_sql::store::pg::connect_with(&url, pool_size, statement_timeout).await {
                     Ok(pool) => {
                         // The temporal backend is what the migrations actually
                         // BUILT, detected once from the catalog and pinned —
                         // the maintenance branch can never disagree with the
                         // DDL on disk, whatever happened to the extension since.
-                        let backend = antares_sql::maintenance::detect_temporal_backend(&pool)
+                        let backend = antares_sql::store::pg::maintenance::detect_temporal_backend(&pool)
                             .await
                             .map_err(|e| format!("ANTARES_STORE={mode}: {e}"))?;
                         // Never silently fall back — timescale mode whose
@@ -447,7 +447,7 @@ async fn build_store(
                         // always; in production set ANTARES_REQUIRE_RLS=1 to turn
                         // the warning into a hard refusal so a superuser DSN can
                         // never silently ship (dev/ETSI stacks leave it unset).
-                        if antares_sql::pg::role_bypasses_rls(&pool).await {
+                        if antares_sql::store::pg::role_bypasses_rls(&pool).await {
                             // A gate that only understands two spellings
                             // fails OPEN on `TRUE`/`yes`/`on`: the operator
                             // believes RLS is enforced and the broker serves
@@ -522,7 +522,7 @@ async fn run(
     store: std::sync::Arc<antares_sql::store::any::AnyStore>,
     temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
     store_mode: antares_sql::StoreMode,
-    temporal_backend: Option<antares_sql::maintenance::TemporalBackend>,
+    temporal_backend: Option<antares_sql::store::pg::maintenance::TemporalBackend>,
     metrics_render: Option<telemetry::MetricsRender>,
     sweep_secs: u64,
     drain_delay: std::time::Duration,
@@ -662,7 +662,7 @@ async fn run(
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
             loop {
                 tick.tick().await; // first tick is immediate: partitions at boot
-                match antares_sql::maintenance::temporal_maintenance(&pool, backend, retention)
+                match antares_sql::store::pg::maintenance::temporal_maintenance(&pool, backend, retention)
                     .await
                 {
                     Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),

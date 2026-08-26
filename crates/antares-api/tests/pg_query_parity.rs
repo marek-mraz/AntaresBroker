@@ -17,7 +17,7 @@
 use antares_jsonld::Loader;
 use antares_model::TenantId;
 use antares_sql::store::any::{AnyStore, PgBackend};
-use antares_sql::store::pg_entity::EntityFilter;
+use antares_sql::store::pg::entity::EntityFilter;
 use serde_json::{json, Value};
 
 macro_rules! require_db {
@@ -141,9 +141,9 @@ fn fixtures() -> Vec<(&'static str, Value)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("parity").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool));
@@ -343,9 +343,9 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exactness_gated_pushdown_pages_projects_and_counts() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("pushdown").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool));
@@ -390,7 +390,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
             &t,
             &EntityFilter {
                 types: Some(&room_types),
-                page: Some(antares_sql::store::pg_entity::Page {
+                page: Some(antares_sql::store::pg::entity::Page {
                     offset: 2,
                     limit: 3,
                 }),
@@ -412,7 +412,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
             &t,
             &EntityFilter {
                 types: Some(&room_types),
-                page: Some(antares_sql::store::pg_entity::Page {
+                page: Some(antares_sql::store::pg::entity::Page {
                     offset: 50,
                     limit: 3,
                 }),
@@ -472,7 +472,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
             &EntityFilter {
                 types: Some(&room_types),
                 scope_q: Some("/A/#"),
-                page: Some(antares_sql::store::pg_entity::Page {
+                page: Some(antares_sql::store::pg::entity::Page {
                     offset: 0,
                     limit: 3,
                 }),
@@ -496,9 +496,9 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_q_prefilter_narrows_but_never_drops() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("tqprefilter").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool));
@@ -748,9 +748,9 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_pruning_matches_the_window_and_keeps_ties() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("tpruning").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool));
@@ -780,7 +780,7 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
         .expect("seed temporal"));
 
     // range: between [Feb, Mar) keeps exactly the February instance
-    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+    let tf = antares_sql::store::pg::temporal::TemporalFilter {
         range: Some(antares_sql::compile::temporal::InstanceRange {
             timerel: "between",
             time_at: "2026-02-01T00:00:00Z",
@@ -803,7 +803,7 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
 
     // lastN=1 with a tie at the top: BOTH tied instances survive the SQL cap
     // (the API's per-attr lastN then picks per its own stable order)
-    let tf = antares_sql::store::pg_temporal::TemporalFilter {
+    let tf = antares_sql::store::pg::temporal::TemporalFilter {
         last_n: Some(1),
         ..Default::default()
     };
@@ -834,9 +834,9 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_geo_prefilter_narrows_but_never_drops() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("tgeopre").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool.clone()));
@@ -1004,9 +1004,9 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_exact_prefilter_pages_correctly() {
     let url = require_db!();
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let t = TenantId::new("tqpage").expect("tenant");
-    antares_sql::pg::ensure_tenant(&pool, &t)
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
         .expect("tenant row");
     let store = AnyStore::Pg(PgBackend::new(pool));

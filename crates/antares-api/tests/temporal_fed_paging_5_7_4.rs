@@ -52,8 +52,8 @@ async fn clause_5_7_4_pages_partition_the_federated_union_on_pg() {
     let url = std::env::var("ANTARES_TEST_DATABASE_URL")
         .expect("ANTARES_TEST_DATABASE_URL must point at a live PostGIS");
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
-    antares_sql::pg::ensure_tenant(&pool, &antares_model::TenantId::default())
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    antares_sql::store::pg::ensure_tenant(&pool, &antares_model::TenantId::default())
         .await
         .expect("tenant row");
     let st = AppState::with_store(

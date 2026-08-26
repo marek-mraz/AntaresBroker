@@ -27,7 +27,7 @@ pub struct PgEntityStore {
 
 // EntityFilter/Page/QueryOutcome live in `store::filter` (pure data,
 // shared with the wasm32 build); re-exported here so existing paths hold.
-pub use super::filter::{EntityFilter, Page, QueryOutcome};
+pub use crate::store::filter::{EntityFilter, Page, QueryOutcome};
 
 /// A bound value. Enumerated because the bind list is built dynamically while
 /// the SQL is assembled — the alternative would be string interpolation.
@@ -278,7 +278,7 @@ impl PgEntityStore {
         let e = extract(doc);
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
@@ -332,7 +332,7 @@ impl PgEntityStore {
     pub fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: expired rows are invalid context until the sweep reaps them
             let row = sqlx::query(
                 "SELECT entity FROM entities WHERE tenant_id = $1 AND id = $2
@@ -352,7 +352,7 @@ impl PgEntityStore {
     pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: an already-expired row is invalid, so deleting it is a
             // 404 exactly as retrieving it is — never a 204 for an entity the
             // API has stopped serving.
@@ -522,7 +522,7 @@ impl PgEntityStore {
         let (sql, paged) = query_sql(&select, &wheres, f.page.as_ref(), decided, &mut binds);
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
             // construction: `sql` is built from this function's own literals
             // plus `$n` placeholders — no caller-supplied text reaches it.
@@ -611,7 +611,7 @@ impl PgEntityStore {
     pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut docs: Vec<Value> = Vec::new();
             {
                 use futures_util::TryStreamExt;
@@ -644,7 +644,7 @@ impl PgEntityStore {
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: an expired row is invalid, so a patch of it is a 404 —
             // the same answer the retrieve it would follow already gives.
             let row = sqlx::query(
@@ -736,7 +736,7 @@ impl PgEntityStore {
         }
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
@@ -801,7 +801,7 @@ impl PgEntityStore {
     ) -> Result<Vec<(String, Value)>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
                  RETURNING id, entity, types, version, created_at::text",
@@ -867,7 +867,7 @@ impl PgEntityStore {
         }
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // lock + before-images in one statement (ordered: stable lock order)
             let prev_rows = sqlx::query(
                 "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
@@ -962,7 +962,7 @@ impl PgEntityStore {
     ) -> Result<Vec<Option<Result<(), E>>>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
                  ORDER BY id FOR UPDATE",
@@ -1067,7 +1067,7 @@ impl PgEntityStore {
     pub fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
-            crate::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query("SELECT version FROM entities WHERE tenant_id = $1 AND id = $2")
                 .bind(tenant.as_str())
                 .bind(id)

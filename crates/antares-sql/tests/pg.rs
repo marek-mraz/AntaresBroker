@@ -9,7 +9,7 @@
 //!           cargo test -p antares-sql --test pg
 
 use antares_model::TenantId;
-use antares_sql::pg;
+use antares_sql::store::pg;
 use sqlx::Row;
 
 macro_rules! require_db {

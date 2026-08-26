@@ -283,7 +283,7 @@ mod tests {
             .expect("runtime");
         let connect = || {
             AnyStore::Pg(PgBackend::new(
-                rt.block_on(antares_sql::pg::connect(&url, 5))
+                rt.block_on(antares_sql::store::pg::connect(&url, 5))
                     .expect("connect+migrate"),
             ))
         };

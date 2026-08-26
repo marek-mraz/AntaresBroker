@@ -165,7 +165,7 @@ async fn clause_5_7_2_4_split_aggregate_filter_postgres() {
     let url = std::env::var("ANTARES_TEST_DATABASE_URL")
         .expect("ANTARES_TEST_DATABASE_URL must point at a live PostGIS");
     std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
-    let pool = antares_sql::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
     let store =
         antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(pool));
     let st = AppState::with_store(
