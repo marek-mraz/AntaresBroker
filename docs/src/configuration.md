@@ -68,8 +68,8 @@ here).
 | `ANTARES_DISCOVERY_SCAN_MAX` | `100000` | Entities one `/types`/`/attributes` discovery fold may read; past it the answer is 403 TooManyResults (5.5.6) instead of an unbounded scan. |
 | `ANTARES_DRAIN_DELAY_MS` | `500` | Rolling update, step 2: keep serving this long after `/q/health` flips to 503 — the load balancer's notice window. |
 | `ANTARES_DRAIN_DEADLINE_SECS` | `20` | Bound on waiting for in-flight connections during drain. Container `stop_grace_period` / `terminationGracePeriodSeconds` MUST exceed delay + deadline. |
-| `ANTARES_TELEMETRY` | off | `1`/`true`/`on` enables the OTLP span pipeline (needs the endpoint too). |
-| `ANTARES_OTLP_ENDPOINT` | unset | OTLP/HTTP traces collector, e.g. `http://collector:4318/v1/traces`. Unset costs nothing. |
+| `ANTARES_TELEMETRY` | off | Any value but an off spelling enables the metrics recorder and, with the endpoint, the OTLP span and log pipelines. |
+| `ANTARES_OTLP_ENDPOINT` | unset | OTLP/HTTP collector for traces and logs, e.g. `http://collector:4318/v1/traces`; log records go to the `v1/logs` twin of that URL with the same resource attributes. Unset costs nothing. |
 
 Compile-time bounds (not configurable; spec-shaped rejections): body
 4 MiB → 413, URI 8 KiB → 414, JSON depth 64 → 400. Current values are

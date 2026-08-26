@@ -65,7 +65,7 @@ tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "json", "chrono", "uuid", "migrate", "macros"] }
 # The JetStream change spine — official client, KV + streams in core
-# (0.50 verified 2026-08-03; pre-1.0 pin — upgrade in dedicated PRs)
+# (0.50; pre-1.0 pin — upgrade in dedicated PRs)
 async-nats = "0.50"
 futures-util = { version = "0.3", default-features = false }
 thiserror = "2"
@@ -78,9 +78,11 @@ opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "trace",
+    "logs",
     "http-proto",
     "reqwest-blocking-client",
 ] }
+opentelemetry-appender-tracing = "0.32"
 tracing-opentelemetry = "0.33"
 console-subscriber = "0.5"
 

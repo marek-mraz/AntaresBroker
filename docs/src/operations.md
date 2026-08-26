@@ -48,6 +48,19 @@ during an outage the API keeps serving (writes land in the transactional
 outbox), `/q/ready` goes 503, and on reconnect the outbox drains — the
 outage-time notifications arrive, none lost.
 
+## Observability
+
+Three signals, one switch (`ANTARES_TELEMETRY`):
+
+| Signal | Where it goes |
+|---|---|
+| Traces | OTLP/HTTP to `ANTARES_OTLP_ENDPOINT` (`…/v1/traces`), batch exported. |
+| Metrics | Prometheus text at `/q/metrics`, scraped. |
+| Logs | Stdout always; with the endpoint set, also OTLP/HTTP to its `…/v1/logs` twin, same `service.name` resource, batch exported from a bounded queue on its own thread. A collector that does not answer drops records and never slows a request. |
+
+Log records exported while a request span is open carry that span's
+trace id, so a collector joins the three signals per request.
+
 ## Tenants
 
 Tenants come to exist implicitly (CIM 009 5.5.10): the first create

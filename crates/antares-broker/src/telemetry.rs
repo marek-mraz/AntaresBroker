@@ -14,7 +14,8 @@
 //! env and restart where a dashboard actually scrapes.
 //!
 //! OTLP: set ANTARES_OTLP_ENDPOINT (e.g. http://collector:4318/v1/traces)
-//! and spans flow out over OTLP/HTTP; unset (the default) costs nothing.
+//! and spans flow out over OTLP/HTTP, log records to its `v1/logs` twin
+//! with the same resource; unset (the default) costs nothing.
 //! tokio-console: cargo feature `console` + RUSTFLAGS="--cfg tokio_unstable"
 //! (the layer only arms when BOTH are present — an --all-features build
 //! without the RUSTFLAGS must not panic at startup).
@@ -50,6 +51,15 @@ fn redact_url(url: &str) -> String {
     }
 }
 
+/// The OTLP/HTTP logs endpoint paired with a traces endpoint: the standard
+/// `v1/traces` suffix becomes `v1/logs`; any other URL is used as given.
+fn logs_endpoint(traces: &str) -> String {
+    match traces.strip_suffix("/v1/traces") {
+        Some(base) => format!("{base}/v1/logs"),
+        None => traces.to_owned(),
+    }
+}
+
 /// Install the tracing subscriber stack and (ANTARES_TELEMETRY=1) the
 /// Prometheus recorder. Call once, before the runtime spins up anything
 /// measurable. Returns the /q/metrics render closure, or None when the
@@ -65,28 +75,55 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
     // The collector endpoint is a URL and may carry `user:password@` userinfo
     // (RFC 3986 clause 3.2.1); it is logged at startup, so the credential is
     // stripped first.
-    // Env-gated OTLP span pipeline — needs the switch AND an endpoint.
-    let otlp = match std::env::var("ANTARES_OTLP_ENDPOINT") {
+    // Env-gated OTLP pipeline — needs the switch AND an endpoint. Spans and
+    // log records share one resource so a collector joins them.
+    let (otlp, logs) = match std::env::var("ANTARES_OTLP_ENDPOINT") {
         Ok(endpoint) if enabled() => {
             use opentelemetry::trace::TracerProvider as _;
             use opentelemetry_otlp::WithExportConfig as _;
+            use tracing_subscriber::Layer as _;
+            let resource = opentelemetry_sdk::Resource::builder()
+                .with_service_name("antares")
+                .build();
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_endpoint(endpoint.clone())
                 .build()?;
             let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                 .with_batch_exporter(exporter)
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder()
-                        .with_service_name("antares")
-                        .build(),
-                )
+                .with_resource(resource.clone())
                 .build();
             let tracer = provider.tracer("antares");
-            tracing::info!(endpoint = redact_url(&endpoint), "OTLP span export enabled");
-            Some(tracing_opentelemetry::layer().with_tracer(tracer))
+            // Log records: batch exporter on its own thread with a bounded
+            // queue, so a dead collector drops records instead of stalling
+            // a request. The exporter's own HTTP stack is filtered out of
+            // the bridge, else every export would log another export.
+            let log_exporter = opentelemetry_otlp::LogExporter::builder()
+                .with_http()
+                .with_endpoint(logs_endpoint(&endpoint))
+                .build()?;
+            let logger_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+                .with_batch_exporter(log_exporter)
+                .with_resource(resource)
+                .build();
+            let bridge = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(tracing_subscriber::filter::filter_fn(|m| {
+                !["opentelemetry", "hyper", "reqwest", "h2", "tonic"]
+                    .iter()
+                    .any(|t| m.target().starts_with(t))
+            }));
+            tracing::info!(
+                endpoint = redact_url(&endpoint),
+                "OTLP span and log export enabled"
+            );
+            (
+                Some(tracing_opentelemetry::layer().with_tracer(tracer)),
+                Some(bridge),
+            )
         }
-        _ => None,
+        _ => (None, None),
     };
 
     #[cfg(all(feature = "console", tokio_unstable))]
@@ -98,6 +135,7 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
         .with(env_filter)
         .with(fmt)
         .with(otlp)
+        .with(logs)
         .with(console)
         .init();
 
@@ -109,7 +147,7 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
             tracing::warn!(
                 endpoint = redact_url(&endpoint),
                 "ANTARES_OTLP_ENDPOINT is set but ANTARES_TELEMETRY is off — \
-                 no spans are exported"
+                 no spans or logs are exported"
             );
         }
         return Ok(None); // the recorder, registry and sampler are never built
@@ -225,6 +263,21 @@ pub fn spawn_sampler(state: antares_api::AppState) {
         }
     });
 }
+#[cfg(test)]
+mod logs_endpoint_tests {
+    #[test]
+    fn traces_suffix_becomes_logs_anything_else_is_kept() {
+        assert_eq!(
+            super::logs_endpoint("http://c:4318/v1/traces"),
+            "http://c:4318/v1/logs"
+        );
+        assert_eq!(
+            super::logs_endpoint("http://c:4318/otlp"),
+            "http://c:4318/otlp"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
