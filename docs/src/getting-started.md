@@ -75,20 +75,26 @@ curl -i -X PATCH \
 # HTTP/1.1 204 No Content
 ```
 
-The listener receives a `Notification` whose `data` carries the entity with
-`temperature.value = 42.0`. MQTT delivery works the same way with an
+The listener receives:
+
+```json
+{"id": "urn:ngsi-ld:Notification:ca63483a-bc7e-4731-a36f-1168f455eb97", "type": "Notification",
+ "subscriptionId": "urn:ngsi-ld:Subscription:demo", "notifiedAt": "2026-08-26T16:16:00.851Z",
+ "data": [{"id": "urn:ngsi-ld:TemperatureSensor:001", "type": "TemperatureSensor",
+           "temperature": {"type": "Property", "unitCode": "CEL", "value": 42.0}}]}
+``` MQTT delivery works the same way with an
 `mqtt[s]://` endpoint URI.
 
 ## First federation pair
 
 Two brokers, one Context Source Registration. Local processes talk over
-private addresses, so the egress guard must be opened for the demo
-(`ANTARES_EGRESS_ALLOW_PRIVATE=true` — never do this facing the internet;
-the default rejects private egress as SSRF protection):
+loopback, which the egress policy allows by default; on an
+internet-facing deployment set `ANTARES_EGRESS_ALLOW_PRIVATE=false`
+(see [Configuration](configuration.md)):
 
 ```bash
-ANTARES_HTTP_PORT=9391 ANTARES_EGRESS_ALLOW_PRIVATE=true antares &   # broker A
-ANTARES_HTTP_PORT=9392 ANTARES_EGRESS_ALLOW_PRIVATE=true antares &   # broker B
+ANTARES_HTTP_PORT=9391 antares &   # broker A
+ANTARES_HTTP_PORT=9392 antares &   # broker B
 ```
 
 Create an entity only broker B knows:
@@ -126,5 +132,14 @@ curl -s 'localhost:9391/ngsi-ld/v1/entities?type=ParkingSpot'
 
 That is the whole federation model: registrations route queries (and
 writes, subscriptions, temporal queries) to the sources that declared the
-matching types and id patterns. The [federation guide](federation.md)
-covers distributed operations in depth.
+matching types and id patterns.
+
+## Next
+
+- [Subscriptions and notifications](subscriptions.md): formats,
+  `showChanges`, periodic delivery, throttling, MQTT, retries.
+- [Temporal API](temporal.md): how history is recorded and queried.
+- [Federation](federation.md): registration modes, loop protection,
+  partial failures, context source subscriptions.
+- [Deployment](deployment.md) and [Operations](operations.md) when it
+  leaves the laptop.
