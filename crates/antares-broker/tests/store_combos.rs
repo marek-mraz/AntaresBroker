@@ -504,3 +504,35 @@ fn file_postgres_retention_prunes_the_temporal_half() {
     );
     assert!(resp.starts_with("HTTP/1.1 204"), "{resp}");
 }
+
+/// `timescale` as the temporal half of a `file` store is checked against the
+/// database exactly like a timescale primary: without the extension the
+/// process refuses to start instead of serving partitioned history under a
+/// timescale label.
+#[test]
+fn file_timescale_without_the_extension_is_fatal() {
+    let url = require_db!();
+    if has_timescale(&url) {
+        eprintln!("SKIP: the test database has timescaledb, the refusal cannot be observed");
+        return;
+    }
+    let dir = tempdir("file-timescale-fatal");
+    let port = free_port();
+    let mut broker = start(port, &dir, "file", "timescale");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = broker.0.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a timescale temporal half without the extension must exit at startup"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(!status.success(), "exit status: {status}");
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "nothing may be listening after the refusal"
+    );
+}

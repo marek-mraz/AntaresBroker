@@ -446,10 +446,11 @@ async fn build_store(
                         // installed only after the migrations ran).
                         if mode == StoreMode::Timescale && backend != TemporalBackend::Hypertable {
                             return Err(format!(
-                                "ANTARES_STORE=timescale but attr_instances is {backend:?} — \
-                                 the timescaledb extension was not CREATEd when the migrations \
-                                 first ran. Install it in a fresh database (CREATE EXTENSION \
-                                 timescaledb before first boot) or use ANTARES_STORE=postgres"
+                                "timescale requested (ANTARES_STORE or ANTARES_TEMPORAL) but \
+                                 attr_instances is {backend:?} — the timescaledb extension was \
+                                 not CREATEd when the migrations first ran. Install it in a fresh \
+                                 database (CREATE EXTENSION timescaledb before first boot) or use \
+                                 postgres"
                             )
                             .into());
                         }
