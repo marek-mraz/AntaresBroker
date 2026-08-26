@@ -4400,7 +4400,9 @@ mod clause_5_6_1_and_5_6_21 {
                 return;
             }
         };
-        let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+        let pool = antares_sql::store::pg::connect(&url, 5)
+            .await
+            .expect("connect");
         let tenant = TenantId::new("purgepaging").expect("tenant");
         antares_sql::store::pg::ensure_tenant(&pool, &tenant)
             .await

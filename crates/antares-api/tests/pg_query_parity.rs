@@ -141,7 +141,9 @@ fn fixtures() -> Vec<(&'static str, Value)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("parity").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
@@ -343,7 +345,9 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exactness_gated_pushdown_pages_projects_and_counts() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("pushdown").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
@@ -496,7 +500,9 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_q_prefilter_narrows_but_never_drops() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("tqprefilter").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
@@ -748,7 +754,9 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_pruning_matches_the_window_and_keeps_ties() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("tpruning").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
@@ -834,7 +842,9 @@ async fn temporal_pruning_matches_the_window_and_keeps_ties() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_geo_prefilter_narrows_but_never_drops() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("tgeopre").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
@@ -1004,7 +1014,9 @@ async fn temporal_geo_prefilter_narrows_but_never_drops() {
 #[tokio::test(flavor = "multi_thread")]
 async fn temporal_exact_prefilter_pages_correctly() {
     let url = require_db!();
-    let pool = antares_sql::store::pg::connect(&url, 5).await.expect("connect");
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
     let t = TenantId::new("tqpage").expect("tenant");
     antares_sql::store::pg::ensure_tenant(&pool, &t)
         .await
