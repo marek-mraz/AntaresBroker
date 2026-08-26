@@ -12,4 +12,5 @@
 - [Admin API](admin-api.md)
 - [Storage drivers](storage.md)
 - [Extending Antares](extending.md)
+- [Conformance](conformance.md)
 - [Ecosystem & positioning](ecosystem.md)
