@@ -5,6 +5,7 @@
 - [Getting started](getting-started.md)
 - [Configuration](configuration.md)
 - [Deployment](deployment.md)
+- [Subscriptions and notifications](subscriptions.md)
 - [Federation](federation.md)
 - [Browser & WebAssembly](wasm.md)
 - [Shared crates](shared-crates.md)
