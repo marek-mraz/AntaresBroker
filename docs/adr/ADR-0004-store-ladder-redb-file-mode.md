@@ -32,3 +32,7 @@ workspace posture), typed tables, copy-on-write MVCC with no WAL to manage,
 and this use is a KV shadow — SQL adds surface without adding value here.
 Rolling updates in `file` mode are Recreate-only (exclusive lock, one broker
 per volume); HA needs `postgres` mode.
+
+## Confirmation
+
+`crates/antares-broker/tests/file_mode.rs` (redb durability across `kill -9`, single-process lock) and `store_combos.rs` (every store × temporal pairing); the file cell of the ETSI matrix.

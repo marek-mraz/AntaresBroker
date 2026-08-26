@@ -142,3 +142,7 @@ response flush is a one-line change to make on a measured latency need.
 - Prior art: coraine `src/lib/db/DbDriver.h`, `src/lib/troe/TroeDriver.h`,
   `doc/plugin-architecture.md` — the seams are copied, the dlopen loader
   deliberately is not.
+
+## Confirmation
+
+`crates/antares-store/src/lib.rs no_temporal_degrades_without_panicking`, `crates/antares-api/tests/temporal_driver_6_3_2.rs`; the `shared-crates` job in `.github/workflows/workspace.yml` fails on any dependency path from a shared crate into api/broker/sql.

@@ -53,3 +53,7 @@ Consequences:
   it from outside. The knob makes the crash state deterministic (rows commit,
   this pod never publishes, another pod's drain recovers them) and doubles as
   the dedicated-drainer split if one is ever wanted.
+
+## Confirmation
+
+`crates/antares-api/tests/temporal_drain.rs` (a temporal read straight after a write sees it; a drain error never changes a sent 2xx) and `temporal_autorecord.rs`.

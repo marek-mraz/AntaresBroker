@@ -9,3 +9,7 @@ idempotent consumers; entity `version` gives order tolerance. `bus = local`
 (in-process) is a first-class single-node mode: no infrastructure beyond
 Postgres. Kafka rejected: operational cost without a matching benefit at
 our scale.
+
+## Confirmation
+
+`crates/antares-broker/tests/nats_e2e.rs sigkill_between_commit_and_publish_republishes_from_outbox` and `nats_outage_flips_health_and_recovers`; the postgres-nats and timescale-nats cells of the full ETSI matrix.

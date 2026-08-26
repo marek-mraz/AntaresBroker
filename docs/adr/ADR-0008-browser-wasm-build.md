@@ -51,3 +51,7 @@ not spec surface.
   target, not a server runtime.
 - Threads/atomics build — nothing needs it; single-threaded keeps the
   send_wrapper argument sound and the artifact small (2.4 MB raw).
+
+## Confirmation
+
+`.github/workflows/wasm.yml` builds `antares-wasm` for `wasm32-unknown-unknown` and runs the browser tests; the wasm-file cell of the full ETSI matrix.

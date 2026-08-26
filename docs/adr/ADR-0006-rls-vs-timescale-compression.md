@@ -24,3 +24,7 @@ Consequences:
   ALTERs — compression must be the LAST thing that touches the table.
 - If Timescale ever lifts the restriction, adding the policy back is a
   single forward migration.
+
+## Confirmation
+
+`crates/antares-sql/tests/pg_rls_pentest.rs rls_tables` names the RLS table set with `attr_instances` handled by its own rule; the timescale cell of the full ETSI matrix runs with compression enabled.

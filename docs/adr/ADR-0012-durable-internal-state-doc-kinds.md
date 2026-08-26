@@ -43,3 +43,7 @@ vanish, and EntityMap references stop resolving.
   sanctioned way to shed snapshots; durability does not repeal it.
 - `tenant_exists` counts the new kinds, so a tenant that only owns an
   EntityMap or snapshot still passes the 5.5.10 gate after a restart.
+
+## Confirmation
+
+`crates/antares-api/tests/durable_state.rs snapshot_and_entity_map_survive_restart`, `dist_sub_mapping_survives_restart`, `dead_letter_survives_restart`.

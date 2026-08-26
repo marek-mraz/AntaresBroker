@@ -54,3 +54,7 @@ whole history into broker RAM.
   window/sort are unaffected.
 - The memory/file arm keeps the v0 one-doc-per-entity model (its documented
   dev/ETSI role, ~10k-entity ceiling).
+
+## Confirmation
+
+`crates/antares-sql/tests/pg_temporal.rs` (reads served from `attr_instances`, aggregation pushdown parity) and `crates/antares-api/tests/pg_query_parity.rs`.

@@ -31,3 +31,7 @@ suite's leftover-subscription failure was exactly that. Regression test:
 Consequence: the facade is the compatibility layer, not the destination —
 per-op SQL (UNNEST batches, compiled q= pushdown) lands inside the
 Pg arm without touching consumers.
+
+## Confirmation
+
+`crates/antares-store/src/lib.rs typed_mutate_round_trips_through_the_boxed_seam` (the mutate-transaction rule survives the trait seam); the enum half is confirmed by ADR-0013.

@@ -43,3 +43,7 @@ client that checked its subscription.
   `ANTARES_EGRESS_ALLOW_PRIVATE=false`.
 - `security_regression.rs` still sets `=true` explicitly, which is now a
   no-op but keeps the test independent of this default.
+
+## Confirmation
+
+`crates/antares-api/src/egress.rs scheme_allowlist_and_private_deny`; the configuration table row `ANTARES_EGRESS_ALLOW_PRIVATE` default `true` under `dev/check-env-docs.sh`.

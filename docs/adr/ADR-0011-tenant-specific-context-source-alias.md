@@ -99,3 +99,7 @@ learns the tenant from the registration's `tenant` member and the
 - ETSI `D018_01` still fails: it registers `mode=inclusive` and asserts 508.
   That is a suite defect (docs/upstream/etsi-raises.md, issue 1), not a
   consequence of this ADR.
+
+## Confirmation
+
+`crates/antares-api/src/federation.rs alias_identifies_the_tenant_not_just_the_broker`, `registered_alias_in_the_via_chain_is_not_a_matching_registration`, `via_loop_compares_tokens_not_suffixes`; `crates/antares-api/tests/federation_loop.rs`.

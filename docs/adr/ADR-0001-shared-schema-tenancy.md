@@ -20,3 +20,7 @@ tenant's row is never deleted.
 Confirmation: `antares-sql/tests/pg.rs purge_tenant_empties_every_tenant_table`
 (loops over every tenant-bearing table) and
 `antares-api/tests/tenants_admin.rs`.
+
+## Confirmation
+
+`crates/antares-sql/tests/pg.rs rls_denies_cross_tenant_reads_and_writes` and `pg_rls_pentest.rs` (every tenant-scoped table under RLS); `crates/antares-api/tests/tenant_isolation.rs`.
