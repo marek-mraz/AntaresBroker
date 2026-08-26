@@ -1,88 +1,217 @@
 # Federation
 
-Antares implements the full CIM 009 distributed-operations model. The
-short version: **Context Source Registrations (CSRs) are the routing
-table.** A broker holding CSRs forwards matching requests to the
-registered sources, merges the answers, and reports per-source problems
-without failing the whole request. Everything below is validated by the
-DistributedOperations and IOP suites in every CI cell (130 + 278 TPs).
+Antares implements the CIM 009 distributed-operations model (4.3.6,
+5.9–5.11, 6.3.17, 6.3.18). Context Source Registrations (CSRs) are the
+routing table: a broker holding CSRs forwards matching requests to the
+registered sources, merges the answers and reports per-source problems
+without failing the request. The DistributedOperations and IOP suites
+(132 + 278 tests) cover this surface in every CI cell.
 
-## Registrations route everything
+Every example below uses two brokers, `broker-a` on 9090 and `broker-b`
+on 9091, as in `examples/federation/compose.yml`:
 
-A CSR declares *what* a source holds (entity types, ids, `idPattern`,
-attribute names) and *how* to treat it:
+```bash
+cd examples/federation && docker compose up -d && ./run.sh
+```
 
-- **inclusive** (default) — the source is one of possibly many holders;
-  results merge (4.5.5).
-- **exclusive** — the source is the only holder of the registered scope;
-  matching writes forward there.
-- **redirect** — the broker proxies without keeping local data.
-- **auxiliary** — consulted only when nobody else answers.
+`run.sh` creates an entity on B, registers B at A and queries A:
 
-The `operations` member bounds what may be forwarded (default
-`federationOps`); registrations carrying `contextSourceInfo` pass
-per-source headers (auth material) on every forward. The
-[getting-started page](getting-started.md#first-federation-pair) shows the
-minimal two-broker pair.
+```text
+entity created on B
+CSR registered on A -> B
+federated query via A:
+[{"id":"urn:ngsi-ld:ParkingSpot:fed:042","type":"ParkingSpot","status":{"type":"Property","value":"free"}}]
+OK: B's entity served by A
+```
+
+With two local binaries instead of compose, set `ANTARES_HOST_ALIAS`
+per process and run `B_FROM_A=http://localhost:9091 ./run.sh`.
+
+## Registrations
+
+A CSR declares what a source holds (`information[]`: entity types, ids,
+`idPattern`, `propertyNames`, `relationshipNames`) and how to treat it
+(`mode`):
+
+| mode | meaning | reads | writes |
+|---|---|---|---|
+| `inclusive` (default) | one of possibly many holders | forwarded and merged (4.5.5) | forwarded, 207 on partial failure |
+| `exclusive` | the only holder of the registered entity and attributes | forwarded | forwarded |
+| `redirect` | the broker proxies, keeps nothing locally | forwarded | forwarded |
+| `auxiliary` | consulted only when nobody else answers | forwarded last | never |
+
+An `exclusive` registration names one entity id and its attributes
+(4.3.6.3); a type-only or pattern registration is refused:
+
+```text
+{"detail":"an exclusive registration shall name an entity id — an id pattern or Entity type defining a group of entities is not supported (4.3.6.3)","status":400,"title":"BadRequestData", ...}
+```
+
+`operations` bounds what may be forwarded (default `federationOps`);
+`contextSourceInfo` key/value pairs travel as headers on every forward
+to that source (4.3.6.5); `localOnly` adds `local=true` to every
+forward (4.3.6.4). `observationInterval` and `managementInterval` gate
+temporal forwards to the sources whose window overlaps the query.
+
+### Timeout and cooldown
+
+`management.timeout` (5.2.34) bounds one forward in milliseconds; the
+broker caps it at 8 seconds, and a registration without it gets the cap.
+`management.cooldown` keeps a source that failed out of the fan-out for
+that many milliseconds; inside the window the forward is answered as a
+timeout without contacting the source. A registration with
+`"management": {"timeout": 500, "cooldown": 10000}` pointing at a closed
+port answers in 7 ms:
+
+```text
+HTTP/1.1 200 OK
+Ngsild-Warning: 199 broker-b "no response was received from the registration endpoint within the timeout period"
+```
+
+### Same source, several registrations
+
+Registrations naming the same source (same endpoint, mode, tenant,
+`contextSourceAlias`, `contextSourceInfo` and `localOnly`) fold into one
+forwarded request whose attribute and entity scopes are the union. A
+different `contextSourceAlias` behind the same endpoint is a different
+source (5.2.9) and is contacted separately.
 
 ## Distributed reads
 
-A query that matches CSRs fans out concurrently (bounded by
-`ANTARES_FED_FANOUT`, default 8), each forward with a per-request timeout
-and a response-size ceiling (`ANTARES_MAX_FED_RESPONSE_BYTES`). Per-source
-failures become `NGSILD-Warning` headers with the spec's warning codes
-(Table 6.3.17-1) — 404 from a peer is a miss, not a warning; a dead peer
-degrades the answer instead of failing it. Entity halves split across
-sources merge per 4.5.5 before pagination.
+A read that matches CSRs fans out concurrently, `ANTARES_FED_FANOUT` at
+a time (default 8), each forward bounded by the registration timeout and
+`ANTARES_MAX_FED_RESPONSE_BYTES`. The forwarded request is narrowed to
+what the registration declares (4.3.6.1): a registration with
+`propertyNames: ["status"]` receives `attrs=status` even when the client
+asked for `attrs=status,owner`, and any `owner` the source returns anyway
+is dropped from the merge. The forward carries the `Via` hop and the
+client's `Link` context, never the client's `NGSILD-Tenant` (4.14); the
+registration's own `tenant` member names the tenant to address at the
+source:
+
+```text
+GET /ngsi-ld/v1/entities?options=sysAttrs&type=ParkingSpot&attrs=status
+Accept: application/json
+Via: 1.1 broker-a
+Link: <https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+```
+
+Entity halves from several sources merge per 4.5.5 before pagination.
+
+### Partial failures
+
+A source that fails does not fail the request. Each problem becomes one
+`NGSILD-Warning` header (6.3.17, Table 6.3.17-1) naming the broker that
+saw it:
+
+| code | when |
+|---|---|
+| 199 | no response within the timeout, or the source is in cooldown |
+| 299 | the source answered an error status other than 404 |
+| 111 | the source answered 2xx with a payload that is not NGSI-LD |
+
+A 404 from a source is a miss, not a warning. Warnings a peer returns
+travel back to the client next to the broker's own. Beyond the
+registration cooldown, a per-host breaker pauses an endpoint whose
+forwards keep timing out; a source that answers, even with an error, is
+never paused.
 
 ## Distributed writes
 
-Writes forward according to registration mode and the registered
-`operations`: exclusive/redirect scopes forward, inclusive-unsupported
-sources are skipped, and a fully unsupported write answers 409 Conflict.
-Batch operations return per-entity success/error arrays with remote
-results folded in.
+Writes forward by registration mode and the registered `operations`.
+An `exclusive` or `redirect` registration whose `operations` exclude the
+write is an error of type Conflict (409), because the data lives only
+there; an `inclusive` one that excludes it is skipped. Batch operations
+return per-entity success and error arrays with the remote results
+folded in; a partial failure across inclusive sources is 207.
 
 ## Loop protection
 
-Every forward carries a `Via` hop (6.3.18) with the broker's
-`ANTARES_HOST_ALIAS` as the pseudonym. A broker seeing its own alias in
-the chain answers 508 (loop detected) instead of forwarding forever.
+Every forward carries a `Via` hop (6.3.18) whose pseudonym is this
+broker's alias for the tenant (ADR-0011): `ANTARES_HOST_ALIAS` for the
+default tenant, `{alias}~{tenant}` otherwise. `/info/sourceIdentity`
+answers the same value per tenant, and that is what a peer stores as the
+registration's `contextSourceAlias`:
+
+```text
+GET /ngsi-ld/v1/info/sourceIdentity
+{"id":"urn:ngsi-ld:ContextSourceIdentity:broker-a","type":"ContextSourceIdentity","contextSourceAlias":"broker-a", ...}
+
+GET /ngsi-ld/v1/info/sourceIdentity   NGSILD-Tenant: odpady
+{"id":"urn:ngsi-ld:ContextSourceIdentity:broker-a~odpady","type":"ContextSourceIdentity","contextSourceAlias":"broker-a~odpady", ...}
+```
+
+Two rules follow from the inbound chain:
+
+- A registration whose `contextSourceAlias` already appears in the chain
+  is not a matching registration (Table 6.3.18-2); the request has been
+  there.
+- A request whose chain names this broker itself runs locally without
+  re-forwarding. When the only matching registration for a write is a
+  single `exclusive` or `redirect` source, the loop closes on data that
+  lives nowhere else and the answer is 508 (6.3.17):
+
+```text
+POST /ngsi-ld/v1/entities/urn:ngsi-ld:Loop:1/attrs   Via: 1.1 broker-b
+HTTP/1.1 508 Loop Detected
+{"detail":"the Via chain already contains this broker","status":508,"title":"Loop Detected", ...}
+```
+
+A chain longer than 32 hops is treated as a loop whatever it names.
 Replicas of one logical broker behind a load balancer share one alias on
-purpose — they are one hop.
+purpose; they are one hop. Changing an alias breaks every peer's loop
+detection, so treat it as a published identifier.
+
+## Context source subscriptions
+
+`POST /csourceSubscriptions` (5.11) watches the registrations instead of
+the entities. A subscription on `ParkingSpot` receives the matching
+registrations at creation and each later change with a `triggerReason`:
+
+```json
+{"id": "urn:ngsi-ld:ContextSourceNotification:bafc4692-…", "type": "ContextSourceNotification",
+ "subscriptionId": "urn:ngsi-ld:Subscription:csr-watch", "notifiedAt": "2026-08-26T16:02:43.945Z",
+ "triggerReason": "newlyMatching",
+ "data": [{"id": "urn:ngsi-ld:ContextSourceRegistration:broker-c", "type": "ContextSourceRegistration",
+           "endpoint": "http://localhost:9092", "information": [{"entities": [{"type": ["ParkingSpot"]}]}]}]}
+```
+
+`csf` filters registrations by their Context Source Properties (4.9).
 
 ## Distributed subscriptions
 
-A subscription whose scope matches CSRs is reduced per source and created
-remotely (5.8); the remote broker notifies back to `ANTARES_PUBLIC_URL`
-— set it whenever the default `http://{host_alias}:{port}` is not
-routable from peers. Reduced copies follow the local subscription's
-lifecycle (update, delete) and the registration's `csf` filter gates
-inbound notifications.
+An entity subscription whose scope matches CSRs is reduced per source and
+created at the remote broker (5.8); the remote notifies back to
+`ANTARES_PUBLIC_URL`, so set it whenever the default
+`http://{host_alias}:{port}` is not routable from peers. Reduced copies
+follow the local subscription's lifecycle (update, delete); the
+registration's `csf` gates which sources take part. Inbound
+notifications from peers are matched against local subscriptions like
+local changes.
 
 ## Pagination without amplification
 
-The first distributed query can build an **EntityMap** (5.14): entity id →
-contributing registrations. Subsequent pages contact only the sources that
-actually hold the page's entities instead of re-broadcasting the query.
-Maps expire (`expiresAt`) and are honoured on retrieve and temporal paths.
+The first distributed query can build an EntityMap (5.14): entity id to
+contributing registrations. Later pages contact only the sources that
+hold the page's entities instead of re-broadcasting the query. Maps
+expire (`expiresAt`, one hour by default) and are honoured on retrieve
+and temporal paths.
 
 ## Tenancy across the federation
 
 The client's `NGSILD-Tenant` never propagates to forwards (4.14); a CSR
-addresses a specific tenant of a remote source via its own registration
-(`tenant` member / `contextSourceAlias`). Cross-broker isolation is
-therefore explicit in registrations, never ambient.
+addresses a specific tenant of a remote source through its `tenant`
+member, and the `~`-suffixed alias keeps each (source, tenant) pair
+distinct in loop detection. A registration pointing back at the same
+broker for another tenant is a legitimate federation shape, not a loop.
 
 ## The five-broker stack
 
-The IOP worked example — five brokers, no Docker:
+The IOP worked example, five brokers and no Docker:
 
 ```bash
 dev/run-five.sh    # ports 9090..9094, aliases antares1..antares5
 ```
 
-Each broker gets `ANTARES_PUBLIC_URL=http://localhost:PORT` (distributed
-subscriptions hand that URL to peers as the notification endpoint — the
-alias default is not resolvable between local processes). This is the
-stack the 278-TP IOP tree runs against in CI.
+Each broker gets `ANTARES_PUBLIC_URL=http://localhost:PORT`; this is the
+stack the 278-test IOP tree runs against in CI.
