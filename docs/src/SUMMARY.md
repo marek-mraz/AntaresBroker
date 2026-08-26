@@ -9,4 +9,5 @@
 - [Browser & WebAssembly](wasm.md)
 - [Shared crates](shared-crates.md)
 - [Operations](operations.md)
+- [Admin API](admin-api.md)
 - [Ecosystem & positioning](ecosystem.md)

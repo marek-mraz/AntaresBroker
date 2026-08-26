@@ -41,7 +41,7 @@ kind smoke (dispatch): apply + every `rollout status` green.
 |---|---|
 | `/q/health` | Liveness + store mode and the temporal backend (`temporal`: `memory`, `file`, `postgres`, `timescale` or `none`), file-mode commit queue, resource limits + rejection counters, jemalloc heap, and under `bus=nats` the bus state `{mode, connected, reconnects}`. 503 = DRAINING (a roll in progress). |
 | `/q/ready` | Readiness: not draining ∧ store answers (`SELECT 1` on Pg) ∧ bus connected. The k8s `readinessProbe` polls this; liveness stays on `/q/health` (a restart does not fix a lost DB). |
-| `/q/metrics` | Prometheus text (`antares_` prefix — see the README observability section). |
+| `/q/metrics` | Prometheus text (`antares_` prefix; every metric in the [admin API](admin-api.md#get-qmetrics)). |
 
 The NATS-outage contract (proven by `nats_e2e::nats_outage_flips_health_and_recovers`):
 during an outage the API keeps serving (writes land in the transactional
