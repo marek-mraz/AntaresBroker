@@ -14,6 +14,10 @@ gateway is the third consumer of that same AST.
 | `antares-matcher` | subscription matching against an in-memory entity: entity selector (5.2.33), `q`/`scopeQ`/`geoQ` conditions, activity and throttling | `cargo run -p antares-matcher --example would_notify` |
 | `antares-store` | the two storage driver traits, `TemporalEvent`, `NoTemporal` | — |
 
+The backends behind those traits live one folder each under
+`crates/antares-sql/src/store/`; its `README.md` is the procedure for adding
+one.
+
 CI builds and tests each of them standalone and fails on any dependency
 path back into the broker, the API crate or a storage backend
 (`shared-crates` job in `workspace.yml`).
