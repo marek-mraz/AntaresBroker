@@ -3035,7 +3035,7 @@ mod clause_4_11 {
     /// 5.7.3.4 / 4.5.5.3: instances with the same datasetId (or both default)
     /// AND the same timeproperty value are CONFLICTING instances of one slot
     /// — the merge resolves them to one (most recent modifiedAt wins), never
-    /// serves both. Red 2026-08-13: the same instance held by two federated
+    /// serves both. Regression: the same instance held by two federated
     /// brokers came back twice (IOP_EXT_TMP_02_05).
     #[test]
     fn merge_resolves_same_slot_instances_to_one() {

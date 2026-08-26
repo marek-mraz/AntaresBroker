@@ -727,7 +727,7 @@ fn role_pairs_exactly_once_semantics() {
     );
 }
 
-// ---------- NATS outage drill (backlog 08-14 item 4) ----------
+// ---------- NATS outage drill ----------
 
 /// A stoppable TCP proxy in front of the real NATS server: killing it (and
 /// hard-shutting its live connections) IS the outage from the broker's
@@ -786,7 +786,7 @@ fn kill_proxy(p: &Proxy) {
 
 /// Kill NATS mid-run: /q/health flips `bus.connected` to false while the
 /// API keeps serving writes; on restart the client reconnects (reconnects
-/// counter increments), the outbox drains the outage-time backlog, and
+/// counter increments), the outbox drains what queued during the outage, and
 /// subscription notifications resume — no panic, no lost event.
 #[test]
 fn nats_outage_flips_health_and_recovers() {
@@ -911,7 +911,7 @@ fn nats_outage_flips_health_and_recovers() {
     assert!(h.starts_with("HTTP/1.1 200"), "no panic, still UP: {h}");
 }
 
-/// 5.2.34 cooldown across api pods (fleet run 2026-08-15, IOP_EXT_ERR_01_06
+/// 5.2.34 cooldown across api pods (fleet regression, IOP_EXT_ERR_01_06
 /// red): the per-registration cooldown stamped after a failed forward must
 /// be visible to EVERY api pod — round-robin otherwise re-dials the failed
 /// source from the pod that never saw the failure. The stamp rides the

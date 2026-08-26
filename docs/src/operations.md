@@ -71,7 +71,7 @@ volume — K10): use a `Recreate` strategy there, as `broker-file.yaml` does.
 the role-split stack in role-group order — the same-group peer must be
 healthy before its twin goes down, so no role ever has 0 live pods (api
 pods gate on `/q/health` + the LB rise window; workers on `/q/ready`).
-Measured in-sandbox 2026-08-15: full roll ≈ 43 s (the api pod pays the
+Measured: full roll ≈ 43 s (the api pod pays the
 ~21 s drain, workers ~2 s each), 52/52 LB requests answered 200 across the
 whole roll.
 

@@ -301,7 +301,7 @@ teardown() {
     if [ "${WASM_DOCKER:-0}" = 1 ]; then
       for port in 9090 9091 9092 9093 9094; do
         # crash forensics BEFORE rm — a mid-run shim death is invisible
-        # otherwise (2026-08-16: 9090 died in IOP, logs gone with the rm)
+        # otherwise (a shim died mid-IOP once and its logs went with the rm)
         docker logs "antares-wasm-$port" > "$RESULTS/shim-$port.log" 2>&1 || true
         docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} {{.State.Error}}' \
           "antares-wasm-$port" >> "$RESULTS/shim-$port.log" 2>&1 || true
@@ -346,7 +346,7 @@ if [ ! -x .venv/bin/robot ]; then
   (cd ngsi-ld-test-suite && ../.venv/bin/pip -q install -r requirements.txt)
 fi
 # Same HttpCtrl heal as etsi-run.sh: a stale editable path poisons every
-# mock-server keyword ("No keyword with name 'Start Server'", 2026-08-16).
+# mock-server keyword ("No keyword with name 'Start Server'").
 if ! .venv/bin/python -c "import HttpCtrl" >/dev/null 2>&1; then
   echo "venv: vendored HttpCtrl not importable — reinstalling editable"
   (cd ngsi-ld-test-suite && ../.venv/bin/pip -q install -r requirements.txt \

@@ -527,7 +527,7 @@ struct FetchedDoc {
     stale_at: Option<Instant>,
     /// The Tenant this document belongs to, for the locally stored kinds
     /// (5.13.1 "Hosted": "@contexts that are explicitly added by users";
-    /// "ImplicitlyCreated": created "as a result of a user request"). 5.5.10:
+    /// "ImplicitlyCreated": created as a side effect of an operation). 5.5.10:
     /// "If a Tenant is specified for an NGSI-LD operation, the operation
     /// shall only be applied to information related to the specified
     /// Tenant" — so those mappings expand that Tenant's payloads only.

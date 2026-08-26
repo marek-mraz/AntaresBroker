@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the ETSI matrix results as a static site (backlog 08-14 item 1).
+"""Render the ETSI matrix results as a static site.
 
 Usage: etsi-report-site.py <cells-dir> <out-dir>
   <cells-dir> is the ETSI-matrix-results bundle layout: one

@@ -28,7 +28,7 @@ check_suites_complete "$SUITE" || exit 1
 # The bootstrap gate VERIFIES the vendored HttpCtrl actually imports — a venv
 # that predates a suite move keeps a working `robot` but a stale editable
 # path (easy-install.pth), and every mock-server keyword then fails with
-# "No keyword with name 'Start Server'" (seen 2026-08-16, two full runs
+# "No keyword with name 'Start Server'" (two full runs
 # poisoned). Heal with a forced editable reinstall, not just presence checks.
 VENV="$PWD/.venv"
 if [ ! -x "$VENV/bin/robot" ]; then

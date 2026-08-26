@@ -21,7 +21,7 @@ tenant** is registered to redirect back on to the Context Broker".
 
 A tenant-blind alias makes every tenant of one broker look like one Context
 Source, and cross-tenant federation *inside* a single broker is a first-class
-deployment shape here: a reader/agent tenant reaches other tenants' data only
+deployment shape here: a reader tenant reaches other tenants' data only
 through CSRs whose `tenant` member points back at this same broker
 (`csr_tenant_federates_across_tenants_in_one_broker`, the wasm playground's
 context-spaces UI, and the Urbivita federated-twin model generally). Under a

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Roles-fleet smoke (backlog 2026-08-15b item 1) — NOT a TP. Asserts:
+# Roles-fleet smoke — NOT a TP. Asserts:
 #   1. every fleet pod answers: api pods /q/health (and via the LB), workers
 #      /q/ready — polled from outside because the image is distroless (no
 #      shell for a compose healthcheck probe);
@@ -63,7 +63,7 @@ trap 'kill $RX_PID 2>/dev/null || true' EXIT
 
 # The receiver must be ACCEPTING before the subscription exists: delivery is
 # attempted within ms of the entity write and a refused connection is a
-# terminal failure (5.8.6 status=failed, no redelivery) — seen live 2026-08-15
+# terminal failure (5.8.6 status=failed, no redelivery) — observed
 # as a 1-in-3 smoke flake (times_sent=1, last_failure 4 ms after send).
 until curl -s -o /dev/null "http://127.0.0.1:$RX_PORT/"; do sleep 0.1; done
 

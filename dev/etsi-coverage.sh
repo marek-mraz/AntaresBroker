@@ -53,7 +53,7 @@ esac
 # depends entirely on `clean` wiping stale uninstrumented artifacts. clean
 # refuses (but still exits 0! — hence the hard check below) when the target
 # dir lacks cargo's CACHEDIR.TAG marker; a target/ created by anything other
-# than cargo itself is missing it. Seen 2026-08-14: the silent clean failure
+# than cargo itself is missing it. Without the check the silent clean failure
 # reused uninstrumented rlibs and the coverage map covered 4 of 11 crates.
 mkdir -p target
 [ -f target/CACHEDIR.TAG ] || printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > target/CACHEDIR.TAG

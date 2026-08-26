@@ -29,7 +29,7 @@ Start Mqtt Server
     END
     # docker run -d returns before mosquitto listens; without this wait the
     # first MQTT connect races the daemon start and fails with ECONNREFUSED
-    # (error.md 2026-08-05). Poll the broker port until it accepts.
+    # Poll the broker port until it accepts.
     Wait Until Keyword Succeeds    15s    0.5s    Mqtt Port Is Open    ${port}
 
 Mqtt Port Is Open

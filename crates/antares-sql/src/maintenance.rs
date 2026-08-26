@@ -122,7 +122,7 @@ pub async fn temporal_maintenance(
     crate::pg::set_service(&mut tx).await?;
     let mut done: Vec<String> = Vec::new();
     // The 4.22 reaps run in their own transactions AFTER this one commits: both
-    // DELETEs grow with stored volume and can exceed the session
+    // DELETEs grow with stored volume and can exceed the connection's
     // statement_timeout, and a reap that times out must not abort the partition
     // pre-creation that keeps ingest writable.
     if backend == TemporalBackend::Hypertable {
@@ -165,7 +165,7 @@ pub async fn temporal_maintenance(
             }
             // Rows for this range already sit in DEFAULT. Adopt them: the move
             // empties the range, so the ATTACH's revalidation of DEFAULT
-            // passes. Its ACCESS EXCLUSIVE lock is bounded by the session
+            // passes. Its ACCESS EXCLUSIVE lock is bounded by the connection's
             // lock_timeout, and a loser simply retries on the next tick.
             let mut sp = tx.begin().await?;
             let mut adopted = Ok(());
@@ -225,7 +225,7 @@ pub async fn temporal_maintenance(
     // 4.22 also names Properties/Relationships: an attribute instance whose
     // expiresAt has passed "should be deleted from an NGSI-LD system". This
     // DELETE additionally contends with concurrent ingest on the same rows, and
-    // a deadlock must cost only the reap (seen live under ~1.2k msg/s ingest).
+    // a deadlock must cost only the reap (observed under ~1.2k msg/s ingest).
     match reap_expired_instances(pool).await {
         Ok(0) => {}
         Ok(n) => done.push(format!("reaped {n} expired attribute instances (4.22)")),
@@ -261,7 +261,7 @@ async fn plain_retention(pool: &PgPool, days: i64) -> Result<Vec<String>, sqlx::
     for r in parts {
         let name: String = r.get("relname");
         let bound: String = r.get::<Option<String>, _>("bound").unwrap_or_default();
-        // bound looks like: FOR VALUES FROM ('2026-07-27 ...') TO ('2026-08-03 ...')
+        // bound looks like: FOR VALUES FROM ('<lo>') TO ('<hi>')
         let Some(hi) = bound
             .split("TO ('")
             .nth(1)
@@ -400,8 +400,8 @@ async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
 mod tests {
     use super::*;
 
-    const LO: &str = "2026-08-17 00:00:00+00";
-    const HI: &str = "2026-08-24 00:00:00+00";
+    const LO: &str = "2026-08-17T00:00:00+00";
+    const HI: &str = "2026-08-24T00:00:00+00";
 
     #[test]
     fn create_partition_covers_exactly_the_week() {

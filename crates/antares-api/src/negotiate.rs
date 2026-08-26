@@ -456,7 +456,7 @@ pub(crate) fn link_header_value(ctx: &Context) -> String {
 }
 
 /// Build a payload-carrying NGSI-LD response (6.3.6).
-/// Served-JSON key order (user request 2026-08-13): every object serializes
+/// Served-JSON key order: every object serializes
 /// `id` then `type` first, recursively (an attribute object leads with
 /// `"type": "Property"`, a GeoJSON Feature with `id`/`type` — the order the
 /// spec's own examples print). Cosmetic only: RFC 8259 objects are unordered

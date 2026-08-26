@@ -23,7 +23,7 @@ commit hashes recorded next to it.
       accepted in writing.
 - [ ] **R5 — User docs complete.** The book covers getting started,
       configuration, deployment, federation, wasm, operations and
-      conformance (done 2026-08-16) and tracks any surface added
+      conformance, and tracks any surface added
       before 1.0.
 - [ ] **R6 — Release machinery proven.** At least one 0.x release has
       shipped end to end through the gated pipeline (image + binaries +

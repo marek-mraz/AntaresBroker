@@ -159,7 +159,7 @@ async fn attr_instances_decomposition_and_maintenance() {
     .await
     .expect("obs");
     assert!(
-        obs.starts_with("2026-08-04"),
+        obs.replace(' ', "T").starts_with("2026-08-04T10:00"),
         "fallback to modifiedAt: {obs}"
     );
 
