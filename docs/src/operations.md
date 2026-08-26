@@ -48,6 +48,23 @@ during an outage the API keeps serving (writes land in the transactional
 outbox), `/q/ready` goes 503, and on reconnect the outbox drains — the
 outage-time notifications arrive, none lost.
 
+## Tenants
+
+Tenants come to exist implicitly (CIM 009 5.5.10): the first create
+operation carrying an `NGSILD-Tenant` header creates the tenant, and the
+default tenant always exists. The NGSI-LD API has no operation to list or
+remove tenants; the admin surface has both.
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /q/tenants` | Every tenant with what it holds: `{tenant, createdAt, counts: {entities, subscriptions, csourceSubscriptions, registrations, snapshots, entityMaps, distSubs, attrInstances}}`. `createdAt` is present on Postgres, where the `tenants` table records it. |
+| `DELETE /q/tenants/{tenant}` | Purge: every document of the tenant leaves the current-state backend and the temporal backend in one transaction each. 204 when done, 404 for a tenant that does not exist, 409 while the tenant still holds distributed subscriptions (unsubscribe them first), 400 for a name outside the tenant grammar. The default tenant is emptied and keeps existing. |
+
+The path names the tenant; an `NGSILD-Tenant` header on these calls is
+ignored. Like the rest of `/q/*`, the routes sit outside `/ngsi-ld/v1` and
+belong behind the gateway. What the gateway owns instead: who may create a
+tenant, quotas and rate limits per tenant, authentication.
+
 ## Backup, per store mode
 
 The README's store-mode table is the authority; the operational short form:

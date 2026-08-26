@@ -94,6 +94,29 @@ impl std::fmt::Display for StoreMode {
     }
 }
 
+/// What one tenant holds, per current-state document kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TenantStats {
+    /// The tenant name.
+    pub tenant: String,
+    /// When the tenant row was created, if the backend records it.
+    pub created_at: Option<String>,
+    /// 5.2.4 entities.
+    pub entities: u64,
+    /// 5.2.12 subscriptions.
+    pub subscriptions: u64,
+    /// 5.2.9 context source registrations.
+    pub registrations: u64,
+    /// Context source registration subscriptions.
+    pub csource_subscriptions: u64,
+    /// 5.16 snapshots.
+    pub snapshots: u64,
+    /// Entity maps (5.14).
+    pub entity_maps: u64,
+    /// Distributed subscriptions this tenant placed at other brokers.
+    pub dist_subs: u64,
+}
+
 /// The read-modify-write closure as the object-safe seam carries it. The
 /// typed `Result<T, E>` travels through [`CurrentStateDriverExt::mutate`]'s
 /// side slot; the boxed closure only signals commit (`Ok`) vs reject
@@ -216,6 +239,18 @@ pub trait CurrentStateDriver: Send + Sync {
     /// Tenants that may hold interval subscriptions (the sweep's iteration
     /// domain).
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
+    /// Inventory: every tenant the backend knows and what it holds. The
+    /// default Tenant is listed even when empty (5.5.10: it always exists).
+    fn tenant_stats(&self) -> Result<Vec<TenantStats>, NgsiError> {
+        Err(NgsiError::OperationNotSupported("tenant inventory".into()))
+    }
+    /// Remove every current-state document of one tenant; `false` when the
+    /// tenant did not exist. The default Tenant is emptied but keeps
+    /// existing.
+    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        let _ = tenant;
+        Err(NgsiError::OperationNotSupported("tenant purge".into()))
+    }
     /// 5.13 @context documents, shared across tenants by design.
     fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError>;
     /// Read a stored @context document by id; `None` if absent.
@@ -394,6 +429,17 @@ pub trait TemporalDriver: Send + Sync {
     /// write path skips recording entirely.
     fn supported(&self) -> bool {
         true
+    }
+    /// Stored attribute instances of one tenant (inventory); a driver
+    /// without history reports 0.
+    fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
+        let _ = tenant;
+        Ok(0)
+    }
+    /// Remove the whole history of one tenant; nothing to do without history.
+    fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
+        let _ = tenant;
+        Ok(())
     }
     /// Readiness of the temporal backend; the default is always ready.
     fn ping(&self) -> Result<(), NgsiError> {

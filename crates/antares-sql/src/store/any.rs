@@ -748,6 +748,111 @@ impl AnyStore {
         }
     }
 
+    /// Inventory of every tenant with per-kind counts.
+    pub fn tenant_stats(&self) -> Result<Vec<antares_store::TenantStats>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.tenant_stats()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                let rows: Vec<(String, String)> =
+                    sqlx::query_as("SELECT tenant_id, created_at::text FROM tenants ORDER BY 1")
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                let mut out = Vec::with_capacity(rows.len());
+                // one transaction, the tenant setting re-pointed per row so
+                // the RLS-guarded counts see that tenant's rows
+                for (tenant, created_at) in rows {
+                    sqlx::query(crate::SET_TENANT_SQL)
+                        .bind(&tenant)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                    let c: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                        "SELECT (SELECT count(*) FROM entities WHERE tenant_id = $1),
+                                (SELECT count(*) FROM subscriptions WHERE tenant_id = $1),
+                                (SELECT count(*) FROM csource_registrations WHERE tenant_id = $1),
+                                (SELECT count(*) FROM csource_subscriptions WHERE tenant_id = $1),
+                                (SELECT count(*) FROM snapshots WHERE tenant_id = $1),
+                                (SELECT count(*) FROM entity_map_docs WHERE tenant_id = $1),
+                                (SELECT count(*) FROM dist_subs WHERE tenant_id = $1)",
+                    )
+                    .bind(&tenant)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                    out.push(antares_store::TenantStats {
+                        tenant,
+                        created_at: Some(created_at),
+                        entities: c.0 as u64,
+                        subscriptions: c.1 as u64,
+                        registrations: c.2 as u64,
+                        csource_subscriptions: c.3 as u64,
+                        snapshots: c.4 as u64,
+                        entity_maps: c.5 as u64,
+                        dist_subs: c.6 as u64,
+                    });
+                }
+                tx.commit().await.map_err(db)?;
+                Ok(out)
+            }),
+        }
+    }
+
+    /// Purge the current-state half of one tenant in one transaction;
+    /// `false` when the tenant did not exist. The default tenant's row stays.
+    pub fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.purge_tenant(tenant)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                let known = sqlx::query_scalar::<_, i32>(
+                    "SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE",
+                )
+                .bind(tenant.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db)?
+                .is_some();
+                if !known {
+                    return Ok(false);
+                }
+                for table in [
+                    "entities",
+                    "subscriptions",
+                    "csource_subscriptions",
+                    "csource_registrations",
+                    "csource_index",
+                    "entity_maps",
+                    "outbox",
+                    "snapshots",
+                    "entity_map_docs",
+                    "dist_subs",
+                ] {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DELETE FROM {table} WHERE tenant_id = $1"
+                    )))
+                    .bind(tenant.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                }
+                if tenant.as_str() != TenantId::DEFAULT {
+                    sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+                        .bind(tenant.as_str())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                }
+                tx.commit().await.map_err(db)?;
+                Ok(true)
+            }),
+        }
+    }
+
     pub fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.subscription_tenants()),
@@ -960,6 +1065,12 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         AnyStore::subscription_tenants(self)
     }
+    fn tenant_stats(&self) -> Result<Vec<antares_store::TenantStats>, NgsiError> {
+        AnyStore::tenant_stats(self)
+    }
+    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        AnyStore::purge_tenant(self, tenant)
+    }
     fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
         AnyStore::context_put(self, id, doc)
     }
@@ -975,6 +1086,46 @@ impl antares_store::CurrentStateDriver for AnyStore {
 }
 
 impl antares_store::TemporalDriver for AnyStore {
+    fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.attr_instance_count(tenant)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                let n: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = $1")
+                        .bind(tenant.as_str())
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                Ok(n as u64)
+            }),
+        }
+    }
+    fn purge_tenant(&self, tenant: &TenantId) -> Result<(), NgsiError> {
+        match self {
+            AnyStore::Mem(s) => {
+                s.purge_kinds(tenant, &[Kind::Temporal]);
+                Ok(())
+            }
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg_entity::wait(async {
+                let mut tx = p.docs.pool().begin().await.map_err(db)?;
+                crate::pg::set_tenant(&mut tx, tenant).await.map_err(db)?;
+                for table in ["attr_instances", "temporal_entities"] {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "DELETE FROM {table} WHERE tenant_id = $1"
+                    )))
+                    .bind(tenant.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db)?;
+                }
+                tx.commit().await.map_err(db)
+            }),
+        }
+    }
     fn temporal_append(
         &self,
         tenant: &TenantId,

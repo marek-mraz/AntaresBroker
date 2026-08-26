@@ -75,7 +75,7 @@ pub mod page_sink {
     }
 }
 
-use antares_model::{NgsiError, API_ROOT};
+use antares_model::{NgsiError, TenantId, API_ROOT};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -126,6 +126,8 @@ pub fn ops_router(state: AppState) -> Router {
         .route("/q/health", get(health))
         .route("/q/ready", get(ready))
         .route("/q/metrics", get(metrics_endpoint))
+        .route("/q/tenants", get(tenants_list))
+        .route("/q/tenants/{tenant}", delete(tenant_purge))
         .with_state(state)
 }
 
@@ -296,6 +298,8 @@ pub fn router(state: AppState) -> Router {
         // Prometheus text format. 404 until the broker installs the
         // renderer — the api crate never depends on an exporter.
         .route("/q/metrics", get(metrics_endpoint))
+        .route("/q/tenants", get(tenants_list))
+        .route("/q/tenants/{tenant}", delete(tenant_purge))
         // 6.3.6/6.3.21: Prefer: ngsi-ld=<version> → 4.3.6.8 amendment +
         // Preference-Applied (+203 when altered) on every API response.
         // OPTIONS (2.0 #59 pre-adoption): axum's MethodRouter already
@@ -562,6 +566,108 @@ async fn health(
 /// bus is connected. On a Postgres failover or a NATS partition the pod is
 /// still alive (liveness stays 200 — a restart fixes nothing) but must stop
 /// receiving traffic, so the readinessProbe points HERE.
+/// Tenant inventory: every tenant the backends know and what it holds.
+/// Admin surface, never under the API root.
+async fn tenants_list(axum::extract::State(st): axum::extract::State<AppState>) -> Response {
+    let stats = match st.store.tenant_stats() {
+        Ok(s) => s,
+        Err(e) => return crate::negotiate::ApiError::from(e).into_response(),
+    };
+    let mut out = Vec::with_capacity(stats.len());
+    for s in stats {
+        let instances = TenantId::new(&s.tenant)
+            .ok()
+            .and_then(|t| st.temporal.attr_instance_count(&t).ok())
+            .unwrap_or(0);
+        let mut row = serde_json::json!({
+            "tenant": s.tenant,
+            "counts": {
+                "entities": s.entities,
+                "subscriptions": s.subscriptions,
+                "csourceSubscriptions": s.csource_subscriptions,
+                "registrations": s.registrations,
+                "snapshots": s.snapshots,
+                "entityMaps": s.entity_maps,
+                "distSubs": s.dist_subs,
+                "attrInstances": instances,
+            },
+        });
+        if let Some(c) = s.created_at {
+            row["createdAt"] = serde_json::Value::String(c);
+        }
+        out.push(row);
+    }
+    (StatusCode::OK, axum::Json(serde_json::Value::Array(out))).into_response()
+}
+
+/// Purge one tenant from both backends: 400 for a name no request could
+/// carry, 404 when it does not exist (5.5.10), 409 while it still holds
+/// distributed subscriptions (unsubscribe them first), 204 once every
+/// document of it is gone. Deleted subscriptions and registrations are
+/// announced to the bus mirrors the way an API delete is.
+async fn tenant_purge(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    use crate::negotiate::ApiError;
+    use antares_store::Kind;
+    let bad = || {
+        ApiError::from(NgsiError::BadRequestData(format!(
+            "invalid tenant: {raw:?}"
+        )))
+        .into_response()
+    };
+    if reserved_tenant(&raw) {
+        return bad();
+    }
+    let Ok(tenant) = TenantId::new(&raw) else {
+        return bad();
+    };
+    match st.store.tenant_exists(&tenant) {
+        Ok(true) => {}
+        Ok(false) => {
+            return ApiError::from(NgsiError::ResourceNotFound(format!("tenant {raw}")))
+                .into_response()
+        }
+        Err(e) => return ApiError::from(e).into_response(),
+    }
+    let ids = |kind: Kind| -> Result<Vec<String>, NgsiError> {
+        Ok(st
+            .store
+            .list(&tenant, kind)?
+            .into_iter()
+            .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect())
+    };
+    let run = || -> Result<(), NgsiError> {
+        if !ids(Kind::DistSub)?.is_empty() {
+            return Err(NgsiError::Conflict(
+                "tenant holds active distributed subscriptions".into(),
+            ));
+        }
+        let mut subs = ids(Kind::Subscription)?;
+        subs.extend(ids(Kind::CSourceSubscription)?);
+        let regs = ids(Kind::Registration)?;
+        st.temporal.purge_tenant(&tenant)?;
+        st.store.purge_tenant(&tenant)?;
+        if let Some(sync) = &st.sub_sync {
+            for id in &subs {
+                sync(&tenant, id, None);
+            }
+        }
+        if let Some(sync) = &st.reg_sync {
+            for id in &regs {
+                sync(&tenant, id, None);
+            }
+        }
+        Ok(())
+    };
+    match run() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
 async fn ready(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {

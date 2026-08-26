@@ -200,3 +200,147 @@ async fn rls_denies_cross_tenant_reads_and_writes() {
         .get(0);
     assert_eq!(n, 0, "no tenant in scope must mean no rows");
 }
+
+/// Purging a tenant empties every tenant-bearing table for it in one
+/// transaction and touches no row of another tenant.
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_tenant_empties_every_tenant_table() {
+    use antares_store::{CurrentStateDriver, Kind, TemporalDriver};
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    store.set_outbox(true);
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let a = TenantId::new(&format!("pgpa{run}")).expect("tenant");
+    let b = TenantId::new(&format!("pgpb{run}")).expect("tenant");
+    let doc = |id: &str| {
+        serde_json::json!({
+            "id": id, "type": "Test",
+            "createdAt": "2026-08-04T09:00:00Z", "modifiedAt": "2026-08-04T09:00:00Z",
+            "n": {"type": "Property", "value": 1, "observedAt": "2026-08-04T09:00:00Z"}
+        })
+    };
+    for t in [&a, &b] {
+        pg::ensure_tenant(&pool, t).await.expect("tenant row");
+        for kind in [
+            Kind::Entity,
+            Kind::Subscription,
+            Kind::Registration,
+            Kind::CSourceSubscription,
+            Kind::Snapshot,
+            Kind::EntityMap,
+            Kind::DistSub,
+        ] {
+            let id = "urn:x:1";
+            let d = if kind == Kind::Registration {
+                serde_json::json!({"id": id, "type": "ContextSourceRegistration",
+                    "information": [{"entities": [{"type": "Test"}]}],
+                    "endpoint": "http://127.0.0.1:9"})
+            } else {
+                doc(id)
+            };
+            assert!(
+                CurrentStateDriver::create(&store, t, kind, id, d).expect("create"),
+                "{kind:?}"
+            );
+        }
+        TemporalDriver::create(&store, t, "urn:x:1", doc("urn:x:1")).expect("temporal");
+        store
+            .temporal_append(
+                t,
+                "urn:x:1",
+                &doc("urn:x:1"),
+                &serde_json::json!({"n": [{"type": "Property", "value": 2,
+                    "observedAt": "2026-08-04T09:01:00Z", "instanceId": "urn:i:1"}]}),
+            )
+            .expect("append");
+        sqlx::query(
+            "INSERT INTO entity_maps (tenant_id, map_id, pos, query_checksum, entity_id,
+             registration_id, last_access, expires_at)
+             VALUES ($1, 'm', 0, 'c', 'urn:x:1', 'r', now(), now() + interval '1 hour')",
+        )
+        .bind(t.as_str())
+        .execute(&pool)
+        .await
+        .expect("entity map row");
+    }
+    const TABLES: [&str; 12] = [
+        "entities",
+        "subscriptions",
+        "csource_subscriptions",
+        "csource_registrations",
+        "csource_index",
+        "entity_maps",
+        "outbox",
+        "snapshots",
+        "entity_map_docs",
+        "dist_subs",
+        "temporal_entities",
+        "attr_instances",
+    ];
+    let count = |table: &'static str, t: &TenantId| {
+        let pool = pool.clone();
+        let t = t.as_str().to_string();
+        async move {
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} WHERE tenant_id = $1"
+            )))
+            .bind(t)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+            n
+        }
+    };
+    for table in TABLES {
+        assert!(count(table, &a).await > 0, "seed missing in {table}");
+    }
+    let before_b: Vec<i64> = {
+        let mut v = Vec::new();
+        for table in TABLES {
+            v.push(count(table, &b).await);
+        }
+        v
+    };
+    let stats = store.tenant_stats().expect("stats");
+    let row = stats
+        .iter()
+        .find(|r| r.tenant == a.as_str())
+        .expect("listed");
+    assert_eq!(
+        (row.entities, row.subscriptions, row.registrations),
+        (1, 1, 1)
+    );
+    assert_eq!(row.dist_subs, 1);
+    assert!(TemporalDriver::attr_instance_count(&store, &a).expect("n") >= 1);
+
+    assert!(CurrentStateDriver::purge_tenant(&store, &a).expect("purge"));
+    TemporalDriver::purge_tenant(&store, &a).expect("purge history");
+    for table in TABLES {
+        assert_eq!(
+            count(table, &a).await,
+            0,
+            "{table} still holds rows of the purged tenant"
+        );
+    }
+    assert!(!store.tenant_exists(&a).expect("exists"));
+    for (table, before) in TABLES.iter().zip(before_b) {
+        assert_eq!(
+            count(table, &b).await,
+            before,
+            "{table} of the other tenant changed"
+        );
+    }
+    assert!(
+        !CurrentStateDriver::purge_tenant(&store, &a).expect("purge"),
+        "nothing left"
+    );
+    // cleanup
+    assert!(CurrentStateDriver::purge_tenant(&store, &b).expect("purge b"));
+    TemporalDriver::purge_tenant(&store, &b).expect("purge b history");
+}

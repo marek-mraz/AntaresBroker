@@ -523,6 +523,78 @@ impl Store {
             .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
     }
 
+    /// Inventory over every kind; the default tenant is always listed.
+    pub fn tenant_stats(&self) -> Vec<antares_store::TenantStats> {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut names: std::collections::BTreeSet<String> =
+            std::iter::once(TenantId::DEFAULT.to_string()).collect();
+        for kind in ALL_KINDS {
+            names.extend(Self::map(&inner, kind).keys().cloned());
+        }
+        names
+            .into_iter()
+            .map(|tenant| {
+                let n = |k: Kind| {
+                    Self::map(&inner, k)
+                        .get(&tenant)
+                        .map_or(0, |m| m.len() as u64)
+                };
+                antares_store::TenantStats {
+                    entities: n(Kind::Entity),
+                    subscriptions: n(Kind::Subscription),
+                    registrations: n(Kind::Registration),
+                    csource_subscriptions: n(Kind::CSourceSubscription),
+                    snapshots: n(Kind::Snapshot),
+                    entity_maps: n(Kind::EntityMap),
+                    dist_subs: n(Kind::DistSub),
+                    created_at: None,
+                    tenant,
+                }
+            })
+            .collect()
+    }
+
+    /// Attribute instances held in the tenant's temporal documents.
+    pub fn attr_instance_count(&self, tenant: &TenantId) -> u64 {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.temporal.get(tenant.as_str()).map_or(0, |docs| {
+            docs.values()
+                .filter_map(Value::as_object)
+                .flat_map(|d| d.values().filter_map(Value::as_array))
+                .map(|a| a.iter().filter(|i| i.is_object()).count() as u64)
+                .sum()
+        })
+    }
+
+    /// Drop every document of the given kinds for one tenant; `true` when
+    /// the tenant held any of them. Persisted per key in `file` mode.
+    pub fn purge_kinds(&self, tenant: &TenantId, kinds: &[Kind]) -> bool {
+        on_blocking(|| {
+            let mut inner = self.write_inner();
+            let mut hit = false;
+            for kind in kinds {
+                if let Some(docs) = Self::map_mut(&mut inner, *kind).remove(tenant.as_str()) {
+                    hit = true;
+                    for id in docs.keys() {
+                        self.persist(table_for(*kind), &key_bytes(tenant.as_str(), id), None);
+                    }
+                }
+            }
+            hit
+        })
+    }
+
+    /// Remove the tenant from every kind, history included.
+    pub fn purge_tenant(&self, tenant: &TenantId) -> bool {
+        self.purge_kinds(tenant, &ALL_KINDS)
+    }
+
     pub fn subscription_tenants(&self) -> Vec<String> {
         let inner = self
             .inner
@@ -1342,5 +1414,41 @@ mod tests {
         });
         assert!(matches!(r, Some(Err("nope"))));
         assert_eq!(s.get(&t, Kind::Entity, "urn:a").unwrap()["n"], 1);
+    }
+
+    /// A purged tenant is gone from every kind, the neighbour tenant is
+    /// untouched, and in `file` mode the removal survives a reopen.
+    #[test]
+    fn purge_tenant_empties_every_kind_and_survives_reopen() {
+        let dir = tempdir("purge");
+        let a = TenantId::new("purge_a").expect("tenant");
+        let b = TenantId::new("purge_b").expect("tenant");
+        {
+            let s = Store::open_file(&dir).expect("open");
+            for t in [&a, &b] {
+                for kind in ALL_KINDS {
+                    assert!(s.create(t, kind, "urn:x:1", json!({"id": "urn:x:1"})));
+                }
+            }
+            let stats = s.tenant_stats();
+            let row = stats
+                .iter()
+                .find(|r| r.tenant == "purge_a")
+                .expect("listed");
+            assert_eq!((row.entities, row.subscriptions, row.dist_subs), (1, 1, 1));
+            assert!(s.purge_tenant(&a));
+            assert!(!s.purge_tenant(&a), "second purge finds nothing");
+            assert!(!s.tenant_exists(&a));
+            assert!(s.tenant_exists(&b));
+            for kind in ALL_KINDS {
+                assert!(s.get(&a, kind, "urn:x:1").is_none(), "{kind:?} row left");
+                assert!(s.get(&b, kind, "urn:x:1").is_some(), "{kind:?} lost for b");
+            }
+            assert!(s.tenant_stats().iter().all(|r| r.tenant != "purge_a"));
+        }
+        let s = Store::open_file(&dir).expect("reopen");
+        assert!(!s.tenant_exists(&a), "purge must be persisted");
+        assert!(s.tenant_exists(&b));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

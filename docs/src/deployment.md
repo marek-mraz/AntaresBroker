@@ -47,6 +47,8 @@ Broker + PostGIS. `timescale` differs only in the image and
 `ANTARES_STORE`; temporal data lands in a hypertable. Set
 `ANTARES_REQUIRE_RLS=1` in shared-schema multi-tenant deployments so the
 broker refuses a DB role that bypasses Row-Level Security.
+Tenants are created implicitly by the first write; listing and purging
+them is described under [operations](operations.md#tenants).
 
 ## HA: replicas behind a load balancer
 
