@@ -39,7 +39,7 @@ kind smoke (dispatch): apply + every `rollout status` green.
 
 | Endpoint | Meaning |
 |---|---|
-| `/q/health` | Liveness + store mode, file-mode commit queue, resource limits + rejection counters, jemalloc heap, and under `bus=nats` the bus state `{mode, connected, reconnects}`. 503 = DRAINING (a roll in progress). |
+| `/q/health` | Liveness + store mode and the temporal backend (`temporal`: `memory`, `file`, `postgres`, `timescale` or `none`), file-mode commit queue, resource limits + rejection counters, jemalloc heap, and under `bus=nats` the bus state `{mode, connected, reconnects}`. 503 = DRAINING (a roll in progress). |
 | `/q/ready` | Readiness: not draining ∧ store answers (`SELECT 1` on Pg) ∧ bus connected. The k8s `readinessProbe` polls this; liveness stays on `/q/health` (a restart does not fix a lost DB). |
 | `/q/metrics` | Prometheus text (`antares_` prefix — see the README observability section). |
 

@@ -51,6 +51,10 @@ pub struct AppState {
     /// `/info/sourceIdentity`, which is a spec resource). A typed value so
     /// mode-gated sections switch on an enum, never on strings.
     pub store_mode: antares_sql::StoreMode,
+    /// The temporal backend `/q/health` names: the store's own mode when one
+    /// instance serves both seams, `None` when history is off (`NoTemporal`);
+    /// a second backend overwrites it after construction.
+    pub temporal_mode: Option<antares_sql::StoreMode>,
     pub loader: Arc<Loader>,
     pub started: Instant,
     /// Startup timestamp (createdAt of the built-in core @context entry).
@@ -255,10 +259,12 @@ impl AppState {
                     _ => format!("http://{host_alias}"),
                 }
             });
+        let temporal_mode = temporal.supported().then_some(store_mode);
         Self {
             store,
             temporal,
             store_mode,
+            temporal_mode,
             loader,
             started: Instant::now(),
             started_at: now_iso(),

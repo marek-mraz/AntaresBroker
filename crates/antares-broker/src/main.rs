@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(async {
-            let (store, temporal, backend) = build_drivers(mode).await?;
+            let (store, temporal, backend, temporal_mode) = build_drivers(mode).await?;
             run(
                 port,
                 host_alias,
@@ -268,6 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 store,
                 temporal,
                 mode,
+                temporal_mode,
                 backend,
                 metrics_render,
                 sweep_secs,
@@ -355,22 +356,23 @@ async fn build_drivers(
         std::sync::Arc<antares_sql::store::any::AnyStore>,
         std::sync::Arc<dyn antares_store::TemporalDriver>,
         Option<antares_sql::store::pg::maintenance::TemporalBackend>,
+        Option<antares_sql::StoreMode>,
     ),
     Box<dyn std::error::Error>,
 > {
     let (store, backend) = build_store(store_mode).await?;
     let store = std::sync::Arc::new(store);
     let raw = std::env::var("ANTARES_TEMPORAL").ok();
-    let temporal: std::sync::Arc<dyn antares_store::TemporalDriver> =
+    let (temporal, temporal_mode): (std::sync::Arc<dyn antares_store::TemporalDriver>, _) =
         match temporal_choice(store_mode, raw.as_deref())? {
-            TemporalChoice::SameAsStore => store.clone(),
-            TemporalChoice::None => std::sync::Arc::new(antares_store::NoTemporal),
+            TemporalChoice::SameAsStore => (store.clone(), Some(store_mode)),
+            TemporalChoice::None => (std::sync::Arc::new(antares_store::NoTemporal), None),
             TemporalChoice::Second(mode) => {
                 let (second, _) = build_store(mode).await?;
-                std::sync::Arc::new(second)
+                (std::sync::Arc::new(second), Some(mode))
             }
         };
-    Ok((store, temporal, backend))
+    Ok((store, temporal, backend, temporal_mode))
 }
 
 /// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
@@ -386,8 +388,8 @@ async fn build_store(
     ),
     Box<dyn std::error::Error>,
 > {
-    use antares_sql::store::pg::maintenance::TemporalBackend;
     use antares_sql::store::any::{AnyStore, PgBackend};
+    use antares_sql::store::pg::maintenance::TemporalBackend;
     use antares_sql::store::Store;
     use antares_sql::StoreMode;
     match mode {
@@ -413,15 +415,17 @@ async fn build_store(
             // The DB container may still be booting — bounded retry, then die.
             let mut last = String::new();
             for _ in 0..30 {
-                match antares_sql::store::pg::connect_with(&url, pool_size, statement_timeout).await {
+                match antares_sql::store::pg::connect_with(&url, pool_size, statement_timeout).await
+                {
                     Ok(pool) => {
                         // The temporal backend is what the migrations actually
                         // BUILT, detected once from the catalog and pinned —
                         // the maintenance branch can never disagree with the
                         // DDL on disk, whatever happened to the extension since.
-                        let backend = antares_sql::store::pg::maintenance::detect_temporal_backend(&pool)
-                            .await
-                            .map_err(|e| format!("ANTARES_STORE={mode}: {e}"))?;
+                        let backend =
+                            antares_sql::store::pg::maintenance::detect_temporal_backend(&pool)
+                                .await
+                                .map_err(|e| format!("ANTARES_STORE={mode}: {e}"))?;
                         // Never silently fall back — timescale mode whose
                         // database is not hypertable-shaped is a config error,
                         // not a downgrade (extension missing at first boot, or
@@ -522,6 +526,7 @@ async fn run(
     store: std::sync::Arc<antares_sql::store::any::AnyStore>,
     temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
     store_mode: antares_sql::StoreMode,
+    temporal_mode: Option<antares_sql::StoreMode>,
     temporal_backend: Option<antares_sql::store::pg::maintenance::TemporalBackend>,
     metrics_render: Option<telemetry::MetricsRender>,
     sweep_secs: u64,
@@ -560,6 +565,7 @@ async fn run(
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
     let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
+    state.temporal_mode = temporal_mode;
     state.delivery = antares_api::DeliveryPolicy::from_env().unwrap_or_default();
     state.temporal_record = std::env::var("ANTARES_TEMPORAL_RECORD")
         .as_deref()
@@ -662,8 +668,10 @@ async fn run(
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
             loop {
                 tick.tick().await; // first tick is immediate: partitions at boot
-                match antares_sql::store::pg::maintenance::temporal_maintenance(&pool, backend, retention)
-                    .await
+                match antares_sql::store::pg::maintenance::temporal_maintenance(
+                    &pool, backend, retention,
+                )
+                .await
                 {
                     Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),
                     Err(e) => tracing::warn!("temporal maintenance failed: {e}"),

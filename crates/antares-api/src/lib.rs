@@ -539,6 +539,7 @@ async fn health(
     let mut body = serde_json::json!({
         "status": if draining { "DRAINING" } else { "UP" },
         "store": state.store_mode.as_str(),
+        "temporal": state.temporal_mode.map_or("none", antares_sql::StoreMode::as_str),
         // Version surface: workspace version + build-time git hash
         // (build.rs), asserted by the release smoke test.
         "version": env!("CARGO_PKG_VERSION"),
@@ -940,7 +941,40 @@ mod tests {
         assert_ne!(body["commit"], "", "commit hash empty");
     }
 
-    /// Backlog 08-14 item 4: /q/health reports the bus — `bus: {mode,
+    /// /q/health names the temporal backend next to the store: the store's
+    /// own mode when one instance serves both seams, `none` for NoTemporal.
+    #[tokio::test]
+    async fn health_names_the_temporal_backend() {
+        let body = body_json(
+            app()
+                .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert_eq!(body["store"], "memory");
+        assert_eq!(body["temporal"], "memory");
+
+        let st = AppState::with_drivers(
+            "antares-test".into(),
+            std::sync::Arc::new(antares_sql::store::any::AnyStore::Mem(
+                antares_sql::store::Store::default(),
+            )),
+            std::sync::Arc::new(antares_store::NoTemporal),
+            antares_sql::StoreMode::Memory,
+        );
+        let body = body_json(
+            router(st)
+                .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert_eq!(body["store"], "memory");
+        assert_eq!(body["temporal"], "none");
+    }
+
+    /// /q/health reports the bus — `bus: {mode,
     /// connected, reconnects}` when the nats wiring installed bus_stats,
     /// and the field is ABSENT for bus=local (no stats installed).
     #[tokio::test]
