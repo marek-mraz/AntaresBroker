@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(async {
-            let (store, temporal, backend, temporal_mode) = build_drivers(mode).await?;
+            let (store, temporal, maintenance, temporal_mode) = build_drivers(mode).await?;
             run(
                 port,
                 host_alias,
@@ -269,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 temporal,
                 mode,
                 temporal_mode,
-                backend,
+                maintenance,
                 metrics_render,
                 sweep_secs,
                 drain_delay,
@@ -355,12 +355,21 @@ async fn build_drivers(
     (
         std::sync::Arc<antares_sql::store::any::AnyStore>,
         std::sync::Arc<dyn antares_store::TemporalDriver>,
-        Option<antares_sql::store::pg::maintenance::TemporalBackend>,
+        Vec<(
+            antares_sql::sqlx::PgPool,
+            antares_sql::store::pg::maintenance::TemporalBackend,
+        )>,
         Option<antares_sql::StoreMode>,
     ),
     Box<dyn std::error::Error>,
 > {
     let (store, backend) = build_store(store_mode).await?;
+    // Every pg half gets the maintenance job: partitions, retention and the
+    // 4.22 reap belong to whichever database holds the history.
+    let mut maintenance = Vec::new();
+    if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) = (&store, backend) {
+        maintenance.push((p.docs.pool().clone(), backend));
+    }
     let store = std::sync::Arc::new(store);
     let raw = std::env::var("ANTARES_TEMPORAL").ok();
     let (temporal, temporal_mode): (std::sync::Arc<dyn antares_store::TemporalDriver>, _) =
@@ -368,11 +377,16 @@ async fn build_drivers(
             TemporalChoice::SameAsStore => (store.clone(), Some(store_mode)),
             TemporalChoice::None => (std::sync::Arc::new(antares_store::NoTemporal), None),
             TemporalChoice::Second(mode) => {
-                let (second, _) = build_store(mode).await?;
+                let (second, backend) = build_store(mode).await?;
+                if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
+                    (&second, backend)
+                {
+                    maintenance.push((p.docs.pool().clone(), backend));
+                }
                 (std::sync::Arc::new(second.temporal_only()), Some(mode))
             }
         };
-    Ok((store, temporal, backend, temporal_mode))
+    Ok((store, temporal, maintenance, temporal_mode))
 }
 
 /// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
@@ -527,7 +541,10 @@ async fn run(
     temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
     store_mode: antares_sql::StoreMode,
     temporal_mode: Option<antares_sql::StoreMode>,
-    temporal_backend: Option<antares_sql::store::pg::maintenance::TemporalBackend>,
+    maintenance: Vec<(
+        antares_sql::sqlx::PgPool,
+        antares_sql::store::pg::maintenance::TemporalBackend,
+    )>,
     metrics_render: Option<telemetry::MetricsRender>,
     sweep_secs: u64,
     drain_delay: std::time::Duration,
@@ -639,12 +656,9 @@ async fn run(
     }
     // Temporal maintenance — plain-mode partition pre-creation and the
     // (opt-in) retention horizon, single-winner via SKIP LOCKED.
-    // The branch is PINNED to the detected backend (never re-probed): memory
-    // and file modes have no backend and get no job, for sure.
-    if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
-        (store.as_ref(), temporal_backend)
-    {
-        let pool = p.docs.pool().clone();
+    // One job per pg half (current state and/or history), PINNED to the
+    // backend detected at startup; memory and file halves get none.
+    if !maintenance.is_empty() {
         let retention: Option<i64> = std::env::var("ANTARES_TEMPORAL_RETENTION_DAYS")
             .ok()
             .map(|v| {
@@ -661,23 +675,25 @@ async fn run(
                     })
             })
             .transpose()?;
-        tokio::spawn(async move {
-            // Same ANTARES_SWEEP_SECS cadence as the Mem arm — the job's 4.22
-            // reap is the sweep here; the partition/retention steps riding on
-            // the same tick are idempotent and SKIP LOCKED single-winner.
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
-            loop {
-                tick.tick().await; // first tick is immediate: partitions at boot
-                match antares_sql::store::pg::maintenance::temporal_maintenance(
-                    &pool, backend, retention,
-                )
-                .await
-                {
-                    Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),
-                    Err(e) => tracing::warn!("temporal maintenance failed: {e}"),
+        for (pool, backend) in maintenance {
+            tokio::spawn(async move {
+                // Same ANTARES_SWEEP_SECS cadence as the Mem arm — the job's 4.22
+                // reap is the sweep here; the partition/retention steps riding on
+                // the same tick are idempotent and SKIP LOCKED single-winner.
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
+                loop {
+                    tick.tick().await; // first tick is immediate: partitions at boot
+                    match antares_sql::store::pg::maintenance::temporal_maintenance(
+                        &pool, backend, retention,
+                    )
+                    .await
+                    {
+                        Ok(msg) => tracing::debug!("temporal maintenance: {msg}"),
+                        Err(e) => tracing::warn!("temporal maintenance failed: {e}"),
+                    }
                 }
-            }
-        });
+            });
+        }
     }
     // Handles the drain needs, taken before `state` is consumed by the
     // router — the flag the health endpoint reads, and the store whose pools

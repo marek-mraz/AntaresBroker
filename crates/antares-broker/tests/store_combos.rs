@@ -47,7 +47,20 @@ fn db_url() -> Option<String> {
 }
 
 fn start(port: u16, dir: &Path, store: &str, temporal: &str) -> Broker {
+    start_with(port, dir, store, temporal, &[])
+}
+
+fn start_with(
+    port: u16,
+    dir: &Path,
+    store: &str,
+    temporal: &str,
+    extra: &[(&str, &str)],
+) -> Broker {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_antares"));
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
     cmd.env("ANTARES_HTTP_PORT", port.to_string())
         .env("ANTARES_STORE", store)
         .env("ANTARES_TEMPORAL", temporal)
@@ -437,4 +450,57 @@ fn file_timescale() {
         return;
     }
     pg_row(&url, "file", "timescale");
+}
+
+/// Retention applies to the temporal half wherever it lives: a `file`
+/// store with `postgres` history still gets the maintenance job, and an
+/// instance older than the horizon is pruned while the entity stays.
+#[test]
+fn file_postgres_retention_prunes_the_temporal_half() {
+    let url = require_db!();
+    let row = "file-postgres-retention";
+    let dir = tempdir(row);
+    let port = free_port();
+    let _broker = start_with(
+        port,
+        &dir,
+        "file",
+        "postgres",
+        &[
+            ("ANTARES_TEMPORAL_RETENTION_DAYS", "1"),
+            ("ANTARES_SWEEP_SECS", "1"),
+        ],
+    );
+    wait_healthy(port);
+    write_twice(port, row);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let pruned = loop {
+        let (entities, instances) = pg_rows_blocking(&url, row);
+        assert_eq!(
+            entities, 0,
+            "the file store holds the entity, not the database"
+        );
+        if instances == 0 {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert!(
+        pruned,
+        "instances older than the retention horizon were never pruned"
+    );
+    assert!(
+        current_state_present(port, row),
+        "retention must not touch current state"
+    );
+    let resp = send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{}", id(row)),
+        "",
+    );
+    assert!(resp.starts_with("HTTP/1.1 204"), "{resp}");
 }

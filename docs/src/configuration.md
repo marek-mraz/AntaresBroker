@@ -30,7 +30,7 @@ here).
 | `ANTARES_MIGRATE` | on | `0`/`false` skips running migrations from this process, so serving replicas do not race the DDL — run them once from a job or init container instead. |
 | `ANTARES_ALLOW_SHARED_LOCAL` | unset | `1` permits `bus=local` with a `postgres`/`timescale` store — safe ONLY for a strictly single-process deployment; two such processes double-fire notifications. |
 | `ANTARES_TEMPORAL_RECORD` | `all` | History gate for the entity endpoints. `all`: every changed attribute instance is recorded. `observed`: only instances carrying `observedAt` enter history — a metadata-only write (no `observedAt`) updates current state and its `modifiedAt` but leaves no history, so `timeproperty=modifiedAt`/`createdAt` temporal queries return nothing for never-observed attributes. `none`: the entity endpoints record nothing; the temporal API still stores and serves what it is given directly (unlike `ANTARES_TEMPORAL=none`, which switches the temporal seam off). The ETSI temporal suites assume `all`, which is why it stays the default. Unknown value = fatal. |
-| `ANTARES_TEMPORAL_RETENTION_DAYS` | unset (keep forever) | Temporal history retention; the sweep job prunes older attribute instances. |
+| `ANTARES_TEMPORAL_RETENTION_DAYS` | unset (keep forever) | Temporal history retention; the sweep job prunes older attribute instances. Applies to the temporal half wherever it lives: a `file` store with `postgres` history still runs the job. |
 | `ANTARES_SWEEP_SECS` | `900` | Cadence of the background GC sweep (expired entities/registrations, 4.22) — identical across store modes. |
 
 ## NATS scale-out
