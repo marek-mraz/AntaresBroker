@@ -26,14 +26,15 @@ impl Drop for Broker {
 }
 
 fn free_port() -> u16 {
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    let base = 21_000 + (std::process::id() % 120) as u16 * 100;
-    loop {
-        let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 100;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
+    // The kernel hands out ephemeral ports without repeating a just-freed
+    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
+    // hundreds of nextest processes pick the same port and one test talk
+    // to the other's broker.
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn tempdir(name: &str) -> PathBuf {
@@ -74,7 +75,32 @@ fn start_with(
     {
         cmd.env("ANTARES_DATABASE_URL", url);
     }
-    Broker(cmd.spawn().expect("spawn antares"))
+    let mut broker = Broker(cmd.spawn().expect("spawn antares"));
+    // Health from THIS child, not from whoever else holds the port: a child
+    // that died (AddrInUse, bad config) is reported with its own stderr
+    // instead of the test carrying on against a stranger's broker.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(Some(status)) = broker.0.try_wait() {
+            let err = std::fs::read_to_string(dir.join("antares.err")).unwrap_or_default();
+            panic!("antares exited before it was healthy ({status}): {err}");
+        }
+        if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+            let req = "GET /q/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+            let mut out = String::new();
+            if s.write_all(req.as_bytes()).is_ok()
+                && s.read_to_string(&mut out).is_ok()
+                && out.contains("200")
+            {
+                return broker;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "antares never became healthy on {port}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn http(port: u16, request: &str) -> String {

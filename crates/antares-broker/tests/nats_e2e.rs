@@ -27,18 +27,15 @@ impl Drop for Broker {
 }
 
 fn free_port() -> u16 {
-    // Bind-0 / close / rebind races the other test processes for the same
-    // port (seen as AddrInUse on the spawned broker). Each process draws from
-    // its own pid-keyed range instead, still bind-probed, and stays below the
-    // ephemeral range (32768+) so outbound connections never land on it.
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    let base = 20_000 + (std::process::id() % 120) as u16 * 100;
-    loop {
-        let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 100;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
+    // The kernel hands out ephemeral ports without repeating a just-freed
+    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
+    // hundreds of nextest processes pick the same port and one test talk
+    // to the other's broker.
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn start(port: u16, roles: &str, db: &str, nats: &str) -> Broker {

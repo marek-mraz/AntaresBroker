@@ -113,21 +113,16 @@ fn wait_healthy(port: u16) -> String {
     }
 }
 
-/// Ask the OS for a free port — racing other parallel test binaries on a
-/// pid-derived port was flaky.
 fn free_port() -> u16 {
-    // Bind-0 / close / rebind races the other test processes for the same
-    // port (seen as AddrInUse on the spawned broker). Each process draws from
-    // its own pid-keyed range instead, still bind-probed, and stays below the
-    // ephemeral range (32768+) so outbound connections never land on it.
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-    let base = 20_000 + (std::process::id() % 120) as u16 * 100;
-    loop {
-        let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 100;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
+    // The kernel hands out ephemeral ports without repeating a just-freed
+    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
+    // hundreds of nextest processes pick the same port and one test talk
+    // to the other's broker.
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
 }
 
 fn tempdir(name: &str) -> PathBuf {
@@ -518,10 +513,13 @@ fn unknown_key_is_fatal_but_the_test_prefix_is_reserved() {
 #[test]
 fn local_bus_with_shared_store_is_fatal_without_optin() {
     let dir = tempdir("localpg");
+    // a CI cell exports ANTARES_DATABASE_URL for the broker under test; with
+    // it inherited the opted-in run below would connect and serve forever
     let refused = Command::new(env!("CARGO_BIN_EXE_antares"))
         .env("ANTARES_BUS", "local")
         .env("ANTARES_STORE", "postgres")
         .env("ANTARES_DATA_DIR", &dir)
+        .env_remove("ANTARES_DATABASE_URL")
         .output()
         .expect("run broker");
     assert!(
@@ -542,6 +540,7 @@ fn local_bus_with_shared_store_is_fatal_without_optin() {
         .env("ANTARES_STORE", "postgres")
         .env("ANTARES_ALLOW_SHARED_LOCAL", "1")
         .env("ANTARES_DATA_DIR", &dir)
+        .env_remove("ANTARES_DATABASE_URL")
         .output()
         .expect("run broker");
     let err = String::from_utf8_lossy(&opted_in.stderr);
