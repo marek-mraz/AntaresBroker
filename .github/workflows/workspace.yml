@@ -129,7 +129,9 @@ jobs:
           which psql >/dev/null || sudo apt-get install -y -qq postgresql-client
           PGPASSWORD=antares psql -h localhost -p 15433 -U antares -d antares \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb"
-          dev/unit-junit.sh timescale-store -p antares-sql
+          # the broker's store×temporal combos too: their timescale rows skip
+          # against the plain PostGIS service and only run here for real
+          dev/unit-junit.sh timescale-store -p antares-sql -p antares-broker --test store_combos
       # Uploaded even on a red job: a failing config is exactly the one the
       # reports page must render, and fold-reports.sh takes the NEWEST bundle.
       - name: Unit JUnit bundle (folded into /reports/unit/)
