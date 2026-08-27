@@ -2205,6 +2205,14 @@ async fn send_outbound(
             for (k, v) in headers {
                 req = req.header(k, v);
             }
+            // endpoint.timeout rides on the request natively (io_deadline is
+            // a passthrough there — the client's 5 s total alone would let a
+            // stalled endpoint eat the full cap per delivery); stretched
+            // under the sanitizer like the client's own deadlines.
+            #[cfg(not(target_arch = "wasm32"))]
+            let req = req.timeout(std::time::Duration::from_millis(
+                u64::from(timeout_ms) * crate::state::slow_factor(),
+            ));
             // One Send unit so the admin replay handler stays Send on wasm32.
             antares_jsonld::http_interaction(async move {
                 // endpoint.timeout (Table 5.2.15-1), clamped
