@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # The workspace dep is default-features=false so the wasm crate can shed
 # the Pg arm; the native binary turns everything back on here.
-antares-api = { workspace = true, features = ["mqtt", "postgres"] }
+antares-api = { workspace = true, features = ["postgres"] }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -50,6 +50,11 @@ console-subscriber = { workspace = true, optional = true }
 # --all-features build without the RUSTFLAGS stays a no-op instead of
 # panicking at startup.
 console = ["dep:console-subscriber"]
+default = ["mqtt"]
+# MQTT notification delivery (rumqttc + rustls); off drops the client and
+# its TLS stack from the binary, MQTT endpoints then fail at subscription
+# creation.
+mqtt = ["antares-api/mqtt"]
 # Decay-purging allocator + heap stats (glibc malloc holds far more RSS).
 # Unix-only: the wasm target keeps the default allocator.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

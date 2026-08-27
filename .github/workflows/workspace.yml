@@ -205,6 +205,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked -p ${{ matrix.crate }} -j 2
       - run: cargo test --locked -p ${{ matrix.crate }} -j 2
+      # the smallest broker build (every optional feature off) must compile
+      - run: cargo check --locked -p antares-broker --no-default-features -j 2
+        if: matrix.crate == 'antares-store'
       # The public surface a gateway author reads: every item documented
       # (#![deny(missing_docs)] in the crate) and no broken intra-doc link.
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p ${{ matrix.crate }}

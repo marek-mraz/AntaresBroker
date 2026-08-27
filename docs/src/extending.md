@@ -26,9 +26,18 @@ Every optional capability is one cargo feature plus a registration in
 | `antares-sql` | `postgres` | on | the Postgres and TimescaleDB backend (`sqlx`); off in the browser build |
 | `antares-notifier` | `mqtt` | on | `rumqttc` + `rustls` |
 | `antares-broker` | `console` | off | `tokio-console` support; only arms under `RUSTFLAGS="--cfg tokio_unstable"` |
+| `antares-broker` | `mqtt` | on | forwards `antares-api/mqtt`; off, MQTT endpoints fail at subscription creation. Measured on one release build: 27.2 → 26.0 MB binary, 58.1 → 55.4 MiB idle RSS |
 
 The browser artifact (`antares-wasm`) is the one build with `postgres`
 off: it drives the same router over the memory store and the OPFS shadow.
+
+No other capability gets a flag: the native binary serves every store
+mode behind one `ANTARES_STORE` value, so `postgres` stays compiled in
+(the browser build is the deployment that sheds it), and the NATS bus,
+the telemetry stack and the admin routes are runtime switches that
+allocate nothing until enabled. A flag earns its place with a measured
+saving, and `cargo build -p antares-broker --no-default-features` is
+checked in CI so the smallest build keeps compiling.
 
 ## Layer 1: component drivers
 
