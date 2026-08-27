@@ -2809,7 +2809,10 @@ mod change_pipeline {
     async fn overflowing_change_queue_drops_and_counts() {
         // stages a race between producer and a parked consumer; under a
         // sanitizer's slowdown the producer never outruns the queue
-        if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
+        // (same for the file store: fsync per create is slower than the drain)
+        if std::env::var_os("ANTARES_TEST_SANITIZER").is_some()
+            || std::env::var("ANTARES_TEST_STORE").is_ok_and(|s| s == "file")
+        {
             return;
         }
         std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
