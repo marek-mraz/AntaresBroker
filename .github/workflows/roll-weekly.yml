@@ -78,7 +78,7 @@ jobs:
       - name: Gate — green under continuous rolls
         run: |
           gate=$(cat results/roll-postgres/gate-status.txt 2>/dev/null || echo MISSING)
-          echo "K8 roll gate = $gate"
+          echo "roll gate = $gate"
           cat results/roll-postgres/run-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           [ "$gate" = PASS ]
 

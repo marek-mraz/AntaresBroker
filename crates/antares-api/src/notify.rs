@@ -2874,10 +2874,10 @@ mod change_pipeline {
             assert_eq!(post(&st, "/ngsi-ld/v1/subscriptions", body).await, 201);
         }
         assert_eq!(create_vehicle(&st, 7).await, 201);
-        for _ in 0..50 {
-            if hits.load(Ordering::SeqCst) > 0 {
-                break;
-            }
+        // a wall-clock bound, not an iteration count: a sanitizer build
+        // delivers the same notification an order of magnitude slower
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while hits.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert_eq!(

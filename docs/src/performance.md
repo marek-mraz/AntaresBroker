@@ -114,7 +114,16 @@ Repository → *Settings* → *Secrets and variables* → *Actions* →
 The names must match exactly; the workflows read them as
 `${{ secrets.HCLOUD_TOKEN }}` and `${{ secrets.RUNNER_PAT }}`.
 
-### 4. First run
+### 4. Limits on a fresh Hetzner project
+
+A new project starts with small quotas. `scale-weekly` at 1.0 asks for a
+ccx43 (16 dedicated cores) and a 500 GB volume, and Hetzner answers
+`dedicated core limit exceeded` / `volumes size limit exceeded` until the
+limits are raised: Project → *Limits* → request more dedicated cores and
+volume storage (a short form, usually approved within a day). The 0.01
+dry run needs the core limit only; it shrinks the volume to 10 GB.
+
+### 5. First run
 
 Actions → *scale-weekly* → *Run workflow* with `scale` = `0.01` (about an
 hour, a few euros); read the step summary for the cost line and the

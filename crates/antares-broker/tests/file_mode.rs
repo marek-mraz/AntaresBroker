@@ -19,6 +19,40 @@ fn http(port: u16, request: &str) -> String {
     out
 }
 
+/// One keep-alive response: headers, then exactly Content-Length body bytes.
+/// `None` when the peer closed or timed out before a full response.
+fn read_keepalive_response(s: &mut TcpStream) -> Option<String> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        let n = s.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let len: usize = head
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("content-length:")
+                .or_else(|| l.strip_prefix("Content-Length:"))
+        })
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    while buf.len() < header_end + len {
+        let n = s.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
 /// Kills the child on drop, so a failed assert never leaks a broker process
 /// into the test host (the drain test found this the hard way: its panic left
 /// a live broker answering health checks half an hour later).
@@ -581,9 +615,33 @@ fn connections_beyond_the_cap_are_dropped() {
     );
     wait_healthy(port);
 
-    // this connection takes the single slot
+    // this connection takes the single slot. A round trip on it proves the
+    // slot is held: the health probe's own connection releases its permit
+    // only when its task ends, and under instrumentation that can lag past
+    // any fixed sleep — then `first` would be the one dropped and `second`
+    // would be served, waiting for headers until the deadline below.
     let mut first = TcpStream::connect(("127.0.0.1", port)).expect("connect first");
-    std::thread::sleep(Duration::from_millis(200)); // let the accept loop claim the slot
+    first
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let held = Instant::now() + Duration::from_secs(30);
+    loop {
+        first
+            .write_all(b"GET /q/health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .expect("write keep-alive");
+        match read_keepalive_response(&mut first) {
+            Some(resp) if resp.contains("200") => break,
+            _ if Instant::now() < held => {
+                // dropped at accept: the probe's permit was still held
+                first = TcpStream::connect(("127.0.0.1", port)).expect("reconnect first");
+                first
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            other => panic!("the in-cap connection never served: {other:?}"),
+        }
+    }
 
     // over the cap: must be dropped, not served. "Dropped" means the peer
     // closes; under load the close can lag a beat behind the accept, so the
