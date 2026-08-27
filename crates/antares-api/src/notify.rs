@@ -1108,10 +1108,21 @@ pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
             }
         }
     }
-    for g in groups {
-        deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
-    }
+    // Groups are distinct subscriptions, so they leave concurrently; a
+    // subscription's changes in this drain are already one group, and the
+    // next drain starts only after this one, so per-subscription order holds.
+    // ponytail: fixed width, make it a knob when a deployment asks
+    use futures_util::StreamExt;
+    futures_util::stream::iter(groups)
+        .for_each_concurrent(DELIVERY_WIDTH, |g| async move {
+            deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
+        })
+        .await;
 }
+
+/// Notifications in flight at once per drain: one serial POST at a time
+/// capped a 9-subscription fan-out at ~600 POST/s and overflowed the queue.
+const DELIVERY_WIDTH: usize = 64;
 
 async fn matches_for(
     st: &AppState,
