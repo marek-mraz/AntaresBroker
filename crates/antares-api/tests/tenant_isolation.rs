@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Tenant isolation, the router-level half: no existence oracle across
 //! tenants and tenant-keyed store state. The RLS denial half runs against
 //! live Postgres in `antares-sql/tests`; the NATS subject re-verification

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! HTTP negotiation (CIM 009 6.3.4/6.3.5/6.3.6): content types, Accept,
 //! Link-header @context resolution, response building.
 

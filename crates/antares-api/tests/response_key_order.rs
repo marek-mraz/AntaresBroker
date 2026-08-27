@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Served-JSON key order: every response object
 //! leads with `id` then `type` (the spec-example order), recursively — an
 //! attribute object prints `"type": "Property"` first. Pure serialization

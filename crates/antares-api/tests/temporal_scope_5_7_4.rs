@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.4.4 S4 (and S7 post-aggregation): the Scope query on the temporal
 //! query surface, matched per 4.19 with 4.18 validity semantics — "a given
 //! Scope is considered valid from the time it has been set until the time

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.2.4 split entities (p.202): "the filters (filter conditions specified
 //! by the query, geospatial restrictions imposed by the geoquery, Scope
 //! query, Attributes) shall be removed before forwarding the request. These

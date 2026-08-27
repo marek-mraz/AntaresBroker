@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Tenant inventory and purge on the admin surface. Tenants come to exist
 //! implicitly (CIM 009 5.5.10) and the NGSI-LD API has no operation to
 //! remove one; `/q/tenants` lists what each tenant holds and

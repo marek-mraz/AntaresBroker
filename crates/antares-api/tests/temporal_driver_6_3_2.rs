@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Temporal storage as a driver choice: a broker composed WITHOUT a
 //! temporal store answers the temporal API with the error type
 //! OperationNotSupported and HTTP 422 (CIM 009 Table 6.3.2-1:

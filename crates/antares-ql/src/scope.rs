@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Scope Query Language (CIM 009 clause 4.19), evaluated in memory over the
 //! entity's `scope` member.
 

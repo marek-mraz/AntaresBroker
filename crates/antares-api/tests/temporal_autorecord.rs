@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.6.4 + auto-recording: every Partial Attribute Update appends a new
 //! attribute instance to the temporal evolution — the regression behind the
 //! playground's flat history charts (create recorded, PATCHes silently not).

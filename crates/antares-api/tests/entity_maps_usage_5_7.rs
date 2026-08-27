@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! EntityMap USAGE on the consumption operations (not the 5.14 CRUD):
 //! Retrieve Entity 5.7.1.4, Retrieve Temporal Evolution 5.7.3.4 and Query
 //! Temporal Evolution 5.7.4.4 — "if a flag to return an EntityMap was

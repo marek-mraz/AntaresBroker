@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 4.5.7: a temporal Property instance is the Property "at a particular point
 //! in time … recorded as a Temporal Property of the instance (typically
 //! observedAt)". A Core-API re-send carrying the same observedAt for the same

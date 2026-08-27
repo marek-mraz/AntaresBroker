@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! wasm32 only: a bounded map with moka's call surface. moka's clock
 //! calls `std::time::Instant::now()` unconditionally, which panics on
 //! wasm32-unknown-unknown — so the browser build swaps in this FIFO-evicting

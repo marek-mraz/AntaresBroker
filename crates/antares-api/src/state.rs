@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Shared application state.
 
 use antares_jsonld::Loader;

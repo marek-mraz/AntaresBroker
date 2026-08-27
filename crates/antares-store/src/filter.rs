@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Query-filter shapes shared by every backend (the pushdown contract),
 //! plus the pure pieces of the geo and temporal query shapes the filters
 //! reference. Pure data — no SQL, no I/O; the memory arm consumes these

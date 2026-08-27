@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Bus wiring: roles × bus. The composition root is the ONLY
 //! place that knows both the bus variant and which consumers exist.
 //!

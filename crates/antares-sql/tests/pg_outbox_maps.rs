@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Transactional outbox atomicity + entity_maps TTL sweep.
 //! Skips loudly without ANTARES_TEST_DATABASE_URL.
 

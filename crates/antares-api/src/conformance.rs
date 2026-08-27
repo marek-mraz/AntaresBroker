@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Version negotiation (6.3.6/6.3.21 + 5.8.6 `ngsildConformance`): amend
 //! response payloads to conform to an earlier NGSI-LD version per the
 //! backwards-compatibility fallbacks of clause 4.3.6.8 (Tables 4.3.6.8-1/2/3).

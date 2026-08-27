@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.5.9.3 Pagination with Entity maps — the paged federated fetch.
 //!
 //! "In the case of queries based on Entity maps, the set of Entities

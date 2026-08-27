@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Subscription matching is index-shaped. The `SubMirror`
 //! candidate lookup must (a) never miss a subscription that could fire —
 //! the safety property, checked against a naive reference — and (b) never

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Subscription matching (CIM 009 5.8.6) against one in-memory entity: the
 //! predicates the broker's notification path applies, usable without a
 //! broker — a gateway or an edge component can answer "would this change

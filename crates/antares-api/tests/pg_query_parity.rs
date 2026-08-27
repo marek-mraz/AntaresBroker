@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Store-mode parity for the compiled query path. ONE fixture set, run
 //! through BOTH engines:
 //!

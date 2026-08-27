@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Notification delivery.
 //!
 //! The pluggability seam is fixed in v0: sinks register by `endpoint.uri`

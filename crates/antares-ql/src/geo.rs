@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Geoquery evaluation (CIM 009 4.10) — in-memory, over GeoJSON values,
 //! via `geo`'s DE-9IM relate (polygon holes, edge-crossing
 //! intersects, line/line, MultiPolygon, topological equals — the planar

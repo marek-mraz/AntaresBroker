@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.9.2 Register Context Source under concurrency: many registrations
 //! created at once must all land, and the broker must keep answering
 //! while they do. The check-then-write section is serialized (5.9.2.4

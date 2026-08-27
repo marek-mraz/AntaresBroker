@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Graceful shutdown drain.
 //!
 //! The ORDER is the whole feature, and it exists because of one asymmetry: a

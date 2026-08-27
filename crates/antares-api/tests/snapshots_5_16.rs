@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.16 Snapshots (optional API group, resources 6.36–6.38, scoping
 //! 6.3.22): Create/Clone/Retrieve status/Update status/Delete/Purge, the
 //! 5.2.41 Snapshot data type gates, background query execution into an

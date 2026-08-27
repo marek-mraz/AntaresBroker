@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The 2-instance e2e: real binaries, roles split across processes,
 //! one shared Postgres + one NATS. Instance A serves the API only; instance B
 //! runs matcher+notifier+temporal only. A subscription and an entity created

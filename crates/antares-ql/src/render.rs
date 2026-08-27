@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Render an AST back to 4.9 `q=` syntax, so a rewritten query can travel
 //! on as a query string. `parse_q(&node.to_string())` yields `node` again.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Input bounds wall: every request-shaped resource has
 //! a configured cap, rejected with the spec-shaped error. One middleware
 //! enforces the transport-level caps (URI length 414, body size 413, JSON

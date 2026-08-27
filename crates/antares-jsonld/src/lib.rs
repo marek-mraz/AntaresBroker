@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! JSON-LD layer — hand-rolled NGSI-LD-subset processor: context processing,
 //! expansion with structural validation, compaction, caching loader with
 //! pinned core contexts.

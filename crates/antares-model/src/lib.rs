@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD data model (ETSI CIM 009 V1.9.1).
 //!
 //! Shapes and invariants only: no I/O, no clocks, no config.

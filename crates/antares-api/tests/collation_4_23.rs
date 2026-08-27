@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 4.23.1 / 4.23.3 EXAMPLES 6/7: the collation parameter — orderBy string
 //! comparison under an ICU collation (RFC 6067 tag) instead of codepoint
 //! order; 5.2.43 maps the OrderingParams `collation` member onto it.

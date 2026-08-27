@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Subscription matching + HTTP notification delivery (5.8.6, 5.3.1).
 //!
 //! Change detection: the store's change hook feeds every entity write here as

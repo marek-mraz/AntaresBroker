@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Process-wide cache of compiled regular expressions.
 //!
 //! Two NGSI-LD surfaces carry a client-supplied regular expression. The query

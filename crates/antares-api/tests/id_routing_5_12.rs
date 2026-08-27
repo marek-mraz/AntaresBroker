@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.12 / 4.3.6.1 — id & idPattern routing decisions at the query fan-out.
 //!
 //! 5.12 (pp. 241-242): a query-side id pattern matches an EntityInfo only

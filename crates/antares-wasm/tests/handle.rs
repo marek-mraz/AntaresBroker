@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The `handle(request) -> response` seam is the whole broker. These run
 //! NATIVELY against the same target-independent code the browser loads — the
 //! wasm32 build differs only below this seam (executor, fetch, timers), so a

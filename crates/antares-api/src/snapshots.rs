@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.16 Snapshots (optional API group; resources 6.36 /snapshots,
 //! 6.37 /snapshots/{id}, 6.38 /snapshots/{id}/clone; scoping 6.3.22).
 //!

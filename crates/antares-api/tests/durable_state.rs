@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Durable state across restarts: snapshots (5.16), EntityMaps (5.14) and
 //! distributed-subscription mappings (5.8.1.4) live in the store
 //! (Kind::Snapshot / Kind::EntityMap / Kind::DistSub / Kind::DeadLetter) — reopening a

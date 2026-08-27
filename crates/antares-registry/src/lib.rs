@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! CSR store + distributed operations.
 //!
 //! Contracts fixed now: candidate matching is SQL over csource_index (never a

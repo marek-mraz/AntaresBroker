@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! /jsonldContexts management (5.13; resources 6.29/6.30).
 //!
 //! Three kinds (5.13.1): Hosted (client-added, served on demand),

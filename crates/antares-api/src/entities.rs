@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! /entities resource (CIM 009 6.4–6.7; operations 5.6.1–5.6.6, 5.6.17,
 //! 5.6.18, 5.6.19, 5.6.21, 5.7.1, 5.7.2).
 

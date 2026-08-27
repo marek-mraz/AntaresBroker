@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! MQTT notification binding — CIM 009 clause 7 (feature `mqtt`).
 //!
 //! 7.2: a subscription whose `notification.endpoint.uri` uses the mqtt(s)
@@ -177,11 +178,11 @@ pub fn build_message(
     Value::Object(msg)
 }
 
-/// The key a pooled MQTT session is shared under. Everything that changes
-/// WHO the session is authenticated as (or how) must participate — two
-/// subscriptions whose endpoints differ only in password must never reuse
-/// one another's authenticated session. Keys are map keys only: never log
-/// them.
+/// The key a pooled MQTT connection is shared under. Everything that changes
+/// the identity the connection authenticates as (or how) must participate:
+/// two subscriptions whose endpoints differ only in password must never
+/// reuse one another's authenticated connection. Keys are map keys only:
+/// never log them.
 fn pool_key(ep: &MqttEndpoint, params: MqttParams) -> String {
     // The password participates via a one-way hash so the plaintext never
     // sits in a map key. DefaultHasher collisions are acceptable here — a

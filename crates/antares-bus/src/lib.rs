@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Change-event bus.
 //!
 //! Two implementations behind one closed enum (the AnyStore pattern,

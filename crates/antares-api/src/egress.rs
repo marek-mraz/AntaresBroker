@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Outbound safety for the request-path egress classes:
 //! notification delivery and federation forwarding. The third class,
 //! @context fetching, enforces the same policy inside `antares-jsonld`

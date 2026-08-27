@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.2.4 filter forwarding on distributed queries.
 //!
 //! The clause splits on the split-entities setting: "If split entities flag

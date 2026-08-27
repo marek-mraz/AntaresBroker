@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD `q=` (CIM 009 clause 4.9) compiled to SQL jsonpath.
 //!
 //! Strategy is Scorpio's, proven against the ETSI suite: the predicate

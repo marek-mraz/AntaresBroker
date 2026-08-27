@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Discovery contract beyond the representation shapes: tenant scoping,
 //! what must NOT be discoverable, and the parameter surface of
 //! GET /types, /types/{type}, /attributes and /attributes/{attrId}

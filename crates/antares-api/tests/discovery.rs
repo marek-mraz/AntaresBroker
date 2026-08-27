@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 4.5.10+ discovery representations (/types, /attributes).
 
 use antares_api::AppState;

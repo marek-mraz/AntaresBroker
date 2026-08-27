@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! csf (Context Source Filter, 4.9 grammar) applied to Context Source
 //! matching on the QUERY paths: 5.7.2.4 / 5.7.4.4 / 5.6.21.4 — with a csf
 //! present, only registrations whose Context Source Properties match the

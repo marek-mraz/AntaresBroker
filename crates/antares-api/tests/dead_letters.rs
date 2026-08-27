@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Dead letters on the admin surface: notifications the delivery policy
 //! gave up on are listed, replayed once through the same binding, or
 //! deleted — always for ONE tenant named by `?tenant=`, never reachable

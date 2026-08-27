@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Distributed operations (4.3.6, 5.12 matching, 6.3.17–6.3.19).
 //!
 //! Registration modes: inclusive (local + forward), auxiliary (read-only

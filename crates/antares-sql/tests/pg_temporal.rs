@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! PgTemporalStore integration (the temporal bridge). Skips
 //! loudly without ANTARES_TEST_DATABASE_URL (see tests/pg.rs recipe).
 

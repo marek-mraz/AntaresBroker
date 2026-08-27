@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Temporal Query Language (CIM 009 clause 4.11) compiled to a
 //! per-instance SQL predicate over a jsonb instance object.
 //!

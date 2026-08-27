@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! PgStore slice three: the temporal store over
 //! `attr_instances` ROWS. The 0002
 //! bridge doc is gone — `temporal_entities` holds only the small `meta`

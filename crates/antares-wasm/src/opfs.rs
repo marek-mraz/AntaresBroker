@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! OPFS persistence — redb's `StorageBackend` over a
 //! `FileSystemSyncAccessHandle`. The six sync trait methods map 1:1 onto the
 //! handle (`getSize`/`read`/`truncate`/`flush`/`write`/`close`), which is the

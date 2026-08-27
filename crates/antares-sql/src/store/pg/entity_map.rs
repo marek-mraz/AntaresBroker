@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! EntityMap rows (`entity_maps`, 5.5.9.3 distributed
 //! pagination). One row per (map, position): the id→source materialization
 //! that keeps broad federation pageable without re-fanning per page.

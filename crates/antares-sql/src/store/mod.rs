@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The storage seam: one folder per backend (`mem/`, `pg/`), `AnyStore`
 //! as the dispatcher between them, and the backend-neutral filter types.
 

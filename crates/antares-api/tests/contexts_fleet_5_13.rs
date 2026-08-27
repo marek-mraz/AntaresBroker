@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.13 behind a load balancer: two api
 //! instances share ONE store, and the Cached-@context bookkeeping must be
 //! shared with it — numberOfHits/lastUsage visible from either instance

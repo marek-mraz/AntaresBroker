@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Antares — NGSI-LD context broker (composition root).
 //!
 //! Config: ANTARES_* env vars only for v0 (antares.toml layering can land
@@ -166,6 +167,25 @@ fn is_off(v: &str) -> bool {
         || v.eq_ignore_ascii_case("no")
 }
 
+/// One plain HTTP/1.0 GET of /q/health on the configured port; anything but
+/// a 200 status line is an error, so `HEALTHCHECK` sees exit 1.
+fn health_probe() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    let port = std::env::var("ANTARES_HTTP_PORT").unwrap_or_else(|_| "9090".into());
+    let timeout = std::time::Duration::from_secs(3);
+    let addr = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>()?;
+    let mut s = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.write_all(b"GET /q/health HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+    let mut head = [0u8; 16];
+    s.read_exact(&mut head)?;
+    if head.starts_with(b"HTTP/1.1 200") || head.starts_with(b"HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err(format!("health: {}", String::from_utf8_lossy(&head)).into())
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --version answers without starting anything (a bare `antares
     // --version` used to boot a server).
@@ -178,6 +198,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             antares_api::GIT_HASH
         );
         return Ok(());
+    }
+    // --health is the container health probe: the image has no shell or
+    // curl, so the binary asks its own /q/health and exits 0 only on 200.
+    if std::env::args_os().any(|a| a == "--health") {
+        return health_probe();
     }
     // Tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.

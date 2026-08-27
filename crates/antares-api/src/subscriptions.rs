@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! /subscriptions and /csourceSubscriptions (5.8, 5.11; resources 6.10/6.11,
 //! 6.12/6.13). One implementation, two store kinds — both use the
 //! Subscription data type (5.2.12).

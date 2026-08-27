@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 4.9 linked-entity subqueries (`attr{path}`, EXAMPLE 13/14) inside a
 //! Subscription's q: the notification matcher shall resolve the linked
 //! Entity through the local store — a matching linked term fires the

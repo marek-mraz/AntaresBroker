@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! /csourceRegistrations (5.9, 5.10; resources 6.8/6.9).
 
 use crate::negotiate::*;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 6.3.8 / 5.8.6: notifications and forwards SHALL be attempted — the
 //! per-destination breaker exists for one failure shape only (an UNRESPONSIVE
 //! peer must not spend the full deadline on every request). An endpoint that

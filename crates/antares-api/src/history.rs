@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The temporal seam's producer side (ADR-0013): the write path pushes
 //! `TemporalEvent`s into a per-request buffer; the buffer is drained ONCE
 //! per request — after the handler, before the response leaves — so the

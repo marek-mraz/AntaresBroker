@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD Query Language (CIM 009 clause 4.9): one AST, two backends.
 //!
 //! [`parse_q`] turns a `q=` expression into a [`QNode`]; [`eval`] evaluates

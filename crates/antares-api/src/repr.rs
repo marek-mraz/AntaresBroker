@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Representation transforms (6.3.7, 4.5.4, concise, sysAttrs, attrs
 //! projection, lang filter) — applied on the INTERNAL expanded form before
 //! compaction.

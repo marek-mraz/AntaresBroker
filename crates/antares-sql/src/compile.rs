@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! AST → (SQL fragment, binds). The structure of every statement comes from
 //! this module; every value a client supplied travels as a bind.
 

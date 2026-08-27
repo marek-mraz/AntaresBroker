@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! PgStore slice two: the doc-table kinds —
 //! `subscriptions`, `csource_registrations`, `csource_subscriptions` — plus
 //! cross-tenant `jsonld_contexts`. Same sync-facade shape as `pg_entity`.

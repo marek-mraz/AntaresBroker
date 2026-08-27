@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Tracing + Prometheus metrics + env-gated OTLP span export.
 //!
 //! Naming follows Prometheus conventions with the `antares_` prefix and

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Security regression suite: known context-broker CVE-class findings,
 //! kept failing-forever as tests.
 //!

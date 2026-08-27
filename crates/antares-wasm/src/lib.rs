@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The broker in a browser tab.
 //!
 //! Everything above the socket is unchanged — the same axum router, the same

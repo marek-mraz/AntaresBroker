@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.3.1 Notification data type — the GeoJSON reading of the `data` member:
 //! endpoint.accept application/geo+json ⇒ data is a FeatureCollection
 //! (5.2.30); receiverInfo Prefer body=json ⇒ that FeatureCollection carries

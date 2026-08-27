@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Batch operations /entityOperations/* (5.6.7–5.6.10, 5.6.20, 5.7.2-POST;
 //! resources 6.14–6.17, 6.23, 6.31).
 

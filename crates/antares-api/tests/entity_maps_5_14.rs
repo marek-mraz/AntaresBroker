@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.14 Context Source Entity Mapping — wire-level tests through the router:
 //! Retrieve/Update/Delete EntityMap (5.14.1-5.14.3, resource 6.32), Create
 //! EntityMap for Query Entities (5.14.4, 6.34) and for the Temporal

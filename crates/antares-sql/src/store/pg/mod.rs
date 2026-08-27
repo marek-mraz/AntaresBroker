@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Postgres foundation: ONE shared pool, embedded migrations,
 //! transaction-scoped tenancy. Store implementations build on top.
 

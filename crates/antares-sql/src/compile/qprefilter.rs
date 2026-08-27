@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.4.4 S2 — the values filter compiled to a SUPERSET SQL prefilter.
 //!
 //! The temporal store keeps one row per Attribute instance, so the entity

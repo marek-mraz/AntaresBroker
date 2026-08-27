@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! PgStore, first slice: entity CRUD over the `entities`
 //! table. Sync facade — same signatures as the in-memory `Store`, sqlx driven
 //! internally via `block_in_place` + `Handle::block_on`, so the 63 existing

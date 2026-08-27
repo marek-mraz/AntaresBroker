@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Attribute-level operations (5.6.2–5.6.5, 5.6.19; resources 6.6/6.7).
 
 use crate::federation::path_segment;

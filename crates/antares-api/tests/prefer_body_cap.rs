@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 6.3.6 `Prefer: ngsi-ld=` amendment layer: honouring the preference is
 //! optional (RFC 7240 section 2: a server "MAY ignore the preference"), so
 //! the layer must never buffer more than the advertised body cap

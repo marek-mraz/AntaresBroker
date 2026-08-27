@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Loop-detection topologies (4.3.6.4, 6.3.18) over real sockets: chains and
 //! cycles across the tenants of ONE broker, and across TWO brokers.
 //!

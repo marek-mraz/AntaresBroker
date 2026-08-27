@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Compaction: internal expanded form → response document under the request
 //! @context. Never mutates its input (enforced by the &input signature).
 

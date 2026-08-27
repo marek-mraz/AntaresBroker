@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! OTLP log export: with ANTARES_TELEMETRY on and ANTARES_OTLP_ENDPOINT set,
 //! log records leave over OTLP/HTTP to the `v1/logs` twin of the traces
 //! endpoint, carrying the same resource; a collector nobody answers never

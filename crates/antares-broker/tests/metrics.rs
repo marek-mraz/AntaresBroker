@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The observability surface, proven against the real binary.
 //! /q/metrics serves the Prometheus text format with antares_-prefixed,
 //! unit-suffixed instruments and the counters actually move.

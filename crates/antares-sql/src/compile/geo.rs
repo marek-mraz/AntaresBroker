@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Geoquery Language (CIM 009 clause 4.10) compiled to PostGIS
 //! over the extracted `entities.location` column (GIST-indexed).
 //!

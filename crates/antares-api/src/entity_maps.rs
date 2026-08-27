@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! EntityMaps (5.14; resources 6.32, 6.34, 6.35): per-query candidate maps
 //! recording which Entities — and which Context Sources — are relevant to an
 //! ongoing consumption request (4.5.25, data type 5.2.39).

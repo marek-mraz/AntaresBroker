@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Loop detection over the Via header (6.3.17 / 6.3.18, Tables 5.2.9-1 and
 //! 5.2.40-1), end to end through the router against a mock Context Source.
 //!

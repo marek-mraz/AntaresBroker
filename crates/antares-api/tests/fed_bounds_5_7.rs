@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Federation response byte cap (the input bounds wall applied to the 5.7.2.4
 //! forwarded-query read path). A registered Context Source answering with a
 //! payload above ANTARES_MAX_FED_RESPONSE_BYTES is treated exactly like one

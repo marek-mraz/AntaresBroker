@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Concurrent distributed fan-out (4.3.6.1). The clause distributes one
 //! query "to all registered Context Sources" with no mandate on request
 //! order; result priority is fixed by the 4.5.5 merge (aux after non-aux),

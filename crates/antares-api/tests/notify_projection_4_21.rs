@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 4.21 NGSI-LD Attribute Projection Language applied to notification
 //! `pick`/`omit`, which Table 5.2.14.1-1 defines as "a valid attribute
 //! projection language string as per clause 4.21".

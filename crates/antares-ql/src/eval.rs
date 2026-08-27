@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! In-memory `q=` evaluation against internal expanded entities — the
 //! evaluator the query path and the subscription matcher share, so the two
 //! cannot disagree; a gateway evaluating the same `q` gets the same answer.

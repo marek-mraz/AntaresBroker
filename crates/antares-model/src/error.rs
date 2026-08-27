@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD error model: the Table 5.5.2-1 error-type vocabulary (variant
 //! names verbatim) with the Table 6.3.2-1 HTTP status mapping. Error type
 //! URI base is https (V1.9.1). errors/Conflict entered with 5.9.2.4

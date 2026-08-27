@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD HTTP binding: axum routers, thin
 //! handlers per spec operation.
 #![cfg_attr(test, allow(clippy::unwrap_used))]

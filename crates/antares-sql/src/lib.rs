@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! AST → SQL compilation + schema.
 //!
 //! The q= compiler emits parameterized SQL — structure from the

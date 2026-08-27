@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The store seam: ONE closed set of backends behind the
 //! memory store's 12-method surface. An enum, not a trait — `mutate<T, E>` is
 //! generic (dyn-incompatible), the backend set is closed by design

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! /temporal/entities (5.6.11–5.6.16, 5.7.3/5.7.4; resources 6.18–6.22).
 
 use crate::negotiate::*;

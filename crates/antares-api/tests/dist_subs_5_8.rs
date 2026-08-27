@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.8.1.4 / 5.8.2.4 / 5.8.5.4 — the CONSUMER half of distributed
 //! subscriptions: an entity Subscription (localOnly != true) creates an
 //! internal Context Source Registration Subscription (5.11.2); a matching

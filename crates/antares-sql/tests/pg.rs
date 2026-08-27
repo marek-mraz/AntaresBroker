@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Postgres foundation integration tests. Need a live
 //! PostGIS; skip (pass vacuously, loudly) when ANTARES_TEST_DATABASE_URL is
 //! unset so plain `cargo test` stays service-free.

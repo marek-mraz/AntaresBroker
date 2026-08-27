@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.4.3 Table: expandValues / jsonKeys on the temporal query — the same
 //! 4.9 EXAMPLE 12 type coercion the entity query applies (attribute values
 //! expanded against the @context before executing the query).

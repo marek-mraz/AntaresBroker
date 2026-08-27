@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.7.4.4 + 5.5.9: pagination applies AFTER the federated temporal union
 //! is merged — the SQL page pushdown must be disabled when registrations
 //! match, or page 1 returns local-page + all-remote rows (matrix-9

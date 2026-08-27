@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! EXPLAIN-based index-usability regression tests: a review once
 //! found three of five entity indexes dead — the compiled q= used the
 //! function form `jsonb_path_exists()` the GIN index can never match, and the

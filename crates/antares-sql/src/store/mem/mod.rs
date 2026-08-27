@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! In-memory store — v0 storage backend.
 //!
 //! DELIBERATE DEVIATION (recorded in docs/adr/): the target backend is

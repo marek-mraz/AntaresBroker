@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! A gateway in front of the broker rewrites an incoming `q=` with the
 //! broker's own query engine: parse, AND in an authorization predicate,
 //! render the result as the query string to forward — and show the SQL the

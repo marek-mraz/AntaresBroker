@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The storage seam: two driver traits every backend implements, plus the
 //! backend-neutral types they speak (resource kinds, filter shapes, the
 //! store-mode enum). This crate names no backend — redb, sqlx and the

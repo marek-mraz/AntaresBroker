@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Current-state store × temporal store, one real broker process per row.
 //! Each row writes an entity with an `observedAt` instance, patches it once,
 //! then proves the current state lives ONLY in the store backend and the
@@ -542,7 +543,7 @@ fn file_timescale() {
 #[test]
 fn file_postgres_retention_prunes_the_temporal_half() {
     // Retention is cross-tenant service work: a one-day horizon with a
-    // one-second sweep would reap every sibling test's 2026-01-01 instances
+    // one-second sweep would reap every sibling test's New-Year instants
     // out of the shared database, so this broker gets a database of its own.
     let url = own_database(&require_db!(), "antares_retention");
     let row = "file-postgres-retention";

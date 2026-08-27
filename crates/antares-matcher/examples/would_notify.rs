@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Answer "would this entity change notify subscription X" without a broker:
 //! the same predicates the broker's notification path applies (5.8.6), over
 //! a stored subscription document and an entity in its internal form.

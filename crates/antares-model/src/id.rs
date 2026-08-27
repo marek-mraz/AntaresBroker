@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Validated id newtypes. Tenant scoping is threaded through the type system:
 //! store methods take `&TenantId` as their first parameter.
 

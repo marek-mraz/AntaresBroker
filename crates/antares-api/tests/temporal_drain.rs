@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The temporal seam drains once per request (ADR-0013): a write's history
 //! events reach the driver in ONE `event_list` call after the handler ran,
 //! a client reading its history straight after the write finds it, and a

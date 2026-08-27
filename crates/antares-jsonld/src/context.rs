@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! JSON-LD context processing — the NGSI-LD-subset processor (hand-rolled,
 //! no `json-ld` crate dependency).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.13 Storing, Managing and Serving @contexts — wire-level tests through
 //! the router: Add (5.13.2), List (5.13.3), Serve (5.13.4) and
 //! Delete/Reload (5.13.5) against the memory store.

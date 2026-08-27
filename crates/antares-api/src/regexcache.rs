@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Process-wide caches of compiled client query text — the regex, `q` and
 //! `geoQ` caches live in `antares_ql::regex`; this module keeps the
 //! broker-side names.

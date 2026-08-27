@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Transactional outbox: the change event is
 //! INSERTed in the SAME transaction as the entity write, so a broker crash
 //! between commit and publish can never lose an event. The drain loop

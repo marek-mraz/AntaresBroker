@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Streaming list endpoints: list responses are
 //! emitted entity-by-entity via `Body::from_stream`, never as one contiguous
 //! serialized buffer. These tests pin the OBSERVABLE contract: the streamed

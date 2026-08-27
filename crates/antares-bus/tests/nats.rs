@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Live-NATS integration (env-gated, same pattern as the live-PG
 //! tests): the broadcast-vs-balanced assertion, the claim check on
 //! the wire, and Nats-Msg-Id dedup. Skips loudly without

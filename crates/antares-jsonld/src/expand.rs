@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD expansion + structural validation (the NGSIObject-equivalent
 //! pass): compacted/concise input → internal expanded form.
 //!

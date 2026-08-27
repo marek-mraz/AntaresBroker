@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Remote @context loading + caching + pinned core contexts.
 
 use crate::context::Context;

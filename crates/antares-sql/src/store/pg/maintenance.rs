@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Temporal maintenance: the broker's own scheduled
 //! job replaces TimescaleDB background workers in plain mode, and drives the
 //! retention knob in both modes.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Discovery: /types and /attributes (5.7.5–5.7.10; resources 6.25–6.28).
 
 use crate::negotiate::*;

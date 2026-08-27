@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! 5.8.1.4: the broker hands its own URL to peer brokers as the
 //! distributed-subscription notification endpoint. When ANTARES_PUBLIC_URL
 //! is unset the default must still be reachable — i.e. carry the HTTP port

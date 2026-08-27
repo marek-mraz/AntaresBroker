@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! `file` mode e2e: the real binary, real HTTP, real
 //! SIGKILL. Commit-before-ack means an entity acknowledged with 201 MUST
 //! survive an immediate `kill -9`; deletes must reach redb too (the Scorpio
@@ -811,4 +812,28 @@ fn non_utf8_environment_and_argv_do_not_kill_the_process() {
     let health = wait_healthy(port);
     assert!(health.contains(r#""status":"UP""#), "health: {health}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `antares --health` is the container HEALTHCHECK: exit 0 only while the
+/// broker on ANTARES_HTTP_PORT answers /q/health with 200.
+#[test]
+fn health_probe_follows_the_broker() {
+    let dir = tempdir("probe");
+    let port = free_port();
+    let probe = |port: u16| {
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .arg("--health")
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .status()
+            .expect("run probe")
+            .success()
+    };
+    assert!(!probe(port), "nothing listens yet, the probe must fail");
+    let _broker = start(port, &dir, "memory");
+    wait_healthy(port);
+    assert!(probe(port), "a healthy broker must pass the probe");
+    assert!(
+        !probe(free_port()),
+        "a port nobody serves must fail the probe"
+    );
 }

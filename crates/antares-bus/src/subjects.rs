@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Subject encoding: `changes.{tenant}.{type_hash}.{id_hash}`.
 //!
 //! Entity types and ids are IRIs/URNs containing `.` and `:` — illegal or

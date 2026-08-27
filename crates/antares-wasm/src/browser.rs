@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The browser bindings — the Service Worker glue and the in-page API.
 //!
 //! Both reduce to `Broker::handle`. The Service Worker intercepts `fetch` on

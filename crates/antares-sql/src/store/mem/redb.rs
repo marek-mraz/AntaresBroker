@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! `file` mode durability: the redb write-through shadow behind the
 //! in-memory maps, its tables and key layout.
 

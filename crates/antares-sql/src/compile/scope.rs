@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Scope Query Language (CIM 009 clause 4.19) compiled to SQL over the
 //! extracted `scopes text[]` column (GIN-indexed).
 //!

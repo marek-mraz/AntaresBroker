@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The JetStream implementation of the bus.
 //!
 //! One `ANTARES_CHANGES` stream (Interest retention, subjects `changes.>`),

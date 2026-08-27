@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Request screening at the edge with the broker's own validation: a
 //! gateway resolves the request's @context through a loader over ITS OWN
 //! HTTP client, then expands the payload exactly as the broker will — a
