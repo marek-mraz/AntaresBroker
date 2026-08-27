@@ -140,8 +140,10 @@ jobs:
           # connection cap left at the default 10 000: the 200 pin refused
           # 60% of the 500-VU fire run before any handler ran
           mkdir -p "$OUT"
+          # pool 100 of Postgres' 300: the default 20 stalled 2-3 s per acquire
+          # under federated queries at 100 rps (10k subs / 10k regs run)
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
-            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 ANTARES_PG_POOL=100 \
             nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
           # bounded: an unbounded wait once burned the whole rented hour

@@ -33,7 +33,10 @@ case "${1:-}" in
         if [ -n "$PG" ]; then
           # every backend of the server, summed (shared buffers count once
           # per process here; the ceiling is generous for that reason)
-          p=$(docker exec "$PG" sh -c "awk '/VmRSS/ {s+=\$2} END {print s+0}' /proc/[0-9]*/status" 2>/dev/null || echo 0)
+          # cgroup memory, not a sum of backend RSS: every backend maps the
+          # same shared buffers, so the sum counted them once per backend
+          # (50 GiB "RSS" on a 32 GB machine)
+          p=$(docker exec "$PG" sh -c "awk '{print int(\$1/1024)}' /sys/fs/cgroup/memory.current 2>/dev/null || awk '/VmRSS/ {s+=\$2} END {print s+0}' /proc/[0-9]*/status" 2>/dev/null || echo 0)
           pj=$(docker exec "$PG" sh -c "cat /proc/[0-9]*/stat 2>/dev/null | awk '{s+=\$14+\$15} END {print s+0}'" 2>/dev/null || echo 0)
         fi
         t1=$(date +%s.%N)
