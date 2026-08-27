@@ -2880,10 +2880,32 @@ mod change_pipeline {
         while hits.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        // the receiver's count alone cannot say WHY nothing arrived: the
+        // subscription's own bookkeeping and the pipeline counters can
+        let diagnosis = || {
+            let sub = st
+                .store
+                .get(
+                    &TenantId::default(),
+                    Kind::Subscription,
+                    "urn:ngsi-ld:Subscription:eu",
+                )
+                .ok()
+                .flatten()
+                .map(|s| s["notification"].to_string())
+                .unwrap_or_else(|| "subscription missing".into());
+            format!(
+                "notification={sub} changes_dropped={} task_panics={} dead_letters={}",
+                changes_dropped(),
+                task_panics(),
+                DEAD_LETTERS.load(Ordering::Relaxed)
+            )
+        };
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
-            "entityUpdated implies attributeCreated, so a creation notifies"
+            "entityUpdated implies attributeCreated, so a creation notifies; {}",
+            diagnosis()
         );
         assert_eq!(
             quiet_hits.load(Ordering::SeqCst),
