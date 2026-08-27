@@ -129,3 +129,39 @@ carries the fix. The current list:
 
 Filing is manual; each entry carries the clause quotation and the
 proposed fix so it can be pasted into the ETSI tracker as is.
+
+## Spec-statement coverage
+
+The ledger says implemented or partial per clause; this table says which
+of those clauses no Robot test exercises at all. `python3 dev/spec.py
+statements` counts the SHALL statements in each leaf clause's text against
+the TPs tagged with its number (or its operation's number) and the
+code/test anchors its evidence cites. It adds no tests; it names where the
+next ones belong.
+
+310 leaf clauses carry 1661 SHALL statements; 119 of them have no Robot TP (350 SHALLs), 64 cite no code/test anchor.
+
+The fifteen untested clauses with the most SHALL statements:
+
+| clause | title | SHALL | robot TPs | code/test anchors |
+|---|---|---:|---:|---:|
+| 6.18.3.2 | Resource methods › GET | 23 | 0 | 1 |
+| 6.8.3.2 | Resource methods › GET | 17 | 0 | 0 |
+| 6.5.3.1 | Resource methods › GET | 11 | 0 | 0 |
+| 5.2.39 | EntityMap | 10 | 0 | 2 |
+| 5.2.9 | CSourceRegistration | 9 | 0 | 2 |
+| 4.2.3 | Cross Domain Ontology | 8 | 0 | 1 |
+| 5.2.35 | VocabProperty | 8 | 0 | 0 |
+| 5.2.38 | JsonProperty | 8 | 0 | 0 |
+| 7.2 | Notification behaviour | 8 | 0 | 2 |
+| 5.2.36 | ListProperty | 7 | 0 | 0 |
+| 5.2.5 | Property | 7 | 0 | 0 |
+| 5.2.7 | GeoProperty | 7 | 0 | 0 |
+| 6.3.8 | Notification behaviour | 7 | 0 | 3 |
+| 5.2.37 | ListRelationship | 6 | 0 | 0 |
+| 5.2.6 | Relationship | 6 | 0 | 0 |
+
+A SHALL count is a proxy: one sentence can carry several rules, and a
+clause's unit tests (the anchors column) may assert what no TP does. The
+counts are a snapshot to regenerate after ledger or suite changes, not a
+gate.

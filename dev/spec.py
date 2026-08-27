@@ -223,6 +223,51 @@ def ledger():
     return out
 
 
+def cmd_statements():
+    """Per leaf clause: SHALL sentences in the spec text against the Robot
+    TPs and code/test anchors the ledger cites. Reveals clauses whose
+    normative statements no test asserts; adds no tests itself."""
+    rows = []
+    metas = [m for m in (read_frontmatter(p) for p in all_sections()) if m]
+    leaf = {m["clause"] for m in leaves(metas)}
+    by_clause = {m["clause"]: m for m in metas}
+
+    def ancestors(clause):
+        parts = clause.split(".")
+        return [".".join(parts[:i]) for i in range(len(parts), 0, -1)]
+
+    def robot_tps(clause):
+        # a TP tagged with the operation clause covers its sub-clauses
+        return {tp for c in ancestors(clause) for tp in (by_clause.get(c, {}).get("robot") or [])}
+
+    def full_title(clause):
+        own = by_clause[clause]["title"]
+        parent = by_clause.get(".".join(clause.split(".")[:-1]))
+        return f"{parent['title']} › {own}" if parent and len(clause.split(".")) > 3 else own
+    for path in all_sections():
+        meta = read_frontmatter(path)
+        if not meta or meta["clause"] not in leaf:
+            continue
+        if meta.get("status") in (None, "informative", "not-implemented"):
+            continue
+        body = path.read_text().split("---\n", 2)[2]
+        shalls = len(re.findall(r"\bshall\b", body, re.I))
+        if not shalls:
+            continue
+        evidence = str(meta.get("evidence") or "")
+        anchors = len(re.findall(r"[\w/]+\.(?:rs|robot|py|sql)\b", evidence))
+        rows.append((meta["clause"], full_title(meta["clause"]), shalls, len(robot_tps(meta["clause"])), anchors, meta.get("status")))
+    untested = [r for r in rows if r[3] == 0]
+    print("| clause | title | SHALL | robot TPs | code/test anchors | status |")
+    print("|---|---|---:|---:|---:|---|")
+    for c, t, sh, tp, an, st in sorted(rows, key=lambda r: (-r[2], r[0])):
+        print(f"| {c} | {t} | {sh} | {tp} | {an} | {st} |")
+    print()
+    print(f"{len(rows)} leaf clauses carry {sum(r[2] for r in rows)} SHALL statements; "
+          f"{len(untested)} of them have no Robot TP ({sum(r[2] for r in untested)} SHALLs), "
+          f"{sum(1 for r in rows if r[4] == 0)} cite no code/test anchor.")
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -267,4 +312,5 @@ if __name__ == "__main__":
         "status": cmd_status,
         "gaps": cmd_gaps,
         "check": cmd_check,
+        "statements": cmd_statements,
     }.get(cmd, cmd_status)()
