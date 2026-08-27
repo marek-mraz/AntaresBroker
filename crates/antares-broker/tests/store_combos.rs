@@ -66,8 +66,9 @@ fn start_with(
         .env("ANTARES_TEMPORAL", temporal)
         .env("ANTARES_DATA_DIR", dir)
         .env("ANTARES_ALLOW_SHARED_LOCAL", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        // the broker log is the only witness of a failed temporal drain
+        .stdout(std::fs::File::create(dir.join("antares.log")).expect("log file"))
+        .stderr(std::fs::File::create(dir.join("antares.err")).expect("err file"));
     if let Some(url) = db_url() {
         cmd.env("ANTARES_DATABASE_URL", url);
     }
@@ -157,7 +158,26 @@ fn history(port: u16, row: &str) -> String {
     get(port, &format!("/ngsi-ld/v1/temporal/entities/{}", id(row)))
 }
 
-fn history_present(port: u16, row: &str) -> bool {
+/// What a failed assertion needs to say: the health body (drain errors,
+/// backend names) and the tail of the broker log.
+fn diagnostics(port: u16, dir: &Path) -> String {
+    let log = std::fs::read_to_string(dir.join("antares.err")).unwrap_or_default();
+    let tail: Vec<&str> = log
+        .lines()
+        .rev()
+        .take(15)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!(
+        "health: {}\nlog tail:\n{}",
+        get(port, "/q/health"),
+        tail.join("\n")
+    )
+}
+
+fn history_present(port: u16, dir: &Path, row: &str) -> bool {
     // history is recorded after the response (the temporal drain), so
     // poll until both instants show or the entity is absent
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -170,7 +190,8 @@ fn history_present(port: u16, row: &str) -> bool {
     }
     assert!(
         (resp.starts_with("HTTP/1.1 200") && both) || resp.starts_with("HTTP/1.1 404"),
-        "temporal retrieve must be the full history or 404: {resp}"
+        "temporal retrieve must be the full history or 404: {resp}\n{}",
+        diagnostics(port, dir)
     );
     resp.starts_with("HTTP/1.1 200")
 }
@@ -201,9 +222,22 @@ fn local_row(store: &str, temporal: &str) {
     let port = free_port();
     let mut broker = start(port, &dir, store, temporal);
     assert_health_names(&wait_healthy(port), store, temporal);
+    // a previous failed pass may have left the row behind
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{}", id(&row)),
+        "",
+    );
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/temporal/entities/{}", id(&row)),
+        "",
+    );
     write_twice(port, &row);
     assert!(current_state_present(port, &row));
-    assert!(history_present(port, &row));
+    assert!(history_present(port, &dir, &row));
     broker.0.kill().expect("SIGKILL");
     broker.0.wait().expect("reap");
 
@@ -215,7 +249,7 @@ fn local_row(store: &str, temporal: &str) {
         "current state after kill -9 must follow the {store} store"
     );
     assert_eq!(
-        history_present(port, &row),
+        history_present(port, &dir, &row),
         survives(temporal),
         "history after kill -9 must follow the {temporal} temporal backend"
     );
@@ -338,6 +372,19 @@ fn pg_row(url: &str, store: &str, temporal: &str) {
     let port = free_port();
     let mut broker = start(port, &dir, store, temporal);
     assert_health_names(&wait_healthy(port), store, temporal);
+    // a previous failed pass may have left the row behind
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{}", id(&row)),
+        "",
+    );
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/temporal/entities/{}", id(&row)),
+        "",
+    );
     write_twice(port, &row);
     assert!(current_state_present(port, &row));
     let db_store = matches!(store, "postgres" | "timescale");
@@ -349,7 +396,7 @@ fn pg_row(url: &str, store: &str, temporal: &str) {
             "temporal read under none: {resp}"
         );
     } else {
-        assert!(history_present(port, &row));
+        assert!(history_present(port, &dir, &row));
     }
     let (entities, instances) = pg_rows_blocking(url, &row);
     assert_eq!(entities, i64::from(db_store), "entities rows for {row}");
@@ -370,7 +417,7 @@ fn pg_row(url: &str, store: &str, temporal: &str) {
     );
     if temporal != "none" {
         assert_eq!(
-            history_present(port, &row),
+            history_present(port, &dir, &row),
             db_temporal || survives(temporal),
             "history after kill -9 must follow the {temporal} temporal backend"
         );
@@ -601,11 +648,32 @@ fn record_pg_row(url: &str, record: &str, expect: (i64, i64)) {
         &[("ANTARES_TEMPORAL_RECORD", record)],
     );
     wait_healthy(port);
+    // a previous failed pass may have left the row behind
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{}", id(&row)),
+        "",
+    );
+    send(
+        port,
+        "DELETE",
+        &format!("/ngsi-ld/v1/temporal/entities/{}", id(&row)),
+        "",
+    );
     write_mixed(port, &row);
+    // history lands after the response: poll for the expected rows
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut rows = pg_attr_rows(url, &row);
+    while rows != expect && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        rows = pg_attr_rows(url, &row);
+    }
     assert_eq!(
-        pg_attr_rows(url, &row),
+        rows,
         expect,
-        "(speed, name) rows under {record}"
+        "(speed, name) rows under {record}\n{}",
+        diagnostics(port, &dir)
     );
     let resp = send(
         port,
