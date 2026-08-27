@@ -46,6 +46,11 @@ if [ -n "$cid" ] && [ "$cid" != "null" ]; then
   printf '{"schemaVersion":1,"label":"coverage (ETSI+unit)","message":"%s%%","color":"%s"}' "$pct" "$color" \
     > site/reports/coverage-badge.json
 else
+  # the documented /reports/coverage/ link must resolve before the first
+  # weekly run has produced a bundle
+  mkdir -p site/reports/coverage
+  echo '<!doctype html><title>Coverage</title><p>No etsi-coverage bundle in the retention window — dispatch the etsi-coverage workflow.' \
+    > site/reports/coverage/index.html
   echo '{"schemaVersion":1,"label":"coverage","message":"no recent run","color":"lightgrey"}' \
     > site/reports/coverage-badge.json
 fi
@@ -61,8 +66,17 @@ for name in perf-weekly-results scale-weekly-results; do
       && unzip -qo "$name.zip" -d "site/reports/perf/latest/${name%-results}" || true
   fi
 done
-[ -d site/reports/perf/latest ] && cat > site/reports/perf/latest/index.html <<'HTML'
-<!doctype html><meta charset=utf-8><title>Antares performance</title>
-<p><a href="perf-weekly/">Weekly shapes (memory store)</a> · <a href="scale-weekly/">Scale run (design targets on PostgreSQL)</a></p>
-HTML
+# the index exists even before the first bundle: a missing run shows as a
+# missing link on the page, never as a 404 on the documented URL
+mkdir -p site/reports/perf/latest
+{
+  echo '<!doctype html><meta charset=utf-8><title>Antares performance</title>'
+  for name in perf-weekly scale-weekly; do
+    if [ -d "site/reports/perf/latest/$name" ]; then
+      echo "<p><a href=\"$name/\">$name</a></p>"
+    else
+      echo "<p>$name — no bundle in the retention window; dispatch the $name workflow.</p>"
+    fi
+  done
+} > site/reports/perf/latest/index.html
 true
