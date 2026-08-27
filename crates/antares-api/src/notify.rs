@@ -1507,7 +1507,7 @@ pub(crate) async fn deliver(
     // a notification body is bounded the way an inbound body is (6.3.4 wall,
     // MAX_BODY_BYTES): a grouped delivery over the cap leaves as several
     // notifications, each whole entities, never one unbounded POST
-    for chunk in chunk_by_bytes(data, crate::bounds::MAX_BODY_BYTES) {
+    for chunk in chunk_by_bytes(data, *crate::bounds::MAX_BODY_BYTES) {
         deliver_as(
             st,
             tenant,
@@ -2809,7 +2809,7 @@ mod change_pipeline {
     async fn overflowing_change_queue_drops_and_counts() {
         // stages a race between producer and a parked consumer; under a
         // sanitizer's slowdown the producer never outruns the queue
-        if std::env::var_os("ANTARES_SANITIZER").is_some() {
+        if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
             return;
         }
         std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");

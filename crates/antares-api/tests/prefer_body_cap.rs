@@ -52,9 +52,9 @@ async fn get_with_prefer(app: axum::Router) -> (StatusCode, Option<String>, Stri
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_response_passes_through_unamended() {
     // one JSON array comfortably above MAX_BODY_BYTES (4 MiB)
-    let n = antares_api::bounds::MAX_BODY_BYTES / 10 + 1;
+    let n = *antares_api::bounds::MAX_BODY_BYTES / 10 + 1;
     let payload = format!("[{}]", vec!["123456789"; n].join(","));
-    assert!(payload.len() > antares_api::bounds::MAX_BODY_BYTES);
+    assert!(payload.len() > *antares_api::bounds::MAX_BODY_BYTES);
 
     let (status, applied, body) = get_with_prefer(app(payload.clone())).await;
     assert_eq!(status, StatusCode::OK);

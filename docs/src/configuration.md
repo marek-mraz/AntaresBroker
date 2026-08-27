@@ -49,6 +49,8 @@ here).
 | `ANTARES_FED_FANOUT` | `8` | Concurrent forwards per distributed read (4.3.6.1 orders the merge, not the requests). |
 | `ANTARES_MAX_FED_RESPONSE_BYTES` | `16777216` (16 MiB) | Ceiling on one forwarded response body — one misbehaving peer cannot balloon broker memory. Over-cap parts fail as warning 111 (Table 6.3.17-1). |
 | `ANTARES_MAX_BATCH_ITEMS` | `1000` | Batch entity-count cap (DoS bound; the spec sets none). Raise for trusted bulk producers. |
+| `ANTARES_MAX_BODY_BYTES` | `4194304` (4 MiB) | Request body cap, answered with a bare 413 (6.3.4). One number governs the extractor limit and the bounds wall. |
+| `ANTARES_CORS_ORIGINS` | unset (no CORS headers) | Browser origins allowed, comma-separated, or `*`. Preflights are answered for every method and header; `Link`, `NGSILD-Tenant` and `NGSILD-Results-Count` are exposed. |
 | `ANTARES_EXTRA_CA_FILE` | unset | PEM bundle of ADDITIONAL trust anchors for egress TLS (private CAs). Verification itself is never disableable. |
 
 ## Notification delivery

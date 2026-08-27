@@ -837,3 +837,130 @@ fn health_probe_follows_the_broker() {
         "a port nobody serves must fail the probe"
     );
 }
+
+/// `antares --help` names every accepted configuration key, so a typo can
+/// be checked against the same list the startup guard enforces.
+#[test]
+fn help_lists_every_known_key() {
+    let out = Command::new(env!("CARGO_BIN_EXE_antares"))
+        .arg("--help")
+        .output()
+        .expect("run --help");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for key in [
+        "ANTARES_HTTP_PORT",
+        "ANTARES_STORE",
+        "ANTARES_MAX_BODY_BYTES",
+        "ANTARES_CORS_ORIGINS",
+    ] {
+        assert!(text.contains(key), "--help lacks {key}:\n{text}");
+    }
+    assert!(
+        !text.contains("ANTARES_TEST_"),
+        "harness keys are not configuration"
+    );
+}
+
+/// ANTARES_MAX_BODY_BYTES moves the 413 wall: a body over the raised cap is
+/// still refused, one under it (but over the 4 MiB default) is accepted.
+#[test]
+fn body_cap_is_a_knob() {
+    let dir = tempdir("bodycap");
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            .env("ANTARES_MAX_BODY_BYTES", "6000000")
+            .spawn()
+            .expect("spawn antares"),
+    );
+    let health = wait_healthy(port);
+    assert!(health.contains("\"maxBodyBytes\":6000000"), "{health}");
+    let entity = |pad: usize| {
+        format!(
+            r#"{{"id":"urn:ngsi-ld:Test:cap{pad}","type":"Test","note":{{"type":"Property","value":"{}"}}}}"#,
+            "x".repeat(pad)
+        )
+    };
+    let post = |body: &str| {
+        http(
+            port,
+            &format!(
+                "POST /ngsi-ld/v1/entities HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let over_default = post(&entity(5_000_000));
+    assert!(
+        over_default.starts_with("HTTP/1.1 201"),
+        "{}",
+        &over_default[..80]
+    );
+    let over_cap = post(&entity(6_100_000));
+    assert!(over_cap.starts_with("HTTP/1.1 413"), "{}", &over_cap[..80]);
+}
+
+/// ANTARES_CORS_ORIGINS: a listed origin gets the allow header on the
+/// preflight and the response, an unlisted one and an unset knob get none.
+#[test]
+fn cors_follows_the_origin_list() {
+    let dir = tempdir("cors");
+    let port = free_port();
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env("ANTARES_HTTP_PORT", port.to_string())
+            .env("ANTARES_STORE", "memory")
+            .env("ANTARES_DATA_DIR", &dir)
+            .env(
+                "ANTARES_CORS_ORIGINS",
+                "https://a.example, https://b.example",
+            )
+            .spawn()
+            .expect("spawn antares"),
+    );
+    wait_healthy(port);
+    let preflight = |origin: &str| {
+        http(
+            port,
+            &format!(
+                "OPTIONS /ngsi-ld/v1/entities HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .to_ascii_lowercase()
+    };
+    let allowed = preflight("https://b.example");
+    assert!(
+        allowed.contains("access-control-allow-origin: https://b.example"),
+        "{allowed}"
+    );
+    assert!(
+        allowed.contains("access-control-allow-methods"),
+        "{allowed}"
+    );
+    let denied = preflight("https://evil.example");
+    assert!(!denied.contains("access-control-allow-origin"), "{denied}");
+    let get = http(
+        port,
+        "GET /ngsi-ld/v1/entities?type=Test HTTP/1.1\r\nHost: localhost\r\nOrigin: https://a.example\r\nConnection: close\r\n\r\n",
+    )
+    .to_ascii_lowercase();
+    assert!(
+        get.contains("access-control-allow-origin: https://a.example"),
+        "{get}"
+    );
+    assert!(get.contains("access-control-expose-headers"), "{get}");
+
+    let quiet_port = free_port();
+    let _quiet = start(quiet_port, &tempdir("nocors"), "memory");
+    wait_healthy(quiet_port);
+    let none = http(
+        quiet_port,
+        "GET /ngsi-ld/v1/entities?type=Test HTTP/1.1\r\nHost: localhost\r\nOrigin: https://a.example\r\nConnection: close\r\n\r\n",
+    )
+    .to_ascii_lowercase();
+    assert!(!none.contains("access-control-allow-origin"), "{none}");
+}

@@ -72,6 +72,7 @@ dependencies = [
  "sonic-rs",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "uuid",
  "wasm-bindgen-futures",

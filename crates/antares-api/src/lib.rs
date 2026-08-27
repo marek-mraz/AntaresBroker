@@ -290,7 +290,9 @@ pub fn router(state: AppState) -> Router {
     // caps do not apply.
     let remote_notify = Router::new()
         .route("/ngsi-ld/ex/remote-notify", post(distsub::remote_notify))
-        .layer(axum::extract::DefaultBodyLimit::max(bounds::MAX_BODY_BYTES))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            *bounds::MAX_BODY_BYTES,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             bounds::bounds_layer,
@@ -347,7 +349,9 @@ pub fn router(state: AppState) -> Router {
                 // 413'd although /q/health advertises maxBodyBytes = 4 MiB
                 // (found by mutation-testing the 413 wall). One
                 // number governs both walls.
-                .layer(axum::extract::DefaultBodyLimit::max(bounds::MAX_BODY_BYTES)),
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    *bounds::MAX_BODY_BYTES,
+                )),
         )
         .fallback(not_found)
         // outermost on purpose: axum attaches the 405 Allow header in the
@@ -356,7 +360,39 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(options_204))
         // Outermost so the duration covers the full stack.
         .layer(axum::middleware::from_fn(http_metrics_layer))
+        .layer(cors_layer())
         .with_state(state)
+}
+
+/// Browser access is off unless ANTARES_CORS_ORIGINS names the origins
+/// (comma-separated, or `*` for any). NGSI-LD says nothing about CORS; the
+/// Link header and the NGSILD-Tenant / NGSILD-Results-Count headers are
+/// exposed so a browser client can read them.
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    let Some(spec) = std::env::var("ANTARES_CORS_ORIGINS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return CorsLayer::new();
+    };
+    let origin = if spec.trim() == "*" {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(
+            spec.split(',')
+                .filter_map(|o| o.trim().parse::<axum::http::HeaderValue>().ok()),
+        )
+    };
+    CorsLayer::new()
+        .allow_origin(origin)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers([
+            axum::http::header::LINK,
+            axum::http::HeaderName::from_static("ngsild-tenant"),
+            axum::http::HeaderName::from_static("ngsild-results-count"),
+        ])
 }
 
 /// Tenants the broker mints for its own bookkeeping: the snapshot module's
@@ -1854,7 +1890,7 @@ mod tests {
             "the URI precondition decides, not the unknown tenant"
         );
 
-        let big = vec![b'a'; crate::bounds::MAX_BODY_BYTES + 1];
+        let big = vec![b'a'; *crate::bounds::MAX_BODY_BYTES + 1];
         let resp = app
             .oneshot(
                 Request::post("/ngsi-ld/v1/entities")
@@ -1913,9 +1949,9 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .header(
                         "Content-Length",
-                        ("x".repeat(bounds::MAX_BODY_BYTES + 1)).len(),
+                        ("x".repeat(*bounds::MAX_BODY_BYTES + 1)).len(),
                     )
-                    .body(Body::from("x".repeat(bounds::MAX_BODY_BYTES + 1)))
+                    .body(Body::from("x".repeat(*bounds::MAX_BODY_BYTES + 1)))
                     .expect("req"),
             )
             .await

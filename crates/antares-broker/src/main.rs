@@ -48,6 +48,8 @@ const KNOWN_KEYS: &[&str] = &[
     // Batch entity-count cap; default 1000 — raised where a
     // trusted producer legitimately batches larger (the spec sets no ceiling).
     "ANTARES_MAX_BATCH_ITEMS",
+    "ANTARES_MAX_BODY_BYTES",
+    "ANTARES_CORS_ORIGINS",
     // Drain: the LB notice window, and the ceiling on waiting for
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",
@@ -197,6 +199,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             env!("CARGO_PKG_VERSION"),
             antares_api::GIT_HASH
         );
+        return Ok(());
+    }
+    if std::env::args_os().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "antares {} — NGSI-LD context broker (ETSI GS CIM 009 V1.9.1)\n\n\
+             Usage: antares [--version | --health | --help]\n\n\
+             Configuration is environment only; every accepted key is listed\n\
+             below and documented with its default in docs/src/configuration.md\n\
+             (an unknown ANTARES_* key is fatal at startup).\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        for key in KNOWN_KEYS {
+            println!("  {key}");
+        }
         return Ok(());
     }
     // --health is the container health probe: the image has no shell or

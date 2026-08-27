@@ -128,7 +128,7 @@ jobs:
       # cannot see; its readiness atomics report as races on every run
       TSAN_OPTIONS: "suppressions=${{ github.workspace }}/dev/tsan-suppressions.txt"
       # the two tests that stage a timing race skip themselves under it
-      ANTARES_SANITIZER: thread
+      ANTARES_TEST_SANITIZER: thread
       RUST_BACKTRACE: 1
       CARGO_TERM_COLOR: always
     steps:
@@ -154,7 +154,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows"
+          # ignore-leaks: crossbeam-epoch parks its per-thread handle in a thread-local
+          # that Miri reports as leaked at exit; not a broker leak.
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly

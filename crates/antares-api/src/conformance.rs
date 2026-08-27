@@ -304,7 +304,7 @@ pub async fn prefer_version_layer(req: Request<Body>, next: Next) -> Response {
                 return Response::from_parts(parts, Body::empty());
             }
             Some(Ok(chunk)) => {
-                if buf.len() + chunk.len() > crate::bounds::MAX_BODY_BYTES {
+                if buf.len() + chunk.len() > *crate::bounds::MAX_BODY_BYTES {
                     // stitch the already-read prefix back in front of the
                     // untouched remainder of the stream
                     let read = futures_util::stream::iter([

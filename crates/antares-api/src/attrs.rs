@@ -1414,7 +1414,7 @@ mod attr_name_and_via_paths {
     async fn forwarded_attribute_path_keeps_the_whole_id_and_name() {
         // five forwards through a blocking mock, each under the 8 s forward
         // cap; a sanitizer's slowdown turns them into 504s
-        if std::env::var_os("ANTARES_SANITIZER").is_some() {
+        if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
             return;
         }
         // both delimiters an id may legally carry (RFC 3986 clause 3.3)
@@ -1478,6 +1478,11 @@ mod attr_name_and_via_paths {
     /// or the registered source writes on entities the client scoped out.
     #[tokio::test(flavor = "multi_thread")]
     async fn type_selector_travels_with_the_forwarded_attribute_write() {
+        // five forwards through a blocking mock, each under the 8 s forward
+        // cap; a sanitizer's slowdown turns them into 504s
+        if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
+            return;
+        }
         const ENTITY: &str = "urn:ngsi-ld:Vehicle:attrs-typesel";
         let st = state();
         let (port, hits, targets) = mock_source();

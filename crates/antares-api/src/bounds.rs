@@ -15,7 +15,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard caps (v1: compile-time constants — a config file is a later knob;
 /// every value is spec-shaped on rejection).
-pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024; // → bare 413 (6.3.4)
+/// → bare 413 (6.3.4). Deployment knob (ANTARES_MAX_BODY_BYTES): the spec
+/// names no ceiling; 4 MiB is the DoS bound, raised where a trusted
+/// producer legitimately sends bigger batches. Read once at first use.
+pub static MAX_BODY_BYTES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(4 * 1024 * 1024)
+});
 pub const MAX_URI_BYTES: usize = 8 * 1024; // → bare 414
 pub const MAX_JSON_DEPTH: usize = 64; // → 400 BadRequestData
 /// → 400 BadRequestData. Maximum coordinate positions in a QUERY geometry
@@ -78,7 +87,7 @@ pub struct LimitStats {
 impl LimitStats {
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
-            "maxBodyBytes": MAX_BODY_BYTES,
+            "maxBodyBytes": *MAX_BODY_BYTES,
             "maxUriBytes": MAX_URI_BYTES,
             "maxJsonDepth": MAX_JSON_DEPTH,
             "maxGeoVertices": MAX_GEO_VERTICES,
@@ -163,7 +172,7 @@ pub async fn bounds_layer(
         return next.run(req).await;
     }
     let (parts, body) = req.into_parts();
-    let bytes: Bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+    let bytes: Bytes = match axum::body::to_bytes(body, *MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => {
             st.limits.body_too_large.fetch_add(1, Ordering::Relaxed);
