@@ -206,7 +206,15 @@ Input is NDJSON, one entity per line in the store's internal form:
 attribute names as expanded IRIs, each attribute an array of instances,
 `id`/`type`/`scope` short. `type` and `scope` may be a string or an
 array; the loader stores both as arrays, which is the shape the query
-evaluator reads.
+evaluator reads. A line may name its own tenant as a prefix separated by
+the byte `0x02` (`t42<0x02>{"id":…}`), which lets one file load many
+tenants; a bare JSON line lands in the tenant given as the argument. The
+file may be a FIFO, so a generator can stream straight into the loader:
+
+```bash
+python3 dev/perf/gen.py --entities 1000000 --tenants 100 > /tmp/e.fifo &
+DATABASE_URL=… dev/bulk-load.sh /tmp/e.fifo
+```
 
 ```json
 {"id":"urn:ngsi-ld:Vehicle:bulk:1","type":"https://uri.etsi.org/ngsi-ld/default-context/Vehicle","https://uri.etsi.org/ngsi-ld/default-context/speed":[{"type":"Property","value":42}],"https://uri.etsi.org/ngsi-ld/location":[{"type":"GeoProperty","value":{"type":"Point","coordinates":[19.15,48.73]}}]}

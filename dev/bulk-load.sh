@@ -11,6 +11,8 @@
 # `scope` may be given as a string or an array; the stored document always
 # carries them as arrays, which is what the query evaluator reads.
 # Existing (tenant_id, id) rows are left untouched (ON CONFLICT DO NOTHING).
+# A line may carry its own tenant as a prefix, `<tenant>\x02<json>`, which
+# is what dev/perf/gen.py writes; the file may be a FIFO.
 #
 #   DATABASE_URL=postgres://… dev/bulk-load.sh entities.ndjson [tenant]
 #
@@ -25,13 +27,20 @@ TENANT=${2:-default}
 
 LOC='https://uri.etsi.org/ngsi-ld/location'
 
+# one text column: `tenant\x02json` splits on the byte, a bare json line
+# lands whole in the first column (no \x02 in JSON) and takes the argument
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v tenant="$TENANT" <<SQL
-INSERT INTO tenants (tenant_id) VALUES (:'tenant') ON CONFLICT DO NOTHING;
-CREATE UNLOGGED TABLE IF NOT EXISTS bulk_stage (doc jsonb);
+CREATE UNLOGGED TABLE IF NOT EXISTS bulk_raw (line text);
+TRUNCATE bulk_raw;
+\copy bulk_raw (line) FROM '$FILE' WITH (FORMAT csv, QUOTE E'\x01', DELIMITER E'\x03')
+CREATE UNLOGGED TABLE IF NOT EXISTS bulk_stage (tenant_id text, doc jsonb);
 TRUNCATE bulk_stage;
--- csv with unused quote/delimiter bytes = raw line passthrough, so the
--- jsonb cast is the only parser the payload meets
-\copy bulk_stage (doc) FROM '$FILE' WITH (FORMAT csv, QUOTE E'\x01', DELIMITER E'\x02')
+INSERT INTO bulk_stage
+SELECT CASE WHEN position(E'\x02' IN line) > 0 THEN split_part(line, E'\x02', 1) ELSE :'tenant' END,
+       CASE WHEN position(E'\x02' IN line) > 0 THEN split_part(line, E'\x02', 2) ELSE line END::jsonb
+FROM bulk_raw;
+DROP TABLE bulk_raw;
+INSERT INTO tenants (tenant_id) SELECT DISTINCT tenant_id FROM bulk_stage ON CONFLICT DO NOTHING;
 
 -- secondary indexes off during the load; PK stays (ON CONFLICT needs it)
 -- exactly the set the migrations leave in place (0005 dropped the scopes
@@ -43,7 +52,7 @@ DROP INDEX IF EXISTS i_entities_location, i_entities_jsonb, i_entities_types,
 -- instance, a GeoJSON geometry (not a collection); anything else with the
 -- geoproperty present is location_ambiguous and judged by the evaluator
 WITH src AS (
-  SELECT jsonb_set(
+  SELECT tenant_id, jsonb_set(
            CASE WHEN doc ? 'scope' AND jsonb_typeof(doc->'scope') <> 'array'
                 THEN jsonb_set(doc, '{scope}', jsonb_build_array(doc->'scope')) ELSE doc END,
            '{type}',
@@ -56,7 +65,7 @@ WITH src AS (
   FROM bulk_stage
   WHERE doc->>'id' IS NOT NULL
 ), geom AS (
-  SELECT doc,
+  SELECT tenant_id, doc,
          CASE WHEN g->>'type' IN ('Point','MultiPoint','LineString','MultiLineString','Polygon','MultiPolygon')
                AND ST_IsValid(try_geomfromgeojson(g::text))
               THEN try_geomfromgeojson(g::text) END AS location
@@ -65,7 +74,7 @@ WITH src AS (
 INSERT INTO entities
   (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
    location, location_ambiguous)
-SELECT :'tenant', doc->>'id', doc,
+SELECT tenant_id, doc->>'id', doc,
        ARRAY(SELECT jsonb_array_elements_text(doc->'type')),
        CASE WHEN doc->'scope' IS NULL THEN NULL
             ELSE ARRAY(SELECT jsonb_array_elements_text(doc->'scope')) END,
@@ -88,4 +97,4 @@ CREATE INDEX i_entities_expires ON entities (expires_at) WHERE expires_at IS NOT
 ANALYZE entities;
 SQL
 
-echo "bulk load done: $(wc -l < "$FILE") lines offered into tenant '$TENANT'"
+echo "bulk load done: $(wc -l < "$FILE") lines offered (tenant from the line prefix, else '$TENANT')"
