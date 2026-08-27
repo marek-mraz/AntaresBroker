@@ -619,7 +619,8 @@ mod clause_4_9_extensions {
     }
 }
 
-#[cfg(test)]
+// regex compiles run for hours under Miri; the fuzz job covers them
+#[cfg(all(test, not(miri)))]
 mod bounds_and_patterns {
     use super::*;
     use crate::parse_q;

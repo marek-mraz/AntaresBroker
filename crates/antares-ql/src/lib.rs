@@ -728,6 +728,7 @@ mod complexity_tests {
     /// query string killed the whole broker process, and a percent-encoded
     /// copy stored in a subscription made that a restart-surviving crash loop.
     #[test]
+    #[cfg_attr(miri, ignore)] // 50k parens: nine minutes under the interpreter
     fn deep_nesting_is_refused_before_it_can_overflow_the_stack() {
         let deep = format!("{}a==1{}", "(".repeat(50_000), ")".repeat(50_000));
         assert!(

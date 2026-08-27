@@ -153,7 +153,8 @@ pub(crate) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(test)]
+// regex compiles run for hours under Miri; the fuzz job covers them
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

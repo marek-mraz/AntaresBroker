@@ -65,6 +65,10 @@ services:
       # Same alias as antares1 ON PURPOSE: behind the LB they are one broker,
       # and Via-chain loop detection must treat them as one hop.
       ANTARES_HOST_ALIAS: antares1
+      # 5.8.1.4: peers notify the LB, never this replica — without this the
+      # default is http://antares1:9096 and every chain notification dies
+      # with the rolled replica.
+      ANTARES_PUBLIC_URL: http://localhost:9090
       ANTARES_STORE: ${STORE:-memory}
       ANTARES_DATA_DIR: /data
       ANTARES_EGRESS_ALLOW_PRIVATE: "true"
