@@ -142,8 +142,7 @@ jobs:
           ./dev/perf/startup.sh
           # do the subscriptions fire, and up to what rate: update + delete
           # streams over the loaded entities, delivered set against due
-          read -r ENTITIES TENANTS SUBS < <(python3 -c "
-s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10), n(100000,1))")
+          read -r ENTITIES TENANTS SUBS < <(python3 -c "s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10), n(100000,1))")
           TENANTS=$TENANTS SUBS=$SUBS ENTITIES=$ENTITIES MQTT=1 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fire.sh
       - name: Resident set verdict
         if: always()
