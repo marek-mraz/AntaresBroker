@@ -16,11 +16,11 @@ on:
   workflow_run:
     # full.yml absorbed etsi-full — its twice-a-week schedule (and
     # dispatches) fire this. Scheduled runs live on the default branch
-    # (dev); tag runs and promotion-PR runs don't match the filter, so a
-    # PR can never repaint the public badges.
+    # (master); tag runs and PR runs don't match the filter, so a PR can
+    # never repaint the public badges.
     workflows: [full]
     types: [completed]
-    branches: [dev]
+    branches: [master]
   workflow_dispatch:
 
 concurrency:

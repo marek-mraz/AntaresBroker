@@ -3,11 +3,11 @@ name: ci
 # The DEV pipeline — workspace tests GATE everything downstream:
 #
 #   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
-#                   └──→ build arm64 image ──────────────→ publish :dev (dev branch, all green)
+#                   └──→ build arm64 image ──────────────→ publish :dev (master, all green)
 #
-# Branch model: feature branches PR into `dev` (this workflow is the
-# required check), promotion PRs `dev` → `main` are gated by full.yml.
-# Both branches are merge-only — protection lives in GitHub rulesets
+# Branch model: feature branches PR into `master` (this workflow is the
+# required check); `v*` tags run full.yml, the release gate.
+# master is merge-only — protection lives in GitHub rulesets
 # (dev/branch-protection.sh), not here.
 #
 # No wasm here: the browser bundle is built and ETSI-tested (wasm-file
@@ -24,13 +24,13 @@ name: ci
 # k8s-smoke.yml. Shared pieces: workspace.yml (the test gate),
 # etsi-matrix.yml (the cell matrix), build-image.yml (image builds).
 
-# Runs on merges to dev, on PRs targeting dev, and on manual dispatch.
-# PRs into main run full.yml instead — the promotion gate.
+# Runs on pushes to master, on PRs targeting master, and on manual dispatch.
+# Tags run full.yml — the release gate.
 on:
   push:
-    branches: [dev]
+    branches: [master]
   pull_request:
-    branches: [dev]
+    branches: [master]
   workflow_dispatch:
 
 # A newer commit supersedes a running pipeline.
@@ -65,21 +65,21 @@ jobs:
     name: Build the arm64 image (untested)
     # GATE: only build after the workspace suite passes.
     needs: workspace
-    if: github.ref == 'refs/heads/dev'
+    if: github.ref == 'refs/heads/master'
     uses: ./.github/workflows/build-image.yml
     with:
       arch: arm64
 
   publish-dev:
-    # Every green merge to dev ships a DEV image: the sha and a moving
+    # Every green push to master ships a DEV image: the sha and a moving
     # `dev` tag. Never `latest` — that belongs to a released version, so
     # `docker pull …:latest` can't silently land on an unreleased build.
     # The wasm broker image publishes from full.yml, after its cell.
     name: Publish the dev image to GHCR
-    # Merges to dev publish :dev; PRs never do. All signals — workspace
+    # Pushes to master publish :dev; PRs never do. All signals — workspace
     # tests, the cell matrix (quick preset, all 8 suites incl. IOP per
     # cell) and the arm build — must be green.
-    if: github.ref == 'refs/heads/dev' && success()
+    if: github.ref == 'refs/heads/master' && success()
     needs: [workspace, matrix, build-arm]
     runs-on: ubuntu-latest
     permissions:

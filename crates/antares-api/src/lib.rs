@@ -360,7 +360,8 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(options_204))
         // Outermost so the duration covers the full stack.
         .layer(axum::middleware::from_fn(http_metrics_layer))
-        .layer(cors_layer())
+        // absent knob = no layer at all: a bare OPTIONS keeps its 204 + Allow
+        .layer(tower::util::option_layer(cors_layer()))
         .with_state(state)
 }
 
@@ -368,14 +369,11 @@ pub fn router(state: AppState) -> Router {
 /// (comma-separated, or `*` for any). NGSI-LD says nothing about CORS; the
 /// Link header and the NGSILD-Tenant / NGSILD-Results-Count headers are
 /// exposed so a browser client can read them.
-fn cors_layer() -> tower_http::cors::CorsLayer {
+fn cors_layer() -> Option<tower_http::cors::CorsLayer> {
     use tower_http::cors::{AllowOrigin, CorsLayer};
-    let Some(spec) = std::env::var("ANTARES_CORS_ORIGINS")
+    let spec = std::env::var("ANTARES_CORS_ORIGINS")
         .ok()
-        .filter(|s| !s.trim().is_empty())
-    else {
-        return CorsLayer::new();
-    };
+        .filter(|s| !s.trim().is_empty())?;
     let origin = if spec.trim() == "*" {
         AllowOrigin::any()
     } else {
@@ -384,7 +382,7 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
                 .filter_map(|o| o.trim().parse::<axum::http::HeaderValue>().ok()),
         )
     };
-    CorsLayer::new()
+    let layer = CorsLayer::new()
         .allow_origin(origin)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
@@ -392,7 +390,8 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
             axum::http::header::LINK,
             axum::http::HeaderName::from_static("ngsild-tenant"),
             axum::http::HeaderName::from_static("ngsild-results-count"),
-        ])
+        ]);
+    Some(layer)
 }
 
 /// Tenants the broker mints for its own bookkeeping: the snapshot module's

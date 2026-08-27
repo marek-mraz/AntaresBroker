@@ -8,6 +8,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true }
 antares-model = { workspace = true }
 antares-store = { workspace = true }
@@ -67,7 +68,6 @@ postgres = ["antares-sql/postgres"]
 sonic = ["dep:sonic-rs"]
 
 [dev-dependencies]
-tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
 
 [lints]

@@ -30,7 +30,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    branches: [main] # the dev -> main promotion gate
+    branches: [master] # the release gate for a promotion PR
   workflow_dispatch:
 
 concurrency:
