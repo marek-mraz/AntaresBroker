@@ -2867,7 +2867,9 @@ mod change_pipeline {
                 "type": "Subscription",
                 "entities": [{"type": "Vehicle"}],
                 "notificationTrigger": [trigger],
-                "notification": {"endpoint": {"uri": uri, "timeout": 2_000}},
+                // 30 s: a sanitizer runner with 370 concurrent tests took
+                // 8 s to deliver once; this test is about triggers, not latency
+                "notification": {"endpoint": {"uri": uri, "timeout": 30_000}},
             })
         };
         for body in [
