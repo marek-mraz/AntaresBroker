@@ -1676,6 +1676,35 @@ pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<Csour
     }
 }
 
+/// Registration writes prepare one job per CSource subscription of the
+/// tenant (5.11.7) and every subscription with localOnly != true owns one,
+/// so a registration stream against many subscriptions queues
+/// subscriptions × registrations jobs faster than the sources drain them —
+/// at 10 000 × 100 the queued jobs were a 3 GB broker peak. The permit is
+/// taken in the request path: a write waits for a fan-out slot instead of
+/// stacking jobs, and the prepare order (the handlers' commit order) holds.
+const CSOURCE_FANOUT_WIDTH: usize = 64;
+static CSOURCE_FANOUT: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(CSOURCE_FANOUT_WIDTH);
+
+/// Registration create/update/delete → prepare in the request path, send
+/// spawned (the ack must not block on the receiver), bounded as above.
+pub async fn csource_fanout(
+    st: &AppState,
+    tenant: &TenantId,
+    before: Option<Value>,
+    after: Option<Value>,
+) {
+    // never closed, so acquire only fails if it were — then send unbounded
+    let permit = CSOURCE_FANOUT.acquire().await.ok();
+    let jobs = prepare_csource_jobs(st, tenant, before, after).await;
+    let (st2, t2) = (st.clone(), tenant.clone());
+    crate::spawn(async move {
+        send_csource_jobs(&st2, &t2, jobs).await;
+        drop(permit);
+    });
+}
+
 /// Compatibility wrapper: prepare + send in one call (spawned contexts that
 /// don't need the phase split).
 pub async fn csource_changed(
@@ -4139,7 +4168,7 @@ mod clause_5_8_6_grouped_delivery {
             post(&st, "/ngsi-ld/v1/entityOperations/create", json!(batch)).await,
             201
         );
-        for _ in 0..40 {
+        for _ in 0..600 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             if !seen.lock().expect("bodies").is_empty() {
                 break;

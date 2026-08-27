@@ -920,15 +920,7 @@ pub async fn create_registration(
             doc
         };
         st.reg_changed(&tenant, &id, Some(&doc));
-        {
-            // Prepare in the request path (ordering), spawn only the send
-            // (the ack must not block on the receiver).
-            let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, None, Some(doc)).await;
-            let (st2, t2) = (st.clone(), tenant.clone());
-            crate::spawn(async move {
-                crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
-            });
-        }
+        crate::notify::csource_fanout(&st, &tenant, None, Some(doc)).await;
         Ok::<_, ApiError>(created(
             format!("/ngsi-ld/v1/csourceRegistrations/{id}"),
             &tenant,
@@ -1544,11 +1536,7 @@ pub async fn update_registration(
             Some(Ok(())) => {
                 let after = st.store.get(&tenant, Kind::Registration, &id)?;
                 st.reg_changed(&tenant, &id, after.as_ref());
-                let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, after).await;
-                let (st2, t2) = (st.clone(), tenant.clone());
-                crate::spawn(async move {
-                    crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
-                });
+                crate::notify::csource_fanout(&st, &tenant, before, after).await;
                 Ok(no_content(&tenant))
             }
         }
@@ -1572,11 +1560,7 @@ pub async fn delete_registration(
         let before = st.store.get(&tenant, Kind::Registration, &id)?;
         if st.store.delete(&tenant, Kind::Registration, &id)? {
             st.reg_changed(&tenant, &id, None);
-            let jobs = crate::notify::prepare_csource_jobs(&st, &tenant, before, None).await;
-            let (st2, t2) = (st.clone(), tenant.clone());
-            crate::spawn(async move {
-                crate::notify::send_csource_jobs(&st2, &t2, jobs).await;
-            });
+            crate::notify::csource_fanout(&st, &tenant, before, None).await;
             Ok(no_content(&tenant))
         } else {
             Err::<Response, ApiError>(
