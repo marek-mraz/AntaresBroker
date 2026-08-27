@@ -2806,6 +2806,11 @@ mod change_pipeline {
     /// changes are dropped and counted instead of growing without limit.
     #[tokio::test(flavor = "multi_thread")]
     async fn overflowing_change_queue_drops_and_counts() {
+        // stages a race between producer and a parked consumer; under a
+        // sanitizer's slowdown the producer never outruns the queue
+        if std::env::var_os("ANTARES_SANITIZER").is_some() {
+            return;
+        }
         std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
         // accepts, reads nothing, never answers — the serial consumer parks
         // on the first delivery for the endpoint's whole timeout

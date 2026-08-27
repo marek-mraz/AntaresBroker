@@ -126,6 +126,8 @@ jobs:
       # tokio's I/O driver synchronizes through epoll, which the sanitizer
       # cannot see; its readiness atomics report as races on every run
       TSAN_OPTIONS: "suppressions=${{ github.workspace }}/dev/tsan-suppressions.txt"
+      # the two tests that stage a timing race skip themselves under it
+      ANTARES_SANITIZER: thread
       RUST_BACKTRACE: 1
       CARGO_TERM_COLOR: always
     steps:
