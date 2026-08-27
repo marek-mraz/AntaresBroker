@@ -59,7 +59,7 @@ jobs:
           runcmd:
             - |
               mkdir -p /opt/runner && cd /opt/runner
-              curl -sL https://github.com/actions/runner/releases/download/v2.321.0/actions-runner-linux-x64-2.321.0.tar.gz | tar xz
+              curl -sL https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.337.0.tar.gz | tar xz
               export RUNNER_ALLOW_RUNASROOT=1
               ./config.sh --url https://github.com/${{ github.repository }} \
                 --token $REG --ephemeral --unattended --labels $LABEL --name $LABEL

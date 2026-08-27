@@ -67,7 +67,7 @@ jobs:
             - mkdir -p /mnt/data && mount /dev/disk/by-id/scsi-0HC_Volume_VOLID /mnt/data
             - |
               mkdir -p /opt/runner && cd /opt/runner
-              curl -sL https://github.com/actions/runner/releases/download/v2.321.0/actions-runner-linux-x64-2.321.0.tar.gz | tar xz
+              curl -sL https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.337.0.tar.gz | tar xz
               export RUNNER_ALLOW_RUNASROOT=1
               ./config.sh --url https://github.com/${{ github.repository }} \
                 --token $REG --ephemeral --unattended --labels $LABEL --name $LABEL
@@ -76,16 +76,16 @@ jobs:
           )
           VOL=$(jq -n --arg name "$LABEL" --arg loc "$SERVER_LOCATION" --arg exp "$EXPIRY" \
             '{name:$name, size:'"$VOLUME_GB"', location:$loc, format:"ext4", labels:{role:"perf-runner", expiry:$exp}}' \
-            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
-              https://api.hetzner.cloud/v1/volumes)
+            | curl -sS --fail-with-body -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
+              https://api.hetzner.cloud/v1/volumes) || { echo "volume refused: $VOL"; exit 1; }
           VOLID=$(echo "$VOL" | jq -r .volume.id)
           USERDATA=${USERDATA//VOLID/$VOLID}
           RESP=$(jq -n --arg name "$LABEL" --arg type "$SERVER_TYPE" --arg image "$SERVER_IMAGE" \
             --arg loc "$SERVER_LOCATION" --arg ud "$USERDATA" --arg exp "$EXPIRY" --argjson vol "$VOLID" \
             '{name:$name, server_type:$type, image:$image, location:$loc, user_data:$ud,
               volumes:[$vol], automount:false, labels:{role:"perf-runner", expiry:$exp}}' \
-            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
-              https://api.hetzner.cloud/v1/servers)
+            | curl -sS --fail-with-body -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
+              https://api.hetzner.cloud/v1/servers) || { echo "server refused: $RESP"; exit 1; }
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           echo "server_id=$(echo "$RESP" | jq -r .server.id)" >> "$GITHUB_OUTPUT"
           echo "volume_id=$VOLID" >> "$GITHUB_OUTPUT"
