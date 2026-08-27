@@ -311,7 +311,11 @@ The [ngsi-ld-test-suite](https://forge.etsi.org/rep/cim/ngsi-ld-test-suite)
 is vendored at `ngsi-ld-test-suite/` (override with `SUITE=...`) — same
 serial-run recipe as ScorpioBroker's `dev/etsi-serial.sh`, which this repo
 uses as its reference implementation. Per-suite pass count is the only
-progress metric.
+progress metric. The vendored copy is a fork: it carries a handful of
+test-side fixes (fixtures and keywords the clause text contradicts), each
+with its rationale and the issue text ready to file upstream in
+[`docs/upstream/etsi-raises.md`](docs/upstream/etsi-raises.md); no test is
+weakened to fit the broker.
 
 ## Repository layout
 
