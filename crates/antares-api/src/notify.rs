@@ -3671,11 +3671,13 @@ mod delivery_policy_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_egress_refusal_is_never_retried() {
         let (mut st, t) = state(policy(3, 50));
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "false");
-        st.egress = Arc::new(crate::egress::Egress::new(
-            antares_jsonld::EgressPolicy::from_env(),
-        ));
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        // the deny policy is built directly: the environment is shared by
+        // every test thread in this process, and a state constructed while
+        // the variable read "false" would refuse its loopback endpoint for
+        // the rest of its life
+        st.egress = Arc::new(crate::egress::Egress::new(antares_jsonld::EgressPolicy {
+            allow_private: false,
+        }));
         let (uri, hits) = flaky_endpoint(0).await;
         let sub = subscribe(&st, &t, SUB_ID, &uri);
         send(&st, &t, &sub).await;
