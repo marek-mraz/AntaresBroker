@@ -1,0 +1,6 @@
+# ThreadSanitizer suppressions for the weekly sanitizer run.
+# tokio's I/O driver hands readiness between threads through epoll; the
+# sanitizer does not model that happens-before and flags the readiness
+# atomics on every run. Nothing here is broker code.
+race:tokio::runtime::io::scheduled_io
+race:tokio::runtime::io::driver

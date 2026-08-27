@@ -123,6 +123,9 @@ jobs:
     timeout-minutes: 120
     env:
       RUSTFLAGS: "-Zsanitizer=thread"
+      # tokio's I/O driver synchronizes through epoll, which the sanitizer
+      # cannot see; its readiness atomics report as races on every run
+      TSAN_OPTIONS: "suppressions=${{ github.workspace }}/dev/tsan-suppressions.txt"
       RUST_BACKTRACE: 1
       CARGO_TERM_COLOR: always
     steps:
