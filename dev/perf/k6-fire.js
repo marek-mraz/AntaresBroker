@@ -15,6 +15,7 @@
 //      DELETE_PCT (10), MQTT (0|1).
 
 import http from "k6/http";
+import exec from "k6/execution";
 import { Counter } from "k6/metrics";
 
 const BASE = `${__ENV.BROKER_URL || "http://localhost:9090"}/ngsi-ld/v1`;
@@ -52,19 +53,26 @@ function subsOf(t) {
 }
 
 export default function () {
-  const i = __VU * 1e6 + __ITER;
+  // one global sequence across VUs: tenants rotate, slots never repeat
+  // until the pool wraps (VU*1e6+ITER made every VU hit the same slots)
+  const i = exec.scenario.iterationInTest;
   const t = i % TENANTS;
   const tenant = `t${t}`;
   const headers = { "Content-Type": "application/json", "NGSILD-Tenant": tenant };
-  const del = (i % Math.round(100 / DELETE_PCT)) === 0;
   const slot = Math.floor(i / TENANTS);
+  // decided per slot, not per i: with i the deletes all land on tenant 0
+  // whenever 100/DELETE_PCT divides TENANTS
+  const period = Math.round(100 / DELETE_PCT);
+  const del = (slot % period) === 0;
   if (del && UPDATE_IDS < PER_TENANT) {
-    const n = UPDATE_IDS + (slot % (PER_TENANT - UPDATE_IDS));
+    // gen.py numbers entities globally: tenant t owns t, t+TENANTS, t+2·TENANTS, …
+    // pool index walks slot/period so consecutive deletes hit fresh ids
+    const n = t + (UPDATE_IDS + (Math.floor(slot / period) % (PER_TENANT - UPDATE_IDS))) * TENANTS;
     const r = http.del(`${BASE}/entities/urn:ngsi-ld:Vehicle:${tenant}:${n}`, null, { headers });
     if (r.status === 204) deletes.add(1); else if (r.status !== 404) errors.add(1);
     return;
   }
-  const n = slot % UPDATE_IDS;
+  const n = t + (slot % UPDATE_IDS) * TENANTS;
   const r = http.patch(`${BASE}/entities/urn:ngsi-ld:Vehicle:${tenant}:${n}/attrs`,
     JSON.stringify({ speed: { type: "Property", value: 101 + Math.floor(Math.random() * 1e9) } }), { headers });
   if (r.status === 204) {
