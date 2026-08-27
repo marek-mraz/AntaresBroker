@@ -39,7 +39,7 @@ RUN cargo auditable build --release --locked -p antares-broker \
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:adcd20c7b4c988b73cbfbddb26d2eee574571e6d7c9ffea29b3821e0690efb77
 COPY --from=build /src/target/release/antares /antares
-# jemalloc decay tuning, measured (2026-08-07): without a background
+# jemalloc decay tuning, measured: without a background
 # thread, freed pages only purge on ALLOCATION activity — an idle broker
 # after a burst parked ~48 MiB of dead pages forever; with it, RSS decays
 # back toward live×1.2 within seconds. Both env spellings: tikv-jemalloc
@@ -50,5 +50,16 @@ ENV MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_deca
 # mountpoint's ownership, so `file` mode can write without running as root —
 # distroless has no shell to chown at runtime.
 COPY --from=build --chown=65532:65532 /data-init /data
+# OCI labels: what the registry shows and what a scanner reads
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="Antares" \
+      org.opencontainers.image.description="NGSI-LD Context Broker (ETSI GS CIM 009 V1.9.1) in Rust" \
+      org.opencontainers.image.source="https://github.com/marek-mraz/AntaresBroker" \
+      org.opencontainers.image.documentation="https://antares-ngsi-ld-demo.marek-mraz.com/docs/" \
+      org.opencontainers.image.licenses="EUPL-1.2" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION"
 EXPOSE 9090
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["/antares", "--health"]
 ENTRYPOINT ["/antares"]

@@ -44,6 +44,9 @@ jobs:
         with:
           context: .
           tags: antares-local:${{ env.TAG }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
           load: true
           cache-from: type=gha${{ inputs.arch == 'arm64' && ',scope=arm64' || '' }}
           cache-to: type=gha,mode=max${{ inputs.arch == 'arm64' && ',scope=arm64' || '' }}
