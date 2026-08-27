@@ -10,8 +10,8 @@ with the raw CSVs next to the tables.
 
 | run | box | what it measures | cadence |
 |---|---|---|---|
-| `perf-weekly` | ccx23 (4 vCPU, 16 GB) | the request shapes other brokers publish, on the in-memory store | Saturday |
-| `scale-weekly` | ccx43 (16 vCPU, 64 GB) + 500 GB volume | the design targets on PostgreSQL | Sunday |
+| `perf-weekly` | ccx33 (8 dedicated vCPU, 32 GB), one hour | the request shapes other brokers publish, on the in-memory store | Saturday |
+| `scale-weekly` | ccx33 (8 dedicated vCPU, 32 GB) + volume, one hour | the design targets on PostgreSQL, at scale 0.01 | Sunday |
 
 ## The shapes (`perf-weekly`)
 
@@ -58,15 +58,19 @@ registration: it counts notifications and answers forwarded queries with
 an empty list, so the fan-out over 100,000 registrations costs the broker
 the matching and the HTTP round trips and nothing else.
 
-Dispatch `scale-weekly` with `scale=0.01` for a one-hour dry run of the
-whole rig; the schedule runs `1.0`. Bulk load bypasses the broker
+Every run is capped at one hour: the server's TTL, the job timeout and
+the box's own shutdown timer agree on it. Scale `0.01` (1,000,000
+entities, 100 tenants, 1,000 subscriptions, 1,000 registrations) fits with
+margin and is what the schedule runs; `1.0` does not fit in an hour and
+is a deliberate dispatch on a bigger box with the TTL raised in the
+workflow. Bulk load bypasses the broker
 (no notifications, no history), which is the documented path for initial
 loads in [Operations](operations.md#bulk-load-postgres-timescale).
 
 ## Setting up the rented runner (two repository secrets)
 
 `perf-weekly` and `scale-weekly` rent a Hetzner Cloud server for the run
-(ccx23 for the shapes, ccx43 plus a volume for the design targets),
+(ccx33 for both; the design targets add a volume),
 register it as an ephemeral GitHub runner, and delete it afterwards;
 `perf-janitor` sweeps anything past its `expiry` label. Until the two
 secrets below exist, both workflows stop at "Create server" with an empty
@@ -117,8 +121,8 @@ The names must match exactly; the workflows read them as
 
 ### 4. Limits on a fresh Hetzner project
 
-A new project starts with small quotas. `scale-weekly` at 1.0 asks for a
-ccx43 (16 dedicated cores) and a 500 GB volume, and Hetzner answers
+A new project starts with small quotas. Both runs ask for a ccx33 (8
+dedicated cores); `scale-weekly` at 1.0 would add a 500 GB volume, and Hetzner answers
 `dedicated core limit exceeded` / `volumes size limit exceeded` until the
 limits are raised: Project → *Limits* → request more dedicated cores and
 volume storage (a short form, usually approved within a day). The 0.01

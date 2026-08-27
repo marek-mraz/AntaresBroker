@@ -8,10 +8,11 @@ name: scale-weekly
 # registered as an ephemeral runner, deleted afterwards; perf-janitor
 # sweeps a leaked server or volume by its expiry label.
 #
-# `scale` scales every count linearly (0.01 = a one-hour dry run of the
-# whole rig; 1.0 = the targets, several hours). The schedule runs 1.0 on
-# master only; dispatch picks. Report-only: budgets are asserted by
-# dev/perf/rss.sh at scale 1.0, nothing else gates.
+# `scale` scales every count linearly. The box lives ONE hour at most
+# (TTL, job timeout and the server's own shutdown timer agree), which fits
+# scale 0.01 with margin; the full targets (1.0) do not fit and are not
+# scheduled. Report-only: budgets are asserted by dev/perf/rss.sh at
+# scale 1.0, nothing else gates.
 #
 # Secrets: HCLOUD_TOKEN (project-scoped Hetzner API token), RUNNER_PAT
 # (fine-grained, this repository, Administration read/write).
@@ -23,20 +24,20 @@ on:
     inputs:
       scale:
         description: fraction of the design targets (1.0 = 100M entities)
-        default: "1.0"
+        default: "0.01"
 
 concurrency:
   group: scale-weekly
   cancel-in-progress: false
 
 env:
-  SERVER_TYPE: ccx43
+  SERVER_TYPE: ccx33
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
   # full-scale data volume; a fractional dispatch shrinks it in the create
   # step so a dry run fits a fresh project's volume limit
   VOLUME_GB: 500
-  TTL_HOURS: 10
+  TTL_HOURS: 1
 
 jobs:
   create:
@@ -54,7 +55,7 @@ jobs:
           RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
         run: |
           LABEL="scale-${{ github.run_id }}"
-          VOLUME_GB=$(python3 -c "import math; print(max(10, math.ceil($VOLUME_GB * ${{ inputs.scale || '1.0' }})))")
+          VOLUME_GB=$(python3 -c "import math; print(max(10, math.ceil($VOLUME_GB * ${{ inputs.scale || '0.01' }})))")
           REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
             | jq -r .token)
@@ -99,9 +100,9 @@ jobs:
   scale:
     needs: create
     runs-on: ${{ needs.create.outputs.label }}
-    timeout-minutes: 540
+    timeout-minutes: 55
     env:
-      SCALE: ${{ inputs.scale || '1.0' }}
+      SCALE: ${{ inputs.scale || '0.01' }}
       DATABASE_URL: postgresql://antares:antares@127.0.0.1:5432/antares
       OUT: results/perf
     steps:
@@ -138,7 +139,7 @@ jobs:
           # request shapes and saturation against the loaded store, one tenant
           # per request (k6 picks TENANT); startup rows for the postgres store
           TENANT=t7 BIN=target/release/antares PORT=9471 ./dev/perf/shapes.sh
-          STORE=postgres PORT=9473 ./dev/perf/saturate.sh
+          STORE=postgres PORT=9473 STAGES=10 STAGE=15s ./dev/perf/saturate.sh
           ./dev/perf/startup.sh
           # do the subscriptions fire, and up to what rate: update + delete
           # streams over the loaded entities, delivered set against due
