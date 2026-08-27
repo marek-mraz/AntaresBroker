@@ -73,7 +73,7 @@ fn mock(reply: String) -> u16 {
 fn entity_reply(id: &str) -> String {
     let body = json!([{ "id": id, "type": "Vehicle" }]).to_string();
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
 }

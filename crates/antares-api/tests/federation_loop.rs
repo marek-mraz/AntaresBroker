@@ -448,7 +448,7 @@ async fn auxiliary_data_never_overrides_local() {
     .to_string();
     let reply: &'static str = Box::leak(
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
             remote.len()
         )
         .into_boxed_str(),
@@ -1024,7 +1024,7 @@ async fn clause_5_7_3_temporal_retrieve_forwarding() {
     .to_string();
     let reply: &'static str = Box::leak(
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             remote.len(),
             remote
         )
@@ -1102,7 +1102,7 @@ async fn clause_5_7_4_temporal_query_forwarding() {
     .to_string();
     let reply: &'static str = Box::leak(
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             remote.len(),
             remote
         )
