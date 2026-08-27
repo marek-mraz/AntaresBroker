@@ -8,14 +8,14 @@
 #   TENANTS=… SUBS=… ENTITIES=… dev/perf/fire.sh
 #
 # Env: BROKER_URL (http://127.0.0.1:9090), SINK (http://127.0.0.1:9800),
-#      OUT (results/perf), RATES ("500 1000 2000 4000"), DURATION (60s),
+#      OUT (results/perf), RATES ("100 200 500 1000 2000 4000"), DURATION (60s),
 #      TENANTS, SUBS, ENTITIES (the loader's counts), MQTT (0|1).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BROKER_URL="${BROKER_URL:-http://127.0.0.1:9090}"
 SINK="${SINK:-http://127.0.0.1:9800}"
 OUT="${OUT:-results/perf}"; mkdir -p "$OUT"
-RATES="${RATES:-500 1000 2000 4000}"
+RATES="${RATES:-100 200 500 1000 2000 4000}"
 DURATION="${DURATION:-60s}"
 : "${TENANTS:?}" "${SUBS:?}" "${ENTITIES:?}"
 command -v k6 >/dev/null || { echo "k6 missing"; exit 1; }
