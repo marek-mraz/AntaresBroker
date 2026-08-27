@@ -126,11 +126,18 @@ jobs:
         run: cargo build --release --locked -p antares-broker
       - name: Start the broker under the resident-set sampler
         run: |
+          mkdir -p "$OUT"
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
             ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_MAX_CONNECTIONS=200 ANTARES_HTTP_PORT=9090 \
             nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
-          until curl -sf -o /dev/null http://127.0.0.1:9090/q/health; do sleep 0.5; done
+          # bounded: an unbounded wait once burned the whole rented hour
+          for i in $(seq 1 120); do
+            curl -sf -o /dev/null http://127.0.0.1:9090/q/health && break
+            sleep 0.5
+          done
+          curl -sf -o /dev/null http://127.0.0.1:9090/q/health \
+            || { echo "broker never became healthy"; cat "$OUT/broker.log"; exit 1; }
           ./dev/perf/rss.sh start "$(cat broker.pid)" pg
       - name: Load the dataset
         run: MQTT_URL=mqtt://127.0.0.1:1883 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/load.sh
