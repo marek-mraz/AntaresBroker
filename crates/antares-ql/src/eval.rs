@@ -453,7 +453,7 @@ fn num_cmp(t: f64, op: CmpOp, n: f64) -> bool {
 mod clause_4_9_extensions {
     use super::*;
     use crate::parse_q;
-    use antares_jsonld::{Context, Loader};
+    use antares_jsonld::Context;
     use serde_json::json;
 
     fn ctx() -> std::sync::Arc<Context> {
@@ -623,7 +623,6 @@ mod clause_4_9_extensions {
 mod bounds_and_patterns {
     use super::*;
     use crate::parse_q;
-    use antares_jsonld::Loader;
     use serde_json::json;
     use std::cell::Cell;
 
@@ -871,7 +870,6 @@ mod bounds_and_patterns {
 mod tests {
     use super::*;
     use crate::parse_q;
-    use antares_jsonld::Loader;
     use serde_json::json;
 
     fn entity() -> Value {
@@ -891,7 +889,7 @@ mod tests {
 
     #[test]
     fn comparisons_and_paths() {
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let e = entity();
         for (q, want) in [
             ("speed>80", true),
@@ -914,7 +912,7 @@ mod tests {
         // type of the Query Term value are different, then they shall be
         // considered unequal" — so `!=` MATCHES. Equal carries the mirror rule
         // ("considered as not matching"); the asymmetry is deliberate.
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let e = json!({
             "id": "urn:ngsi-ld:Vehicle:2",
             "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
@@ -943,7 +941,7 @@ mod tests {
         // 4.9 Unequal, p.91: "The target value does not include any of the list
         // values, if the target value is an array (e.g. matches
         // ["blue","black","green"], but not ["blue","red","green"])."
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let mk = |vals: Value| {
             json!({
                 "id": "urn:ngsi-ld:Vehicle:3",
@@ -970,7 +968,7 @@ mod tests {
     /// array examples verbatim.
     #[test]
     fn value_list_semantics() {
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let mk = |v: Value| {
             json!({
                 "id": "urn:ngsi-ld:Vehicle:4",
@@ -1015,7 +1013,7 @@ mod tests {
     /// 4.9 Range — Equal p.90 ("both included") and Unequal p.91.
     #[test]
     fn range_semantics() {
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let mk = |v: Value| {
             json!({
                 "id": "urn:ngsi-ld:Vehicle:5",
@@ -1061,7 +1059,7 @@ mod tests {
     /// matching" — deliberately NOT the `!=` type-mismatch rule.
     #[test]
     fn not_pattern_semantics() {
-        let ctx = antares_jsonld::core_context().into();
+        let ctx = antares_jsonld::core_context();
         let mk = |v: Value| {
             json!({
                 "id": "urn:ngsi-ld:Vehicle:7",
