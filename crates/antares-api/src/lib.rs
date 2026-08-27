@@ -2612,7 +2612,7 @@ mod tests {
     /// (read-only registration), so the batch is a 207.
     #[tokio::test]
     async fn batch_items_outside_a_registrations_types_stay_local() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let app = app();
         let reg = serde_json::json!({
             "id": "urn:ngsi-ld:ContextSourceRegistration:type-scope",

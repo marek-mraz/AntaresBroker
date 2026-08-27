@@ -3210,7 +3210,7 @@ mod tests {
     #[tokio::test]
     async fn partial_failure_detail_omits_the_peer_endpoint() {
         use std::io::{Read, Write};
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         // a Context Source that refuses every forwarded write
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();

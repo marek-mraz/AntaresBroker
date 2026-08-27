@@ -1282,7 +1282,7 @@ mod attr_name_and_via_paths {
 
     fn state() -> AppState {
         // the mock source is loopback, denied by the egress policy by default
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         AppState::new(ALIAS.into())
     }
 
