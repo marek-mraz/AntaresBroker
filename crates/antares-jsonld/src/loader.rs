@@ -1329,7 +1329,7 @@ mod tests {
                 while let Ok((mut sock, _)) = listener.accept().await {
                     use tokio::io::AsyncWriteExt;
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = sock.write_all(resp.as_bytes()).await;
@@ -1607,7 +1607,7 @@ mod tests {
                 let b = served.lock().expect("lock").clone();
                 let resp = match b {
                     Some(b) => format!(
-                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{b}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nContent-Length: {}\r\n\r\n{b}",
                         b.len()
                     ),
                     None => "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
@@ -1688,7 +1688,7 @@ mod tests {
                 let _ = sock.read(&mut reqbuf).await;
                 if sock
                     .write_all(
-                        b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/ld+json\r\nTransfer-Encoding: chunked\r\n\r\n",
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nTransfer-Encoding: chunked\r\n\r\n",
                     )
                     .await
                     .is_err()

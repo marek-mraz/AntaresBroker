@@ -160,7 +160,7 @@ async fn clause_5_7_1_4_live_map_gates_registrations() {
     })
     .to_string();
     let reply = format!(
-        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
         remote.len()
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");

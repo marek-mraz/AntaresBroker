@@ -101,7 +101,7 @@ fn query(uri: String) -> Request<Body> {
 }
 
 const EMPTY_ARR: &str =
-    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]";
+    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]";
 
 /// 5.12: exact-id EntityInfo vs a foreign query idPattern — no match
 /// condition holds, the source records ZERO requests; the same pattern
