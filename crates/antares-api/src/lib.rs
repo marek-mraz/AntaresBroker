@@ -628,6 +628,8 @@ async fn health(
     body["temporalDrainErrors"] = history::drain_errors().into();
     // Notifications the delivery policy gave up on (this process, since start).
     body["deadLetters"] = notify::dead_letters_written().into();
+    // Changes the bounded matcher queue dropped (this process, since start).
+    body["changesDropped"] = notify::changes_dropped().into();
     // Jemalloc heap stats (RSS ≈ live×1.2 is the target).
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();

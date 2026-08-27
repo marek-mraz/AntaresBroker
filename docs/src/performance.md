@@ -51,7 +51,7 @@ rented box:
 | registrations | `api-load.py registrations` | 100,000, one id pattern each, endpoint at the sink |
 | resident set | `rss.sh` | broker and Postgres backends sampled at 1 Hz for the whole run; the verdict asserts broker < 500 MiB and Postgres < 16 GiB only at scale 1.0 |
 | at load | `shapes.sh`, `saturate.sh` | throughput per tenant, the knee |
-| subscriptions firing | `fire.sh` | update + delete streams over the loaded entities at 500, 1,000, 2,000 and 4,000 rps; every update fires each subscription of its tenant once, so the notifications due are known; the table shows due, delivered, the distinct subscriptions that fired and how long the sink kept receiving after the stream; the limit is the last rate that delivered 99% with no failed operation |
+| subscriptions firing | `fire.sh` | update + delete streams over the loaded entities at 500, 1,000, 2,000 and 4,000 rps; every update fires each subscription of its tenant once, so the notifications due are known; the table shows due, delivered, the distinct subscriptions that fired, how long the sink kept receiving after the stream, failed operations by class (no HTTP answer / 4xx / 5xx) and the broker's own counters over the rate (changes the bounded matcher queue dropped, dead letters), so a delivery gap is attributed to the queue, the delivery policy or the receiver; the limit is the last rate that delivered 99% with no failed operation |
 
 `dev/perf/sink.py` is the other end of every subscription and
 registration: it counts notifications and answers forwarded queries with

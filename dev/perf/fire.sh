@@ -30,12 +30,13 @@ print(sum(x["entities"] for x in c), sum(x["subscriptions"] for x in c), sum(x["
 {
   echo "In the broker: $ENT entities, $SUB subscriptions, $REG registrations over $(curl -sf "$BROKER_URL/q/tenants" | python3 -c 'import sys,json; r=json.load(sys.stdin); print(len(r if isinstance(r,list) else r.get("tenants",[])))') tenants."
   echo
-  echo "| rate (rps) | updates | deletes | failed ops | entity notifications due | delivered | delivered % | subscriptions that fired | notification POSTs | POSTs/s | quiet after (s) |"
-  echo "|---|---|---|---|---|---|---|---|---|---|---|"
+  echo "| rate (rps) | updates | deletes | failed ops (conn/4xx/5xx) | entity notifications due | delivered | delivered % | subscriptions that fired | notification POSTs | POSTs/s | quiet after (s) | dropped by broker | dead letters |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$OUT/fire.md"
 LIMIT=none
 for rate in $RATES; do
   curl -s -X DELETE "$SINK/stats" >/dev/null
+  curl -sf "$BROKER_URL/q/health" > "$OUT/fire-$rate-health-before.json"
   k6 run --quiet --summary-export "$OUT/fire-$rate.json" -e BROKER_URL="$BROKER_URL" -e RATE="$rate" \
     -e DURATION="$DURATION" -e TENANTS="$TENANTS" -e SUBS="$SUBS" -e ENTITIES="$ENTITIES" \
     -e MQTT="${MQTT:-0}" dev/perf/k6-fire.js >/dev/null || true
@@ -47,15 +48,21 @@ for rate in $RATES; do
     if [ "$cur" = "$prev" ]; then quiet=$((quiet+1)); else quiet=0; fi
     prev=$cur; sleep 1
   done
+  curl -sf "$BROKER_URL/q/health" > "$OUT/fire-$rate-health-after.json"
   row=$(SINK="$SINK" python3 - "$OUT/fire-$rate.json" "$rate" "$t_end" 2>"$OUT/fire-verdict.txt" <<'PY'
 import sys,json,os,urllib.request
 m=json.load(open(sys.argv[1]))["metrics"]
 c=lambda k: int(m.get(k,{}).get("count",0))
 s=json.load(urllib.request.urlopen(os.environ["SINK"]+"/stats"))
+# broker-side counters over this rate: where the missing notifications went
+base=sys.argv[1][:-5]
+h0,h1=(json.load(open(f"{base}-health-{w}.json")) for w in ("before","after"))
+delta=lambda k: int(h1.get(k,0))-int(h0.get(k,0))
+failed=f'{c("op_errors")} ({c("op_errors_conn")}/{c("op_errors_4xx")}/{c("op_errors_5xx")})'
 due=c("notifications_expected_http"); got=s["entities"]
 pct=(100.0*got/due) if due else 0.0
 quiet=max(0,int((s["last"] or int(sys.argv[3]))-int(sys.argv[3])))
-print(f'| {sys.argv[2]} | {c("updates_ok")} | {c("deletes_ok")} | {c("op_errors")} | {due} | {got} | {pct:.1f} | {s.get("subscriptions",0)} | {s["posts"]} | {s.get("posts_per_second") or 0} | {quiet} |')
+print(f'| {sys.argv[2]} | {c("updates_ok")} | {c("deletes_ok")} | {failed} | {due} | {got} | {pct:.1f} | {s.get("subscriptions",0)} | {s["posts"]} | {s.get("posts_per_second") or 0} | {quiet} | {delta("changesDropped")} | {delta("deadLetters")} |')
 print("OK" if c("op_errors")==0 and due and pct>=99.0 else "FAIL", file=sys.stderr)
 PY
   )

@@ -42,6 +42,14 @@ export const options = {
 const updates = new Counter("updates_ok");
 const deletes = new Counter("deletes_ok");
 const errors = new Counter("op_errors");
+// failed ops by class: status 0 = no HTTP answer (refused/reset/timeout)
+const errConn = new Counter("op_errors_conn");
+const err4xx = new Counter("op_errors_4xx");
+const err5xx = new Counter("op_errors_5xx");
+function fail(r) {
+  errors.add(1);
+  if (r.status === 0) errConn.add(1); else if (r.status >= 500) err5xx.add(1); else err4xx.add(1);
+}
 const expected = new Counter("notifications_expected");
 const expectedHttp = new Counter("notifications_expected_http");
 
@@ -69,7 +77,7 @@ export default function () {
     // pool index walks slot/period so consecutive deletes hit fresh ids
     const n = t + (UPDATE_IDS + (Math.floor(slot / period) % (PER_TENANT - UPDATE_IDS))) * TENANTS;
     const r = http.del(`${BASE}/entities/urn:ngsi-ld:Vehicle:${tenant}:${n}`, null, { headers });
-    if (r.status === 204) deletes.add(1); else if (r.status !== 404) errors.add(1);
+    if (r.status === 204) deletes.add(1); else if (r.status !== 404) fail(r);
     return;
   }
   const n = t + (slot % UPDATE_IDS) * TENANTS;
@@ -81,6 +89,6 @@ export default function () {
     expected.add(all);
     expectedHttp.add(viaHttp);
   } else {
-    errors.add(1);
+    fail(r);
   }
 }

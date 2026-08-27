@@ -126,9 +126,11 @@ jobs:
         run: cargo build --release --locked -p antares-broker
       - name: Start the broker under the resident-set sampler
         run: |
+          # connection cap left at the default 10 000: the 200 pin refused
+          # 60% of the 500-VU fire run before any handler ran
           mkdir -p "$OUT"
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
-            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_MAX_CONNECTIONS=200 ANTARES_HTTP_PORT=9090 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 \
             nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
           # bounded: an unbounded wait once burned the whole rented hour
