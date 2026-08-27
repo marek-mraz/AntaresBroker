@@ -44,7 +44,7 @@ DistributedOperations, jsonldContext}`. 555 carry ETSI's numbering
 normative surface the official set leaves untested (`566_01` for 5.6.6,
 `5510_01` for 5.5.10, `586_01` for 5.8.6), following the same conventions
 and tagged with their clause so the ledger picks them up. Every file
-expands to test cases; one full run is 1784 test cases:
+expands to test cases; one full run is 1786 test cases:
 
 | suite | test cases |
 |---|---|
@@ -53,7 +53,7 @@ expands to test cases; one full run is 1784 test cases:
 | EntityMap | 22 |
 | Provision | 396 |
 | Snapshot | 5 |
-| Subscription | 153 |
+| Subscription | 155 |
 | ContextSource | 136 |
 | DistributedOperations | 132 |
 | IOP | 278 |
@@ -61,7 +61,7 @@ expands to test cases; one full run is 1784 test cases:
 
 ## The matrix
 
-The same 1784 cases run once per cell. Every push gates on the quick
+The same 1786 cases run once per cell. Every push gates on the quick
 preset; the full preset runs twice a week, on `v*` tags and on dispatch,
 and is what the report page and the badges render.
 
@@ -75,7 +75,7 @@ and is what the report page and the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A cell passes at 1784/1784. `dev/etsi-matrix-summary.py` folds the
+A cell passes at 1786/1786. `dev/etsi-matrix-summary.py` folds the
 per-cell results into one table and lists every failure across the
 matrix; a release requires that list to be empty.
 

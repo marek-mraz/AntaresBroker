@@ -36,15 +36,15 @@ Three properties, each backed by a number CI reproduces on every full run:
 1. **Footprint** — ~35 MiB average RSS (45–64 MiB peak) while running the
    complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
    where a JVM broker's heap alone would not.
-2. **Conformance** — 1784/1784 ETSI CIM 009 V1.9.1 test cases green in
+2. **Conformance** — 1786/1786 ETSI CIM 009 V1.9.1 test cases green in
    every cell of the seven-cell matrix (six native store cells and the
    browser build), including the two cells where a 10-container
    role-split fleet rolls continuously under the suite
    ([per-store report with Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
    The methodology is a per-clause ledger over the whole spec text
    (`docs/spec/`, 947 clause files), not just the official TP list.
-3. **The browser build** — the same broker compiles to a 3.99 MB wasm
-   artifact (1.52 MB gzipped) and serves `/ngsi-ld/v1/*` from a Service
+3. **The browser build** — the same broker compiles to a 4.05 MB wasm
+   artifact (1.55 MB gzipped) and serves `/ngsi-ld/v1/*` from a Service
    Worker inside a web page: an NGSI-LD broker with zero installation, for
    demos, edge devices and offline-first tooling. No other NGSI-LD broker
    has this.
@@ -237,7 +237,7 @@ entities, subscribe, watch notifications arrive in-page).
 
 ```bash
 ./dev/install-wasm-tools.sh   # wasm-bindgen (lockfile-matched) + wasm-opt
-./dev/wasm-build.sh           # → www/pkg (≤8 MB raw / ≤3 MB gzip budget; ~2.4/0.9 today)
+./dev/wasm-build.sh           # → www/pkg (≤8 MB raw / ≤3 MB gzip budget; 4.05/1.55 today)
 node www/node-shim.mjs 9090   # the SAME .wasm behind a real TCP port (Node ≥18)
 ./dev/wasm-test.sh            # Node smoke + headless-Chromium page test
 ```
@@ -342,7 +342,7 @@ reporting.
 | Message bus | none (`local`) or NATS JetStream | Kafka ([README](https://github.com/ScorpioBroker/ScorpioBroker/blob/development/README.md)) | none | Kafka ([docker-compose.yml](https://github.com/stellio-hub/stellio-context-broker/blob/develop/docker-compose.yml)) | none |
 | Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka | broker + in-memory plugin (no persistence) |
 | Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized | — |
-| Browser/wasm build | yes — 3.99 MB artifact, full API in a Service Worker | no | no | no | no |
+| Browser/wasm build | yes — 4.05 MB artifact, full API in a Service Worker | no | no | no | no |
 | Conformance evidence | [public per-store matrix, Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) | see project | see project | see project | see project |
 
 All five speak the same ETSI CIM 009 API — that is the point of the

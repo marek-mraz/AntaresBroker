@@ -2,7 +2,7 @@
 
 The same broker crates compile to `wasm32-unknown-unknown` and run inside
 a web page — an NGSI-LD broker with zero installation. Current artifact:
-**3.99 MB raw, 1.52 MB gzipped** (budgets: 8 MB / 3 MB, the build fails
+**4.05 MB raw, 1.55 MB gzipped** (budgets: 8 MB / 3 MB, the build fails
 over budget). Try it: <https://antares-ngsi-ld-demo.marek-mraz.com/>.
 
 ## Two ways to use it in a page
