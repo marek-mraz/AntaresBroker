@@ -82,7 +82,8 @@ async fn deleted_subscription_stops_notifying() {
             sink.fetch_add(1, Ordering::SeqCst);
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            let _ =
+                s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         }
     });
 
