@@ -177,8 +177,13 @@ mod tests {
 
     const DC: &str = "https://uri.etsi.org/ngsi-ld/default-context";
 
+    /// The core context once per process, with no loader behind it: the
+    /// interpreter-run of these tests (Miri) must not pay for a cache and an
+    /// HTTP client it never uses.
     fn ctx() -> Arc<Context> {
-        antares_jsonld::Loader::new().core()
+        static CORE: std::sync::OnceLock<Arc<Context>> = std::sync::OnceLock::new();
+        CORE.get_or_init(|| Arc::new(antares_jsonld::core_context()))
+            .clone()
     }
 
     /// A stored entity in its internal form: the broker's own expansion of

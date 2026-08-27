@@ -625,16 +625,26 @@ impl Loader {
             .expect("reqwest client"),
         )
     }
+}
 
+/// The pinned core `@context`, parsed and frozen, with no loader, client or
+/// cache behind it: the value every `Loader` pins, and what a test of
+/// expansion or matching needs on its own.
+pub fn core_context() -> Context {
+    let mut core = Context::default();
+    merge_context_value(&mut core, &pinned(CORE_CONTEXT).expect("pinned core"));
+    core.freeze();
+    core.source = Value::String(CORE_CONTEXT.to_owned());
+    core
+}
+
+impl Loader {
     /// A loader over the caller's own HTTP client — a gateway with its own
     /// proxy, allowlist or TLS setup fetches @contexts through it. `policy`
     /// still governs the private-range deny and the redirect cap; every
     /// cache is per instance, nothing here is process-global.
     pub fn with_client(policy: EgressPolicy, client: reqwest::Client) -> Self {
-        let mut core = Context::default();
-        merge_context_value(&mut core, &pinned(CORE_CONTEXT).expect("pinned core"));
-        core.freeze();
-        core.source = Value::String(CORE_CONTEXT.to_owned());
+        let core = core_context();
         Self {
             http: wrap_client(client),
             policy,

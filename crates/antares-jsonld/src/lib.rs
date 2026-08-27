@@ -19,6 +19,6 @@ pub use expand::{
     is_ngsi_null_langmap, parse_datetime, reject_first_level_nulls, valid_scope_value, ExpandOpts,
 };
 pub use loader::{
-    client_builder, http_interaction, io_deadline, with_timeouts, wrap_client, CtxUsage,
-    EgressPolicy, HttpClient, Loader, CORE_CONTEXT, INTERNAL_FETCH_HEADER, MAX_REDIRECTS,
+    client_builder, core_context, http_interaction, io_deadline, with_timeouts, wrap_client,
+    CtxUsage, EgressPolicy, HttpClient, Loader, CORE_CONTEXT, INTERNAL_FETCH_HEADER, MAX_REDIRECTS,
 };

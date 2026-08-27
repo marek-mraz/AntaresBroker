@@ -152,8 +152,7 @@ jobs:
     name: Miri UB check (weekly)
     if: github.event.schedule != '41 2 * * *'
     runs-on: ubuntu-latest
-    # tree borrows over three crates runs past an hour on a hosted runner
-    timeout-minutes: 180
+    timeout-minutes: 60
     env:
           # ignore-leaks: crossbeam-epoch parks its per-thread handle in a thread-local
           # that Miri reports as leaked at exit; not a broker leak.
