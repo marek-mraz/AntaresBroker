@@ -116,6 +116,11 @@ jobs:
             --run-ignored ignored-only
           dev/unit-junit.sh ignored-db-broker -p antares-broker --bin antares \
             --run-ignored ignored-only outbox_flush_waits
+      # The API tests once more on the on-disk redb store: AppState::new
+      # composes a fresh file store per state under this harness variable,
+      # so every test that passed on memory has to pass on the durable
+      # backend too — no second copy of the tests.
+      - run: ANTARES_TEST_STORE=file dev/unit-junit.sh file-store -p antares-api
       # feature matrix: no defaults + all features
       - run: dev/unit-junit.sh no-default-features --workspace --no-default-features
       - run: dev/unit-junit.sh all-features --workspace --all-features

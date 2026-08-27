@@ -149,8 +149,24 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// In-memory store (tests, `memory` mode).
+    /// The built-in store: in-memory, or — under the reserved harness
+    /// variable `ANTARES_TEST_STORE=file` — a fresh on-disk redb store per
+    /// state, so the same test binary proves the durable backend without a
+    /// second copy of every test. The broker's own boot path never calls
+    /// this; it composes from `ANTARES_STORE` in `with_store`.
     pub fn new(host_alias: String) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("ANTARES_TEST_STORE").as_deref() == Ok("file") {
+            let dir = std::env::temp_dir()
+                .join("antares-test-store")
+                .join(uuid::Uuid::new_v4().simple().to_string());
+            let store = Store::open_file(&dir).expect("open the redb test store");
+            return Self::with_store(
+                host_alias,
+                Arc::new(AnyStore::Mem(store)),
+                antares_sql::StoreMode::File,
+            );
+        }
         Self::with_store(
             host_alias,
             Arc::new(AnyStore::Mem(Store::default())),

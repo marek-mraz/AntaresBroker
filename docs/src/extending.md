@@ -97,7 +97,12 @@ sink registration plus a router merge, with no change to a core crate.
    sweep and the maintenance job in `main.rs`.
 6. Add the restart-survival and per-kind tests the other backends carry
    (`crates/antares-broker/tests/store_combos.rs` has one row per
-   store × temporal pairing).
+   store × temporal pairing). The API test suite itself runs once per
+   built-in store: `AppState::new` composes a fresh store per state from
+   `ANTARES_TEST_STORE` (`memory` by default, `file` for a redb directory
+   under the system temp dir), and `workspace.yml` runs
+   `cargo nextest -p antares-api` under each value. A backend that wants
+   the same proof adds its arm there and one more CI configuration.
 7. Add a cell to the matrix in `.github/workflows/etsi-matrix.yml`. The
    full preset runs seven cells today: memory, file, postgres, timescale,
    postgres-nats, timescale-nats and wasm-file; every cell must pass the

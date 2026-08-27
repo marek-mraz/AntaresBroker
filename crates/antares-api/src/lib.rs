@@ -988,8 +988,10 @@ mod tests {
                 .expect("resp"),
         )
         .await;
-        assert_eq!(body["store"], "memory");
-        assert_eq!(body["temporal"], "memory");
+        // whichever built-in store the harness composed, both seams name it
+        let store = body["store"].as_str().expect("store name").to_owned();
+        assert!(store == "memory" || store == "file", "store: {store}");
+        assert_eq!(body["temporal"], store);
 
         let st = AppState::with_drivers(
             "antares-test".into(),
