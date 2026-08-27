@@ -56,6 +56,8 @@ jobs:
           EXPIRY=$(( $(date +%s) + TTL_HOURS * 3600 ))
           USERDATA=$(cat <<EOF
           #cloud-config
+          package_update: true
+          packages: [jq, build-essential]
           runcmd:
             - |
               mkdir -p /opt/runner && cd /opt/runner

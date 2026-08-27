@@ -33,6 +33,8 @@ env:
   SERVER_TYPE: ccx43
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
+  # full-scale data volume; a fractional dispatch shrinks it in the create
+  # step so a dry run fits a fresh project's volume limit
   VOLUME_GB: 500
   TTL_HOURS: 10
 
@@ -52,6 +54,7 @@ jobs:
           RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
         run: |
           LABEL="scale-${{ github.run_id }}"
+          VOLUME_GB=$(python3 -c "import math; print(max(10, math.ceil($VOLUME_GB * ${{ inputs.scale || '1.0' }})))")
           REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
             | jq -r .token)
@@ -60,7 +63,7 @@ jobs:
           USERDATA=$(cat <<EOF
           #cloud-config
           package_update: true
-          packages: [docker.io, jq]
+          packages: [docker.io, jq, build-essential]
           runcmd:
             - shutdown -h +$(( TTL_HOURS * 60 ))
             - mkfs.ext4 -F /dev/disk/by-id/scsi-0HC_Volume_VOLID || true
