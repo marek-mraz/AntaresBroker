@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Does the broker use the cores it is given? Pin the broker to 1, 2, 4, 8
+# physical cores (SMT siblings excluded), keep the load generator on the
+# remaining cores, and record req/s for the query shape at c50.
+#
+#   dev/perf/core-scale.sh
+#
+# Env: BIN (target/release/antares), OUT (results/perf), PORT (9472),
+#      DURATION (5s), STORE (memory — the point is the broker, not the
+#      database, so the store stays in-process).
+# Refuses a step where the load generator would share a core with the
+# broker; the table stops at the largest step the box can isolate.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+BIN="${BIN:-target/release/antares}"
+OUT="${OUT:-results/perf}"
+PORT="${PORT:-9472}"
+DURATION="${DURATION:-5s}"
+STORE="${STORE:-memory}"
+mkdir -p "$OUT"
+command -v k6 >/dev/null || { echo "k6 missing"; exit 1; }
+[ -x "$BIN" ] || { echo "missing $BIN"; exit 1; }
+
+# one CPU id per physical core: the first thread of each core
+mapfile -t CORES < <(lscpu -p=CPU,CORE | grep -v '^#' | sort -t, -k2,2n -u | cut -d, -f1)
+TOTAL=${#CORES[@]}
+DATA=$(mktemp -d); trap 'rm -rf "$DATA"; [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null' EXIT
+
+{
+  echo "| broker cores | req/s | vs 1 core | efficiency |"
+  echo "|---|---|---|---|"
+  base=
+  for n in 1 2 4 8 16; do
+    [ "$n" -le $(( TOTAL / 2 )) ] || { echo "| $n | (needs $((n * 2)) physical cores, box has $TOTAL) | | |"; break; }
+    bset=$(IFS=,; echo "${CORES[*]:0:$n}")
+    lset=$(IFS=,; echo "${CORES[*]:$n}")
+    ANTARES_STORE="$STORE" ANTARES_DATA_DIR="$DATA" ANTARES_HTTP_PORT="$PORT" \
+      taskset -c "$bset" "$BIN" > "$OUT/core-scale-$n.log" 2>&1 & PID=$!
+    until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; done
+    taskset -c "$lset" k6 run --quiet --summary-export "$OUT/core-scale.json" \
+      -e BROKER_URL="http://127.0.0.1:$PORT" -e SHAPE=query -e VUS=50 -e DURATION="$DURATION" \
+      dev/perf/k6-shapes.js >/dev/null
+    rps=$(python3 -c "import json; print(round(json.load(open('$OUT/core-scale.json'))['metrics']['http_reqs']['rate']))")
+    kill "$PID"; wait "$PID" 2>/dev/null || true; PID=
+    if [ -z "$base" ]; then base=$rps; echo "| $n | $rps | — | — |"
+    else python3 -c "r=$rps/$base; print(f'| $n | $rps | {r:.2f}x | {100*r/$n:.0f}% |')"; fi
+  done
+} | tee "$OUT/core-scale.md"
