@@ -24,11 +24,10 @@ name: ci
 # k8s-smoke.yml. Shared pieces: workspace.yml (the test gate),
 # etsi-matrix.yml (the cell matrix), build-image.yml (image builds).
 
-# Runs on pushes to master, on PRs targeting master, and on manual dispatch.
-# Tags run full.yml — the release gate.
+# Runs on PRs targeting master and on manual dispatch — NOT on every push:
+# cancel-in-progress meant a 40 min run never finished under a stream of
+# fix commits. Dispatch it when a batch is ready. Tags run full.yml.
 on:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
