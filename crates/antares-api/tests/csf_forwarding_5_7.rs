@@ -17,14 +17,25 @@ async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, Value) {
         .await
         .expect("response");
     let status = res.status();
+    // 6.3.17: a source that failed shows up here, not in the body — keep
+    // the reason in the assertion messages (TSan-only flakes, 2026-08)
+    let warnings: Vec<String> = res
+        .headers()
+        .get_all("NGSILD-Warning")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_owned))
+        .collect();
     let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
         .await
         .expect("body");
-    let body = if bytes.is_empty() {
+    let mut body = if bytes.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     };
+    if !warnings.is_empty() {
+        body = json!({"body": body, "NGSILD-Warning": warnings});
+    }
     (status, body)
 }
 
@@ -126,6 +137,8 @@ async fn clause_5_7_2_4_csf_filters_forwarding_targets() {
     let (status, body) = get(&st, "/ngsi-ld/v1/entities?type=Vehicle").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ids: Vec<&str> = body
+        .get("body")
+        .unwrap_or(&body)
         .as_array()
         .expect("array")
         .iter()
@@ -142,6 +155,8 @@ async fn clause_5_7_2_4_csf_filters_forwarding_targets() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ids: Vec<&str> = body
+        .get("body")
+        .unwrap_or(&body)
         .as_array()
         .expect("array")
         .iter()
@@ -180,6 +195,8 @@ async fn clause_5_7_2_4_csf_matching_nothing_stays_local() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ids: Vec<&str> = body
+        .get("body")
+        .unwrap_or(&body)
         .as_array()
         .expect("array")
         .iter()
