@@ -78,6 +78,18 @@ pub struct CtxUsage {
 /// DENIAL — the policy never passes a destination it could not check.
 const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Outbound deadlines stretch 10× when the test binary runs under a
+/// sanitizer (ANTARES_TEST_SANITIZER, set by the strict workflow):
+/// ThreadSanitizer slows every thread, and hundreds of tests sharing one
+/// runner pushed loopback fetches past their limits. Production is 1.
+pub fn slow_factor() -> u64 {
+    if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
+        10
+    } else {
+        1
+    }
+}
+
 /// Egress policy hook for @context fetches: scheme allowlist is
 /// enforced in `fetch`; this adds the private-range deny (loopback,
 /// RFC 1918, link-local incl. the 169.254.169.254 metadata range, ULA).
@@ -175,7 +187,8 @@ impl EgressPolicy {
     /// Deny-by-default for private destinations. Resolves the host
     /// once; any private address in the answer denies the fetch.
     pub async fn check_host(&self, host: &str, port: u16) -> Result<(), String> {
-        self.check_host_within(host, port, DNS_TIMEOUT).await
+        self.check_host_within(host, port, DNS_TIMEOUT * slow_factor() as u32)
+            .await
     }
 
     async fn check_host_within(
@@ -618,8 +631,8 @@ impl Loader {
             policy,
             with_timeouts(
                 client_builder(policy),
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(5 * slow_factor()),
+                std::time::Duration::from_secs(10 * slow_factor()),
             )
             .build()
             .expect("reqwest client"),

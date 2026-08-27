@@ -373,11 +373,7 @@ impl AppState {
 /// pushed loopback forwards past the 2 s connect / 5 s total limits —
 /// each run failing a different test with a 504. Production is unchanged.
 pub fn slow_factor() -> u64 {
-    if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
-        10
-    } else {
-        1
-    }
+    antares_jsonld::slow_factor()
 }
 
 fn outbound_client(
