@@ -62,6 +62,69 @@ whole rig; the schedule runs `1.0`. Bulk load bypasses the broker
 (no notifications, no history), which is the documented path for initial
 loads in [Operations](operations.md#bulk-load-postgres-timescale).
 
+## Setting up the rented runner (two repository secrets)
+
+`perf-weekly` and `scale-weekly` rent a Hetzner Cloud server for the run
+(ccx23 for the shapes, ccx43 plus a volume for the design targets),
+register it as an ephemeral GitHub runner, and delete it afterwards;
+`perf-janitor` sweeps anything past its `expiry` label. Until the two
+secrets below exist, both workflows stop at "Create server" with an empty
+token, so the weekly runs stay red and no perf report is published.
+
+### 1. `HCLOUD_TOKEN` — Hetzner Cloud API token
+
+1. Sign in at <https://console.hetzner.cloud/>.
+2. Create a project of its own for this (for example `antares-perf`) so the
+   token cannot touch anything else, and set a spending alert on the
+   project (Project → *Billing* → *Alerts*).
+3. In that project open *Security* → *API tokens* → *Generate API token*.
+   Name it `github-actions`, permission **Read & Write** (the workflow
+   creates and deletes servers and volumes and reads the price list).
+4. Copy the token once; Hetzner never shows it again.
+
+### 2. `RUNNER_PAT` — GitHub token that can register a runner
+
+The workflow asks the GitHub API for a runner registration token
+(`POST /repos/<owner>/<repo>/actions/runners/registration-token`), which the
+default `GITHUB_TOKEN` is not allowed to do.
+
+1. GitHub → *Settings* (your account) → *Developer settings* →
+   *Personal access tokens* → *Fine-grained tokens* → *Generate new token*.
+2. Resource owner: the account that owns this repository. Repository
+   access: **Only select repositories** → this repository.
+3. Repository permissions: **Administration: Read and write**. Nothing
+   else.
+4. Expiration: one year is the maximum; put the renewal date in your
+   calendar, the workflow fails with HTTP 401 when it lapses.
+5. Copy the token once.
+
+A classic token with the `repo` scope works too, but grants far more than
+the workflow needs.
+
+### 3. Store both as repository secrets
+
+Repository → *Settings* → *Secrets and variables* → *Actions* →
+*New repository secret*, twice:
+
+| Name | Value |
+|------|-------|
+| `HCLOUD_TOKEN` | the Hetzner token from step 1 |
+| `RUNNER_PAT` | the GitHub token from step 2 |
+
+The names must match exactly; the workflows read them as
+`${{ secrets.HCLOUD_TOKEN }}` and `${{ secrets.RUNNER_PAT }}`.
+
+### 4. First run
+
+Actions → *scale-weekly* → *Run workflow* with `scale` = `0.01` (about an
+hour, a few euros); read the step summary for the cost line and the
+tables. Then Actions → *perf-weekly* → *Run workflow*. Both schedules take
+over from there (Saturday 03:17 UTC and Sunday 02:17 UTC), and `pages`
+folds the newest bundles into `/reports/perf/latest/`.
+
+If you would rather not rent hardware, disable the two workflows (Actions
+→ workflow → *⋯* → *Disable workflow*) so the weekly runs stop going red.
+
 ## What the numbers are not
 
 They are one machine, one request shape, one week. A different instance
