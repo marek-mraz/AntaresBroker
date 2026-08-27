@@ -12,6 +12,13 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 async fn send_h(
     st: &AppState,
     method: &str,
@@ -380,7 +387,7 @@ async fn clause_5_16_7_purge_by_query() {
 /// after the fill, carrying snapshotId + status.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_6_snapshot_notification() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = state();
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:n1", 80).await;
 
@@ -493,7 +500,7 @@ async fn clause_5_16_1_temporal_queries_fill_the_temporal_view() {
 /// the snapshot alongside local ones.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_16_1_federated_fill() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = state();
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:fedlocal", 70).await;
 
@@ -702,7 +709,7 @@ async fn clause_5_16_7_purge_q_restricted_to_snapshot_members() {
 /// internal synthetic tenant never leaks as NGSILD-Tenant.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_22_snapshot_scoped_subscription_notification_header() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = state();
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:sn1", 80).await;
     let snap = json!({"type": "Snapshot",

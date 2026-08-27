@@ -14,6 +14,13 @@ use axum::http::{Request, StatusCode};
 use std::io::{Read, Write};
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 const ENTITY: &str = "urn:ngsi-ld:Vehicle:topology";
 
 /// Serve a broker's router on a real ephemeral TCP port — forwards from
@@ -136,7 +143,7 @@ async fn query_ids(st: &AppState, tenant: Option<&str>) -> Vec<String> {
 /// at hop 2.
 #[tokio::test(flavor = "multi_thread")]
 async fn cross_tenant_chain_through_one_broker_completes() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = AppState::new("hub".into());
     let port = serve(&st).await;
     let endpoint = format!("http://127.0.0.1:{port}");
@@ -160,7 +167,7 @@ async fn cross_tenant_chain_through_one_broker_completes() {
 /// on requests bouncing between the two tenants.
 #[tokio::test(flavor = "multi_thread")]
 async fn cross_tenant_cycle_terminates_with_the_data() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = AppState::new("hub2".into());
     let port = serve(&st).await;
     let endpoint = format!("http://127.0.0.1:{port}");
@@ -190,7 +197,7 @@ async fn cross_tenant_cycle_terminates_with_the_data() {
 /// loop verdict must not be laundered into a generic gateway error).
 #[tokio::test(flavor = "multi_thread")]
 async fn two_broker_cycle_returns_508() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let b1 = AppState::new("antares1".into());
     let b2 = AppState::new("antares2".into());
     let p1 = serve(&b1).await;
@@ -233,7 +240,7 @@ async fn two_broker_cycle_returns_508() {
 /// pseudonym").
 #[tokio::test(flavor = "multi_thread")]
 async fn two_broker_chain_stamps_both_pseudonyms_in_order() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let b1 = AppState::new("antares1".into());
     let b2 = AppState::new("antares2".into());
     let p2 = serve(&b2).await;
@@ -302,7 +309,7 @@ async fn two_broker_chain_stamps_both_pseudonyms_in_order() {
 /// peer answer NonexistentTenant (and leak the local tenant name).
 #[tokio::test(flavor = "multi_thread")]
 async fn tenantless_registration_targets_the_peer_default_tenant() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let hub = AppState::new("hub3".into());
     let peer = AppState::new("peer3".into());
     let peer_port = serve(&peer).await;

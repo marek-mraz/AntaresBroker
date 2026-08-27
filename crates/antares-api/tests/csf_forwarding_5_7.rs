@@ -54,6 +54,13 @@ async fn post(st: &AppState, uri: &str, body: String) -> (StatusCode, Value) {
     .await
 }
 
+/// set_var once: a sibling test reading the env while this one rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 /// Canned Context Source answering every request with `reply` (raw HTTP).
 fn mock(reply: String) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -96,7 +103,7 @@ async fn register(st: &AppState, reg_id: &str, port: u16, source_type: &str) {
 /// non-matching source's entity must NOT appear; without csf both do.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_2_4_csf_filters_forwarding_targets() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = AppState::new("antares-csf".into());
     let port_a = mock(entity_reply("urn:ngsi-ld:Vehicle:fromA"));
     let port_b = mock(entity_reply("urn:ngsi-ld:Vehicle:fromB"));
@@ -151,7 +158,7 @@ async fn clause_5_7_2_4_csf_filters_forwarding_targets() {
 /// local data answers.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_2_4_csf_matching_nothing_stays_local() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = AppState::new("antares-csf2".into());
     let port_a = mock(entity_reply("urn:ngsi-ld:Vehicle:fromA2"));
     register(

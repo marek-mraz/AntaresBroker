@@ -5530,3 +5530,11 @@ mod clause_6_3_11 {
         assert_eq!(inst_of(&t_sys)["expiresAt"], "2100-01-01T00:00:00Z");
     }
 }
+
+/// set_var once: a test reading the env while a sibling rewrites it saw the
+/// policy missing and refused the loopback forward (TSan flake).
+#[cfg(test)]
+pub(crate) fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}

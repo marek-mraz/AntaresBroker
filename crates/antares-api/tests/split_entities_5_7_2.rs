@@ -18,6 +18,13 @@ use axum::http::Request;
 use std::io::{Read, Write};
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 const ENTITY: &str = "urn:ngsi-ld:Vehicle:split572";
 
 fn mock_replying(reply: String) -> u16 {
@@ -151,7 +158,7 @@ async fn assert_aggregate_filter(st: &AppState, tenant: &str) {
 /// Memory-store control: never pushed filters, must keep working.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_2_4_split_aggregate_filter_memory() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let st = AppState::new("antares1".into());
     assert_aggregate_filter(&st, "sagg-mem").await;
 }
@@ -166,7 +173,7 @@ async fn clause_5_7_2_4_split_aggregate_filter_memory() {
 async fn clause_5_7_2_4_split_aggregate_filter_postgres() {
     let url = std::env::var("ANTARES_TEST_DATABASE_URL")
         .expect("ANTARES_TEST_DATABASE_URL must point at a live PostGIS");
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let pool = antares_sql::store::pg::connect(&url, 5)
         .await
         .expect("connect");

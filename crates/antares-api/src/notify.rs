@@ -2400,7 +2400,7 @@ mod deleted_subscription_delivery {
     /// longer exists, so its endpoint must receive nothing.
     #[tokio::test(flavor = "multi_thread")]
     async fn deleted_subscription_receives_no_notification() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let st = AppState::new("antares-deleted-sub-test".into());
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = count.clone();
@@ -2760,7 +2760,7 @@ mod change_pipeline {
     /// slow machines.
     #[tokio::test(flavor = "multi_thread")]
     async fn panicking_change_does_not_stop_the_next_notification() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-panic-guard".into());
         wire(&mut st);
@@ -2815,7 +2815,7 @@ mod change_pipeline {
         {
             return;
         }
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         // accepts, reads nothing, never answers — the serial consumer parks
         // on the first delivery for the endpoint's whole timeout
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2856,7 +2856,7 @@ mod change_pipeline {
     /// spelled-out list does — while "entityDeleted" alone does not.
     #[tokio::test(flavor = "multi_thread")]
     async fn entity_updated_trigger_notifies_on_entity_creation() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let (quiet_uri, quiet_hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-trigger-equivalence".into());
@@ -3399,7 +3399,7 @@ mod clause_5_2_14_2_bookkeeping {
     /// notification" — an output-only member implementations shall generate.
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_delivery_generates_and_increments_times_failed() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, hits) = endpoint(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
         let st = AppState::new("antares-times-failed".into());
         let tenant = TenantId::new("default").expect("tenant");
@@ -3431,7 +3431,7 @@ mod clause_5_2_14_2_bookkeeping {
     /// never reaches the wire, so neither member may move.
     #[tokio::test(flavor = "multi_thread")]
     async fn breaker_suppressed_delivery_does_not_move_times_sent() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, hits) = endpoint(axum::http::StatusCode::OK).await;
         let st = AppState::new("antares-breaker-bookkeeping".into());
         let tenant = TenantId::new("default").expect("tenant");
@@ -3513,7 +3513,7 @@ mod delivery_policy_tests {
     }
 
     fn state(p: DeliveryPolicy) -> (AppState, TenantId) {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let mut st = AppState::new("antares-policy".into());
         st.delivery = p;
         (st, TenantId::new("default").expect("tenant"))
@@ -3918,7 +3918,7 @@ mod clause_5_8_6_periodic_sweep {
     /// there are no matching Entities, no Notification is sent."
     #[tokio::test(flavor = "multi_thread")]
     async fn periodic_sweep_notifies_only_the_subscribed_entities() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, seen) = recording_endpoint().await;
         let (st, _mirror, tenant) = state_with_mirror("antares-periodic-narrowing");
         for (id, ty) in [
@@ -3984,7 +3984,7 @@ mod clause_5_8_6_periodic_sweep {
     #[tokio::test(flavor = "multi_thread")]
     async fn armed_sweep_clock_skips_the_tick_until_a_subscription_write_clears_it() {
         use std::sync::atomic::Ordering::Relaxed;
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, seen) = recording_endpoint().await;
         let (st, mirror, tenant) = state_with_mirror("antares-periodic-clock");
         st.store
@@ -4093,7 +4093,7 @@ mod clause_5_8_6_grouped_delivery {
     /// notifications — and Table 5.2.14.2-1 `timesSent` moves by one.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_batch_of_matching_entities_is_one_notification() {
-        std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+        crate::allow_private();
         let (uri, seen) = recording_endpoint().await;
         let mut st = AppState::new("antares-grouped-delivery".into());
         wire(&mut st);

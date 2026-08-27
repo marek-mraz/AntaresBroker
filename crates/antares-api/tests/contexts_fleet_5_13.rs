@@ -13,6 +13,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 /// Tiny @context server: serves one JSON-LD context document on any GET and
 /// counts fetches (the negative half: a warm cache must NOT refetch).
 fn mock_ctx_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
@@ -109,7 +116,7 @@ async fn delete(st: &AppState, uri: &str) -> StatusCode {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cached_context_bookkeeping_is_shared_across_instances() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let store = Arc::new(antares_sql::store::any::AnyStore::Mem(Default::default()));
     let a = AppState::with_store("podA".into(), store.clone(), antares_sql::StoreMode::Memory);
     let b = AppState::with_store("podB".into(), store.clone(), antares_sql::StoreMode::Memory);
@@ -182,7 +189,7 @@ async fn cached_context_bookkeeping_is_shared_across_instances() {
 /// after a delete re-caches the @context, it does not lose it.
 #[tokio::test(flavor = "multi_thread")]
 async fn deleted_row_recreated_when_peer_doc_cache_is_warm() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let store = Arc::new(antares_sql::store::any::AnyStore::Mem(Default::default()));
     let a = AppState::with_store("podA".into(), store.clone(), antares_sql::StoreMode::Memory);
     let b = AppState::with_store("podB".into(), store.clone(), antares_sql::StoreMode::Memory);

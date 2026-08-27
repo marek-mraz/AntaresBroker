@@ -32,6 +32,13 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 async fn send(st: &AppState, path: &str, doc: Value) -> (StatusCode, String) {
     let body = doc.to_string();
     let req = Request::builder()
@@ -130,7 +137,7 @@ fn linked_entity(n: &Value) -> Value {
 /// `model` and nothing else from the Device.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_21_nested_term_constrains_the_linked_entity() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     seed_device(&st).await;
@@ -165,7 +172,7 @@ async fn clause_4_21_nested_term_constrains_the_linked_entity() {
 /// Relationship whole. Projecting it anyway would break 4.21.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_21_bare_term_selects_the_whole_linked_entity() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     seed_device(&st).await;
@@ -187,7 +194,7 @@ async fn clause_4_21_bare_term_selects_the_whole_linked_entity() {
 /// and including when the whole thing arrives as one array element.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_21_pipe_and_comma_are_equivalent_in_notifications() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     seed_device(&st).await;
@@ -212,7 +219,7 @@ async fn clause_4_21_pipe_and_comma_are_equivalent_in_notifications() {
 /// Attribute from the Linked Entity, leaving the rest.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_21_omit_with_children_constrains_the_linked_entity() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     seed_device(&st).await;

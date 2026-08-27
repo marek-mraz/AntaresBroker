@@ -15,6 +15,13 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward (TSan flake).
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
 async fn send(
     st: &AppState,
     method: &str,
@@ -149,7 +156,7 @@ async fn wait_for<F: Fn() -> bool>(what: &str, f: F) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_1_4_consumer_half_end_to_end() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub".into());
     antares_api::notify::wire(&mut st);
@@ -318,7 +325,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
 /// matching the filter after its copy exists stops reaching the subscriber.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("antares-distsub3".into());
     antares_api::notify::wire(&mut st);
     let (sensor_port, sensor_seen) = recording_mock();
@@ -456,7 +463,7 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
 /// conditions; the reduced remote copy carries no q (5.8.1.4).
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_6_split_entities_inbound_merge() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-split".into());
     antares_api::notify::wire(&mut st);
@@ -613,7 +620,7 @@ async fn clause_5_8_6_split_entities_inbound_merge() {
 /// its 201 until the test's assertions ran, and the test deletes right after.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_5_4_delete_races_slow_create_forward() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub4".into());
     antares_api::notify::wire(&mut st);
@@ -704,7 +711,7 @@ async fn clause_5_8_5_4_delete_races_slow_create_forward() {
 /// CSR subscription, nothing forwarded.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_8_1_4_local_only_subscription_stays_local() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     let mut st = AppState::new("antares-distsub2".into());
     antares_api::notify::wire(&mut st);
     let (remote_port, remote_seen) = recording_mock();
@@ -755,7 +762,7 @@ async fn clause_5_8_1_4_local_only_subscription_stays_local() {
 /// idPattern does not match reaches the subscriber in NO payload.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-distsub-idr".into());
     antares_api::notify::wire(&mut st);
@@ -885,7 +892,7 @@ async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
 /// EXTENDED by this broker's alias, so downstream brokers can detect loops.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_18_forwarded_copy_extends_the_via_chain() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-ext".into());
     antares_api::notify::wire(&mut st);
@@ -956,7 +963,7 @@ async fn clause_6_3_18_forwarded_copy_extends_the_via_chain() {
 /// trip creates two more Subscriptions without bound.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_18_a_looped_copy_is_not_reforwarded() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-loop".into());
     antares_api::notify::wire(&mut st);
@@ -1054,7 +1061,7 @@ async fn clause_6_3_18_a_looped_copy_is_not_reforwarded() {
 /// registration naming a different source still does.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_6_3_18_registration_already_in_the_via_chain_receives_no_copy() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    allow_private();
     std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
     let mut st = AppState::new("antares-via-reg".into());
     antares_api::notify::wire(&mut st);
