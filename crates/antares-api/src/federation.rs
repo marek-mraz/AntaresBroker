@@ -1108,7 +1108,8 @@ pub async fn forward(
         // 5.2.34 timeout bounds the forward below the 8 s ceiling.
         // Natively io_deadline is a passthrough (the client owns the 8 s
         // default), so the per-registration budget rides on the request.
-        let deadline: u32 = reg.timeout_ms.map_or(8_000, |t| t.min(8_000) as u32);
+        let ceiling = 8_000 * crate::state::slow_factor();
+        let deadline: u32 = reg.timeout_ms.map_or(ceiling, |t| t.min(ceiling)) as u32;
         #[cfg(not(target_arch = "wasm32"))]
         let req = req.timeout(std::time::Duration::from_millis(deadline as u64));
         let sent = antares_jsonld::io_deadline(req.send(), deadline).await;

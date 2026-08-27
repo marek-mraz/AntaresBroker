@@ -288,8 +288,14 @@ impl AppState {
             host_alias,
             default_limit: 1000,
             max_limit: 1000,
-            http: outbound_client(egress_policy, std::time::Duration::from_secs(5)),
-            fed_http: outbound_client(egress_policy, std::time::Duration::from_secs(8)),
+            http: outbound_client(
+                egress_policy,
+                std::time::Duration::from_secs(5 * slow_factor()),
+            ),
+            fed_http: outbound_client(
+                egress_policy,
+                std::time::Duration::from_secs(8 * slow_factor()),
+            ),
             #[cfg(feature = "mqtt")]
             mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
             limits: Arc::new(crate::bounds::LimitStats::default()),
@@ -361,13 +367,26 @@ impl AppState {
 /// construction). Title-case headers are an http1 knob and timeouts are
 /// client-level knobs — both native-only; the browser's fetch supplies its
 /// own transport on wasm32.
+/// Outbound timeouts stretch 10× when the test binary runs under a
+/// sanitizer (ANTARES_TEST_SANITIZER, set by the strict workflow):
+/// ThreadSanitizer slows every thread, and 371 tests sharing one runner
+/// pushed loopback forwards past the 2 s connect / 5 s total limits —
+/// each run failing a different test with a 504. Production is unchanged.
+pub fn slow_factor() -> u64 {
+    if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
+        10
+    } else {
+        1
+    }
+}
+
 fn outbound_client(
     policy: antares_jsonld::EgressPolicy,
     total: std::time::Duration,
 ) -> antares_jsonld::HttpClient {
     let b = antares_jsonld::with_timeouts(
         antares_jsonld::client_builder(policy),
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2 * slow_factor()),
         total,
     );
     // the suite's notification receiver asserts header names
