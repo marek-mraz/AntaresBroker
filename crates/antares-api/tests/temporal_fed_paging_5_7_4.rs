@@ -103,7 +103,7 @@ async fn clause_5_7_4_pages_partition_the_federated_union_on_pg() {
     ])
     .to_string();
     let port = mock_replying(format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
         remote.len()
     ));
     let reg = json!({
