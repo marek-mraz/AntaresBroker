@@ -2819,7 +2819,9 @@ mod change_pipeline {
         });
         let mut st = AppState::new("antares-queue-bound".into());
         wire(&mut st);
-        subscribe(&st, "staller", &format!("http://{addr}/notify"), 30_000).await;
+        // the stall must outlast the whole create loop, sanitizer slowdown
+        // included, or the consumer times out and drains the queue
+        subscribe(&st, "staller", &format!("http://{addr}/notify"), 600_000).await;
         let before = changes_dropped();
         for n in 0..(CHANGE_QUEUE + 64) {
             assert_eq!(create_vehicle(&st, 1_000 + n).await, 201);

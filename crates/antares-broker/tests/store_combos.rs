@@ -158,8 +158,16 @@ fn history(port: u16, row: &str) -> String {
 }
 
 fn history_present(port: u16, row: &str) -> bool {
-    let resp = history(port, row);
-    let both = resp.contains("2026-01-01T00:00:00Z") && resp.contains("2026-01-01T00:00:01Z");
+    // history is recorded after the response (the temporal drain), so
+    // poll until both instants show or the entity is absent
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut resp = history(port, row);
+    let mut both = resp.contains("2026-01-01T00:00:00Z") && resp.contains("2026-01-01T00:00:01Z");
+    while resp.starts_with("HTTP/1.1 200") && !both && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        resp = history(port, row);
+        both = resp.contains("2026-01-01T00:00:00Z") && resp.contains("2026-01-01T00:00:01Z");
+    }
     assert!(
         (resp.starts_with("HTTP/1.1 200") && both) || resp.starts_with("HTTP/1.1 404"),
         "temporal retrieve must be the full history or 404: {resp}"
