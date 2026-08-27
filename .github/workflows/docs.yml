@@ -88,7 +88,9 @@ jobs:
         id: lychee
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress docs/ README.md
+          # docs/spec is the spec text: its IRIs (uri.etsi.org/ngsi-ld/…,
+          # http://example/…) are identifiers, not pages
+          args: --no-progress --exclude-path docs/spec --exclude-loopback docs/ README.md
           fail: true
       - name: File an issue on dead external links
         if: failure() && github.event_name == 'schedule'
