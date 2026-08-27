@@ -7,8 +7,7 @@ Row-Level Security as the enforced backstop (`SET LOCAL antares.tenant`).
 NOT database-per-tenant (Scorpio's model: 1,000 DBs, pool explosion,
 CREATE-DATABASE races — Scorpio issues #653/#663).
 
-Consequence: tenant create = INSERT, delete = DELETE; one connection pool;
-GDPR-grade physical isolation is explicitly out of scope.
+Consequence: tenant create = INSERT, delete = DELETE; one connection pool.
 
 Amendment: the `tenants` table is the inventory. Every implicit tenant
 creation inserts its row in the same transaction as the document; purge
