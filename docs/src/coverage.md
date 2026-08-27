@@ -1,0 +1,45 @@
+# Coverage
+
+Two jobs measure which broker code no test executes; both publish
+rather than gate, except for the unit floor.
+
+| job | what runs under instrumentation | where the numbers land |
+|---|---|---|
+| `strict` → Coverage floor (daily) | the workspace unit and integration tests, with live PostGIS, MQTT and NATS so the integration tests count instead of skipping | `cargo llvm-cov --fail-under-lines 60`; the floor only ratchets up after a green run |
+| `etsi-coverage` (weekly, per store) | the workspace tests **and** the whole Robot suite against an instrumented broker, once per store mode (memory, file, postgres, timescale), then merged | [`/reports/coverage/`](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/) with the per-store and merged HTML, the badge on the README, and the step summary's `lcov --list` table |
+
+A zero-count line in the merged view means no Rust test and no ETSI test
+procedure in any store mode ever ran it. `dev/coverage-attribution.py`
+splits the merged profile into lines only the unit tests reach, lines only
+the Robot suite reaches, and lines both reach, so a clause whose only
+witness is a unit test shows up as such (the [spec-statement
+table](conformance.md#spec-statement-coverage) is the clause-level view
+of the same question).
+
+## Reading the uncovered lines
+
+Uncovered code falls into two kinds, and they call for different work:
+
+- **Reachable but untested**: a request shape no test sends yet (an
+  optional URL parameter, a rarely combined pair of options, a tenant
+  header on an admin route). The fix is a test, usually a Robot TP with
+  the clause tag so the ledger picks it up.
+- **Needs fault injection**: the error arms behind a store that fails
+  mid-transaction, a peer that answers with a truncated body, a
+  notification endpoint that hangs. No request from the outside reaches
+  them on a healthy stack; they need a failing dependency (the
+  `nats_e2e` and `mqtt_notify` tests do this for their subsystems) or a
+  mock that misbehaves (`federation` tests use one).
+
+The weekly ratchet fails the job on a drop of more than one point against
+the published run, so a change that removes a test's reach is visible
+before the badge moves.
+
+## Reproducing locally
+
+```bash
+dev/etsi-coverage.sh memory        # one store mode, same script CI runs
+cargo llvm-cov --workspace --html   # the unit half only, target/llvm-cov/html
+```
+
+Both need `cargo-llvm-cov` and the `llvm-tools-preview` component.
