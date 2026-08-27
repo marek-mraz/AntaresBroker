@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 lock = threading.Lock()
 stats = {"posts": 0, "entities": 0, "bytes": 0, "gets": 0, "first": None, "last": None}
 subscriptions = set()
+by_sub = {}   # subscriptionId -> entities delivered (fire.sh folds per class)
+csr_gets = {}  # /csr/<k> -> calls (the federated-query stage)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,6 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         with lock:
             if sid:
                 subscriptions.add(sid)
+                by_sub[sid] = by_sub.get(sid, 0) + items
             stats["posts"] += 1
             stats["entities"] += items
             stats["bytes"] += n
@@ -64,17 +67,24 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 s = dict(stats)
                 s["subscriptions"] = len(subscriptions)
+                s["by_sub"] = dict(by_sub)
+                s["csr_gets"] = dict(csr_gets)
             span = (s["last"] - s["first"]) if s["first"] and s["last"] and s["last"] > s["first"] else 0
             s["posts_per_second"] = round(s["posts"] / span, 1) if span else None
             return self._json(200, s)
         with lock:
             stats["gets"] += 1
+            if self.path.startswith("/csr/"):
+                key = self.path.split("?", 1)[0]
+                csr_gets[key] = csr_gets.get(key, 0) + 1
         self._json(200, [])
 
     def do_DELETE(self):
         with lock:
             stats.update(posts=0, entities=0, bytes=0, gets=0, first=None, last=None)
             subscriptions.clear()
+            by_sub.clear()
+            csr_gets.clear()
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()

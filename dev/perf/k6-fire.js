@@ -4,12 +4,16 @@
 //
 //   k6 run -e RATE=1000 -e DURATION=60s -e TENANTS=10000 -e SUBS=100000 -e ENTITIES=100000000 dev/perf/k6-fire.js
 //
-// Every update sets speed to a new value above 100 on a loaded entity (the
-// same value again is no change and does not notify), so each subscription of
-// that tenant (`q=speed>100`, type Vehicle) fires once. Deletes take ids
-// from the top tenth of each tenant (a repeat is a 404, not a failure); a subscription
-// without entityDeleted in its triggers is silent on them. MQTT=1 marks
-// every tenth subscription as delivered elsewhere than the HTTP sink.
+// Entity n is a Vehicle / Building / Sensor by n % 3 (gen.py); an update
+// sets speed / temperature / value to a fresh number (the same value again
+// is no change and does not notify). Subscription k of tenant t = k % TENANTS
+// has p = k / TENANTS, filter class p % 8 with p as its parameter
+// (api-load.py SUB_CLASSES, every subscription of a tenant unique);
+// CLASS_FIRES below is the same rule, so the notifications due are known.
+// Deletes take ids from the top tenth of each tenant (a repeat is a 404,
+// not a failure); a subscription without entityDeleted in its triggers is
+// silent on them. MQTT=1 marks every tenth subscription as delivered
+// elsewhere than the HTTP sink.
 //
 // Env: BROKER_URL, RATE (1000), DURATION (60s), TENANTS, SUBS, ENTITIES,
 //      DELETE_PCT (10), MQTT (0|1).
@@ -52,12 +56,41 @@ function fail(r) {
 }
 const expected = new Counter("notifications_expected");
 const expectedHttp = new Counter("notifications_expected_http");
+const NCLASS = 8;
+// api-load.py SUB_CLASSES, in order: does an update of entity n (type
+// kind, new value v) fire a subscription of this class?
+const CLASS_FIRES = [
+  (kind, n, v, p) => kind === "Vehicle" && v > 100 + p,                    // vehicle-any q=speed>100+p
+  () => false,                                                             // vehicle-cold-attr watches brand
+  (kind, n, v, p) => kind === "Vehicle" && v > 500000000 + p * 1000000,    // vehicle-high-speed
+  (kind, n, v, p) => kind === "Vehicle" && n % 10 === p % 10,              // vehicle-id-tail idPattern .*{p%10}$
+  (kind, n, v, p) => kind === "Building" && v > 20 + p,                    // building-any q=temperature>20+p
+  (kind, n, v, p) => kind === "Sensor" && v > p,                           // sensor-any q=value>p
+  (kind, n, v, p) => kind === "Vehicle" && n % 1000 < 250 + 5 * p,         // vehicle-geo-west, edge at 250+5p
+  (kind, n, v, p) => SCOPE_FIRES[p % 4](n % 4),                            // any-scope SCOPE_Q[p%4]
+];
+// api-load.py SCOPE_Q: /region/north/#, /region/south/#, /region/north/urban,
+// /region/south/rural against gen.py scope_of (n % 4: north/urban,
+// north/rural, south/urban, south/rural)
+const SCOPE_FIRES = [(s) => s < 2, (s) => s >= 2, (s) => s === 0, (s) => s === 3];
+const expectedByClass = Array.from({ length: NCLASS }, (_, c) => new Counter(`notifications_expected_class${c}`));
+const TYPES = ["Vehicle", "Building", "Sensor"];
+const ATTR = { Vehicle: "speed", Building: "temperature", Sensor: "value" };
 
-// subscriptions of tenant t: k = t, t+TENANTS, … < SUBS (api-load.py's layout)
-function subsOf(t) {
+// subscriptions of tenant t: k = t, t+TENANTS, … < SUBS (api-load.py's
+// layout), class (k / TENANTS) % 8 — count the ones this update fires
+function fired(t, kind, n, v) {
   let all = 0, viaHttp = 0;
-  for (let k = t; k < SUBS; k += TENANTS) { all++; if (!(MQTT && k % 10 === 0)) viaHttp++; }
-  return [all, viaHttp];
+  const perClass = new Array(NCLASS).fill(0);
+  for (let k = t; k < SUBS; k += TENANTS) {
+    const p = Math.floor(k / TENANTS);
+    const c = p % NCLASS;
+    if (!CLASS_FIRES[c](kind, n, v, p)) continue;
+    all++;
+    if (MQTT && k % 10 === 0) continue; // delivered elsewhere than the HTTP sink
+    viaHttp++; perClass[c]++;
+  }
+  return [all, viaHttp, perClass];
 }
 
 export default function () {
@@ -76,18 +109,22 @@ export default function () {
     // gen.py numbers entities globally: tenant t owns t, t+TENANTS, t+2·TENANTS, …
     // pool index walks slot/period so consecutive deletes hit fresh ids
     const n = t + (UPDATE_IDS + (Math.floor(slot / period) % (PER_TENANT - UPDATE_IDS))) * TENANTS;
-    const r = http.del(`${BASE}/entities/urn:ngsi-ld:Vehicle:${tenant}:${n}`, null, { headers });
+    const r = http.del(`${BASE}/entities/urn:ngsi-ld:${TYPES[n % 3]}:${tenant}:${n}`, null, { headers });
     if (r.status === 204) deletes.add(1); else if (r.status !== 404) fail(r);
     return;
   }
   const n = t + (slot % UPDATE_IDS) * TENANTS;
-  const r = http.patch(`${BASE}/entities/urn:ngsi-ld:Vehicle:${tenant}:${n}/attrs`,
-    JSON.stringify({ speed: { type: "Property", value: 101 + Math.floor(Math.random() * 1e9) } }), { headers });
+  const kind = TYPES[n % 3];
+  // above every class threshold (speed>100, temperature>20) and fresh
+  const v = 101 + Math.floor(Math.random() * 1e9);
+  const body = {}; body[ATTR[kind]] = { type: "Property", value: v };
+  const r = http.patch(`${BASE}/entities/urn:ngsi-ld:${kind}:${tenant}:${n}/attrs`, JSON.stringify(body), { headers });
   if (r.status === 204) {
     updates.add(1);
-    const [all, viaHttp] = subsOf(t);
+    const [all, viaHttp, perClass] = fired(t, kind, n, v);
     expected.add(all);
     expectedHttp.add(viaHttp);
+    for (let c = 0; c < NCLASS; c++) if (perClass[c]) expectedByClass[c].add(perClass[c]);
   } else {
     fail(r);
   }

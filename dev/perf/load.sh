@@ -27,7 +27,7 @@ BROKER_URL="${BROKER_URL:-http://localhost:9090}"
 mkdir -p "$OUT"
 
 n() { python3 -c "import math,sys; print(max(int(sys.argv[2]), int(round($1 * float(sys.argv[1])))))" "$SCALE" "$2"; }
-ENTITIES=$(n 100000000 1); TENANTS=$(n 10000 10); SUBS=$(n 100000 1); CSRS=$(n 100000 1)
+ENTITIES=$(n 100000000 1); TENANTS=$(n 10000 10); SUBS="${SUBS:-$(n 100000 1)}"; CSRS="${CSRS:-$(n 100000 1)}"
 echo "scale $SCALE: $ENTITIES entities / $TENANTS tenants / $SUBS subscriptions / $CSRS registrations" | tee "$OUT/load.md"
 
 # the sink outlives this script: the measurements after the load need it
@@ -47,9 +47,9 @@ python3 dev/perf/gen.py --entities "$ENTITIES" --tenants "$TENANTS" > "$FIFO" & 
 stage "entities ($ENTITIES, bulk COPY)" bash -c "${BULK:-dev/bulk-load.sh} '$FIFO' | tail -1"
 wait $GEN; rm -f "$FIFO"
 
-stage "subscriptions ($SUBS)" python3 dev/perf/api-load.py subscriptions --count "$SUBS" --tenants "$TENANTS" \
+stage "subscriptions ($SUBS)" python3 dev/perf/api-load.py subscriptions --count "$SUBS" --tenants "$TENANTS" --out "$OUT" \
   --broker "$BROKER_URL" --sink "http://127.0.0.1:$SINK_PORT" ${MQTT_URL:+--mqtt "$MQTT_URL"}
-stage "registrations ($CSRS)" python3 dev/perf/api-load.py registrations --count "$CSRS" --tenants "$TENANTS" \
+stage "registrations ($CSRS)" python3 dev/perf/api-load.py registrations --count "$CSRS" --tenants "$TENANTS" --out "$OUT" \
   --broker "$BROKER_URL" --sink "http://127.0.0.1:$SINK_PORT"
 
 echo "loaded; sink stats at http://127.0.0.1:$SINK_PORT/stats" | tee -a "$OUT/load.md"

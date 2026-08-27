@@ -25,13 +25,22 @@ on:
       scale:
         description: fraction of the design targets (1.0 = 100M entities)
         default: "0.01"
+      subs:
+        description: subscriptions to load (every one a different filter)
+        default: "10000"
+      regs:
+        description: context source registrations to load (every one different)
+        default: "10000"
+      server_type:
+        description: Hetzner server type (ccx33 = 8 dedicated vCPU / 32 GB, ccx43 = 16 / 64, ccx53 = 32 / 128)
+        default: ccx33
 
 concurrency:
   group: scale-weekly
   cancel-in-progress: false
 
 env:
-  SERVER_TYPE: ccx33
+  SERVER_TYPE: ${{ inputs.server_type || 'ccx33' }}
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
   # full-scale data volume; a fractional dispatch shrinks it in the create
@@ -103,6 +112,8 @@ jobs:
     timeout-minutes: 55
     env:
       SCALE: ${{ inputs.scale || '0.01' }}
+      SUBS: ${{ inputs.subs || '10000' }}
+      CSRS: ${{ inputs.regs || '10000' }}
       DATABASE_URL: postgresql://antares:antares@127.0.0.1:5432/antares
       OUT: results/perf
     steps:
@@ -112,7 +123,7 @@ jobs:
         run: |
           curl -sL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
             | tar xz --strip-components=1 && mv k6 /usr/local/bin/
-          apt-get install -y -q postgresql-client
+          apt-get install -y -q postgresql-client python3-matplotlib
       - name: PostgreSQL on the volume, mosquitto
         run: |
           docker run -d --name pg --network host -v /mnt/data/pg:/var/lib/postgresql/data \
@@ -142,7 +153,7 @@ jobs:
             || { echo "broker never became healthy"; cat "$OUT/broker.log"; exit 1; }
           ./dev/perf/rss.sh start "$(cat broker.pid)" pg
       - name: Load the dataset
-        run: MQTT_URL=mqtt://127.0.0.1:1883 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/load.sh
+        run: SUBS=$SUBS CSRS=$CSRS MQTT_URL=mqtt://127.0.0.1:1883 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/load.sh
       - name: Measure at load
         run: |
           # request shapes and saturation against the loaded store, one tenant
@@ -152,8 +163,10 @@ jobs:
           ./dev/perf/startup.sh
           # do the subscriptions fire, and up to what rate: update + delete
           # streams over the loaded entities, delivered set against due
-          read -r ENTITIES TENANTS SUBS < <(python3 -c "s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10), n(100000,1))")
+          read -r ENTITIES TENANTS < <(python3 -c "s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10))")
           TENANTS=$TENANTS SUBS=$SUBS ENTITIES=$ENTITIES MQTT=1 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fire.sh
+          # federated queries across the loaded registrations (all at the sink)
+          TENANTS=$TENANTS BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fed.sh
       - name: Resident set verdict
         if: always()
         run: BROKER_MIB=500 PG_GIB=16 ./dev/perf/rss.sh stop
