@@ -97,4 +97,7 @@ CREATE INDEX i_entities_expires ON entities (expires_at) WHERE expires_at IS NOT
 ANALYZE entities;
 SQL
 
-echo "bulk load done: $(wc -l < "$FILE") lines offered (tenant from the line prefix, else '$TENANT')"
+# no line count of $FILE here: load.sh hands over a FIFO whose writer is
+# gone by now, and opening it again blocks forever (scale-weekly lost an
+# hour to exactly that); the INSERT counts above are the tally
+echo "bulk load done (tenant from the line prefix, else '$TENANT')"
