@@ -185,13 +185,6 @@ docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=postgres \
   -e ANTARES_DATABASE_URL=postgresql://antares:antares@db:5432/antares \
   ghcr.io/marek-mraz/antares-broker:latest
-
-# the WASM broker — the same bytes the browser playground loads, served
-# by the Node shim (memory or file store; no NATS/MQTT/Postgres by design)
-docker run --rm --network host \
-  -e ANTARES_STORE=file -e ANTARES_FILE=/data/antares.redb \
-  -v antares-wasm-data:/data \
-  ghcr.io/marek-mraz/antares-wasm-broker:dev 9090
 ```
 
 Or the local compose stacks (broker + PostGIS + NATS + mosquitto):

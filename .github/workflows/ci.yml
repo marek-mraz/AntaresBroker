@@ -10,10 +10,9 @@ name: ci
 # Both branches are merge-only — protection lives in GitHub rulesets
 # (dev/branch-protection.sh), not here.
 #
-# No wasm here: the browser bundle is built, ETSI-
-# tested (wasm-file cell) and published as antares-wasm-broker:dev by
-# full.yml — publish follows proof, and a commit that only touches
-# native code doesn't pay a wasm toolchain.
+# No wasm here: the browser bundle is built and ETSI-tested (wasm-file
+# cell) by full.yml, and a commit that only touches native code doesn't
+# pay a wasm toolchain.
 #
 # fmt + clippy + the full workspace suite run FIRST (the shared
 # workspace.yml). If any of them fail no image or bundle is built and the
