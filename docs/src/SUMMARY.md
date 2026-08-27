@@ -21,6 +21,7 @@
 - [Admin API](admin-api.md)
 - [Storage drivers](storage.md)
 - [Conformance](conformance.md)
+- [Performance](performance.md)
 - [Shared crates](shared-crates.md)
 - [API reference](api.md)
 

@@ -101,6 +101,7 @@ and built from `docs/src`:
 | [Admin API](docs/src/admin-api.md) | the `/q/*` routes |
 | [Storage drivers](docs/src/storage.md) | the store ladder, the temporal driver, measured costs, migrations |
 | [Conformance](docs/src/conformance.md) | the ledger, the matrix, how to run a suite, upstream raises |
+| [Performance](docs/src/performance.md) | the weekly shape and scale runs, how each number is produced, how to reproduce them |
 | [Shared crates](docs/src/shared-crates.md) | the parser, query engine and matcher as libraries for a gateway |
 | [Extending Antares](docs/src/extending.md) | features, the driver registry, hooks, adding a backend |
 | [Decisions](docs/adr/README.md) | the architecture decision records |
@@ -122,6 +123,13 @@ project does not have yet.
 | Postgres memory | < 16 GB, PostGIS required, **TimescaleDB optional** (two temporal modes) at the same full load |
 | Compliance | full NGSI-LD (ETSI CIM 009 V1.9.1), gated on the ETSI Robot suite + this repo's extension TPs |
 | HA | stateless broker pods, NATS JetStream, Postgres primary/replica |
+
+Measured against these rows by the weekly `scale-weekly` run on `master`
+(100 M entities, 10 k tenants, 100 k subscriptions, 100 k registrations on
+one rented box, resident set asserted against the budgets): the tables and
+CSVs of the newest run are at
+<https://antares-ngsi-ld-demo.marek-mraz.com/reports/perf/latest/>, and the
+[Performance](docs/src/performance.md) chapter says how each number is made.
 
 ## Architecture in one paragraph
 

@@ -11,7 +11,7 @@ same four part titles):
 |---|---|
 | tutorial | getting-started.md |
 | how-to | deployment.md, subscriptions.md, temporal.md, federation.md, operations.md, wasm.md |
-| reference | configuration.md, admin-api.md, storage.md, conformance.md, shared-crates.md, api.md (links to the ReDoc render and rustdoc) |
+| reference | configuration.md, admin-api.md, storage.md, conformance.md, performance.md, shared-crates.md, api.md (links to the ReDoc render and rustdoc) |
 | explanation | introduction.md, extending.md, ecosystem.md, decisions.md (the ADR index) |
 
 Gap check, last run against this mapping: every feature an operator can

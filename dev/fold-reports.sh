@@ -49,3 +49,20 @@ else
   echo '{"schemaVersion":1,"label":"coverage","message":"no recent run","color":"lightgrey"}' \
     > site/reports/coverage-badge.json
 fi
+
+# the performance runs: newest weekly (shapes) and scale (design targets)
+# bundles, each with its index.html + perf.json + CSVs
+for name in perf-weekly-results scale-weekly-results; do
+  pid=$(gh api "repos/$REPO/actions/artifacts?name=$name&per_page=1" \
+        -q '.artifacts[0].id' 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" != "null" ]; then
+    gh api "repos/$REPO/actions/artifacts/$pid/zip" > "$name.zip" \
+      && mkdir -p "site/reports/perf/latest/${name%-results}" \
+      && unzip -qo "$name.zip" -d "site/reports/perf/latest/${name%-results}" || true
+  fi
+done
+[ -d site/reports/perf/latest ] && cat > site/reports/perf/latest/index.html <<'HTML'
+<!doctype html><meta charset=utf-8><title>Antares performance</title>
+<p><a href="perf-weekly/">Weekly shapes (memory store)</a> · <a href="scale-weekly/">Scale run (design targets on PostgreSQL)</a></p>
+HTML
+true
