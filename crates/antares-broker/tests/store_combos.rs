@@ -52,7 +52,7 @@ fn start(port: u16, dir: &Path, store: &str, temporal: &str) -> Broker {
     start_with(port, dir, store, temporal, &[])
 }
 
-fn start_with(
+fn spawn_with(
     port: u16,
     dir: &Path,
     store: &str,
@@ -75,7 +75,17 @@ fn start_with(
     {
         cmd.env("ANTARES_DATABASE_URL", url);
     }
-    let mut broker = Broker(cmd.spawn().expect("spawn antares"));
+    Broker(cmd.spawn().expect("spawn antares"))
+}
+
+fn start_with(
+    port: u16,
+    dir: &Path,
+    store: &str,
+    temporal: &str,
+    extra: &[(&str, &str)],
+) -> Broker {
+    let mut broker = spawn_with(port, dir, store, temporal, extra);
     // Health from THIS child, not from whoever else holds the port: a child
     // that died (AddrInUse, bad config) is reported with its own stderr
     // instead of the test carrying on against a stranger's broker.
@@ -633,7 +643,7 @@ fn file_timescale_without_the_extension_is_fatal() {
     }
     let dir = tempdir("file-timescale-fatal");
     let port = free_port();
-    let mut broker = start(port, &dir, "file", "timescale");
+    let mut broker = spawn_with(port, &dir, "file", "timescale", &[]);
     let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
         if let Some(status) = broker.0.try_wait().expect("try_wait") {
