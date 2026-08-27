@@ -1,0 +1,178 @@
+name: scale-weekly
+
+# The design targets, measured: 100,000,000 entities over 10,000 tenants,
+# 100,000 subscriptions and 100,000 registrations on one PostgreSQL, the
+# broker's resident set against its 500 MiB budget and Postgres against
+# 16 GiB, plus the throughput, saturation and notification numbers at that
+# load. One rented dedicated-vCPU box with a volume for the database,
+# registered as an ephemeral runner, deleted afterwards; perf-janitor
+# sweeps a leaked server or volume by its expiry label.
+#
+# `scale` scales every count linearly (0.01 = a one-hour dry run of the
+# whole rig; 1.0 = the targets, several hours). The schedule runs 1.0 on
+# master only; dispatch picks. Report-only: budgets are asserted by
+# dev/perf/rss.sh at scale 1.0, nothing else gates.
+#
+# Secrets: HCLOUD_TOKEN (project-scoped Hetzner API token), RUNNER_PAT
+# (fine-grained, this repository, Administration read/write).
+
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: fraction of the design targets (1.0 = 100M entities)
+        default: "1.0"
+
+concurrency:
+  group: scale-weekly
+  cancel-in-progress: false
+
+env:
+  SERVER_TYPE: ccx43
+  SERVER_IMAGE: ubuntu-24.04
+  SERVER_LOCATION: hel1
+  VOLUME_GB: 500
+  TTL_HOURS: 10
+
+jobs:
+  create:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.mk.outputs.label }}
+      server_id: ${{ steps.mk.outputs.server_id }}
+      volume_id: ${{ steps.mk.outputs.volume_id }}
+    steps:
+      - name: Create server + volume, register the ephemeral runner
+        id: mk
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+        run: |
+          LABEL="scale-${{ github.run_id }}"
+          REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
+            | jq -r .token)
+          EXPIRY=$(( $(date +%s) + TTL_HOURS * 3600 ))
+          # last resort below the API: the box halts itself after the TTL
+          USERDATA=$(cat <<EOF
+          #cloud-config
+          package_update: true
+          packages: [docker.io, jq]
+          runcmd:
+            - shutdown -h +$(( TTL_HOURS * 60 ))
+            - mkfs.ext4 -F /dev/disk/by-id/scsi-0HC_Volume_VOLID || true
+            - mkdir -p /mnt/data && mount /dev/disk/by-id/scsi-0HC_Volume_VOLID /mnt/data
+            - |
+              mkdir -p /opt/runner && cd /opt/runner
+              curl -sL https://github.com/actions/runner/releases/download/v2.321.0/actions-runner-linux-x64-2.321.0.tar.gz | tar xz
+              export RUNNER_ALLOW_RUNASROOT=1
+              ./config.sh --url https://github.com/${{ github.repository }} \
+                --token $REG --ephemeral --unattended --labels $LABEL --name $LABEL
+              nohup ./run.sh >/var/log/runner.log 2>&1 &
+          EOF
+          )
+          VOL=$(jq -n --arg name "$LABEL" --arg loc "$SERVER_LOCATION" --arg exp "$EXPIRY" \
+            '{name:$name, size:'"$VOLUME_GB"', location:$loc, format:"ext4", labels:{role:"perf-runner", expiry:$exp}}' \
+            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
+              https://api.hetzner.cloud/v1/volumes)
+          VOLID=$(echo "$VOL" | jq -r .volume.id)
+          USERDATA=${USERDATA//VOLID/$VOLID}
+          RESP=$(jq -n --arg name "$LABEL" --arg type "$SERVER_TYPE" --arg image "$SERVER_IMAGE" \
+            --arg loc "$SERVER_LOCATION" --arg ud "$USERDATA" --arg exp "$EXPIRY" --argjson vol "$VOLID" \
+            '{name:$name, server_type:$type, image:$image, location:$loc, user_data:$ud,
+              volumes:[$vol], automount:false, labels:{role:"perf-runner", expiry:$exp}}' \
+            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
+              https://api.hetzner.cloud/v1/servers)
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "server_id=$(echo "$RESP" | jq -r .server.id)" >> "$GITHUB_OUTPUT"
+          echo "volume_id=$VOLID" >> "$GITHUB_OUTPUT"
+          PRICE=$(curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" https://api.hetzner.cloud/v1/server_types \
+            | jq -r ".server_types[] | select(.name==\"$SERVER_TYPE\") | .prices[] | select(.location==\"$SERVER_LOCATION\") | .price_hourly.gross")
+          echo "cost cap: $SERVER_TYPE at $PRICE/h x ${TTL_HOURS}h + ${VOLUME_GB} GB volume" >> "$GITHUB_STEP_SUMMARY"
+
+  scale:
+    needs: create
+    runs-on: ${{ needs.create.outputs.label }}
+    timeout-minutes: 540
+    env:
+      SCALE: ${{ inputs.scale || '1.0' }}
+      DATABASE_URL: postgresql://antares:antares@127.0.0.1:5432/antares
+      OUT: results/perf
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install k6 and the Postgres client
+        run: |
+          curl -sL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
+            | tar xz --strip-components=1 && mv k6 /usr/local/bin/
+          apt-get install -y -q postgresql-client
+      - name: PostgreSQL on the volume, mosquitto
+        run: |
+          docker run -d --name pg --network host -v /mnt/data/pg:/var/lib/postgresql/data \
+            -e POSTGRES_USER=antares -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
+            --shm-size=2g ghcr.io/baosystems/postgis:17-3.5 \
+            -c shared_buffers=4GB -c work_mem=64MB -c maintenance_work_mem=2GB \
+            -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c max_connections=300
+          docker run -d --name mqtt --network host -v "$PWD/compose-files/mosquitto:/mosquitto/config:ro" eclipse-mosquitto:2
+          until docker exec pg pg_isready -q; do sleep 1; done
+      - name: Build the release broker
+        run: cargo build --release --locked -p antares-broker
+      - name: Start the broker under the resident-set sampler
+        run: |
+          ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_MAX_CONNECTIONS=200 ANTARES_HTTP_PORT=9090 \
+            nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
+          echo $! > broker.pid
+          until curl -sf -o /dev/null http://127.0.0.1:9090/q/health; do sleep 0.5; done
+          ./dev/perf/rss.sh start "$(cat broker.pid)" pg
+      - name: Load the dataset
+        run: MQTT_URL=mqtt://127.0.0.1:1883 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/load.sh
+      - name: Measure at load
+        run: |
+          # request shapes and saturation against the loaded store, one tenant
+          # per request (k6 picks TENANT); startup rows for the postgres store
+          TENANT=t7 BIN=target/release/antares PORT=9471 ./dev/perf/shapes.sh
+          STORE=postgres PORT=9473 ./dev/perf/saturate.sh
+          ./dev/perf/startup.sh
+          # notification throughput: a 1,000 rps update stream against the
+          # 100k subscriptions, delivered/s and lag from the sink
+          curl -s -X DELETE http://127.0.0.1:9800/stats
+          k6 run --quiet -e BROKER_URL=http://127.0.0.1:9090 -e SHAPE=write -e STEP=1000 -e STAGES=1 -e STAGE=60s \
+            dev/perf/k6-saturate.js || true
+          curl -s http://127.0.0.1:9800/stats | tee "$OUT/notifications.json"
+      - name: Resident set verdict
+        if: always()
+        run: BROKER_MIB=500 PG_GIB=16 ./dev/perf/rss.sh stop
+      - name: Fold the tables into one report
+        if: always()
+        run: |
+          python3 dev/perf/report.py "$OUT"
+          { echo "## Scale run (scale $SCALE, ${{ env.SERVER_TYPE }})"; python3 dev/perf/report.py "$OUT" --readme; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-weekly-results
+          path: results/perf
+          retention-days: 90
+
+  delete:
+    needs: [create, scale]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the server and its volume
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+        run: |
+          ID="${{ needs.create.outputs.server_id }}"; VOL="${{ needs.create.outputs.volume_id }}"
+          [ -n "$ID" ] && [ "$ID" != "null" ] && curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers/$ID" || true
+          # a volume detaches only once its server is gone
+          for _ in $(seq 30); do
+            [ -n "$VOL" ] && [ "$VOL" != "null" ] || exit 0
+            curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/volumes/$VOL" && exit 0
+            sleep 10
+          done

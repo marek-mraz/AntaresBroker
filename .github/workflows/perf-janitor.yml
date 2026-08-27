@@ -34,6 +34,19 @@ jobs:
                   echo "$id" >> leaked.txt
                 fi
               done
+          # volumes carry the same labels (scale-weekly); a volume outlives
+          # its server when the delete job never ran
+          curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/volumes?label_selector=role=perf-runner" \
+            | jq -r '.volumes[] | "\(.id) \(.labels.expiry // 0) \(.name)"' \
+            | while read -r id expiry name; do
+                if [ "$expiry" -lt "$NOW" ]; then
+                  echo "leaked volume $name ($id, expired $expiry) — deleting"
+                  curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+                    "https://api.hetzner.cloud/v1/volumes/$id"
+                  echo "volume $id" >> leaked.txt
+                fi
+              done
           if [ -s leaked.txt ]; then
             echo "leaked servers were swept — the primary teardown failed"
             exit 1
