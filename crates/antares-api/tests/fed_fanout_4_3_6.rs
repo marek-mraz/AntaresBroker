@@ -109,6 +109,11 @@ async fn fanout_is_concurrent_and_complete() {
     for id in ids {
         assert_eq!(text.matches(id).count(), 1, "no duplicate for {id}");
     }
+    // the wall-clock proof is meaningless under a sanitizer: 371 tests
+    // sharing one slowed runner took a 500 ms fan-out to 9 s
+    if std::env::var_os("ANTARES_TEST_SANITIZER").is_some() {
+        return;
+    }
     assert!(
         elapsed < std::time::Duration::from_millis(1400),
         "three 500 ms sources must fan out concurrently, took {elapsed:?}"
