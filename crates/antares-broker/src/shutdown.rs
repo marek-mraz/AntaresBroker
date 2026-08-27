@@ -98,11 +98,16 @@ pub async fn drain(
     flush_outbox: bool,
 ) {
     let started = Instant::now();
-    while inflight.load(Ordering::Relaxed) > 0 {
+    // A request is not over when its response is: the remote leg of a
+    // distributed subscription, an initial Context Source notification and a
+    // forwarded notification all run as tasks after the 2xx, and a stop that
+    // dropped them left the subscription chain half-built on every roll.
+    while inflight.load(Ordering::Relaxed) > 0 || antares_api::background_tasks() > 0 {
         if started.elapsed() >= deadline {
             tracing::warn!(
-                "drain deadline {deadline:?} hit with {} connection(s) still open — closing anyway",
-                inflight.load(Ordering::Relaxed)
+                "drain deadline {deadline:?} hit with {} connection(s) and {} task(s) still open — closing anyway",
+                inflight.load(Ordering::Relaxed),
+                antares_api::background_tasks()
             );
             break;
         }
@@ -226,6 +231,29 @@ mod tests {
 
     fn mem_store() -> antares_sql::store::any::AnyStore {
         antares_sql::store::any::AnyStore::Mem(antares_sql::store::Store::default())
+    }
+
+    /// A request's follow-up work (the remote leg of a distributed
+    /// subscription, a forwarded notification) runs after its response; the
+    /// drain waits for it like it waits for the request itself.
+    #[test]
+    fn drain_waits_for_request_born_tasks() {
+        rt().block_on(async {
+            let inflight = Arc::new(AtomicUsize::new(0));
+            let done = Arc::new(AtomicBool::new(false));
+            let d = done.clone();
+            antares_api::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                d.store(true, Ordering::SeqCst);
+            });
+            let store = mem_store();
+            drain(&inflight, &store, Duration::from_secs(5), false).await;
+            assert!(
+                done.load(Ordering::SeqCst),
+                "drain returned before the task finished"
+            );
+            assert_eq!(antares_api::background_tasks(), 0);
+        });
     }
 
     /// Nothing in flight = nothing to wait for: the drain must not sit out

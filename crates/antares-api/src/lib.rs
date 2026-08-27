@@ -35,7 +35,32 @@ pub use state::{AppState, TemporalRecord};
 /// only the executor differs. Send is required natively (worker threads) and
 /// meaningless on single-threaded wasm.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn spawn<F>(fut: F)
+pub fn spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    BACKGROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tokio::spawn(async move {
+        fut.await;
+        BACKGROUND.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+/// Work a request left behind after its response — the remote leg of a
+/// distributed subscription, an initial Context Source notification, a
+/// forwarded notification, a retry. Counted so a shutdown drain waits for
+/// it: a rolling update that killed these tasks left the chain half-built.
+static BACKGROUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Request-born tasks still running.
+pub fn background_tasks() -> usize {
+    BACKGROUND.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A task that lives as long as the process (the matcher drain, the
+/// interval tick): never counted, or a drain would wait on it forever.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn spawn_loop<F>(fut: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -43,7 +68,15 @@ where
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn spawn<F>(fut: F)
+pub(crate) fn spawn_loop<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn spawn<F>(fut: F)
 where
     F: std::future::Future<Output = ()> + 'static,
 {

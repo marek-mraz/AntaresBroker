@@ -424,7 +424,7 @@ pub fn wire(state: &mut AppState) {
             }
         }));
     let st = state.clone();
-    crate::spawn(async move {
+    crate::spawn_loop(async move {
         while let Some(mut batch) = rx.recv().await {
             // everything already queued behind it rides the same pass
             while batch.len() < CHANGE_BATCH {
@@ -438,7 +438,7 @@ pub fn wire(state: &mut AppState) {
         }
     });
     let st = state.clone();
-    crate::spawn(async move {
+    crate::spawn_loop(async move {
         loop {
             // Tokio's timer natively; the browser's own timer on wasm32
             // (tokio time never fires without a reactor there).
