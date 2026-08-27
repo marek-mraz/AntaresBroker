@@ -795,12 +795,16 @@ pub fn check_proxied_overlap(
 /// conflict-free set and both land, leaving the two exclusive registrations
 /// for one Entity ID and Attribute the clause forbids. Every registration
 /// write holds it for the whole check-then-write sequence.
-static REGISTRATION_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// Async on purpose: the Postgres driver answers a store call by parking
+/// the calling thread on the runtime's I/O driver, and a waiter blocked in
+/// a plain `Mutex::lock` would hold a runtime worker hostage; once the
+/// worker that owns the I/O driver is among the waiters, the holder never
+/// gets its query result and the whole broker stops accepting.
+static REGISTRATION_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn registration_write_lock() -> std::sync::MutexGuard<'static, ()> {
-    REGISTRATION_WRITE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+async fn registration_write_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    REGISTRATION_WRITE.lock().await
 }
 
 /// Output shaping: compact IRIs.
@@ -897,7 +901,7 @@ pub async fn create_registration(
         };
         validate_auxiliary_ops(&norm)?;
         let doc = {
-            let _serialized = registration_write_lock();
+            let _serialized = registration_write_lock().await;
             check_entity_conflict(&st, &tenant, &norm)?;
             check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
             let ts = now_iso();
@@ -1490,7 +1494,7 @@ pub async fn update_registration(
         // mutate then writes — the pair is atomic or a concurrent write can
         // invalidate the checks between them.
         let (before, res) = {
-            let _serialized = registration_write_lock();
+            let _serialized = registration_write_lock().await;
             let before = st.store.get(&tenant, Kind::Registration, &id)?;
             if let Some(prev) = before.as_ref().and_then(Value::as_object) {
                 // validate the post-merge document (4.3.6.3) BEFORE mutating:
