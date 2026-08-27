@@ -25,6 +25,7 @@ TABLES = [
     ("saturate.md", "Saturation knee"),
     ("rss.md", "Resident set under load"),
     ("load.md", "Dataset load"),
+    ("fire.md", "Subscriptions under an update stream"),
     ("noise-profile.txt", "Noise profile"),
 ]
 

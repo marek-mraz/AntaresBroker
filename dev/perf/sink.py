@@ -3,7 +3,8 @@
 
     python3 dev/perf/sink.py 9800
 
-Counts every POST (notifications from subscriptions) and answers every
+Counts every POST (notifications from subscriptions), the entities in
+their data arrays and the distinct subscriptionIds they carry and answers every
 GET with an empty entity list (a registered context source that holds
 nothing, so forwarded queries cost the broker the fan-out and nothing
 else). `GET /stats` returns the counters as JSON; `DELETE /stats` resets
@@ -17,7 +18,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 lock = threading.Lock()
-stats = {"posts": 0, "bytes": 0, "gets": 0, "first": None, "last": None}
+stats = {"posts": 0, "entities": 0, "bytes": 0, "gets": 0, "first": None, "last": None}
+subscriptions = set()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,10 +38,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(n)
+        body = self.rfile.read(n)
         now = time.time()
+        sid, items = None, 0
+        try:
+            doc = json.loads(body)
+            sid = doc.get("subscriptionId")
+            items = len(doc.get("data") or [])
+        except Exception:
+            pass
         with lock:
+            if sid:
+                subscriptions.add(sid)
             stats["posts"] += 1
+            stats["entities"] += items
             stats["bytes"] += n
             stats["first"] = stats["first"] or now
             stats["last"] = now
@@ -51,6 +63,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/stats":
             with lock:
                 s = dict(stats)
+                s["subscriptions"] = len(subscriptions)
             span = (s["last"] - s["first"]) if s["first"] and s["last"] and s["last"] > s["first"] else 0
             s["posts_per_second"] = round(s["posts"] / span, 1) if span else None
             return self._json(200, s)
@@ -60,7 +73,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         with lock:
-            stats.update(posts=0, bytes=0, gets=0, first=None, last=None)
+            stats.update(posts=0, entities=0, bytes=0, gets=0, first=None, last=None)
+            subscriptions.clear()
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()

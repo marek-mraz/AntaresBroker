@@ -140,12 +140,11 @@ jobs:
           TENANT=t7 BIN=target/release/antares PORT=9471 ./dev/perf/shapes.sh
           STORE=postgres PORT=9473 ./dev/perf/saturate.sh
           ./dev/perf/startup.sh
-          # notification throughput: a 1,000 rps update stream against the
-          # 100k subscriptions, delivered/s and lag from the sink
-          curl -s -X DELETE http://127.0.0.1:9800/stats
-          k6 run --quiet -e BROKER_URL=http://127.0.0.1:9090 -e SHAPE=write -e STEP=1000 -e STAGES=1 -e STAGE=60s \
-            dev/perf/k6-saturate.js || true
-          curl -s http://127.0.0.1:9800/stats | tee "$OUT/notifications.json"
+          # do the subscriptions fire, and up to what rate: update + delete
+          # streams over the loaded entities, delivered set against due
+          read -r ENTITIES TENANTS SUBS < <(python3 -c "
+s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10), n(100000,1))")
+          TENANTS=$TENANTS SUBS=$SUBS ENTITIES=$ENTITIES MQTT=1 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fire.sh
       - name: Resident set verdict
         if: always()
         run: BROKER_MIB=500 PG_GIB=16 ./dev/perf/rss.sh stop
