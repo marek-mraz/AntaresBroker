@@ -58,5 +58,6 @@ with open(dst, "w") as f:
         elif first_bad is None: first_bad = r
 print(f"| {store} | {shape} | {knee or '—'} | {f'{knee_p99:.1f} ms' if knee_p99 is not None else '—'} | {first_bad or 'none reached'} |")
 EOF
+    rm -f "$OUT/saturate-$shape.jsonl"   # every request as a JSON line: hundreds of MB, folded into the CSV above
   done
 } | tee "$OUT/saturate.md"

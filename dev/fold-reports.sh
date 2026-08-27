@@ -63,7 +63,8 @@ for name in perf-weekly-results scale-weekly-results; do
   if [ -n "$pid" ] && [ "$pid" != "null" ]; then
     gh api "repos/$REPO/actions/artifacts/$pid/zip" > "$name.zip" \
       && mkdir -p "site/reports/perf/latest/${name%-results}" \
-      && unzip -qo "$name.zip" -d "site/reports/perf/latest/${name%-results}" || true
+      && unzip -qo "$name.zip" -d "site/reports/perf/latest/${name%-results}" \
+        'index.html' 'perf.json' '*.md' '*.csv' '*.txt' || true   # not the broker logs and raw k6 output
   fi
 done
 # the index exists even before the first bundle: a missing run shows as a
