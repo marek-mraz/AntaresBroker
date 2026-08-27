@@ -166,7 +166,7 @@ pub fn compact_entity_shallow(internal: &Value, ctx: &Context) -> Value {
 /// 4.5.4 Simplified Representation: the VocabProperty form is the single-key
 /// object {"vocab": …} (Example 6) whose IRI(s) compact back to terms, exactly
 /// as on the normalized path; multi-instance attributes are the {"dataset":
-/// {<datasetId>|"@none": <simplified>}} map (Example 2), compacted per
+/// `{<datasetId>|"@none": <simplified>}}` map (Example 2), compacted per
 /// instance. All other simplified values are plain JSON and stay verbatim.
 fn compact_simplified_value(v: &Value, ctx: &Context) -> Value {
     let Some(o) = v.as_object() else {

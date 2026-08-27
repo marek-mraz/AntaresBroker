@@ -361,7 +361,7 @@ pub fn normalize_subscription(
                     }
                 }
                 // Table 5.2.15-1: cooldown and timeout are Numbers "Greater
-                // than 0" (V-16/V-17)
+                // than 0"
                 for key in ["cooldown", "timeout"] {
                     if let Some(v) = ep.get(key) {
                         v.as_f64().filter(|n| *n > 0.0).ok_or_else(|| {
@@ -882,7 +882,8 @@ pub async fn delete(
 // axum route fns
 
 macro_rules! route4 {
-    ($create:ident, $retrieve:ident, $list:ident, $update:ident, $delete:ident, $kind:expr) => {
+    ($create:ident, $retrieve:ident, $list:ident, $update:ident, $delete:ident, $kind:expr, $c:literal) => {
+        #[doc = concat!("HTTP handler for ", $c, " Create: the axum seam over [`create`].")]
         pub async fn $create(
             State(st): State<AppState>,
             CleanParams(params): CleanParams,
@@ -893,6 +894,7 @@ macro_rules! route4 {
                 .await
                 .unwrap_or_else(|e| e.into_response())
         }
+        #[doc = concat!("HTTP handler for ", $c, " Retrieve: the axum seam over [`retrieve`].")]
         pub async fn $retrieve(
             State(st): State<AppState>,
             Path(id): Path<String>,
@@ -903,6 +905,7 @@ macro_rules! route4 {
                 .await
                 .unwrap_or_else(|e| e.into_response())
         }
+        #[doc = concat!("HTTP handler for ", $c, " Query: the axum seam over [`list`].")]
         pub async fn $list(
             State(st): State<AppState>,
             CleanParams(params): CleanParams,
@@ -912,6 +915,7 @@ macro_rules! route4 {
                 .await
                 .unwrap_or_else(|e| e.into_response())
         }
+        #[doc = concat!("HTTP handler for ", $c, " Update: the axum seam over [`update`].")]
         pub async fn $update(
             State(st): State<AppState>,
             Path(id): Path<String>,
@@ -923,6 +927,7 @@ macro_rules! route4 {
                 .await
                 .unwrap_or_else(|e| e.into_response())
         }
+        #[doc = concat!("HTTP handler for ", $c, " Delete: the axum seam over [`delete`].")]
         pub async fn $delete(
             State(st): State<AppState>,
             Path(id): Path<String>,
@@ -942,7 +947,8 @@ route4!(
     query_subscriptions,
     update_subscription,
     delete_subscription,
-    Kind::Subscription
+    Kind::Subscription,
+    "5.8 Subscription"
 );
 route4!(
     create_csource_subscription,
@@ -950,7 +956,8 @@ route4!(
     query_csource_subscriptions,
     update_csource_subscription,
     delete_csource_subscription,
-    Kind::CSourceSubscription
+    Kind::CSourceSubscription,
+    "5.11 Context Source Registration Subscription"
 );
 
 #[cfg(test)]
@@ -1026,7 +1033,7 @@ mod tests {
     }
 
     /// Table 5.2.14.1-1 p.120: "showChanges cannot be true in case format is
-    /// keyValues" (audit V-20). "simplified" is the table's declared synonym.
+    /// keyValues". "simplified" is the table's declared synonym.
     #[test]
     fn show_changes_with_key_values_is_rejected() {
         let ctx = Loader::new().core();
@@ -1059,7 +1066,7 @@ mod tests {
     }
 
     /// Table 5.2.14.1-1 p.119: "Empty array (0 length) is not allowed" on
-    /// notification.attributes / pick / omit (audit V-18).
+    /// notification.attributes / pick / omit.
     #[test]
     fn empty_projection_arrays_are_rejected() {
         let ctx = Loader::new().core();

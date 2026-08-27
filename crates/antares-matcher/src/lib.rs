@@ -109,7 +109,9 @@ pub fn geo_params(g: &Map<String, Value>) -> std::collections::HashMap<String, S
     params
 }
 
-/// q / scopeQ / geoQ conditions against an internal entity doc.
+/// 5.8.6 notification matching: the subscription's q (4.9), scopeQ (4.19)
+/// and geoQ (4.10) conditions against an internal entity doc; all present
+/// conditions must hold.
 pub fn conditions_match(sub: &Value, doc: &Value, ctx: &Context, lookup: EntityLookup) -> bool {
     if let Some(q) = sub_str(sub, "q") {
         // q values in subscription bodies may be percent-encoded (4.9, 046_05)

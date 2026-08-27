@@ -369,7 +369,7 @@ enum LocalOutcome {
     Ok,
 }
 
-/// V-15: a distributed /attrs operation answers 204, 404, or **207 with an
+/// 6.3.17: a distributed /attrs operation answers 204, 404, or **207 with an
 /// UpdateResult** (Tables 6.6.3.1-2, 6.6.3.2-2, 6.7.3.1-2, 6.7.3.2-2,
 /// 6.7.3.3-2; 5.2.18 applies "regardless of whether local or distributed")
 /// — never the batch {success, errors} shape. Per-registration failures are
@@ -1756,7 +1756,7 @@ mod update_result_tests {
         serde_json::from_slice(&bytes).expect("json")
     }
 
-    /// V-15: Tables 6.6.3.1-2 / 6.7.3.1-2 — the /attrs 207 body is an
+    /// Tables 6.6.3.1-2 / 6.7.3.1-2 — the /attrs 207 body is an
     /// UpdateResult (updated: String[], notUpdated: NotUpdatedDetails[] with
     /// mandatory attributeName+reason, optional registrationId), never the
     /// batch {success, errors} shape.

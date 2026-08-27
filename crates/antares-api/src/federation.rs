@@ -821,7 +821,7 @@ fn merge_same_source(regs: Vec<FedReg>) -> Vec<FedReg> {
 /// part of contextSourceInfo"), connection/binding-managed headers cannot be
 /// overridden ("shall be ignored"), and the 4.3.6.6 processed keys (accept,
 /// contentType, jsonldContext, ngsildConformance) are TRANSFORMED by
-/// `forward` (V-29) rather than passed through raw
+/// `forward` rather than passed through raw
 /// would corrupt negotiation instead.
 const CSI_SKIP: &[&str] = &[
     "ngsild-tenant",
@@ -948,7 +948,7 @@ pub async fn forward(
             return (504, Value::Null, Vec::new());
         }
     }
-    // 4.3.6.6 (V-29): the four contextSourceInfo keys with processing
+    // 4.3.6.6: the four contextSourceInfo keys with processing
     // semantics. Values were validated at registration time (5.9.2).
     let csi_get = |key: &str| {
         reg.csi
@@ -1671,7 +1671,7 @@ pub async fn fed_retrieve(
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
         warnings.extend(peer_warns);
-        // V-14: abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
+        // Abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
         // as a failed overall response; 404-with-no-data is normal.
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
@@ -1960,7 +1960,7 @@ pub async fn fed_query(
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
         warnings.extend(peer_warns);
-        // V-14: same NGSILD-Warning classification as fed_retrieve (6.3.17)
+        // Same NGSILD-Warning classification as fed_retrieve (6.3.17)
         if let Some((code, text)) = read_warning(status, &body) {
             warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
         }
@@ -2620,7 +2620,7 @@ mod tests {
         assert!(via_loop(&hdrs(Some("HTTP/1.1 b1")), "b1"));
         assert!(
             !via_loop(&hdrs(Some("1.1 sub-b1")), "b1"),
-            "suffix must not match — this was the V-30 false positive"
+            "suffix must not match — a former suffix-match false positive"
         );
         assert!(!via_loop(&hdrs(Some("1.1 b10")), "b1"));
         assert!(!via_loop(&hdrs(None), "b1"));

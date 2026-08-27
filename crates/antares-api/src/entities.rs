@@ -2821,7 +2821,7 @@ pub async fn replace_entity(
 // ---------- Entity Ordering (4.23) ----------
 
 /// Sort by an orderBy spec: comma-separated `member[;asc|desc]`.
-/// 4.23 Entity Ordering: orderBy = AttrName[;direction] *(, …) with asc
+/// 4.23 Entity Ordering: orderBy = `AttrName[;direction] *(, …)` with asc
 /// (default) / desc / dist-asc / dist-desc (4.23.3); distance keys need the
 /// orderFrom reference coordinates (orderGeometry, default Point) and apply
 /// to GeoProperties — non-GeoProperties fall back to value order after them

@@ -2358,7 +2358,7 @@ pub(crate) async fn replay_dead_letter(st: &AppState, letter: &Value) -> Result<
 }
 
 /// Endpoint URIs may carry credentials in the authority's userinfo
-/// (mqtt[s]://username:password@host, clause 7.1) — strip everything
+/// (`mqtt[s]://username:password@host`, clause 7.1) — strip everything
 /// between the `//` and the authority's `@` before the URI reaches a log.
 pub(crate) fn redact_userinfo(uri: &str) -> String {
     if let Some(scheme_end) = uri.find("//") {

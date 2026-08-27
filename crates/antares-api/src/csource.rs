@@ -250,7 +250,7 @@ pub fn normalize_registration(
                                 .into(),
                         ));
                     };
-                    // 4.3.6.6 (V-29): the four processed keys have constrained
+                    // 4.3.6.6: the four processed keys have constrained
                     // value spaces — reject bad ones at registration, not at
                     // first forward
                     let sval = value.as_str();
@@ -459,8 +459,8 @@ pub fn normalize_registration(
 /// relate to specific Attributes found on a single Entity. Thus, the
 /// registration shall define both: an entity id (i.e. an id pattern or Entity
 /// type defining a group of entities is not supported for exclusive
-/// registrations) [and] Attributes."
-/// ISO 8601 duration (5.2.9 refreshRate): P[nY][nM][nW][nD][T[nH][nM][nS]],
+/// registrations) `[and]` Attributes."
+/// ISO 8601 duration (5.2.9 refreshRate): `P[nY][nM][nW][nD][T[nH][nM][nS]]`,
 /// at least one component, digits (fraction allowed in seconds).
 fn valid_iso8601_duration(s: &str) -> bool {
     let Some(rest) = s.strip_prefix('P') else {

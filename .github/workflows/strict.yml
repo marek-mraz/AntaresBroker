@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: dev/spdx-check.sh
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-machete

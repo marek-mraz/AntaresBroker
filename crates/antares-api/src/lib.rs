@@ -3739,7 +3739,7 @@ mod tests {
         );
     }
 
-    /// V-27 — 4.5.19.1 Table -1 + 5.7.4.4 p.211: string-valued Properties
+    /// 4.5.19.1 Table -1 + 5.7.4.4 p.211: string-valued Properties
     /// aggregate min/max lexicographically ("first/last value in
     /// lexicographical order"); a method the datatype is not eligible for
     /// ("sum" on strings is N/A) raises InvalidRequest; and numeric folds

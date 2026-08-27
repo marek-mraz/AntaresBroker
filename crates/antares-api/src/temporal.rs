@@ -635,7 +635,7 @@ fn window(
     w
 }
 
-/// Content-Range: date-time <start>-<end>/<size> (Scorpio-parity semantics).
+/// `Content-Range: date-time <start>-<end>/<size>` (Scorpio-parity semantics).
 fn content_range(
     truncated: bool,
     ts_min: Option<&str>,
@@ -779,7 +779,7 @@ fn present_temporal(
                             } else if let Some(l) = inst.get("valueList") {
                                 // 4.5.9 p.63 EXAMPLE 3: the pair's first element
                                 // is the BARE ordered array, not a {"valueList"}
-                                // wrapper (audit V-24) — unlike languageMap/
+                                // wrapper — unlike languageMap/
                                 // json/vocab, which the clause does wrap
                                 l.clone()
                             } else if let Some(l) = inst.get("objectList") {
@@ -1074,7 +1074,7 @@ fn ts_float(v: &Value) -> Value {
     }
 }
 
-/// Aggregated representation (4.5.19): attr → {type, <method>: [[v,start,end]]}.
+/// Aggregated representation (4.5.19): attr → `{type, <method>: [[v,start,end]]}`.
 /// Aggregation datatype class per 4.5.19.1 (Tables -1, -2, -3). Booleans
 /// count as numbers (1/0, table NOTE); DateTime/Date and plain strings share
 /// the lexicographic min/max column; Time additionally supports avg.
@@ -1326,7 +1326,7 @@ fn render_aggregated(
 }
 
 /// One bucket, one method — per-class semantics from Tables 4.5.19.1-1/2/3.
-/// Never emits an out-of-range float (audit V-27: the old fold seeded with
+/// Never emits an out-of-range float (the old fold seeded with
 /// f64::INFINITY, which serde_json serializes as null).
 fn aggregate_bucket(method: &str, class: AggrClass, vals: &[&Value]) -> Value {
     let nums: Vec<f64> = vals.iter().filter_map(|v| numeric_of(class, v)).collect();

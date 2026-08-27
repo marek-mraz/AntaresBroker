@@ -211,7 +211,7 @@ jobs:
         if: matrix.crate == 'antares-store'
       # The public surface a gateway author reads: every item documented
       # (#![deny(missing_docs)] in the crate) and no broken intra-doc link.
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p ${{ matrix.crate }}
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items -p ${{ matrix.crate }}
       - name: Dependency direction
         run: |
           if cargo tree --locked -p ${{ matrix.crate }} -e normal --prefix none \
