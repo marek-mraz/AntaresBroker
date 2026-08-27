@@ -69,7 +69,8 @@ fn start_with(
         // the broker log is the only witness of a failed temporal drain
         .stdout(std::fs::File::create(dir.join("antares.log")).expect("log file"))
         .stderr(std::fs::File::create(dir.join("antares.err")).expect("err file"));
-    if let Some(url) = db_url() {
+    if let Some(url) = db_url().filter(|_| !extra.iter().any(|(k, _)| *k == "ANTARES_DATABASE_URL"))
+    {
         cmd.env("ANTARES_DATABASE_URL", url);
     }
     Broker(cmd.spawn().expect("spawn antares"))
@@ -327,6 +328,34 @@ async fn pg_rows(url: &str, row: &str) -> (i64, i64) {
     (entities, instances)
 }
 
+/// `url` with its database swapped for `name`, created on first use.
+fn own_database(url: &str, name: &str) -> String {
+    use antares_sql::sqlx;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt")
+        .block_on(async {
+            let pool = antares_sql::store::pg::connect(url, 1)
+                .await
+                .expect("connect");
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("pg_database");
+            if !exists {
+                sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                    .execute(&pool)
+                    .await
+                    .expect("create database");
+            }
+        });
+    let (head, _) = url.rsplit_once('/').expect("database url");
+    format!("{head}/{name}")
+}
+
 fn pg_rows_blocking(url: &str, row: &str) -> (i64, i64) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -512,7 +541,10 @@ fn file_timescale() {
 /// instance older than the horizon is pruned while the entity stays.
 #[test]
 fn file_postgres_retention_prunes_the_temporal_half() {
-    let url = require_db!();
+    // Retention is cross-tenant service work: a one-day horizon with a
+    // one-second sweep would reap every sibling test's 2026-01-01 instances
+    // out of the shared database, so this broker gets a database of its own.
+    let url = own_database(&require_db!(), "antares_retention");
     let row = "file-postgres-retention";
     let dir = tempdir(row);
     let port = free_port();
@@ -522,6 +554,7 @@ fn file_postgres_retention_prunes_the_temporal_half() {
         "file",
         "postgres",
         &[
+            ("ANTARES_DATABASE_URL", &url),
             ("ANTARES_TEMPORAL_RETENTION_DAYS", "1"),
             ("ANTARES_SWEEP_SECS", "1"),
         ],
