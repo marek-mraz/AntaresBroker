@@ -2825,12 +2825,19 @@ mod change_pipeline {
         });
         let mut st = AppState::new("antares-queue-bound".into());
         wire(&mut st);
-        // the stall must outlast the whole create loop, sanitizer slowdown
-        // included, or the consumer times out and drains the queue
-        subscribe(&st, "staller", &format!("http://{addr}/notify"), 600_000).await;
+        // the stall is bounded by the outbound client's own 5 s timeout, not
+        // by endpoint.timeout: after each timeout the consumer frees another
+        // CHANGE_BATCH slots, and on a slow runner a single-queue-depth loop
+        // fits inside that window and never overflows (seen in CI). Produce
+        // several queue depths and stop at the first counted drop — the
+        // producer only has to outpace the drain, not beat one window.
+        subscribe(&st, "staller", &format!("http://{addr}/notify"), 30_000).await;
         let before = changes_dropped();
-        for n in 0..(CHANGE_QUEUE + 64) {
+        for n in 0..(4 * CHANGE_QUEUE) {
             assert_eq!(create_vehicle(&st, 1_000 + n).await, 201);
+            if changes_dropped() > before {
+                break;
+            }
         }
         assert!(
             changes_dropped() > before,

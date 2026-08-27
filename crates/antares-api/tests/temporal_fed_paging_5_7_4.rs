@@ -8,6 +8,7 @@
 //! Needs a live PostGIS (container recipe in antares-sql/tests/pg.rs), so
 //! it is ignored by default: a run without a database reports it as
 //! `ignored` instead of passing vacuously.
+#![cfg(feature = "postgres")]
 
 use antares_api::state::AppState;
 use antares_sql::store::any::{AnyStore, PgBackend};

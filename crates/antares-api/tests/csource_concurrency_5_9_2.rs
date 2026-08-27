@@ -7,6 +7,7 @@
 //! driver, so a worker blocked on a plain mutex while another worker
 //! waits on Postgres under it is a deadlock that takes `/q/health` down
 //! with it. Skips without ANTARES_TEST_DATABASE_URL.
+#![cfg(feature = "postgres")]
 
 use antares_api::AppState;
 use antares_model::TenantId;

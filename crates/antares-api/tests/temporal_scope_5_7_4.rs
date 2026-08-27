@@ -346,6 +346,7 @@ async fn clause_5_7_4_4_scopeq_disables_lastn_and_paging_pushdown() {
 /// cap and entity paging must NOT be pushed down when scopeQ is present —
 /// the store would cap to the last in-window instance BEFORE the 4.18
 /// validity filter runs. Skips loudly without ANTARES_TEST_DATABASE_URL.
+#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_4_4_scopeq_gates_the_sql_pushdown() {
     let Ok(url) = std::env::var("ANTARES_TEST_DATABASE_URL") else {

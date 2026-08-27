@@ -14,6 +14,7 @@
 //!
 //! Skips loudly without ANTARES_TEST_DATABASE_URL (see antares-sql/tests/pg.rs
 //! for the container recipe).
+#![cfg(feature = "postgres")]
 
 use antares_jsonld::Loader;
 use antares_model::TenantId;

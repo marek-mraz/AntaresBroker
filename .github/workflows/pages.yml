@@ -96,6 +96,8 @@ jobs:
         run: |
           cargo doc --no-deps --workspace --locked
           cp -r target/doc site/api
+          # rustdoc has no workspace root page, so /api/ 404s without one
+          echo '<!doctype html><meta http-equiv="refresh" content="0; url=antares_api/"><title>Antares crates</title>' > site/api/index.html
 
       - name: Fold the latest ETSI report + coverage into the site
         env:

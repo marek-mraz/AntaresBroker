@@ -4,7 +4,9 @@
 //! Gated on ANTARES_TEST_MQTT_URL (e.g. `mqtt://127.0.0.1:1883`) — CI installs
 //! mosquitto and sets it; without it the test is skipped, not green-lied.
 //! std-only harness + rumqttc's sync client (no async test rig needed).
-#![cfg(unix)]
+//! A build without the `mqtt` feature rejects the endpoint scheme at
+//! subscription creation (422), so the test only exists with it.
+#![cfg(all(unix, feature = "mqtt"))]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

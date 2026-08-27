@@ -160,6 +160,7 @@ async fn clause_5_7_2_4_split_aggregate_filter_memory() {
 /// merge. Needs a live PostGIS, so it is ignored by default — a run
 /// without a database reports it as `ignored`, never as a pass. When it
 /// IS selected the missing URL is a hard failure, not a vacuous pass.
+#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live PostGIS in ANTARES_TEST_DATABASE_URL: cargo test -p antares-api --test split_entities_5_7_2 -- --ignored"]
 async fn clause_5_7_2_4_split_aggregate_filter_postgres() {
