@@ -166,9 +166,10 @@ jobs:
         run: |
           # the pattern must exist where expected (guard self-test) …
           grep -rqn 'AssertSqlSafe' crates/antares-sql/src/
-          # … and nowhere else
+          # … and nowhere else in shipped code; a test that CREATEs its own
+          # scratch database has no bind-parameter alternative
           ! grep -rn 'AssertSqlSafe\|sqlx::query(&format!' crates/ --include='*.rs' \
-            | grep -v 'crates/antares-sql/'
+            | grep -v 'crates/antares-sql/\|/tests/'
 
 
   msrv:
