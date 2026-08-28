@@ -38,6 +38,7 @@ fi
 
 stage() {  # stage <name> <cmd…>: wall time per stage into load.md
   local name=$1; shift; local t0; t0=$(date +%s)
+  echo "load ${name%% *}" > "$OUT/phase"
   "$@"
   echo "- $name: $(( $(date +%s) - t0 )) s" | tee -a "$OUT/load.md"
 }

@@ -147,6 +147,7 @@ jobs:
           # under federated queries at 100 rps (10k subs / 10k regs run)
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
             ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 ANTARES_PG_POOL=100 \
+            ANTARES_TELEMETRY=1 \
             nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
           # bounded: an unbounded wait once burned the whole rented hour
@@ -156,7 +157,7 @@ jobs:
           done
           curl -sf -o /dev/null http://127.0.0.1:9090/q/health \
             || { echo "broker never became healthy"; cat "$OUT/broker.log"; exit 1; }
-          ./dev/perf/rss.sh start "$(cat broker.pid)" pg
+          METRICS_URL=http://127.0.0.1:9090/q/metrics ./dev/perf/rss.sh start "$(cat broker.pid)" pg
       - name: Load the dataset
         run: SUBS=$SUBS CSRS=$CSRS MQTT_URL=mqtt://127.0.0.1:1883 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/load.sh
       - name: Measure at load
@@ -175,6 +176,45 @@ jobs:
       - name: Resident set verdict
         if: always()
         run: BROKER_MIB=500 PG_GIB=16 ./dev/perf/rss.sh stop
+      - name: Diagnostics for a later analysis
+        if: always()
+        run: |
+          # everything a reader without the box needs: final metrics and
+          # heap stats, the sink's counters, the Postgres side, charts,
+          # and a manifest naming each file
+          curl -sf http://127.0.0.1:9090/q/metrics > "$OUT/metrics-final.prom" || true
+          curl -sf http://127.0.0.1:9090/q/health > "$OUT/health-final.json" || true
+          curl -sf http://127.0.0.1:9090/q/dead-letters > "$OUT/dead-letters.json" || true
+          curl -sf http://127.0.0.1:9800/stats > "$OUT/sink-stats.json" || true
+          for q in "select * from pg_stat_user_tables" "select * from pg_stat_user_indexes" \
+                   "select * from pg_stat_database where datname='antares'" "select * from pg_stat_bgwriter" \
+                   "select relname, pg_size_pretty(pg_total_relation_size(oid)) from pg_class where relkind='r' and relnamespace='public'::regnamespace" \
+                   "select name, setting from pg_settings where source<>'default'"; do
+            psql "$DATABASE_URL" -A -F, -c "$q" >> "$OUT/pg-stats.csv" 2>&1 || true; echo >> "$OUT/pg-stats.csv"
+          done
+          python3 dev/perf/charts.py "$OUT" || true
+          cat > "$OUT/MANIFEST.md" <<'EOF'
+          # scale-weekly results — what each file is
+          Rig: broker (release, postgres store, ANTARES_TELEMETRY=1, port 9090), Postgres 17 + PostGIS in
+          docker on the volume, mosquitto, dev/perf/sink.py on 9800 as every notification/registration
+          target, k6 as the load generator. All on ONE machine (SERVER_TYPE in the step summary).
+          - rss.csv — 1 Hz sampler: RSS KiB + CPU % (100 = one core) per service (broker, postgres cgroup,
+            k6, sink, mosquitto), host busy cores, and `phase` (which perf stage was running).
+          - cpu.png / memory.png — the same, charted, phases shaded.
+          - rss.md — peaks vs the design budgets (broker 500 MiB, Postgres 16 GiB).
+          - metrics/<epoch>.prom — Prometheus snapshots of /q/metrics every 15 s (notification
+            counters incl. antares_notification_changes_dropped_total, HTTP histograms, pool gauges).
+          - metrics-final.prom, health-final.json (jemalloc allocated/resident), dead-letters.json.
+          - load.md — dataset sizes and load wall times; subs.md / csr.md — the subscription and
+            registration classes (api-load.py).
+          - shapes.md — req/s + p99 per request shape; saturate-*.csv/.jsonl + saturate.md — the knee.
+          - fire-<rate>.json + fire.md — subscriptions under the update stream: due vs delivered, drops.
+          - fed-<rate>.json + fed.md — federated queries over the registrations.
+          - sink-stats.json — what the sink received; sink.log; broker.log — broker stderr (warnings
+            on drops, pool waits, breaker trips).
+          - pg-stats.csv — pg_stat_user_tables/indexes/database/bgwriter, table sizes, non-default settings.
+          - perf.json + index.html — the folded report (report.py).
+          EOF
       - name: Fold the tables into one report
         if: always()
         run: |

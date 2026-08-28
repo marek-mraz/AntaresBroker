@@ -30,6 +30,7 @@ echo "| rate (rps) | queries | failed (conn/4xx/5xx) | with a source warning | G
 echo "|---|---|---|---|---|---|---|---|---|" | tee -a "$OUT/fed.md"
 
 for rate in $RATES; do
+  echo "fed $rate" > "$OUT/phase"
   curl -s -X DELETE "$SINK/stats" >/dev/null
   t_start=$(date +%s)
   k6 run --quiet --summary-export "$OUT/fed-$rate.json" -e BROKER_URL="$BROKER_URL" -e RATE="$rate" \

@@ -39,6 +39,7 @@ echo "" >> "$OUT/fire-classes.md"
 echo "| rate (rps) | class | due | delivered | delivered % |" >> "$OUT/fire-classes.md"
 echo "|---|---|---|---|---|" >> "$OUT/fire-classes.md"
 for rate in $RATES; do
+  echo "fire $rate" > "$OUT/phase"
   curl -s -X DELETE "$SINK/stats" >/dev/null
   curl -sf "$BROKER_URL/q/health" > "$OUT/fire-$rate-health-before.json"
   t_start=$(date +%s)

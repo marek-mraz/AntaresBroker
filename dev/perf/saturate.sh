@@ -31,6 +31,7 @@ until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; do
   echo "| store | shape | knee (rps held) | p99 at knee | first failing stage |"
   echo "|---|---|---|---|---|"
   for shape in query write; do
+    echo "saturate $shape" > "$OUT/phase"
     k6 run --quiet --out "json=$OUT/saturate-$shape.jsonl" -e BROKER_URL="http://127.0.0.1:$PORT" \
       -e SHAPE="$shape" -e STEP="$STEP" -e STAGES="$STAGES" -e STAGE="$STAGE" \
       dev/perf/k6-saturate.js >/dev/null || true

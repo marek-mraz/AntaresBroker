@@ -42,6 +42,7 @@ print(f\"{s['http_reqs']['rate']:.0f} {s['http_req_duration']['p(99)']:.2f}\")")
       "$BIN" > "$OUT/shapes-$store.log" 2>&1 & PID=$!
     until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; done
     for spec in "query 50" "query 200" "retrieve 50"; do
+      echo "shapes $store ${spec// /-c}" > "$OUT/phase"
       read -r shape vus <<<"$spec"
       read -r rps p99 < <(run "$shape" "$vus")
       echo "| $store | $shape | c$vus | $rps | $p99 ms |"
