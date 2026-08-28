@@ -29,14 +29,22 @@ case "${1:-}" in
       # host_busy_cores: whole-machine non-idle share of /proc/stat times
       # the core count — the "how many cores are saturated" number.
       tick=$(getconf CLK_TCK); bj0=0; pj0=0; t0=$(date +%s.%N)
+      CG=""
+      if [ -n "$PG" ]; then
+        id=$(docker inspect -f '{{.Id}}' "$PG" 2>/dev/null || true)
+        for c in "/sys/fs/cgroup/system.slice/docker-$id.scope" "/sys/fs/cgroup/docker/$id"; do
+          [ -f "$c/memory.current" ] && CG=$c && break
+        done
+        [ -z "$CG" ] && echo "rss.sh: no cgroup for container $PG, Postgres columns stay 0" >&2
+      fi
       cores=$(nproc); hb0=0; ht0=0; kj0=0; sj0=0; mj0=0; n=0
       [ -n "${METRICS_URL:-}" ] && mkdir -p "$OUT/metrics"
       # by_name <substring>: summed RSS KiB and jiffies of every process
       # whose cmdline carries it (k6 is a fresh process per stage)
       by_name() {
         local rss=0 jf=0 d
-        for d in /proc/[0-9]*; do
-          tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q -- "$1" || continue
+        for d in $(grep -l -a -- "$1" /proc/[0-9]*/cmdline 2>/dev/null); do
+          d=${d%/cmdline}
           rss=$(( rss + $(awk '/VmRSS/ {print $2}' "$d/status" 2>/dev/null || echo 0) ))
           jf=$(( jf + $(awk '{print $14+$15}' "$d/stat" 2>/dev/null || echo 0) ))
         done
@@ -47,23 +55,22 @@ case "${1:-}" in
         b=$(awk '/VmRSS/ {print $2}' "/proc/$BROKER/status" 2>/dev/null || echo 0)
         bj=$(awk '{print $14+$15}' "/proc/$BROKER/stat" 2>/dev/null || echo 0)
         p=0; pj=0
-        if [ -n "$PG" ]; then
-          # every backend of the server, summed (shared buffers count once
-          # per process here; the ceiling is generous for that reason)
-          # cgroup memory, not a sum of backend RSS: every backend maps the
-          # same shared buffers, so the sum counted them once per backend
-          # (50 GiB "RSS" on a 32 GB machine)
-          p=$(docker exec "$PG" sh -c "awk '{print int(\$1/1024)}' /sys/fs/cgroup/memory.current 2>/dev/null || awk '/VmRSS/ {s+=\$2} END {print s+0}' /proc/[0-9]*/status" 2>/dev/null || echo 0)
-          pj=$(docker exec "$PG" sh -c "cat /proc/[0-9]*/stat 2>/dev/null | awk '{s+=\$14+\$15} END {print s+0}'" 2>/dev/null || echo 0)
+        if [ -n "$CG" ]; then
+          # the container's cgroup, read from the host: memory.current
+          # (not a per-backend RSS sum, which counted the shared buffers
+          # once per backend: 50 GiB "RSS" on a 32 GB machine) and
+          # cpu.stat usage_usec converted to jiffies
+          p=$(awk '{print int($1/1024)}' "$CG/memory.current" 2>/dev/null || echo 0)
+          pj=$(awk -v tick="$tick" '/^usage_usec/ {print int($2 * tick / 1000000)}' "$CG/cpu.stat" 2>/dev/null || echo 0)
         fi
         read -r k kj < <(by_name "k6 run")
         read -r sk sj < <(by_name "perf/sink.py")
         read -r mk mj < <(by_name "mosquitto")
         t1=$(date +%s.%N)
         read -r kc sc mc < <(awk -v a="$kj" -v a0="$kj0" -v b="$sj" -v b0="$sj0" -v c="$mj" -v c0="$mj0" -v t0="$t0" -v t1="$t1" -v tick="$tick" \
-          'BEGIN { dt = t1 - t0; if (dt <= 0) dt = 1; printf "%.1f %.1f %.1f\n", (a-a0)*100/tick/dt, (b-b0)*100/tick/dt, (c-c0)*100/tick/dt }')
+          'function d(x, y) { return x > y ? x - y : 0 } BEGIN { dt = t1 - t0; if (dt <= 0) dt = 1; printf "%.1f %.1f %.1f\n", d(a,a0)*100/tick/dt, d(b,b0)*100/tick/dt, d(c,c0)*100/tick/dt }')
         read -r bc pc < <(awk -v bj="$bj" -v bj0="$bj0" -v pj="$pj" -v pj0="$pj0" -v t0="$t0" -v t1="$t1" -v tick="$tick" \
-          'BEGIN { dt = t1 - t0; if (dt <= 0) dt = 1; printf "%.1f %.1f\n", (bj-bj0)*100/tick/dt, (pj-pj0)*100/tick/dt }')
+          'function d(x, y) { return x > y ? x - y : 0 } BEGIN { dt = t1 - t0; if (dt <= 0) dt = 1; printf "%.1f %.1f\n", d(bj,bj0)*100/tick/dt, d(pj,pj0)*100/tick/dt }')
         hc=$(awk -v hb="$hb" -v hb0="$hb0" -v ht="$ht" -v ht0="$ht0" -v cores="$cores" \
           'BEGIN { d = ht - ht0; if (d <= 0) d = 1; printf "%.2f", (hb - hb0) / d * cores }')
         echo "$(date +%s),$b,$p,$bc,$pc,$hc,$cores,$k,$kc,$sk,$sc,$mk,$mc,$(cat "$OUT/phase" 2>/dev/null | tr -d ',\n')" >> "$CSV"
@@ -95,7 +102,7 @@ print(f"| host busy peak / mean | {cpu('host_busy_cores'):.1f} / {avg('host_busy
 for name, key in (("k6", "k6"), ("sink", "sink"), ("mosquitto", "mqtt")):
     if any(r.get(f"{key}_kib") for r in rows):
         print(f"| {name} RSS peak / CPU peak | {max(int(r.get(f'{key}_kib') or 0) for r in rows)/1024:.0f} MiB / {cpu(f'{key}_cpu_pct')/100:.1f} cores | rig, not the broker |")
-print(f"| samples | {len(rows)} | 1 Hz, rss.csv |")
+print(f"| samples | {len(rows)} | rss.csv, {(int(rows[-1]['t'])-int(rows[0]['t']))/max(1,len(rows)-1):.1f} s apart |")
 if scale >= 1.0 and (b > bmax or p > pmax):
     print("BUDGET EXCEEDED"); sys.exit(1)
 EOF
