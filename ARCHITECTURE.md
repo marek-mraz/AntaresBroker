@@ -1,0 +1,230 @@
+# Architecture
+
+A map of the Antares NGSI-LD context broker for anyone who has to change
+it: what lives where, how a request and a change travel, which invariants
+hold the system together, and what to touch for a given kind of change.
+The user-facing story is the book under `docs/src/`; irreversible
+decisions are in `docs/adr/`; the clause-by-clause conformance ledger is in
+`docs/spec/`. This file is the index that links them to code.
+
+Every path below is relative to the repository root. Line counts are
+approximate and mark weight, not authority.
+
+## 1. Shape in one paragraph
+
+One binary (`crates/antares-broker`) serves ETSI CIM 009 V1.9.1 over HTTP
+(`crates/antares-api`, axum). Handlers negotiate the request
+(`negotiate.rs`), call a synchronous store trait
+(`crates/antares-store`), and return. The store fires a change hook on
+every write; the hook records history synchronously and hands the change
+to the notification pipeline (`notify.rs`), which matches subscriptions
+from an in-memory mirror and delivers over HTTP or MQTT
+(`crates/antares-notifier`). Storage is a ladder behind one trait:
+process maps, redb file, PostgreSQL/PostGIS, TimescaleDB
+(`crates/antares-sql`). With `ANTARES_BUS=nats` the same binary splits
+into roles (api, matcher, notifier, temporal, registry) joined by a
+JetStream stream fed from a transactional outbox. The browser build
+(`crates/antares-wasm`) runs the same router behind a Service Worker.
+
+## 2. Crates and their contracts
+
+Dependency direction is acyclic and enforced in CI
+(`.github/workflows/workspace.yml`): `broker → api → {bus, sql, store,
+jsonld, ql, matcher, notifier, model}`. A leaf crate never names a crate
+above it.
+
+| Crate | Lines | Owns | Must not |
+|---|---|---|---|
+| `antares-model` | 600 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
+| `antares-ql` | 4 000 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
+| `antares-jsonld` | 7 200 | `@context` loader with caches and pinned core contexts, expansion/compaction, structural validation, the one outbound `client_builder` | do business logic |
+| `antares-matcher` | 330 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
+| `antares-store` | 1 400 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
+| `antares-sql` | 2 900 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
+| `antares-bus` | 840 | `ChangeEvent`, `LocalBus`, the JetStream bus, subjects | decide who consumes |
+| `antares-notifier` | 1 100 | `NotificationSink` keyed by endpoint scheme (`lib.rs:126`): http, mqtt (feature), delivery policy | match or store |
+| `antares-api` | 40 000 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
+| `antares-broker` | 2 700 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
+| `antares-wasm` | 500 | the router under a Service Worker, OPFS-backed file store | diverge from the native router |
+| `antares-registry` | 16 | `RegMode` and the federation contracts stated as doc | grow without a reason (registration logic lives in `antares-api/src/csource.rs` and `federation.rs`) |
+
+## 3. Module map of `antares-api/src`
+
+One module per NGSI-LD resource family; the clause range is in each
+module's header comment.
+
+| Module | Lines | Surface |
+|---|---|---|
+| `lib.rs` | 5 500 | the router (`/ngsi-ld/v1` nest, `/q/*` admin, `/info`), tenant purge, shared helpers |
+| `negotiate.rs` | 1 500 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
+| `entities.rs` | 4 700 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, paging, distributed write fan-out |
+| `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
+| `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
+| `temporal.rs` | 3 800 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
+| `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
+| `subscriptions.rs` | 1 600 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
+| `notify.rs` | 4 300 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
+| `distsub.rs` | 1 500 | 5.8.1.4 distributed subscriptions, consumer half |
+| `csource.rs` | 2 200 | 5.9, 5.10 registrations, `csource_index` maintenance |
+| `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
+| `entity_maps.rs` | 1 000 | 5.14 EntityMaps |
+| `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
+| `contexts.rs` | 660 | 5.13 `/jsonldContexts` |
+| `conformance.rs` | 760 | 6.3.21 version negotiation |
+| `repr.rs` | 960 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs |
+| `history.rs` | 150 | the producer side of temporal recording (change buffer per request) |
+| `bounds.rs` | 340 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
+| `egress.rs` | 280 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
+| `state.rs` | 520 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, hooks |
+
+## 4. A request, end to end
+
+```
+TCP accept (broker main.rs, TCP_NODELAY)
+ → axum router (api lib.rs)
+ → negotiate: tenant header → TenantId, Accept/Content-Type, params allow-list,
+   Link/@context → antares_jsonld::Loader (cache, pinned core context)
+ → bounds: body size/depth, URI length (rejects are counted in /q/health)
+ → handler <resource>.rs::<operation>_inner
+     expand (jsonld) → validate (model) → store call (CurrentStateDriver)
+     for distributed operations: federation.rs::forward under FED_INFLIGHT
+ → respond: compact, representation (repr.rs), paging Link headers, status
+```
+
+Handlers are synchronous with respect to the store: `antares-sql`'s
+Postgres driver bridges sqlx through `tokio::task::block_in_place`
+(`store/pg/entity.rs::wait`). Every Postgres round trip therefore parks a
+runtime worker; see §8.
+
+## 5. A change, end to end
+
+```
+store write commits
+ → ChangeHook (set at wiring; api role only)
+     history.rs: temporal auto-recording, synchronous, same request
+     buffer_change → per-request change buffer → change_flush at response
+ → notify.rs::wire: bounded mpsc (CHANGE_QUEUE); a full queue drops and
+   counts (antares_notification_changes_dropped_total, warn per thousand)
+ → drain task: batch → process_changes
+     match against SubMirror (in memory, per tenant; store list is the
+     never-wired fallback) → group per subscription → JoinSet under
+     DELIVERY_SLOTS (64)
+ → deliver_as: bookkeeping writeback under the row lock (timesSent,
+   lastNotification, status), mirror updated from that document,
+   egress check + breaker, NotificationSink by scheme, retries as
+   transport (ADR-0015), dead letter on exhaustion
+```
+
+With `ANTARES_BUS=nats` (`broker/src/wiring.rs`): the api role writes an
+outbox row in the same transaction, a drain publishes to the
+`ANTARES_CHANGES` stream with `Nats-Msg-Id` = outbox seq; matcher pods
+consume, subscriptions travel through a KV bucket to every mirror;
+interval firings are claimed through the store so one pod fires.
+
+## 6. Storage
+
+`ANTARES_STORE=memory|file|postgres|timescale` (ADR-0004), one trait
+pair, one schema (`crates/antares-sql/migrations/0001_init.sql`,
+`0002_dead_letters.sql`).
+
+- Tenancy: one shared schema, `tenant_id` on every row, Row-Level
+  Security with `FORCE` on every tenant table (ADR-0001). RLS is a belt
+  only when the role is not a superuser: `ANTARES_REQUIRE_RLS=1` refuses
+  to boot otherwise, and the shipped manifests set it.
+- Documents other than entities (subscriptions, registrations, entity
+  maps, snapshots, dist-sub mappings, dead letters) are `Kind`-tagged
+  JSON rows with the same trait surface (ADR-0012).
+- Queries: `antares-sql/compile/` turns the AST into SQL that NARROWS;
+  the in-memory evaluator (`antares-ql::eval`) is the arbiter
+  (`qprefilter.rs`). A compiled predicate may be partial; it may never
+  drop a candidate.
+- Temporal: `attr_instances`, range-partitioned by `observed_at`
+  (hypertable under timescale, no RLS there by columnstore constraint,
+  ADR-0006); recording is synchronous in the write path (ADR-0007).
+- Registrations: candidate matching goes through `csource_index`, never
+  a scan of a tenant's registrations.
+
+## 7. Invariants (break one and the suite tells you)
+
+1. Spec names: Rust types and function names come from CIM 009 (`Entity`,
+   `create_entity` = 5.6.1). Error variants = Table 6.3.2-1.
+2. Doc comments on normative code cite the clause number and the rule.
+3. Everything inbound is bounded (`bounds.rs`); everything outbound goes
+   through `antares_jsonld::client_builder` and `egress.rs`.
+4. No dynamic SQL outside the compiler (CI gate); `unsafe` forbidden;
+   `unwrap`/`expect` denied outside tests.
+5. Every env variable is in `KNOWN_KEYS` (`broker/src/main.rs`) and in
+   `docs/src/configuration.md` (`dev/check-env-docs.sh`).
+6. `/q/health` lists every cap; a new cap is added to the health snapshot
+   and its test (`bounds::tests`).
+7. A store returns `NgsiError`, never a backend error; a handler never
+   formats SQL.
+8. Tests that wait for a delivery scale their wait by
+   `antares_api::state::slow_factor()` (sanitizer builds run ten times
+   slower).
+9. The ETSI Robot suite is the oracle, never the requirements source;
+   the clause text in `docs/spec/` is.
+
+## 8. Known structural debts
+
+Stated so they are not rediscovered. Each is measured, not guessed.
+
+- The store trait is synchronous over async I/O (ADR-0005). Every
+  Postgres call goes through `block_in_place`; parallelism above the
+  store is bounded by runtime worker threads. This is the single largest
+  architectural lever left; reversing it touches every driver and
+  ~60 call sites in `antares-api`.
+- `state.rs` closes a module cycle: `AppState` carries closures typed
+  with `notify::Change`, so `state → notify → federation → csource →
+  temporal → bounds → state`. Moving `Change` and the hook types to a
+  leaf module breaks it.
+- The distributed-write prologue (`CsrSpec` → `write_regs` →
+  `handle_via_loop` → `strip_covered_expanded`) is repeated in
+  `entities.rs`, `attrs.rs`, `batch.rs`, `temporal.rs`. One helper.
+- Oversized functions carrying one clause's whole validation matrix:
+  `purge_inner`, `batch_write`, `query_temporal_inner`,
+  `normalize_subscription`, `expand_instance`, `normalize_registration`,
+  `deliver_as`. Split by member on touch.
+- Misplaced helpers: the error constructor `bad` lives in
+  `snapshots.rs` and is used crate-wide; `is_meta` exists three times.
+- Per-notification cost is still one row update plus one lookup of the
+  subscription; batching the bookkeeping is what raises the update rate
+  a broker can notify at.
+- Registration candidate selection reads on the order of a thousand
+  rows per federated query on a 10 000-registration registry; the
+  `csource_index` needs a type-first shape.
+- Registration counters of Table 5.2.9-2 (`timesSent`, `timesFailed`,
+  `lastSuccess`, `lastFailure`, `status`) are not produced.
+
+## 9. To change X, touch Y
+
+| Change | Touch | Also |
+|---|---|---|
+| a new query parameter | `negotiate.rs` allow-list, the handler, `antares-ql` if it has grammar | a `docs/spec/` ledger entry, a Robot TP |
+| a new NGSI-LD resource | `<resource>.rs` + route in `lib.rs` | `Kind` in `antares-store` if it is stored |
+| an error status | `antares-model` `NgsiError` | Table 6.3.2-1 in the doc comment |
+| a cap | `bounds.rs` + env key + `docs/src/configuration.md` | `/q/health` test |
+| a store backend | implement both driver traits in a new crate | `StoreMode` in `antares-sql/src/lib.rs`, `ANTARES_STORE` parsing, a CI cell |
+| a notification transport | `NotificationSink` impl in `antares-notifier` | scheme registration in `deliver_as` |
+| outbound HTTP anywhere | `antares_jsonld::client_builder` only | egress policy and breaker |
+| a schema change | a new numbered migration; never edit an applied one | RLS policy + `FORCE` on the table |
+| federation behaviour | `federation.rs` (`forward` is the one outbound chokepoint) | 4.3.6 narrowing is spec-mandated; keep it |
+| the bus or roles | `broker/src/wiring.rs` | ADR-0002 |
+| a role's HTTP surface | `lib.rs` router construction by `roles` | a worker must 404 the API |
+
+## 10. Verification ladder
+
+Unit (`cargo test -p <crate> <filter> -j 2`) → clause Robot TPs against
+one local memory broker (`ANTARES_HTTP_PORT=9377 target/debug/antares`,
+`ngsi-ld-test-suite/`) → `ci.yml` (dispatch: workspace tests, clippy
+wall, quick ETSI matrix) → `full.yml` (seven store cells, twice weekly)
+→ `strict.yml` (TSan, Miri, fuzz replay, coverage floor) →
+`perf-weekly.yml` / `scale-weekly.yml` (rented hardware, `dev/perf/`).
+`dev/code-xray.sh` writes module and call graphs under `results/x-ray/`.
+
+## 11. Reading order for a newcomer
+
+`docs/src/introduction.md` → this file → `docs/adr/` (0001, 0002, 0004,
+0005, 0013, 0015) → `crates/antares-api/src/negotiate.rs` →
+`entities.rs::create_entity` → `notify.rs::wire` →
+`crates/antares-sql/src/store/pg/entity.rs` → `broker/src/wiring.rs`.

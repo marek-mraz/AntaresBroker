@@ -2,6 +2,7 @@
 
 | Document | What it holds |
 |---|---|
+| [../ARCHITECTURE.md](../ARCHITECTURE.md) | The map for maintainers: crates and their contracts, module map, request and change flow, invariants, structural debts, what to touch for a given change |
 | [src/](src/) | The user book (mdBook, rendered to the Pages site under `/docs/`): getting started, configuration, deployment, federation, wasm, [operations runbook](src/operations.md) |
 | [spec/](spec/) + [spec/README.md](spec/README.md) | The conformance ledger — ETSI CIM 009 V1.9.1 full text, ONE file per clause with `status`/`evidence`/`notes` frontmatter; tooling: `python3 dev/spec.py status\|gaps\|check` |
 | [adr/](adr/) | Irreversible decisions, one file each (shared-schema tenancy, JetStream bus, store ladder, wasm build, …) |

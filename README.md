@@ -85,6 +85,10 @@ No Docker? `cargo run -p antares-broker` serves the same API on :9090
 
 ## Documentation
 
+Maintainers start at [ARCHITECTURE.md](ARCHITECTURE.md): the crate and
+module map, the request and change flows, the invariants, and what to
+touch for a given kind of change.
+
 The book is published at <https://antares-ngsi-ld-demo.marek-mraz.com/docs/>
 and built from `docs/src`:
 
