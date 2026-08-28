@@ -35,3 +35,18 @@ Pg arm without touching consumers.
 ## Confirmation
 
 `crates/antares-store/src/lib.rs typed_mutate_round_trips_through_the_boxed_seam` (the mutate-transaction rule survives the trait seam); the enum half is confirmed by ADR-0013.
+
+## Amendment: the facade's I/O runs on its own runtime
+
+`wait` parks the calling thread under `block_in_place`. Past tokio's
+blocking-thread ceiling a parked `block_in_place` also parks the core it
+ran on, and while the pool's sockets and timers lived on the request
+runtime those cores were the only ones polling the driver: past the
+ceiling no acquire, acquire timeout or response could complete and the
+process stopped at zero CPU (seen at 1 000 updates/s with 12 000 client
+connections). The Postgres pool is now connected on, and every awaited
+store future is driven by, a dedicated two-thread runtime
+(`store/pg/entity.rs::io`); a parked caller therefore always wakes, and
+overload degrades into latency instead of a hang. Regression:
+`entity.rs wait_tests::callers_beyond_the_blocking_ceiling_still_wake`.
+

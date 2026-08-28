@@ -170,8 +170,10 @@ pair, one schema (`crates/antares-sql/migrations/0001_init.sql`,
 Stated so they are not rediscovered. Each is measured, not guessed.
 
 - The store trait is synchronous over async I/O (ADR-0005). Every
-  Postgres call goes through `block_in_place`; parallelism above the
-  store is bounded by runtime worker threads. This is the single largest
+  Postgres call goes through `block_in_place`, with the sockets and
+  timers driven by the store's own runtime (`pg/entity.rs::io`) so a
+  parked caller always wakes; parallelism above the store is bounded by
+  tokio's blocking-thread ceiling. This is the single largest
   architectural lever left; reversing it touches every driver and
   ~60 call sites in `antares-api`.
 - `state.rs` closes a module cycle: `AppState` carries closures typed
