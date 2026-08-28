@@ -30,8 +30,8 @@ print(sum(x["entities"] for x in c), sum(x["subscriptions"] for x in c), sum(x["
 {
   echo "In the broker: $ENT entities, $SUB subscriptions, $REG registrations over $(curl -sf "$BROKER_URL/q/tenants" | python3 -c 'import sys,json; r=json.load(sys.stdin); print(len(r if isinstance(r,list) else r.get("tenants",[])))') tenants."
   echo
-  echo "| rate (rps) | updates | deletes | failed ops (conn/4xx/5xx) | entity notifications due | delivered | delivered % | subscriptions that fired | notification POSTs | POSTs/s | quiet after (s) | dropped by broker | dead letters | PATCH p99 (ms) | broker cores | host busy cores |"
-  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+  echo "| rate (rps) | updates | deletes | reads | failed ops (conn/4xx/5xx) | entity notifications due | delivered | delivered % | subscriptions that fired | notification POSTs | POSTs/s | quiet after (s) | dropped by broker | dead letters | PATCH p99 (ms) | GET p99 (ms) | broker cores | host busy cores |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 } > "$OUT/fire.md"
 LIMIT=none
 echo "Per class (api-load.py SUB_CLASSES; k6-fire.js evaluates the same rule for the count due):" > "$OUT/fire-classes.md"
@@ -45,7 +45,7 @@ for rate in $RATES; do
   t_start=$(date +%s)
   k6 run --quiet --summary-export "$OUT/fire-$rate.json" -e BROKER_URL="$BROKER_URL" -e RATE="$rate" \
     -e DURATION="$DURATION" -e TENANTS="$TENANTS" -e SUBS="$SUBS" -e ENTITIES="$ENTITIES" \
-    -e MQTT="${MQTT:-0}" dev/perf/k6-fire.js >/dev/null || true
+    -e MQTT="${MQTT:-0}" -e READ_PCT="${READ_PCT:-20}" dev/perf/k6-fire.js >/dev/null || true
   t_end=$(date +%s)
   # quiet = the sink's count unchanged for 5 s (cap 180 s)
   prev=-1; quiet=0
@@ -77,7 +77,8 @@ t0=int(os.environ["T_START"]); t1=int(sys.argv[3])
 rows=[r for r in csv.DictReader(open(os.environ["RSS_CSV"])) if t0<=int(r["t"])<=t1] if os.path.exists(os.environ["RSS_CSV"]) else []
 mean=lambda k: (sum(float(r.get(k) or 0) for r in rows)/len(rows)) if rows else 0.0
 bcores=mean("broker_cpu_pct")/100; hcores=mean("host_busy_cores")
-p99=m.get("http_req_duration",{}).get("p(99)",0)
+p99=m.get("http_req_duration{scenario:fire}",m.get("http_req_duration",{})).get("p(99)",0)
+rp99=m.get("http_req_duration{scenario:reads}",{}).get("p(99)",0)
 # broker-side counters over this rate: where the missing notifications went
 base=sys.argv[1][:-5]
 h0,h1=(json.load(open(f"{base}-health-{w}.json")) for w in ("before","after"))
@@ -86,7 +87,7 @@ failed=f'{c("op_errors")} ({c("op_errors_conn")}/{c("op_errors_4xx")}/{c("op_err
 due=c("notifications_expected_http"); got=s["entities"]
 pct=(100.0*got/due) if due else 0.0
 quiet=max(0,int((s["last"] or int(sys.argv[3]))-int(sys.argv[3])))
-print(f'| {sys.argv[2]} | {c("updates_ok")} | {c("deletes_ok")} | {failed} | {due} | {got} | {pct:.1f} | {s.get("subscriptions",0)} | {s["posts"]} | {s.get("posts_per_second") or 0} | {quiet} | {delta("changesDropped")} | {delta("deadLetters")} | {p99:.1f} | {bcores:.1f} | {hcores:.1f} |')
+print(f'| {sys.argv[2]} | {c("updates_ok")} | {c("deletes_ok")} | {c("reads_ok")} | {failed} | {due} | {got} | {pct:.1f} | {s.get("subscriptions",0)} | {s["posts"]} | {s.get("posts_per_second") or 0} | {quiet} | {delta("changesDropped")} | {delta("deadLetters")} | {p99:.1f} | {rp99:.1f} | {bcores:.1f} | {hcores:.1f} |')
 print("OK" if c("op_errors")==0 and due and pct>=99.0 else "FAIL", file=sys.stderr)
 PY
   )

@@ -29,9 +29,12 @@ const SUBS = Number(__ENV.SUBS || 10);
 const ENTITIES = Number(__ENV.ENTITIES || 100);
 const DELETE_PCT = Number(__ENV.DELETE_PCT || 10);
 const MQTT = __ENV.MQTT === "1";
+// dashboards poll while devices write: READ_PCT % of RATE as GET /entities/{id}
+const READ_PCT = Number(__ENV.READ_PCT || 20);
 const PER_TENANT = Math.floor(ENTITIES / TENANTS);
 const UPDATE_IDS = Math.max(1, Math.floor(PER_TENANT * 0.9));
 
+const READ_RATE = Math.round(RATE * READ_PCT / 100);
 export const options = {
   scenarios: {
     fire: {
@@ -39,9 +42,29 @@ export const options = {
       rate: RATE, timeUnit: "1s", duration: __ENV.DURATION || "60s",
       preAllocatedVUs: Math.min(4000, Math.max(50, RATE)), maxVUs: 8000,
     },
+    ...(READ_RATE > 0 ? { reads: {
+      executor: "constant-arrival-rate", exec: "read",
+      rate: READ_RATE, timeUnit: "1s", duration: __ENV.DURATION || "60s",
+      preAllocatedVUs: Math.min(1000, Math.max(20, READ_RATE)), maxVUs: 4000,
+    } } : {}),
+  },
+  // never-failing thresholds: they make the per-scenario latency sub-metrics
+  // appear in the summary export
+  thresholds: {
+    "http_req_duration{scenario:fire}": ["p(99)<600000"],
+    "http_req_duration{scenario:reads}": ["p(99)<600000"],
   },
   summaryTrendStats: ["med", "p(99)"],
 };
+
+const reads = new Counter("reads_ok");
+export function read() {
+  const i = exec.scenario.iterationInTest;
+  const t = i % TENANTS;
+  const n = t + Math.floor(Math.random() * PER_TENANT) * TENANTS;
+  const r = http.get(`${BASE}/entities/urn:ngsi-ld:${TYPES[n % 3]}:t${t}:${n}`, { headers: { "NGSILD-Tenant": `t${t}` } });
+  if (r.status === 200 || r.status === 404) reads.add(1); else fail(r);
+}
 
 const updates = new Counter("updates_ok");
 const deletes = new Counter("deletes_ok");

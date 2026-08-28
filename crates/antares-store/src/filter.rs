@@ -26,6 +26,10 @@ pub struct InstanceRange<'a> {
 pub struct EntityFilter<'a> {
     /// exact entity ids (`id=` / the ids of a batch query)
     pub ids: Option<&'a [&'a str]>,
+    /// A literal every `idPattern` match must carry (5.2.33): the store
+    /// narrows on it, the caller's regex still decides. Absent when `id=` is
+    /// given (id takes precedence over idPattern).
+    pub id_literal: Option<IdLiteral<'a>>,
     /// Entity Type Selection (4.17) as OR-of-AND groups, expanded IRIs
     pub types: Option<&'a [Vec<String>]>,
     /// `attrs=`: the entity must carry at least one, expanded IRIs
@@ -58,6 +62,7 @@ impl Default for EntityFilter<'_> {
     fn default() -> Self {
         Self {
             ids: None,
+            id_literal: None,
             types: None,
             attrs: None,
             q: None,
@@ -463,5 +468,104 @@ mod tests {
         let before = doc.clone();
         assert!(!strip_expired(&mut doc, NOW));
         assert_eq!(doc, before);
+    }
+}
+
+/// The longest literal an `idPattern` regex forces on every match: a prefix
+/// when the pattern is anchored (`^urn:x:…`), an infix otherwise. A
+/// necessary condition only — the regex is still evaluated on every row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdLiteral<'a> {
+    /// the characters every match carries
+    pub text: &'a str,
+    /// true = the match starts with `text`; false = it contains `text`
+    pub anchored: bool,
+}
+
+/// Extract the literal of `pattern`, or `None` when the pattern forces no
+/// literal at its start (alternation anywhere, a leading class or group,
+/// an escape, an empty literal). A quantifier after the literal applies to
+/// its last character, which is therefore not required.
+pub fn id_pattern_literal(pattern: &str) -> Option<IdLiteral<'_>> {
+    if pattern.contains('|') {
+        return None;
+    }
+    let (body, anchored) = match pattern.strip_prefix('^') {
+        Some(rest) => (rest, true),
+        None => (pattern, false),
+    };
+    let start = pattern.len() - body.len();
+    let mut end = start;
+    let mut stop = None;
+    for (i, c) in body.char_indices() {
+        if ".^$*+?()[]{}|\\".contains(c) {
+            stop = Some(c);
+            break;
+        }
+        end = start + i + c.len_utf8();
+    }
+    if matches!(stop, Some('*' | '+' | '?' | '{')) {
+        end -= pattern[start..end].chars().last()?.len_utf8();
+    }
+    (end > start).then_some(IdLiteral {
+        text: &pattern[start..end],
+        anchored,
+    })
+}
+
+#[cfg(test)]
+mod id_literal_tests {
+    use super::*;
+
+    /// 5.2.33 idPattern narrowing: the literal is a necessary condition of
+    /// the regex, never a sufficient one, so it may only ever shrink the
+    /// candidate set the regex then decides.
+    #[test]
+    fn literal_is_a_necessary_condition_of_the_pattern() {
+        let lit = id_pattern_literal;
+        let some = |text, anchored| Some(IdLiteral { text, anchored });
+        assert_eq!(
+            lit("^urn:ngsi-ld:Vehicle:.*"),
+            some("urn:ngsi-ld:Vehicle:", true)
+        );
+        assert_eq!(
+            lit("urn:ngsi-ld:Sensor:t7:7.*"),
+            some("urn:ngsi-ld:Sensor:t7:7", false)
+        );
+        assert_eq!(lit("urn:x:abc"), some("urn:x:abc", false));
+        // a quantifier binds the last character: `c` is optional in `abc*`
+        assert_eq!(lit("^abc*"), some("ab", true));
+        assert_eq!(lit("a?bc"), None);
+        assert_eq!(lit("^a{2}"), None);
+        // nothing is forced at the start
+        assert_eq!(lit(".*0$"), None);
+        assert_eq!(lit("^"), None);
+        assert_eq!(lit(""), None);
+        assert_eq!(lit("(?i)abc"), None);
+        assert_eq!(lit("[ab]c"), None);
+        assert_eq!(lit("\\d+"), None);
+        // alternation anywhere: the literal would exclude the other branch
+        assert_eq!(lit("^urn:a|urn:b"), None);
+        assert_eq!(lit("^urn:(a|b)"), None);
+        // the extracted text is a substring of every regex match
+        for (p, sample) in [
+            ("^urn:ngsi-ld:Vehicle:.*", "urn:ngsi-ld:Vehicle:1"),
+            ("t7:7.*", "urn:ngsi-ld:Sensor:t7:71"),
+            ("^abc*", "abd"),
+        ] {
+            let l = lit(p).expect("literal");
+            assert!(
+                regex::Regex::new(p).expect("re").is_match(sample),
+                "{p} vs {sample}"
+            );
+            assert!(
+                if l.anchored {
+                    sample.starts_with(l.text)
+                } else {
+                    sample.contains(l.text)
+                },
+                "{p}: {sample}"
+            );
+        }
     }
 }

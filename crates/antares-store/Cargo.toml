@@ -13,5 +13,8 @@ antares-ql = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+regex = { workspace = true }
+
 [lints]
 workspace = true

@@ -214,6 +214,7 @@ dependencies = [
  "antares-model",
  "antares-ql",
  "chrono",
+ "regex",
  "serde_json",
 ]
 

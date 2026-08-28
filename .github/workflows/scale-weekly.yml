@@ -125,7 +125,11 @@ jobs:
       - name: Install k6 and the Postgres client
         run: |
           curl -sL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
-            | tar xz --strip-components=1 && mv k6 /usr/local/bin/
+            | tar xz --strip-components=1 && mv k6 /usr/local/bin/k6.bin
+          # the load generator and the broker never share a core: k6 takes
+          # the upper half of the machine, the broker is started on the lower
+          N=$(nproc); printf '#!/bin/sh\nexec taskset -c %s-%s /usr/local/bin/k6.bin "$@"\n' "$((N/2))" "$((N-1))" > /usr/local/bin/k6
+          chmod +x /usr/local/bin/k6
           apt-get install -y -q postgresql-client python3-matplotlib
       - name: PostgreSQL on the volume, mosquitto
         run: |
@@ -135,8 +139,10 @@ jobs:
             -c shared_buffers=4GB -c work_mem=64MB -c maintenance_work_mem=2GB \
             -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c max_connections=300 \
             -c shared_preload_libraries=pg_stat_statements
-          docker run -d --name mqtt --network host -v "$PWD/compose-files/mosquitto:/mosquitto/config:ro" eclipse-mosquitto:2
+          docker run -d --name mqtt --network host eclipse-mosquitto:2 \
+            sh -c 'printf "listener 1883\nallow_anonymous true\n" > /mosquitto/config/perf.conf && exec mosquitto -c /mosquitto/config/perf.conf'
           until docker exec pg pg_isready -q; do sleep 1; done
+          until (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null; do sleep 1; done
       - name: Build the release broker
         run: cargo build --release --locked -p antares-broker
       - name: Start the broker under the resident-set sampler
@@ -149,7 +155,7 @@ jobs:
           ANTARES_STORE=postgres ANTARES_DATABASE_URL="$DATABASE_URL" ANTARES_ALLOW_SHARED_LOCAL=1 \
             ANTARES_EGRESS_ALLOW_PRIVATE=true ANTARES_HTTP_PORT=9090 ANTARES_PG_POOL=100 \
             ANTARES_TELEMETRY=1 \
-            nohup ./target/release/antares > "$OUT/broker.log" 2>&1 &
+            nohup taskset -c 0-$(( $(nproc) / 2 - 1 )) ./target/release/antares > "$OUT/broker.log" 2>&1 &
           echo $! > broker.pid
           # bounded: an unbounded wait once burned the whole rented hour
           for i in $(seq 1 120); do
@@ -198,9 +204,11 @@ jobs:
           python3 dev/perf/charts.py "$OUT" || true
           cat > "$OUT/MANIFEST.md" <<'EOF'
           # scale-weekly results — what each file is
-          Rig: broker (release, postgres store, ANTARES_TELEMETRY=1, port 9090), Postgres 17 + PostGIS in
-          docker on the volume, mosquitto, dev/perf/sink.py on 9800 as every notification/registration
-          target, k6 as the load generator. All on ONE machine (SERVER_TYPE in the step summary).
+          Rig: broker (release, postgres store, ANTARES_TELEMETRY=1, port 9090, pinned to the lower half
+          of the cores), Postgres 17 + PostGIS in docker on the volume, mosquitto, dev/perf/sink.py on 9800
+          (eight worker processes on 9801-9808, 9800 folds their stats) as every notification/registration
+          target, k6 as the load generator pinned to the upper half of the cores. All on ONE machine
+          (SERVER_TYPE in the step summary). The update stream carries READ_PCT (20 %) extra GET /entities/{id}.
           - rss.csv — 1 Hz sampler: RSS KiB + CPU % (100 = one core) per service (broker, postgres cgroup,
             k6, sink, mosquitto), host busy cores, and `phase` (which perf stage was running).
           - cpu.png / memory.png — the same, charted, phases shaded; cpu-saturation.png — broker and

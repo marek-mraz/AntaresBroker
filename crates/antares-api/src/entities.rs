@@ -1652,6 +1652,15 @@ pub fn filter_entities_paged(
         tenant,
         &antares_sql::store::filter::EntityFilter {
             ids: ids.as_deref(),
+            // 5.2.33: id takes precedence over idPattern, so the literal
+            // narrows only when no id selector was given
+            id_literal: if ids.is_none() {
+                params
+                    .get("idPattern")
+                    .and_then(|p| antares_sql::store::filter::id_pattern_literal(p))
+            } else {
+                None
+            },
             types: type_sel.as_deref(),
             attrs: if split_agg {
                 None

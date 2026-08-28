@@ -435,6 +435,17 @@ impl PgEntityStore {
             binds.push(Bind::TextArr(ids.iter().map(|s| s.to_string()).collect()));
             wheres.push(format!("id = ANY(${})", binds.len()));
         }
+        // 5.2.33 idPattern: the literal the regex forces is a plain string
+        // test on the id column, exact as a narrowing; the regex itself stays
+        // with the caller, so `decided` is untouched.
+        if let Some(l) = f.id_literal {
+            binds.push(Bind::Text(l.text.to_owned()));
+            wheres.push(if l.anchored {
+                format!("starts_with(id, ${})", binds.len())
+            } else {
+                format!("position(${} in id) > 0", binds.len())
+            });
+        }
         // OR of AND-groups, mirroring the Entity Type Selection Language
         // (4.17) the caller already parsed: `types @> ARRAY[…]` per group.
         if let Some(groups) = f.types {

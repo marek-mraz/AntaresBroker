@@ -75,6 +75,15 @@ def sub_class(k, tenants):
     return (k // tenants) % len(SUB_CLASSES)
 
 
+def sink_for(sink, workers, k):
+    """Worker port for target k: the aggregator on the base port never takes traffic."""
+    if not workers:
+        return sink
+    from urllib.parse import urlsplit, urlunsplit
+    u = urlsplit(sink)
+    return urlunsplit((u.scheme, f"{u.hostname}:{u.port + 1 + k % workers}", u.path, u.query, u.fragment))
+
+
 def subscription(k, tenants, sink, mqtt):
     uri = f"{mqtt}/antares/perf/{k}" if mqtt and k % 10 == 0 else f"{sink}/n/{k}"
     name, entities, extra, _ = SUB_CLASSES[sub_class(k, tenants)]
@@ -190,6 +199,8 @@ def main():
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--broker", default="http://localhost:9090")
     ap.add_argument("--sink", default="http://127.0.0.1:9800")
+    ap.add_argument("--sink-workers", type=int, default=0,
+                    help="sink.py worker count: target k goes to port+1+(k mod N)")
     ap.add_argument("--mqtt", default=None)
     ap.add_argument("--threads", type=int, default=32)
     ap.add_argument("--out", default=None, help="write the class table (subs.md / csr.md) here")
@@ -202,7 +213,7 @@ def main():
     url = a.broker + path
 
     def one(k):
-        tenant, body = make(k, a.tenants, a.sink, a.mqtt)
+        tenant, body = make(k, a.tenants, sink_for(a.sink, a.sink_workers, k), a.mqtt)
         return post(url, tenant, body)
 
     t0 = time.time()

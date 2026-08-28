@@ -22,6 +22,7 @@ cd "$(dirname "$0")/../.."
 SCALE="${SCALE:-0.0001}"
 OUT="${OUT:-results/perf}"
 SINK_PORT="${SINK_PORT:-9800}"
+SINK_WORKERS="${SINK_WORKERS:-8}"
 BROKER_URL="${BROKER_URL:-http://localhost:9090}"
 : "${DATABASE_URL:?set DATABASE_URL}"
 mkdir -p "$OUT"
@@ -32,7 +33,7 @@ echo "scale $SCALE: $ENTITIES entities / $TENANTS tenants / $SUBS subscriptions 
 
 # the sink outlives this script: the measurements after the load need it
 if ! curl -sf "http://127.0.0.1:$SINK_PORT/stats" >/dev/null; then
-  nohup python3 dev/perf/sink.py "$SINK_PORT" > "$OUT/sink.log" 2>&1 &
+  nohup python3 dev/perf/sink.py "$SINK_PORT" "$SINK_WORKERS" > "$OUT/sink.log" 2>&1 &
   echo $! > "$OUT/sink.pid"
 fi
 
@@ -48,9 +49,9 @@ python3 dev/perf/gen.py --entities "$ENTITIES" --tenants "$TENANTS" > "$FIFO" & 
 stage "entities ($ENTITIES, bulk COPY)" bash -c "${BULK:-dev/bulk-load.sh} '$FIFO' | tail -1"
 wait $GEN; rm -f "$FIFO"
 
-stage "subscriptions ($SUBS)" python3 dev/perf/api-load.py subscriptions --count "$SUBS" --tenants "$TENANTS" --out "$OUT" \
+stage "subscriptions ($SUBS)" python3 dev/perf/api-load.py subscriptions --count "$SUBS" --tenants "$TENANTS" --out "$OUT" --sink-workers "$SINK_WORKERS" \
   --broker "$BROKER_URL" --sink "http://127.0.0.1:$SINK_PORT" ${MQTT_URL:+--mqtt "$MQTT_URL"}
-stage "registrations ($CSRS)" python3 dev/perf/api-load.py registrations --count "$CSRS" --tenants "$TENANTS" --out "$OUT" \
+stage "registrations ($CSRS)" python3 dev/perf/api-load.py registrations --count "$CSRS" --tenants "$TENANTS" --out "$OUT" --sink-workers "$SINK_WORKERS" \
   --broker "$BROKER_URL" --sink "http://127.0.0.1:$SINK_PORT"
 
 echo "loaded; sink stats at http://127.0.0.1:$SINK_PORT/stats" | tee -a "$OUT/load.md"

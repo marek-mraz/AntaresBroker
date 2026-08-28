@@ -294,6 +294,25 @@ async fn query_pushdown_narrows_without_dropping_matches() {
         want
     );
 
+    // 5.2.33 idPattern literal: anchored = prefix, unanchored = infix; both
+    // only narrow (the regex decides later), so a literal that occurs
+    // mid-id keeps the row when unanchored and drops it when anchored
+    use antares_sql::store::filter::IdLiteral;
+    let lit = |text, anchored| antares_sql::store::pg::entity::EntityFilter {
+        id_literal: Some(IdLiteral { text, anchored }),
+        ..base()
+    };
+    assert_eq!(
+        q(&lit("urn:ngsi-ld:Room:", true)),
+        ["urn:ngsi-ld:Room:1", "urn:ngsi-ld:Room:2"]
+    );
+    assert_eq!(q(&lit("Room:2", false)), ["urn:ngsi-ld:Room:2"]);
+    assert_eq!(q(&lit("Room:2", true)), Vec::<String>::new());
+    assert_eq!(
+        q(&lit("ngsi-ld:V", false)),
+        ["urn:ngsi-ld:Vehicle:1", "urn:ngsi-ld:Vehicle:2"]
+    );
+
     // type selection (OR of AND-groups, expanded IRIs)
     let groups = vec![vec![ex("Vehicle")]];
     assert_eq!(
