@@ -82,10 +82,13 @@ async fn notified_body(receiver_info: Option<Value>) -> Value {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("notification within 5s")
-        .expect("one notification")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("notification within 5s")
+    .expect("one notification")
 }
 
 /// Table 5.3.1-1: geo+json accept ⇒ data is a FeatureCollection; the

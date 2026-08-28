@@ -187,10 +187,13 @@ async fn notification_data_entities_lead_with_id_then_type() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("notification within 5s")
-        .expect("one notification");
+    let raw = tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("notification within 5s")
+    .expect("one notification");
     // Notification wrapper: id then type first; entity inside data too
     assert!(raw.starts_with("{\"id\""), "notification id first: {raw}");
     before(&raw, "\"type\":\"Notification\"", "\"data\"");

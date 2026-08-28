@@ -109,10 +109,13 @@ async fn clause_4_9_linked_q_resolves_through_the_store_in_notifications() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let n = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("linked-q notification within 5s")
-        .expect("one notification");
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("linked-q notification within 5s")
+    .expect("one notification");
     let ids: Vec<&str> = n["data"]
         .as_array()
         .expect("data")

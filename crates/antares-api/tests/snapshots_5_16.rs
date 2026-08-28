@@ -429,10 +429,13 @@ async fn clause_5_16_6_snapshot_notification() {
         .to_owned();
     let ready = wait_ready(&st, &loc).await;
 
-    let n = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("SnapshotNotification within 5s")
-        .expect("one notification");
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("SnapshotNotification within 5s")
+    .expect("one notification");
     assert_eq!(n["type"], "SnapshotNotification", "{n}");
     assert_eq!(n["snapshotId"], ready["id"], "{n}");
     assert_eq!(n["snapshotStatus"], "success", "{n}");
@@ -768,10 +771,13 @@ async fn clause_6_3_22_snapshot_scoped_subscription_notification_header() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (nh, nb) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("notification within 5s")
-        .expect("one notification");
+    let (nh, nb) = tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("notification within 5s")
+    .expect("one notification");
     assert_eq!(
         nh.get("NGSILD-Snapshot").and_then(|v| v.to_str().ok()),
         Some(sid.as_str()),

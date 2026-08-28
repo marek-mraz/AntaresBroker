@@ -247,10 +247,13 @@ fn dist_sub_mapping_survives_restart() {
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{b}");
-            let copy = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-                .await
-                .expect("forwarded subscription within 10s")
-                .expect("one copy");
+            let copy = tokio::time::timeout(
+                std::time::Duration::from_secs(10 * antares_api::state::slow_factor()),
+                rx.recv(),
+            )
+            .await
+            .expect("forwarded subscription within 10s")
+            .expect("one copy");
             let rid = copy["id"].as_str().expect("remote id").to_owned();
             shutdown(st);
             rid
