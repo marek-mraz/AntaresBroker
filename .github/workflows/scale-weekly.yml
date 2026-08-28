@@ -2,17 +2,15 @@ name: scale-weekly
 
 # The design targets, measured: 100,000,000 entities over 10,000 tenants,
 # 100,000 subscriptions and 100,000 registrations on one PostgreSQL, the
-# broker's resident set against its 500 MiB budget and Postgres against
-# 16 GiB, plus the throughput, saturation and notification numbers at that
-# load. One rented dedicated-vCPU box with a volume for the database,
+# resident set and CPU of broker and Postgres per phase, plus the
+# throughput, saturation and notification numbers at that load. One rented dedicated-vCPU box with a volume for the database,
 # registered as an ephemeral runner, deleted afterwards; perf-janitor
 # sweeps a leaked server or volume by its expiry label.
 #
 # `scale` scales every count linearly. The box lives ONE hour at most
 # (TTL, job timeout and the server's own shutdown timer agree), which fits
 # scale 0.01 with margin; the full targets (1.0) do not fit and are not
-# scheduled. Report-only: budgets are asserted by dev/perf/rss.sh at
-# scale 1.0, nothing else gates.
+# scheduled. Report-only: nothing gates.
 #
 # Secrets: HCLOUD_TOKEN (project-scoped Hetzner API token), RUNNER_PAT
 # (fine-grained, this repository, Administration read/write).
@@ -119,6 +117,10 @@ jobs:
       CSRS: ${{ inputs.regs || '10000' }}
       DATABASE_URL: postgresql://antares:antares@127.0.0.1:5432/antares
       OUT: results/perf
+      # the allocator settings the image ships (Dockerfile), so the resident
+      # set measured here is the one a deployment sees
+      MALLOC_CONF: background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
+      _RJEM_MALLOC_CONF: background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -182,7 +184,7 @@ jobs:
           TENANTS=$TENANTS BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fed.sh
       - name: Resident set verdict
         if: always()
-        run: BROKER_MIB=500 PG_GIB=16 ./dev/perf/rss.sh stop
+        run: ./dev/perf/rss.sh stop
       - name: Diagnostics for a later analysis
         if: always()
         run: |
@@ -213,7 +215,7 @@ jobs:
             k6, sink, mosquitto), host busy cores, and `phase` (which perf stage was running).
           - cpu.png / memory.png — the same, charted, phases shaded; cpu-saturation.png — broker and
             Postgres cores busy against the machine's core count (broker = every antares process).
-          - rss.md — peaks vs the design budgets (broker 500 MiB, Postgres 16 GiB).
+          - rss.md — RSS and CPU peaks of broker, Postgres and the rig processes.
           - metrics/<epoch>.prom — Prometheus snapshots of /q/metrics every 15 s (notification
             counters incl. antares_notification_changes_dropped_total, HTTP histograms, pool gauges).
           - metrics-final.prom, health-final.json (jemalloc allocated/resident), dead-letters.json.

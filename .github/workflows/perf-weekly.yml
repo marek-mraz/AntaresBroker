@@ -89,6 +89,10 @@ jobs:
     needs: create
     runs-on: ${{ needs.create.outputs.label }}
     timeout-minutes: 55
+    env:
+      # the allocator settings the image ships (Dockerfile)
+      MALLOC_CONF: background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
+      _RJEM_MALLOC_CONF: background_thread:true,narenas:4,dirty_decay_ms:10000,muzzy_decay_ms:10000
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -61,8 +61,7 @@ cores = int(float(rows[0].get("host_cores") or 0))
 chart("cpu", f"cores busy (of {cores})",
       [(n, [v / 100 for v in num(f"{k}_cpu_pct")]) for n, k in services] + [("host busy", num("host_busy_cores"))])
 chart("memory", "RSS (MiB)",
-      [(n, [v / 1024 for v in num(f"{k}_kib")]) for n, k in services],
-      hline=(500, "broker budget 500 MiB"))
+      [(n, [v / 1024 for v in num(f"{k}_kib")]) for n, k in services])
 # saturation: broker and Postgres against the core count, host busy as the ground
 fig, ax = plt.subplots(figsize=(14, 5.5))
 ax.fill_between(t, num("host_busy_cores"), color="0.85", lw=0, label="host busy (all processes)")

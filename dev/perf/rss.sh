@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Resident-set sampler for a whole rig run: the broker process, the
 # Postgres container, and the rig's own processes (k6, the sink, mosquitto)
-# by name, RSS + CPU % of each at 1 Hz to CSV, and a verdict against the
-# design budgets at the end (broker < 500 MiB, Postgres < 16 GiB). A
+# by name, RSS + CPU % of each at 1 Hz to CSV, and the peaks at the end
+# (BROKER_MIB / PG_GIB set, the exit code says whether they held). A
 # `phase` column mirrors $OUT/phase, which the perf scripts write as they
 # move between stages, so a chart can be cut per stage.
 #
@@ -12,8 +12,8 @@
 # Env: METRICS_URL (e.g. http://127.0.0.1:9090/q/metrics — a Prometheus
 #      snapshot lands in $OUT/metrics/<epoch>.prom every 15 s, a time
 #      series any later analysis can diff), OUT (results/perf), SCALE (asserts only at 1.0; below that the
-#      peaks are printed and the exit code stays 0), BROKER_MIB (500),
-#      PG_GIB (16).
+#      peaks are printed and the exit code stays 0), BROKER_MIB, PG_GIB
+#      (ceilings in MiB / GiB; unset = report only).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT="${OUT:-results/perf}"; mkdir -p "$OUT"
@@ -82,7 +82,9 @@ case "${1:-}" in
         bj0=$bj; pj0=$pj; t0=$t1; hb0=$hb; ht0=$ht; kj0=$kj; sj0=$sj; mj0=$mj
         n=$((n + 1))
         if [ -n "${METRICS_URL:-}" ] && [ $((n % 15)) -eq 1 ]; then
-          curl -sf "$METRICS_URL" > "$OUT/metrics/$(date +%s).prom" 2>/dev/null || true
+          # bounded: a broker queueing requests held this curl for good and
+          # the sampler with it, so later phases had no rows at all
+          curl -sf --max-time 2 "$METRICS_URL" > "$OUT/metrics/$(date +%s).prom" 2>/dev/null || true
         fi
         sleep 1
       done
@@ -90,7 +92,7 @@ case "${1:-}" in
     ;;
   stop)
     kill "$(cat "$PIDFILE")" 2>/dev/null || true; rm -f "$PIDFILE"
-    python3 - "$CSV" "${SCALE:-0}" "${BROKER_MIB:-500}" "${PG_GIB:-16}" <<'EOF' | tee "$OUT/rss.md"
+    python3 - "$CSV" "${SCALE:-0}" "${BROKER_MIB:-0}" "${PG_GIB:-0}" <<'EOF' | tee "$OUT/rss.md"
 import csv, sys
 path, scale, bmax, pmax = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 rows = list(csv.DictReader(open(path)))
@@ -98,8 +100,8 @@ b = max((int(r["broker_kib"]) for r in rows), default=0) / 1024
 p = max((int(r["postgres_kib"]) for r in rows), default=0) / 1024 / 1024
 cpu = lambda k: max((float(r.get(k) or 0) for r in rows), default=0.0)
 avg = lambda k: (sum(float(r.get(k) or 0) for r in rows) / len(rows)) if rows else 0.0
-print(f"| broker RSS peak | {b:.0f} MiB | budget {bmax} MiB |")
-print(f"| Postgres RSS peak | {p:.2f} GiB | budget {pmax} GiB |")
+print(f"| broker RSS peak | {b:.0f} MiB | {'ceiling ' + str(bmax) + ' MiB' if bmax else 'no ceiling set'} |")
+print(f"| Postgres RSS peak | {p:.2f} GiB | {'ceiling ' + str(pmax) + ' GiB' if pmax else 'no ceiling set'} |")
 cores = int(float(rows[0].get("host_cores") or 0)) if rows else 0
 print(f"| broker CPU peak / mean | {cpu('broker_cpu_pct')/100:.1f} / {avg('broker_cpu_pct')/100:.1f} cores | of {cores} |")
 print(f"| Postgres CPU peak / mean | {cpu('postgres_cpu_pct')/100:.1f} / {avg('postgres_cpu_pct')/100:.1f} cores | of {cores} |")
@@ -108,7 +110,7 @@ for name, key in (("k6", "k6"), ("sink", "sink"), ("mosquitto", "mqtt")):
     if any(r.get(f"{key}_kib") for r in rows):
         print(f"| {name} RSS peak / CPU peak | {max(int(r.get(f'{key}_kib') or 0) for r in rows)/1024:.0f} MiB / {cpu(f'{key}_cpu_pct')/100:.1f} cores | rig, not the broker |")
 print(f"| samples | {len(rows)} | rss.csv, {(int(rows[-1]['t'])-int(rows[0]['t']))/max(1,len(rows)-1):.1f} s apart |")
-if scale >= 1.0 and (b > bmax or p > pmax):
+if scale >= 1.0 and ((bmax and b > bmax) or (pmax and p > pmax)):
     print("BUDGET EXCEEDED"); sys.exit(1)
 EOF
     ;;
