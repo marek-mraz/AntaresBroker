@@ -93,6 +93,7 @@ pub async fn signal() {
 /// config value once, at startup, so a garbage window fails before serving.
 pub async fn drain(
     inflight: &Arc<AtomicUsize>,
+    pending_changes: &AtomicUsize,
     store: &dyn antares_store::CurrentStateDriver,
     deadline: Duration,
     flush_outbox: bool,
@@ -102,12 +103,18 @@ pub async fn drain(
     // distributed subscription, an initial Context Source notification and a
     // forwarded notification all run as tasks after the 2xx, and a stop that
     // dropped them left the subscription chain half-built on every roll.
-    while inflight.load(Ordering::Relaxed) > 0 || antares_api::background_tasks() > 0 {
+    // The matcher queue is part of a request too: a change accepted before
+    // the listener closed still owes its notifications (5.8.6).
+    while inflight.load(Ordering::Relaxed) > 0
+        || antares_api::background_tasks() > 0
+        || pending_changes.load(Ordering::SeqCst) > 0
+    {
         if started.elapsed() >= deadline {
             tracing::warn!(
-                "drain deadline {deadline:?} hit with {} connection(s) and {} task(s) still open — closing anyway",
+                "drain deadline {deadline:?} hit with {} connection(s), {} task(s) and {} change batch(es) still open — closing anyway",
                 inflight.load(Ordering::Relaxed),
-                antares_api::background_tasks()
+                antares_api::background_tasks(),
+                pending_changes.load(Ordering::SeqCst)
             );
             break;
         }
@@ -247,7 +254,14 @@ mod tests {
                 d.store(true, Ordering::SeqCst);
             });
             let store = mem_store();
-            drain(&inflight, &store, Duration::from_secs(5), false).await;
+            drain(
+                &inflight,
+                &AtomicUsize::new(0),
+                &store,
+                Duration::from_secs(5),
+                false,
+            )
+            .await;
             assert!(
                 done.load(Ordering::SeqCst),
                 "drain returned before the task finished"
@@ -264,7 +278,13 @@ mod tests {
         let inflight = Arc::new(AtomicUsize::new(0));
         let store = mem_store();
         let started = Instant::now();
-        rt().block_on(drain(&inflight, &store, Duration::from_secs(20), true));
+        rt().block_on(drain(
+            &inflight,
+            &AtomicUsize::new(0),
+            &store,
+            Duration::from_secs(20),
+            true,
+        ));
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "an idle drain waited {:?} — it must not burn the deadline",
@@ -279,7 +299,13 @@ mod tests {
         let inflight = Arc::new(AtomicUsize::new(1)); // never released
         let store = mem_store();
         let started = Instant::now();
-        rt().block_on(drain(&inflight, &store, Duration::from_millis(300), false));
+        rt().block_on(drain(
+            &inflight,
+            &AtomicUsize::new(0),
+            &store,
+            Duration::from_millis(300),
+            false,
+        ));
         let waited = started.elapsed();
         assert!(
             waited >= Duration::from_millis(300),
@@ -350,7 +376,13 @@ mod tests {
 
         // Not asked to flush: the pending row may not delay the close at all.
         let t0 = Instant::now();
-        rt.block_on(drain(&inflight, &store, Duration::from_millis(400), false));
+        rt.block_on(drain(
+            &inflight,
+            &AtomicUsize::new(0),
+            &store,
+            Duration::from_millis(400),
+            false,
+        ));
         let closed = t0.elapsed();
         assert!(
             closed < Duration::from_millis(250),
@@ -361,7 +393,13 @@ mod tests {
         // process to its deadline rather than exit on top of them.
         let store = connect();
         let t0 = Instant::now();
-        rt.block_on(drain(&inflight, &store, Duration::from_millis(400), true));
+        rt.block_on(drain(
+            &inflight,
+            &AtomicUsize::new(0),
+            &store,
+            Duration::from_millis(400),
+            true,
+        ));
         let waited = t0.elapsed();
         assert!(
             waited >= Duration::from_millis(400),

@@ -29,6 +29,19 @@ const DEFAULT_TRIGGERS: &[&str] = &["attributeCreated", "attributeUpdated"];
 const CHANGE_QUEUE: usize = 1024;
 static CHANGES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TASK_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Hand a batch to the matcher queue: counted as pending on acceptance,
+/// counted as dropped when the queue is full.
+fn enqueue(
+    tx: &tokio::sync::mpsc::Sender<Vec<Change>>,
+    pending: &std::sync::atomic::AtomicUsize,
+    changes: Vec<Change>,
+) {
+    if tx.try_send(changes).is_ok() {
+        pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        note_drop();
+    }
+}
 
 /// Changes dropped because the matcher queue was full, since process start.
 pub fn changes_dropped() -> u64 {
@@ -397,15 +410,15 @@ pub fn wire(state: &mut AppState) {
     // the change and counts it.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Change>>(CHANGE_QUEUE);
     let flush_tx = tx.clone();
+    let flush_pending = state.pending_changes.clone();
     state.change_flush = Some(Arc::new(move |changes: Vec<Change>| {
-        if flush_tx.try_send(changes).is_err() {
-            note_drop();
-        }
+        enqueue(&flush_tx, &flush_pending, changes)
     }));
     // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
     // the ETSI suite queries history immediately after a write); the matcher
     // work is handed to the async task below. One choke point for every write.
     let st_rec = state.clone();
+    let hook_pending = state.pending_changes.clone();
     state
         .store
         .set_change_hook(Box::new(move |tenant, before, after| {
@@ -417,22 +430,26 @@ pub fn wire(state: &mut AppState) {
             else {
                 return;
             };
-            if tx.try_send(vec![change]).is_err() {
-                note_drop();
-            }
+            enqueue(&tx, &hook_pending, vec![change]);
         }));
     let st = state.clone();
+    let pending = state.pending_changes.clone();
     crate::spawn_loop(async move {
         while let Some(mut batch) = rx.recv().await {
+            let mut taken = 1;
             // everything already queued behind it rides the same pass
             while batch.len() < CHANGE_BATCH {
                 match rx.try_recv() {
-                    Ok(c) => batch.extend(c),
+                    Ok(c) => {
+                        batch.extend(c);
+                        taken += 1;
+                    }
                     Err(_) => break,
                 }
             }
             let st = st.clone();
             guarded(async move { process_changes(&st, batch).await }).await;
+            pending.fetch_sub(taken, std::sync::atomic::Ordering::SeqCst);
         }
     });
     let st = state.clone();
@@ -2985,6 +3002,35 @@ mod change_pipeline {
             "a full matcher queue must drop and count, not grow (dropped {} → {})",
             before,
             changes_dropped()
+        );
+    }
+
+    /// Every accepted change is counted until its pass has run, so a drain
+    /// that waits for zero closes the pool only after the last delivery.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_changes_return_to_zero_once_delivered() {
+        crate::allow_private();
+        let (uri, hits) = counting_endpoint().await;
+        let mut st = AppState::new("antares-pending-changes".into());
+        wire(&mut st);
+        subscribe(&st, "counter", &uri, 30_000).await;
+        for n in 0..20 {
+            assert_eq!(create_vehicle(&st, 5_000 + n).await, 201);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // one pass folds queued changes into one notification, so the hit
+        // count is at least one, not twenty
+        let pending = || st.pending_changes.load(Ordering::SeqCst);
+        while (hits.load(Ordering::SeqCst) == 0 || pending() > 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(hits.load(Ordering::SeqCst) > 0, "nothing delivered");
+        assert_eq!(
+            pending(),
+            0,
+            "pending must fall back to zero after delivery"
         );
     }
 

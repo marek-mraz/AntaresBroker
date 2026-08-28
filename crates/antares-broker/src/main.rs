@@ -743,6 +743,7 @@ async fn run(
     // close last.
     let draining = state.draining.clone();
     let store_for_drain = state.store.clone();
+    let pending_for_drain = state.pending_changes.clone();
     // Only the api role serves the NGSI-LD surface — a worker pod
     // exposes health/ready/metrics and nothing else (a subscription created
     // on a worker would bypass the roles.api KV sync and never notify).
@@ -832,7 +833,14 @@ async fn run(
                 // requests finish), in-flight drained, pools closed.
                 drop(listener);
                 let _ = drain_tx.send(true);
-                shutdown::drain(&inflight, &*store_for_drain, drain_deadline, flush_outbox).await;
+                shutdown::drain(
+                    &inflight,
+                    &pending_for_drain,
+                    &*store_for_drain,
+                    drain_deadline,
+                    flush_outbox,
+                )
+                .await;
                 tracing::info!("shutting down");
                 return Ok(());
             }

@@ -88,6 +88,9 @@ pub struct AppState {
     /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
     /// takes this instance out while its socket still works.
     pub draining: Arc<std::sync::atomic::AtomicBool>,
+    /// Change batches the matcher queue accepted and has not finished
+    /// delivering. A shutdown drain waits for zero before the pool closes.
+    pub pending_changes: Arc<std::sync::atomic::AtomicUsize>,
     /// bus=nats: called after every Subscription CUD so the wiring can
     /// push the change into the KV mirror bucket. `None` in local mode — this
     /// process's store already IS the truth every consumer reads.
@@ -303,6 +306,7 @@ impl AppState {
             bus_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_changes: Arc::default(),
             sub_sync: None,
             sub_mirror: None,
             change_flush: None,
