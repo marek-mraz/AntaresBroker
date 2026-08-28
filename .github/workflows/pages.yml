@@ -15,9 +15,10 @@ name: pages
 on:
   workflow_run:
     # full.yml absorbed etsi-full — its twice-a-week schedule (and
-    # dispatches) fire this. Scheduled runs live on the default branch
-    # (master); tag runs and PR runs don't match the filter, so a PR can
-    # never repaint the public badges.
+    # dispatches) fire this. The branch filter matches the HEAD branch of
+    # the triggering run, which a pull request from a fork can also name
+    # master; the job condition below therefore refuses pull_request runs
+    # outright, so a fork can never repaint the public badges.
     workflows: [full]
     types: [completed]
     branches: [master]
@@ -38,8 +39,10 @@ jobs:
     # cancellation and skipping are non-events.
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success' ||
-      github.event.workflow_run.conclusion == 'failure'
+      (github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.conclusion == 'success' ||
+        github.event.workflow_run.conclusion == 'failure'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

@@ -5,8 +5,16 @@
 # pages.yml so the two Pages paths cannot drift. Needs: GH_TOKEN, REPO.
 # A missing bundle renders a placeholder instead of failing the deploy.
 set -e
-id=$(gh api "repos/$REPO/actions/artifacts?name=ETSI-matrix-results&per_page=1" \
-     -q '.artifacts[0].id' 2>/dev/null || true)
+# Only bundles produced on this repository's master are folded: a pull
+# request from a fork also uploads artifacts here, and its branch may be
+# named master too, so the producing run's head repository decides.
+repo_id=$(gh api "repos/$REPO" -q .id)
+newest() {
+  gh api "repos/$REPO/actions/artifacts?name=$1&per_page=30" \
+    -q "[.artifacts[] | select(.expired == false and .workflow_run.head_branch == \"master\" and .workflow_run.head_repository_id == $repo_id)][0].id" \
+    2>/dev/null || true
+}
+id=$(newest ETSI-matrix-results)
 mkdir -p site/reports/latest
 if [ -n "$id" ] && [ "$id" != "null" ]; then
   gh api "repos/$REPO/actions/artifacts/$id/zip" > matrix.zip
@@ -20,8 +28,7 @@ else
 fi
 # the unit/integration JUnit bundle from the newest `workspace` job —
 # rendered as its own page so the ETSI half keeps Robot's HTML untouched
-uid=$(gh api "repos/$REPO/actions/artifacts?name=unit-junit&per_page=1" \
-      -q '.artifacts[0].id' 2>/dev/null || true)
+uid=$(newest unit-junit)
 mkdir -p site/reports/unit
 if [ -n "$uid" ] && [ "$uid" != "null" ]; then
   gh api "repos/$REPO/actions/artifacts/$uid/zip" > unit.zip
@@ -34,8 +41,7 @@ else
     > site/reports/badge-unit.json
 fi
 # the weekly merged coverage (html + % badge)
-cid=$(gh api "repos/$REPO/actions/artifacts?name=etsi-coverage-merged&per_page=1" \
-      -q '.artifacts[0].id' 2>/dev/null || true)
+cid=$(newest etsi-coverage-merged)
 if [ -n "$cid" ] && [ "$cid" != "null" ]; then
   gh api "repos/$REPO/actions/artifacts/$cid/zip" > cov.zip
   mkdir -p cov && unzip -q cov.zip -d cov
@@ -58,8 +64,7 @@ fi
 # the performance runs: newest weekly (shapes) and scale (design targets)
 # bundles, each with its index.html + perf.json + CSVs
 for name in perf-weekly-results scale-weekly-results; do
-  pid=$(gh api "repos/$REPO/actions/artifacts?name=$name&per_page=1" \
-        -q '.artifacts[0].id' 2>/dev/null || true)
+  pid=$(newest "$name")
   if [ -n "$pid" ] && [ "$pid" != "null" ]; then
     gh api "repos/$REPO/actions/artifacts/$pid/zip" > "$name.zip" \
       && mkdir -p "site/reports/perf/latest/${name%-results}" \
