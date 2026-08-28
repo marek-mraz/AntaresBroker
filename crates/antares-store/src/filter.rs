@@ -78,6 +78,9 @@ pub struct Page {
     pub offset: i64,
     /// Maximum rows to return.
     pub limit: i64,
+    /// The client asked for the match total (count=true); otherwise the
+    /// store only needs to know whether a next page exists.
+    pub count: bool,
 }
 
 /// What `query` produced. `decided` = SQL applied every present predicate

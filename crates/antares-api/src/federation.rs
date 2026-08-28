@@ -926,6 +926,9 @@ pub async fn forward(
     // 6.3.17: NGSILD-Warning values received from the peer are returned to
     // the caller — abnormal behaviour detected downstream in a cascade
     // (4.3.6.4) must surface on the aggregated response, not vanish here.
+    // Process-wide slot first (bounds::MAX_FED_INFLIGHT): the buffers and
+    // connections below exist only while a slot is held.
+    let _slot = crate::bounds::FED_INFLIGHT.acquire().await;
     // One policy for every outbound class — scheme allowlist,
     // private-range deny, per-destination circuit breaker.
     if let Err(e) = st.egress.check_url(&url).await {

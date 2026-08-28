@@ -1743,6 +1743,7 @@ pub(crate) async fn query_temporal_inner(
             page: push_page.then_some(antares_sql::store::filter::Page {
                 offset: p_offset as i64,
                 limit: p_limit as i64,
+                count: true,
             }),
             q: q_ast.as_ref(),
             expand: &expand,

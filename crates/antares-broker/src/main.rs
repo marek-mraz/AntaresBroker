@@ -855,7 +855,13 @@ async fn run(
 async fn accept(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // Nagle held every multi-segment response for the peer's
+                // delayed ACK: a fixed ~40 ms on any body over one segment,
+                // 25 req/s per connection whatever the core count.
+                let _ = stream.set_nodelay(true);
+                return stream;
+            }
             Err(e) => {
                 tracing::warn!("accept failed, retrying: {e}");
                 if accept_backoff(&e) {

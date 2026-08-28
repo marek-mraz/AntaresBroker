@@ -194,13 +194,22 @@ fn query_sql(
 ) -> (String, bool) {
     let wheres = wheres.join(" AND ");
     match page.filter(|_| decided) {
+        // count=true: the window total rides the statement. Otherwise one
+        // row past the page answers "is there a next page" — the window
+        // count made Postgres visit the whole match set before LIMIT
+        // (2.9 s p99 for 20 rows out of 10 000).
         Some(p) => {
-            binds.push(Bind::Int(p.limit));
+            let total = if p.count {
+                ", count(*) OVER () AS total"
+            } else {
+                ""
+            };
+            binds.push(Bind::Int(if p.count { p.limit } else { p.limit + 1 }));
             let lim = binds.len();
             binds.push(Bind::Int(p.offset));
             (
                 format!(
-                    "SELECT {select} AS entity, count(*) OVER () AS total \
+                    "SELECT {select} AS entity{total} \
                      FROM entities WHERE {wheres} ORDER BY id LIMIT ${lim} OFFSET ${}",
                     binds.len()
                 ),
@@ -541,20 +550,30 @@ impl PgEntityStore {
             // drop the PgRow — the full row set never sits in memory twice.
             let mut docs: Vec<Value> = Vec::new();
             let mut total: Option<i64> = None;
+            let counted = paged && f.page.as_ref().is_some_and(|p| p.count);
             {
                 use futures_util::TryStreamExt;
                 let mut stream = qy.fetch(&mut *tx);
                 while let Some(row) = stream.try_next().await? {
-                    if paged && docs.is_empty() {
+                    if counted && docs.is_empty() {
                         total = Some(row.get::<i64, _>(1));
                     }
                     docs.push(row.get::<Value, _>(0));
                 }
             }
             check_ceiling(paged, docs.len(), ceiling)?;
-            // an off-the-end page returns zero rows and no window total —
-            // count the match set separately so links/count stay correct
-            if paged && total.is_none() {
+            // uncounted page: the extra row says a next page exists; the
+            // total handed back is the smallest one consistent with that,
+            // enough for the next/prev links and never shown as a count
+            if paged && !counted {
+                let p = f.page.as_ref().expect("paged implies a page");
+                let more = docs.len() as i64 > p.limit;
+                docs.truncate(p.limit as usize);
+                total = Some(p.offset + docs.len() as i64 + i64::from(more));
+            }
+            // an off-the-end counted page returns zero rows and no window
+            // total — count the match set separately so links/count stay correct
+            if counted && total.is_none() {
                 let count_sql = format!(
                     "SELECT count(*) FROM entities WHERE {}",
                     wheres.join(" AND ")
@@ -1235,7 +1254,11 @@ mod tests {
     }
 
     fn page(offset: i64, limit: i64) -> Page {
-        Page { offset, limit }
+        Page {
+            offset,
+            limit,
+            count: true,
+        }
     }
 
     /// 5.5.9.1: a query SQL decided exactly keeps the pushed page — LIMIT
@@ -1249,6 +1272,29 @@ mod tests {
         assert!(sql.contains("LIMIT $2 OFFSET $3"), "{sql}");
         assert!(sql.contains("count(*) OVER ()"), "{sql}");
         assert!(matches!(binds[1], Bind::Int(10)));
+        assert!(matches!(binds[2], Bind::Int(20)));
+    }
+
+    /// 6.3.10: without count=true no total is owed, so the statement carries
+    /// no window count (which forced a walk of the whole match set) and
+    /// fetches one row past the page to learn whether a next page exists.
+    #[test]
+    fn an_uncounted_page_fetches_one_extra_row_and_no_window_total() {
+        let mut binds = vec![Bind::Text("t".to_owned())];
+        let p = Page {
+            offset: 20,
+            limit: 10,
+            count: false,
+        };
+        let (sql, paged) = query_sql("entity", &wheres(), Some(&p), true, &mut binds);
+        assert!(paged);
+        assert!(!sql.contains("count(*) OVER ()"), "{sql}");
+        assert!(sql.contains("LIMIT $2 OFFSET $3"), "{sql}");
+        assert!(
+            matches!(binds[1], Bind::Int(11)),
+            "limit + 1: {:?}",
+            binds[1]
+        );
         assert!(matches!(binds[2], Bind::Int(20)));
     }
 

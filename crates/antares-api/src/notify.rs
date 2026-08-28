@@ -399,8 +399,7 @@ pub fn wire(state: &mut AppState) {
     let flush_tx = tx.clone();
     state.change_flush = Some(Arc::new(move |changes: Vec<Change>| {
         if flush_tx.try_send(changes).is_err() {
-            CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            metrics::counter!("antares_notification_changes_dropped_total").increment(1);
+            note_drop();
         }
     }));
     // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
@@ -419,8 +418,7 @@ pub fn wire(state: &mut AppState) {
                 return;
             };
             if tx.try_send(vec![change]).is_err() {
-                CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                metrics::counter!("antares_notification_changes_dropped_total").increment(1);
+                note_drop();
             }
         }));
     let st = state.clone();
@@ -1111,18 +1109,48 @@ pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
     // Groups are distinct subscriptions, so they leave concurrently; a
     // subscription's changes in this drain are already one group, and the
     // next drain starts only after this one, so per-subscription order holds.
-    // ponytail: fixed width, make it a knob when a deployment asks
-    use futures_util::StreamExt;
-    futures_util::stream::iter(groups)
-        .for_each_concurrent(DELIVERY_WIDTH, |g| async move {
-            deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
-        })
-        .await;
+    // Each group is its own task: the store bridge blocks the calling
+    // thread (block_in_place) for every bookkeeping read/write, and inside
+    // one task's for_each_concurrent that stalled all 64 deliveries behind
+    // each Postgres round-trip (~320 notifications/s on 32 idle cores).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut set = tokio::task::JoinSet::new();
+        for g in groups {
+            let st = st.clone();
+            set.spawn(async move {
+                let _permit = DELIVERY_SLOTS.acquire().await;
+                deliver(&st, &g.tenant, &g.sub, g.data, &g.ctx).await;
+            });
+        }
+        while set.join_next().await.is_some() {}
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use futures_util::StreamExt;
+        futures_util::stream::iter(groups)
+            .for_each_concurrent(DELIVERY_WIDTH, |g| async move {
+                deliver(st, &g.tenant, &g.sub, g.data, &g.ctx).await;
+            })
+            .await;
+    }
+}
+
+/// A change the full queue refused: counted, and said once per thousand so
+/// a 40 % delivery gap is visible in the log and not only on the counter.
+fn note_drop() {
+    let n = CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    metrics::counter!("antares_notification_changes_dropped_total").increment(1);
+    if n == 1 || n % 1000 == 0 {
+        tracing::warn!("notification change queue full: {n} changes dropped so far (delivery slower than the write rate)");
+    }
 }
 
 /// Notifications in flight at once per drain: one serial POST at a time
 /// capped a 9-subscription fan-out at ~600 POST/s and overflowed the queue.
 const DELIVERY_WIDTH: usize = 64;
+#[cfg(not(target_arch = "wasm32"))]
+static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(DELIVERY_WIDTH);
 
 async fn matches_for(
     st: &AppState,

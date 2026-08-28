@@ -1669,6 +1669,7 @@ pub fn filter_entities_paged(
             page: page.map(|(offset, limit)| antares_sql::store::filter::Page {
                 offset: offset as i64,
                 limit: limit as i64,
+                count: params.get("count").map(String::as_str) == Some("true"),
             }),
             keep_attrs: keep_attrs.as_deref(),
             drop_attrs: drop_attrs.as_deref(),

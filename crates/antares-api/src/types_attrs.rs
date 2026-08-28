@@ -83,6 +83,7 @@ fn scan(
         page: Some(Page {
             offset: 0,
             limit: max.saturating_add(1).min(i64::MAX as usize) as i64,
+            count: false,
         }),
         ..Default::default()
     };

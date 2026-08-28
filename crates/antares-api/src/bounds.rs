@@ -58,6 +58,19 @@ pub static MAX_FED_RESPONSE_BYTES: std::sync::LazyLock<usize> = std::sync::LazyL
         .filter(|n| *n > 0)
         .unwrap_or(16 * 1024 * 1024)
 });
+// Deployment knob (ANTARES_FED_INFLIGHT): forwarded requests in flight for
+// the whole process. Per-request fan-out is bounded below; across requests
+// nothing was, and 6 000 open federated queries × 34 sources each held
+// 7.7 GB of buffers and connections. Callers over the cap wait their turn.
+pub static MAX_FED_INFLIGHT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_FED_INFLIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(256)
+});
+pub static FED_INFLIGHT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(*MAX_FED_INFLIGHT));
 // Deployment knob (ANTARES_FED_FANOUT): concurrent forwards per distributed
 // read. 4.3.6.1 orders the MERGE (4.5.5), never the requests, so forwards
 // run concurrently; this bounds how many at once per request.
@@ -94,6 +107,7 @@ impl LimitStats {
             "maxBatchItems": *MAX_BATCH_ITEMS,
             "maxFedResponseBytes": *MAX_FED_RESPONSE_BYTES,
             "maxFedFanout": *MAX_FED_FANOUT,
+            "maxFedInflight": *MAX_FED_INFLIGHT,
             "maxJoinLevel": MAX_JOIN_LEVEL,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
