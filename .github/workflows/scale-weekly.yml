@@ -200,7 +200,8 @@ jobs:
           target, k6 as the load generator. All on ONE machine (SERVER_TYPE in the step summary).
           - rss.csv — 1 Hz sampler: RSS KiB + CPU % (100 = one core) per service (broker, postgres cgroup,
             k6, sink, mosquitto), host busy cores, and `phase` (which perf stage was running).
-          - cpu.png / memory.png — the same, charted, phases shaded.
+          - cpu.png / memory.png — the same, charted, phases shaded; cpu-saturation.png — broker and
+            Postgres cores busy against the machine's core count (broker = every antares process).
           - rss.md — peaks vs the design budgets (broker 500 MiB, Postgres 16 GiB).
           - metrics/<epoch>.prom — Prometheus snapshots of /q/metrics every 15 s (notification
             counters incl. antares_notification_changes_dropped_total, HTTP histograms, pool gauges).

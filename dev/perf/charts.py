@@ -63,4 +63,19 @@ chart("cpu", f"cores busy (of {cores})",
 chart("memory", "RSS (MiB)",
       [(n, [v / 1024 for v in num(f"{k}_kib")]) for n, k in services],
       hline=(500, "broker budget 500 MiB"))
-print(f"charts: {out/'cpu.png'} {out/'memory.png'}; phases: {[s[2] for s in spans if s[2]]}")
+# saturation: broker and Postgres against the core count, host busy as the ground
+fig, ax = plt.subplots(figsize=(14, 5.5))
+ax.fill_between(t, num("host_busy_cores"), color="0.85", lw=0, label="host busy (all processes)")
+ax.plot(t, [v / 100 for v in num("broker_cpu_pct")], color=colors["broker"], lw=1.4, label="broker")
+ax.plot(t, [v / 100 for v in num("postgres_cpu_pct")], color=colors["postgres"], lw=1.4, label="postgres")
+ax.axhline(cores, ls="--", lw=0.8, color="0.3")
+ax.text(t[-1], cores, f" {cores} cores = saturated", va="center", fontsize=8)
+ax.set_ylim(0, cores * 1.08)
+ax.set_xlabel("minutes since sampler start")
+ax.set_ylabel("cores busy")
+ax.margins(x=0)
+shade(ax)
+ax.legend(loc="upper left", fontsize=8)
+fig.tight_layout()
+fig.savefig(out / "cpu-saturation.png", dpi=110)
+print(f"charts: {out/'cpu.png'} {out/'memory.png'} {out/'cpu-saturation.png'}; phases: {[s[2] for s in spans if s[2]]}")

@@ -22,6 +22,7 @@ CSV="$OUT/rss.csv"; PIDFILE="$OUT/rss.pid"
 case "${1:-}" in
   start)
     BROKER=${2:?broker pid}; PG=${3:-}
+    BROKER_NAME=$(tr '\0' ' ' < "/proc/$BROKER/cmdline" | awk '{print $1}')
     echo "t,broker_kib,postgres_kib,broker_cpu_pct,postgres_cpu_pct,host_busy_cores,host_cores,k6_kib,k6_cpu_pct,sink_kib,sink_cpu_pct,mqtt_kib,mqtt_cpu_pct,phase" > "$CSV"
     (
       # CPU % = jiffies burnt per wall second (utime+stime, all threads);
@@ -52,8 +53,9 @@ case "${1:-}" in
       }
       while [ -d "/proc/$BROKER" ]; do
         read -r hb ht < <(awk '/^cpu / {busy=$2+$3+$4+$7+$8+$9; total=busy+$5+$6; print busy, total}' /proc/stat)
-        b=$(awk '/VmRSS/ {print $2}' "/proc/$BROKER/status" 2>/dev/null || echo 0)
-        bj=$(awk '{print $14+$15}' "/proc/$BROKER/stat" 2>/dev/null || echo 0)
+        # every broker process, not only the pid the loop watches: the
+        # shapes, saturation and startup stages run their own brokers
+        read -r b bj < <(by_name "$BROKER_NAME")
         p=0; pj=0
         if [ -n "$CG" ]; then
           # the container's cgroup, read from the host: memory.current
