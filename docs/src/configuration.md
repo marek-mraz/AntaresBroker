@@ -47,6 +47,7 @@ here).
 |---|---|---|
 | `ANTARES_EGRESS_ALLOW_PRIVATE` | `true` | Broker-initiated HTTP and MQTT (notifications, forwards, `@context` fetches) may reach loopback, link-local, RFC 1918 and cloud-metadata ranges. Set `false` (or `0`) on an internet-exposed deployment to deny them; the scheme allowlist, redirect cap, DNS pinning and response-size caps apply regardless. A refused delivery is booked as a failure (`lastFailure`, `status: failed`) and never retried. |
 | `ANTARES_FED_FANOUT` | `8` | Concurrent forwards per distributed read (4.3.6.1 orders the merge, not the requests). |
+| `ANTARES_FED_INFLIGHT` | `256` | Forwarded requests in flight for the whole process; callers over the cap wait. Bounds the buffers and connections open federated queries hold (6 000 open queries × 34 sources once reached 7.7 GB). |
 | `ANTARES_MAX_FED_RESPONSE_BYTES` | `16777216` (16 MiB) | Ceiling on one forwarded response body — one misbehaving peer cannot balloon broker memory. Over-cap parts fail as warning 111 (Table 6.3.17-1). |
 | `ANTARES_MAX_BATCH_ITEMS` | `1000` | Batch entity-count cap (DoS bound; the spec sets none). Raise for trusted bulk producers. |
 | `ANTARES_MAX_BODY_BYTES` | `4194304` (4 MiB) | Request body cap, answered with a bare 413 (6.3.4). One number governs the extractor limit and the bounds wall. |
