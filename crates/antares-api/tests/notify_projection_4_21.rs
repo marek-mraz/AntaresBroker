@@ -123,10 +123,13 @@ async fn fire_and_collect(st: &AppState, mut rx: tokio::sync::mpsc::Receiver<Val
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("notification within 5s")
-        .expect("one notification")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("notification within 5s")
+    .expect("one notification")
 }
 
 fn linked_entity(n: &Value) -> Value {
@@ -246,10 +249,13 @@ async fn clause_4_21_omit_with_children_constrains_the_linked_entity() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let n = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-        .await
-        .expect("notification within 5s")
-        .expect("one notification");
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .expect("notification within 5s")
+    .expect("one notification");
 
     let linked = linked_entity(&n);
     assert!(

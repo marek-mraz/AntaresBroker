@@ -92,6 +92,10 @@ jobs:
             | curl -sS --fail-with-body -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" -d @- \
               https://api.hetzner.cloud/v1/volumes) || { echo "volume refused: $VOL"; exit 1; }
           VOLID=$(echo "$VOL" | jq -r .volume.id)
+          # recorded before the server call: a refused server must not
+          # leave the volume unknown to the delete job (perf-janitor swept
+          # two of those)
+          echo "volume_id=$VOLID" >> "$GITHUB_OUTPUT"
           USERDATA=${USERDATA//VOLID/$VOLID}
           RESP=$(jq -n --arg name "$LABEL" --arg type "$SERVER_TYPE" --arg image "$SERVER_IMAGE" \
             --arg loc "$SERVER_LOCATION" --arg ud "$USERDATA" --arg exp "$EXPIRY" --argjson vol "$VOLID" \
@@ -101,7 +105,6 @@ jobs:
               https://api.hetzner.cloud/v1/servers) || { echo "server refused: $RESP"; exit 1; }
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           echo "server_id=$(echo "$RESP" | jq -r .server.id)" >> "$GITHUB_OUTPUT"
-          echo "volume_id=$VOLID" >> "$GITHUB_OUTPUT"
           PRICE=$(curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" https://api.hetzner.cloud/v1/server_types \
             | jq -r ".server_types[] | select(.name==\"$SERVER_TYPE\") | .prices[] | select(.location==\"$SERVER_LOCATION\") | .price_hourly.gross")
           echo "cost cap: $SERVER_TYPE at $PRICE/h x ${TTL_HOURS}h + ${VOLUME_GB} GB volume" >> "$GITHUB_STEP_SUMMARY"
