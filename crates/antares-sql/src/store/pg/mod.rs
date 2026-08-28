@@ -50,7 +50,7 @@ pub async fn connect_with(
         "SET statement_timeout = '{}ms'; SET lock_timeout = '5s'",
         statement_timeout.as_millis()
     );
-    let options = PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
@@ -65,14 +65,9 @@ pub async fn connect_with(
                     .await?;
                 Ok(())
             })
-        });
-    // Connected on the store's own runtime so every socket, the pool's
-    // reaper and its timers live where `wait` drives them.
-    let url = url.to_owned();
-    let pool = entity::io()
-        .spawn(async move { options.connect(&url).await })
-        .await
-        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))??;
+        })
+        .connect(url)
+        .await?;
     // DDL is exempt from the per-session statement timeout: building an index
     // on a large attr_instances legitimately runs longer than a query ever
     // should. The lock timeout stays — a migration blocked on a lock must

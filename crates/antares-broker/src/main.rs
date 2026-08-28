@@ -298,27 +298,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let (store, temporal, maintenance, temporal_mode) = build_drivers(mode).await?;
-            run(
-                port,
-                host_alias,
-                roles,
-                store,
-                temporal,
-                mode,
-                temporal_mode,
-                maintenance,
-                metrics_render,
-                sweep_secs,
-                drain_delay,
-                drain_deadline,
-            )
-            .await
-        })
+    runtime(max_connections()?)?.block_on(async {
+        let (store, temporal, maintenance, temporal_mode) = build_drivers(mode).await?;
+        run(
+            port,
+            host_alias,
+            roles,
+            store,
+            temporal,
+            mode,
+            temporal_mode,
+            maintenance,
+            metrics_render,
+            sweep_secs,
+            drain_delay,
+            drain_deadline,
+        )
+        .await
+    })
 }
 
 /// ANTARES_PG_STATEMENT_TIMEOUT_MS → the per-session `statement_timeout`
@@ -772,15 +769,7 @@ async fn run(
     // Ceiling on concurrently served connections: accepted streams beyond
     // it are dropped at once — refusing cheaply beats queueing work the box
     // cannot serve (each served connection is a spawned task).
-    let max_connections = std::env::var("ANTARES_MAX_CONNECTIONS")
-        .ok()
-        .map(|v| {
-            v.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
-                format!("ANTARES_MAX_CONNECTIONS must be a positive integer (got {v:?})")
-            })
-        })
-        .transpose()?
-        .unwrap_or(10_000);
+    let max_connections = max_connections()?;
     let conn_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(max_connections));
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -854,6 +843,35 @@ async fn run(
             header_read_timeout,
         );
     }
+}
+
+/// ANTARES_MAX_CONNECTIONS: the ceiling on concurrently served connections
+/// (default 10 000).
+fn max_connections() -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(std::env::var("ANTARES_MAX_CONNECTIONS")
+        .ok()
+        .map(|v| {
+            v.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                format!("ANTARES_MAX_CONNECTIONS must be a positive integer (got {v:?})")
+            })
+        })
+        .transpose()?
+        .unwrap_or(10_000))
+}
+
+/// The request runtime. Every store call parks its thread under
+/// `block_in_place` while the future runs, and past tokio's blocking-thread
+/// ceiling (512 by default) a parked `block_in_place` also parks the core it
+/// ran on: with every core parked nothing polls the I/O and timer driver,
+/// so the very futures the threads wait for can never complete and the
+/// process stops at zero CPU. The ceiling is therefore set above the number
+/// of callers that can exist at once: one per served connection plus the
+/// notification, federation and interval work behind them.
+fn runtime(max_connections: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(max_connections + 1024)
+        .enable_all()
+        .build()
 }
 
 /// Accept the next connection. There is no failure value: `accept()`
@@ -1063,6 +1081,45 @@ mod config_key_tests {
         assert!(
             missing.is_empty(),
             "KNOWN_KEYS is missing variables the workspace reads: {missing:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    /// More parked store callers than tokio's default ceiling must still
+    /// wake: the bridge below is the shape of `antares_sql`'s `wait`, and
+    /// with the default ceiling this many callers park every core.
+    #[test]
+    fn callers_beyond_tokio_default_ceiling_still_wake() {
+        const CALLERS: usize = 600;
+        let rt = runtime(64).expect("runtime");
+        let run = std::thread::spawn(move || {
+            rt.block_on(async {
+                let tasks: Vec<_> = (0..CALLERS)
+                    .map(|_| {
+                        tokio::spawn(async {
+                            let h = tokio::runtime::Handle::current();
+                            tokio::task::block_in_place(|| {
+                                h.block_on(tokio::time::sleep(std::time::Duration::from_millis(50)))
+                            })
+                        })
+                    })
+                    .collect();
+                for t in tasks {
+                    t.await.expect("task");
+                }
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !run.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            run.is_finished(),
+            "parked callers never woke: the runtime is wedged"
         );
     }
 }

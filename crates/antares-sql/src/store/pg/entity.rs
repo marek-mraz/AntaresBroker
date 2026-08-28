@@ -43,77 +43,22 @@ enum Bind {
     Int(i64),
 }
 
-/// The runtime that drives every Postgres socket and timer. Separate from
-/// the request runtime on purpose: `wait` parks the calling thread, and
-/// beyond tokio's blocking-thread ceiling a parked `block_in_place` also
-/// parks the core it ran on. With the pool's I/O on the request runtime
-/// those cores were the only ones polling the driver, so past the ceiling
-/// no acquire, timeout or response could complete and the process hung at
-/// zero CPU. Driven from here, a parked caller always wakes.
-pub(crate) fn io() -> &'static tokio::runtime::Runtime {
-    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("antares-pg-io")
-            .enable_all()
-            .build()
-            .expect("postgres I/O runtime")
-    })
-}
-
 /// Run an async block from sync code without stalling a tokio worker
-/// (same rationale as the redb shadow's `on_blocking`). The future is
-/// polled on this thread, its sockets and timers belong to [`io`].
+/// (same rationale as the redb shadow's `on_blocking`). The parked thread
+/// counts against tokio's blocking-thread ceiling; past that ceiling a
+/// `block_in_place` also parks the core it ran on, so the composition root
+/// sizes the ceiling above the connection cap (`antares-broker` `runtime`).
 pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| io().block_on(fut))
+            tokio::task::block_in_place(|| h.block_on(fut))
         }
         Ok(h) => h.block_on(fut),
-        Err(_) => io().block_on(fut),
-    }
-}
-
-#[cfg(test)]
-mod wait_tests {
-    use super::*;
-
-    /// More parked callers than tokio's blocking-thread ceiling must still
-    /// complete: with the awaited timers on the request runtime the cores
-    /// were all queued behind hand-offs and nothing ever fired.
-    #[test]
-    fn callers_beyond_the_blocking_ceiling_still_wake() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .max_blocking_threads(2)
+        Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
-        let run = std::thread::spawn(move || {
-            rt.block_on(async {
-                let tasks: Vec<_> = (0..8)
-                    .map(|_| {
-                        tokio::spawn(async {
-                            wait(async {
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            })
-                        })
-                    })
-                    .collect();
-                for t in tasks {
-                    t.await.expect("task");
-                }
-            })
-        });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !run.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            run.is_finished(),
-            "parked callers never woke: the runtime is wedged"
-        );
+            .expect("mini runtime")
+            .block_on(fut),
     }
 }
 

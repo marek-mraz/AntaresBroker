@@ -36,17 +36,20 @@ Pg arm without touching consumers.
 
 `crates/antares-store/src/lib.rs typed_mutate_round_trips_through_the_boxed_seam` (the mutate-transaction rule survives the trait seam); the enum half is confirmed by ADR-0013.
 
-## Amendment: the facade's I/O runs on its own runtime
+## Amendment: the blocking ceiling is sized from the connection cap
 
 `wait` parks the calling thread under `block_in_place`. Past tokio's
-blocking-thread ceiling a parked `block_in_place` also parks the core it
-ran on, and while the pool's sockets and timers lived on the request
-runtime those cores were the only ones polling the driver: past the
-ceiling no acquire, acquire timeout or response could complete and the
-process stopped at zero CPU (seen at 1 000 updates/s with 12 000 client
-connections). The Postgres pool is now connected on, and every awaited
-store future is driven by, a dedicated two-thread runtime
-(`store/pg/entity.rs::io`); a parked caller therefore always wakes, and
-overload degrades into latency instead of a hang. Regression:
-`entity.rs wait_tests::callers_beyond_the_blocking_ceiling_still_wake`.
-
+blocking-thread ceiling (512 by default) a parked `block_in_place` also
+parks the core it ran on, and with every core parked nothing polls the
+I/O and timer driver: the pool acquires the threads wait for, and their
+5 s timeouts, can never complete and the process stops at zero CPU
+(seen at 1 000 updates/s with 12 000 client connections). Driving the
+pool from a runtime of its own removes the deadlock but makes every
+round trip a cross-thread wakeup (p99 at 500 updates/s went from
+49 ms to 2 s), so the sockets stay on the request runtime and the
+composition root sizes the ceiling instead: `max_blocking_threads =
+ANTARES_MAX_CONNECTIONS + 1024`, one parked caller per served
+connection plus the background work (`antares-broker` `runtime`).
+Threads are created on demand, so the ceiling costs nothing until a
+storm actually uses it. Regression:
+`antares-broker` `runtime_tests::callers_beyond_tokio_default_ceiling_still_wake`.
