@@ -27,15 +27,25 @@ impl Drop for Broker {
 }
 
 fn free_port() -> u16 {
-    // The kernel hands out ephemeral ports without repeating a just-freed
-    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
-    // hundreds of nextest processes pick the same port and one test talk
-    // to the other's broker.
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+    // Kernel-chosen ports (a pid-keyed pool of 100 ports per 120 pids once
+    // made two nextest processes share one). A closed LISTENING socket
+    // never enters TIME_WAIT, so a burst of ten draws can repeat a port:
+    // two brokers then race for it, the loser exits, and the test talks
+    // to the wrong role (an api port answering a worker's 404). Every
+    // port handed out in this process is remembered and never reused.
+    static TAKEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        let mut taken = TAKEN.lock().expect("taken");
+        if !taken.contains(&port) {
+            taken.push(port);
+            return port;
+        }
+    }
 }
 
 fn start(port: u16, roles: &str, db: &str, nats: &str) -> Broker {
