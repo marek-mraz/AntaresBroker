@@ -1141,7 +1141,7 @@ pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
 fn note_drop() {
     let n = CHANGES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     metrics::counter!("antares_notification_changes_dropped_total").increment(1);
-    if n == 1 || n % 1000 == 0 {
+    if n == 1 || n.is_multiple_of(1000) {
         tracing::warn!("notification change queue full: {n} changes dropped so far (delivery slower than the write rate)");
     }
 }

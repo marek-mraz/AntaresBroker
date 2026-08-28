@@ -399,6 +399,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 page: Some(antares_sql::store::pg::entity::Page {
                     offset: 2,
                     limit: 3,
+                    count: true,
                 }),
                 ..Default::default()
             },
@@ -421,6 +422,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 page: Some(antares_sql::store::pg::entity::Page {
                     offset: 50,
                     limit: 3,
+                    count: true,
                 }),
                 ..Default::default()
             },
@@ -481,6 +483,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
                 page: Some(antares_sql::store::pg::entity::Page {
                     offset: 0,
                     limit: 3,
+                    count: true,
                 }),
                 ..Default::default()
             },
@@ -1077,6 +1080,7 @@ async fn temporal_exact_prefilter_pages_correctly() {
         page: Some(antares_sql::store::filter::Page {
             offset: 0,
             limit: 1,
+            count: true,
         }),
         ..Default::default()
     };

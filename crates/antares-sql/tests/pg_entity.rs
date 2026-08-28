@@ -464,6 +464,7 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
                 page: Some(antares_sql::store::pg::entity::Page {
                     offset: 0,
                     limit: 5,
+                    count: true,
                 }),
                 expand: &ex,
                 ..Default::default()

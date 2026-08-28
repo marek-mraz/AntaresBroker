@@ -1290,11 +1290,7 @@ mod tests {
         assert!(paged);
         assert!(!sql.contains("count(*) OVER ()"), "{sql}");
         assert!(sql.contains("LIMIT $2 OFFSET $3"), "{sql}");
-        assert!(
-            matches!(binds[1], Bind::Int(11)),
-            "limit + 1: {:?}",
-            binds[1]
-        );
+        assert!(matches!(binds[1], Bind::Int(11)), "limit + 1 must be bound");
         assert!(matches!(binds[2], Bind::Int(20)));
     }
 
