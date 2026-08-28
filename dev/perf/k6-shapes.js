@@ -1,5 +1,6 @@
 // The request shapes other brokers publish, so the numbers compare:
-//   query   GET /entities?type=Vehicle&limit=20   over 100 five-attribute entities
+//   query   GET /entities?type=Vehicle&limit=20&local=true   over 100 five-attribute entities
+//           (local=true: the store answers alone, no registration fan-out)
 //   retrieve GET /entities/{id}
 // Closed model (constant VUs) on purpose here: this measures what the
 // broker sustains at a fixed concurrency (c50, c200), which is what the
@@ -52,7 +53,7 @@ export default function () {
   if (SHAPE === "retrieve") {
     r = http.get(`${BASE}/entities/urn:ngsi-ld:Vehicle:shape:${__ITER % N}`, { headers });
   } else {
-    r = http.get(`${BASE}/entities?type=Vehicle&limit=20`, { headers });
+    r = http.get(`${BASE}/entities?type=Vehicle&limit=20&local=true`, { headers });
   }
   check(r, { "200": (res) => res.status === 200 });
 }

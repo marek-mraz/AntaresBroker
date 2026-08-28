@@ -365,6 +365,10 @@ fn snap_touch(st: &AppState, tenant: &TenantId, id: &str) {
 /// notifications from snapshot-scoped subscriptions (6.3.22) without
 /// leaking the internal tenant.
 pub(crate) fn snapshot_of_synth(st: &AppState, synth: &str) -> Option<(TenantId, String)> {
+    // only synthetic tenants are indexed; every other tenant skips the lookup
+    if !synth.starts_with("snap-") {
+        return None;
+    }
     let idx = snap_index_tenant()?;
     let doc = st.store.get(&idx, Kind::Snapshot, synth).ok().flatten()?;
     let owner = TenantId::new(doc.get("tenant")?.as_str()?).ok()?;

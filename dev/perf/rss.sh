@@ -41,7 +41,8 @@ case "${1:-}" in
       cores=$(nproc); hb0=0; ht0=0; kj0=0; sj0=0; mj0=0; n=0
       [ -n "${METRICS_URL:-}" ] && mkdir -p "$OUT/metrics"
       # by_name <substring>: summed RSS KiB and jiffies of every process
-      # whose cmdline carries it (k6 is a fresh process per stage)
+      # whose cmdline carries it — one argument, never a phrase: /proc cmdline
+      # separates arguments with NUL (k6 is a fresh process per stage)
       by_name() {
         local rss=0 jf=0 d
         for d in $(grep -l -a -- "$1" /proc/[0-9]*/cmdline 2>/dev/null); do
@@ -67,7 +68,7 @@ case "${1:-}" in
           p=$(awk '{print int($1/1024)}' "$CG/memory.current" 2>/dev/null || echo 0)
           pj=$(awk -v tick="$tick" '/^usage_usec/ {print int($2 * tick / 1000000)}' "$CG/cpu.stat" 2>/dev/null || echo 0)
         fi
-        read -r k kj < <(by_name "k6 run")
+        read -r k kj < <(by_name "k6")
         read -r sk sj < <(by_name "perf/sink.py")
         read -r mk mj < <(by_name "mosquitto")
         t1=$(date +%s.%N)

@@ -74,9 +74,9 @@ spec:
             - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
-            # PRODUCTION: point the Secret at a NON-superuser, non-BYPASSRLS role
-            # (e.g. antares_app) so the RLS tenant-isolation backstop is enforced,
-            # and set ANTARES_REQUIRE_RLS=1 to refuse boot otherwise. Migrations
+            # The Secret must name a NON-superuser, non-BYPASSRLS role
+            # (e.g. antares_app): ANTARES_REQUIRE_RLS=1 below refuses to boot
+            # otherwise, so the RLS tenant-isolation backstop is enforced. Migrations
             # need a privileged role — run them as a separate bootstrap step, then
             # run the broker as antares_app (granted DML on the tenant tables).
             # The Secret above carries dev credentials only so the CI kind-smoke
@@ -84,7 +84,7 @@ spec:
             - name: ANTARES_DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: antares-db, key: url }
-            # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
+            - { name: ANTARES_REQUIRE_RLS, value: "1" }
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
             - { name: ANTARES_NATS_REPLICAS, value: "3" }
@@ -142,12 +142,12 @@ spec:
             - { name: tmp, mountPath: /tmp }
           env:
             - { name: ANTARES_STORE, value: postgres }
-            # PRODUCTION: use a non-superuser role + ANTARES_REQUIRE_RLS=1
-            # (see the api Deployment above).
+            # Non-superuser role + ANTARES_REQUIRE_RLS=1, as in the api
+            # Deployment above.
             - name: ANTARES_DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: antares-db, key: url }
-            # - { name: ANTARES_REQUIRE_RLS, value: "1" }   # enable in production
+            - { name: ANTARES_REQUIRE_RLS, value: "1" }
             - { name: ANTARES_BUS, value: nats }
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
             - { name: ANTARES_NATS_REPLICAS, value: "3" }

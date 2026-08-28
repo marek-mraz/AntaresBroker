@@ -470,10 +470,15 @@ where
         .await
         .is_err()
     {
-        TASK_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics::counter!("antares_notification_task_panics_total").increment(1);
-        tracing::error!("notification pipeline task panicked; this change is lost");
+        note_panic();
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn note_panic() {
+    TASK_PANICS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics::counter!("antares_notification_task_panics_total").increment(1);
+    tracing::error!("notification pipeline task panicked; this change is lost");
 }
 
 /// Wasm32 has no task boundary to catch with (single-threaded executor, and
@@ -1123,7 +1128,11 @@ pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
                 deliver(&st, &g.tenant, &g.sub, g.data, &g.ctx).await;
             });
         }
-        while set.join_next().await.is_some() {}
+        while let Some(joined) = set.join_next().await {
+            if joined.is_err() {
+                note_panic();
+            }
+        }
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -2068,6 +2077,7 @@ async fn deliver_as(
     // window is the in-flight attempt itself, and the failure TPs wait for the
     // attempt to resolve before asserting.
     let mut prev_success: Option<Value> = None;
+    let mut booked_doc: Option<Value> = None;
     let booked = st
         .store
         .mutate(tenant, kind, &sub_id, |doc| {
@@ -2085,6 +2095,7 @@ async fn deliver_as(
                 prev_success = n.insert("lastSuccess".into(), Value::String(now.clone()));
                 n.insert("status".into(), Value::String("ok".into()));
             }
+            booked_doc = Some(doc.clone());
             Ok::<(), antares_model::NgsiError>(())
         })
         .unwrap_or_else(|e| {
@@ -2097,7 +2108,7 @@ async fn deliver_as(
     if booked.is_none() {
         return;
     }
-    mirror_bookkeeping(st, tenant, kind, &sub_id);
+    mirror_bookkeeping(st, tenant, kind, &sub_id, booked_doc);
     // The notification endpoint is an egress destination like any other
     // — policy check once, breaker consulted before the attempt.
     // A refusal is a delivery failure for bookkeeping (status "failed",
@@ -2151,6 +2162,7 @@ async fn deliver_as(
         // 5.8.6 / 5.11.7: subscription status → "failed" on delivery failure;
         // roll back the optimistic lastSuccess stamp.
         let ts = now_iso();
+        let mut failed_doc: Option<Value> = None;
         st.store
             .mutate(tenant, kind, &sub_id, |doc| {
                 if let Some(o) = doc.as_object_mut() {
@@ -2174,13 +2186,14 @@ async fn deliver_as(
                     n.insert("timesFailed".into(), json!(failed + 1));
                     n.insert("status".into(), Value::String("failed".into()));
                 }
+                failed_doc = Some(doc.clone());
                 Ok::<(), antares_model::NgsiError>(())
             })
             .unwrap_or_else(|e| {
                 tracing::warn!("failure-status writeback failed: {e}");
                 None
             });
-        mirror_bookkeeping(st, tenant, kind, &sub_id);
+        mirror_bookkeeping(st, tenant, kind, &sub_id, failed_doc);
         // Retries are transport, not new notifications: they run on their
         // own task (never on the request path, never delaying another
         // subscription's delivery) and book only the final outcome — a
@@ -2307,6 +2320,7 @@ async fn retry_and_settle(
                 metrics::counter!("antares_notifications_retried_total", "outcome" => "ok")
                     .increment(1);
                 let ts = now_iso();
+                let mut retried_doc: Option<Value> = None;
                 st.store
                     .mutate(tenant, kind, sub_id, |doc| {
                         if let Some(o) = doc.as_object_mut() {
@@ -2320,13 +2334,14 @@ async fn retry_and_settle(
                             n.insert("lastSuccess".into(), Value::String(ts.clone()));
                             n.insert("status".into(), Value::String("ok".into()));
                         }
+                        retried_doc = Some(doc.clone());
                         Ok::<(), antares_model::NgsiError>(())
                     })
                     .unwrap_or_else(|e| {
                         tracing::warn!("retry bookkeeping writeback failed: {e}");
                         None
                     });
-                mirror_bookkeeping(st, tenant, kind, sub_id);
+                mirror_bookkeeping(st, tenant, kind, sub_id, retried_doc);
                 return;
             }
             Err((timed_out, e)) => {
@@ -2456,14 +2471,20 @@ pub(crate) fn redact_userinfo(uri: &str) -> String {
 /// throttling window is per-pod approximate.
 /// Known ceiling: exact distributed throttling = per-notification KV sync or a
 /// store read in `throttled()`; add if a deployment needs the strict window.
-fn mirror_bookkeeping(st: &AppState, tenant: &TenantId, kind: Kind, sub_id: &str) {
+/// The mirror learns the counters from the document the writeback just
+/// committed under the row lock; `None` (no row) leaves it untouched.
+fn mirror_bookkeeping(
+    st: &AppState,
+    tenant: &TenantId,
+    kind: Kind,
+    sub_id: &str,
+    doc: Option<Value>,
+) {
     if kind != Kind::Subscription {
         return;
     }
-    if let Some(m) = &st.sub_mirror {
-        if let Ok(Some(doc)) = st.store.get(tenant, kind, sub_id) {
-            m.apply(tenant.as_str(), sub_id, Some(doc));
-        }
+    if let (Some(m), Some(doc)) = (&st.sub_mirror, doc) {
+        m.apply(tenant.as_str(), sub_id, Some(doc));
     }
 }
 
@@ -2824,6 +2845,47 @@ mod change_pipeline {
             }),
         )
         .await
+    }
+
+    /// Table 5.2.14.2-1 timesSent / lastNotification: the mirror the matcher
+    /// reads carries the counters the delivery writeback committed, and the
+    /// store row agrees — one writeback, no second read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mirror_carries_the_booked_counters() {
+        crate::allow_private();
+        let (uri, hits) = counting_endpoint().await;
+        let mut st = AppState::new("antares-mirror-booked".into());
+        wire(&mut st);
+        subscribe(&st, "booked", &uri, 30_000).await;
+        assert_eq!(create_vehicle(&st, 7).await, 201);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(10 * crate::state::slow_factor());
+        while hits.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one notification delivered");
+        let id = "urn:ngsi-ld:Subscription:booked";
+        let mirrored = st
+            .sub_mirror
+            .as_ref()
+            .expect("mirror wired")
+            .docs("default")
+            .into_iter()
+            .find(|d| d["id"] == id)
+            .expect("subscription mirrored");
+        assert_eq!(mirrored["notification"]["timesSent"], json!(1));
+        assert!(mirrored["notification"]["lastNotification"].is_string());
+        let tenant = TenantId::new("default").expect("tenant");
+        let stored = st
+            .store
+            .get(&tenant, Kind::Subscription, id)
+            .expect("store")
+            .expect("row");
+        assert_eq!(stored["notification"]["timesSent"], json!(1));
+        assert_eq!(
+            stored["notification"]["lastNotification"],
+            mirrored["notification"]["lastNotification"]
+        );
     }
 
     /// 5.8.6: a matching change notifies, and a panic around ONE change must
