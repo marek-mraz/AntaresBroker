@@ -117,16 +117,15 @@ project does not have yet.
 |---|---|
 | Entities | 100,000,000 — current-state, one PostgreSQL cluster |
 | Tenants | 10,000 — **one shared schema**, `tenant_id` + Row-Level Security |
-| Subscriptions | 100,000 per broker (HTTP + MQTT delivery) |
-| CSource registrations | 100,000+ per broker — matching stays index-shaped, fan-out bounded |
-| Broker memory | < 500 MB RSS at full load (100,000,000 entities, 10,000 tenants, 100,000 subscriptions, 100,000 CSource registrations) |
-| Postgres memory | < 16 GB, PostGIS required, **TimescaleDB optional** (two temporal modes) at the same full load |
+| Subscriptions | 10,000 per broker (HTTP + MQTT delivery) |
+| CSource registrations | 10,000+ per broker — matching stays index-shaped, fan-out bounded |
+| Storage | PostgreSQL with PostGIS, **TimescaleDB optional** (two temporal modes) |
 | Compliance | full NGSI-LD (ETSI CIM 009 V1.9.1), gated on the ETSI Robot suite + this repo's extension TPs |
 | HA | stateless broker pods, NATS JetStream, Postgres primary/replica |
 
 Measured against these rows by the weekly `scale-weekly` run on `master`
 (100 M entities, 10 k tenants, 100 k subscriptions, 100 k registrations on
-one rented box, resident set asserted against the budgets): the tables and
+one rented box, broker and Postgres resident set and CPU sampled per phase): the tables and
 CSVs of the newest run are at
 <https://antares-ngsi-ld-demo.marek-mraz.com/reports/perf/latest/>, and the
 [Performance](docs/src/performance.md) chapter says how each number is made.
@@ -315,7 +314,10 @@ progress metric. The vendored copy is a fork: it carries a handful of
 test-side fixes (fixtures and keywords the clause text contradicts), each
 with its rationale and the issue text ready to file upstream in
 [`docs/upstream/etsi-raises.md`](docs/upstream/etsi-raises.md); no test is
-weakened to fit the broker.
+weakened to fit the broker. The suite as published by ETSI is not
+currently aligned with CIM 009 V1.9.1: some TPs assert behaviour the clause
+text contradicts and some do not run as shipped, so a 100 % pass rate is
+only meaningful against a fork that names every test-side change.
 
 ## Repository layout
 

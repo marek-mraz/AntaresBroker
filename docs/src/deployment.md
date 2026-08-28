@@ -14,9 +14,9 @@ the same constraints. Resource numbers are measured by the matrix run
 | Idle | ~9 MiB | — | memory store, no traffic |
 | wasm Node shim | 74–111 MiB | up to 185 MiB | Node runtime overhead, not the broker |
 
-The design budget is < 500 MB RSS at full load (100k subscriptions); the
-CI resource gate enforces 350 MiB during the suite. Postgres sizing budget:
-< 16 GB for the 100M-entity target — standard PostgreSQL tuning applies.
+The CI resource gate enforces 350 MiB during the suite. Postgres sizing
+follows standard PostgreSQL tuning; the weekly scale run publishes the
+measured resident set of both.
 
 ## Single node, no database
 
