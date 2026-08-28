@@ -33,6 +33,37 @@ TABLES = [
     ("noise-profile.txt", "Noise profile"),
 ]
 
+# What each table measures, printed under its title so the numbers read
+# without the scripts open.
+LEGEND = {
+    "shapes.md": (
+        "query = GET /entities?type=Vehicle&limit=20; retrieve = GET /entities/{id}. "
+        "c50 / c200 = that many closed-loop clients, each sending the next request as soon as the "
+        "previous one answers; req/s is what the broker sustained at that concurrency. "
+        "postgres rows run on the main broker over the LOADED dataset (tenant t7), memory rows on a "
+        "fresh in-memory broker holding the 100 seeded entities."
+    ),
+    "saturate.md": (
+        "Open-loop arrival rate stepped up by STEP rps per stage on a FRESH broker in the default "
+        "tenant (100 seeded entities, not the loaded dataset); query = the shapes query, write = "
+        "POST /entities. knee = the last stage whose p99 stayed under P99_MS and error rate under "
+        "ERR; 'none reached' = every stage held, the ceiling is above STAGES*STEP."
+    ),
+    "rss.md": (
+        "1 Hz samples from rss.sh: RSS and CPU per service (100 % = one core); the rig's own "
+        "processes (k6, sink, mosquitto) share the machine with the broker and Postgres."
+    ),
+    "fire.md": (
+        "Updates + deletes streamed at the rate over the loaded entities with every subscription "
+        "live; due = notifications the classes' rules say must fire, delivered = what the sink "
+        "received; dropped by broker = the change queue was full (antares_notification_changes_dropped_total)."
+    ),
+    "fed.md": (
+        "GET /entities fanned out over the matching registrations, every source answering empty at "
+        "the sink; calls per query = how many sources one query dialled."
+    ),
+}
+
 
 def pdf(out, record, sections):
     """report.pdf: every table plus the RSS/CPU timeline and the delivery
@@ -131,7 +162,8 @@ def main():
             continue
         text = open(path).read()
         record["tables"][name.split(".")[0]] = md_table(text)
-        sections.append((title, text))
+        legend = LEGEND.get(name)
+        sections.append((title, f"{legend}\n\n{text}" if legend else text))
     if readme:
         for title, text in sections:
             print(f"### {title}\n\n{text.strip()}\n")
@@ -141,6 +173,9 @@ def main():
     for title, text in sections:
         rows = md_table(text)
         body.append(f"<h2>{html.escape(title)}</h2>")
+        prose = " ".join(l for l in text.splitlines() if l.strip() and not l.startswith("|"))
+        if rows and prose:
+            body.append(f"<p>{html.escape(prose)}</p>")
         if rows:
             body.append("<table>" + "".join(
                 "<tr>" + "".join(("<th>" if i == 0 else "<td>") + html.escape(c) + ("</th>" if i == 0 else "</td>") for c in r) + "</tr>"
