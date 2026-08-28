@@ -265,6 +265,7 @@ mod tests {
                 "maxBodyBytes",
                 "maxContextFetches",
                 "maxFedFanout",
+                "maxFedInflight",
                 "maxFedResponseBytes",
                 "maxGeoVertices",
                 "maxJoinLevel",

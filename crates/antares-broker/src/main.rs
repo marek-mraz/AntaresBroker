@@ -97,6 +97,7 @@ const KNOWN_KEYS: &[&str] = &[
     // 5.7.2.4 fan-out ceiling: how many matching registrations one
     // distributed operation may contact.
     "ANTARES_FED_FANOUT",
+    "ANTARES_FED_INFLIGHT",
     // Ceiling on the body this broker will read back from a forwarded
     // request.
     "ANTARES_MAX_FED_RESPONSE_BYTES",
