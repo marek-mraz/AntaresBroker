@@ -46,6 +46,8 @@ case "${1:-}" in
         local rss=0 jf=0 d
         for d in $(grep -l -a -- "$1" /proc/[0-9]*/cmdline 2>/dev/null); do
           d=${d%/cmdline}
+          # never the sampler itself (its own command line names every pattern)
+          grep -q -a "rss.sh" "$d/cmdline" 2>/dev/null && continue
           rss=$(( rss + $(awk '/VmRSS/ {print $2}' "$d/status" 2>/dev/null || echo 0) ))
           jf=$(( jf + $(awk '{print $14+$15}' "$d/stat" 2>/dev/null || echo 0) ))
         done
