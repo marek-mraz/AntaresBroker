@@ -62,6 +62,26 @@ pub enum StoreMode {
 }
 
 impl StoreMode {
+    /// Every backend this workspace knows, in the order a listing shows
+    /// them. One source of truth: `FromStr`, the unknown-mode message and
+    /// the broker's built-with shelf all read it, so a backend added to the
+    /// enum cannot go missing from any of them.
+    pub const ALL: [StoreMode; 4] = [
+        StoreMode::Memory,
+        StoreMode::File,
+        StoreMode::Postgres,
+        StoreMode::Timescale,
+    ];
+
+    /// The accepted mode names, `memory|file|postgres|timescale`.
+    pub fn names() -> String {
+        StoreMode::ALL
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
     /// The mode name as accepted by `FromStr` (`memory|file|postgres|timescale`).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -80,15 +100,10 @@ impl StoreMode {
 impl std::str::FromStr for StoreMode {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "memory" => Ok(StoreMode::Memory),
-            "file" => Ok(StoreMode::File),
-            "postgres" => Ok(StoreMode::Postgres),
-            "timescale" => Ok(StoreMode::Timescale),
-            other => Err(format!(
-                "unknown store mode {other} (memory|file|postgres|timescale)"
-            )),
-        }
+        StoreMode::ALL
+            .into_iter()
+            .find(|m| m.as_str() == s)
+            .ok_or_else(|| format!("unknown store mode {s} ({})", StoreMode::names()))
     }
 }
 
@@ -602,6 +617,21 @@ impl TemporalDriver for NoTemporal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mode list is one source of truth: every variant round-trips
+    /// through its name, and the message for an unknown name lists all of
+    /// them — a backend added to the enum cannot be missing from either.
+    #[test]
+    fn every_store_mode_round_trips_and_the_error_lists_them_all() {
+        for m in StoreMode::ALL {
+            assert_eq!(m.as_str().parse::<StoreMode>().expect(m.as_str()), m);
+        }
+        let err = "mongo".parse::<StoreMode>().expect_err("unknown mode");
+        assert!(err.contains("mongo"), "{err}");
+        for m in StoreMode::ALL {
+            assert!(err.contains(m.as_str()), "the message must name {m}: {err}");
+        }
+    }
 
     /// A minimal driver proving the boxed seam round-trips typed results:
     /// present row → the closure's T and E cross intact; absent → None.

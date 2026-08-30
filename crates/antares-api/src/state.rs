@@ -51,11 +51,11 @@ pub struct AppState {
     /// Active store backend — reported by `/q/health` (NOT in
     /// `/info/sourceIdentity`, which is a spec resource). A typed value so
     /// mode-gated sections switch on an enum, never on strings.
-    pub store_mode: antares_sql::StoreMode,
+    pub store_mode: antares_store::StoreMode,
     /// The temporal backend `/q/health` names: the store's own mode when one
     /// instance serves both seams, `None` when history is off (`NoTemporal`);
     /// a second backend overwrites it after construction.
-    pub temporal_mode: Option<antares_sql::StoreMode>,
+    pub temporal_mode: Option<antares_store::StoreMode>,
     pub loader: Arc<Loader>,
     pub started: Instant,
     /// Startup timestamp (createdAt of the built-in core @context entry).
@@ -171,13 +171,13 @@ impl AppState {
             return Self::with_store(
                 host_alias,
                 Arc::new(AnyStore::Mem(store)),
-                antares_sql::StoreMode::File,
+                antares_store::StoreMode::File,
             );
         }
         Self::with_store(
             host_alias,
             Arc::new(AnyStore::Mem(Store::default())),
-            antares_sql::StoreMode::Memory,
+            antares_store::StoreMode::Memory,
         )
     }
 
@@ -186,7 +186,7 @@ impl AppState {
     pub fn with_store(
         host_alias: String,
         store: Arc<AnyStore>,
-        store_mode: antares_sql::StoreMode,
+        store_mode: antares_store::StoreMode,
     ) -> Self {
         let temporal: Arc<dyn TemporalDriver> = store.clone();
         Self::with_drivers(host_alias, store, temporal, store_mode)
@@ -196,7 +196,7 @@ impl AppState {
         host_alias: String,
         store: Arc<dyn CurrentStateDriver>,
         temporal: Arc<dyn TemporalDriver>,
-        store_mode: antares_sql::StoreMode,
+        store_mode: antares_store::StoreMode,
     ) -> Self {
         // One policy value, read once, shared by every outbound path —
         // the gate (scheme/breakers) and the clients (DNS pinning, redirect

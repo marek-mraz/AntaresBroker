@@ -6,8 +6,8 @@ use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, ExpandOpts};
 use antares_model::NgsiError;
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -1557,7 +1557,7 @@ mod attr_name_and_via_paths {
         assert_eq!(send(&st, req).await.status(), StatusCode::NOT_FOUND);
         let doc = st
             .store
-            .get(&tenant, antares_sql::store::Kind::Temporal, ENTITY)
+            .get(&tenant, antares_store::Kind::Temporal, ENTITY)
             .expect("store read")
             .expect("temporal doc");
         assert!(

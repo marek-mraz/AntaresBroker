@@ -26,8 +26,8 @@ use crate::negotiate::{
 };
 use crate::state::{now_iso, AppState};
 use antares_model::{NgsiError, TenantId, API_ROOT};
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -639,7 +639,7 @@ async fn run_temporal_query(
             if let Ok(Some(doc)) = st.temporal.get_temporal(
                 tenant,
                 eid,
-                &antares_sql::store::filter::TemporalFilter::default(),
+                &antares_store::filter::TemporalFilter::default(),
             ) {
                 let _ = st.temporal.create(synth, eid, doc);
                 n += 1;

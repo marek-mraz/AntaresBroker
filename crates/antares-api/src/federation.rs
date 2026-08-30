@@ -12,7 +12,7 @@ use crate::state::AppState;
 use antares_jsonld::Context;
 use antares_model::TenantId;
 #[cfg(test)]
-use antares_sql::store::Kind;
+use antares_store::Kind;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};

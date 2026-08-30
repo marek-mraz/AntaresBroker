@@ -18,8 +18,8 @@ use crate::negotiate::{inject_context, link_header_value};
 use crate::state::{now_iso, AppState};
 use antares_jsonld::Context;
 use antares_model::TenantId;
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use antares_store::{TemporalEvent, TemporalOp};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -1453,7 +1453,7 @@ pub async fn interval_tick(st: &AppState) {
                     })
                 });
                 let geo_spec = geo.as_ref().and_then(|g| g.to_sql_spec(&ctx));
-                let filter = antares_sql::store::filter::EntityFilter {
+                let filter = antares_store::filter::EntityFilter {
                     ids: ids.as_ref().map(|_| id_refs.as_slice()),
                     types: (!type_groups.is_empty()).then_some(type_groups.as_slice()),
                     q: q_ast.as_deref(),

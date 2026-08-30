@@ -5,8 +5,8 @@ use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
 use antares_model::NgsiError;
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -578,7 +578,7 @@ fn check_entity_conflict(
             .map(|t| vec![t.to_owned()])
             .collect();
         let types_narrow = ents.iter().all(|e| !ei_types(e).is_empty());
-        let filter = antares_sql::store::filter::EntityFilter {
+        let filter = antares_store::filter::EntityFilter {
             ids: ids_narrow.then_some(ids.as_slice()),
             types: types_narrow.then_some(type_groups.as_slice()),
             attrs: (mode == "exclusive" && !attrs.is_empty()).then_some(attrs.as_slice()),

@@ -1715,13 +1715,13 @@ pub(crate) async fn query_temporal_inner(
         && trepr
             .aggr_methods
             .iter()
-            .all(|m| antares_sql::store::filter::AGGREGATE_METHODS.contains(&m.as_str()));
+            .all(|m| antares_store::filter::AGGREGATE_METHODS.contains(&m.as_str()));
     // scoped: the &dyn expander must not live across an await (handler
     // futures are Send; the store call itself is synchronous)
     let outcome = {
         let expand = |t: &str| ctx.expand_key(t);
         let geo_pre = geo.as_ref().map(|g| g.to_instance_spec(&ctx));
-        let tf = antares_sql::store::filter::TemporalFilter {
+        let tf = antares_store::filter::TemporalFilter {
             ids: ids.as_deref(),
             types: types.as_deref(),
             attrs: entity_attr_filter.as_deref(),
@@ -1740,7 +1740,7 @@ pub(crate) async fn query_temporal_inner(
             timeproperty: tq
                 .as_ref()
                 .map_or("observedAt", |t| t.timeproperty.as_str()),
-            page: push_page.then_some(antares_sql::store::filter::Page {
+            page: push_page.then_some(antares_store::filter::Page {
                 offset: p_offset as i64,
                 limit: p_limit as i64,
                 count: true,
@@ -1748,7 +1748,7 @@ pub(crate) async fn query_temporal_inner(
             q: q_ast.as_ref(),
             expand: &expand,
             geo: geo_pre.as_ref().map(|(s, iri)| (s, iri.as_str())),
-            aggregate: push_agg.then_some(antares_sql::store::filter::Aggregate {
+            aggregate: push_agg.then_some(antares_store::filter::Aggregate {
                 methods: &trepr.aggr_methods,
                 period_secs: match trepr.aggr_period {
                     AggrPeriod::Seconds(sc) => Some(sc),
@@ -2127,7 +2127,7 @@ async fn retrieve_temporal_outer(
             .get_temporal(
                 &tenant,
                 id,
-                &antares_sql::store::filter::TemporalFilter::default(),
+                &antares_store::filter::TemporalFilter::default(),
             )?
             .is_some();
         let map = crate::entity_maps::build_retrieve_map(
@@ -2202,7 +2202,7 @@ async fn retrieve_temporal_inner(
         antares_model::EntityId::new(id)?;
         // Instance pruning pushed into the store (no q=/geo on retrieve,
         // so it is always safe here); window() below stays the arbiter.
-        let tf = antares_sql::store::filter::TemporalFilter {
+        let tf = antares_store::filter::TemporalFilter {
             range: tq
                 .as_ref()
                 .map(|t| antares_sql::compile::temporal::InstanceRange {

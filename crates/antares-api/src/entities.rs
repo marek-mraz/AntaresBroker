@@ -11,8 +11,8 @@ use antares_jsonld::{
 };
 use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -1650,14 +1650,14 @@ pub fn filter_entities_paged(
     let split_agg = crate::federation::split_entities(params) && !fed.is_empty();
     let outcome = st.store.query_entities(
         tenant,
-        &antares_sql::store::filter::EntityFilter {
+        &antares_store::filter::EntityFilter {
             ids: ids.as_deref(),
             // 5.2.33: id takes precedence over idPattern, so the literal
             // narrows only when no id selector was given
             id_literal: if ids.is_none() {
                 params
                     .get("idPattern")
-                    .and_then(|p| antares_sql::store::filter::id_pattern_literal(p))
+                    .and_then(|p| antares_store::filter::id_pattern_literal(p))
             } else {
                 None
             },
@@ -1675,7 +1675,7 @@ pub fn filter_entities_paged(
             },
             geo: if split_agg { None } else { geo_spec.as_ref() },
             expand: &expand,
-            page: page.map(|(offset, limit)| antares_sql::store::filter::Page {
+            page: page.map(|(offset, limit)| antares_store::filter::Page {
                 offset: offset as i64,
                 limit: limit as i64,
                 count: params.get("count").map(String::as_str) == Some("true"),
@@ -4423,7 +4423,7 @@ mod clause_5_6_1_and_5_6_21 {
             std::sync::Arc::new(antares_sql::store::any::AnyStore::Pg(
                 antares_sql::store::any::PgBackend::new(pool),
             )),
-            antares_sql::StoreMode::Postgres,
+            antares_store::StoreMode::Postgres,
         );
         for doc in st.store.list(&tenant, Kind::Entity).expect("list") {
             if let Some(id) = doc["id"].as_str() {

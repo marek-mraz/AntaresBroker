@@ -138,11 +138,13 @@ impl AnyStore {
         }
     }
 
-    /// (Queued writers, peak) of the memory/file write-critical section;
-    /// `None` for the Pg arm (Postgres has no single-writer commit queue).
+    /// (Queued writers, peak) behind the single redb committer, reported
+    /// only by a store that has one: `None` for the Pg arm (Postgres has no
+    /// single-writer commit queue) and for a pure in-memory store, whose
+    /// lock depth is not the fsync queue this number stands for.
     pub fn commit_queue(&self) -> Option<(usize, usize)> {
         match self {
-            AnyStore::Mem(s) => Some(s.commit_queue()),
+            AnyStore::Mem(s) => s.shadowed().then(|| s.commit_queue()),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(_) => None,
         }

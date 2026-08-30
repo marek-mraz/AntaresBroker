@@ -620,19 +620,19 @@ async fn health(
     let mut body = serde_json::json!({
         "status": if draining { "DRAINING" } else { "UP" },
         "store": state.store_mode.as_str(),
-        "temporal": state.temporal_mode.map_or("none", antares_sql::StoreMode::as_str),
+        "temporal": state.temporal_mode.map_or("none", antares_store::StoreMode::as_str),
         // Version surface: workspace version + build-time git hash
         // (build.rs), asserted by the release smoke test.
         "version": env!("CARGO_PKG_VERSION"),
         "commit": env!("ANTARES_GIT_HASH"),
     });
-    // In `file` mode commits serialize behind one writer — the queue
-    // depth (current, peak) is the signal that decides the group-commit lever.
-    if state.store_mode == antares_sql::StoreMode::File {
-        if let Some((depth, peak)) = state.store.commit_queue() {
-            body["commitQueueDepth"] = depth.into();
-            body["commitQueuePeak"] = peak.into();
-        }
+    // Where commits serialize behind one writer, the queue depth (current,
+    // peak) is the signal that decides the group-commit lever. A driver
+    // without such a committer reports nothing, so the branch is the
+    // driver's, not a backend name read here.
+    if let Some((depth, peak)) = state.store.commit_queue() {
+        body["commitQueueDepth"] = depth.into();
+        body["commitQueuePeak"] = peak.into();
     }
     // Configured caps + rejection counters, for observability.
     body["limits"] = state.limits.snapshot();
@@ -1126,7 +1126,7 @@ mod tests {
                 antares_sql::store::Store::default(),
             )),
             std::sync::Arc::new(antares_store::NoTemporal),
-            antares_sql::StoreMode::Memory,
+            antares_store::StoreMode::Memory,
         );
         let body = body_json(
             router(st)
@@ -2588,7 +2588,7 @@ mod tests {
         );
         assert!(state
             .store
-            .list(&idx, antares_sql::store::Kind::Entity)
+            .list(&idx, antares_store::Kind::Entity)
             .expect("store")
             .is_empty());
 

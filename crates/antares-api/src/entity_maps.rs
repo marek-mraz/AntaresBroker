@@ -6,8 +6,8 @@
 use crate::negotiate::*;
 use crate::state::AppState;
 use antares_model::{NgsiError, TenantId};
-use antares_sql::store::Kind;
 use antares_store::CurrentStateDriverExt;
+use antares_store::Kind;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};

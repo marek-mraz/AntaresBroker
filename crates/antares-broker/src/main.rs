@@ -362,9 +362,13 @@ enum TemporalChoice {
     Second(antares_sql::StoreMode),
 }
 
-/// The shelf this binary was built with — every store mode is compiled in,
-/// so the listing is static; a feature-gated backend would drop out here.
-const BUILT_WITH: &str = "memory|file|postgres|timescale (temporal also: none)";
+/// The shelf this binary was built with, rendered from the mode list rather
+/// than spelled out: a backend added to `StoreMode` reaches every message
+/// that names the shelf without a second edit. Every mode is compiled in; a
+/// feature-gated backend would drop out of the list itself.
+fn built_with() -> String {
+    format!("{} (temporal also: none)", antares_sql::StoreMode::names())
+}
 
 /// ANTARES_TEMPORAL → driver choice. Absent or the store's own mode = one
 /// instance for both seams; `none` = no history; any other backend name =
@@ -378,7 +382,10 @@ fn temporal_choice(
         Some(m) if m == store_mode.as_str() => Ok(TemporalChoice::SameAsStore),
         Some("none") => Ok(TemporalChoice::None),
         Some(other) => other.parse().map(TemporalChoice::Second).map_err(|_| {
-            format!("ANTARES_TEMPORAL: unknown backend {other:?}; built with {BUILT_WITH}")
+            format!(
+                "ANTARES_TEMPORAL: unknown backend {other:?}; built with {}",
+                built_with()
+            )
         }),
     }
 }
@@ -1267,8 +1274,23 @@ mod sweep_secs_tests {
 
 #[cfg(test)]
 mod driver_registry_tests {
-    use super::{temporal_choice, TemporalChoice, BUILT_WITH};
+    use super::{built_with, temporal_choice, TemporalChoice};
     use antares_sql::StoreMode;
+
+    /// The shelf in the message is rendered from the mode list, so a backend
+    /// added to `StoreMode` cannot go missing from what the broker claims to
+    /// have been built with.
+    #[test]
+    fn the_shelf_names_every_store_mode() {
+        let shelf = built_with();
+        for m in StoreMode::ALL {
+            assert!(shelf.contains(m.as_str()), "{shelf} omits {m}");
+        }
+        assert!(
+            shelf.contains("none"),
+            "temporal `none` is part of the shelf: {shelf}"
+        );
+    }
 
     /// Absent, or the store's own name, means one instance serves both
     /// seams — no second store is ever built for the default.
@@ -1302,7 +1324,7 @@ mod driver_registry_tests {
     fn unknown_backend_is_fatal_and_lists_the_shelf() {
         let err = temporal_choice(StoreMode::Memory, Some("mongo")).expect_err("must fail");
         assert!(err.contains("mongo"), "{err}");
-        assert!(err.contains(BUILT_WITH), "{err}");
+        assert!(err.contains(&built_with()), "{err}");
         assert!(
             temporal_choice(StoreMode::Memory, Some("")).is_err(),
             "an empty name is not a default"

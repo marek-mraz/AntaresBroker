@@ -4,7 +4,7 @@
 use crate::negotiate::*;
 use crate::state::AppState;
 use antares_model::NgsiError;
-use antares_sql::store::filter::{EntityFilter, Page};
+use antares_store::filter::{EntityFilter, Page};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -418,7 +418,7 @@ mod discovery_folds {
     use super::*;
     use crate::state::AppState;
     use antares_model::TenantId;
-    use antares_sql::store::Kind;
+    use antares_store::Kind;
     use serde_json::json;
 
     const V: &str = "https://uri.etsi.org/ngsi-ld/default-context/v";

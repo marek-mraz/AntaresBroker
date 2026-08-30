@@ -316,6 +316,12 @@ impl Store {
         guard
     }
 
+    /// Whether writes reach a durability shadow (`file` mode, and the
+    /// browser build over OPFS) rather than living only in memory.
+    pub fn shadowed(&self) -> bool {
+        self.shadow.is_some()
+    }
+
     /// (Currently queued writers, peak since start). The peak going
     /// nowhere near sustained depth is the evidence that the group-commit
     /// lever stays unbuilt.
@@ -886,6 +892,22 @@ mod tests {
         let (depth, peak) = s.commit_queue();
         assert_eq!(depth, 0, "no writer in flight after the call returns");
         assert!(peak >= 1, "the write itself must register in the peak");
+    }
+
+    /// The commit queue is a `file`-mode signal: it exists because redb has
+    /// one writer and commits fsync through it. A pure in-memory store has no
+    /// such committer, so it reports nothing rather than a number that would
+    /// read as the same thing and mean something else.
+    #[test]
+    fn only_a_shadowed_store_reports_a_commit_queue() {
+        use crate::store::any::AnyStore;
+        assert_eq!(AnyStore::Mem(Store::default()).commit_queue(), None);
+        let dir = tempdir("commit-queue");
+        let s = Store::open_file(&dir).expect("open");
+        assert!(
+            AnyStore::Mem(s).commit_queue().is_some(),
+            "a durable store reports the queue behind its single committer"
+        );
     }
 
     #[test]
