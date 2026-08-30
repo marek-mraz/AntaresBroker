@@ -695,209 +695,101 @@ async fn batch_write(
             // options=update is no Create Entity parameter (5.6.1.3) and
             // would 400 the forward; the append fallback re-adds
             // noOverwrite explicitly (5.6.9.4).
-            // The id is reported to the client verbatim, so it is kept raw
-            // here and percent-encoded per RFC 3986 clause 3.3 only where it
-            // becomes a path segment of a forwarded URL.
-            let ent_id = |ent: &Value| {
-                ent.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            };
             let mut handled = true;
             match mode {
                 BatchMode::Create if reg.supports("createEntity") => {
+                    let call = BatchFwd::create();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::POST,
-                            format!("{}/ngsi-ld/v1/entities", reg.endpoint),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, true, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 BatchMode::Upsert if reg.supports("createEntity") => {
+                    let create = BatchFwd::create();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::POST,
-                            format!("{}/ngsi-ld/v1/entities", reg.endpoint),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent.clone()),
-                        )
-                        .await;
-                        if status != 409 {
-                            one_outcome(&id, status, true, &mut remote_ok, &mut remote_err);
-                        } else if replace_mode && reg.supports("replaceEntity") {
-                            let (status, _, _) = crate::federation::forward(
-                                st,
-                                reqwest::Method::PUT,
-                                format!(
-                                    "{}/ngsi-ld/v1/entities/{}",
-                                    reg.endpoint,
-                                    crate::federation::path_segment(id.as_str())
-                                ),
-                                &[],
-                                headers,
-                                &tenant,
-                                reg,
-                                &ctx_url,
-                                Some(ent),
-                            )
-                            .await;
-                            one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
-                        } else if !replace_mode && reg.supports("updateEntity") {
-                            let (status, _, _) = crate::federation::forward(
-                                st,
-                                reqwest::Method::PATCH,
-                                format!(
-                                    "{}/ngsi-ld/v1/entities/{}/attrs",
-                                    reg.endpoint,
-                                    crate::federation::path_segment(id.as_str())
-                                ),
-                                &[],
-                                headers,
-                                &tenant,
-                                reg,
-                                &ctx_url,
-                                Some(ent),
-                            )
-                            .await;
-                            one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
-                        } else {
-                            // 5.6.8.4: neither replace nor update available
-                            remote_err.push(err_remote(
-                                Some(&id),
-                                422,
-                                &format!("OperationNotSupported: no upsert path for {id}"),
-                            ));
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent.clone(), &create)
+                                .await;
+                        // 5.6.8.4: an Entity the peer already holds is not a
+                        // failed upsert — it falls through to the operation
+                        // that updates the one that is there.
+                        let fallback = match () {
+                            _ if status != 409 => None,
+                            _ if replace_mode && reg.supports("replaceEntity") => {
+                                Some(BatchFwd::replace())
+                            }
+                            _ if !replace_mode && reg.supports("updateEntity") => {
+                                Some(BatchFwd::update())
+                            }
+                            _ => {
+                                // 5.6.8.4: neither replace nor update available
+                                remote_err.push(err_remote(
+                                    Some(&id),
+                                    422,
+                                    &format!("OperationNotSupported: no upsert path for {id}"),
+                                ));
+                                continue;
+                            }
+                        };
+                        match fallback {
+                            None => one_outcome(&id, status, true, &mut remote_ok, &mut remote_err),
+                            Some(call) => {
+                                let (id, status) =
+                                    forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call)
+                                        .await;
+                                one_outcome(
+                                    &id,
+                                    status,
+                                    call.created,
+                                    &mut remote_ok,
+                                    &mut remote_err,
+                                );
+                            }
                         }
                     }
                 }
                 BatchMode::Upsert if replace_mode && reg.supports("replaceEntity") => {
+                    let call = BatchFwd::replace();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::PUT,
-                            format!(
-                                "{}/ngsi-ld/v1/entities/{}",
-                                reg.endpoint,
-                                crate::federation::path_segment(id.as_str())
-                            ),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 BatchMode::Upsert if !replace_mode && reg.supports("updateEntity") => {
+                    let call = BatchFwd::update();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::PATCH,
-                            format!(
-                                "{}/ngsi-ld/v1/entities/{}/attrs",
-                                reg.endpoint,
-                                crate::federation::path_segment(id.as_str())
-                            ),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 BatchMode::Update if !no_overwrite && reg.supports("updateEntity") => {
+                    let call = BatchFwd::update();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::PATCH,
-                            format!(
-                                "{}/ngsi-ld/v1/entities/{}/attrs",
-                                reg.endpoint,
-                                crate::federation::path_segment(id.as_str())
-                            ),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 BatchMode::Merge if reg.supports("mergeEntity") => {
                     // 5.6.20.4 support ladder: no mergeBatch -> per-entity
                     // Merge Entity (5.6.17) forwards.
+                    let call = BatchFwd::merge();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::PATCH,
-                            format!(
-                                "{}/ngsi-ld/v1/entities/{}",
-                                reg.endpoint,
-                                crate::federation::path_segment(id.as_str())
-                            ),
-                            &[],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 BatchMode::Update if no_overwrite && reg.supports("appendAttrs") => {
                     // 5.6.9.4: append with Attribute overwrite disabled.
+                    let call = BatchFwd::append_no_overwrite();
                     for ent in arr.clone() {
-                        let id = ent_id(&ent);
-                        let (status, _, _) = crate::federation::forward(
-                            st,
-                            reqwest::Method::POST,
-                            format!(
-                                "{}/ngsi-ld/v1/entities/{}/attrs",
-                                reg.endpoint,
-                                crate::federation::path_segment(id.as_str())
-                            ),
-                            &[("options".into(), "noOverwrite".into())],
-                            headers,
-                            &tenant,
-                            reg,
-                            &ctx_url,
-                            Some(ent),
-                        )
-                        .await;
-                        one_outcome(&id, status, false, &mut remote_ok, &mut remote_err);
+                        let (id, status) =
+                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
+                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
                     }
                 }
                 _ => handled = false,
@@ -950,6 +842,119 @@ async fn batch_write(
         BatchMode::Update | BatchMode::Merge => (StatusCode::NO_CONTENT, false),
     };
     Ok(out.respond(&tenant, status, body_on_ok))
+}
+
+/// Where a forwarded batch item lands on the peer.
+#[derive(Clone, Copy)]
+enum FwdPath {
+    Collection,
+    Entity,
+    Attrs,
+}
+
+/// The single-Entity request a batch operation forwards when the peer does
+/// not support the batch operation itself — the 5.6.7.4 / 5.6.8.4 / 5.6.9.4 /
+/// 5.6.20.4 fallback ladders. 5.6.7 posts to the collection, 5.6.8 replaces
+/// the Entity or updates its Attributes, 5.6.9 updates them or appends with
+/// overwrite disabled, 5.6.20 merges the Entity; the loop around them is the
+/// same. None of them inherits the batch `options` parameter, which is no
+/// parameter of the single-Entity operation being carried — 5.6.9.4's
+/// noOverwrite is re-added here, explicitly, because that one is.
+struct BatchFwd {
+    path: FwdPath,
+    method: reqwest::Method,
+    query: Vec<(String, String)>,
+    /// whether a 201 from the peer counts as a creation in the 5.2.16 S array
+    created: bool,
+}
+
+impl BatchFwd {
+    /// 5.6.1 Create Entity.
+    fn create() -> Self {
+        Self {
+            path: FwdPath::Collection,
+            method: reqwest::Method::POST,
+            query: Vec::new(),
+            created: true,
+        }
+    }
+    /// 5.6.4 Replace Entity.
+    fn replace() -> Self {
+        Self {
+            path: FwdPath::Entity,
+            method: reqwest::Method::PUT,
+            query: Vec::new(),
+            created: false,
+        }
+    }
+    /// 5.6.2 Update Entity Attributes.
+    fn update() -> Self {
+        Self {
+            path: FwdPath::Attrs,
+            method: reqwest::Method::PATCH,
+            query: Vec::new(),
+            created: false,
+        }
+    }
+    /// 5.6.17 Merge Entity.
+    fn merge() -> Self {
+        Self {
+            path: FwdPath::Entity,
+            method: reqwest::Method::PATCH,
+            query: Vec::new(),
+            created: false,
+        }
+    }
+    /// 5.6.3 Append Entity Attributes with overwrite disabled (5.6.9.4).
+    fn append_no_overwrite() -> Self {
+        Self {
+            path: FwdPath::Attrs,
+            method: reqwest::Method::POST,
+            query: vec![("options".into(), "noOverwrite".into())],
+            created: false,
+        }
+    }
+}
+
+/// Forward one Entity of the batch to one registration (4.3.6.3) and report
+/// the id it was sent under with the status the peer answered. The id is
+/// reported back to the client verbatim, so it is kept raw here and
+/// percent-encoded per RFC 3986 clause 3.3 only where it becomes a path
+/// segment of the forwarded URL.
+async fn forward_one(
+    st: &AppState,
+    reg: &crate::federation::FedReg,
+    headers: &HeaderMap,
+    tenant: &antares_model::TenantId,
+    ctx_url: &str,
+    ent: Value,
+    call: &BatchFwd,
+) -> (String, u16) {
+    let id = ent
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let seg = crate::federation::path_segment(&id);
+    let base = &reg.endpoint;
+    let url = match call.path {
+        FwdPath::Collection => format!("{base}/ngsi-ld/v1/entities"),
+        FwdPath::Entity => format!("{base}/ngsi-ld/v1/entities/{seg}"),
+        FwdPath::Attrs => format!("{base}/ngsi-ld/v1/entities/{seg}/attrs"),
+    };
+    let (status, _, _) = crate::federation::forward(
+        st,
+        call.method.clone(),
+        url,
+        &call.query,
+        headers,
+        tenant,
+        reg,
+        ctx_url,
+        Some(ent),
+    )
+    .await;
+    (id, status)
 }
 
 // ---------- POST /entityOperations/delete (5.6.10) ----------

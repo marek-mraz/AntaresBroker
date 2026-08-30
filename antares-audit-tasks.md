@@ -43,3 +43,16 @@ commit, large stays on the list until measured.
   reads present, and an entity whose only instance of an attribute expired
   loses the attribute, not the entity. Shared seam — its own commit, with
   the four built-in backends re-run against the extended kit.
+
+- [B] No unit fixture isolates the `created` flag of a forwarded batch
+  upsert. 5.6.8.5 makes the answer depend on what was CREATED — 201 with the
+  created ids when a per-Entity create forward answered 201, 204 when
+  everything was an update — and `batch.rs` carries that as one bool per
+  forwarded call. Setting it to `false` for the create forward leaves the
+  whole `antares-api` suite green, so nothing pins it. Two fixtures were
+  tried and both are unsound: holding the Entity locally and registering a
+  redirect source for it is a 409 by 5.9.2 (the registration conflicts with
+  local data), and a redirect-only fixture still answers 201 with the flag
+  inverted, so some other path sets `any_created` there. Find that path
+  first, then write the fixture that separates a local creation from a
+  forwarded one. Robot covers the behaviour; the crate does not.

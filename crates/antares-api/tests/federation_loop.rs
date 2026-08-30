@@ -763,12 +763,16 @@ async fn clause_5_6_7_batch_create_forwarding_fallbacks() {
         2,
         "one Create Entity forward per entity"
     );
+    // 5.6.1 Create Entity posts to the COLLECTION: an id segment would be
+    // the Entity resource (6.5), which defines no POST — so the request line
+    // is asserted whole, not by prefix.
     assert!(
         m.last_head
             .lock()
             .expect("lock")
-            .starts_with("POST /ngsi-ld/v1/entities"),
-        "fallback uses the single-entity resource"
+            .starts_with("POST /ngsi-ld/v1/entities HTTP/1.1"),
+        "fallback posts to the entity collection: {}",
+        m.last_head.lock().expect("lock")
     );
 
     // retrieve-only proxy source: Conflict, never contacted
