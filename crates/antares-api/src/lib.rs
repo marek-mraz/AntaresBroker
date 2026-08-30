@@ -99,6 +99,35 @@ use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use negotiate::{echo_tenant, respond, tenant_from, Accept, ApiError};
 
+/// 5.5.4 Fragment applied to a stored document resource — a Subscription
+/// (5.8.2), a Context Source Registration (5.9.3) or a Context Source
+/// Subscription (5.11.4). Each member of the already-normalized Fragment
+/// replaces the target's; a member that normalization left as JSON null is
+/// the removal form and takes the member out; `id` is never touched, and the
+/// write stamps `modifiedAt` (4.8). Entities do NOT go through here: 5.5.12
+/// Merge Patch descends into Attribute instances and value objects, which is
+/// `entities::merge_instance`.
+pub(crate) fn apply_doc_fragment(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    fragment: &serde_json::Map<String, serde_json::Value>,
+    ts: &str,
+) {
+    for (k, v) in fragment {
+        if k == "id" {
+            continue;
+        }
+        if v.is_null() {
+            target.remove(k);
+        } else {
+            target.insert(k.clone(), v.clone());
+        }
+    }
+    target.insert(
+        "modifiedAt".into(),
+        serde_json::Value::String(ts.to_owned()),
+    );
+}
+
 /// Instance members that are NOT sub-attributes (shared list).
 pub(crate) fn repr_reserved(k: &str) -> bool {
     matches!(

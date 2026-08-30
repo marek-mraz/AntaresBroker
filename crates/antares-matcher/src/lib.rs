@@ -87,9 +87,9 @@ pub fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
 }
 
 /// A subscription's `geoQ` (Table 5.2.13-1) in the parameter shape the 4.10
-/// GeoQuery parser takes.
-/// A subscription's `geoQ` (Table 5.2.13-1) in the parameter shape
-/// [`GeoQuery::from_params`] takes.
+/// GeoQuery parser takes. The one reading of that table: every validator,
+/// matcher and forwarder in the broker turns a `geoQ` object into query
+/// parameters here, so `coordinates` is spelled the same way on all of them.
 pub fn geo_params(g: &Map<String, Value>) -> std::collections::HashMap<String, String> {
     let mut params: std::collections::HashMap<String, String> = Default::default();
     for k in ["georel", "geometry", "geoproperty"] {

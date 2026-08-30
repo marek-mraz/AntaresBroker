@@ -947,9 +947,7 @@ pub async fn retrieve_registration(
             .get(&tenant, Kind::Registration, &id)?
             .filter(|d| !reg_expired(d))
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("registration {id} not found")))?;
-        let sys = params
-            .get("options")
-            .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
+        let sys = sys_attrs_asked(&params);
         Ok::<_, ApiError>(respond(
             StatusCode::OK,
             present_registration(&doc, &ctx, sys),
@@ -1105,25 +1103,14 @@ pub async fn query_registrations(
             "/ngsi-ld/v1/csourceRegistrations",
             accept,
         )?;
-        let sys = params
-            .get("options")
-            .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
+        let sys = sys_attrs_asked(&params);
         let payload: Vec<Value> = page
             .iter()
             .map(|d| present_registration(d, &ctx, sys))
             .collect();
         let mut resp =
             crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
-        if let Some(total) = count_hdr {
-            if let Ok(v) = total.to_string().parse() {
-                resp.headers_mut().insert("NGSILD-Results-Count", v);
-            }
-        }
-        for l in links {
-            if let Ok(v) = l.parse() {
-                resp.headers_mut().append(axum::http::header::LINK, v);
-            }
-        }
+        attach_paging(&mut resp, count_hdr, &links);
         Ok::<_, ApiError>(resp)
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -1334,6 +1321,16 @@ pub fn csr_matches(spec: &CsrSpec, doc: &Value, ctx: &Context) -> bool {
 /// Full 5.11.2.4 match of a registration against a csource subscription:
 /// 5.12 entity/attr matching + temporal interval rules + geoQ vs the
 /// registration's own `location`.
+///
+/// Not the same rule as `antares_matcher::selector_match`, which it shares a
+/// signature with: that one asks whether an ENTITY satisfies a
+/// subscription's `entities` selector, this one asks whether a REGISTRATION
+/// does — and a registration carries its selector inside `information`, has
+/// an observation/management interval a latest-information subscription must
+/// not match, and answers `geoQ` from its own `location` rather than from a
+/// GeoProperty of the data. The part that IS the same rule is the selector
+/// walk, and it is not written twice: `spec_for_subscription` turns the
+/// subscription into a `CsrSpec` and `csr_matches` walks it.
 pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool {
     // An expired registration is no longer a Context Source: it must not be
     // reported as newlyMatching, nor receive a forwarded subscription copy.
@@ -1367,22 +1364,7 @@ pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool
         }
     }
     if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
-        let mut params: HashMap<String, String> = HashMap::new();
-        for k in ["georel", "geometry", "geoproperty"] {
-            if let Some(s) = g.get(k).and_then(Value::as_str) {
-                params.insert(k.into(), s.into());
-            }
-        }
-        if let Some(c) = g.get("coordinates") {
-            params.insert(
-                "coordinates".into(),
-                match c {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                },
-            );
-        }
-        if let Ok(Some(gq)) = crate::geo::GeoQuery::from_params(&params) {
+        if let Ok(Some(gq)) = crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g)) {
             match reg.get("location") {
                 Some(geom) => {
                     if !gq.matches_geometry(geom) {
@@ -1515,17 +1497,7 @@ pub async fn update_registration(
                         "stored registration is not a JSON object".into(),
                     ));
                 };
-                for (k, v) in &norm {
-                    if k == "id" {
-                        continue;
-                    }
-                    if v.is_null() {
-                        target.remove(k);
-                    } else {
-                        target.insert(k.clone(), v.clone());
-                    }
-                }
-                target.insert("modifiedAt".into(), Value::String(ts.clone()));
+                crate::apply_doc_fragment(target, &norm, &ts);
                 Ok::<(), NgsiError>(())
             })?;
             (before, res)

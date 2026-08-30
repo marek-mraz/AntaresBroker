@@ -1426,16 +1426,7 @@ async fn query_entities_inner(
     } else {
         crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant)
     };
-    if let Some(total) = count_hdr {
-        if let Ok(v) = total.to_string().parse() {
-            resp.headers_mut().insert("NGSILD-Results-Count", v);
-        }
-    }
-    for l in links {
-        if let Ok(v) = l.parse() {
-            resp.headers_mut().append(axum::http::header::LINK, v);
-        }
-    }
+    attach_paging(&mut resp, count_hdr, &links);
     attach_warnings(&mut resp, &warnings);
     // 6.4.3.2: entityMap=true — the EntityMap for this query is (re)created;
     // the response carries NGSILD-EntityMap and 201 Created.

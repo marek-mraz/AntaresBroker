@@ -164,22 +164,7 @@ pub fn normalize_subscription(
                 let g = v
                     .as_object()
                     .ok_or_else(|| bad("geoQ must be an object".into()))?;
-                let mut params: HashMap<String, String> = HashMap::new();
-                for k in ["georel", "geometry", "geoproperty"] {
-                    if let Some(s) = g.get(k).and_then(Value::as_str) {
-                        params.insert(k.into(), s.to_owned());
-                    }
-                }
-                if let Some(c) = g.get("coordinates") {
-                    params.insert(
-                        "coordinates".into(),
-                        match c {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        },
-                    );
-                }
-                crate::geo::GeoQuery::from_params(&params)?
+                crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))?
                     .ok_or_else(|| bad("geoQ requires georel (5.2.13)".into()))?;
                 let mut ng = g.clone();
                 if let Some(gp) = g.get("geoproperty").and_then(Value::as_str) {
@@ -735,9 +720,7 @@ pub async fn retrieve(
         .store
         .get(&tenant, kind, id)?
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("subscription {id} not found")))?;
-    let sys = params
-        .get("options")
-        .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
+    let sys = sys_attrs_asked(params);
     let payload = present_subscription(&doc, &ctx, sys, kind == Kind::CSourceSubscription);
     Ok(respond(StatusCode::OK, payload, &ctx, accept, &tenant))
 }
@@ -765,24 +748,13 @@ pub async fn list(
         &format!("/ngsi-ld/v1/{}", resource_path(kind)),
         accept,
     )?;
-    let sys = params
-        .get("options")
-        .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"));
+    let sys = sys_attrs_asked(params);
     let payload: Vec<Value> = page
         .iter()
         .map(|d| present_subscription(d, &ctx, sys, kind == Kind::CSourceSubscription))
         .collect();
     let mut resp = crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
-    if let Some(total) = count_hdr {
-        if let Ok(v) = total.to_string().parse() {
-            resp.headers_mut().insert("NGSILD-Results-Count", v);
-        }
-    }
-    for l in links {
-        if let Ok(v) = l.parse() {
-            resp.headers_mut().append(axum::http::header::LINK, v);
-        }
-    }
+    attach_paging(&mut resp, count_hdr, &links);
     Ok(resp)
 }
 
@@ -819,17 +791,7 @@ pub async fn update(
     let ts = now_iso();
     let res = st.store.mutate(&tenant, kind, id, |doc| {
         let target = doc.as_object_mut().expect("subscription object");
-        for (k, v) in &norm {
-            if k == "id" {
-                continue;
-            }
-            if v.is_null() {
-                target.remove(k);
-            } else {
-                target.insert(k.clone(), v.clone());
-            }
-        }
-        target.insert("modifiedAt".into(), Value::String(ts.clone()));
+        crate::apply_doc_fragment(target, &norm, &ts);
         Ok::<(), NgsiError>(())
     })?;
     match res {

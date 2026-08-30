@@ -2063,20 +2063,6 @@ pub(crate) async fn query_temporal_inner(
     Ok(resp)
 }
 
-/// 6.3.13 NGSILD-Results-Count + the 6.3.9 pagination Link headers.
-fn attach_paging(resp: &mut Response, count_hdr: Option<usize>, links: &[String]) {
-    if let Some(total) = count_hdr {
-        if let Ok(v) = total.to_string().parse() {
-            resp.headers_mut().insert("NGSILD-Results-Count", v);
-        }
-    }
-    for l in links {
-        if let Ok(v) = l.parse() {
-            resp.headers_mut().append(axum::http::header::LINK, v);
-        }
-    }
-}
-
 // ---------- GET /temporal/entities/{id} (5.7.3) ----------
 
 pub async fn retrieve_temporal(

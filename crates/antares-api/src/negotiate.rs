@@ -514,6 +514,31 @@ pub fn respond(
     resp
 }
 
+/// 6.3.13 `NGSILD-Results-Count` + the 6.3.9 pagination `Link` headers, on
+/// every paged list the API serves. A header that will not parse is dropped
+/// rather than failing the response: the page itself is still the answer.
+pub(crate) fn attach_paging(resp: &mut Response, count_hdr: Option<usize>, links: &[String]) {
+    if let Some(total) = count_hdr {
+        if let Ok(v) = total.to_string().parse() {
+            resp.headers_mut().insert("NGSILD-Results-Count", v);
+        }
+    }
+    for l in links {
+        if let Ok(v) = l.parse() {
+            resp.headers_mut().append(axum::http::header::LINK, v);
+        }
+    }
+}
+
+/// 6.3.11 `options=sysAttrs`: does this request ask for the system-generated
+/// Temporal Properties (4.8) to be shown? Read the same way wherever the
+/// answer is not already carried by a `Repr`.
+pub(crate) fn sys_attrs_asked(params: &std::collections::HashMap<String, String>) -> bool {
+    params
+        .get("options")
+        .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"))
+}
+
 /// Build a list response that STREAMS entity-by-entity (J5; the J3/J11c
 /// lesson: the serialized page must never exist as one contiguous buffer).
 /// Json and LdJson only — GeoJSON wraps a FeatureCollection object and takes
