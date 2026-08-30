@@ -381,7 +381,13 @@ pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
 /// on a reserved member (`id`, `value`, `datasetId`, `observedAt`, …) and
 /// overwrite it — skipping that member's own validation. Same rule
 /// expand_types applies to Entity Type names.
-fn expand_attr_name(name: &str, ctx: &Context) -> Result<String, NgsiError> {
+///
+/// Public because the Attribute name also arrives in a URL path (5.6.4,
+/// 5.6.5, 5.6.19, 5.6.13, 5.6.14), where the clauses require the same
+/// "fully qualified name (URI)" from the same 5.5.7 expansion. A path name
+/// that skips this check lands on a member of the stored document that is
+/// not an Attribute.
+pub fn expand_attr_name(name: &str, ctx: &Context) -> Result<String, NgsiError> {
     let iri = ctx.expand_key(name);
     if crate::context::is_absolute_iri(&iri) {
         Ok(iri)

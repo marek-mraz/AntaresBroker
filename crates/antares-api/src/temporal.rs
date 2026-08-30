@@ -2546,7 +2546,7 @@ pub async fn delete_temporal_attr(
         crate::attrs::check_attr_name(&attr)?;
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let attr_iri = ctx.expand_key(&attr);
+        let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
         let want_ds = params.get("datasetId").cloned();
         let mut found = false;
@@ -2756,7 +2756,7 @@ pub async fn modify_temporal_instance(
                 ..Default::default()
             },
         )?;
-        let attr_iri = parsed.ctx.expand_key(&attr);
+        let attr_iri = antares_jsonld::expand_attr_name(&attr, &parsed.ctx)?;
         let frag_inst = expanded
             .get(&attr_iri)
             .and_then(Value::as_array)
@@ -2825,7 +2825,7 @@ pub async fn delete_temporal_instance(
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let attr_iri = ctx.expand_key(&attr);
+        let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let mut found = false;
         let ts = now_iso();
         let res = st.temporal.mutate(&tenant, &id, |doc| {

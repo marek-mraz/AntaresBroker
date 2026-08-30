@@ -3212,7 +3212,7 @@ async fn retrieve_attr_inner(
         .store
         .get(&tenant, Kind::Entity, id)?
         .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
-    let attr_iri = ctx.expand_key(attr);
+    let attr_iri = antares_jsonld::expand_attr_name(attr, &ctx)?;
     let node = doc.get(&attr_iri).ok_or_else(|| {
         NgsiError::ResourceNotFound(format!("entity {id} has no attribute {attr}"))
     })?;

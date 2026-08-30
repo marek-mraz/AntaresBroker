@@ -15,8 +15,9 @@ pub(crate) mod minicache;
 pub use compact::{compact_entity, compact_entity_shallow, compact_types};
 pub use context::{Context, DEFAULT_VOCAB, NGSI_LD_BASE};
 pub use expand::{
-    expand_attr_fragment, expand_entity, expand_types, is_deletion_instance, is_ngsi_null,
-    is_ngsi_null_langmap, parse_datetime, reject_first_level_nulls, valid_scope_value, ExpandOpts,
+    expand_attr_fragment, expand_attr_name, expand_entity, expand_types, is_deletion_instance,
+    is_ngsi_null, is_ngsi_null_langmap, parse_datetime, reject_first_level_nulls,
+    valid_scope_value, ExpandOpts,
 };
 pub use loader::{
     client_builder, core_context, http_interaction, io_deadline, slow_factor, with_timeouts,

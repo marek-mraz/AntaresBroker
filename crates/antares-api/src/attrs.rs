@@ -798,7 +798,12 @@ async fn partial_update_inner(
         "fragment must be a JSON object".into(),
     ))?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
-    let attr_iri = parsed.ctx.expand_key(attr);
+    // 5.6.4.4: "Apply term expansion as mandated by clause 5.5.7, so that
+    // the fully qualified name (URI) associated to the target Attribute is
+    // properly obtained" — a path name with no fully qualified name is not a
+    // valid Attribute name, and lands on a member of the stored document
+    // that is not an Attribute.
+    let attr_iri = antares_jsonld::expand_attr_name(attr, &parsed.ctx)?;
     // 5.6.4.4: "If the target Attribute is scope, then an error of type
     // BadRequestData shall be raised."
     if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
@@ -933,7 +938,7 @@ pub async fn replace_attr(
         // 5.5.7 term expansion first, then 5.6.19.4: "If the target Attribute
         // is scope, then an error of type BadRequestData shall be raised" —
         // the target is the expanded name, so the IRI spelling counts too.
-        let attr_iri = parsed.ctx.expand_key(&attr);
+        let attr_iri = antares_jsonld::expand_attr_name(&attr, &parsed.ctx)?;
         if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
             return Err(NgsiError::BadRequestData(
                 "scope cannot be the target of a replace attribute (5.6.19)".into(),
@@ -1075,10 +1080,13 @@ async fn delete_attr_inner(
     check_attr_name(attr)?;
     check_params(params, &["datasetId", "deleteAll", "local", "type"])?;
     let ctx = request_context(&st.loader, headers).await?;
+    // 5.6.5.4 expands the path name the same way 5.6.4.4 does; `scope` is
+    // the one name the clause addresses as itself rather than as an
+    // Attribute, so it is answered before the expansion.
     let attr_iri = if attr == "scope" {
         "scope".to_owned()
     } else {
-        ctx.expand_key(attr)
+        antares_jsonld::expand_attr_name(attr, &ctx)?
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();

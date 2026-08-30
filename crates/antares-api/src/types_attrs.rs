@@ -385,6 +385,11 @@ pub async fn attribute_info(
         check_params(&params, &["local"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        // 5.7.10 / Table 6.28.2-1: the FQN or a shortname the request
+        // @context defines. Discovery reads the tenant's attribute
+        // inventory and touches no stored document, so a name that
+        // expands to nothing an Entity carries is simply absent —
+        // ResourceNotFound below, not a rejected name.
         let iri = ctx.expand_key(&attr);
         // attributeCount, attributeTypes and typeNames (5.2.28) are all
         // properties of the entities that CARRY this attribute; the rest of
