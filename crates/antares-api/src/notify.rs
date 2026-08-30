@@ -30,8 +30,11 @@ const CHANGE_QUEUE: usize = 1024;
 static CHANGES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TASK_PANICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Hand a batch to the matcher queue: counted as pending on acceptance,
-/// counted as dropped when the queue is full.
-fn enqueue(
+/// counted as dropped when the queue is full. Not the durable outbox
+/// (`antares_sql::store::pg::outbox::enqueue`), which is a row inside the
+/// caller's transaction: this ring lives in the process and a full one
+/// drops, which is why the drop is counted.
+fn queue_for_matching(
     tx: &tokio::sync::mpsc::Sender<Vec<Change>>,
     pending: &std::sync::atomic::AtomicUsize,
     changes: Vec<Change>,
@@ -443,7 +446,7 @@ pub fn wire(state: &mut AppState) {
     let flush_tx = tx.clone();
     let flush_pending = state.pending_changes.clone();
     state.change_flush = Some(Arc::new(move |changes: Vec<Change>| {
-        enqueue(&flush_tx, &flush_pending, changes)
+        queue_for_matching(&flush_tx, &flush_pending, changes)
     }));
     // Temporal auto-recording runs SYNCHRONOUSLY on the hook (read-your-writes:
     // the ETSI suite queries history immediately after a write); the matcher
@@ -461,7 +464,7 @@ pub fn wire(state: &mut AppState) {
             else {
                 return;
             };
-            enqueue(&tx, &hook_pending, vec![change]);
+            queue_for_matching(&tx, &hook_pending, vec![change]);
         }));
     let st = state.clone();
     let pending = state.pending_changes.clone();

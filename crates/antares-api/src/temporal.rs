@@ -273,6 +273,11 @@ pub struct TemporalQ {
 }
 
 impl TemporalQ {
+    /// The 4.11 Temporal Query from its request parameters: `timerel` decides
+    /// which of `timeAt`/`endTimeAt` are required, and `required` says
+    /// whether the operation demands one at all (5.7.4 does, 5.7.3 does not).
+    /// `GeoQuery::from_params` is the same convention for a different
+    /// parameter family, not the same parser.
     pub fn from_params(
         params: &HashMap<String, String>,
         required: bool,

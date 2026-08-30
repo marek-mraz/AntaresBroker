@@ -197,6 +197,9 @@ fn parse_geometry(gtype: &str, coords: &Value) -> Result<geo_types::Geometry<f64
 impl GeoQuery {
     /// Build from query params; `None` when no georel present. Validates per
     /// 4.10 (georel present ⇒ geometry+coordinates required and well-formed).
+    /// The 4.11 twin is `antares_api::temporal::TemporalQ::from_params`: the
+    /// name is the workspace convention for one query family parsed from its
+    /// own parameters, and the two share no code.
     pub fn from_params(params: &HashMap<String, String>) -> Result<Option<Self>, NgsiError> {
         let Some(georel) = params.get("georel") else {
             if params.contains_key("geometry") || params.contains_key("coordinates") {

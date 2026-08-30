@@ -44,7 +44,7 @@ pub fn compile_prefilter(
     first_bind: usize,
     expand: &dyn Fn(&str) -> String,
 ) -> Option<CompiledSql> {
-    let (sql, binds, _) = emit(node, range, entity, first_bind, expand)?;
+    let (sql, binds, _) = emit_prefilter(node, range, entity, first_bind, expand)?;
     Some(CompiledSql { sql, binds })
 }
 
@@ -59,13 +59,16 @@ pub fn prefilter_exact(
     range: Option<&InstanceRange<'_>>,
     expand: &dyn Fn(&str) -> String,
 ) -> bool {
-    emit(node, range, "m", 1, expand).is_some_and(|(_, _, exact)| exact)
+    emit_prefilter(node, range, "m", 1, expand).is_some_and(|(_, _, exact)| exact)
 }
 
-/// `first` is the ABSOLUTE number the member's first bind will get; refused
-/// subtrees return `None` without having committed any binds, so numbering
-/// stays dense.
-fn emit(
+/// Lower one `q=` node to a TEMPORAL PREFILTER: a predicate over the
+/// instance table plus whether it is exact (`antares_ql::sql::emit` is the
+/// other lowering -- a predicate over an entity's own jsonb column, which
+/// is always exact or nothing). `first` is the ABSOLUTE number the member's
+/// first bind will get; refused subtrees return `None` without having
+/// committed any binds, so numbering stays dense.
+fn emit_prefilter(
     node: &QNode,
     range: Option<&InstanceRange<'_>>,
     entity: &str,
@@ -78,7 +81,9 @@ fn emit(
             let mut binds = Vec::new();
             let mut exact = true;
             for it in items {
-                if let Some((s, b, e)) = emit(it, range, entity, first + binds.len(), expand) {
+                if let Some((s, b, e)) =
+                    emit_prefilter(it, range, entity, first + binds.len(), expand)
+                {
                     sqls.push(s);
                     binds.extend(b);
                     exact &= e;
@@ -95,7 +100,7 @@ fn emit(
             let mut binds = Vec::new();
             let mut exact = true;
             for it in items {
-                let (s, b, e) = emit(it, range, entity, first + binds.len(), expand)?;
+                let (s, b, e) = emit_prefilter(it, range, entity, first + binds.len(), expand)?;
                 sqls.push(s);
                 binds.extend(b);
                 exact &= e;

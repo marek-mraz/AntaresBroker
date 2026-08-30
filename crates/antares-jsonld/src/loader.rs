@@ -118,7 +118,10 @@ pub fn allow_private_egress(v: bool) {
 }
 
 impl EgressPolicy {
-    /// Policy from `ANTARES_EGRESS_ALLOW_PRIVATE` or the programmatic override.
+    /// Policy from `ANTARES_EGRESS_ALLOW_PRIVATE` or the programmatic
+    /// override. One of several `from_env` constructors in the workspace
+    /// (the notifier's retry policy is another): each reads its own keys for
+    /// its own type, so the shared name is the convention, not a copy.
     pub fn from_env() -> Self {
         Self {
             allow_private: Self::allow_private_from(
