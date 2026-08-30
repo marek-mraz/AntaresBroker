@@ -41,7 +41,7 @@ above it.
 | `antares-matcher` | 330 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
 | `antares-store` | 1 400 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
 | `antares-sql` | 2 900 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
-| `antares-bus` | 840 | `ChangeEvent`, `LocalBus`, the JetStream bus, subjects | decide who consumes |
+| `antares-bus` | 760 | `ChangeEvent`, the JetStream bus, subjects | decide who consumes |
 | `antares-notifier` | 1 700 | `NotificationSink` (schemes, `parse_endpoint`, `deliver`, `network`) chosen from `SinkRegistry` by endpoint scheme: http (`http.rs`), mqtt behind the feature, delivery policy, `Outbound` | match or store |
 | `antares-api` | 40 000 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
 | `antares-broker` | 2 700 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |

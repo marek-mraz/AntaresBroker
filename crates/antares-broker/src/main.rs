@@ -9,7 +9,6 @@ mod telemetry;
 mod wiring;
 
 use antares_api::AppState;
-use antares_bus::LocalBus;
 
 // ANTARES_DATABASE_URL: accepted — the ETSI compose wires one DB per broker —
 // consumed by the postgres/timescale store modes.
@@ -590,7 +589,6 @@ async fn run(
     drain_delay: std::time::Duration,
     drain_deadline: std::time::Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _bus = LocalBus::new(1024); // local-mode ring (in-process hook path)
     let roles = wiring::Roles::parse(&roles).map_err(|e| format!("ANTARES_ROLES: {e}"))?;
     // Bus seam: local (default) or nats. An unknown value is fatal.
     let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Change-event bus.
 //!
-//! Two implementations behind one closed enum (the AnyStore pattern,
-//! ADR-0005): `local` — an in-process broadcast ring, single-node mode, no
-//! infrastructure beyond the store — and `nats` — the JetStream spine
-//! (`ANTARES_CHANGES`, durable pull consumers, KV subscription mirror) that
-//! makes multi-instance roles possible. `bus = local` is the default and
-//! what the ETSI pipeline runs; `nats` becomes mandatory only on scale-out.
+//! The event and its transport. `bus = local`, the default and what the
+//! ETSI pipeline runs, carries changes in-process through the store's change
+//! hook and needs nothing from here but `ChangeEvent`. `bus = nats` adds the
+//! JetStream spine (`ANTARES_CHANGES`, durable pull consumers, KV
+//! subscription mirror) that makes multi-instance roles possible, and
+//! becomes mandatory only on scale-out. The composition root
+//! (`antares-broker/src/wiring.rs`) is the only place that names either.
 
 pub mod nats;
 pub mod subjects;
 
 use antares_model::{EntityId, TenantId};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 
 /// Operation kind — mirrors Scorpio's requestType int registry as an enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,55 +114,6 @@ impl ChangeEvent {
     }
 }
 
-/// In-process bus for single-node mode (`bus = local`).
-/// Bounded ring; a lagging consumer drops oldest (backpressure over buffering).
-#[derive(Clone)]
-pub struct LocalBus {
-    tx: broadcast::Sender<ChangeEvent>,
-}
-
-impl LocalBus {
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
-    }
-
-    /// Publish; returns number of current subscribers.
-    pub fn publish(&self, event: ChangeEvent) -> usize {
-        // No subscribers is fine (e.g. api-only role in tests).
-        self.tx.send(event).unwrap_or(0)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<ChangeEvent> {
-        self.tx.subscribe()
-    }
-}
-
-/// The closed bus seam (`bus = local | nats`): core crates see only
-/// this; the broker's wiring picks the variant and starts the consumers that
-/// match it.
-#[derive(Clone)]
-pub enum AnyBus {
-    Local(LocalBus),
-    Nats(std::sync::Arc<nats::NatsBus>),
-}
-
-impl AnyBus {
-    /// Publish one change event. On the NATS arm this is the DIRECT path
-    /// (used by the outbox drain, which owns retry/dedup); producers in
-    /// postgres mode never call this straight from a request handler —
-    /// they enqueue in the write transaction instead.
-    pub async fn publish(&self, event: ChangeEvent) -> Result<(), nats::BusError> {
-        match self {
-            AnyBus::Local(b) => {
-                b.publish(event);
-                Ok(())
-            }
-            AnyBus::Nats(b) => b.publish(&event).await,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,16 +133,6 @@ mod tests {
             payload_ref: None,
             prev_payload_ref: None,
         }
-    }
-
-    #[tokio::test]
-    async fn broadcast_reaches_all_subscribers() {
-        let bus = LocalBus::new(16);
-        let mut a = bus.subscribe();
-        let mut b = bus.subscribe();
-        assert_eq!(bus.publish(event(1)), 2);
-        assert_eq!(a.recv().await.expect("recv a").version, 1);
-        assert_eq!(b.recv().await.expect("recv b").version, 1);
     }
 
     #[test]
@@ -264,22 +205,5 @@ mod tests {
             i64::MIN,
             "must saturate, never wrap to i64::MAX"
         );
-    }
-
-    /// The ring is bounded: a consumer that stops reading costs a fixed
-    /// amount of memory and is told it lagged, rather than growing the
-    /// buffer without limit.
-    #[tokio::test]
-    async fn a_lagging_consumer_is_dropped_not_buffered() {
-        let bus = LocalBus::new(2);
-        let mut rx = bus.subscribe();
-        for v in 1..=5 {
-            bus.publish(event(v));
-        }
-        assert!(
-            matches!(rx.recv().await, Err(broadcast::error::RecvError::Lagged(3))),
-            "the oldest events must be dropped, not queued"
-        );
-        assert_eq!(rx.recv().await.expect("recv").version, 4);
     }
 }
