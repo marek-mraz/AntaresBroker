@@ -10,6 +10,7 @@
 use crate::negotiate::*;
 use crate::state::AppState;
 use antares_jsonld::Context;
+use antares_model::operations::{group_members, DEFAULT_OPERATION_GROUP};
 use antares_model::TenantId;
 #[cfg(test)]
 use antares_store::Kind;
@@ -17,135 +18,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-
-const FEDERATION_OPS: &[&str] = &[
-    "retrieveEntity",
-    "queryEntity",
-    "queryBatch",
-    "retrieveEntityTypes",
-    "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo",
-    "retrieveAttrTypes",
-    "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo",
-    "createSubscription",
-    "updateSubscription",
-    "retrieveSubscription",
-    "querySubscription",
-    "deleteSubscription",
-    "retrieveEntityMap",
-    "updateEntityMap",
-    "deleteEntityMap",
-    "createEntityMapQueryEntity",
-    "retrieveContextSourceIdentity",
-];
-const REDIRECTION_OPS: &[&str] = &[
-    "createEntity",
-    "updateEntity",
-    "appendAttrs",
-    "updateAttrs",
-    "deleteAttrs",
-    "deleteEntity",
-    "mergeEntity",
-    "replaceEntity",
-    "replaceAttrs",
-    "retrieveEntity",
-    "queryEntity",
-    "purgeEntity",
-    "retrieveEntityTypes",
-    "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo",
-    "retrieveAttrTypes",
-    "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo",
-    "retrieveEntityMap",
-    "updateEntityMap",
-    "deleteEntityMap",
-    "createEntityMapQueryEntity",
-    "retrieveContextSourceIdentity",
-];
-/// Table 4.20-2 associationOps: federationOps WITHOUT the EntityMap support
-/// operations.
-const ASSOCIATION_OPS: &[&str] = &[
-    "retrieveEntity",
-    "queryEntity",
-    "queryBatch",
-    "retrieveEntityTypes",
-    "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo",
-    "retrieveAttrTypes",
-    "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo",
-    "createSubscription",
-    "updateSubscription",
-    "retrieveSubscription",
-    "querySubscription",
-    "deleteSubscription",
-    "retrieveContextSourceIdentity",
-];
-/// Table 4.20-1: every named API operation (plus the 4.20-2 group names in
-/// OPERATION_GROUPS) — the legal value space of the 5.2.9 `operations`
-/// member.
-pub(crate) const ALL_OPERATION_NAMES: &[&str] = &[
-    "createEntity",
-    "updateEntity",
-    "appendAttrs",
-    "updateAttrs",
-    "deleteAttrs",
-    "deleteEntity",
-    "createBatch",
-    "upsertBatch",
-    "updateBatch",
-    "deleteBatch",
-    "upsertTemporal",
-    "appendAttrsTemporal",
-    "deleteAttrsTemporal",
-    "updateAttrInstanceTemporal",
-    "deleteAttrInstanceTemporal",
-    "deleteTemporal",
-    "mergeEntity",
-    "replaceEntity",
-    "replaceAttrs",
-    "mergeBatch",
-    "purgeEntity",
-    "retrieveEntity",
-    "queryEntity",
-    "queryBatch",
-    "retrieveTemporal",
-    "queryTemporal",
-    "retrieveEntityTypes",
-    "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo",
-    "retrieveAttrTypes",
-    "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo",
-    "createSubscription",
-    "updateSubscription",
-    "retrieveSubscription",
-    "querySubscription",
-    "deleteSubscription",
-    "retrieveEntityMap",
-    "updateEntityMap",
-    "deleteEntityMap",
-    "createEntityMapQueryEntity",
-    "createEntityMapQueryTemporal",
-    "retrieveContextSourceIdentity",
-];
-pub(crate) const OPERATION_GROUPS: &[&str] = &[
-    "federationOps",
-    "associationOps",
-    "updateOps",
-    "retrieveOps",
-    "redirectionOps",
-];
-
-const UPDATE_OPS: &[&str] = &[
-    "updateEntity",
-    "updateAttrs",
-    "replaceEntity",
-    "replaceAttrs",
-];
-const RETRIEVE_OPS: &[&str] = &["retrieveEntity", "queryEntity"];
 
 /// One matching registration, compiled for forwarding.
 #[derive(Clone, Debug, Default)]
@@ -200,14 +72,9 @@ impl FedReg {
     /// registration's `operations` list (5.2.9) by name or operation group;
     /// default when absent is federationOps.
     pub fn supports(&self, op: &str) -> bool {
-        self.ops.iter().any(|o| {
-            o == op
-                || (o == "federationOps" && FEDERATION_OPS.contains(&op))
-                || (o == "redirectionOps" && REDIRECTION_OPS.contains(&op))
-                || (o == "updateOps" && UPDATE_OPS.contains(&op))
-                || (o == "retrieveOps" && RETRIEVE_OPS.contains(&op))
-                || (o == "associationOps" && ASSOCIATION_OPS.contains(&op))
-        })
+        self.ops
+            .iter()
+            .any(|o| o == op || group_members(o).is_some_and(|members| members.contains(&op)))
     }
     pub fn is_proxy(&self) -> bool {
         self.mode == "exclusive" || self.mode == "redirect"
@@ -684,7 +551,7 @@ pub fn matching_regs(
                         .map(str::to_owned)
                         .collect()
                 })
-                .unwrap_or_else(|| vec!["federationOps".into()]);
+                .unwrap_or_else(|| vec![DEFAULT_OPERATION_GROUP.into()]);
             let mut attrs: Option<Vec<String>> = Some(Vec::new());
             let mut ent_ids = Vec::new();
             let mut ent_types = Vec::new();
@@ -1312,7 +1179,7 @@ pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_else(|| vec!["federationOps".into()]),
+            .unwrap_or_else(|| vec![DEFAULT_OPERATION_GROUP.into()]),
         attrs: None,
         ent_ids: Vec::new(),
         ent_types: Vec::new(),

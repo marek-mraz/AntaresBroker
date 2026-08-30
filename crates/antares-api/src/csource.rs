@@ -4,6 +4,7 @@
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
+use antares_model::operations::{OPERATION_GROUPS, OPERATION_NAMES};
 use antares_model::NgsiError;
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
@@ -295,11 +296,10 @@ pub fn normalize_registration(
                     .ok_or_else(|| bad("operations must be a non-empty array (5.2.9)".into()))?;
                 for op in arr {
                     let name = op.as_str().unwrap_or_default();
-                    if !crate::federation::ALL_OPERATION_NAMES.contains(&name)
-                        && !crate::federation::OPERATION_GROUPS.contains(&name)
-                    {
+                    if !OPERATION_NAMES.contains(&name) && !OPERATION_GROUPS.contains(&name) {
                         return Err(bad(format!(
-                            "unknown operation {name:?} — entries are limited to the 4.20                              names and groups (5.2.9)"
+                            "unknown operation {name:?} — entries are limited to the \
+                             4.20 names and groups (5.2.9)"
                         )));
                     }
                 }
@@ -1569,6 +1569,57 @@ pub async fn delete_registration(
         }
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+#[cfg(test)]
+mod clause_4_20 {
+    use super::*;
+    use antares_jsonld::Loader;
+    use serde_json::json;
+
+    fn reg_with(ops: Value) -> Result<Map<String, Value>, NgsiError> {
+        let ctx = Loader::new().core();
+        let doc = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:ops",
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer:9090",
+            "information": [{"entities": [{"type": "Building"}]}],
+            "operations": ops
+        });
+        normalize_registration(doc.as_object().expect("object"), &ctx, false)
+    }
+
+    /// Table 5.2.9-1: `operations` entries "are limited to the named API
+    /// operations and named operation groups (see clause 4.20)". Every name
+    /// of Table 4.20-1 and every group of Table 4.20-2 is accepted, and
+    /// nothing else is — including a name that only looks like one.
+    #[test]
+    fn only_the_4_20_vocabulary_is_accepted() {
+        for op in OPERATION_NAMES.iter().chain(OPERATION_GROUPS) {
+            assert!(reg_with(json!([op])).is_ok(), "{op} is a 4.20 name");
+        }
+        assert!(
+            reg_with(json!(OPERATION_NAMES.to_vec())).is_ok(),
+            "the whole vocabulary at once is legal"
+        );
+        for bad in [
+            "notARealOp",
+            "createentity",
+            "createEntity ",
+            "federationops",
+            "queryEntities",
+            "",
+        ] {
+            let e = reg_with(json!([bad])).expect_err("outside the vocabulary");
+            assert!(
+                matches!(e, NgsiError::BadRequestData(_)),
+                "{bad} must be BadRequestData, got {e:?}"
+            );
+        }
+        // 5.2.9: the member is present-or-absent, never an empty list
+        assert!(reg_with(json!([])).is_err(), "empty operations");
+        assert!(reg_with(json!("federationOps")).is_err(), "not an array");
+    }
 }
 
 #[cfg(test)]

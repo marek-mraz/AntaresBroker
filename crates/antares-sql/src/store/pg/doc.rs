@@ -8,6 +8,7 @@
 //! from the doc on every write, so the row stays the truth while the
 //! API layer keeps its doc-shaped view until the cutover completes.
 
+use antares_model::operations::{group_members, DEFAULT_OPERATION_GROUP, OPERATION_NAMES};
 use antares_model::TenantId;
 use serde_json::Value;
 use sqlx::postgres::PgPool;
@@ -83,142 +84,16 @@ fn bookkeeping(
 // transaction as every registration write (no triggers). Deleting a
 // registration cleans its rows via the FK ON DELETE CASCADE.
 
-/// Table 4.20-1 operation names; bit position in `csource_index.ops` = index.
-/// Order is append-only: a bitmask is stored data, so renumbering is a
-/// migration.
-pub const OPERATIONS: &[&str] = &[
-    "createEntity",
-    "updateEntity",
-    "appendAttrs",
-    "updateAttrs",
-    "deleteAttrs",
-    "deleteEntity",
-    "createBatch",
-    "upsertBatch",
-    "updateBatch",
-    "deleteBatch",
-    "upsertTemporal",
-    "appendAttrsTemporal",
-    "deleteAttrsTemporal",
-    "updateAttrInstanceTemporal",
-    "deleteAttrInstanceTemporal",
-    "deleteTemporal",
-    "mergeEntity",
-    "replaceEntity",
-    "replaceAttrs",
-    "mergeBatch",
-    "purgeEntity",
-    "retrieveEntity",
-    "queryEntity",
-    "queryBatch",
-    "retrieveTemporal",
-    "queryTemporal",
-    "retrieveEntityTypes",
-    "retrieveEntityTypeDetails",
-    "retrieveEntityTypeInfo",
-    "retrieveAttrTypes",
-    "retrieveAttrTypeDetails",
-    "retrieveAttrTypeInfo",
-    "createSubscription",
-    "updateSubscription",
-    "retrieveSubscription",
-    "querySubscription",
-    "deleteSubscription",
-    "retrieveEntityMap",
-    "updateEntityMap",
-    "deleteEntityMap",
-    "createEntityMapQueryEntity",
-    "createEntityMapQueryTemporal",
-    "retrieveContextSourceIdentity",
-];
-
-/// The bit position is stored data (`csource_index.ops` is a `bigint`), so
-/// appending a 64th operation would overflow the shift in `ops_mask` and
-/// write a mask no later migration could distinguish from a real one. Fail at
-/// compile time on the day it is appended, not on a corrupted row later.
-const _: () = assert!(OPERATIONS.len() < 64, "ops bitmask is i64");
-
-/// Table 4.20-2 named groups, expanded to their members before masking.
-fn group_members(name: &str) -> Option<&'static [&'static str]> {
-    const FEDERATION: &[&str] = &[
-        "retrieveEntity",
-        "queryEntity",
-        "queryBatch",
-        "retrieveEntityTypes",
-        "retrieveEntityTypeDetails",
-        "retrieveEntityTypeInfo",
-        "retrieveAttrTypes",
-        "retrieveAttrTypeDetails",
-        "retrieveAttrTypeInfo",
-        "createSubscription",
-        "updateSubscription",
-        "retrieveSubscription",
-        "querySubscription",
-        "deleteSubscription",
-        "retrieveEntityMap",
-        "updateEntityMap",
-        "deleteEntityMap",
-        "createEntityMapQueryEntity",
-        "retrieveContextSourceIdentity",
-    ];
-    const ASSOCIATION: &[&str] = &[
-        "retrieveEntity",
-        "queryEntity",
-        "queryBatch",
-        "retrieveEntityTypes",
-        "retrieveEntityTypeDetails",
-        "retrieveEntityTypeInfo",
-        "retrieveAttrTypes",
-        "retrieveAttrTypeDetails",
-        "retrieveAttrTypeInfo",
-        "createSubscription",
-        "updateSubscription",
-        "retrieveSubscription",
-        "querySubscription",
-        "deleteSubscription",
-        "retrieveContextSourceIdentity",
-    ];
-    const UPDATE: &[&str] = &[
-        "updateEntity",
-        "updateAttrs",
-        "replaceEntity",
-        "replaceAttrs",
-    ];
-    const RETRIEVE: &[&str] = &["retrieveEntity", "queryEntity"];
-    const REDIRECTION: &[&str] = &[
-        "createEntity",
-        "updateEntity",
-        "appendAttrs",
-        "updateAttrs",
-        "deleteAttrs",
-        "deleteEntity",
-        "mergeEntity",
-        "replaceEntity",
-        "replaceAttrs",
-        "retrieveEntity",
-        "queryEntity",
-        "purgeEntity",
-        "retrieveEntityTypes",
-        "retrieveEntityTypeDetails",
-        "retrieveEntityTypeInfo",
-        "retrieveAttrTypes",
-        "retrieveAttrTypeDetails",
-        "retrieveAttrTypeInfo",
-        "retrieveEntityMap",
-        "updateEntityMap",
-        "deleteEntityMap",
-        "createEntityMapQueryEntity",
-        "retrieveContextSourceIdentity",
-    ];
-    match name {
-        "federationOps" => Some(FEDERATION),
-        "associationOps" => Some(ASSOCIATION),
-        "updateOps" => Some(UPDATE),
-        "retrieveOps" => Some(RETRIEVE),
-        "redirectionOps" => Some(REDIRECTION),
-        _ => None,
-    }
-}
+// A registration's operations are stored as a bitmask over Table 4.20-1
+// (`antares_model::operations::OPERATION_NAMES`), bit position = index in
+// that list. The list's order is append-only for exactly this reason: a
+// bitmask is stored data, so renumbering it is a migration, not an edit.
+//
+// The bit position being stored data also means appending a 64th operation
+// would overflow the shift below and write a mask no later migration could
+// distinguish from a real one. Fail at compile time on the day it is
+// appended, not on a corrupted row later.
+const _: () = assert!(OPERATION_NAMES.len() < 64, "ops bitmask is i64");
 
 /// Registration `operations` → bitmask; absent defaults to federationOps
 /// (5.2.9).
@@ -227,10 +102,10 @@ pub fn ops_mask(reg: &Value) -> i64 {
         .get("operations")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_else(|| vec!["federationOps"]);
+        .unwrap_or_else(|| vec![DEFAULT_OPERATION_GROUP]);
     let mut mask = 0i64;
     let mut set = |op: &str| {
-        if let Some(bit) = OPERATIONS.iter().position(|o| *o == op) {
+        if let Some(bit) = OPERATION_NAMES.iter().position(|o| *o == op) {
             mask |= 1 << bit;
         }
     };
@@ -865,8 +740,13 @@ mod tests {
         let default_mask = ops_mask(&json!({}));
         let fed_mask = ops_mask(&json!({"operations": ["federationOps"]}));
         assert_eq!(default_mask, fed_mask);
-        let bit = |op: &str| 1i64 << OPERATIONS.iter().position(|o| *o == op).expect(op);
-        assert_ne!(fed_mask & bit("retrieveEntity"), 0);
+        let bit = |op: &str| 1i64 << OPERATION_NAMES.iter().position(|o| *o == op).expect(op);
+        // every member of the group, not a sample: the index and the
+        // registration validator read one Table 4.20-2, so a member the
+        // vocabulary gains or loses has to move this mask with it
+        for op in group_members("federationOps").expect("federationOps") {
+            assert_ne!(fed_mask & bit(op), 0, "{op} is in federationOps");
+        }
         assert_eq!(
             fed_mask & bit("createEntity"),
             0,
@@ -886,7 +766,7 @@ mod tests {
     #[test]
     fn redirection_ops_expands_to_the_whole_table_4_20_2_group() {
         let m = ops_mask(&json!({"operations": ["redirectionOps"]}));
-        let bit = |op: &str| 1i64 << OPERATIONS.iter().position(|o| *o == op).expect(op);
+        let bit = |op: &str| 1i64 << OPERATION_NAMES.iter().position(|o| *o == op).expect(op);
         for op in [
             "createEntity",
             "deleteEntity",
@@ -925,12 +805,16 @@ mod tests {
     /// wrong mask no migration could tell from a real one.
     #[test]
     fn the_operation_list_still_fits_the_bitmask() {
-        assert!(OPERATIONS.len() < 64, "ops bitmask is i64");
+        assert!(OPERATION_NAMES.len() < 64, "ops bitmask is i64");
         // every name is unique: a duplicate would give one operation two bits
-        let mut seen = OPERATIONS.to_vec();
+        let mut seen = OPERATION_NAMES.to_vec();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), OPERATIONS.len(), "duplicate operation name");
+        assert_eq!(
+            seen.len(),
+            OPERATION_NAMES.len(),
+            "duplicate operation name"
+        );
     }
 
     /// The explosion ceiling has to bound the shape its own doc comment names

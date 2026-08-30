@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod id;
+pub mod operations;
 
 pub use error::{NgsiError, ProblemDetails};
 pub use id::{EntityId, TenantId};
