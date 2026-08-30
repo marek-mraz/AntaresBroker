@@ -2873,3 +2873,23 @@ NotificationParams for csource registration subscriptions. The fixture
 it, so a broker emitting the spec-defined member failed the strict diff.
 Fixture now carries `"timesFailed": 1` (deterministic: exactly one failed
 send in the scenario).
+
+## 021_23_02/03 assert an exact result set over a shared tenant
+
+`ContextInformation/Consumption/TemporalEntity/QueryTemporalEvolutionOfEntities/021_23.robot`
+queries `type=Building` with `timerel=after&timeAt=1970-01-01T00:00:00Z&timeproperty=createdAt`
+and asserts the answer is exactly `[Building:1, Building:2, Building:3]` in
+order. The 148 other TPs in the same directory create Buildings in the same
+(default) tenant, and 4.8 keeps their Temporal Evolutions readable after the
+Entity is deleted, so the query legitimately answers eleven. The two cases
+fail or pass according to which TPs ran before them, not according to what
+the broker does — the same two fail identically on the commit before and
+after an unrelated broker change, and the whole directory passes when the
+tenant happens to be clean.
+
+The assertion the clause supports is containment and relative order of the
+three seeded ids (4.23 orders the answer; 5.7.4.4 does not promise that a
+query over a type returns only the entities one TP created). Either narrow
+the query — a `q` on the seeded `name` values, or an `id` list — or assert
+that the three appear in the expected relative order within the answer. Not
+worked around in the broker: nothing here is a broker behaviour.

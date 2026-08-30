@@ -68,9 +68,9 @@ pub async fn upsert_temporal(
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["options", "local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let obj = parsed.value.as_object().ok_or_else(|| {
-            NgsiError::BadRequestData("temporal entity must be a JSON object".into())
-        })?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "temporal entity must be a JSON object".into(),
+        ))?;
         let expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
         let id = expanded["id"].as_str().expect("validated").to_owned();
         // 5.6.11.4: exclusive/redirect registrations matching the input are
@@ -925,6 +925,22 @@ const AGGR_METHODS: &[&str] = &[
     "sumsq",
 ];
 
+/// 5.7.3.4 / 5.7.4.4: "If projection attributes are present and indicate the
+/// use of Linked Entity retrieval, an error of type BadRequestData shall be
+/// raised." Unconditional on both temporal consumption operations, because
+/// neither defines a join; only the clause number in the message differs.
+fn reject_linked_projection(trepr: &TRepr, clause: &str) -> Result<(), NgsiError> {
+    let depth = |p: &Option<Vec<crate::repr::ProjNode>>| {
+        p.as_deref().map(crate::repr::proj_depth).unwrap_or(0)
+    };
+    if depth(&trepr.pick) > 0 || depth(&trepr.omit) > 0 {
+        return Err(NgsiError::BadRequestData(format!(
+            "temporal projection must not use Linked Entity selection ({clause})"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr, NgsiError> {
     let mut r = TRepr::default();
     if let Some(opts) = params.get("options") {
@@ -1602,24 +1618,7 @@ pub(crate) async fn query_temporal_inner(
     let tq = TemporalQ::from_params(params, true)?;
     let trepr = parse_trepr(params, &ctx)?;
     // 5.7.4.4: {…} projection is Linked Entity retrieval — unconditional 400
-    if trepr
-        .pick
-        .as_deref()
-        .map(crate::repr::proj_depth)
-        .unwrap_or(0)
-        > 0
-        || trepr
-            .omit
-            .as_deref()
-            .map(crate::repr::proj_depth)
-            .unwrap_or(0)
-            > 0
-    {
-        return Err(NgsiError::BadRequestData(
-            "temporal projection must not use Linked Entity selection (5.7.4.4)".into(),
-        )
-        .into());
-    }
+    reject_linked_projection(&trepr, "5.7.4.4")?;
     let last_n = trepr.last_n;
 
     let ids: Option<Vec<&str>> = params.get("id").map(|s| s.split(',').collect());
@@ -2118,24 +2117,7 @@ async fn retrieve_temporal_inner(
         // 5.7.3.4: "If projection attributes are present and indicate the
         // use of Linked Entity retrieval, an error of type BadRequestData
         // shall be raised" — unconditional, temporal defines no join.
-        if trepr
-            .pick
-            .as_deref()
-            .map(crate::repr::proj_depth)
-            .unwrap_or(0)
-            > 0
-            || trepr
-                .omit
-                .as_deref()
-                .map(crate::repr::proj_depth)
-                .unwrap_or(0)
-                > 0
-        {
-            return Err(NgsiError::BadRequestData(
-                "temporal projection must not use Linked Entity selection (5.7.3.4)".into(),
-            )
-            .into());
-        }
+        reject_linked_projection(&trepr, "5.7.3.4")?;
         let last_n = trepr.last_n;
         antares_model::EntityId::new(id)?;
         // Instance pruning pushed into the store (no q=/geo on retrieve,
@@ -2365,15 +2347,7 @@ pub async fn delete_temporal(
         // 5.6.16.4: forward to registrations supporting the operation;
         // unsupported proxy modes are Conflict.
         let ctx = st.loader.core();
-        let local_part = crate::federation::Part {
-            status: if deleted { 204 } else { 404 },
-            detail: if deleted {
-                "deleted locally".into()
-            } else {
-                format!("temporal entity {id} not found locally")
-            },
-        };
-        if let Some(r) = temporal_attr_fed(
+        answer_temporal_attr_write(
             &st,
             &tenant,
             &headers,
@@ -2384,17 +2358,14 @@ pub async fn delete_temporal(
             reqwest::Method::DELETE,
             "",
             None,
-            local_part,
+            LocalWrite {
+                res: deleted.then_some(Ok(())),
+                found: deleted,
+                missing: format!("temporal entity {id}"),
+                applied: "deleted locally",
+            },
         )
-        .await?
-        {
-            return Ok(r);
-        }
-        if deleted {
-            Ok::<_, ApiError>(no_content(&tenant))
-        } else {
-            Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
-        }
+        .await
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -2607,21 +2578,7 @@ pub async fn delete_temporal_attr(
             }
             Ok::<(), NgsiError>(())
         })?;
-        let local_part = match &res {
-            None => crate::federation::Part {
-                status: 404,
-                detail: format!("temporal entity {id} not found locally"),
-            },
-            Some(_) if found => crate::federation::Part {
-                status: 204,
-                detail: "deleted locally".into(),
-            },
-            Some(_) => crate::federation::Part {
-                status: 404,
-                detail: format!("attribute {attr} not found locally"),
-            },
-        };
-        if let Some(r) = temporal_attr_fed(
+        answer_temporal_attr_write(
             &st,
             &tenant,
             &headers,
@@ -2632,22 +2589,14 @@ pub async fn delete_temporal_attr(
             reqwest::Method::DELETE,
             &format!("/attrs/{}", crate::federation::path_segment(&attr)),
             None,
-            local_part,
+            LocalWrite {
+                res,
+                found,
+                missing: format!("attribute {attr}"),
+                applied: "deleted locally",
+            },
         )
-        .await?
-        {
-            return Ok(r);
-        }
-        match res {
-            None => {
-                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
-            }
-            Some(Err(e)) => Err(ApiError::from(e)),
-            Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => {
-                Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
-            }
-        }
+        .await
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -2658,8 +2607,30 @@ pub async fn delete_temporal_attr(
 /// = no matching registrations (the operation stays purely local).
 /// `path_suffix` arrives with its client-controlled segments already
 /// percent-encoded (RFC 3986 clause 3.3); the entity id is encoded here.
-#[allow(clippy::too_many_arguments)]
-async fn temporal_attr_fed(
+/// What the local `mutate` did, in the words the answer needs. 5.6.13,
+/// 5.6.14, 5.6.15 and 5.6.16 all answer the same three ways: 204 when the
+/// target was there, ResourceNotFound naming the Entity when the Entity was
+/// not, and ResourceNotFound naming the Attribute or the instance when the
+/// Entity was there but the target inside it was not.
+struct LocalWrite {
+    /// `None` when the Temporal Evolution itself is absent.
+    res: Option<Result<(), NgsiError>>,
+    /// whether the operation's target inside it was there.
+    found: bool,
+    /// what a 404 names once the Entity itself was found.
+    missing: String,
+    /// what the 204 Part reports was done here.
+    applied: &'static str,
+}
+
+/// 5.6.13 / 5.6.14 / 5.6.15 / 5.6.16 answer: the local result becomes one
+/// 4.3.6 Part, every registration supporting `op` (Table 4.20-1) contributes
+/// another, and 4.3.6.4 combines them into the one status the client sees.
+/// With no registration to forward to — the common case — the local result
+/// is the whole answer. The four operations differ in what they change and
+/// in what they forward, never in how the two halves are answered together.
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
+async fn answer_temporal_attr_write(
     st: &AppState,
     tenant: &antares_model::TenantId,
     headers: &HeaderMap,
@@ -2670,8 +2641,8 @@ async fn temporal_attr_fed(
     method: reqwest::Method,
     path_suffix: &str,
     body: Option<Value>,
-    local_part: crate::federation::Part,
-) -> ApiResult<Option<Response>> {
+    local: LocalWrite,
+) -> ApiResult<Response> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
@@ -2683,11 +2654,34 @@ async fn temporal_attr_fed(
         tenant,
         &mut regs,
     ) {
-        return Ok(Some(r));
+        return Ok(r);
     }
     if regs.is_empty() {
-        return Ok(None);
+        return match local.res {
+            None => {
+                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
+            }
+            Some(Err(e)) => Err(ApiError::from(e)),
+            Some(Ok(())) if local.found => Ok(no_content(tenant)),
+            Some(Ok(())) => {
+                Err(NgsiError::ResourceNotFound(format!("{} not found", local.missing)).into())
+            }
+        };
     }
+    let local_part = match &local.res {
+        None => crate::federation::Part {
+            status: 404,
+            detail: format!("temporal entity {id} not found locally"),
+        },
+        Some(_) if local.found => crate::federation::Part {
+            status: 204,
+            detail: local.applied.into(),
+        },
+        Some(_) => crate::federation::Part {
+            status: 404,
+            detail: format!("{} not found locally", local.missing),
+        },
+    };
     let mut parts = vec![local_part];
     let ctx_url = crate::federation::ctx_link_url(headers, &ctx.source);
     for reg in &regs {
@@ -2716,11 +2710,11 @@ async fn temporal_attr_fed(
             .await,
         );
     }
-    Ok(Some(crate::federation::combine(
+    Ok(crate::federation::combine(
         parts,
         no_content(tenant),
         tenant,
-    )))
+    ))
 }
 
 // ---------- PATCH/DELETE .../attrs/{attrId}/{instanceId} (5.6.14/5.6.15) ----------
@@ -2790,21 +2784,7 @@ pub async fn modify_temporal_instance(
             }
             Ok::<(), NgsiError>(())
         })?;
-        let local_part = match &res {
-            None => crate::federation::Part {
-                status: 404,
-                detail: format!("temporal entity {id} not found locally"),
-            },
-            Some(_) if found => crate::federation::Part {
-                status: 204,
-                detail: "applied locally".into(),
-            },
-            Some(_) => crate::federation::Part {
-                status: 404,
-                detail: format!("instance {instance_id} not found locally"),
-            },
-        };
-        if let Some(r) = temporal_attr_fed(
+        answer_temporal_attr_write(
             &st,
             &tenant,
             &headers,
@@ -2819,22 +2799,14 @@ pub async fn modify_temporal_instance(
                 crate::federation::path_segment(&instance_id)
             ),
             Some(parsed.value.clone()),
-            local_part,
+            LocalWrite {
+                res,
+                found,
+                missing: format!("instance {instance_id}"),
+                applied: "applied locally",
+            },
         )
-        .await?
-        {
-            return Ok(r);
-        }
-        match res {
-            None => {
-                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
-            }
-            Some(Err(e)) => Err(ApiError::from(e)),
-            Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => {
-                Err(NgsiError::ResourceNotFound(format!("instance {instance_id} not found")).into())
-            }
-        }
+        .await
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -2873,21 +2845,7 @@ pub async fn delete_temporal_instance(
             }
             Ok::<(), NgsiError>(())
         })?;
-        let local_part = match &res {
-            None => crate::federation::Part {
-                status: 404,
-                detail: format!("temporal entity {id} not found locally"),
-            },
-            Some(_) if found => crate::federation::Part {
-                status: 204,
-                detail: "applied locally".into(),
-            },
-            Some(_) => crate::federation::Part {
-                status: 404,
-                detail: format!("instance {instance_id} not found locally"),
-            },
-        };
-        if let Some(r) = temporal_attr_fed(
+        answer_temporal_attr_write(
             &st,
             &tenant,
             &headers,
@@ -2902,22 +2860,14 @@ pub async fn delete_temporal_instance(
                 crate::federation::path_segment(&instance_id)
             ),
             None,
-            local_part,
+            LocalWrite {
+                res,
+                found,
+                missing: format!("instance {instance_id}"),
+                applied: "applied locally",
+            },
         )
-        .await?
-        {
-            return Ok(r);
-        }
-        match res {
-            None => {
-                Err(NgsiError::ResourceNotFound(format!("temporal entity {id} not found")).into())
-            }
-            Some(Err(e)) => Err(ApiError::from(e)),
-            Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => {
-                Err(NgsiError::ResourceNotFound(format!("instance {instance_id} not found")).into())
-            }
-        }
+        .await
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
