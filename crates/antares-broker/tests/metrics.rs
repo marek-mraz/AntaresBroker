@@ -121,4 +121,31 @@ fn q_metrics_serves_prometheus_text_and_counters_move() {
         .and_then(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
         .unwrap_or(0.0);
     assert!(post_count >= 1.0, "POST counter did not move:\n{metrics}");
+
+    // A latency metric is a HISTOGRAM, not a rolling summary. A summary's
+    // quantiles are computed over a sliding window the exporter owns: an idle
+    // scrape reports 0 for every quantile while the count keeps climbing, and
+    // a busy one reports only the last window, so the series cannot be
+    // aggregated across instances or read backwards over a rollout. Buckets
+    // are cumulative and belong to the scrape.
+    assert!(
+        metrics.contains("antares_http_request_duration_seconds_bucket"),
+        "duration is not exported as a histogram:\n{metrics}"
+    );
+    assert!(
+        !metrics
+            .lines()
+            .any(|l| l.starts_with("antares_http_request_duration_seconds")
+                && l.contains("quantile=")),
+        "duration is still a rolling summary:\n{metrics}"
+    );
+    // The measured tail lives well past the exporter's 10 s default top
+    // bucket, so a bucket must cover it or every slow request lands in +Inf.
+    assert!(
+        metrics.lines().any(
+            |l| l.starts_with("antares_http_request_duration_seconds_bucket")
+                && l.contains(r#"le="30""#)
+        ),
+        "no bucket covers the measured multi-second tail:\n{metrics}"
+    );
 }

@@ -153,10 +153,32 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
         }
         return Ok(None); // the recorder, registry and sampler are never built
     }
-    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .set_buckets(LATENCY_BUCKETS_SECONDS)?
+        .install_recorder()?;
     describe();
     Ok(Some(Arc::new(move || handle.render())))
 }
+
+/// Bucket bounds, in seconds, for every histogram this binary registers —
+/// both are request-shaped latencies.
+///
+/// Without them the exporter renders a histogram as a rolling summary, whose
+/// quantiles are computed over a sliding window it owns rather than over the
+/// scrape: an idle window reports `0` for every quantile while `_count` and
+/// `_sum` keep climbing, a busy one reports only the last window, and neither
+/// can be aggregated across instances or read back over a rollout. Buckets
+/// are cumulative and belong to the scrape, so `histogram_quantile()` works
+/// on them.
+///
+/// The range is set from measured service time: single-digit milliseconds
+/// when the broker is healthy, tens of seconds once the accept path is the
+/// bottleneck. The exporter's own default stops at 10 s, which files every
+/// slow request under `+Inf` — precisely the requests a latency dashboard
+/// exists to show.
+const LATENCY_BUCKETS_SECONDS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
 
 /// Metric metadata — Prometheus-convention names (antares_ prefix, unit suffixes).
 fn describe() {

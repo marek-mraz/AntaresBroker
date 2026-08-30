@@ -96,6 +96,11 @@ Prometheus text with the `antares_` prefix:
 | `antares_notification_task_panics_total` | Delivery tasks that panicked (a bug, never expected). |
 | `antares_change_lag_seconds` | Age of the change a notifier is handling. |
 
+Both `_seconds` metrics are true histograms, bucketed at 5 ms, 10 ms, 25 ms,
+50 ms, 100 ms, 250 ms, 500 ms, 1 s, 2.5 s, 5 s, 10 s, 30 s and 60 s. The
+bounds are what `histogram_quantile()` can resolve, and the top ones exist
+because service time reaches tens of seconds once the accept path saturates.
+
 ## Tenants
 
 `GET /q/tenants` answers the names, sorted, and nothing else:
