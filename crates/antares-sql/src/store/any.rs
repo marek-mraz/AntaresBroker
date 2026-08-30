@@ -763,54 +763,80 @@ impl AnyStore {
         }
     }
 
-    /// Inventory of every tenant with per-kind counts.
-    pub fn tenant_stats(&self) -> Result<Vec<antares_store::TenantStats>, NgsiError> {
+    /// Every tenant name the backend knows, sorted. One cheap query: at the
+    /// 10 000-tenant target (ADR-0001) an inventory that counted every kind
+    /// of every tenant would be 7 counts per tenant on one transaction, so
+    /// the counts live in `tenant_stats_one` and are paid per lookup.
+    pub fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.tenant_stats()),
+            AnyStore::Mem(s) => Ok(s.tenant_ids()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => super::pg::entity::wait(async {
+                let mut rows: Vec<String> =
+                    sqlx::query_scalar("SELECT tenant_id FROM tenants ORDER BY 1")
+                        .fetch_all(p.docs.pool())
+                        .await
+                        .map_err(db)?;
+                // 5.5.10: the default Tenant implicitly exists, whether or
+                // not a row was ever written for it.
+                if !rows.iter().any(|t| t == TenantId::DEFAULT) {
+                    rows.push(TenantId::DEFAULT.to_owned());
+                    rows.sort();
+                }
+                Ok(rows)
+            }),
+        }
+    }
+
+    /// What one tenant holds; `None` when it does not exist (5.5.10 keeps
+    /// the default Tenant existing even when empty).
+    pub fn tenant_stats_one(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
+        if !self.tenant_exists(tenant)? {
+            return Ok(None);
+        }
+        match self {
+            AnyStore::Mem(s) => Ok(Some(s.tenant_stats_one(tenant))),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let mut tx = p.docs.pool().begin().await.map_err(db)?;
-                let rows: Vec<(String, String)> =
-                    sqlx::query_as("SELECT tenant_id, created_at::text FROM tenants ORDER BY 1")
-                        .fetch_all(&mut *tx)
-                        .await
-                        .map_err(db)?;
-                let mut out = Vec::with_capacity(rows.len());
-                // one transaction, the tenant setting re-pointed per row so
-                // the RLS-guarded counts see that tenant's rows
-                for (tenant, created_at) in rows {
-                    sqlx::query(crate::SET_TENANT_SQL)
-                        .bind(&tenant)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(db)?;
-                    let c: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-                        "SELECT (SELECT count(*) FROM entities WHERE tenant_id = $1),
-                                (SELECT count(*) FROM subscriptions WHERE tenant_id = $1),
-                                (SELECT count(*) FROM csource_registrations WHERE tenant_id = $1),
-                                (SELECT count(*) FROM csource_subscriptions WHERE tenant_id = $1),
-                                (SELECT count(*) FROM snapshots WHERE tenant_id = $1),
-                                (SELECT count(*) FROM entity_map_docs WHERE tenant_id = $1),
-                                (SELECT count(*) FROM dist_subs WHERE tenant_id = $1)",
-                    )
-                    .bind(&tenant)
-                    .fetch_one(&mut *tx)
+                // the tenant setting is what the RLS-guarded counts see
+                crate::store::pg::set_tenant(&mut tx, tenant)
                     .await
                     .map_err(db)?;
-                    out.push(antares_store::TenantStats {
-                        tenant,
-                        created_at: Some(created_at),
-                        entities: c.0 as u64,
-                        subscriptions: c.1 as u64,
-                        registrations: c.2 as u64,
-                        csource_subscriptions: c.3 as u64,
-                        snapshots: c.4 as u64,
-                        entity_maps: c.5 as u64,
-                        dist_subs: c.6 as u64,
-                    });
-                }
+                let created_at: Option<String> =
+                    sqlx::query_scalar("SELECT created_at::text FROM tenants WHERE tenant_id = $1")
+                        .bind(tenant.as_str())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                let c: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                    "SELECT (SELECT count(*) FROM entities WHERE tenant_id = $1),
+                            (SELECT count(*) FROM subscriptions WHERE tenant_id = $1),
+                            (SELECT count(*) FROM csource_registrations WHERE tenant_id = $1),
+                            (SELECT count(*) FROM csource_subscriptions WHERE tenant_id = $1),
+                            (SELECT count(*) FROM snapshots WHERE tenant_id = $1),
+                            (SELECT count(*) FROM entity_map_docs WHERE tenant_id = $1),
+                            (SELECT count(*) FROM dist_subs WHERE tenant_id = $1)",
+                )
+                .bind(tenant.as_str())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db)?;
                 tx.commit().await.map_err(db)?;
-                Ok(out)
+                Ok(Some(antares_store::TenantStats {
+                    tenant: tenant.as_str().to_owned(),
+                    created_at,
+                    entities: c.0 as u64,
+                    subscriptions: c.1 as u64,
+                    registrations: c.2 as u64,
+                    csource_subscriptions: c.3 as u64,
+                    snapshots: c.4 as u64,
+                    entity_maps: c.5 as u64,
+                    dist_subs: c.6 as u64,
+                }))
             }),
         }
     }
@@ -1083,8 +1109,14 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         AnyStore::subscription_tenants(self)
     }
-    fn tenant_stats(&self) -> Result<Vec<antares_store::TenantStats>, NgsiError> {
-        AnyStore::tenant_stats(self)
+    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+        AnyStore::tenant_ids(self)
+    }
+    fn tenant_stats_one(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
+        AnyStore::tenant_stats_one(self, tenant)
     }
     fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         AnyStore::purge_tenant(self, tenant)

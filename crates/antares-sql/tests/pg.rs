@@ -310,16 +310,32 @@ async fn purge_tenant_empties_every_tenant_table() {
         }
         v
     };
-    let stats = store.tenant_stats().expect("stats");
-    let row = stats
-        .iter()
-        .find(|r| r.tenant == a.as_str())
-        .expect("listed");
+    let ids = store.tenant_ids().expect("ids");
+    assert!(ids.iter().any(|t| t == a.as_str()), "listed: {ids:?}");
+    assert!(
+        ids.iter().any(|t| t == antares_model::TenantId::DEFAULT),
+        "5.5.10: the default tenant is always listed: {ids:?}"
+    );
+    let row = store
+        .tenant_stats_one(&a)
+        .expect("stats")
+        .expect("tenant exists");
     assert_eq!(
         (row.entities, row.subscriptions, row.registrations),
         (1, 1, 1)
     );
     assert_eq!(row.dist_subs, 1);
+    assert!(
+        row.created_at.is_some(),
+        "the tenants row carries its stamp"
+    );
+    assert!(
+        store
+            .tenant_stats_one(&TenantId::new("never-seen").expect("tenant"))
+            .expect("stats")
+            .is_none(),
+        "an unknown tenant has no stats to report"
+    );
     assert!(TemporalDriver::attr_instance_count(&store, &a).expect("n") >= 1);
 
     assert!(CurrentStateDriver::purge_tenant(&store, &a).expect("purge"));

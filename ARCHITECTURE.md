@@ -75,7 +75,8 @@ module's header comment.
 | `history.rs` | 150 | the producer side of temporal recording (change buffer per request) |
 | `bounds.rs` | 340 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 280 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
-| `state.rs` | 520 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, hooks |
+| `surface.rs` | 90 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
+| `state.rs` | 590 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 ## 4. A request, end to end
 

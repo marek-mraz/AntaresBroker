@@ -427,8 +427,8 @@ impl Store {
             .any(|k| Self::map(&inner, *k).contains_key(tenant.as_str()))
     }
 
-    /// Inventory over every kind; the default tenant is always listed.
-    pub fn tenant_stats(&self) -> Vec<antares_store::TenantStats> {
+    /// Every tenant name, sorted; the default tenant is always present.
+    pub fn tenant_ids(&self) -> Vec<String> {
         let inner = self
             .inner
             .read()
@@ -438,27 +438,32 @@ impl Store {
         for kind in ALL_KINDS {
             names.extend(Self::map(&inner, kind).keys().cloned());
         }
-        names
-            .into_iter()
-            .map(|tenant| {
-                let n = |k: Kind| {
-                    Self::map(&inner, k)
-                        .get(&tenant)
-                        .map_or(0, |m| m.len() as u64)
-                };
-                antares_store::TenantStats {
-                    entities: n(Kind::Entity),
-                    subscriptions: n(Kind::Subscription),
-                    registrations: n(Kind::Registration),
-                    csource_subscriptions: n(Kind::CSourceSubscription),
-                    snapshots: n(Kind::Snapshot),
-                    entity_maps: n(Kind::EntityMap),
-                    dist_subs: n(Kind::DistSub),
-                    created_at: None,
-                    tenant,
-                }
-            })
-            .collect()
+        names.into_iter().collect()
+    }
+
+    /// What one tenant holds. Existence is the caller's question — an
+    /// unknown tenant simply counts zero of everything.
+    pub fn tenant_stats_one(&self, tenant: &TenantId) -> antares_store::TenantStats {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let n = |k: Kind| {
+            Self::map(&inner, k)
+                .get(tenant.as_str())
+                .map_or(0, |m| m.len() as u64)
+        };
+        antares_store::TenantStats {
+            entities: n(Kind::Entity),
+            subscriptions: n(Kind::Subscription),
+            registrations: n(Kind::Registration),
+            csource_subscriptions: n(Kind::CSourceSubscription),
+            snapshots: n(Kind::Snapshot),
+            entity_maps: n(Kind::EntityMap),
+            dist_subs: n(Kind::DistSub),
+            created_at: None,
+            tenant: tenant.as_str().to_owned(),
+        }
     }
 
     /// Attribute instances held in the tenant's temporal documents.
@@ -1336,11 +1341,8 @@ mod tests {
                     assert!(s.create(t, kind, "urn:x:1", json!({"id": "urn:x:1"})));
                 }
             }
-            let stats = s.tenant_stats();
-            let row = stats
-                .iter()
-                .find(|r| r.tenant == "purge_a")
-                .expect("listed");
+            assert!(s.tenant_ids().iter().any(|t| t == "purge_a"), "listed");
+            let row = s.tenant_stats_one(&a);
             assert_eq!((row.entities, row.subscriptions, row.dist_subs), (1, 1, 1));
             assert!(s.purge_tenant(&a));
             assert!(!s.purge_tenant(&a), "second purge finds nothing");
@@ -1350,7 +1352,12 @@ mod tests {
                 assert!(s.get(&a, kind, "urn:x:1").is_none(), "{kind:?} row left");
                 assert!(s.get(&b, kind, "urn:x:1").is_some(), "{kind:?} lost for b");
             }
-            assert!(s.tenant_stats().iter().all(|r| r.tenant != "purge_a"));
+            assert!(s.tenant_ids().iter().all(|t| t != "purge_a"));
+            assert_eq!(
+                s.tenant_stats_one(&a).entities,
+                0,
+                "a purged tenant counts nothing"
+            );
         }
         let s = Store::open_file(&dir).expect("reopen");
         assert!(!s.tenant_exists(&a), "purge must be persisted");

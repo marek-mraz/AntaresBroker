@@ -126,6 +126,9 @@ pub(crate) fn repr_reserved(k: &str) -> bool {
     )
 }
 
+pub mod surface;
+pub use surface::ApiSurface;
+
 pub use antares_ql::scope::scope_matches;
 
 /// 4.3.5 NGSI-LD API structure: Core API mandatory; Distributed API mandatory for
@@ -139,16 +142,45 @@ pub use antares_ql::scope::scope_matches;
 /// (and a subscription created there was never KV-synced, because the sync
 /// hooks are wired `if roles.api`); a worker now 404s the API surface.
 pub fn ops_router(state: AppState) -> Router {
+    // Admin only, deliberately: a worker widening its surface to whatever a
+    // deployment registered is the same class of accident this router exists
+    // to prevent.
     Router::new()
-        .route("/q/health", get(health))
-        .route("/q/ready", get(ready))
-        .route("/q/metrics", get(metrics_endpoint))
-        .route("/q/tenants", get(tenants_list))
-        .route("/q/tenants/{tenant}", delete(tenant_purge))
-        .route("/q/dead-letters", get(dead_letters_list))
-        .route("/q/dead-letters/{id}", delete(dead_letter_delete))
-        .route("/q/dead-letters/{id}/replay", post(dead_letter_replay))
+        .nest(Admin.prefix(), Admin.router(state.clone()))
         .with_state(state)
+}
+
+/// The broker's own operational surface: health, readiness, metrics, the
+/// tenant list and purge, and the dead-letter admin. Gateway-protected like
+/// every `/q` route — the broker adds no authentication of its own.
+pub struct Admin;
+
+impl ApiSurface for Admin {
+    fn name(&self) -> &str {
+        "admin"
+    }
+
+    fn prefix(&self) -> &str {
+        "/q"
+    }
+
+    fn router(&self, _st: AppState) -> Router<AppState> {
+        Router::new()
+            .route("/health", get(health))
+            .route("/ready", get(ready))
+            // Prometheus text format. 404 until the broker installs the
+            // renderer — the api crate never depends on an exporter.
+            .route("/metrics", get(metrics_endpoint))
+            .route("/tenants", get(tenants_list))
+            .route("/tenants/{tenant}", get(tenant_get).delete(tenant_purge))
+            .route("/dead-letters", get(dead_letters_list))
+            .route("/dead-letters/{id}", delete(dead_letter_delete))
+            .route("/dead-letters/{id}/replay", post(dead_letter_replay))
+    }
+
+    fn version_info(&self) -> serde_json::Value {
+        serde_json::json!({"routes": 8})
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -313,18 +345,16 @@ pub fn router(state: AppState) -> Router {
             bounds::bounds_layer,
         ));
 
-    Router::new()
-        .route("/q/health", get(health))
-        .route("/q/ready", get(ready))
+    // Every registered surface, each under its own reserved prefix — the
+    // admin one by default. `with_surface` already refused a prefix outside
+    // /q and /x and any overlap, so the merge here cannot shadow a route.
+    let mut surfaces = Router::new();
+    for s in state.surfaces.iter() {
+        surfaces = surfaces.nest(s.prefix(), s.router(state.clone()));
+    }
+
+    surfaces
         .merge(remote_notify)
-        // Prometheus text format. 404 until the broker installs the
-        // renderer — the api crate never depends on an exporter.
-        .route("/q/metrics", get(metrics_endpoint))
-        .route("/q/tenants", get(tenants_list))
-        .route("/q/tenants/{tenant}", delete(tenant_purge))
-        .route("/q/dead-letters", get(dead_letters_list))
-        .route("/q/dead-letters/{id}", delete(dead_letter_delete))
-        .route("/q/dead-letters/{id}/replay", post(dead_letter_replay))
         // 6.3.6/6.3.21: Prefer: ngsi-ld=<version> → 4.3.6.8 amendment +
         // Preference-Applied (+203 when altered) on every API response.
         // OPTIONS (2.0 #59 pre-adoption): axum's MethodRouter already
@@ -608,6 +638,26 @@ async fn health(
     body["limits"] = state.limits.snapshot();
     // History events a driver failed to record after the write stood.
     body["temporalDrainErrors"] = history::drain_errors().into();
+    // What this binary serves beside the NGSI-LD API: one entry per mounted
+    // surface, its prefix and whatever the surface reports about itself.
+    body["surfaces"] = serde_json::Value::Object(
+        state
+            .surfaces
+            .iter()
+            .map(|s| {
+                let mut info = match s.version_info() {
+                    serde_json::Value::Object(m) => m,
+                    other => {
+                        let mut m = serde_json::Map::new();
+                        m.insert("info".into(), other);
+                        m
+                    }
+                };
+                info.insert("prefix".into(), s.prefix().into());
+                (s.name().to_owned(), serde_json::Value::Object(info))
+            })
+            .collect(),
+    );
     // Endpoint schemes this deployment can deliver notifications to: the
     // registered bindings (6.3.8, clause 7, and any a deployment added).
     // A subscription naming a scheme absent here is refused at creation.
@@ -753,38 +803,66 @@ async fn dead_letter_delete(
     }
 }
 
-/// Tenant inventory: every tenant the backends know and what it holds.
-/// Admin surface, never under the API root.
+/// Tenant inventory: the names the backends know, sorted. Names only —
+/// at the 10 000-tenant target (ADR-0001) a list carrying per-kind counts
+/// would cost a count per kind per tenant, so a client picks a name here and
+/// reads its detail from `GET /q/tenants/{tenant}`. Admin surface, never
+/// under the API root.
 async fn tenants_list(axum::extract::State(st): axum::extract::State<AppState>) -> Response {
-    let stats = match st.store.tenant_stats() {
-        Ok(s) => s,
-        Err(e) => return crate::negotiate::ApiError::from(e).into_response(),
-    };
-    let mut out = Vec::with_capacity(stats.len());
-    for s in stats {
-        let instances = TenantId::new(&s.tenant)
-            .ok()
-            .and_then(|t| st.temporal.attr_instance_count(&t).ok())
-            .unwrap_or(0);
-        let mut row = serde_json::json!({
-            "tenant": s.tenant,
-            "counts": {
-                "entities": s.entities,
-                "subscriptions": s.subscriptions,
-                "csourceSubscriptions": s.csource_subscriptions,
-                "registrations": s.registrations,
-                "snapshots": s.snapshots,
-                "entityMaps": s.entity_maps,
-                "distSubs": s.dist_subs,
-                "attrInstances": instances,
-            },
-        });
-        if let Some(c) = s.created_at {
-            row["createdAt"] = serde_json::Value::String(c);
-        }
-        out.push(row);
+    match st.store.tenant_ids() {
+        Ok(ids) => (StatusCode::OK, axum::Json(ids)).into_response(),
+        Err(e) => crate::negotiate::ApiError::from(e).into_response(),
     }
-    (StatusCode::OK, axum::Json(serde_json::Value::Array(out))).into_response()
+}
+
+/// What one tenant holds: 400 for a name no request could carry, 404 when it
+/// does not exist (5.5.10 keeps the default Tenant existing even when
+/// empty), 200 with its counts otherwise. The path names the tenant; the
+/// NGSILD-Tenant header never redirects the read.
+async fn tenant_get(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    use crate::negotiate::ApiError;
+    let bad = || {
+        ApiError::from(NgsiError::BadRequestData(format!(
+            "invalid tenant: {raw:?}"
+        )))
+        .into_response()
+    };
+    // the broker's internal snapshot tenants are not addressable
+    if reserved_tenant(&raw) {
+        return bad();
+    }
+    let Ok(tenant) = TenantId::new(&raw) else {
+        return bad();
+    };
+    let stats = match st.store.tenant_stats_one(&tenant) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return ApiError::from(NgsiError::ResourceNotFound(format!("tenant {raw}")))
+                .into_response()
+        }
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let instances = st.temporal.attr_instance_count(&tenant).unwrap_or(0);
+    let mut row = serde_json::json!({
+        "tenant": stats.tenant,
+        "counts": {
+            "entities": stats.entities,
+            "subscriptions": stats.subscriptions,
+            "csourceSubscriptions": stats.csource_subscriptions,
+            "registrations": stats.registrations,
+            "snapshots": stats.snapshots,
+            "entityMaps": stats.entity_maps,
+            "distSubs": stats.dist_subs,
+            "attrInstances": instances,
+        },
+    });
+    if let Some(c) = stats.created_at {
+        row["createdAt"] = serde_json::Value::String(c);
+    }
+    (StatusCode::OK, axum::Json(row)).into_response()
 }
 
 /// Purge one tenant from both backends: 400 for a name no request could

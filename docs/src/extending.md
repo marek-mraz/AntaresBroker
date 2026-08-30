@@ -9,7 +9,7 @@ marshalling round per value.
 
 | layer | what it is | how it is chosen |
 |---|---|---|
-| Component drivers | storage, temporal history, notification sinks, the event bus | a name in the environment at startup |
+| Component drivers | storage, temporal history, notification sinks, the event bus, the HTTP surfaces beside the API root | a name in the environment at startup |
 | Lifecycle hooks | five named phases in the request lifecycle | compiled in behind a cargo feature; settings are data |
 | Dynamic tier | loadable or sandboxed code | not built; the two driver traits are the only coupling it would need |
 
@@ -89,6 +89,30 @@ per-destination circuit breaker — runs in the caller before `deliver`, so a
 sink cannot step around it. A sink that opens no socket says so by returning
 `false` from `network()`; every binding shipped here returns the default
 `true`, and a unit test holds that.
+
+### API surfaces
+
+`ApiSurface` (`crates/antares-api/src/surface.rs`) is the routing seam: a
+name, a prefix, an `axum::Router<AppState>` and a `version_info()` object
+that `/q/health` prints under `surfaces`. The broker's own operational
+routes are one such surface, `admin`, mounted at `/q`.
+
+A surface may only claim a reserved prefix — `/q`, `/x`, or a path below
+`/x`. The NGSI-LD API root belongs to the spec: a surface that could shadow
+a spec resource would make conformance a function of deployment
+configuration, so `AppState::with_surface` refuses any other prefix, and
+refuses a prefix that overlaps one already mounted rather than leaving the
+winner to route-matching order. Both refusals are startup errors.
+
+`ANTARES_API_SURFACES` names the selection, comma-separated; absent means
+`admin`. An unknown name is fatal at startup and lists the shelf, the same
+way an unknown backend does. A selection that leaves `admin` out serves no
+`/q` at all, health and readiness included, so an empty selection is
+refused outright.
+
+Adding one is a struct implementing the trait plus an entry in
+`SURFACE_SHELF` (`crates/antares-broker/src/main.rs`); no core crate
+changes.
 
 ### How to add a storage backend
 

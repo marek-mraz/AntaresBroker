@@ -49,6 +49,9 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_MAX_BATCH_ITEMS",
     "ANTARES_MAX_BODY_BYTES",
     "ANTARES_CORS_ORIGINS",
+    // The HTTP surfaces mounted beside the NGSI-LD API root, comma-separated;
+    // default `admin` (/q). An unknown name is fatal and names the shelf.
+    "ANTARES_API_SURFACES",
     // Drain: the LB notice window, and the ceiling on waiting for
     // in-flight requests once the listener has closed.
     "ANTARES_DRAIN_DELAY_MS",
@@ -380,6 +383,50 @@ fn temporal_choice(
     }
 }
 
+/// One entry of the surface shelf: the name a deployment selects it with,
+/// and how to build it.
+type SurfaceCtor = fn() -> Box<dyn antares_api::ApiSurface>;
+
+/// The HTTP surfaces this binary was built with, outside the NGSI-LD API
+/// root. Every one is compiled in, so the shelf is static; a feature-gated
+/// surface would drop out here.
+const SURFACE_SHELF: &[(&str, SurfaceCtor)] = &[("admin", || Box::new(antares_api::Admin))];
+
+/// ANTARES_API_SURFACES → the surfaces mounted beside the NGSI-LD API,
+/// comma-separated; absent = `admin`. An unknown name is fatal and names
+/// the shelf, and so is a selection that ends up empty: health, readiness
+/// and metrics are the admin surface, and a pod that serves none of them
+/// can never report itself up.
+fn api_surfaces(raw: Option<&str>) -> Result<Vec<(&'static str, SurfaceCtor)>, String> {
+    let mut chosen = Vec::new();
+    for name in raw
+        .unwrap_or("admin")
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        let entry = SURFACE_SHELF
+            .iter()
+            .find(|(n, _)| *n == name)
+            .ok_or_else(|| {
+                let shelf: Vec<&str> = SURFACE_SHELF.iter().map(|(n, _)| *n).collect();
+                format!(
+                    "ANTARES_API_SURFACES: unknown surface {name:?}; built with {}",
+                    shelf.join("|")
+                )
+            })?;
+        chosen.push(*entry);
+    }
+    if chosen.is_empty() {
+        return Err(
+            "ANTARES_API_SURFACES selects no surface; /q (health, readiness, metrics) \
+                    is the admin surface"
+                .into(),
+        );
+    }
+    Ok(chosen)
+}
+
 /// The backend registry: the two driver seams from their configured names.
 /// Every backend is one arm of `build_store`; the temporal driver is by
 /// default the same instance (history recorded and served by the
@@ -626,6 +673,11 @@ async fn run(
         .as_deref()
         .unwrap_or("all")
         .parse()?;
+    // The surfaces mounted beside the NGSI-LD API root, from configuration
+    // rather than from a hard-wired list: the selection replaces what the
+    // default mounting put there, before the state is shared.
+    let selected = api_surfaces(std::env::var("ANTARES_API_SURFACES").ok().as_deref())?;
+    state = state.with_surfaces(selected.iter().map(|(_, build)| build()).collect())?;
     // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.
@@ -1255,6 +1307,53 @@ mod driver_registry_tests {
             temporal_choice(StoreMode::Memory, Some("")).is_err(),
             "an empty name is not a default"
         );
+    }
+}
+
+#[cfg(test)]
+mod api_surface_tests {
+    use super::{api_surfaces, SURFACE_SHELF};
+
+    fn names(raw: Option<&str>) -> Vec<&'static str> {
+        api_surfaces(raw)
+            .expect("selection")
+            .iter()
+            .map(|(n, _)| *n)
+            .collect()
+    }
+
+    /// Absent means the operational surface, and nothing else: a pod that
+    /// was never configured still answers its probes.
+    #[test]
+    fn absent_selects_admin() {
+        assert_eq!(names(None), vec!["admin"]);
+        assert_eq!(names(Some("admin")), vec!["admin"]);
+        assert_eq!(
+            names(Some(" admin , ")),
+            vec!["admin"],
+            "spacing is not a name"
+        );
+    }
+
+    /// An unknown name is fatal at startup and the message names the shelf
+    /// this binary was built with — never a silently ignored surface.
+    #[test]
+    fn an_unknown_surface_is_fatal_and_lists_the_shelf() {
+        let err = api_surfaces(Some("admin,dashboard")).expect_err("must fail");
+        assert!(err.contains("dashboard"), "{err}");
+        for (name, _) in SURFACE_SHELF {
+            assert!(err.contains(name), "the message lists {name}: {err}");
+        }
+    }
+
+    /// An empty selection is fatal too: readiness, health and metrics are
+    /// the admin surface, so a pod without one can never report itself up.
+    #[test]
+    fn an_empty_selection_is_fatal() {
+        for raw in ["", " ", ",", " , "] {
+            let err = api_surfaces(Some(raw)).expect_err(&format!("{raw:?} selects nothing"));
+            assert!(err.contains("ANTARES_API_SURFACES"), "{err}");
+        }
     }
 }
 

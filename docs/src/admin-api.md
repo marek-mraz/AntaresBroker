@@ -10,7 +10,8 @@ routes. Errors use the same problem-details shape as the NGSI-LD API.
 | `GET /q/health` | Liveness and the process view |
 | `GET /q/ready` | Readiness for the load balancer |
 | `GET /q/metrics` | Prometheus text |
-| `GET /q/tenants` | Tenant inventory |
+| `GET /q/tenants` | Tenant names |
+| `GET /q/tenants/{tenant}` | What one tenant holds |
 | `DELETE /q/tenants/{tenant}` | Tenant purge |
 | `GET /q/dead-letters` | Notifications the delivery policy gave up on |
 | `POST /q/dead-letters/{id}/replay` | One more delivery attempt |
@@ -96,13 +97,28 @@ Prometheus text with the `antares_` prefix:
 
 ## Tenants
 
+`GET /q/tenants` answers the names, sorted, and nothing else:
+
 ```text
 GET /q/tenants
-[{"tenant":"default","counts":{"entities":0,"subscriptions":0,"csourceSubscriptions":0,
-  "registrations":0,"snapshots":0,"entityMaps":0,"distSubs":0,"attrInstances":0}}]
+["default","acme","zoo"]
 ```
 
-`createdAt` is present on Postgres, where the `tenants` table records it.
+Names only on purpose. A deployment runs up to 10 000 tenants (ADR-0001), and
+a list carrying per-kind counts would cost a count per kind per tenant on one
+request. Pick a name, then read its detail:
+
+```text
+GET /q/tenants/acme
+{"tenant":"acme","counts":{"entities":0,"subscriptions":0,"csourceSubscriptions":0,
+  "registrations":0,"snapshots":0,"entityMaps":0,"distSubs":0,"attrInstances":0}}
+```
+
+`200`, `404` for a tenant that does not exist, `400` for a name outside the
+tenant grammar or one of the broker's internal names. `createdAt` is present
+on Postgres, where the `tenants` table records it. The default tenant always
+exists (5.5.10) and is always readable, even when empty.
+
 `DELETE /q/tenants/{tenant}` purges the tenant: `204` when done, `404` for
 an unknown tenant (`{"title":"ResourceNotFound","detail":"tenant nope"}`),
 `409` while it still holds distributed subscriptions, `400` for a name

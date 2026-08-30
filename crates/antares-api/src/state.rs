@@ -73,6 +73,10 @@ pub struct AppState {
     /// Notification bindings by `endpoint.uri` scheme (6.3.8, 7.2). The
     /// only way a delivery transport is chosen; `with_sink` adds one.
     pub sinks: Arc<antares_notifier::SinkRegistry>,
+    /// HTTP surfaces mounted outside the NGSI-LD API root, each under its
+    /// own reserved prefix; `with_surface` adds one. The admin surface is
+    /// here by default.
+    pub surfaces: Arc<Vec<Box<dyn crate::ApiSurface>>>,
     /// Bounds-wall rejection counters (exported by /q/health).
     pub limits: Arc<crate::bounds::LimitStats>,
     /// Allocator stats provider (set by the broker; None in tests/wasm).
@@ -308,6 +312,7 @@ impl AppState {
                 std::time::Duration::from_secs(8 * slow_factor()),
             ),
             sinks: Arc::new(sinks),
+            surfaces: Arc::new(vec![Box::new(crate::Admin)]),
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
             bus_stats: None,
@@ -341,6 +346,46 @@ impl AppState {
             None => tracing::warn!("sink registry already shared; binding not registered"),
         }
         self
+    }
+
+    /// Mount one more HTTP surface (`/q`, `/x`, or below `/x`). A prefix
+    /// outside those, or one that overlaps a surface already mounted, is an
+    /// error the caller is expected to make fatal: a surface that could
+    /// shadow a spec resource would make conformance a function of
+    /// deployment configuration, and two surfaces on one prefix would leave
+    /// the winner to route-matching order. Call before the state is shared.
+    pub fn with_surface(mut self, s: Box<dyn crate::ApiSurface>) -> Result<Self, String> {
+        crate::surface::check_prefix(s.prefix())?;
+        if let Some(clash) = self
+            .surfaces
+            .iter()
+            .find(|m| crate::surface::overlaps(m.prefix(), s.prefix()))
+        {
+            return Err(format!(
+                "api surface {:?} claims {:?}, already served by {:?} at {:?}",
+                s.name(),
+                s.prefix(),
+                clash.name(),
+                clash.prefix()
+            ));
+        }
+        match Arc::get_mut(&mut self.surfaces) {
+            Some(v) => v.push(s),
+            None => return Err("api surfaces already shared; register before serving".into()),
+        }
+        Ok(self)
+    }
+
+    /// Replace the mounted surfaces with a deployment's own selection —
+    /// what a binary reads out of its configuration, rather than what the
+    /// default mounting put there. Same prefix rules as `with_surface`, and
+    /// a selection may leave admin out: `/q` is then not served at all.
+    pub fn with_surfaces(mut self, list: Vec<Box<dyn crate::ApiSurface>>) -> Result<Self, String> {
+        self.surfaces = Arc::new(Vec::new());
+        for s in list {
+            self = self.with_surface(s)?;
+        }
+        Ok(self)
     }
 
     /// Temporal auto-recording happens synchronously in the write path in

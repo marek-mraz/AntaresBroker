@@ -52,6 +52,7 @@ here).
 | `ANTARES_MAX_BATCH_ITEMS` | `1000` | Batch entity-count cap (DoS bound; the spec sets none). Raise for trusted bulk producers. |
 | `ANTARES_MAX_BODY_BYTES` | `4194304` (4 MiB) | Request body cap, answered with a bare 413 (6.3.4). One number governs the extractor limit and the bounds wall. |
 | `ANTARES_CORS_ORIGINS` | unset (no CORS headers) | Browser origins allowed, comma-separated, or `*`. Preflights are answered for every method and header; `Link`, `NGSILD-Tenant` and `NGSILD-Results-Count` are exposed. |
+| `ANTARES_API_SURFACES` | `admin` | Comma list of HTTP surfaces mounted beside the NGSI-LD API root, each under its own reserved prefix (`admin` serves `/q`). An unknown name is fatal at startup and names the shelf the binary was built with; a selection that leaves out `admin` serves no `/q` at all, probes included. |
 | `ANTARES_EXTRA_CA_FILE` | unset | PEM bundle of ADDITIONAL trust anchors for egress TLS (private CAs). Verification itself is never disableable. |
 
 ## Notification delivery

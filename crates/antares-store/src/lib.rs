@@ -243,9 +243,17 @@ pub trait CurrentStateDriver: Send + Sync {
     /// Tenants that may hold interval subscriptions (the sweep's iteration
     /// domain).
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
-    /// Inventory: every tenant the backend knows and what it holds. The
-    /// default Tenant is listed even when empty (5.5.10: it always exists).
-    fn tenant_stats(&self) -> Result<Vec<TenantStats>, NgsiError> {
+    /// Every tenant the backend knows, sorted. The default Tenant is listed
+    /// even when empty (5.5.10: it always exists). Names only: at the
+    /// 10 000-tenant target (ADR-0001) an inventory carrying per-kind counts
+    /// would cost a count per kind per tenant, so the counts are paid per
+    /// lookup in `tenant_stats_one`.
+    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+        Err(NgsiError::OperationNotSupported("tenant inventory".into()))
+    }
+    /// What one tenant holds; `None` when it does not exist.
+    fn tenant_stats_one(&self, tenant: &TenantId) -> Result<Option<TenantStats>, NgsiError> {
+        let _ = tenant;
         Err(NgsiError::OperationNotSupported("tenant inventory".into()))
     }
     /// Remove every current-state document of one tenant; `false` when the

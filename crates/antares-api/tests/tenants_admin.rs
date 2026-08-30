@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Tenant inventory and purge on the admin surface. Tenants come to exist
 //! implicitly (CIM 009 5.5.10) and the NGSI-LD API has no operation to
-//! remove one; `/q/tenants` lists what each tenant holds and
+//! remove one; `/q/tenants` lists the tenant names and
 //! `DELETE /q/tenants/{tenant}` removes every document of that tenant from
 //! the current-state and the temporal backend, leaving other tenants
-//! untouched.
+//! untouched. `GET /q/tenants/{tenant}` answers for one tenant: at the
+//! 10 000-tenant target (ADR-0001) the inventory is not a lookup, and
+//! counting every tenant to read one is the wrong shape.
 
 use antares_api::AppState;
 use antares_model::TenantId;
@@ -91,38 +93,95 @@ async fn seed(st: &AppState, tenant: &str, id: &str) {
     assert_eq!(s, StatusCode::CREATED);
 }
 
-fn row<'a>(list: &'a Value, tenant: &str) -> Option<&'a Value> {
-    list.as_array()
-        .expect("array")
-        .iter()
-        .find(|r| r["tenant"] == tenant)
+fn listed(list: &Value, tenant: &str) -> bool {
+    list.as_array().expect("array").iter().any(|t| t == tenant)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn inventory_lists_every_tenant_with_its_counts() {
+async fn inventory_lists_the_tenant_names_and_nothing_else() {
     let st = state();
     seed(&st, "inva", "urn:ngsi-ld:Room:1").await;
     seed(&st, "invb", "urn:ngsi-ld:Room:2").await;
     let (s, list) = send(&st, "GET", "/q/tenants", None, None).await;
     assert_eq!(s, StatusCode::OK, "{list}");
-    let a = row(&list, "inva").expect("tenant inva listed");
-    assert_eq!(a["counts"]["entities"], 1, "{a}");
-    assert_eq!(a["counts"]["subscriptions"], 1, "{a}");
-    assert_eq!(a["counts"]["registrations"], 0, "{a}");
-    assert_eq!(
-        a["counts"]["attrInstances"], 1,
-        "one observed instance: {a}"
-    );
-    assert!(row(&list, "invb").is_some());
+    assert!(listed(&list, "inva"), "{list}");
+    assert!(listed(&list, "invb"), "{list}");
     // the default tenant implicitly exists and is listed even when empty
-    assert!(row(&list, "default").is_some(), "{list}");
+    assert!(listed(&list, "default"), "{list}");
+    let names = list.as_array().expect("array");
     assert!(
-        list.as_array()
-            .expect("array")
-            .iter()
-            .all(|r| r.get("tenant_id").is_none()),
-        "internal column names must not leak: {list}"
+        names.iter().all(Value::is_string),
+        "names only — the counts are paid per lookup at /q/tenants/{{tenant}}: {list}"
     );
+    let sorted: Vec<&Value> = {
+        let mut v: Vec<&Value> = names.iter().collect();
+        v.sort_by_key(|t| t.as_str().unwrap_or_default());
+        v
+    };
+    assert_eq!(
+        names.iter().collect::<Vec<&Value>>(),
+        sorted,
+        "sorted, so a client can page or binary-search it: {list}"
+    );
+}
+
+/// One tenant is addressable directly, and that is where its counts live.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_tenant_is_addressable_and_matches_its_inventory_row() {
+    let st = state();
+    seed(&st, "geta", "urn:ngsi-ld:Room:1").await;
+    seed(&st, "getb", "urn:ngsi-ld:Room:2").await;
+    let (s, one) = send(&st, "GET", "/q/tenants/geta", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{one}");
+    assert_eq!(one["tenant"], "geta", "{one}");
+    assert_eq!(one["counts"]["entities"], 1, "{one}");
+    assert_eq!(one["counts"]["subscriptions"], 1, "{one}");
+    assert_eq!(one["counts"]["attrInstances"], 1, "{one}");
+    assert!(one.get("tenant_id").is_none(), "no internal names: {one}");
+    let (_, list) = send(&st, "GET", "/q/tenants", None, None).await;
+    assert!(listed(&list, "geta"), "named in the inventory too: {list}");
+    // one tenant, not a filtered list
+    assert!(one.is_object(), "{one}");
+    // 5.5.10: the default tenant always exists, so it is always readable
+    let (s, def) = send(&st, "GET", "/q/tenants/default", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{def}");
+    assert_eq!(def["tenant"], "default", "{def}");
+}
+
+/// The same guards the purge carries: an unknown tenant is 404, a name no
+/// request could carry is 400, and the broker's internal snapshot tenants
+/// are not addressable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_one_tenant_rejects_unknown_and_malformed_names() {
+    let st = state();
+    seed(&st, "getguard", "urn:ngsi-ld:Room:1").await;
+    let (s, _) = send(&st, "GET", "/q/tenants/never-seen", None, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send(&st, "GET", "/q/tenants/bad%20name", None, None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = send(&st, "GET", "/q/tenants/snap-index", None, None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// The path names the tenant; the NGSILD-Tenant header never redirects the
+/// read to another one.
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_one_tenant_is_addressed_by_the_path_never_by_the_header() {
+    let st = state();
+    seed(&st, "getpath", "urn:ngsi-ld:Room:1").await;
+    seed(&st, "getother", "urn:ngsi-ld:Room:2").await;
+    let (s, one) = send(&st, "GET", "/q/tenants/getpath", None, Some("getother")).await;
+    assert_eq!(s, StatusCode::OK, "{one}");
+    assert_eq!(one["tenant"], "getpath", "{one}");
+}
+
+/// Not under the API root: the tenant admin is the operator's, not a client's.
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_one_tenant_is_not_reachable_under_the_api_root() {
+    let st = state();
+    seed(&st, "getroot", "urn:ngsi-ld:Room:1").await;
+    let (s, _) = send(&st, "GET", "/ngsi-ld/v1/q/tenants/getroot", None, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -161,8 +220,9 @@ async fn purge_removes_one_tenant_and_leaves_the_other() {
     assert_eq!(s, StatusCode::NOT_FOUND, "history must go with the tenant");
 
     let (_, list) = send(&st, "GET", "/q/tenants", None, None).await;
-    assert!(row(&list, "purgea").is_none(), "{list}");
-    let b = row(&list, "purgeb").expect("other tenant kept");
+    assert!(!listed(&list, "purgea"), "{list}");
+    assert!(listed(&list, "purgeb"), "other tenant kept: {list}");
+    let (_, b) = send(&st, "GET", "/q/tenants/purgeb", None, None).await;
     assert_eq!(b["counts"]["entities"], 1);
     assert_eq!(b["counts"]["subscriptions"], 1);
     assert_eq!(b["counts"]["attrInstances"], 1);
@@ -242,8 +302,10 @@ async fn purge_is_addressed_by_the_path_never_by_the_tenant_header() {
     let (s, _) = send(&st, "DELETE", "/q/tenants/hdra", None, Some("hdrb")).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, list) = send(&st, "GET", "/q/tenants", None, Some("hdra")).await;
-    assert!(row(&list, "hdra").is_none(), "{list}");
-    assert_eq!(row(&list, "hdrb").expect("kept")["counts"]["entities"], 1);
+    assert!(!listed(&list, "hdra"), "{list}");
+    assert!(listed(&list, "hdrb"), "{list}");
+    let (_, kept) = send(&st, "GET", "/q/tenants/hdrb", None, None).await;
+    assert_eq!(kept["counts"]["entities"], 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -278,10 +340,9 @@ async fn purging_the_default_tenant_empties_it_but_it_keeps_existing() {
         "{err}"
     );
     let (_, list) = send(&st, "GET", "/q/tenants", None, None).await;
-    assert_eq!(
-        row(&list, "default").expect("default listed")["counts"]["entities"],
-        0
-    );
+    assert!(listed(&list, "default"), "{list}");
+    let (_, def) = send(&st, "GET", "/q/tenants/default", None, None).await;
+    assert_eq!(def["counts"]["entities"], 0, "{def}");
     let (s, _) = send(
         &st,
         "POST",
