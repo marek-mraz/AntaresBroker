@@ -448,6 +448,68 @@ pub(crate) fn build_retrieve_map(
     Ok(doc)
 }
 
+/// The NGSILD-EntityMap response header: the resource URI of the map that
+/// determined the sources of this response (6.3.17).
+fn set_map_header(resp: &mut Response, mid: &str) {
+    if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
+        resp.headers_mut().insert("NGSILD-EntityMap", v);
+    }
+}
+
+/// 5.7.1.4 / 5.7.3.4 EntityMap usage on a single-Entity retrieve: a supplied
+/// NGSILD-EntityMap location is retrieved and, if live, is the only source
+/// used to determine which registrations match; an unknown or expired
+/// reference — or the `entityMap=true` flag — creates a new map, whose
+/// location is returned in the NGSILD-EntityMap response header. The two
+/// clauses word that rule identically and part company only over what
+/// "held locally" reads and which operation a registration must support,
+/// and both of those follow from `temporal` — so the rule is read once
+/// here and the retrieve itself is the caller's `inner`.
+pub(crate) async fn retrieve_with_map<F, Fut>(
+    st: &AppState,
+    id: &str,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    temporal: bool,
+    inner: F,
+) -> ApiResult<Response>
+where
+    F: Fn(Option<Value>) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<Response>>,
+{
+    let tenant = tenant_from(headers)?;
+    let map_ref = headers
+        .get("NGSILD-EntityMap")
+        .and_then(|v| v.to_str().ok())
+        .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
+    if let Some(map) = map_ref.as_deref().and_then(|mid| map_get(st, &tenant, mid)) {
+        let mut resp = inner(Some(map)).await?;
+        set_map_header(&mut resp, &map_ref.unwrap_or_default());
+        return Ok(resp);
+    }
+    let want_map = map_ref.is_some() || params.get("entityMap").map(String::as_str) == Some("true");
+    let mut resp = inner(None).await?;
+    if want_map && resp.status().is_success() {
+        let ctx = request_context(&st.loader, headers).await?;
+        let local_held = if temporal {
+            st.temporal
+                .get_temporal(
+                    &tenant,
+                    id,
+                    &antares_store::filter::TemporalFilter::default(),
+                )?
+                .is_some()
+        } else {
+            st.store.get(&tenant, Kind::Entity, id)?.is_some()
+        };
+        let map = build_retrieve_map(st, &tenant, &ctx, headers, id, params, temporal, local_held)?;
+        if let Some(mid) = map.get("id").and_then(Value::as_str) {
+            set_map_header(&mut resp, mid);
+        }
+    }
+    Ok(resp)
+}
+
 /// 201 + the EntityMap body + the NGSILD-EntityMap header carrying the
 /// resource URI of the created map (6.34.3.1 / 6.35.3.1).
 fn created_response(

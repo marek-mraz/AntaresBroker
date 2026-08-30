@@ -700,16 +700,8 @@ fn present_temporal(
                 "createdAt" | "modifiedAt" if !r.sys => continue,
                 _ => {}
             }
-            // pick/omit constrain core members too (4.21)
-            if let Some(pick) = &r.pick {
-                if !pick.iter().any(|n| n.raw == *k) {
-                    continue;
-                }
-            }
-            if let Some(omit) = &r.omit {
-                if omit.iter().any(|n| n.raw == *k && n.children.is_none()) {
-                    continue;
-                }
+            if !crate::repr::meta_projected(r.pick.as_deref(), r.omit.as_deref(), k) {
+                continue;
             }
             if k == "type" {
                 out.insert("type".into(), antares_jsonld::compact_types(v, ctx));
@@ -972,16 +964,7 @@ fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr,
             }
         }
     }
-    // 4.21 mutual exclusivity
-    let excl = ["pick", "omit", "attrs"]
-        .iter()
-        .filter(|k| params.contains_key(**k))
-        .count();
-    if excl > 1 {
-        return Err(NgsiError::BadRequestData(
-            "pick, omit and attrs are mutually exclusive (4.21)".into(),
-        ));
-    }
+    crate::repr::check_projection_exclusive(params)?;
     if let Some(pck) = params.get("pick") {
         r.pick = Some(crate::repr::parse_projection(pck, ctx)?);
     }
@@ -2076,61 +2059,25 @@ pub async fn retrieve_temporal(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    match retrieve_temporal_outer(&st, &id, params, &headers).await {
+    match retrieve_temporal_outer(&st, &id, &params, &headers).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
 }
 
-/// 5.7.3.4 EntityMap usage on the temporal retrieve: a supplied
-/// NGSILD-EntityMap location is retrieved and, if live, is the only source
-/// used to determine which registrations match; an unknown/expired
-/// reference — or the entityMap=true flag — creates a new map, whose
-/// location is returned in the NGSILD-EntityMap response header.
+/// 5.7.3.4 Retrieve Temporal Evolution: the EntityMap half of the clause is
+/// the shared rule (`entity_maps::retrieve_with_map`); this is the retrieve
+/// it wraps.
 async fn retrieve_temporal_outer(
     st: &AppState,
     id: &str,
-    params: HashMap<String, String>,
+    params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    let tenant = tenant_from(headers)?;
-    let map_ref = headers
-        .get("NGSILD-EntityMap")
-        .and_then(|v| v.to_str().ok())
-        .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
-    if let Some(map) = map_ref
-        .as_deref()
-        .and_then(|mid| crate::entity_maps::map_get(st, &tenant, mid))
-    {
-        let mut resp = retrieve_temporal_inner(st, id, &params, headers, Some(&map)).await?;
-        let mid = map_ref.unwrap_or_default();
-        if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
-            resp.headers_mut().insert("NGSILD-EntityMap", v);
-        }
-        return Ok(resp);
-    }
-    let want_map = map_ref.is_some() || params.get("entityMap").map(String::as_str) == Some("true");
-    let mut resp = retrieve_temporal_inner(st, id, &params, headers, None).await?;
-    if want_map && resp.status().is_success() {
-        let ctx = request_context(&st.loader, headers).await?;
-        let local_held = st
-            .temporal
-            .get_temporal(
-                &tenant,
-                id,
-                &antares_store::filter::TemporalFilter::default(),
-            )?
-            .is_some();
-        let map = crate::entity_maps::build_retrieve_map(
-            st, &tenant, &ctx, headers, id, &params, true, local_held,
-        )?;
-        if let Some(mid) = map.get("id").and_then(Value::as_str) {
-            if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
-                resp.headers_mut().insert("NGSILD-EntityMap", v);
-            }
-        }
-    }
-    Ok(resp)
+    crate::entity_maps::retrieve_with_map(st, id, params, headers, true, |map| async move {
+        retrieve_temporal_inner(st, id, params, headers, map.as_ref()).await
+    })
+    .await
 }
 
 async fn retrieve_temporal_inner(
@@ -2466,10 +2413,9 @@ pub async fn add_temporal_attrs(
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "fragment must be a JSON object".into(),
+        ))?;
         // 5.6.12 input is pushed history — the 4.5.7 deleted-instance
         // representation is legal (5.5.4 temporal exception), hence
         // allow_null (mirrors 5.6.11).
@@ -2799,10 +2745,9 @@ pub async fn modify_temporal_instance(
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "fragment must be a JSON object".into(),
+        ))?;
         let mut wrapper = Map::new();
         let mut frag = obj.clone();
         frag.remove("@context");
@@ -2993,10 +2938,9 @@ pub async fn batch_temporal_query(
         )?;
         let accept = parse_accept(&headers)?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let q = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
+        let q = parsed.object(NgsiError::BadRequestData(
+            "query body must be an object".into(),
+        ))?;
         if q.get("type").and_then(Value::as_str) != Some("Query") {
             return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
         }
@@ -3748,5 +3692,60 @@ mod clause_4_6_3 {
             dt_key("2026-05-01T00:00:00,5Z"),
             "2026-05-01T00:00:00.500000"
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_21 {
+    use super::*;
+    use antares_jsonld::Loader;
+
+    fn params(kv: &[(&str, &str)]) -> HashMap<String, String> {
+        kv.iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 4.21 Projections: "pick, omit and attrs are mutually exclusive" holds
+    /// on the temporal representation exactly as it does on the current-state
+    /// one — the temporal operations define no exception to it, so any pair
+    /// is BadRequestData and each one alone parses.
+    #[test]
+    fn pick_omit_and_attrs_cannot_be_combined_on_a_temporal_query() {
+        let ctx = Loader::new().core();
+        for p in [
+            params(&[("pick", "a"), ("omit", "b")]),
+            params(&[("pick", "a"), ("attrs", "b")]),
+            params(&[("omit", "a"), ("attrs", "b")]),
+            params(&[("pick", "a"), ("omit", "b"), ("attrs", "c")]),
+        ] {
+            match parse_trepr(&p, &ctx) {
+                Err(NgsiError::BadRequestData(_)) => {}
+                other => panic!("must be BadRequestData, got {:?}", other.err()),
+            }
+        }
+        for p in [
+            params(&[("pick", "a")]),
+            params(&[("omit", "a")]),
+            params(&[("attrs", "a")]),
+        ] {
+            assert!(parse_trepr(&p, &ctx).is_ok());
+        }
+    }
+
+    /// 4.21 on the core members of a temporal Entity: `pick` constrains them
+    /// strictly (only what is named survives) and `omit` drops a named member
+    /// only when the node carries no children — the same reading the
+    /// current-state representation applies, so the two never disagree about
+    /// whether `id` or `type` is in the answer.
+    #[test]
+    fn core_members_follow_the_same_projection_rule() {
+        let pick = crate::repr::parse_projection("id", &Loader::new().core()).expect("pick");
+        assert!(crate::repr::meta_projected(Some(&pick), None, "id"));
+        assert!(!crate::repr::meta_projected(Some(&pick), None, "type"));
+        let omit = crate::repr::parse_projection("type", &Loader::new().core()).expect("omit");
+        assert!(!crate::repr::meta_projected(None, Some(&omit), "type"));
+        assert!(crate::repr::meta_projected(None, Some(&omit), "id"));
+        assert!(crate::repr::meta_projected(None, None, "type"));
     }
 }

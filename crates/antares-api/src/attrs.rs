@@ -139,10 +139,9 @@ async fn write_attrs(
     antares_model::EntityId::new(id)?;
     check_params(params, &["options", "local", "type"])?;
     let parsed = parse_body(&st.loader, headers, body, mode.body_kind).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::BadRequestData(
+        "fragment must be a JSON object".into(),
+    ))?;
     let fragment = expand_entity(
         obj,
         &parsed.ctx,
@@ -795,10 +794,9 @@ async fn partial_update_inner(
     check_attr_name(attr)?;
     check_params(params, &["local", "type"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::BadRequestData(
+        "fragment must be a JSON object".into(),
+    ))?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     let attr_iri = parsed.ctx.expand_key(attr);
     // 5.6.4.4: "If the target Attribute is scope, then an error of type
@@ -942,10 +940,9 @@ pub async fn replace_attr(
             )
             .into());
         }
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "fragment must be a JSON object".into(),
+        ))?;
         let mut wrapper = Map::new();
         wrapper.insert(attr.clone(), Value::Object(without_context_map(obj)));
         let fragment = expand_entity(

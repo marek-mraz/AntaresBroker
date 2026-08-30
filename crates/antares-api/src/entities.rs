@@ -247,10 +247,9 @@ async fn create_entity_inner(
     let tenant = tenant_from(headers)?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::InvalidRequest("entity document must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::InvalidRequest(
+        "entity document must be a JSON object".into(),
+    ))?;
     let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
     let id = expanded["id"].as_str().expect("validated id").to_owned();
 
@@ -363,54 +362,24 @@ pub async fn retrieve_entity(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    match retrieve_entity_outer(&st, &id, params, &headers).await {
+    match retrieve_entity_outer(&st, &id, &params, &headers).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
 }
 
-/// 5.7.1.4 EntityMap usage on the retrieve: a supplied NGSILD-EntityMap
-/// location is retrieved and, if live, is the only source used to determine
-/// which registrations match; an unknown/expired reference — or the
-/// entityMap=true flag — creates a new map, whose location is returned in
-/// the NGSILD-EntityMap response header.
+/// 5.7.1.4 Retrieve Entity: the EntityMap half of the clause is the shared
+/// rule (`entity_maps::retrieve_with_map`); this is the retrieve it wraps.
 async fn retrieve_entity_outer(
     st: &AppState,
     id: &str,
-    params: HashMap<String, String>,
+    params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    let tenant = tenant_from(headers)?;
-    let map_ref = headers
-        .get("NGSILD-EntityMap")
-        .and_then(|v| v.to_str().ok())
-        .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
-    if let Some(map) = map_ref
-        .as_deref()
-        .and_then(|mid| crate::entity_maps::map_get(st, &tenant, mid))
-    {
-        let mut resp = retrieve_entity_inner(st, id, &params, headers, Some(&map)).await?;
-        let mid = map_ref.unwrap_or_default();
-        if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
-            resp.headers_mut().insert("NGSILD-EntityMap", v);
-        }
-        return Ok(resp);
-    }
-    let want_map = map_ref.is_some() || params.get("entityMap").map(String::as_str) == Some("true");
-    let mut resp = retrieve_entity_inner(st, id, &params, headers, None).await?;
-    if want_map && resp.status().is_success() {
-        let ctx = request_context(&st.loader, headers).await?;
-        let local_held = st.store.get(&tenant, Kind::Entity, id)?.is_some();
-        let map = crate::entity_maps::build_retrieve_map(
-            st, &tenant, &ctx, headers, id, &params, false, local_held,
-        )?;
-        if let Some(mid) = map.get("id").and_then(Value::as_str) {
-            if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{mid}").parse() {
-                resp.headers_mut().insert("NGSILD-EntityMap", v);
-            }
-        }
-    }
-    Ok(resp)
+    crate::entity_maps::retrieve_with_map(st, id, params, headers, false, |map| async move {
+        retrieve_entity_inner(st, id, params, headers, map.as_ref()).await
+    })
+    .await
 }
 
 async fn retrieve_entity_inner(
@@ -2356,10 +2325,9 @@ async fn merge_entity_inner(
         &["options", "format", "observedAt", "lang", "local", "type"],
     )?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::BadRequestData(
+        "fragment must be a JSON object".into(),
+    ))?;
     if let Some(bid) = obj.get("id").and_then(Value::as_str) {
         if bid != id {
             return Err(NgsiError::BadRequestData("fragment id mismatch".into()).into());
@@ -2734,10 +2702,9 @@ pub async fn replace_entity(
             let old = local_doc
                 .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
             let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-            let obj = parsed
-                .value
-                .as_object()
-                .ok_or_else(|| NgsiError::BadRequestData("entity must be a JSON object".into()))?;
+            let obj = parsed.object(NgsiError::BadRequestData(
+                "entity must be a JSON object".into(),
+            ))?;
             let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
             if expanded["id"].as_str() != Some(id.as_str()) {
                 return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());
@@ -2752,10 +2719,9 @@ pub async fn replace_entity(
             return Ok::<_, ApiError>(no_content(&tenant));
         }
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("entity must be a JSON object".into()))?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "entity must be a JSON object".into(),
+        ))?;
         let expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
         if expanded["id"].as_str() != Some(id.as_str()) {
             return Err(NgsiError::BadRequestData("entity id mismatch".into()).into());

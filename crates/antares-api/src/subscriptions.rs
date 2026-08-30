@@ -624,10 +624,9 @@ pub async fn create(
     let tenant = tenant_from(headers)?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("subscription must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::BadRequestData(
+        "subscription must be a JSON object".into(),
+    ))?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
     check_endpoint(st, &norm)?;
     check_jsonld_context(st, &norm).await?;
@@ -776,10 +775,9 @@ pub async fn update(
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+    let obj = parsed.object(NgsiError::BadRequestData(
+        "fragment must be a JSON object".into(),
+    ))?;
     if let Some(bid) = obj.get("id").and_then(Value::as_str) {
         if bid != id {
             return Err(NgsiError::BadRequestData("fragment id mismatch".into()).into());

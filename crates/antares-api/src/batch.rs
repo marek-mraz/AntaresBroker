@@ -1509,10 +1509,9 @@ async fn batch_query_inner(
     // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
     let accept = parse_accept_geo(headers)?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
-    let q = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
+    let q = parsed.object(NgsiError::BadRequestData(
+        "query body must be an object".into(),
+    ))?;
     if q.get("type").and_then(Value::as_str) != Some("Query") {
         return Err(NgsiError::BadRequestData("body type must be Query (5.2.23)".into()).into());
     }

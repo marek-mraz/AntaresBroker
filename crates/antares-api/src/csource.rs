@@ -1459,10 +1459,9 @@ pub async fn update_registration(
             .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
-        let obj = parsed
-            .value
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
+        let obj = parsed.object(NgsiError::BadRequestData(
+            "fragment must be a JSON object".into(),
+        ))?;
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
         // The 5.9.3.4 re-checks below read the registration set that the

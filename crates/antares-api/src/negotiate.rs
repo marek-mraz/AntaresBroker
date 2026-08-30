@@ -324,6 +324,17 @@ pub struct ParsedBody {
     pub ctx: Arc<Context>,
 }
 
+impl ParsedBody {
+    /// Every operation whose body carries one document requires that
+    /// document to be a JSON object; anything else never reaches expansion.
+    /// The caller supplies the error because Table 6.3.2-1 does not answer
+    /// the same way everywhere: 5.6.1 raises InvalidRequest for an Entity,
+    /// the fragment operations raise BadRequestData.
+    pub fn object(&self, err: NgsiError) -> ApiResult<&Map<String, Value>> {
+        self.value.as_object().ok_or_else(|| err.into())
+    }
+}
+
 /// Parse a request body per the 6.3.5 @context rules.
 pub async fn parse_body(
     loader: &Loader,
@@ -1529,5 +1540,46 @@ mod clause_5_2_3 {
             json!(["https://example.org/a.jsonld", CORE_CONTEXT]),
             "a user context already listing the core is echoed verbatim"
         );
+    }
+}
+
+#[cfg(test)]
+mod parsed_body_object {
+    use super::*;
+    use serde_json::json;
+
+    fn parsed(v: Value) -> ParsedBody {
+        ParsedBody {
+            value: v,
+            ctx: Loader::new().core(),
+        }
+    }
+
+    /// A document body that is not a JSON object never reaches expansion,
+    /// and the error is the CALLER's: Table 6.3.2-1 does not answer the same
+    /// way for every operation — 5.6.1 raises InvalidRequest for an Entity
+    /// while the fragment operations raise BadRequestData — so the shared
+    /// check must pass the operation's own error through untouched.
+    #[test]
+    fn a_non_object_body_raises_the_operations_own_error() {
+        for body in [json!([]), json!("x"), json!(1), Value::Null] {
+            let p = parsed(body.clone());
+            let e = p
+                .object(NgsiError::InvalidRequest("entity".into()))
+                .expect_err("rejected");
+            assert!(
+                matches!(e, ApiError::Ngsi(NgsiError::InvalidRequest(_))),
+                "{body} -> {e:?}"
+            );
+            let e = p
+                .object(NgsiError::BadRequestData("fragment".into()))
+                .expect_err("rejected");
+            assert!(
+                matches!(e, ApiError::Ngsi(NgsiError::BadRequestData(_))),
+                "{body} -> {e:?}"
+            );
+        }
+        let p = parsed(json!({"id": "urn:e"}));
+        assert!(p.object(NgsiError::InvalidRequest("entity".into())).is_ok());
     }
 }

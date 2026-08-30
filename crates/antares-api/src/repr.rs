@@ -73,16 +73,7 @@ pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Rep
         Some("concise") => r.concise = true,
         _ => {}
     }
-    // 4.21: pick, omit and attrs are mutually exclusive
-    let excl = ["pick", "omit", "attrs"]
-        .iter()
-        .filter(|k| params.contains_key(**k))
-        .count();
-    if excl > 1 {
-        return Err(NgsiError::BadRequestData(
-            "pick, omit and attrs are mutually exclusive (4.21)".into(),
-        ));
-    }
+    check_projection_exclusive(params)?;
     if let Some(a) = params.get("attrs") {
         let mut list = Vec::new();
         for t in a.split(',') {
@@ -222,6 +213,42 @@ pub(crate) fn parse_projection(s: &str, ctx: &Context) -> Result<Vec<ProjNode>, 
 }
 
 /// Apply the representation to an internal doc, producing a new internal doc
+/// 4.21 Projections: "pick, omit and attrs are mutually exclusive" — the one
+/// reading, so an operation cannot accept a combination another rejects.
+pub fn check_projection_exclusive(params: &HashMap<String, String>) -> Result<(), NgsiError> {
+    let excl = ["pick", "omit", "attrs"]
+        .iter()
+        .filter(|k| params.contains_key(**k))
+        .count();
+    if excl > 1 {
+        return Err(NgsiError::BadRequestData(
+            "pick, omit and attrs are mutually exclusive (4.21)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// 4.21: does a core Entity member (id, type, scope, the system temporal
+/// Properties) survive the projection? `pick` constrains core members
+/// strictly — only what is named survives; `omit` drops a named member only
+/// when the node carries no children, because a node with children
+/// constrains the linked Entity below the head, not the head itself. The
+/// current-state and temporal representations project core members by the
+/// same rule and differ only below it.
+pub fn meta_projected(pick: Option<&[ProjNode]>, omit: Option<&[ProjNode]>, k: &str) -> bool {
+    if let Some(pick) = pick {
+        if !pick.iter().any(|n| n.raw == *k) {
+            return false;
+        }
+    }
+    if let Some(omit) = omit {
+        if omit.iter().any(|n| n.raw == *k && n.children.is_none()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// ready for compaction.
 pub fn apply(doc: &Value, r: &Repr) -> Value {
     let Some(obj) = doc.as_object() else {
@@ -237,16 +264,8 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 "createdAt" | "modifiedAt" | "expiresAt" if !r.sys_attrs => continue,
                 _ => {}
             }
-            // pick strictly constrains core members too (4.21)
-            if let Some(pick) = &r.pick {
-                if !pick.iter().any(|n| n.raw == *k) {
-                    continue;
-                }
-            }
-            if let Some(omit) = &r.omit {
-                if omit.iter().any(|n| n.raw == *k && n.children.is_none()) {
-                    continue;
-                }
+            if !meta_projected(r.pick.as_deref(), r.omit.as_deref(), k) {
+                continue;
             }
             out.insert(k.clone(), v.clone());
             continue;
