@@ -21,6 +21,7 @@ import sys
 TABLES = [
     ("startup.md", "Startup and idle footprint"),
     ("shapes.md", "Throughput per request shape"),
+    ("writes.md", "Throughput per write shape"),
     ("core-scale.md", "Core scaling"),
     ("saturate.md", "Saturation knee"),
     ("rss.md", "Resident set and CPU under load"),
@@ -28,6 +29,7 @@ TABLES = [
     ("subs.md", "Subscription classes"),
     ("csr.md", "Context source registration classes"),
     ("fire.md", "Subscriptions under an update stream"),
+    ("mix.md", "Write shapes and reads together, with subscriptions"),
     ("fire-classes.md", "Notifications due and delivered per subscription class"),
     ("fed.md", "Federated queries over the registrations"),
     ("noise-profile.txt", "Noise profile"),
@@ -42,6 +44,20 @@ LEGEND = {
         "previous one answers; req/s is what the broker sustained at that concurrency. "
         "postgres rows run on the main broker over the LOADED dataset (tenant t7), memory rows on a "
         "fresh in-memory broker holding the 100 seeded entities."
+    ),
+    "writes.md": (
+        "One write shape at a time against a quiet broker, each its own k6 run: update = PATCH "
+        "/entities/{id}/attrs, partial = PATCH on one named attribute, merge = PATCH /entities/{id}, "
+        "replace = PUT /entities/{id}, append = POST /entities/{id}/attrs, create = POST /entities "
+        "with a fresh id, upsert20 = POST /entityOperations/upsert carrying twenty entities. The set "
+        "carries its own entity type, so no subscription matches it and the row is the write path "
+        "alone; entities/s counts what the request changed, which is twenty times req/s for upsert20."
+    ),
+    "mix.md": (
+        "One weighted wheel of update, replace, get, upsert20 and delete20 against the broker that "
+        "owns the loaded dataset, inside a tenant that carries its subscriptions, so every write "
+        "that matches one delivers. The churn block sits above the loaded id range: a delete never "
+        "removes a loaded entity. dropped by broker = the change queue was full while the mix ran."
     ),
     "saturate.md": (
         "Open-loop arrival rate stepped up by STEP rps per stage on a FRESH broker in the default "

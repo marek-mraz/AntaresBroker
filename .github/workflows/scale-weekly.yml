@@ -175,12 +175,17 @@ jobs:
           # request shapes and saturation against the loaded store, one tenant
           # per request (k6 picks TENANT); startup rows for the postgres store
           TENANT=t7 BIN=target/release/antares PORT=9471 ./dev/perf/shapes.sh
+          # every write shape on its own, over the loaded database
+          STORES=postgres TENANT=t7 BIN=target/release/antares PORT=9475 ./dev/perf/writes.sh
           STORE=postgres PORT=9473 STAGES=10 STAGE=15s ./dev/perf/saturate.sh
           ./dev/perf/startup.sh
           # do the subscriptions fire, and up to what rate: update + delete
           # streams over the loaded entities, delivered set against due
           read -r ENTITIES TENANTS < <(python3 -c "s=float('$SCALE'); n=lambda t,f: max(f,int(round(t*s))); print(n(100000000,1), n(10000,10))")
           TENANTS=$TENANTS SUBS=$SUBS ENTITIES=$ENTITIES MQTT=1 BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fire.sh
+          # the same shapes together, with reads, in a tenant that carries
+          # its subscriptions: what the broker holds when nothing runs alone
+          TENANT=t7 ENTITIES=$ENTITIES BROKER_URL=http://127.0.0.1:9090 ./dev/perf/mix.sh
           # federated queries across the loaded registrations (all at the sink)
           TENANTS=$TENANTS BROKER_URL=http://127.0.0.1:9090 ./dev/perf/fed.sh
       - name: Resident set verdict
@@ -222,7 +227,12 @@ jobs:
           - metrics-final.prom, health-final.json (jemalloc allocated/resident), dead-letters.json.
           - load.md — dataset sizes and load wall times; subs.md / csr.md — the subscription and
             registration classes (api-load.py).
-          - shapes.md — req/s + p99 per request shape; saturate-*.csv/.jsonl + saturate.md — the knee.
+          - shapes.md — req/s + p99 per read shape; saturate-*.csv/.jsonl + saturate.md — the knee.
+          - writes.md — req/s, entities/s and p99 per write shape, each measured on its own
+            against a quiet broker (update, partial, merge, replace, append, create, upsert20).
+          - mix.md + mix-<clients>.json — the write shapes and reads drawn from one wheel in a
+            tenant with its subscriptions: per-operation rates, what the sink received, what the
+            broker dropped.
           - fire-<rate>.json + fire.md — subscriptions under the update stream: due vs delivered, drops.
           - fed-<rate>.json + fed.md — federated queries over the registrations.
           - sink-stats.json — what the sink received; sink.log; broker.log — broker stderr (warnings

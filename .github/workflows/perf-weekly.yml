@@ -110,6 +110,8 @@ jobs:
         run: ./dev/perf/startup.sh
       - name: Throughput per request shape
         run: ./dev/perf/shapes.sh
+      - name: Throughput per write shape
+        run: STORES=memory PORT=9475 ./dev/perf/writes.sh
       - name: Core scaling
         run: ./dev/perf/core-scale.sh
       - name: Saturation sweep
