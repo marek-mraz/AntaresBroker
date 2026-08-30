@@ -146,7 +146,7 @@ impl EgressPolicy {
     /// denying it costs nothing, while reaching it from a client-supplied
     /// @context URL or notification endpoint is the classic credential-theft
     /// SSRF.
-    pub(crate) fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
+    pub fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => v4.is_link_local(),
             std::net::IpAddr::V6(v6) => {
@@ -159,7 +159,15 @@ impl EgressPolicy {
         }
     }
 
-    pub(crate) fn ip_is_private(ip: std::net::IpAddr) -> bool {
+    /// The ranges the private-egress deny covers: loopback, RFC 1918,
+    /// link-local, unspecified and broadcast for IPv4; loopback,
+    /// unspecified, `fc00::/7` unique-local and `fe80::/10` link-local for
+    /// IPv6, with an IPv4-mapped address judged as its IPv4 self. Public
+    /// because every client-supplied destination is judged by this one
+    /// classifier — the @context fetch here and the MQTT endpoint in
+    /// `antares-notifier` — so a range added to it cannot be missing from
+    /// one of the bindings.
+    pub fn ip_is_private(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => {
                 v4.is_loopback()

@@ -7,6 +7,7 @@
 //! parameters ride in `notifier_info` (Table 7.2-1), receiver metadata in
 //! `receiver_info` (Table 7.2-2).
 
+use antares_jsonld::loader::EgressPolicy;
 use antares_model::NgsiError;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -204,73 +205,15 @@ fn shared_tls_config() -> Result<rumqttc::TlsConfiguration, NgsiError> {
 
 /// Is egress to private/loopback ranges allowed? The MQTT destination is
 /// client-supplied (`notification.endpoint.uri`, 7.2), so it is governed by
-/// the same deployment switch as the HTTP callbacks and @context fetches:
-/// private egress is allowed by default (dev boxes, compose stacks and the
-/// conformance mocks all live there) and
+/// the same deployment switch, and judged by the same address classifiers,
+/// as the HTTP callbacks and @context fetches: `EgressPolicy` is the one
+/// copy of both. Private egress is allowed by default (dev boxes, compose
+/// stacks and the conformance mocks all live there) and
 /// `ANTARES_EGRESS_ALLOW_PRIVATE=false` turns the deny on for
 /// internet-exposed deployments. Read once per process.
 fn allow_private_egress() -> bool {
     static ALLOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ALLOW.get_or_init(|| {
-        allow_private_from(
-            std::env::var("ANTARES_EGRESS_ALLOW_PRIVATE")
-                .ok()
-                .as_deref(),
-        )
-    })
-}
-
-/// Read the switch tolerantly, as the HTTP side does: a security control
-/// that understands one spelling hands the operator the opposite of the
-/// intent when the value is `FALSE` or carries stray whitespace.
-fn allow_private_from(v: Option<&str>) -> bool {
-    v.is_none_or(|v| {
-        let v = v.trim();
-        !(v.eq_ignore_ascii_case("false") || v == "0")
-    })
-}
-
-/// The cloud instance-metadata endpoints — IPv4 link-local (169.254.0.0/16,
-/// RFC 3927), its IPv6 spellings and the IMDS-over-IPv6 ULA `fd00:ec2::254`.
-/// Refused whatever the private-egress switch says: a subscription that
-/// points its notifications at the instance credentials is the classic
-/// credential-theft SSRF, and no real MQTT broker lives there.
-fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => {
-            v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254]
-                || v6
-                    .to_ipv4_mapped()
-                    .or_else(|| v6.to_ipv4())
-                    .is_some_and(|v4| v4.is_link_local())
-        }
-    }
-}
-
-fn ip_is_private(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-        }
-        std::net::IpAddr::V6(v6) => {
-            // an IPv4-mapped address (::ffff:a.b.c.d) is the v4 target in v6
-            // spelling — judge it as its v4 self, or ::ffff:127.0.0.1 slips
-            // past the v6 checks
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return ip_is_private(std::net::IpAddr::V4(v4));
-            }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 unique-local + fe80::/10 link-local
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
+    *ALLOW.get_or_init(|| EgressPolicy::from_env().allow_private)
 }
 
 /// Resolve the endpoint host ONCE and return the address to dial, or a
@@ -308,7 +251,10 @@ async fn checked_addr(
     };
     addrs
         .into_iter()
-        .find(|a| !ip_is_metadata(a.ip()) && (allow_private || !ip_is_private(a.ip())))
+        .find(|a| {
+            !EgressPolicy::ip_is_metadata(a.ip())
+                && (allow_private || !EgressPolicy::ip_is_private(a.ip()))
+        })
         .ok_or_else(denied)
 }
 
@@ -813,21 +759,6 @@ mod tests {
         // IPv6 comes back unbracketed, which is what rumqttc resolves
         let v6 = "[2001:db8::1]:1883".parse().expect("v6 addr");
         assert_eq!(dial_host(&plain, v6), "2001:db8::1");
-    }
-
-    /// The private-egress switch is read exactly as the HTTP side reads it:
-    /// allowed unless the value spells false.
-    #[test]
-    fn private_egress_switch_parses_tolerantly() {
-        for v in [None, Some(""), Some("true"), Some("yes"), Some(" 1 ")] {
-            assert!(allow_private_from(v), "{v:?} must allow private egress");
-        }
-        for v in ["false", "FALSE", " False ", "0", " 0 "] {
-            assert!(
-                !allow_private_from(Some(v)),
-                "{v:?} must deny private egress"
-            );
-        }
     }
 
     #[test]
