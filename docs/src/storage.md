@@ -76,11 +76,19 @@ it (`crates/antares-api/src/history.rs`):
 
 1. **Value change**, in the producer: an attribute instance whose value did
    not change never becomes an event.
-2. **`ANTARES_TEMPORAL_RECORD`**: `all` (default, what the ETSI temporal
-   suites assume) admits everything; `observed` keeps only instances carrying
-   `observedAt`, so a metadata-only write updates current state and leaves no
-   history; `none` records nothing from the entity endpoints while the
-   temporal API itself still stores what it is given.
+2. **`ANTARES_TEMPORAL_RECORD`**: `all` (the default) admits everything;
+   `observed` keeps only instances carrying `observedAt`, so a write without
+   one updates current state and leaves no history; `none` records nothing
+   from the entity endpoints while the temporal API itself still stores what
+   it is given.
+
+`observed` is a narrowing, not a tidying: an Entity created through the Core
+API with no `observedAt` has no temporal evolution at all under it, and a
+temporal query over such an Entity answers empty rather than answering with
+its values. That is why `all` is the default — five of the ETSI temporal
+conformance tests create their fixtures without an `observedAt` and expect to
+read the history back. Choose `observed` only where every producer stamps its
+own observation times.
 
 A drain that fails leaves the client's 2xx standing and increments
 `temporalDrainErrors` on `/q/health`. `ANTARES_TEMPORAL_RETENTION_DAYS` prunes
