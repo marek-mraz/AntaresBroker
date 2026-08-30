@@ -5,7 +5,7 @@
 //! router, so a seam that changes shape breaks this file rather than
 //! silently leaving the plugin behind.
 
-use antares_api::{ApiSurface, AppState};
+use antares_api::AppState;
 use antares_model::TenantId;
 use antares_notifier::NotificationSink;
 use antares_plugin_example::{ExampleStore, ExampleSurface, MemorySink};
