@@ -1041,6 +1041,68 @@ pub async fn forward(
     .await
 }
 
+/// 6.3.17: a forwarded response contributes the NGSILD-Warning values the
+/// peer sent AND, for an abnormal outcome, one warning of this broker's own
+/// — whether or not the payload can be used. Only a 2xx payload can be:
+/// 4.3.6.4 makes a failed forward a warning on a successful overall
+/// response, never a failure of it, so a non-2xx registration is dropped
+/// from the answer after it has been reported.
+fn usable_payload(
+    st: &AppState,
+    tenant: &TenantId,
+    status: u16,
+    body: &Value,
+    peer_warns: Vec<String>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    warnings.extend(peer_warns);
+    if let Some((code, text)) = read_warning(status, body) {
+        warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
+    }
+    (200..300).contains(&status)
+}
+
+/// 5.2.9 `attrs`: a registration's scope narrows what a forwarded read asks
+/// for. The names go out compacted against the request @context, because the
+/// peer is asked in terms, not in IRIs.
+fn scope_attrs(reg: &FedReg, ctx: &Context) -> Option<(String, String)> {
+    let scope = reg.attrs.as_ref()?;
+    let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
+    Some(("attrs".into(), names.join(",")))
+}
+
+/// The 4.11 temporal window a forwarded temporal read carries (5.7.3.4 and
+/// 5.7.4.4 ask the peer over the SAME window), plus sysAttrs on every
+/// forwarded read: conflicting instances resolve by most recent
+/// observedAt/modifiedAt (4.5.5.3), and without the remote modifiedAt the
+/// winner would be arrival order.
+fn temporal_window(params: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
+    for k in ["timerel", "timeAt", "endTimeAt", "timeproperty", "lastN"] {
+        if let Some(v) = params.get(k) {
+            query.push((k.into(), v.clone()));
+        }
+    }
+    query
+}
+
+/// 5.2.9 `attrs` again, on the way back: the scope narrows ATTRIBUTES, so the
+/// entity-level members of 4.5.1 stay whatever the scope says — dropping
+/// them would let 4.5.5.3 read a missing `expiresAt` as "absent from a
+/// received version" and delete the local one.
+fn narrow_to_scope(expanded: Value, reg: &FedReg) -> Option<Value> {
+    let Some(scope) = &reg.attrs else {
+        return Some(expanded);
+    };
+    let mut out = Map::new();
+    for (k, v) in expanded.as_object()? {
+        if crate::repr::ENTITY_META.contains(&k.as_str()) || scope.iter().any(|s| s == k) {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Some(Value::Object(out))
+}
+
 /// Expand + registration-scope-filter one remote compacted entity.
 pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value> {
     let mut obj = remote.as_object()?.clone();
@@ -1054,30 +1116,7 @@ pub fn import_entity(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Valu
         },
     )
     .ok()?;
-    let Some(scope) = &reg.attrs else {
-        return Some(expanded);
-    };
-    let mut out = Map::new();
-    for (k, v) in expanded.as_object()? {
-        // The scope narrows ATTRIBUTES (5.2.9 `attrs`); the entity-level
-        // members stay, or 4.5.5.3 would read the missing expiresAt as
-        // "absent from a received version" and drop the local one.
-        if [
-            "id",
-            "type",
-            "scope",
-            "createdAt",
-            "modifiedAt",
-            "expiresAt",
-            "deletedAt",
-        ]
-        .contains(&k.as_str())
-            || scope.iter().any(|s| s == k)
-        {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    Some(Value::Object(out))
+    narrow_to_scope(expanded, reg)
 }
 
 /// Expand + registration-scope-filter one remote temporal entity (5.7.3.4).
@@ -1100,27 +1139,7 @@ fn import_temporal(remote: &Value, reg: &FedReg, ctx: &Context) -> Option<Value>
         },
     )
     .ok()?;
-    let Some(scope) = &reg.attrs else {
-        return Some(expanded);
-    };
-    let mut out = Map::new();
-    for (k, v) in expanded.as_object()? {
-        if [
-            "id",
-            "type",
-            "scope",
-            "createdAt",
-            "modifiedAt",
-            "expiresAt",
-            "deletedAt",
-        ]
-        .contains(&k.as_str())
-            || scope.iter().any(|s| s == k)
-        {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    Some(Value::Object(out))
+    narrow_to_scope(expanded, reg)
 }
 
 /// 5.7.3.4: forward Retrieve Temporal Evolution to matching registrations
@@ -1262,16 +1281,8 @@ pub async fn fed_retrieve_temporal(
     let fetched = fan_out(regs, move |reg| async move {
         // the temporal window travels with the forward; sysAttrs for the
         // 4.5.5.3 recency arbitration
-        let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
-        for k in ["timerel", "timeAt", "endTimeAt", "timeproperty", "lastN"] {
-            if let Some(v) = params.get(k) {
-                query.push((k.into(), v.clone()));
-            }
-        }
-        if let Some(scope) = &reg.attrs {
-            let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
-            query.push(("attrs".into(), names.join(",")));
-        }
+        let mut query = temporal_window(params);
+        query.extend(scope_attrs(&reg, ctx));
         let (status, body, peer_warns) = forward(
             st,
             reqwest::Method::GET,
@@ -1293,11 +1304,7 @@ pub async fn fed_retrieve_temporal(
     .await;
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
-        warnings.extend(peer_warns);
-        if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
-        }
-        if !(200..300).contains(&status) {
+        if !usable_payload(st, tenant, status, &body, peer_warns, warnings) {
             continue;
         }
         if body.get("id").and_then(Value::as_str) != Some(id) {
@@ -1475,10 +1482,7 @@ pub async fn fed_retrieve(
         // most recent observedAt/modifiedAt (4.5.5.3) — without the remote
         // modifiedAt the winner would be arrival order, i.e. indeterminate.
         let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
-        if let Some(scope) = &reg.attrs {
-            let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
-            query.push(("attrs".into(), names.join(",")));
-        }
+        query.extend(scope_attrs(&reg, ctx));
         let (status, body, peer_warns) = match op {
             "retrieveEntity" => {
                 forward(
@@ -1541,13 +1545,7 @@ pub async fn fed_retrieve(
     .await;
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
-        warnings.extend(peer_warns);
-        // Abnormal outcomes surface as NGSILD-Warning (6.3.17) — never
-        // as a failed overall response; 404-with-no-data is normal.
-        if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
-        }
-        if !(200..300).contains(&status) {
+        if !usable_payload(st, tenant, status, &body, peer_warns, warnings) {
             continue;
         }
         let candidates: Vec<&Value> = match &body {
@@ -1830,12 +1828,7 @@ pub async fn fed_query(
     .await;
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
-        warnings.extend(peer_warns);
-        // Same NGSILD-Warning classification as fed_retrieve (6.3.17)
-        if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
-        }
-        if !(200..300).contains(&status) {
+        if !usable_payload(st, tenant, status, &body, peer_warns, warnings) {
             continue;
         }
         if let Value::Array(a) = &body {
@@ -1960,17 +1953,8 @@ pub async fn fed_query_temporal(
         .filter(|reg| reg.supports("queryTemporal"))
         .collect();
     let fetched = fan_out(regs, move |reg| async move {
-        let mut query: Vec<(String, String)> = vec![("options".into(), "sysAttrs".into())];
-        for k in [
-            "type",
-            "id",
-            "idPattern",
-            "timerel",
-            "timeAt",
-            "endTimeAt",
-            "timeproperty",
-            "lastN",
-        ] {
+        let mut query = temporal_window(params);
+        for k in ["type", "id", "idPattern"] {
             if let Some(v) = params.get(k) {
                 query.push((k.into(), v.clone()));
             }
@@ -1993,9 +1977,8 @@ pub async fn fed_query_temporal(
                 }
             }
         }
-        if let Some(scope) = &reg.attrs {
-            let names: Vec<String> = scope.iter().map(|a| ctx.compact_iri(a)).collect();
-            query.push(("attrs".into(), names.join(",")));
+        if let Some(a) = scope_attrs(&reg, ctx) {
+            query.push(a);
         } else if let Some(a) = params.get("attrs") {
             query.push(("attrs".into(), a.clone()));
         }
@@ -2016,11 +1999,7 @@ pub async fn fed_query_temporal(
     .await;
     let mut out = Vec::new();
     for (reg, status, body, peer_warns) in fetched {
-        warnings.extend(peer_warns);
-        if let Some((code, text)) = read_warning(status, &body) {
-            warnings.push(warning(code, &alias_for(&st.host_alias, tenant), text));
-        }
-        if !(200..300).contains(&status) {
+        if !usable_payload(st, tenant, status, &body, peer_warns, warnings) {
             continue;
         }
         if let Value::Array(a) = &body {

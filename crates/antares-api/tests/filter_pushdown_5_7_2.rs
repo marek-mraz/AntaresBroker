@@ -105,13 +105,23 @@ fn mock_source(temporal: bool) -> Mock {
     }
 }
 
-async fn register(st: &AppState, port: u16, ops: &[&str], csi: Option<serde_json::Value>) {
+async fn register(
+    st: &AppState,
+    port: u16,
+    ops: &[&str],
+    csi: Option<serde_json::Value>,
+    props: Option<&[&str]>,
+) {
+    let mut info = serde_json::json!({"entities": [{"type": "Vehicle"}]});
+    if let Some(names) = props {
+        info["propertyNames"] = serde_json::json!(names);
+    }
     let mut doc = serde_json::json!({
         "id": format!("urn:ngsi-ld:ContextSourceRegistration:pushdown-{port}"),
         "type": "ContextSourceRegistration",
         "mode": "inclusive",
         "operations": ops,
-        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "information": [info],
         "endpoint": format!("http://127.0.0.1:{port}"),
     });
     if let Some(c) = csi {
@@ -158,7 +168,7 @@ async fn get(st: &AppState, uri: &str) -> String {
 async fn non_split_query_forwards_filters() {
     let st = state();
     let m = mock_source(false);
-    register(&st, m.port, &["queryEntity"], None).await;
+    register(&st, m.port, &["queryEntity"], None, None).await;
 
     let body = get(
         &st,
@@ -192,7 +202,7 @@ async fn non_split_query_forwards_filters() {
 async fn query_batch_forwards_the_clients_query_not_the_registrations() {
     let st = state();
     let m = mock_source(false);
-    register(&st, m.port, &["queryBatch"], None).await;
+    register(&st, m.port, &["queryBatch"], None, None).await;
 
     let body = get(
         &st,
@@ -224,7 +234,7 @@ async fn query_batch_forwards_the_clients_query_not_the_registrations() {
 async fn split_query_strips_filters_before_forwarding() {
     let st = state();
     let m = mock_source(false);
-    register(&st, m.port, &["queryEntity"], None).await;
+    register(&st, m.port, &["queryEntity"], None, None).await;
 
     let _ = get(
         &st,
@@ -257,6 +267,7 @@ async fn jsonld_context_registration_skips_filter_pushdown() {
             "key": "jsonldContext",
             "value": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
         }])),
+        None,
     )
     .await;
 
@@ -276,7 +287,7 @@ async fn jsonld_context_registration_skips_filter_pushdown() {
 async fn split_temporal_query_strips_filters_before_forwarding() {
     let st = state();
     let m = mock_source(true);
-    register(&st, m.port, &["queryTemporal"], None).await;
+    register(&st, m.port, &["queryTemporal"], None, None).await;
 
     let _ = get(
         &st,
@@ -302,7 +313,7 @@ async fn split_temporal_query_strips_filters_before_forwarding() {
 async fn non_split_temporal_query_forwards_filters() {
     let st = state();
     let m = mock_source(true);
-    register(&st, m.port, &["queryTemporal"], None).await;
+    register(&st, m.port, &["queryTemporal"], None, None).await;
 
     let _ = get(
         &st,
@@ -314,5 +325,32 @@ async fn non_split_temporal_query_forwards_filters() {
     assert!(
         head.contains("q=speed"),
         "non-split temporal forward carries q: {head}"
+    );
+}
+
+/// 5.2.9: a registration scoped by `propertyNames` narrows the forwarded read
+/// to that scope, and the names travel as TERMS. The peer expands `attrs`
+/// against the @context it is handed (5.5.7), so an already-expanded IRI asks
+/// a question the peer's own context need not answer, and the registration's
+/// whole scope drops out of the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_scope_forwards_attrs_as_terms() {
+    let st = state();
+    let m = mock_source(true);
+    register(&st, m.port, &["queryTemporal"], None, Some(&["speed"])).await;
+
+    let _ = get(
+        &st,
+        "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2026-01-01T00:00:00Z",
+    )
+    .await;
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.contains("attrs=speed"),
+        "the registration scope must be forwarded as a term: {head}"
+    );
+    assert!(
+        !head.contains("default-context"),
+        "the scope must not travel as an expanded IRI: {head}"
     );
 }

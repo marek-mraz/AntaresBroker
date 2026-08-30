@@ -113,7 +113,7 @@ pub fn proj_depth(nodes: &[ProjNode]) -> usize {
         .unwrap_or(0)
 }
 
-const ENTITY_META: &[&str] = &[
+pub(crate) const ENTITY_META: &[&str] = &[
     "id",
     "type",
     "scope",

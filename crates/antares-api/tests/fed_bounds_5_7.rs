@@ -168,3 +168,39 @@ async fn oversized_undeclared_response_is_skipped_with_warning() {
         "warning 111 expected, got {warn:?}"
     );
 }
+
+/// 6.3.17 across a cascade (4.3.6.4): a registered Context Source that is
+/// itself a broker reports its own abnormal parts with `NGSILD-Warning`. Those
+/// values travel on to the client with the aggregated response — a warning
+/// dropped at the first hop hides a failure two hops away behind a 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_warnings_reach_the_client() {
+    let st = state();
+    let body = entity_array(16);
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         NGSILD-Warning: 299 downstream \"an error response was received \
+         from the registration endpoint\"\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let port = mock_replying(reply);
+    register_query_source(&st, port).await;
+
+    let (parts, out) = query_vehicles(&st).await;
+    assert_eq!(parts.status, 200);
+    assert!(
+        out.contains(REMOTE_ID),
+        "a usable payload is still merged: {out}"
+    );
+    let warns: Vec<String> = parts
+        .headers
+        .get_all("NGSILD-Warning")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(str::to_owned))
+        .collect();
+    assert!(
+        warns.iter().any(|w| w.contains("downstream")),
+        "the peer's own warning must reach the client: {warns:?}"
+    );
+}

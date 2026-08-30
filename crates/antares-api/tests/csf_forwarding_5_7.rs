@@ -18,7 +18,7 @@ async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, Value) {
         .expect("response");
     let status = res.status();
     // 6.3.17: a source that failed shows up here, not in the body — keep
-    // the reason in the assertion messages (TSan-only flakes, 2026-08)
+    // the reason in the assertion messages, where a flake can be read.
     let warnings: Vec<String> = res
         .headers()
         .get_all("NGSILD-Warning")
