@@ -26,6 +26,10 @@ on:
         type: boolean
         default: false
 
+# The default for the build; the Pages deploy declares its own wider set.
+permissions:
+  contents: read
+
 concurrency:
   group: wasm-${{ github.ref }}
   cancel-in-progress: true

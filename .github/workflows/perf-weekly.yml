@@ -36,6 +36,11 @@ env:
   SERVER_LOCATION: hel1
   TTL_HOURS: 1
 
+# The Hetzner credentials are the sensitive part of this run; the
+# GITHUB_TOKEN itself only has to read the checkout.
+permissions:
+  contents: read
+
 jobs:
   create:
     runs-on: ubuntu-latest

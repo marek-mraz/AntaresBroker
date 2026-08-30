@@ -28,6 +28,11 @@ on:
 env:
   MEM_LIMIT_MB: 350 # per-broker peak-RSS gate, same limit as ScorpioBroker's pipeline
 
+# The default for the cells; the aggregate job declares the wider set it
+# needs to dispatch.
+permissions:
+  contents: read
+
 jobs:
   build:
     # ONE image for the whole run (the shared build-image.yml). Every store

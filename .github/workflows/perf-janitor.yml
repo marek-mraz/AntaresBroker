@@ -13,6 +13,11 @@ on:
     - cron: "43 */6 * * *"
   workflow_dispatch:
 
+# The sweep reads the checkout and talks to Hetzner with its own token;
+# the alarm job that files an issue declares its own wider set.
+permissions:
+  contents: read
+
 jobs:
   sweep:
     runs-on: ubuntu-latest

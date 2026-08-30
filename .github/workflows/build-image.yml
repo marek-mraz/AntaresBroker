@@ -26,6 +26,11 @@ on:
         type: string
         default: amd64
 
+# Builds and uploads an image tarball as an artifact; nothing is
+# published from here, so the token only has to read the checkout.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build the ${{ inputs.arch }} image

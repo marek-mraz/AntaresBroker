@@ -16,6 +16,11 @@ on:
     - cron: "41 4 * * 1" # weekly Monday — after strict.yml's daily slots
   workflow_dispatch:
 
+# Coverage runs read the checkout and upload artifacts; the alarm job
+# that files an issue declares its own wider set.
+permissions:
+  contents: read
+
 jobs:
   cover:
     name: ETSI coverage (${{ matrix.store }})

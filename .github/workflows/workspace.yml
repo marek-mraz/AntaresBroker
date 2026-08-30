@@ -11,6 +11,11 @@ name: workspace
 on:
   workflow_call:
 
+# Compiles and tests the workspace and uploads reports; the token only
+# has to read the checkout.
+permissions:
+  contents: read
+
 jobs:
   workspace:
     # fmt + clippy + the workspace test suite across the feature matrix, with

@@ -39,6 +39,8 @@ concurrency:
 
 jobs:
   workspace:
+    permissions:
+      contents: read
     # The shared workspace-test gate (workflow_call) — one definition for
     # ci and full, see .github/workflows/workspace.yml.
     name: Workspace tests
@@ -59,6 +61,8 @@ jobs:
       actions: write # the summary job deletes the merged per-cell artifacts
 
   build-arm:
+    permissions:
+      contents: read
     # The arm64 half of the published manifest — BUILT, never tested; the
     # rationale lives in the shared build-image.yml.
     name: Build the arm64 image (untested)

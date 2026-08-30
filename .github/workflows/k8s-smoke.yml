@@ -8,6 +8,11 @@ name: k8s-smoke
 on:
   workflow_dispatch:
 
+# Brings a cluster up inside the runner and applies the manifests; the
+# token only has to read the checkout.
+permissions:
+  contents: read
+
 concurrency:
   group: k8s-smoke
   cancel-in-progress: true

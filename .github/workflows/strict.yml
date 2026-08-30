@@ -16,6 +16,11 @@ on:
     - cron: "41 3 * * 0" # weekly Sunday — tsan + miri
   workflow_dispatch:
 
+# The default for the sanitizer, Miri, fuzz and coverage jobs; the alarm
+# job that files an issue declares its own wider set.
+permissions:
+  contents: read
+
 jobs:
   hygiene:
     # Broken rustdoc links / malformed clause citations fail here instead of

@@ -25,6 +25,8 @@ env:
 
 jobs:
   build:
+    permissions:
+      contents: read
     name: Build the image under test
     uses: ./.github/workflows/build-image.yml
     with:

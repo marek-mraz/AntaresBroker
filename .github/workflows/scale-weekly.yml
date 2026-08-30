@@ -33,6 +33,11 @@ on:
         description: Hetzner server type (ccx33 = 8 dedicated vCPU / 32 GB, ccx43 = 16 / 64, ccx53 = 32 / 128)
         default: ccx33
 
+# The Hetzner credentials are the sensitive part of this run; the
+# GITHUB_TOKEN itself only has to read the checkout.
+permissions:
+  contents: read
+
 concurrency:
   group: scale-weekly
   cancel-in-progress: false

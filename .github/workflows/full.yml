@@ -33,6 +33,11 @@ on:
     branches: [master] # the release gate for a promotion PR
   workflow_dispatch:
 
+# The default for every job here; the ones that publish an image, cut a
+# release or file an issue declare their own wider set.
+permissions:
+  contents: read
+
 concurrency:
   group: full-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
