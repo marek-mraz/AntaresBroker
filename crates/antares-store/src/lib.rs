@@ -162,6 +162,14 @@ pub trait CurrentStateDriver: Send + Sync {
     }
     /// Drain: finish in-flight work and disconnect cleanly.
     fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    /// What this driver runs on, for `/q/health`: engine, server version,
+    /// extensions — whatever an operator needs to tell two deployments of
+    /// the same backend name apart. Read from state captured at startup,
+    /// never by querying on the request: health is polled. An empty object
+    /// (the default) means the driver has nothing to add to its name.
+    fn version_info(&self) -> Value {
+        Value::Object(serde_json::Map::new())
+    }
     /// Installs the (tenant, before, after) hook called on every entity write.
     fn set_change_hook(&self, h: ChangeHook);
     /// Turn the same-transaction outbox producer on (bus=nats).
@@ -471,6 +479,19 @@ pub trait TemporalDriver: Send + Sync {
     /// Readiness of the temporal backend; the default is always ready.
     fn ping(&self) -> Result<(), NgsiError> {
         Ok(())
+    }
+    /// What this temporal driver runs on, for `/q/health`; the same
+    /// contract as [`CurrentStateDriver::version_info`].
+    fn version_info(&self) -> Value {
+        Value::Object(serde_json::Map::new())
+    }
+    /// Drain: finish in-flight work and disconnect cleanly. A temporal
+    /// driver configured as a backend of its own holds its own pool, and the
+    /// shutdown path closes it here. May be called more than once — when one
+    /// instance serves both seams it is closed through each of them — so an
+    /// implementation makes it idempotent. The default has nothing to close.
+    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
     }
     /// Auto-recording fast path: append instances, creating the meta shell
     /// on first touch — and only for an entity that still exists (5.6.6

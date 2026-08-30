@@ -81,6 +81,10 @@ pub struct PgBackend {
     pub temporal: PgTemporalStore,
     pub docs: PgDocStore,
     hook: std::sync::RwLock<Option<ChangeHook>>,
+    /// Server and extension versions, read once at startup
+    /// (`with_version`); `/q/health` serves this copy rather than querying
+    /// the database on a polled endpoint.
+    version: Value,
 }
 
 #[cfg(feature = "postgres")]
@@ -91,7 +95,15 @@ impl PgBackend {
             temporal: PgTemporalStore::new(pool.clone()),
             docs: PgDocStore::new(pool),
             hook: std::sync::RwLock::new(None),
+            version: Value::Object(serde_json::Map::new()),
         }
+    }
+
+    /// Attach what the startup probe read from the server
+    /// (`pg::version_info`), so `/q/health` can answer it without a query.
+    pub fn with_version(mut self, version: Value) -> Self {
+        self.version = version;
+        self
     }
 
     /// Poison recovery (`into_inner`) is deliberate, the same choice the
@@ -135,6 +147,19 @@ impl AnyStore {
                     .map(|_| ())
             })
             .map_err(db),
+        }
+    }
+
+    /// What this store runs on, for `/q/health`. The memory and file modes
+    /// are one backend with two durability shapes and must not read as the
+    /// same thing; the Postgres arm serves what the startup probe read.
+    pub fn version_info(&self) -> Value {
+        match self {
+            AnyStore::Mem(s) => serde_json::json!({
+                "engine": if s.shadowed() { "redb" } else { "memory" },
+            }),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => p.version.clone(),
         }
     }
 
@@ -1011,6 +1036,9 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn commit_queue(&self) -> Option<(usize, usize)> {
         AnyStore::commit_queue(self)
     }
+    fn version_info(&self) -> Value {
+        AnyStore::version_info(self)
+    }
     fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(AnyStore::close(self))
     }
@@ -1138,6 +1166,12 @@ impl antares_store::CurrentStateDriver for AnyStore {
 }
 
 impl antares_store::TemporalDriver for AnyStore {
+    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(AnyStore::close(self))
+    }
+    fn version_info(&self) -> Value {
+        AnyStore::version_info(self)
+    }
     fn attr_instance_count(&self, tenant: &TenantId) -> Result<u64, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.attr_instance_count(tenant)),

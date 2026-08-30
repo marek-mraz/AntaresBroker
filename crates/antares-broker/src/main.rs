@@ -586,7 +586,14 @@ async fn build_store(
                             "ANTARES_STORE={mode}: pool up, migrations applied, serving \
                              from postgres (temporal backend: {backend:?})"
                         );
-                        return Ok((AnyStore::Pg(PgBackend::new(pool)), Some(backend)));
+                        // Read once, here: /q/health is polled, so what it
+                        // says about the server is captured at startup and
+                        // never queried on the request.
+                        let version = antares_sql::store::pg::version_info(&pool).await;
+                        return Ok((
+                            AnyStore::Pg(PgBackend::new(pool).with_version(version)),
+                            Some(backend),
+                        ));
                     }
                     Err(e) => {
                         last = e.to_string();
@@ -797,6 +804,9 @@ async fn run(
     // close last.
     let draining = state.draining.clone();
     let store_for_drain = state.store.clone();
+    // The temporal seam may be a second store with its own pool; the drain
+    // closes both.
+    let temporal_for_drain = state.temporal.clone();
     let pending_for_drain = state.pending_changes.clone();
     // Only the api role serves the NGSI-LD surface — a worker pod
     // exposes health/ready/metrics and nothing else (a subscription created
@@ -883,6 +893,7 @@ async fn run(
                     &inflight,
                     &pending_for_drain,
                     &*store_for_drain,
+                    &*temporal_for_drain,
                     drain_deadline,
                     flush_outbox,
                 )

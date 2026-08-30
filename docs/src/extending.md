@@ -62,6 +62,15 @@ a match from the configured names to constructors.
 - Every Postgres half, primary or temporal-only, gets its own maintenance
   loop (partitions, retention).
 
+Both traits carry the same two lifecycle methods. `version_info()` answers
+what the driver runs on — engine, server version, extensions — from state
+captured at startup, never by querying on the call: `/q/health` is polled,
+and it prints the answer as `storeInfo` and `temporalInfo`. `close()` is the
+drain: the shutdown path closes both seams, because a deployment whose
+`ANTARES_TEMPORAL` names a second backend has two pools to close. One
+instance can serve both seams, so it is closed through each of them and
+`close()` must be idempotent.
+
 An unknown name is fatal at startup and lists what the binary was built
 with:
 

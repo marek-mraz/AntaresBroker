@@ -10,6 +10,7 @@ pub mod outbox;
 pub mod temporal;
 
 use antares_model::TenantId;
+use serde_json::Value;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, Transaction};
 
@@ -119,6 +120,39 @@ pub async fn role_bypasses_rls(pool: &PgPool) -> bool {
         .fetch_one(pool)
         .await,
     )
+}
+
+/// What the connected server is, read ONCE at startup and served from
+/// `/q/health` afterwards: server version plus the version of each extension
+/// the broker's behaviour depends on. A probe that fails is not fatal — the
+/// broker serves fine without knowing its own server version — so the caller
+/// gets an empty object and health simply says nothing.
+pub async fn version_info(pool: &PgPool) -> Value {
+    let row: Result<(String, Option<String>, Option<String>), sqlx::Error> = sqlx::query_as(
+        "SELECT current_setting('server_version'), \
+         (SELECT extversion FROM pg_extension WHERE extname = 'postgis'), \
+         (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb')",
+    )
+    .fetch_one(pool)
+    .await;
+    match row {
+        Ok((server, postgis, timescale)) => {
+            let mut m = serde_json::Map::new();
+            m.insert("engine".into(), "postgres".into());
+            m.insert("server".into(), server.into());
+            if let Some(v) = postgis {
+                m.insert("postgis".into(), v.into());
+            }
+            if let Some(v) = timescale {
+                m.insert("timescaledb".into(), v.into());
+            }
+            Value::Object(m)
+        }
+        Err(e) => {
+            tracing::warn!("server version probe failed ({e}); /q/health will not report it");
+            Value::Object(serde_json::Map::new())
+        }
+    }
 }
 
 fn bypasses(probe: Result<bool, sqlx::Error>) -> bool {

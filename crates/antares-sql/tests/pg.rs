@@ -363,3 +363,36 @@ async fn purge_tenant_empties_every_tenant_table() {
     assert!(CurrentStateDriver::purge_tenant(&store, &b).expect("purge b"));
     TemporalDriver::purge_tenant(&store, &b).expect("purge b history");
 }
+
+/// The startup probe reads what the server actually is, and the store serves
+/// that copy afterwards. `/q/health` is polled, so a health body that named
+/// the server by querying for it would put a database round trip on every
+/// probe; the version is captured once, here.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_version_is_probed_once_and_served_from_the_store() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let probed = pg::version_info(&pool).await;
+    assert_eq!(probed["engine"], "postgres", "{probed}");
+    assert!(
+        probed["server"].as_str().is_some_and(|v| !v.is_empty()),
+        "the server version must be named: {probed}"
+    );
+    assert!(
+        probed["postgis"].as_str().is_some(),
+        "the broker needs PostGIS and must report which one: {probed}"
+    );
+
+    let plain = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    assert_eq!(
+        plain.version_info(),
+        serde_json::json!({}),
+        "a store built without the probe reports nothing rather than guessing"
+    );
+    let probed_store = antares_sql::store::any::AnyStore::Pg(
+        antares_sql::store::any::PgBackend::new(pool).with_version(probed.clone()),
+    );
+    assert_eq!(probed_store.version_info(), probed);
+}

@@ -146,3 +146,23 @@ async fn a_selection_replaces_the_default_surfaces() {
         .expect("two surfaces on one prefix must be refused");
     assert!(err.contains("/x"), "{err}");
 }
+
+/// Health names what each driver actually runs on, not just the backend
+/// name: memory and file are one backend with two durability shapes, and an
+/// operator reading a health body must be able to tell them apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_names_the_engine_behind_each_driver() {
+    let st = AppState::new("surfaces".into());
+    let (code, body) = get_path(&st, "/q/health").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).expect("health json");
+    let engine = v["storeInfo"]["engine"].as_str().unwrap_or_default();
+    assert!(
+        matches!(engine, "memory" | "redb"),
+        "the store must name its engine, got {v}"
+    );
+    assert!(
+        v.get("temporalInfo").is_some(),
+        "the temporal seam is the same store here and must report the same way: {v}"
+    );
+}

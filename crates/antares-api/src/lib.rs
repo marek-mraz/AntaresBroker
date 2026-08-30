@@ -626,6 +626,18 @@ async fn health(
         "version": env!("CARGO_PKG_VERSION"),
         "commit": env!("ANTARES_GIT_HASH"),
     });
+    // What each driver runs on — engine, server version, extensions — so an
+    // operator can tell two deployments of the same backend name apart. Both
+    // seams answer from state captured at startup; a driver with nothing to
+    // add answers an empty object and the key stays off the body.
+    for (key, info) in [
+        ("storeInfo", state.store.version_info()),
+        ("temporalInfo", state.temporal.version_info()),
+    ] {
+        if info.as_object().is_some_and(|m| !m.is_empty()) {
+            body[key] = info;
+        }
+    }
     // Where commits serialize behind one writer, the queue depth (current,
     // peak) is the signal that decides the group-commit lever. A driver
     // without such a committer reports nothing, so the branch is the

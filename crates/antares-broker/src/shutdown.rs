@@ -95,6 +95,7 @@ pub async fn drain(
     inflight: &Arc<AtomicUsize>,
     pending_changes: &AtomicUsize,
     store: &dyn antares_store::CurrentStateDriver,
+    temporal: &dyn antares_store::TemporalDriver,
     deadline: Duration,
     flush_outbox: bool,
 ) {
@@ -152,6 +153,11 @@ pub async fn drain(
         }
     }
     store.close().await;
+    // Both seams, because the temporal half may be a store of its own
+    // (`ANTARES_TEMPORAL` naming a second backend) with its own pool. When
+    // one instance serves both, the second call lands on an already-closed
+    // pool and does nothing.
+    temporal.close().await;
     tracing::info!("drain complete in {:?}", started.elapsed());
 }
 
@@ -167,6 +173,121 @@ pub fn begin(draining: &Arc<AtomicBool>, delay: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temporal driver that only records whether it was closed; every
+    /// operation answers "no temporal store", the same shape as `NoTemporal`.
+    struct CountsCloses(Arc<AtomicUsize>);
+
+    impl CountsCloses {
+        fn off<T>() -> Result<T, antares_model::NgsiError> {
+            Err(antares_model::NgsiError::OperationNotSupported(
+                "test driver".into(),
+            ))
+        }
+    }
+
+    impl antares_store::TemporalDriver for CountsCloses {
+        fn close<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+        fn temporal_append(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+            _shell: &serde_json::Value,
+            _add: &serde_json::Value,
+        ) -> Result<(), antares_model::NgsiError> {
+            Self::off()
+        }
+        fn query_temporal(
+            &self,
+            _t: &antares_model::TenantId,
+            _f: &antares_store::filter::TemporalFilter<'_>,
+        ) -> Result<antares_store::filter::TemporalOutcome, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn get_temporal(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+            _f: &antares_store::filter::TemporalFilter<'_>,
+        ) -> Result<Option<serde_json::Value>, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn get(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+        ) -> Result<Option<serde_json::Value>, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn create(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+            _d: serde_json::Value,
+        ) -> Result<bool, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn upsert(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+            _d: serde_json::Value,
+        ) -> Result<bool, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn delete(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+        ) -> Result<bool, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn list(
+            &self,
+            _t: &antares_model::TenantId,
+        ) -> Result<Vec<serde_json::Value>, antares_model::NgsiError> {
+            Self::off()
+        }
+        fn mutate_boxed<'a>(
+            &self,
+            _t: &antares_model::TenantId,
+            _id: &str,
+            _f: antares_store::MutateFn<'a>,
+        ) -> Result<Option<Result<(), ()>>, antares_model::NgsiError> {
+            Self::off()
+        }
+    }
+
+    /// The drain closes BOTH driver seams. With `ANTARES_TEMPORAL` naming a
+    /// backend of its own the temporal half is a second store holding its own
+    /// connection pool; closing only the current-state store left that pool
+    /// open for process teardown to sever, with whatever it still owed
+    /// in flight.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drain_closes_the_temporal_driver_too() {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let temporal = CountsCloses(Arc::clone(&closes));
+        let store = antares_sql::store::any::AnyStore::Mem(antares_sql::store::Store::default());
+        drain(
+            &Arc::new(AtomicUsize::new(0)),
+            &AtomicUsize::new(0),
+            &store,
+            &temporal,
+            Duration::from_millis(50),
+            false,
+        )
+        .await;
+        assert_eq!(
+            closes.load(Ordering::SeqCst),
+            1,
+            "the temporal driver must be closed by the drain, not by process exit"
+        );
+    }
 
     /// Both drain knobs in ONE test: the environment is process-global, so
     /// parsing them from parallel test threads would race.
@@ -258,6 +379,7 @@ mod tests {
                 &inflight,
                 &AtomicUsize::new(0),
                 &store,
+                &antares_store::NoTemporal,
                 Duration::from_secs(5),
                 false,
             )
@@ -282,6 +404,7 @@ mod tests {
             &inflight,
             &AtomicUsize::new(0),
             &store,
+            &antares_store::NoTemporal,
             Duration::from_secs(20),
             true,
         ));
@@ -303,6 +426,7 @@ mod tests {
             &inflight,
             &AtomicUsize::new(0),
             &store,
+            &antares_store::NoTemporal,
             Duration::from_millis(300),
             false,
         ));
@@ -380,6 +504,7 @@ mod tests {
             &inflight,
             &AtomicUsize::new(0),
             &store,
+            &antares_store::NoTemporal,
             Duration::from_millis(400),
             false,
         ));
@@ -397,6 +522,7 @@ mod tests {
             &inflight,
             &AtomicUsize::new(0),
             &store,
+            &antares_store::NoTemporal,
             Duration::from_millis(400),
             true,
         ));

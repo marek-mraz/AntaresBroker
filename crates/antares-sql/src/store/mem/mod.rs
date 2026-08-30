@@ -894,6 +894,19 @@ mod tests {
         assert!(peak >= 1, "the write itself must register in the peak");
     }
 
+    /// What a store reports about itself, for an operator reading
+    /// `/q/health`: the memory and file modes are one backend with two
+    /// durability shapes, and the health body must not present them as the
+    /// same thing.
+    #[test]
+    fn a_store_reports_the_engine_it_actually_runs() {
+        let dir = tempdir("engine");
+        let mem = crate::store::any::AnyStore::Mem(Store::default());
+        let file = crate::store::any::AnyStore::Mem(Store::open_file(&dir).expect("open"));
+        assert_eq!(mem.version_info()["engine"], "memory");
+        assert_eq!(file.version_info()["engine"], "redb");
+    }
+
     /// The commit queue is a `file`-mode signal: it exists because redb has
     /// one writer and commits fsync through it. A pure in-memory store has no
     /// such committer, so it reports nothing rather than a number that would

@@ -59,13 +59,14 @@ progress). A memory-store broker answers:
 | `status` | `UP`, or `DRAINING` with status 503 once shutdown began. |
 | `store` | The current-state backend: `memory`, `file`, `postgres`, `timescale`. |
 | `temporal` | The history backend: one of the four, or `none` when history is off (`ANTARES_TEMPORAL`). |
+| `storeInfo`, `temporalInfo` | What each driver actually runs on: `{engine}` for the built-in stores (`memory` or `redb`), and on Postgres `{engine, server, postgis, timescaledb?}` read once at startup. Absent when a driver has nothing to add to its name (`none` history). Two deployments answering `postgres` are told apart here. |
 | `version`, `commit` | Workspace version and the git hash the binary was built from. |
 | `notificationSchemes` | The `notification.endpoint.uri` schemes this build can deliver to — the registered bindings (6.3.8, clause 7, and any a deployment added). A subscription naming a scheme absent here is refused at creation with `BadRequestData`. |
 | `deadLetters` | Dead letters this process wrote since start ([notification delivery](operations.md#notification-delivery)). |
 | `temporalDrainErrors` | Post-response history writes that failed since start; the client's 2xx stands, the counter and a warning record the loss. |
 | `limits` | The bounds wall: every `max*` cap in force and the `rejected*` counters of requests refused by it. |
 | `memory` | jemalloc live (`allocatedBytes`) and resident (`residentBytes`) bytes. |
-| `commitQueueDepth`, `commitQueuePeak` | `file` store only: writers queued behind the single redb committer, now and at peak. |
+| `commitQueueDepth`, `commitQueuePeak` | Present only for a store with a single committer to queue behind (`file`, and the browser build over OPFS): writers queued now and at peak. |
 | `bus` | `ANTARES_BUS=nats` only: `{mode, connected, reconnects}`. |
 
 ## GET /q/ready
