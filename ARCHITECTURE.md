@@ -200,6 +200,43 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `csource_index` needs a type-first shape.
 - Registration counters of Table 5.2.9-2 (`timesSent`, `timesFailed`,
   `lastSuccess`, `lastFailure`, `status`) are not produced.
+- Duplication has a measured floor rather than a target of zero.
+  `dev/dup-check.sh` ratchets the workspace at 78 token clones over 1032
+  lines (`dev/dup-baseline.json`), 890 of them in `antares-api`. What the
+  ratchet still allows:
+  - 68 lines are `use` blocks in files serving neighbouring clauses. A
+    `use` list is not logic, and a shared prelude would hide what each
+    module depends on.
+  - 51 lines are the Entity Type List and Attribute List discovery
+    operations (5.7.5, 5.7.6). That parallel is the specification's: the
+    two build different representations from different tables
+    (5.2.24/5.2.25 against 5.2.27/5.2.28), so one generic over both would
+    take more parameters than it removes and would let a change to one
+    table reshape the other.
+  - Roughly 230 lines are per-operation handler heads and tails of nine to
+    fifteen lines each. What those share is already extracted --
+    `tenant_from`, `check_params`, `request_context`,
+    `ParsedBody::object`, `attach_paging`, `entity_maps::retrieve_with_map`
+    -- and what remains is the part that differs: the parameter
+    vocabulary, the error type of Table 6.3.2-1, the forwarded operation
+    name. Fifty `check_params` call sites carry twenty-one distinct
+    allowlists, and only two share the eleven-name query prefix; one
+    allowlist for operations whose allowlists deliberately differ would
+    widen what each endpoint accepts.
+  - One signature group is the reference plugin's, and stays: because
+    `examples/plugin-example` implements the same two driver traits as the
+    in-binary memory store, its `live`, `rows` and `emit` necessarily carry
+    the memory store's signatures. That is the seam being demonstrated, so
+    the ratchet holds it at ten rather than nine.
+  - The remainder is real debt, in four places, each reading one rule more
+    than once: the temporal attribute writes (147 lines, the local part
+    plus the forwarded part plus the local answer, shared by
+    `delete_temporal_attr`, `delete_temporal_instance` and
+    `modify_temporal_instance`), the batch forwarding arm (107 lines, six
+    copies of forwarding one Entity to one registration), the federation
+    entry points (86 lines, `fed_query`/`fed_query_temporal`/
+    `fed_retrieve_temporal` and `import_entity`/`import_temporal`) and the
+    EntityMap and snapshot document handlers (137 lines).
 
 ## 9. To change X, touch Y
 

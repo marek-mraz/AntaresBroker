@@ -1,8 +1,8 @@
 {
- "clone_lines": 1501,
- "clones": 108,
- "same_signature": 9,
- "same_name": 6,
- "same_fields": 1,
+ "clone_lines": 1032,
+ "clones": 78,
+ "same_signature": 10,
+ "same_name": 2,
+ "same_fields": 0,
  "dead_surface": 0
 }
