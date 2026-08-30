@@ -20,12 +20,7 @@ DURATION="${DURATION:-60s}"
 : "${TENANT:?}" "${ENTITIES:?}"
 command -v k6 >/dev/null || { echo "k6 missing"; exit 1; }
 
-SUBS_IN_TENANT=$(curl -sf "$BROKER_URL/q/tenants" | python3 -c '
-import sys, json, os
-rows = json.load(sys.stdin)
-rows = rows if isinstance(rows, list) else rows.get("tenants", [])
-t = os.environ["TENANT"]
-print(next((r["counts"]["subscriptions"] for r in rows if r.get("tenant") == t), 0))' || echo 0)
+read -r _ SUBS_IN_TENANT _ < <(python3 dev/perf/tenant-counts.py "$BROKER_URL" "$TENANT")
 
 {
   echo "Mixed workload in tenant $TENANT ($SUBS_IN_TENANT subscriptions, wheel ${MIX:-update:4,replace:2,get:2,upsert20:1,delete20:1})."
