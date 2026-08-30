@@ -17,27 +17,7 @@ fn bad(m: String) -> NgsiError {
     NgsiError::BadRequestData(m)
 }
 
-/// Strip the authority's userinfo from an endpoint URI. 7.2 allows
-/// credentials there (`mqtt[s]://[<username>][:<password>]@<host>…`), while
-/// a rejected endpoint travels back to the client as the `detail` member of
-/// the ProblemDetails body (5.5.3) and into the delivery logs — neither may
-/// carry the subscription's password. Everything after the last `@` of the
-/// authority is kept; an `@` in the topic is path data, not userinfo.
-fn redacted(uri: &str) -> String {
-    let Some((scheme, rest)) = uri.split_once("://") else {
-        return uri.to_owned();
-    };
-    match rest.split_once('/') {
-        Some((authority, path)) => {
-            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-            format!("{scheme}://{host}/{path}")
-        }
-        None => {
-            let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
-            format!("{scheme}://{host}")
-        }
-    }
-}
+use crate::redact_userinfo as redacted;
 
 /// Parsed `mqtt[s]://[user][:pass]@host[:port]/topic[/subtopic]*` (7.2).
 #[derive(Debug, Clone, PartialEq)]
@@ -392,7 +372,7 @@ impl MqttSink {
 
     /// Deliver one notification message. `message` is the 7.2 wrapper from
     /// [`build_message`], serialized by the caller once per subscription.
-    pub async fn deliver(
+    pub async fn publish_message(
         &self,
         ep: &MqttEndpoint,
         params: MqttParams,
@@ -560,6 +540,53 @@ impl MqttSink {
     }
 }
 
+/// Clause 7: the mqtt(s) binding. `parse_endpoint` holds Table 7.2-1 (the
+/// endpoint URI syntax and the notifier parameters) at subscription
+/// creation; `deliver` publishes the 7.2 message — `{"metadata": …,
+/// "body": <Notification>}` — on the endpoint's topic.
+impl crate::NotificationSink for MqttSink {
+    fn schemes(&self) -> &'static [&'static str] {
+        &["mqtt", "mqtts"]
+    }
+
+    fn parse_endpoint(&self, uri: &str, notifier_info: &[(&str, &str)]) -> Result<(), NgsiError> {
+        MqttEndpoint::parse(uri)?;
+        MqttParams::from_notifier_info(notifier_info.iter().copied())?;
+        Ok(())
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        uri: &'a str,
+        out: &'a crate::Outbound,
+        _timeout: Duration,
+    ) -> crate::DeliveryFuture<'a> {
+        Box::pin(async move {
+            // Creation validated the endpoint (7.2 / Table 7.2-1); a parse
+            // failure here means a hand-edited row. The message names only
+            // the redacted URI: 7.2 permits credentials in the userinfo.
+            let Ok(ep) = MqttEndpoint::parse(uri) else {
+                return Err(crate::DeliveryError::failed(format!(
+                    "mqtt endpoint {:?} unusable",
+                    redacted(uri)
+                )));
+            };
+            let Ok(params) = MqttParams::from_notifier_info(out.notifier_pairs()) else {
+                return Err(crate::DeliveryError::failed(format!(
+                    "mqtt notifierInfo of {:?} unusable",
+                    redacted(uri)
+                )));
+            };
+            let msg = build_message(&out.body, &out.accept, Some(&out.link), &out.receiver_info);
+            let bytes = antares_model::ordered_vec(&msg);
+            self.publish_message(&ep, params, &bytes)
+                .await
+                // broker/socket-level failure — keep the timeout guard
+                .map_err(|e| crate::DeliveryError::timeout(e.to_string()))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,7 +736,7 @@ mod tests {
         let ep = MqttEndpoint::parse("mqtt://user:hunter2@169.254.169.254/t").expect("parse");
         let sink = MqttSink::new(2, Duration::from_millis(250));
         let err = sink
-            .deliver(&ep, MqttParams::default(), b"{}")
+            .publish_message(&ep, MqttParams::default(), b"{}")
             .await
             .expect_err("the metadata range must never be dialled");
         let msg = err.to_string();

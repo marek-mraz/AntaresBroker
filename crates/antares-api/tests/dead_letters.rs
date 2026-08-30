@@ -377,6 +377,9 @@ async fn delete_removes_one_letter_once() {
     );
 }
 
+/// The letter's endpoint URI decides the binding, exactly as it does for a
+/// fresh send: a scheme no sink serves, or a letter that cannot be read back
+/// into a notification, answers 502 and puts nothing on the wire.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_binding_or_unreadable_letter_is_a_502_not_a_send() {
     let st = state();
@@ -385,7 +388,7 @@ async fn an_unknown_binding_or_unreadable_letter_is_a_502_not_a_send() {
     let mut l = letter(
         "urn:ngsi-ld:DeadLetter:1",
         "urn:s:1",
-        &uri,
+        "smtp://mail.example.org/queue",
         "2026-01-01T00:00:01Z",
     );
     l["binding"] = json!("smtp");

@@ -1,15 +1,173 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Notification delivery.
 //!
-//! The pluggability seam is fixed in v0: sinks register by `endpoint.uri`
-//! scheme; a subscription naming an unregistered scheme is rejected at
-//! creation with OperationNotSupported (422). Sinks: http/reqwest,
-//! mqtt/rumqttc behind the `mqtt` feature, ws in `antares-ws`.
+//! A sink serves one family of `endpoint.uri` schemes (6.3.8, and 7.2 for
+//! the optional MQTT binding): it validates its own endpoints at
+//! subscription creation and delivers the prepared notification. The
+//! registry keys sinks by scheme and is the only way one is chosen — a
+//! scheme it does not hold is rejected at creation, never delivered through
+//! another binding. Sinks: http/reqwest, mqtt/rumqttc behind the `mqtt`
+//! feature.
+//!
+//! The egress policy (allowlist, private-range deny, per-destination
+//! breakers) runs in the caller before `deliver`, so a sink registered from
+//! outside this workspace cannot step around it.
 
 use antares_model::NgsiError;
+use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
 
+pub mod http;
 #[cfg(feature = "mqtt")]
 pub mod mqtt;
+
+pub use http::HttpSink;
+
+/// One prepared notification, deliverable any number of times: a retry or a
+/// dead-letter replay renders the identical message from the same parts.
+/// The parts are transport-neutral — 6.3.8 turns them into HTTP headers,
+/// Table 7.2-2 into the MQTT message's `metadata` object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outbound {
+    /// The Notification (5.3.1) to deliver.
+    pub body: Value,
+    /// `endpoint.accept` (Table 5.2.15-1): the MIME type of `body`.
+    pub accept: String,
+    /// The JSON-LD `@context` Link value belonging to `body` (6.3.8).
+    pub link: String,
+    /// `endpoint.receiverInfo` (Table 5.2.15-1) followed by the tenant and
+    /// snapshot markers the binding has to convey (6.3.22).
+    pub receiver_info: Vec<(String, String)>,
+    /// `endpoint.notifierInfo` (Table 5.2.15-1): the parameters the binding
+    /// needs to set up its channel, e.g. Table 7.2-1's MQTT-QoS. Opaque to
+    /// every sink but the one whose scheme the endpoint names.
+    pub notifier_info: Vec<(String, String)>,
+}
+
+impl Outbound {
+    /// A dead letter back into deliverable form. Letters written before the
+    /// bindings moved behind the registry carry a rendered HTTP header list, or
+    /// an already-wrapped clause 7 message, instead of the endpoint members they
+    /// were rendered from; both read back, so an upgrade does not strand the
+    /// letters an operator has not replayed yet.
+    pub fn from_dead_letter(letter: &Value) -> Result<Self, String> {
+        let pairs = |v: &Value| -> Vec<(String, String)> {
+            serde_json::from_value::<Vec<(String, String)>>(v.clone()).unwrap_or_default()
+        };
+        if letter.get("accept").and_then(Value::as_str).is_some() {
+            return Ok(Self {
+                body: letter["payload"].clone(),
+                accept: letter["accept"].as_str().unwrap_or_default().to_owned(),
+                link: letter["link"].as_str().unwrap_or_default().to_owned(),
+                receiver_info: pairs(&letter["receiverInfo"]),
+                notifier_info: pairs(&letter["notifierInfo"]),
+            });
+        }
+        // Pre-registry HTTP: Content-Type and Link ARE the accept and link they
+        // were rendered from; every other header came from receiverInfo.
+        if let Some(headers) = letter.get("headers").filter(|h| !h.is_null()) {
+            let headers = serde_json::from_value::<Vec<(String, String)>>(headers.clone())
+                .map_err(|e| format!("dead letter headers unreadable: {e}"))?;
+            let take = |name: &str| {
+                headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            return Ok(Self {
+                body: letter["payload"].clone(),
+                accept: take("Content-Type"),
+                link: take("Link"),
+                receiver_info: headers
+                    .iter()
+                    .filter(|(k, _)| {
+                        !k.eq_ignore_ascii_case("Content-Type") && !k.eq_ignore_ascii_case("Link")
+                    })
+                    .cloned()
+                    .collect(),
+                notifier_info: Vec::new(),
+            });
+        }
+        // Pre-registry MQTT: the payload is the 7.2 message, so the notification
+        // and its metadata come back out of the wrapper.
+        let meta = &letter["payload"]["metadata"];
+        if let Some(meta) = meta.as_object() {
+            let mut notifier_info = Vec::new();
+            if let Some(q) = letter["mqtt"]["qos"].as_u64() {
+                notifier_info.push(("MQTT-QoS".to_owned(), q.to_string()));
+            }
+            if let Some(v5) = letter["mqtt"]["v5"].as_bool() {
+                let v = if v5 { "mqtt5.0" } else { "mqtt3.1.1" };
+                notifier_info.push(("MQTT-Version".to_owned(), v.to_owned()));
+            }
+            return Ok(Self {
+                body: letter["payload"]["body"].clone(),
+                accept: meta
+                    .get("Content-Type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("application/json")
+                    .to_owned(),
+                link: meta
+                    .get("Link")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                receiver_info: meta
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "Content-Type" && k.as_str() != "Link")
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+                    .collect(),
+                notifier_info,
+            });
+        }
+        Err("dead letter carries no deliverable notification".to_owned())
+    }
+
+    /// `notifier_info` in the borrowed pair form the sinks parse.
+    pub fn notifier_pairs(&self) -> Vec<(&str, &str)> {
+        self.notifier_info
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+}
+
+/// Why one delivery attempt did not land. `timed_out` is the only class the
+/// caller's circuit breaker counts: an endpoint that answers — with any
+/// status — is alive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeliveryError {
+    /// The attempt ran out of time rather than being answered.
+    pub timed_out: bool,
+    /// Failure text for the log, the subscription status and the dead
+    /// letter. Never carries endpoint credentials.
+    pub message: String,
+}
+
+impl DeliveryError {
+    /// The endpoint answered, or refused, within the deadline.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            timed_out: false,
+            message: message.into(),
+        }
+    }
+
+    /// The deadline passed with no answer.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            timed_out: true,
+            message: message.into(),
+        }
+    }
+}
+
+/// The future one `deliver` returns. `Send` on every target: the un-Send
+/// piece of a browser fetch is fenced inside `antares_jsonld::http_interaction`.
+pub type DeliveryFuture<'a> = Pin<Box<dyn Future<Output = Result<(), DeliveryError>> + Send + 'a>>;
 
 /// How one notification is delivered: how many attempts, how they are
 /// spaced, and how long after the first attempt the last one may still
@@ -122,23 +280,78 @@ impl DeliveryPolicy {
     }
 }
 
+/// Strip the authority's userinfo from an endpoint URI. 7.2 allows
+/// credentials there (`mqtt[s]://[<username>][:<password>]@<host>…`), and a
+/// rejected or failed endpoint travels back to the client as the `detail`
+/// member of the ProblemDetails body (5.5.3) and into the delivery logs —
+/// neither may carry the subscription's password. Everything after the
+/// authority's last `@` is kept; an `@` in the path or topic is data.
+pub fn redact_userinfo(uri: &str) -> String {
+    if let Some(scheme_end) = uri.find("//") {
+        let rest = &uri[scheme_end + 2..];
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if let Some(at) = rest[..authority_end].rfind('@') {
+            return format!("{}{}", &uri[..scheme_end + 2], &rest[at + 1..]);
+        }
+    }
+    uri.to_owned()
+}
+
 /// A delivery binding for one URI scheme family.
 pub trait NotificationSink: Send + Sync {
     /// Schemes this sink serves, e.g. `["http", "https"]`.
     fn schemes(&self) -> &'static [&'static str];
+
+    /// 5.8.1.4: the endpoint's own syntax and parameters, checked at
+    /// subscription creation rather than at first delivery. `notifier_info`
+    /// is `endpoint.notifierInfo` (Table 5.2.15-1) as key/value pairs. An
+    /// endpoint that does not meet the sink's requirements is
+    /// BadRequestData; the message names the URI with any userinfo
+    /// credentials stripped, since it travels back in `detail` (5.5.3).
+    fn parse_endpoint(&self, uri: &str, notifier_info: &[(&str, &str)]) -> Result<(), NgsiError>;
+
+    /// Does an endpoint of this binding name a network destination? The
+    /// caller runs the egress guard — host and port policy, private-range
+    /// and metadata-address deny, per-destination circuit breaker — against
+    /// every endpoint that does, before `deliver` and never inside it, so
+    /// one guard covers every binding whatever scheme it serves. The
+    /// default is the safe answer: a sink is policed unless it declares
+    /// that it opens no socket, and a release binary registers no sink that
+    /// declares otherwise.
+    fn network(&self) -> bool {
+        true
+    }
+
+    /// One attempt on the wire. `timeout` is `endpoint.timeout`
+    /// (Table 5.2.15-1) already clamped by the caller.
+    fn deliver<'a>(
+        &'a self,
+        uri: &'a str,
+        out: &'a Outbound,
+        timeout: Duration,
+    ) -> DeliveryFuture<'a>;
 }
 
-/// Scheme → sink registry; populated by the composition root.
+/// Scheme → sink registry; populated by the composition root. Choosing a
+/// binding goes through here and nowhere else, so an endpoint scheme with no
+/// sink can never fall through to the HTTP binding.
 #[derive(Default)]
 pub struct SinkRegistry {
     sinks: Vec<Box<dyn NotificationSink>>,
 }
 
 impl SinkRegistry {
+    /// Add a binding. A scheme already served keeps its first sink.
     pub fn register(&mut self, sink: Box<dyn NotificationSink>) {
         self.sinks.push(sink);
     }
 
+    /// The scheme of an endpoint URI, lowercased per IETF RFC 3986 §3.1.
+    pub fn scheme_of(uri: &str) -> String {
+        uri.split(':').next().unwrap_or("").to_ascii_lowercase()
+    }
+
+    /// The sink serving `scheme`, if any.
     pub fn sink_for(&self, scheme: &str) -> Option<&dyn NotificationSink> {
         // Linear scan is fine at <5 sinks; switch to a map when sinks multiply.
         self.sinks
@@ -147,36 +360,210 @@ impl SinkRegistry {
             .map(AsRef::as_ref)
     }
 
-    /// Reject-at-creation check: an endpoint scheme this deployment cannot
-    /// deliver to is OperationNotSupported (5.5.6).
-    pub fn require(&self, scheme: &str) -> Result<(), NgsiError> {
-        self.sink_for(scheme).map(|_| ()).ok_or_else(|| {
-            NgsiError::OperationNotSupported(format!(
-                "no notification binding registered for scheme {scheme:?}"
+    /// The sink serving an endpoint URI, by its scheme.
+    pub fn sink_for_uri(&self, uri: &str) -> Option<&dyn NotificationSink> {
+        self.sink_for(&Self::scheme_of(uri))
+    }
+
+    /// 5.8.1.4 reject-at-creation: the sink for this endpoint, having
+    /// accepted the endpoint's own syntax. An endpoint whose scheme this
+    /// deployment cannot deliver to is input data that does not meet the
+    /// requirements of the operation — BadRequestData (Table 5.5.2-1, 400
+    /// per Table 6.3.2-1). Not OperationNotSupported: Create Subscription
+    /// is supported, this endpoint value is not.
+    pub fn require(&self, uri: &str, notifier_info: &[(&str, &str)]) -> Result<(), NgsiError> {
+        let scheme = Self::scheme_of(uri);
+        let sink = self.sink_for(&scheme).ok_or_else(|| {
+            NgsiError::BadRequestData(format!(
+                "no notification binding registered for endpoint scheme {scheme:?} (6.3.8)"
             ))
-        })
+        })?;
+        sink.parse_endpoint(uri, notifier_info)
+    }
+
+    /// Schemes this deployment can deliver to, for `/q/health` and the
+    /// startup banner.
+    pub fn schemes(&self) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = self
+            .sinks
+            .iter()
+            .flat_map(|s| s.schemes())
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    struct HttpSink;
-    impl NotificationSink for HttpSink {
+    struct FakeHttp;
+    impl NotificationSink for FakeHttp {
         fn schemes(&self) -> &'static [&'static str] {
             &["http", "https"]
         }
+        fn parse_endpoint(&self, uri: &str, _ni: &[(&str, &str)]) -> Result<(), NgsiError> {
+            uri.contains("://")
+                .then_some(())
+                .ok_or_else(|| NgsiError::BadRequestData(format!("no authority in {uri:?}")))
+        }
+        fn deliver<'a>(
+            &'a self,
+            _uri: &'a str,
+            _o: &'a Outbound,
+            _t: Duration,
+        ) -> DeliveryFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
-    #[test]
-    fn unknown_scheme_is_operation_not_supported() {
+    fn registry() -> SinkRegistry {
         let mut reg = SinkRegistry::default();
-        reg.register(Box::new(HttpSink));
-        assert!(reg.require("http").is_ok());
-        assert!(reg.require("https").is_ok());
-        let err = reg.require("ws").expect_err("ws not registered in v1");
-        assert_eq!(err.status(), 422);
+        reg.register(Box::new(FakeHttp));
+        reg
+    }
+
+    /// 5.8.1.4 + Table 5.5.2-1: an endpoint scheme no sink serves is input
+    /// data that does not meet the operation's requirements — BadRequestData
+    /// (400), not OperationNotSupported. Create Subscription is supported.
+    #[test]
+    fn unknown_scheme_is_bad_request_data() {
+        let reg = registry();
+        assert!(reg.require("http://h/n", &[]).is_ok());
+        assert!(reg.require("https://h/n", &[]).is_ok());
+        let err = reg
+            .require("ws://h/n", &[])
+            .expect_err("ws has no sink in v1");
+        assert_eq!(err.status(), 400);
+        assert!(matches!(err, NgsiError::BadRequestData(_)), "{err:?}");
+        assert!(format!("{err}").contains("ws"), "{err}");
+    }
+
+    /// The scheme comparison is case-insensitive (IETF RFC 3986 §3.1),
+    /// so `HTTP://…` is not silently unroutable.
+    #[test]
+    fn scheme_matching_ignores_case() {
+        assert!(registry().require("HTTP://h/n", &[]).is_ok());
+        assert_eq!(SinkRegistry::scheme_of("MQTTS://h/t"), "mqtts");
+    }
+
+    /// The sink's own endpoint check runs at creation, and its error is the
+    /// one the client sees.
+    #[test]
+    fn the_sinks_own_rejection_is_returned() {
+        let err = registry()
+            .require("http:/malformed", &[])
+            .expect_err("no authority");
+        assert_eq!(err.status(), 400);
+        assert!(format!("{err}").contains("no authority"), "{err}");
+    }
+
+    /// Every binding this workspace ships opens a socket, so every endpoint
+    /// it delivers to passes the caller's egress policy. A sink that
+    /// declares otherwise is in-process only and belongs to a test.
+    #[test]
+    fn every_shipped_sink_is_policed() {
+        let mut reg = SinkRegistry::default();
+        reg.register(Box::new(crate::HttpSink::new(
+            antares_jsonld::HttpClient::default(),
+        )));
+        #[cfg(feature = "mqtt")]
+        reg.register(Box::new(crate::mqtt::MqttSink::default()));
+        assert!(!reg.sinks.is_empty());
+        for s in &reg.sinks {
+            assert!(
+                s.network(),
+                "shipped sink {:?} skips the egress policy",
+                s.schemes()
+            );
+        }
+    }
+
+    /// A dead letter reads back into the same notification whichever broker
+    /// wrote it: the current shape, and the two shapes written before the
+    /// bindings moved behind the registry.
+    #[test]
+    fn dead_letters_of_every_shape_read_back() {
+        let body = json!({"type": "Notification", "subscriptionId": "urn:s:1"});
+        let link = "<https://ctx>; rel=\"http://www.w3.org/ns/json-ld#context\"";
+
+        let current = json!({"uri": "http://h/n", "payload": body,
+            "accept": "application/ld+json", "link": link,
+            "receiverInfo": [["Authorization", "Bearer t"]],
+            "notifierInfo": []});
+        let o = Outbound::from_dead_letter(&current).expect("current shape");
+        assert_eq!(o.body, body);
+        assert_eq!(o.accept, "application/ld+json");
+        assert_eq!(
+            o.receiver_info,
+            [("Authorization".into(), "Bearer t".into())]
+        );
+
+        let legacy_http = json!({"uri": "http://h/n", "binding": "http", "payload": body,
+            "headers": [["Content-Type", "application/json"], ["Link", link],
+                        ["Authorization", "Bearer t"]]});
+        let o = Outbound::from_dead_letter(&legacy_http).expect("legacy http shape");
+        assert_eq!(o.body, body);
+        assert_eq!(o.accept, "application/json");
+        assert_eq!(o.link, link);
+        assert_eq!(
+            o.receiver_info,
+            [("Authorization".into(), "Bearer t".into())],
+            "Content-Type and Link are the accept and link, not receiverInfo"
+        );
+
+        let legacy_mqtt = json!({"uri": "mqtt://h/t", "binding": "mqtt",
+            "mqtt": {"qos": 2, "v5": false},
+            "payload": {"metadata": {"Content-Type": "application/json", "Link": link,
+                                     "NGSILD-Tenant": "acme"},
+                        "body": body}});
+        let o = Outbound::from_dead_letter(&legacy_mqtt).expect("legacy mqtt shape");
+        assert_eq!(
+            o.body, body,
+            "the notification comes back out of the wrapper"
+        );
+        assert_eq!(o.accept, "application/json");
+        assert_eq!(o.receiver_info, [("NGSILD-Tenant".into(), "acme".into())]);
+        assert_eq!(
+            o.notifier_info,
+            [
+                ("MQTT-QoS".to_owned(), "2".to_owned()),
+                ("MQTT-Version".to_owned(), "mqtt3.1.1".to_owned())
+            ]
+        );
+
+        assert!(Outbound::from_dead_letter(&json!({"uri": "http://h/n"})).is_err());
+    }
+
+    /// Endpoint URIs may carry credentials (mqtt[s]://user:pass@host, 7.1);
+    /// log lines must never leak them.
+    #[test]
+    fn log_redaction_strips_uri_userinfo() {
+        let red = redact_userinfo("mqtts://alice:s3cret@broker:8883/topic");
+        assert_eq!(red, "mqtts://broker:8883/topic");
+        assert!(!red.contains("s3cret"));
+        assert!(!red.contains("alice"));
+        assert_eq!(
+            redact_userinfo("http://host:9090/notify"),
+            "http://host:9090/notify"
+        );
+        // an '@' beyond the authority is path data, not userinfo
+        assert_eq!(redact_userinfo("http://h/p@x"), "http://h/p@x");
+    }
+
+    /// An unregistered scheme resolves to no sink at delivery time either —
+    /// there is no fall-through to the first registered binding.
+    #[test]
+    fn delivery_lookup_never_falls_through() {
+        let reg = registry();
+        assert!(reg.sink_for_uri("http://h/n").is_some());
+        assert!(reg.sink_for_uri("memory://box").is_none());
+        assert!(reg.sink_for("").is_none());
+        assert_eq!(reg.schemes(), vec!["http", "https"]);
     }
 }
 

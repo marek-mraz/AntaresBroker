@@ -27,7 +27,6 @@ icu_collator = { workspace = true }
 icu_locale_core = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # The metrics facade only — a no-op unless the broker installs a recorder,

@@ -17,6 +17,46 @@ pub const CORE_CONTEXT_URL: &str =
 /// API root path (CIM 009 clause 6.2).
 pub const API_ROOT: &str = "/ngsi-ld/v1";
 
+/// Egress key order for a served payload: every object serializes `id`
+/// then `type` first, recursively (an attribute object leads with
+/// `"type": "Property"`, a GeoJSON Feature with `id`/`type` — the order the
+/// spec's own examples print). Cosmetic only: RFC 8259 objects are unordered
+/// and CIM 009 4.5.1 mandates presence, not position. Applied ONLY at egress
+/// (responses and notifications) — internal serialization (storage, temporal
+/// diff) stays byte-stable alphabetical and must not use this.
+pub struct SpecOrder<'a>(pub &'a serde_json::Value);
+
+impl serde::Serialize for SpecOrder<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        use serde_json::Value;
+        match self.0 {
+            Value::Object(m) => {
+                let mut map = s.serialize_map(Some(m.len()))?;
+                for k in ["id", "type"] {
+                    if let Some(v) = m.get(k) {
+                        map.serialize_entry(k, &SpecOrder(v))?;
+                    }
+                }
+                for (k, v) in m {
+                    if k != "id" && k != "type" {
+                        map.serialize_entry(k, &SpecOrder(v))?;
+                    }
+                }
+                map.end()
+            }
+            Value::Array(a) => s.collect_seq(a.iter().map(SpecOrder)),
+            other => other.serialize(s),
+        }
+    }
+}
+
+/// Serialize a response or notification payload in egress key order
+/// (serializing a `Value` cannot fail).
+pub fn ordered_vec(v: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&SpecOrder(v)).unwrap_or_default()
+}
+
 /// Canonical lexicographic comparison key for a 4.6.3 DateTime: the trailing
 /// `Z` dropped and the optional seconds fraction (`.` or the request-side `,`
 /// separator) zero-padded to six digits, so string order equals temporal

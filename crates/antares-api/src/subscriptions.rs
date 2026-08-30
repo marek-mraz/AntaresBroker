@@ -289,35 +289,7 @@ pub fn normalize_subscription(
                     .ok_or_else(|| bad("endpoint.uri is required (5.2.15)".into()))?;
                 antares_model::EntityId::new(uri)
                     .map_err(|_| bad(format!("endpoint.uri is not a valid URI: {uri:?}")))?;
-                let scheme = uri.split(':').next().unwrap_or("");
-                // A scheme with no registered sink is 422 at creation.
-                #[cfg(feature = "mqtt")]
-                let supported = ["http", "https", "mqtt", "mqtts"];
-                #[cfg(not(feature = "mqtt"))]
-                let supported = ["http", "https"];
-                if !supported.contains(&scheme) {
-                    return Err(NgsiError::OperationNotSupported(format!(
-                        "unsupported endpoint scheme {scheme:?}"
-                    )));
-                }
-                #[cfg(feature = "mqtt")]
-                if scheme.starts_with("mqtt") {
-                    // 7.2: endpoint URI shape and Table 7.2-1 params validate
-                    // at creation, not at first delivery.
-                    antares_notifier::mqtt::MqttEndpoint::parse(uri)?;
-                    let pairs = ep
-                        .get("notifierInfo")
-                        .and_then(Value::as_array)
-                        .map(|ni| {
-                            ni.iter()
-                                .filter_map(|kv| {
-                                    Some((kv.get("key")?.as_str()?, kv.get("value")?.as_str()?))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    antares_notifier::mqtt::MqttParams::from_notifier_info(pairs)?;
-                }
+
                 let member_names = |key: &str| -> Vec<String> {
                     n.get(key)
                         .and_then(Value::as_array)
@@ -607,6 +579,36 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
 
 /// Validate a subscription's jsonldContext member (5.2.12): must be a
 /// dereferenceable @context — invalid value ⇒ 400, unresolvable ⇒ 504.
+/// 5.8.1.4 and 5.8.2.4: the notification endpoint has to be one this
+/// deployment can deliver to. The sink registered for the URI's scheme
+/// (6.3.8, and 7.2 for the optional MQTT binding) validates the endpoint's
+/// own syntax and its `notifierInfo`; a scheme no sink serves is input data
+/// that does not meet the requirements of the operation — BadRequestData,
+/// never a fall-through to the HTTP binding. A fragment that carries no
+/// endpoint leaves the stored one in place and has nothing to check.
+fn check_endpoint(st: &AppState, norm: &Map<String, Value>) -> Result<(), NgsiError> {
+    let Some(ep) = norm
+        .get("notification")
+        .and_then(|n| n.get("endpoint"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    let Some(uri) = ep.get("uri").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let notifier_info = ep
+        .get("notifierInfo")
+        .and_then(Value::as_array)
+        .map(|ni| {
+            ni.iter()
+                .filter_map(|kv| Some((kv.get("key")?.as_str()?, kv.get("value")?.as_str()?)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    st.sinks.require(uri, &notifier_info)
+}
+
 async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Result<(), ApiError> {
     let Some(v) = norm.get("jsonldContext") else {
         return Ok(());
@@ -642,6 +644,7 @@ pub async fn create(
         .as_object()
         .ok_or_else(|| NgsiError::BadRequestData("subscription must be a JSON object".into()))?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
+    check_endpoint(st, &norm)?;
     check_jsonld_context(st, &norm).await?;
     let id = match norm.get("id").and_then(Value::as_str) {
         Some(id) => id.to_owned(),
@@ -811,6 +814,7 @@ pub async fn update(
         }
     }
     let norm = normalize_subscription(obj, &parsed.ctx, true)?;
+    check_endpoint(st, &norm)?;
     check_jsonld_context(st, &norm).await?;
     let ts = now_iso();
     let res = st.store.mutate(&tenant, kind, id, |doc| {
@@ -1418,10 +1422,10 @@ mod tests {
 
     // ---------- 5.2.14 / 5.2.15 notification parameters ----------
 
-    /// Table 5.2.15-1 Endpoint: uri is mandatory and a valid URI; a scheme
-    /// with no registered notification binding is OperationNotSupported
-    /// (422 per Table 6.3.2-1), NOT BadRequestData; cooldown and timeout are
-    /// Numbers "Greater than 0"; accept is one of the three media types.
+    /// Table 5.2.15-1 Endpoint: uri is mandatory and a valid URI; cooldown
+    /// and timeout are Numbers "Greater than 0"; accept is one of the three
+    /// media types. Which schemes are deliverable is the sink registry's
+    /// question, answered by `check_endpoint` where the state is in hand.
     #[test]
     fn clause_5_2_15_endpoint_contract() {
         let mk = |ep: Value| sub(json!({"notification": {"endpoint": ep}}));
@@ -1432,10 +1436,6 @@ mod tests {
         assert!(norm(&mk(json!({}))).is_err(), "endpoint.uri required");
         assert!(norm(&mk(json!({"uri": "no-scheme"}))).is_err());
         assert!(norm(&mk(json!({"uri": "http://a/x\r\nX: y"}))).is_err());
-        match norm(&mk(json!({"uri": "ftp://a/x"}))) {
-            Err(NgsiError::OperationNotSupported(_)) => {}
-            other => panic!("unsupported endpoint scheme must be OperationNotSupported: {other:?}"),
-        }
         for key in ["cooldown", "timeout"] {
             for bad in [json!(0), json!(-1), json!("5")] {
                 assert!(

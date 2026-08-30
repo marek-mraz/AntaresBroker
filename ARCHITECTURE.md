@@ -42,7 +42,7 @@ above it.
 | `antares-store` | 1 400 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
 | `antares-sql` | 2 900 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
 | `antares-bus` | 840 | `ChangeEvent`, `LocalBus`, the JetStream bus, subjects | decide who consumes |
-| `antares-notifier` | 1 100 | `NotificationSink` keyed by endpoint scheme (`lib.rs:126`): http, mqtt (feature), delivery policy | match or store |
+| `antares-notifier` | 1 700 | `NotificationSink` (schemes, `parse_endpoint`, `deliver`, `network`) chosen from `SinkRegistry` by endpoint scheme: http (`http.rs`), mqtt behind the feature, delivery policy, `Outbound` | match or store |
 | `antares-api` | 40 000 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
 | `antares-broker` | 2 700 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
 | `antares-wasm` | 500 | the router under a Service Worker, OPFS-backed file store | diverge from the native router |
@@ -111,8 +111,10 @@ store write commits
      DELIVERY_SLOTS (64)
  → deliver_as: bookkeeping writeback under the row lock (timesSent,
    lastNotification, status), mirror updated from that document,
-   egress check + breaker, NotificationSink by scheme, retries as
-   transport (ADR-0015), dead letter on exhaustion
+   egress check + breaker for a binding that opens a socket, the
+   NotificationSink the registry holds for the endpoint's scheme (never a
+   fall-through, ADR-0016), retries as transport (ADR-0015), dead letter on
+   exhaustion
 ```
 
 With `ANTARES_BUS=nats` (`broker/src/wiring.rs`): the api role writes an
@@ -207,7 +209,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | an error status | `antares-model` `NgsiError` | Table 6.3.2-1 in the doc comment |
 | a cap | `bounds.rs` + env key + `docs/src/configuration.md` | `/q/health` test |
 | a store backend | implement both driver traits in a new crate | `StoreMode` in `antares-sql/src/lib.rs`, `ANTARES_STORE` parsing, a CI cell |
-| a notification transport | `NotificationSink` impl in `antares-notifier` | scheme registration in `deliver_as` |
+| a notification transport | `NotificationSink` impl (own crate, or `antares-notifier`) | `SinkRegistry::register` at the composition root; `network()` false only if it opens no socket |
 | outbound HTTP anywhere | `antares_jsonld::client_builder` only | egress policy and breaker |
 | a schema change | a new numbered migration; never edit an applied one | RLS policy + `FORCE` on the table |
 | federation behaviour | `federation.rs` (`forward` is the one outbound chokepoint) | 4.3.6 narrowing is spec-mandated; keep it |

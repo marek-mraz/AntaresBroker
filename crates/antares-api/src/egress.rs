@@ -116,12 +116,28 @@ impl Egress {
     /// scheme allowlist + private-range deny. `Err` is a reason
     /// string for the caller\'s log/207 detail.
     pub async fn check_url(&self, url: &str) -> Result<(), String> {
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad URL {url}: {e}"))?;
-        match parsed.scheme() {
-            "http" | "https" | "mqtt" | "mqtts" => {}
+        let scheme = reqwest::Url::parse(url)
+            .map(|u| u.scheme().to_owned())
+            .map_err(|e| format!("bad URL {url}: {e}"))?;
+        match scheme.as_str() {
+            "http" | "https" => {}
             other => return Err(format!("scheme {other:?} is not allowed for egress")),
         }
-        let host = parsed.host_str().unwrap_or_default().to_owned();
+        self.check_destination(url).await
+    }
+
+    /// The host policy for the destination of any notification binding. The
+    /// scheme belongs to the sink (6.3.8, clause 7, or one a deployment
+    /// registered); the host and port belong here, and every private-range,
+    /// metadata-address and allowlist rule applies unchanged. A URI with no
+    /// host names no destination that can be cleared, so it is refused.
+    pub async fn check_destination(&self, url: &str) -> Result<(), String> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad URL {url}: {e}"))?;
+        let host = parsed
+            .host_str()
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| format!("endpoint {url} names no host"))?
+            .to_owned();
         let port = parsed.port_or_known_default().unwrap_or(443);
         self.policy.check_host(&host, port).await
     }
@@ -204,7 +220,25 @@ mod tests {
             allow_private: true,
         });
         assert!(allow.check_url("http://127.0.0.1:9090/x").await.is_ok());
-        assert!(allow.check_url("mqtt://localhost:1883/t").await.is_ok());
+        assert!(
+            allow.check_url("mqtt://localhost:1883/t").await.is_err(),
+            "@context fetches and federation forwards are HTTP; a notification \
+             binding's own scheme goes through check_destination"
+        );
+        // A binding's own scheme is the sink's business, but its host is
+        // still the policy's: a plugin binding cannot reach a denied host,
+        // and an endpoint with no host is refused outright.
+        assert!(allow
+            .check_destination("wss://localhost:9000/n")
+            .await
+            .is_ok());
+        assert!(e.check_destination("wss://127.0.0.1:9000/n").await.is_err());
+        assert!(e
+            .check_destination("wss://169.254.169.254/latest")
+            .await
+            .is_err());
+        assert!(allow.check_destination("file:///etc/passwd").await.is_err());
+        assert!(allow.check_destination("memory://").await.is_err());
     }
 
     /// 5.2.34 + 5.5.10: the cooldown a failing registration earns belongs to

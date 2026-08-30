@@ -86,32 +86,11 @@ where
     wasm_bindgen_futures::spawn_local(fut);
 }
 
-/// Wasm only: a page-registered notification sink. A browser page has no
-/// inbound socket to receive notification callbacks on, so a subscription
-/// whose endpoint matches the registered URL prefix is delivered to page JS
-/// instead of the network. Endpoints outside the prefix still leave via
-/// fetch — the Node tier registers nothing and keeps pure HTTP delivery.
+/// The browser build's notification channel: re-exported from the HTTP
+/// binding, where it belongs — the page sink is how that binding delivers
+/// when the runtime has no inbound socket.
 #[cfg(target_arch = "wasm32")]
-pub mod page_sink {
-    use std::sync::OnceLock;
-
-    type Sink = Box<dyn Fn(&str, &[u8]) -> bool + Send + Sync>;
-    type Hook = (String, Sink);
-    static HOOK: OnceLock<Hook> = OnceLock::new();
-
-    /// Register the sink (once per module instance).
-    pub fn set(prefix: String, h: Sink) {
-        let _ = HOOK.set((prefix, h));
-    }
-
-    /// True when the page sink claimed (and thus delivered) this endpoint.
-    pub fn try_deliver(url: &str, body: &[u8]) -> bool {
-        match HOOK.get() {
-            Some((prefix, h)) if url.starts_with(prefix.as_str()) => h(url, body),
-            _ => false,
-        }
-    }
-}
+pub use antares_notifier::http::page_sink;
 
 use antares_model::{NgsiError, TenantId, API_ROOT};
 use axum::http::{HeaderMap, StatusCode};
@@ -629,6 +608,10 @@ async fn health(
     body["limits"] = state.limits.snapshot();
     // History events a driver failed to record after the write stood.
     body["temporalDrainErrors"] = history::drain_errors().into();
+    // Endpoint schemes this deployment can deliver notifications to: the
+    // registered bindings (6.3.8, clause 7, and any a deployment added).
+    // A subscription naming a scheme absent here is refused at creation.
+    body["notificationSchemes"] = state.sinks.schemes().into();
     // Notifications the delivery policy gave up on (this process, since start).
     body["deadLetters"] = notify::dead_letters_written().into();
     // Changes the bounded matcher queue dropped (this process, since start).
@@ -1017,6 +1000,34 @@ mod tests {
 
     /// /q/health names the temporal backend next to the store: the store's
     /// own mode when one instance serves both seams, `none` for NoTemporal.
+    /// The deliverable endpoint schemes are the registered bindings and
+    /// nothing else, so a client can tell what a subscription may name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn health_lists_the_registered_notification_schemes() {
+        let st = AppState::new("h".into());
+        let (code, body) = health(axum::extract::State(st)).await;
+        assert_eq!(code, StatusCode::OK);
+        let schemes = body.0["notificationSchemes"]
+            .as_array()
+            .expect("notificationSchemes")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            schemes.contains(&"http") && schemes.contains(&"https"),
+            "{schemes:?}"
+        );
+        #[cfg(feature = "mqtt")]
+        assert!(
+            schemes.contains(&"mqtt") && schemes.contains(&"mqtts"),
+            "{schemes:?}"
+        );
+        assert!(
+            !schemes.contains(&"ws"),
+            "only registered bindings: {schemes:?}"
+        );
+    }
+
     #[tokio::test]
     async fn health_names_the_temporal_backend() {
         let body = body_json(

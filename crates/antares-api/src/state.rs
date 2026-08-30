@@ -70,9 +70,9 @@ pub struct AppState {
     /// Federation-forwarding client — longer deadline: the ETSI mock replies
     /// to unstubbed forwards only when the robot side wakes (up to ~5 s).
     pub fed_http: antares_jsonld::HttpClient,
-    /// Clause 7 MQTT delivery: bounded pooled sink.
-    #[cfg(feature = "mqtt")]
-    pub mqtt: Arc<antares_notifier::mqtt::MqttSink>,
+    /// Notification bindings by `endpoint.uri` scheme (6.3.8, 7.2). The
+    /// only way a delivery transport is chosen; `with_sink` adds one.
+    pub sinks: Arc<antares_notifier::SinkRegistry>,
     /// Bounds-wall rejection counters (exported by /q/health).
     pub limits: Arc<crate::bounds::LimitStats>,
     /// Allocator stats provider (set by the broker; None in tests/wasm).
@@ -280,6 +280,17 @@ impl AppState {
                 }
             });
         let temporal_mode = temporal.supported().then_some(store_mode);
+        // 6.3.8 is the mandatory binding; clause 7's MQTT one is optional and
+        // registers only when compiled in. Both go through the registry, so
+        // notification delivery never names a transport.
+        let http = outbound_client(
+            egress_policy,
+            std::time::Duration::from_secs(5 * slow_factor()),
+        );
+        let mut sinks = antares_notifier::SinkRegistry::default();
+        sinks.register(Box::new(antares_notifier::HttpSink::new(http.clone())));
+        #[cfg(feature = "mqtt")]
+        sinks.register(Box::new(antares_notifier::mqtt::MqttSink::default()));
         Self {
             store,
             temporal,
@@ -291,16 +302,12 @@ impl AppState {
             host_alias,
             default_limit: 1000,
             max_limit: 1000,
-            http: outbound_client(
-                egress_policy,
-                std::time::Duration::from_secs(5 * slow_factor()),
-            ),
+            http: http.clone(),
             fed_http: outbound_client(
                 egress_policy,
                 std::time::Duration::from_secs(8 * slow_factor()),
             ),
-            #[cfg(feature = "mqtt")]
-            mqtt: Arc::new(antares_notifier::mqtt::MqttSink::default()),
+            sinks: Arc::new(sinks),
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
             bus_stats: None,
@@ -320,6 +327,20 @@ impl AppState {
             snapshot_cap: 1024,
             delivery: antares_notifier::DeliveryPolicy::default(),
         }
+    }
+
+    /// Register one more notification binding (6.3.8). A deployment adds a
+    /// sink for a scheme this workspace does not ship; endpoints naming that
+    /// scheme then validate and deliver through it. Call before the state is
+    /// shared — a clone already handed out keeps the registry it was made
+    /// with.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Box<dyn antares_notifier::NotificationSink>) -> Self {
+        match Arc::get_mut(&mut self.sinks) {
+            Some(reg) => reg.register(sink),
+            None => tracing::warn!("sink registry already shared; binding not registered"),
+        }
+        self
     }
 
     /// Temporal auto-recording happens synchronously in the write path in

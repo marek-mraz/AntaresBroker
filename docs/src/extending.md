@@ -74,11 +74,21 @@ ANTARES_TEMPORAL: unknown backend "mongo"; built with memory|file|postgres|times
 ### Notification sinks
 
 `NotificationSink` (`crates/antares-notifier/src/lib.rs`) is the delivery
-seam. A sink declares the URI schemes it serves; `SinkRegistry` maps
-`endpoint.uri` schemes to sinks, and a subscription naming an unregistered
-scheme is rejected when it is created. HTTP is always registered; MQTT
-registers behind the `mqtt` feature. A WebSocket binding would be a
-sink registration plus a router merge, with no change to a core crate.
+seam. A sink declares the URI schemes it serves, validates its own endpoints
+at subscription creation (`parse_endpoint`), and delivers one prepared
+notification (`deliver`). `SinkRegistry` keys sinks by scheme and is the only
+way a binding is chosen: a subscription naming a scheme no sink serves is
+rejected when it is created, with `BadRequestData` (400), and a stored row
+that names one is dropped rather than delivered through some other binding.
+HTTP is always registered; MQTT registers behind the `mqtt` feature. Add one
+with `AppState::with_sink`. A WebSocket binding would be a sink registration
+plus a router merge, with no change to a core crate.
+
+The egress policy — allowlist, private-range and metadata-address deny,
+per-destination circuit breaker — runs in the caller before `deliver`, so a
+sink cannot step around it. A sink that opens no socket says so by returning
+`false` from `network()`; every binding shipped here returns the default
+`true`, and a unit test holds that.
 
 ### How to add a storage backend
 

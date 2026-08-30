@@ -1916,9 +1916,16 @@ async fn deliver_as(
         }
         return;
     }
-    let is_mqtt = uri.starts_with("mqtt://") || uri.starts_with("mqtts://");
-    if !uri.starts_with("http") && !is_mqtt {
-        return; // creation rejects unknown schemes with 422; belt only
+    // 6.3.8: the binding comes from the registry and nowhere else. Creation
+    // rejects an endpoint whose scheme no sink serves, so a stored row that
+    // still names one was hand-edited — it is dropped, never delivered
+    // through some other binding.
+    if st.sinks.sink_for_uri(uri).is_none() {
+        tracing::warn!(
+            "subscription {sub_id} endpoint {} has no registered binding",
+            redact_userinfo(uri)
+        );
+        return;
     }
     // endpoint.cooldown — drop (never queue) while the window is open.
     // Before any bookkeeping: a suppressed notification was never sent, so
@@ -1933,7 +1940,10 @@ async fn deliver_as(
     // instant when the last notification has been sent") must not move
     // either. `is_open` returning false IS the half-open probe, so the
     // check stays exactly once per attempt.
-    if st.egress.is_open(uri) {
+    // A binding that opens no socket has no destination for the policy or
+    // the breaker to judge; every network binding is policed below.
+    let policed = st.sinks.sink_for_uri(uri).is_some_and(|s| s.network());
+    if policed && st.egress.is_open(uri) {
         tracing::debug!(
             "notification to {} short-circuited (breaker open)",
             redact_userinfo(uri)
@@ -1993,20 +2003,7 @@ async fn deliver_as(
         }
         body["data"] = fc;
     }
-    let receiver_info: Vec<(String, String)> = ep
-        .get("receiverInfo")
-        .and_then(Value::as_array)
-        .map(|ri| {
-            ri.iter()
-                .filter_map(|kv| {
-                    Some((
-                        kv.get("key")?.as_str()?.to_owned(),
-                        kv.get("value")?.as_str()?.to_owned(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let receiver_info = kv_pairs(ep.get("receiverInfo"));
 
     // 6.3.22: a subscription living under a snapshot's synthetic tenant
     // notifies with the NGSILD-Snapshot header and the OWNER tenant — the
@@ -2016,75 +2013,24 @@ async fn deliver_as(
         None => (tenant.clone(), None),
     };
 
-    // Per-binding send, prepared BEFORE the bookkeeping writeback so the
-    // optimistic stamp covers only the in-flight attempt (046_12_01 race).
-    let outbound = if is_mqtt {
-        #[cfg(feature = "mqtt")]
-        {
-            use antares_notifier::mqtt::{build_message, MqttEndpoint, MqttParams};
-            // Creation validated both (5.2.15 / Table 7.2-1); a parse failure
-            // here means a hand-edited row — log, count as delivery failure.
-            let parsed = MqttEndpoint::parse(uri).and_then(|e| {
-                let pairs = ep
-                    .get("notifierInfo")
-                    .and_then(Value::as_array)
-                    .map(|ni| {
-                        ni.iter()
-                            .filter_map(|kv| {
-                                Some((kv.get("key")?.as_str()?, kv.get("value")?.as_str()?))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                Ok((e, MqttParams::from_notifier_info(pairs)?))
-            });
-            match parsed {
-                Ok((endpoint, params)) => {
-                    // 7.2 Table 7.2-2: header-borne info moves into "metadata".
-                    let link = link_header_value(ctx);
-                    let mut ri = receiver_info.clone();
-                    if hdr_tenant.as_str() != "default" {
-                        ri.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().to_owned()));
-                    }
-                    if let Some(sid) = &snapshot_id {
-                        ri.push(("NGSILD-Snapshot".into(), sid.clone()));
-                    }
-                    let msg = build_message(&body, accept, Some(&link), &ri);
-                    Outbound::Mqtt(endpoint, params, crate::negotiate::ordered_vec(&msg))
-                }
-                Err(_) => {
-                    // The parse error embeds the endpoint URI, which can carry
-                    // credentials in its userinfo.
-                    tracing::warn!(
-                        "mqtt endpoint of subscription {sub_id} unusable: {}",
-                        redact_userinfo(uri)
-                    );
-                    return;
-                }
-            }
-        }
-        #[cfg(not(feature = "mqtt"))]
-        {
-            return; // no sink compiled: creation already answered 422
-        }
-    } else {
-        let mut headers: Vec<(String, String)> = Vec::new();
-        if accept == "application/ld+json" {
-            headers.push(("Content-Type".into(), "application/ld+json".into()));
-        } else {
-            // application/json and application/geo+json (5.3.1) both carry
-            // the @context via the Link header (6.3.5)
-            headers.push(("Content-Type".into(), accept.into()));
-            headers.push(("Link".into(), link_header_value(ctx)));
-        }
-        headers.extend(receiver_info.iter().cloned());
-        if hdr_tenant.as_str() != "default" {
-            headers.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().into()));
-        }
-        if let Some(sid) = &snapshot_id {
-            headers.push(("NGSILD-Snapshot".into(), sid.clone()));
-        }
-        Outbound::Http(headers, crate::negotiate::ordered_vec(&body))
+    // Prepared BEFORE the bookkeeping writeback so the optimistic stamp
+    // covers only the in-flight attempt (046_12_01 race). The parts are
+    // transport-neutral: the sink registered for the endpoint's scheme turns
+    // them into HTTP headers (6.3.8) or an MQTT metadata object (Table
+    // 7.2-2).
+    let mut info = receiver_info;
+    if hdr_tenant.as_str() != "default" {
+        info.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().to_owned()));
+    }
+    if let Some(sid) = &snapshot_id {
+        info.push(("NGSILD-Snapshot".into(), sid.clone()));
+    }
+    let outbound = Outbound {
+        body,
+        accept: accept.to_owned(),
+        link: link_header_value(ctx),
+        receiver_info: info,
+        notifier_info: kv_pairs(ep.get("notifierInfo")),
     };
     // Bookkeeping BEFORE the send (5.8.6/5.2.14.2: lastNotification is the
     // instant the notification is sent). The ETSI mock unblocks the test the
@@ -2131,16 +2077,17 @@ async fn deliver_as(
     // A refusal is a delivery failure for bookkeeping (status "failed",
     // lastSuccess rolled back below) but never breaker state: the policy
     // verdict says nothing about the endpoint's health.
-    let refused = match st.egress.check_url(uri).await {
-        Ok(()) => false,
-        Err(e) => {
-            tracing::warn!(
-                "notification endpoint {} refused by egress policy: {e}",
-                redact_userinfo(uri)
-            );
-            true
-        }
-    };
+    let refused = policed
+        && match st.egress.check_destination(uri).await {
+            Ok(()) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "notification endpoint {} refused by egress policy: {e}",
+                    redact_userinfo(uri)
+                );
+                true
+            }
+        };
     // (delivered, timed_out): only a TIMEOUT-class failure feeds the breaker
     // — that protects against peers that eat the deadline. An endpoint
     // that ANSWERS (any status) is alive, costs only its own response time,
@@ -2156,7 +2103,7 @@ async fn deliver_as(
         Ok(()) => (true, false),
         Err((t, _)) => (false, *t),
     };
-    if !refused {
+    if policed && !refused {
         if ok {
             st.egress.record_success(uri);
         } else if timed_out {
@@ -2167,9 +2114,14 @@ async fn deliver_as(
             st.egress.record_success(uri);
         }
     }
-    // Delivery counters by sink scheme (facade — no-op without the
-    // broker's recorder).
-    let scheme = if is_mqtt { "mqtt" } else { "http" };
+    // Delivery counters by binding (facade — no-op without the broker's
+    // recorder). The label is the sink's first scheme, so the two members of
+    // a family share one series.
+    let scheme = st
+        .sinks
+        .sink_for_uri(uri)
+        .and_then(|s| s.schemes().first().copied())
+        .unwrap_or("unknown");
     if ok {
         metrics::counter!("antares_notifications_sent_total", "scheme" => scheme).increment(1);
     } else {
@@ -2230,20 +2182,26 @@ async fn deliver_as(
     }
 }
 
-/// One prepared notification, sendable any number of times: the HTTP form
-/// carries its headers as data so a retry or a dead-letter replay rebuilds
-/// the identical request.
-pub(crate) enum Outbound {
-    Http(Vec<(String, String)>, Vec<u8>),
-    #[cfg(feature = "mqtt")]
-    Mqtt(
-        antares_notifier::mqtt::MqttEndpoint,
-        antares_notifier::mqtt::MqttParams,
-        Vec<u8>,
-    ),
+/// A `KeyValuePair[]` member of `endpoint` (Table 5.2.15-1) as owned pairs.
+/// A member that is not an array of well-formed pairs contributes nothing:
+/// 5.2.12 validation at creation already refused a malformed one.
+fn kv_pairs(v: Option<&Value>) -> Vec<(String, String)> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|kv| {
+                    Some((
+                        kv.get("key")?.as_str()?.to_owned(),
+                        kv.get("value")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-/// One attempt on the wire. `Err((timed_out, why))`: only a timeout-class
+/// One attempt on the wire, through the binding the registry holds for the
+/// endpoint's scheme (6.3.8). `Err((timed_out, why))`: only a timeout-class
 /// failure feeds the breaker — an endpoint that answers is alive.
 async fn send_outbound(
     st: &AppState,
@@ -2251,48 +2209,22 @@ async fn send_outbound(
     timeout_ms: u32,
     outbound: &Outbound,
 ) -> Result<(), (bool, String)> {
-    match outbound {
-        Outbound::Http(headers, bytes) => {
-            // Wasm: the page sink takes matching endpoints — a page
-            // cannot listen on a socket, so this IS its delivery channel.
-            #[cfg(target_arch = "wasm32")]
-            if crate::page_sink::try_deliver(uri, bytes) {
-                return Ok(());
-            }
-            let mut req = st.http.post(uri);
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-            // endpoint.timeout rides on the request natively (io_deadline is
-            // a passthrough there — the client's 5 s total alone would let a
-            // stalled endpoint eat the full cap per delivery); stretched
-            // under the sanitizer like the client's own deadlines.
-            #[cfg(not(target_arch = "wasm32"))]
-            let req = req.timeout(std::time::Duration::from_millis(
-                u64::from(timeout_ms) * crate::state::slow_factor(),
-            ));
-            // One Send unit so the admin replay handler stays Send on wasm32.
-            antares_jsonld::http_interaction(async move {
-                // endpoint.timeout (Table 5.2.15-1), clamped
-                match antares_jsonld::io_deadline(req.body(bytes.clone()).send(), timeout_ms).await
-                {
-                    Some(Ok(r)) if r.status().is_success() => Ok(()),
-                    Some(Ok(r)) => Err((false, format!("HTTP {}", r.status().as_u16()))),
-                    Some(Err(e)) => Err((e.is_timeout(), redact_userinfo(&e.to_string()))),
-                    None => Err((true, "timeout".into())),
-                }
-            })
-            .await
-        }
-        #[cfg(feature = "mqtt")]
-        Outbound::Mqtt(endpoint, params, bytes) => {
-            match st.mqtt.deliver(endpoint, *params, bytes).await {
-                Ok(()) => Ok(()),
-                // broker/socket-level failure — keep the timeout guard
-                Err(e) => Err((true, e.to_string())),
-            }
-        }
-    }
+    let Some(sink) = st.sinks.sink_for_uri(uri) else {
+        return Err((
+            false,
+            format!(
+                "no notification binding registered for {}",
+                redact_userinfo(uri)
+            ),
+        ));
+    };
+    sink.deliver(
+        uri,
+        outbound,
+        std::time::Duration::from_millis(u64::from(timeout_ms)),
+    )
+    .await
+    .map_err(|e| (e.timed_out, e.message))
 }
 
 /// Dead letters written by this process since start (`/q/health`
@@ -2413,19 +2345,12 @@ fn dead_letter(
         "firstAt": first_at,
         "lastAt": now_iso(),
     });
-    match outbound {
-        Outbound::Http(headers, bytes) => {
-            doc["binding"] = json!("http");
-            doc["headers"] = json!(headers);
-            doc["payload"] = serde_json::from_slice(bytes).unwrap_or(Value::Null);
-        }
-        #[cfg(feature = "mqtt")]
-        Outbound::Mqtt(_, params, bytes) => {
-            doc["binding"] = json!("mqtt");
-            doc["mqtt"] = json!({"qos": params.qos, "v5": params.v5});
-            doc["payload"] = serde_json::from_slice(bytes).unwrap_or(Value::Null);
-        }
-    }
+    doc["binding"] = json!(antares_notifier::SinkRegistry::scheme_of(uri));
+    doc["payload"] = outbound.body.clone();
+    doc["accept"] = json!(outbound.accept);
+    doc["link"] = json!(outbound.link);
+    doc["receiverInfo"] = json!(outbound.receiver_info);
+    doc["notifierInfo"] = json!(outbound.notifier_info);
     doc
 }
 
@@ -2433,51 +2358,21 @@ fn dead_letter(
 /// (the caller deletes the letter); `Err` carries the failure text.
 pub(crate) async fn replay_dead_letter(st: &AppState, letter: &Value) -> Result<(), String> {
     let uri = letter["uri"].as_str().ok_or("dead letter without uri")?;
-    let bytes = crate::negotiate::ordered_vec(&letter["payload"]);
     let timeout_ms = letter["timeoutMs"].as_u64().unwrap_or(5_000) as u32;
-    let outbound = match letter["binding"].as_str() {
-        Some("http") => {
-            let headers =
-                serde_json::from_value::<Vec<(String, String)>>(letter["headers"].clone())
-                    .map_err(|e| format!("dead letter headers unreadable: {e}"))?;
-            Outbound::Http(headers, bytes)
-        }
-        #[cfg(feature = "mqtt")]
-        Some("mqtt") => {
-            use antares_notifier::mqtt::{MqttEndpoint, MqttParams};
-            let endpoint = MqttEndpoint::parse(uri).map_err(|e| e.to_string())?;
-            let params = MqttParams {
-                qos: letter["mqtt"]["qos"].as_u64().unwrap_or(0) as u8,
-                v5: letter["mqtt"]["v5"].as_bool().unwrap_or(true),
-            };
-            Outbound::Mqtt(endpoint, params, bytes)
-        }
-        other => {
-            return Err(format!(
-                "dead letter binding {other:?} not deliverable here"
-            ))
-        }
-    };
+    let outbound = Outbound::from_dead_letter(letter)?;
     // the egress policy of the moment applies, exactly as for a fresh send
-    st.egress.check_url(uri).await.map_err(|e| e.to_string())?;
+    if st.sinks.sink_for_uri(uri).is_some_and(|s| s.network()) {
+        st.egress
+            .check_destination(uri)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     send_outbound(st, uri, timeout_ms, &outbound)
         .await
         .map_err(|(_, e)| e)
 }
 
-/// Endpoint URIs may carry credentials in the authority's userinfo
-/// (`mqtt[s]://username:password@host`, clause 7.1) — strip everything
-/// between the `//` and the authority's `@` before the URI reaches a log.
-pub(crate) fn redact_userinfo(uri: &str) -> String {
-    if let Some(scheme_end) = uri.find("//") {
-        let rest = &uri[scheme_end + 2..];
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        if let Some(at) = rest[..authority_end].rfind('@') {
-            return format!("{}{}", &uri[..scheme_end + 2], &rest[at + 1..]);
-        }
-    }
-    uri.to_owned()
-}
+pub(crate) use antares_notifier::{redact_userinfo, Outbound};
 
 /// The matcher reads subscriptions from the
 /// SubMirror, so every notification bookkeeping writeback must be applied
@@ -2572,22 +2467,6 @@ mod endpoint_tests {
 
     fn ep(v: Value) -> serde_json::Map<String, Value> {
         v.as_object().expect("map").clone()
-    }
-
-    /// Endpoint URIs may carry credentials (mqtt[s]://user:pass@host, 7.1);
-    /// log lines must never leak them.
-    #[test]
-    fn log_redaction_strips_uri_userinfo() {
-        let red = redact_userinfo("mqtts://alice:s3cret@broker:8883/topic");
-        assert_eq!(red, "mqtts://broker:8883/topic");
-        assert!(!red.contains("s3cret"));
-        assert!(!red.contains("alice"));
-        assert_eq!(
-            redact_userinfo("http://host:9090/notify"),
-            "http://host:9090/notify"
-        );
-        // an '@' beyond the authority is path data, not userinfo
-        assert_eq!(redact_userinfo("http://h/p@x"), "http://h/p@x");
     }
 
     /// Clause 4.21 + Table 5.2.14.1-1: notification `pick`/`omit` are
@@ -3823,9 +3702,11 @@ mod delivery_policy_tests {
         assert!(l["id"]
             .as_str()
             .is_some_and(|i| i.starts_with("urn:ngsi-ld:DeadLetter:")));
-        assert!(l["headers"]
-            .as_array()
-            .is_some_and(|h| h.iter().any(|kv| kv[0] == "Content-Type")));
+        // the letter carries the endpoint members the binding renders from,
+        // so a replay produces the identical request
+        assert_eq!(l["accept"], json!("application/json"));
+        assert!(l["link"].as_str().is_some_and(|v| v.contains("rel=")));
+        assert!(l["receiverInfo"].is_array());
         assert!(dead_letters_written() > before);
         let n = notification(&st, &t, SUB_ID);
         assert_eq!(n["timesSent"], json!(1));

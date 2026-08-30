@@ -200,10 +200,12 @@ capped, DNS pinned, response size capped, and a per-host breaker that
 pauses a failing endpoint. Private and loopback destinations are allowed
 by default; `ANTARES_EGRESS_ALLOW_PRIVATE=false` denies them for an
 internet-facing deployment, and a refused delivery is booked as a failure.
-Any other scheme is refused when the subscription is created:
+A scheme no notification binding serves is refused when the subscription is
+created — the endpoint is input data that does not meet the requirements of
+the operation (5.8.1.4, Table 5.5.2-1), so the error is BadRequestData:
 
 ```json
-{"detail":"unsupported endpoint scheme \"ftp\"","status":422,"title":"OperationNotSupported",...}
+{"detail":"no notification binding registered for endpoint scheme \"ftp\" (6.3.8)","status":400,"title":"Bad Request Data",...}
 ```
 
 ## MQTT endpoints

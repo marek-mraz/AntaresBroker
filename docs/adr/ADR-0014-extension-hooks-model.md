@@ -1,6 +1,6 @@
 # ADR-0014: extension hooks — fixed phases, batch granularity
 
-Date: 2026-08-24 · Status: accepted
+Date: 2026-08-24 · Status: accepted; the notification-sink paragraph superseded by ADR-0016
 
 ## Context
 
