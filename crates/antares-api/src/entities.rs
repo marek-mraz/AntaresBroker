@@ -45,9 +45,18 @@ pub fn stamp_new(doc: &mut Value, ts: &str) {
     }
 }
 
-/// 5.2.2: createdAt/modifiedAt are server-generated on every Attribute
-/// instance and its sub-Attributes; a client-provided value is ignored.
-fn stamp_instances(v: &mut Value, ts: &str) {
+/// Stamp one Attribute's instances, and their sub-Attributes, with the
+/// 4.8 timestamps: createdAt and modifiedAt are "the temporal Property at
+/// which the Entity, Property or Relationship was entered into"/"last
+/// modified in an NGSI-LD system", a sub-Property is a Property, and the
+/// value is server-generated — whatever the client sent is overwritten.
+/// Every write path that brings a new Attribute in uses this one: 5.6.1
+/// through `stamp_new`, 5.6.2 and 5.6.3 through `attrs.rs`, so the served
+/// representation does not depend on which operation wrote the Attribute.
+/// The temporal write path stamps differently (`temporal::stamp_instances`):
+/// there an instance is the unit of history and carries an instanceId, and
+/// sub-Attributes are part of the instance, not stamped separately.
+pub(crate) fn stamp_instances(v: &mut Value, ts: &str) {
     if let Some(arr) = v.as_array_mut() {
         for inst in arr {
             if let Some(o) = inst.as_object_mut() {

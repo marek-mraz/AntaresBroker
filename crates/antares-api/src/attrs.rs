@@ -186,7 +186,7 @@ async fn append_attrs_inner(
                     continue;
                 }
                 let mut incoming = v.clone();
-                stamp_new_attr(&mut incoming, &ts);
+                crate::entities::stamp_instances(&mut incoming, &ts);
                 match target.get_mut(k) {
                     None => {
                         target.insert(k.clone(), incoming);
@@ -497,17 +497,6 @@ fn combine_attr_parts(
     )
 }
 
-fn stamp_new_attr(v: &mut Value, ts: &str) {
-    if let Some(arr) = v.as_array_mut() {
-        for inst in arr {
-            if let Some(o) = inst.as_object_mut() {
-                o.insert("createdAt".into(), Value::String(ts.to_owned()));
-                o.insert("modifiedAt".into(), Value::String(ts.to_owned()));
-            }
-        }
-    }
-}
-
 /// Merge incoming instances into an existing instance array by datasetId.
 /// Deletion-marker instances (urn:ngsi-ld:null) remove the matched instance.
 /// Returns false when nothing was applied (noOverwrite and all existed).
@@ -650,7 +639,7 @@ async fn update_attrs_inner(
                     continue;
                 }
                 let mut incoming = v.clone();
-                stamp_new_attr(&mut incoming, &ts);
+                crate::entities::stamp_instances(&mut incoming, &ts);
                 match target.get_mut(k) {
                     // 5.6.2 + 011_01_03: unknown attributes are appended silently
                     None => {
@@ -1651,6 +1640,75 @@ mod attr_name_and_via_paths {
             hits.load(Ordering::SeqCst),
             0,
             "registrations dropped by the Via chain must not be contacted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_8 {
+    use serde_json::{json, Value};
+
+    const TS: &str = "2026-08-30T10:00:00.000Z";
+
+    /// 4.8: createdAt and modifiedAt are the times at which "the Entity,
+    /// Property or Relationship" entered and was last modified in an NGSI-LD
+    /// system. A sub-Property is a Property, so an Attribute arriving through
+    /// 5.6.2/5.6.3 is stamped to the same depth as one arriving through
+    /// 5.6.1 — the served representation cannot depend on which operation
+    /// wrote the Attribute.
+    #[test]
+    fn an_appended_attribute_is_stamped_to_the_same_depth_as_a_created_one() {
+        let attr = json!([{
+            "type": "Property",
+            "value": 21,
+            "unitCode": "CEL",
+            "https://example.org/accuracy": [{
+                "type": "Property",
+                "value": 0.5,
+                "https://example.org/basis": [{"type": "Property", "value": "spec"}]
+            }],
+            "https://example.org/provider": [{
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Sensor:1"
+            }]
+        }]);
+        let mut appended = attr.clone();
+        crate::entities::stamp_instances(&mut appended, TS);
+
+        // what 5.6.1 Create Entity produces for the same attribute
+        let mut created = json!({
+            "id": "urn:ngsi-ld:Room:1",
+            "type": "Room",
+            "https://example.org/temperature": attr
+        });
+        crate::entities::stamp_new(&mut created, TS);
+        assert_eq!(
+            appended, created["https://example.org/temperature"],
+            "an appended attribute must carry the timestamps a created one carries"
+        );
+
+        // and spelled out, so the shape is not merely equal to a wrong shape
+        let inst = &appended[0];
+        assert_eq!(inst["createdAt"], TS);
+        assert_eq!(inst["modifiedAt"], TS);
+        let acc = &inst["https://example.org/accuracy"][0];
+        assert_eq!(acc["createdAt"], TS, "sub-Property createdAt");
+        assert_eq!(acc["modifiedAt"], TS, "sub-Property modifiedAt");
+        assert_eq!(
+            acc["https://example.org/basis"][0]["createdAt"], TS,
+            "sub-Property of a sub-Property"
+        );
+        assert_eq!(
+            appended[0]["https://example.org/provider"][0]["createdAt"], TS,
+            "sub-Relationship createdAt"
+        );
+        // 4.8 NOTE 1: a TemporalProperty is not reified — the members that
+        // carry the Attribute's own value are left exactly as they arrived
+        assert_eq!(inst["value"], 21);
+        assert_eq!(inst["unitCode"], "CEL");
+        assert!(
+            !matches!(inst["unitCode"], Value::Array(_)),
+            "a reserved member is never walked as an instance array"
         );
     }
 }
