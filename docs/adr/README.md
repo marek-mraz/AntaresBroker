@@ -18,10 +18,11 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0010](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0010-egress-allow-private-by-default.md) | Private-range egress allowed by default | accepted, implemented |
 | [ADR-0011](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0011-tenant-specific-context-source-alias.md) | The Via pseudonym identifies a (Context Source, Tenant) pair | accepted, implemented |
 | [ADR-0012](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0012-durable-internal-state-doc-kinds.md) | Internal broker state lives in the store as doc kinds, keyed under reserved tenants | accepted, implemented |
-| [ADR-0013](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0013-storage-drivers.md) | storage drivers — current-state and temporal as separate traits | accepted (supersedes the enum half of ADR-0005; |
+| [ADR-0013](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0013-storage-drivers.md) | storage drivers — current-state and temporal as separate traits | accepted; supersedes the enum half of ADR-0005; the driver-identity consequence superseded by ADR-0017 |
 | [ADR-0014](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0014-extension-hooks-model.md) | extension hooks — fixed phases, batch granularity | accepted; sink paragraph superseded by ADR-0016 |
 | [ADR-0015](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0015-notification-delivery-policy.md) | Notification delivery policy: one attempt by default, retries as transport, dead letters in the store | accepted, implemented |
 | [ADR-0016](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0016-notification-bindings-behind-the-sink-registry.md) | Notification bindings behind the sink registry | accepted, implemented |
+| [ADR-0017](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0017-drivers-are-named-not-enumerated.md) | A driver is identified by its name, not by an enum value | accepted, implemented |
 
 ## Format
 

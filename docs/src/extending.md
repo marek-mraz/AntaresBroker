@@ -9,7 +9,7 @@ marshalling round per value.
 
 | layer | what it is | how it is chosen |
 |---|---|---|
-| Component drivers | storage, temporal history, notification sinks, the event bus, the HTTP surfaces beside the API root | a name in the environment at startup |
+| Component drivers | storage, temporal history, notification sinks, the HTTP surfaces beside the API root | a name in the environment at startup |
 | Lifecycle hooks | five named phases in the request lifecycle | compiled in behind a cargo feature; settings are data |
 | Dynamic tier | loadable or sandboxed code | not built; the two driver traits are the only coupling it would need |
 

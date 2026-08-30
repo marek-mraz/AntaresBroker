@@ -2,7 +2,9 @@
 
 Date: 2026-08-24 · Status: accepted (supersedes the enum half of ADR-0005;
 the sync-facade half of ADR-0005 and all of ADR-0007's no-bus-recorder
-decision stand)
+decision stand). The driver-identity consequence below is superseded by
+ADR-0017: a driver is named, and `fn mode(&self) -> StoreMode` was never
+written.
 
 ## Context
 
