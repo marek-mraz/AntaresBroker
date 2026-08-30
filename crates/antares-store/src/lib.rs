@@ -269,8 +269,13 @@ pub trait CurrentStateDriver: Send + Sync {
     }
     /// 5.5.10: the default Tenant implicitly exists; others once created.
     fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError>;
-    /// Tenants that may hold interval subscriptions (the sweep's iteration
-    /// domain).
+    /// The iteration domain of the interval sweep and of both mirror
+    /// hydrations: every tenant holding a Subscription or a Context Source
+    /// Registration Subscription SHALL appear. A superset is allowed — the
+    /// callers list per tenant afterwards and an empty list costs nothing —
+    /// so a backend that cannot narrow the set cheaply may return every
+    /// tenant it knows. A SUBSET is a silent outage: a tenant missing here
+    /// never fires a periodic notification and never reaches the mirror.
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError>;
     /// Every tenant the backend knows, sorted. The default Tenant is listed
     /// even when empty (5.5.10: it always exists). Names only: at the

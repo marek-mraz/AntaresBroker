@@ -473,7 +473,8 @@ fn hydrate(
     store: &dyn antares_store::CurrentStateDriver,
     kind: Kind,
 ) {
-    // subscription_tenants lists ALL tenants on the Pg arm — serves both kinds
+    // The domain may be a superset (the Pg arm answers every known tenant);
+    // a tenant holding neither kind costs one empty list.
     let tenants = store.subscription_tenants().unwrap_or_default();
     for tenant_str in tenants {
         let Ok(tenant) = TenantId::new(&tenant_str) else {

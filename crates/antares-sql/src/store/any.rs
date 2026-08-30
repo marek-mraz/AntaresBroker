@@ -927,8 +927,13 @@ impl AnyStore {
     pub fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         match self {
             AnyStore::Mem(s) => Ok(s.subscription_tenants()),
-            // Pg: all known tenants (tenants table carries no RLS); the
-            // interval scan lists per tenant under set_tenant anyway.
+            // Pg answers the superset the contract allows: every known
+            // tenant. Narrowing it would need a cross-tenant read of
+            // `subscriptions`, and that table is deliberately outside the
+            // `antares.service` escape — a subscription document carries
+            // endpoint.receiverInfo, i.e. the credentials the notification
+            // is sent with. The callers list per tenant under set_tenant
+            // afterwards, so the extra names cost one empty list each.
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => super::pg::entity::wait(async {
                 let rows =

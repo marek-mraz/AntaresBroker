@@ -239,6 +239,25 @@ pub fn run_current_state_contract(
         );
     }
 
+    // `subscription_tenants` is the iteration domain the interval sweep and
+    // both mirror hydrations walk. A backend may return MORE tenants than
+    // hold a subscription — every caller lists per tenant afterwards and an
+    // empty list costs nothing. It may never return FEWER: a tenant missing
+    // here is a tenant whose periodic notifications never fire and whose
+    // subscriptions never reach the mirror, with no error anywhere.
+    let sub = format!("urn:ngsi-ld:Subscription:{prefix}:1");
+    d.upsert(a, Kind::Subscription, &sub, doc(&sub))
+        .expect("upsert subscription");
+    let domain = d.subscription_tenants().expect("subscription_tenants");
+    assert!(
+        domain.iter().any(|t| t == a.as_str()),
+        "a tenant holding a subscription must appear in subscription_tenants: {domain:?}"
+    );
+    assert!(
+        d.delete(a, Kind::Subscription, &sub).expect("delete"),
+        "the contract's own subscription must be removable"
+    );
+
     for id in [&e1, &e2] {
         assert!(
             d.delete(a, Kind::Entity, id).expect("delete"),
