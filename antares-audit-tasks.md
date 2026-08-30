@@ -26,3 +26,20 @@ commit, large stays on the list until measured.
 - [B] antares-sql store/pg/entity_map.rs `sweep()` ("run by a broker job") has no caller: expired maps are pruned on touch in antares-api entity_maps.rs, so the fn is dead surface — delete it or wire it into the sweep loop. Found while writing the operations runbook.
 
 - [B] csource.rs registration write lock was a std Mutex around Postgres-backed store calls: 32 concurrent registration creates parked the runtime worker owning the I/O driver and wedged the whole broker (health included). Fixed: tokio::sync::Mutex.
+
+- [B] `antares-store::contract` does not state clause 4.22, and a driver
+  written against it can therefore get expiry exactly backwards. The
+  reference plugin passed both contract functions and then failed 9 TPs
+  across 4 suites (Provision TransientEntities 422_01/03/06/08, Subscription
+  029_10, ContextSource 038_05) on ONE rule: the entity-level `expiresAt`
+  stamp hides a document, but ONLY for entities — an expired subscription
+  stays retrievable with `status: "expired"` (5.8.6, p.224) and stays
+  updatable (5.8.2), and expired attribute INSTANCES are stripped from a
+  live entity rather than hiding it. The built-in backends encode this
+  (`store/mem/mod.rs` `is_expired`, `filter::strip_expired`); the contract
+  says nothing, so it is a rule every new backend must rediscover through
+  the conformance suite. Add both cases to `run_current_state_contract`:
+  an entity past its stamp reads absent while a subscription past its stamp
+  reads present, and an entity whose only instance of an attribute expired
+  loses the attribute, not the entity. Shared seam — its own commit, with
+  the four built-in backends re-run against the extended kit.
