@@ -88,20 +88,57 @@ pub async fn append_attrs(
     }
 }
 
-async fn append_attrs_inner(
+/// What separates 5.6.3 Append Attributes from 5.6.2 Update Attributes: the
+/// body kind each accepts, whether NGSI-LD Null may appear in it (5.5.4:
+/// only the update form carries deletions), and the operation name and
+/// method a forward to a registered Context Source carries. Everything else
+/// -- id and parameter validation, expansion, the registration plan, the
+/// loop guard, which half is served locally, the multi-status assembly --
+/// is one operation, written once in `write_attrs`.
+struct AttrWrite {
+    body_kind: BodyKind,
+    allow_null: bool,
+    op: &'static str,
+    method: reqwest::Method,
+}
+
+const APPEND: AttrWrite = AttrWrite {
+    body_kind: BodyKind::Standard,
+    allow_null: false,
+    op: "appendAttrs",
+    method: reqwest::Method::POST,
+};
+
+const UPDATE: AttrWrite = AttrWrite {
+    body_kind: BodyKind::MergePatch,
+    allow_null: true,
+    op: "updateEntity",
+    method: reqwest::Method::PATCH,
+};
+
+/// One entity-level attribute write. `merge` is the clause's own algorithm
+/// for the Entity Fragment's `scope` and its Attributes; the Entity Type
+/// union above it is the same rule in both clauses ("added to the list of
+/// Entity Type names of the target Entity").
+async fn write_attrs(
     st: &AppState,
     id: &str,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
     body: &[u8],
+    mode: &AttrWrite,
+    merge: impl FnOnce(
+        &mut Map<String, Value>,
+        &Map<String, Value>,
+        &str,
+        &mut Vec<String>,
+        &mut Vec<(String, String)>,
+    ),
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     antares_model::EntityId::new(id)?;
     check_params(params, &["options", "local", "type"])?;
-    let no_overwrite = params
-        .get("options")
-        .is_some_and(|o| o.split(',').any(|s| s.trim() == "noOverwrite"));
-    let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
+    let parsed = parse_body(&st.loader, headers, body, mode.body_kind).await?;
     let obj = parsed
         .value
         .as_object()
@@ -111,7 +148,7 @@ async fn append_attrs_inner(
         &parsed.ctx,
         ExpandOpts {
             fragment: true,
-            allow_null: false,
+            allow_null: mode.allow_null,
             temporal: false,
             ..Default::default()
         },
@@ -136,7 +173,8 @@ async fn append_attrs_inner(
         None
     } else {
         let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            // 5.6.3.4: the ?type selector narrows the target entity
+            // 5.6.2.4 / 5.6.3.4: the ?type selector narrows the target — a
+            // mismatch means the entity is not known for this operation.
             if !matches_type_param(doc, params, &parsed.ctx) {
                 return Err(NgsiError::ResourceNotFound(format!(
                     "entity {id} does not match the type selector"
@@ -144,7 +182,8 @@ async fn append_attrs_inner(
             }
             let target = doc.as_object_mut().expect("entity object");
             let frag = fragment.as_object().expect("fragment object");
-            // 5.6.3: appended types extend the type set
+            // 5.6.2.4 / 5.6.3.4: Entity Type names not yet in the target are
+            // added to its list
             if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
                 let mut cur: Vec<Value> = target
                     .get("type")
@@ -159,50 +198,7 @@ async fn append_attrs_inner(
                 target.insert("type".into(), Value::Array(cur));
                 updated.push("type".into());
             }
-            // appended scope: overwrite replaces; noOverwrite unions (010_07)
-            if let Some(new_scope) = frag.get("scope") {
-                if target.contains_key("scope") && no_overwrite {
-                    let mut cur: Vec<Value> = target
-                        .get("scope")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    for sc in new_scope.as_array().cloned().unwrap_or_default() {
-                        if !cur.contains(&sc) {
-                            cur.push(sc);
-                        }
-                    }
-                    target.insert("scope".into(), Value::Array(cur));
-                } else {
-                    target.insert("scope".into(), new_scope.clone());
-                }
-                updated.push("scope".into());
-            }
-            for (k, v) in frag {
-                if matches!(
-                    k.as_str(),
-                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
-                ) {
-                    continue;
-                }
-                let mut incoming = v.clone();
-                crate::entities::stamp_instances(&mut incoming, &ts);
-                match target.get_mut(k) {
-                    None => {
-                        target.insert(k.clone(), incoming);
-                        updated.push(k.clone());
-                    }
-                    Some(existing) => {
-                        let merged = merge_instance_sets(existing, &incoming, no_overwrite);
-                        if merged {
-                            updated.push(k.clone());
-                        } else {
-                            not_updated
-                                .push((k.clone(), "attribute already exists (noOverwrite)".into()));
-                        }
-                    }
-                }
-            }
+            merge(target, frag, &ts, &mut updated, &mut not_updated);
             target.insert("modifiedAt".into(), Value::String(ts.clone()));
             Ok::<(), NgsiError>(())
         })?;
@@ -226,8 +222,8 @@ async fn append_attrs_inner(
         &tenant,
         &parsed.ctx.source,
         &regs,
-        "appendAttrs",
-        reqwest::Method::POST,
+        mode.op,
+        mode.method.clone(),
         &format!("/entities/{}/attrs/", path_segment(id)),
         &query,
         Some(Value::Object(without_context_map(obj))),
@@ -243,6 +239,142 @@ async fn append_attrs_inner(
         &regs,
         &fed_parts,
     ))
+}
+
+/// 5.6.3.4 Append Attributes: an Attribute the target does not have is
+/// appended; one it has is replaced datasetId-wise unless `noOverwrite` was
+/// asked for, in which case it is reported in `notUpdated`.
+async fn append_attrs_inner(
+    st: &AppState,
+    id: &str,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> ApiResult<Response> {
+    let no_overwrite = params
+        .get("options")
+        .is_some_and(|o| o.split(',').any(|s| s.trim() == "noOverwrite"));
+    write_attrs(
+        st,
+        id,
+        params,
+        headers,
+        body,
+        &APPEND,
+        |target, frag, ts, updated, not_updated| {
+            // appended scope: overwrite replaces; noOverwrite unions (010_07)
+            if let Some(new_scope) = frag.get("scope") {
+                if target.contains_key("scope") && no_overwrite {
+                    let mut cur: Vec<Value> = target
+                        .get("scope")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    for sc in new_scope.as_array().cloned().unwrap_or_default() {
+                        if !cur.contains(&sc) {
+                            cur.push(sc);
+                        }
+                    }
+                    target.insert("scope".into(), Value::Array(cur));
+                } else {
+                    target.insert("scope".into(), new_scope.clone());
+                }
+                updated.push("scope".into());
+            }
+            for (k, v) in frag {
+                if is_fragment_meta(k) {
+                    continue;
+                }
+                let mut incoming = v.clone();
+                crate::entities::stamp_instances(&mut incoming, ts);
+                match target.get_mut(k) {
+                    None => {
+                        target.insert(k.clone(), incoming);
+                        updated.push(k.clone());
+                    }
+                    Some(existing) => {
+                        let merged = merge_instance_sets(existing, &incoming, no_overwrite);
+                        if merged {
+                            updated.push(k.clone());
+                        } else {
+                            not_updated
+                                .push((k.clone(), "attribute already exists (noOverwrite)".into()));
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// 5.6.2.4 Update Attributes: every Attribute of the Fragment is applied —
+/// an unknown one is appended silently (011_01_03), an NGSI-LD Null deletes
+/// the instance it matches (5.5.8), and an Attribute left with no instances
+/// leaves the Entity.
+async fn update_attrs_inner(
+    st: &AppState,
+    id: &str,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> ApiResult<Response> {
+    write_attrs(
+        st,
+        id,
+        params,
+        headers,
+        body,
+        &UPDATE,
+        |target, frag, ts, updated, not_updated| {
+            // 5.6.2: scope updates only when the entity already has one
+            if let Some(new_scope) = frag.get("scope") {
+                if target.contains_key("scope") {
+                    target.insert("scope".into(), new_scope.clone());
+                    updated.push("scope".into());
+                } else {
+                    not_updated.push(("scope".into(), "entity has no scope".into()));
+                }
+            }
+            for (k, v) in frag {
+                if is_fragment_meta(k) {
+                    continue;
+                }
+                let mut incoming = v.clone();
+                crate::entities::stamp_instances(&mut incoming, ts);
+                match target.get_mut(k) {
+                    // 5.6.2 + 011_01_03: unknown attributes are appended silently
+                    None => {
+                        let live: Vec<Value> = incoming
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|i| !antares_jsonld::is_deletion_instance(i))
+                            .collect();
+                        if !live.is_empty() {
+                            target.insert(k.clone(), Value::Array(live));
+                        }
+                        updated.push(k.clone());
+                    }
+                    Some(existing) => {
+                        merge_instance_sets(existing, &incoming, false);
+                        if existing.as_array().is_some_and(Vec::is_empty) {
+                            target.remove(k);
+                        }
+                        updated.push(k.clone());
+                    }
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// The Entity Fragment members that are not Attributes: handled by the
+/// write itself (`id`, `type`, `scope`) or server-generated (4.8).
+fn is_fragment_meta(k: &str) -> bool {
+    matches!(k, "id" | "type" | "scope" | "createdAt" | "modifiedAt")
 }
 
 /// Shared federation plan for attribute writes: the matching non-aux
@@ -276,6 +408,29 @@ fn attr_fed_plan_iris(
         ..Default::default()
     };
     crate::federation::write_regs(st, tenant, &spec, ctx, params, headers)
+}
+
+/// The registrations an attribute-level operation has to consider, with the
+/// 6.3.18 loop guard already applied. A returned response is the loop
+/// chain's own answer (Table 6.3.18-2) and ends the operation before
+/// anything local happens.
+fn attr_regs_or_loop(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    id: &str,
+    attr_iri: &str,
+    ctx: &antares_jsonld::Context,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> (Vec<crate::federation::FedReg>, Option<Response>) {
+    let mut regs = attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers);
+    let loop_answer = crate::federation::handle_via_loop(
+        headers,
+        &crate::federation::alias_for(&st.host_alias, tenant),
+        tenant,
+        &mut regs,
+    );
+    (regs, loop_answer)
 }
 
 /// The local half of a distributed attribute write is skipped only when every
@@ -497,6 +652,65 @@ fn combine_attr_parts(
     )
 }
 
+/// The local half's answer for an operation that addresses exactly ONE
+/// Attribute (5.6.4 Partial Update, 5.6.5 Delete, 5.6.19 Replace): per
+/// Table 6.3.2-1 the Entity may be absent (404 naming the Entity), present
+/// without the addressed Attribute (404 naming the Attribute), or edited
+/// (204). `found` is what the edit itself reports.
+fn single_attr_local(
+    res: Option<Result<(), NgsiError>>,
+    found: bool,
+    id: &str,
+    attr: &str,
+    tenant: &antares_model::TenantId,
+) -> ApiResult<Response> {
+    match res {
+        None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
+        Some(Err(e)) => Err(e.into()),
+        Some(Ok(())) if found => Ok(no_content(tenant)),
+        Some(Ok(())) => {
+            Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
+        }
+    }
+}
+
+/// The multi-status assembly for the same three operations: one Attribute is
+/// addressed, so the local and distributed halves are combined over a
+/// one-element attribute list, and the Attribute counts as updated only when
+/// the local half actually applied it. `local_covered` means an
+/// exclusive/redirect registration holds it and there was no local half.
+fn combine_single_attr(
+    tenant: &antares_model::TenantId,
+    attr_iri: &str,
+    local_covered: bool,
+    local_resp: &Option<ApiResult<Response>>,
+    regs: &[crate::federation::FedReg],
+    fed_parts: &[crate::federation::Part],
+) -> Response {
+    let local_outcome = classify_local(local_resp);
+    let all_attr_iris = vec![attr_iri.to_owned()];
+    let local_iris = if local_covered {
+        Vec::new()
+    } else {
+        all_attr_iris.clone()
+    };
+    let updated = if matches!(local_outcome, LocalOutcome::Ok) {
+        all_attr_iris.clone()
+    } else {
+        Vec::new()
+    };
+    combine_attr_parts(
+        tenant,
+        &all_attr_iris,
+        &local_iris,
+        local_outcome,
+        updated,
+        Vec::new(),
+        regs,
+        fed_parts,
+    )
+}
+
 /// Merge incoming instances into an existing instance array by datasetId.
 /// Deletion-marker instances (urn:ngsi-ld:null) remove the matched instance.
 /// Returns false when nothing was applied (noOverwrite and all existed).
@@ -553,159 +767,6 @@ pub async fn update_attrs(
     }
 }
 
-async fn update_attrs_inner(
-    st: &AppState,
-    id: &str,
-    params: &HashMap<String, String>,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> ApiResult<Response> {
-    let tenant = tenant_from(headers)?;
-    antares_model::EntityId::new(id)?;
-    check_params(params, &["options", "local", "type"])?;
-    let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
-    let obj = parsed
-        .value
-        .as_object()
-        .ok_or_else(|| NgsiError::BadRequestData("fragment must be a JSON object".into()))?;
-    let fragment = expand_entity(
-        obj,
-        &parsed.ctx,
-        ExpandOpts {
-            fragment: true,
-            allow_null: true,
-            temporal: false,
-            ..Default::default()
-        },
-    )?;
-    let (mut regs, all_attr_iris) =
-        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
-        return Ok(r);
-    }
-    let local_covered = proxies_cover_all(&regs, &all_attr_iris);
-    let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
-    let local_iris = attr_iris_of(&fragment);
-    let ts = now_iso();
-    let mut updated = Vec::new();
-    let mut not_updated = Vec::new();
-    let local_resp: Option<ApiResult<Response>> = if local_covered {
-        None
-    } else {
-        let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-            // 5.6.2.4: the ?type selector narrows the target — a mismatch
-            // means the entity is not known for this operation.
-            if !matches_type_param(doc, params, &parsed.ctx) {
-                return Err(NgsiError::ResourceNotFound(format!(
-                    "entity {id} does not match the type selector"
-                )));
-            }
-            let target = doc.as_object_mut().expect("entity object");
-            let frag = fragment.as_object().expect("fragment object");
-            // 5.6.2: appended/updated types extend the type set
-            if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
-                let mut cur: Vec<Value> = target
-                    .get("type")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                for t in new_types {
-                    if !cur.contains(t) {
-                        cur.push(t.clone());
-                    }
-                }
-                target.insert("type".into(), Value::Array(cur));
-                updated.push("type".into());
-            }
-            // 5.6.2: scope updates only when the entity already has one
-            if let Some(new_scope) = frag.get("scope") {
-                if target.contains_key("scope") {
-                    target.insert("scope".into(), new_scope.clone());
-                    updated.push("scope".into());
-                } else {
-                    not_updated.push(("scope".into(), "entity has no scope".into()));
-                }
-            }
-            for (k, v) in frag {
-                if matches!(
-                    k.as_str(),
-                    "id" | "type" | "scope" | "createdAt" | "modifiedAt"
-                ) {
-                    continue;
-                }
-                let mut incoming = v.clone();
-                crate::entities::stamp_instances(&mut incoming, &ts);
-                match target.get_mut(k) {
-                    // 5.6.2 + 011_01_03: unknown attributes are appended silently
-                    None => {
-                        let live: Vec<Value> = incoming
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|i| !antares_jsonld::is_deletion_instance(i))
-                            .collect();
-                        if !live.is_empty() {
-                            target.insert(k.clone(), Value::Array(live));
-                        }
-                        updated.push(k.clone());
-                    }
-                    Some(existing) => {
-                        merge_instance_sets(existing, &incoming, false);
-                        if existing.as_array().is_some_and(Vec::is_empty) {
-                            target.remove(k);
-                        }
-                        updated.push(k.clone());
-                    }
-                }
-            }
-            target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            Ok::<(), NgsiError>(())
-        })?;
-        Some(match res {
-            None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
-            Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(&tenant, updated.clone(), not_updated.clone())),
-        })
-    };
-    if regs.is_empty() {
-        // the local half is skipped only while registrations cover the
-        // attributes, so an empty list always leaves a local response
-        return local_resp
-            .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
-    }
-    let local_outcome = classify_local(&local_resp);
-    let query = fwd_query(params, &["options", "type"]);
-    let fed_parts = crate::federation::fed_attr_parts(
-        st,
-        headers,
-        &tenant,
-        &parsed.ctx.source,
-        &regs,
-        "updateEntity",
-        reqwest::Method::PATCH,
-        &format!("/entities/{}/attrs/", path_segment(id)),
-        &query,
-        Some(Value::Object(without_context_map(obj))),
-    )
-    .await;
-    Ok(combine_attr_parts(
-        &tenant,
-        &all_attr_iris,
-        &local_iris,
-        local_outcome,
-        updated,
-        not_updated.into_iter().map(|(a, r)| (a, r, None)).collect(),
-        &regs,
-        &fed_parts,
-    ))
-}
-
 // ---------- PATCH /entities/{id}/attrs/{attrId} — Partial update (5.6.4) ----------
 
 pub async fn partial_update_attr(
@@ -748,21 +809,9 @@ async fn partial_update_inner(
         )
         .into());
     }
-    let mut regs = attr_fed_plan_iris(
-        st,
-        &tenant,
-        id,
-        std::slice::from_ref(&attr_iri),
-        &parsed.ctx,
-        params,
-        headers,
-    );
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
+    let (regs, loop_answer) =
+        attr_regs_or_loop(st, &tenant, id, &attr_iri, &parsed.ctx, params, headers);
+    if let Some(r) = loop_answer {
         return Ok(r);
     }
     let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
@@ -827,14 +876,7 @@ async fn partial_update_inner(
             }
             Ok::<(), NgsiError>(())
         })?;
-        Some(match res {
-            None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
-            Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) if found => Ok(no_content(&tenant)),
-            Some(Ok(())) => {
-                Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
-            }
-        })
+        Some(single_attr_local(res, found, id, attr, &tenant))
     };
     if regs.is_empty() {
         // the local half is skipped only while registrations cover the
@@ -842,18 +884,6 @@ async fn partial_update_inner(
         return local_resp
             .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
-    let local_outcome = classify_local(&local_resp);
-    let all_attr_iris = vec![attr_iri.clone()];
-    let local_iris = if local_covered {
-        Vec::new()
-    } else {
-        vec![attr_iri.clone()]
-    };
-    let updated = if matches!(local_outcome, LocalOutcome::Ok) {
-        vec![attr_iri.clone()]
-    } else {
-        Vec::new()
-    };
     let fed_parts = crate::federation::fed_attr_parts(
         st,
         headers,
@@ -871,13 +901,11 @@ async fn partial_update_inner(
         Some(Value::Object(without_context_map(obj))),
     )
     .await;
-    Ok(combine_attr_parts(
+    Ok(combine_single_attr(
         &tenant,
-        &all_attr_iris,
-        &local_iris,
-        local_outcome,
-        updated,
-        Vec::new(),
+        &attr_iri,
+        local_covered,
+        &local_resp,
         &regs,
         &fed_parts,
     ))
@@ -943,21 +971,9 @@ pub async fn replace_attr(
             .get("datasetId")
             .and_then(Value::as_str)
             .map(String::from);
-        let mut regs = attr_fed_plan_iris(
-            &st,
-            &tenant,
-            &id,
-            std::slice::from_ref(&attr_iri),
-            &parsed.ctx,
-            &params,
-            &headers,
-        );
-        if let Some(r) = crate::federation::handle_via_loop(
-            &headers,
-            &crate::federation::alias_for(&st.host_alias, &tenant),
-            &tenant,
-            &mut regs,
-        ) {
+        let (regs, loop_answer) =
+            attr_regs_or_loop(&st, &tenant, &id, &attr_iri, &parsed.ctx, &params, &headers);
+        if let Some(r) = loop_answer {
             return Ok(r);
         }
         let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
@@ -999,14 +1015,7 @@ pub async fn replace_attr(
                 }
                 Ok::<(), NgsiError>(())
             })?;
-            Some(match res {
-                None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
-                Some(Err(e)) => Err(ApiError::from(e)),
-                Some(Ok(())) if found => Ok(no_content(&tenant)),
-                Some(Ok(())) => {
-                    Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
-                }
-            })
+            Some(single_attr_local(res, found, &id, &attr, &tenant))
         };
         if regs.is_empty() {
             // the local half is skipped only while registrations cover the
@@ -1014,18 +1023,6 @@ pub async fn replace_attr(
             return local_resp
                 .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
         }
-        let local_outcome = classify_local(&local_resp);
-        let all_attr_iris = vec![attr_iri.clone()];
-        let local_iris = if local_covered {
-            Vec::new()
-        } else {
-            vec![attr_iri.clone()]
-        };
-        let updated = if matches!(local_outcome, LocalOutcome::Ok) {
-            vec![attr_iri.clone()]
-        } else {
-            Vec::new()
-        };
         let fed_parts = crate::federation::fed_attr_parts(
             &st,
             &headers,
@@ -1043,13 +1040,11 @@ pub async fn replace_attr(
             Some(Value::Object(without_context_map(obj))),
         )
         .await;
-        Ok(combine_attr_parts(
+        Ok(combine_single_attr(
             &tenant,
-            &all_attr_iris,
-            &local_iris,
-            local_outcome,
-            updated,
-            Vec::new(),
+            &attr_iri,
+            local_covered,
+            &local_resp,
             &regs,
             &fed_parts,
         ))
@@ -1090,21 +1085,8 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let mut regs = attr_fed_plan_iris(
-        st,
-        &tenant,
-        id,
-        std::slice::from_ref(&attr_iri),
-        &ctx,
-        params,
-        headers,
-    );
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
+    let (regs, loop_answer) = attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers);
+    if let Some(r) = loop_answer {
         return Ok(r);
     }
     let local_covered = proxies_cover_all(&regs, std::slice::from_ref(&attr_iri));
@@ -1165,14 +1147,12 @@ async fn delete_attr_inner(
                 want_ds.as_deref(),
                 &ts,
             );
-        Some(match res {
-            None if temporal_had => Ok(no_content(&tenant)),
-            None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
-            Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) if found || temporal_had => Ok(no_content(&tenant)),
-            Some(Ok(())) => {
-                Err(NgsiError::ResourceNotFound(format!("attribute {attr} not found")).into())
-            }
+        // An entity that exists only temporally still answers 204: the
+        // deletion was recorded even though there was no current state.
+        Some(if res.is_none() && temporal_had {
+            Ok(no_content(&tenant))
+        } else {
+            single_attr_local(res, found || temporal_had, id, attr, &tenant)
         })
     };
     if regs.is_empty() {
@@ -1181,18 +1161,6 @@ async fn delete_attr_inner(
         return local_resp
             .unwrap_or_else(|| Err(NgsiError::InternalError("no local result".into()).into()));
     }
-    let local_outcome = classify_local(&local_resp);
-    let all_attr_iris = vec![attr_iri.clone()];
-    let local_iris = if local_covered {
-        Vec::new()
-    } else {
-        vec![attr_iri.clone()]
-    };
-    let updated = if matches!(local_outcome, LocalOutcome::Ok) {
-        vec![attr_iri.clone()]
-    } else {
-        Vec::new()
-    };
     let query = fwd_query(params, &["datasetId", "deleteAll", "type"]);
     let fed_parts = crate::federation::fed_attr_parts(
         st,
@@ -1211,13 +1179,11 @@ async fn delete_attr_inner(
         None,
     )
     .await;
-    Ok(combine_attr_parts(
+    Ok(combine_single_attr(
         &tenant,
-        &all_attr_iris,
-        &local_iris,
-        local_outcome,
-        updated,
-        Vec::new(),
+        &attr_iri,
+        local_covered,
+        &local_resp,
         &regs,
         &fed_parts,
     ))
