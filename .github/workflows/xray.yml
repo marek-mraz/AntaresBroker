@@ -1,0 +1,89 @@
+name: xray
+
+# Code structure report and the duplication gate: token clones, structural
+# duplicate candidates (rustdoc JSON), dead surface, ratcheted against
+# dev/dup-baseline.json. dev/code-xray.sh writes the module graphs, symbol
+# index and complexity radar as an artifact; dev/dup-check.sh is the gate
+# and runs identically on a laptop.
+
+on:
+  pull_request:
+    paths: ["crates/**", "Cargo.*", "dev/dup-*", ".github/workflows/xray.yml"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xray-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dup-gate:
+    name: duplication gate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: xray
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Duplication gate
+        run: ./dev/dup-check.sh
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Duplication gate"
+            cat results/dup/summary.md
+            echo
+            echo '```'
+            head -30 results/dup/clones.txt
+            echo '```'
+            echo '```'
+            head -60 results/dup/signatures.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dup-report
+          path: results/dup
+
+  xray:
+    name: structure report
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: xray
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete,cargo-modules,cargo-depgraph
+      - run: rustup component add rust-analyzer
+      - run: python3 -m venv .venv && .venv/bin/pip -q install lizard
+      - name: X-ray
+        run: ./dev/code-xray.sh
+      - name: Step summary
+        run: |
+          { echo "## Code radar (complexity x churn)"; echo '```'; head -40 results/x-ray/code-radar.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-ray
+          path: results/x-ray
