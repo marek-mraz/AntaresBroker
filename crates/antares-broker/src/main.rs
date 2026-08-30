@@ -273,13 +273,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let roles = std::env::var("ANTARES_ROLES").unwrap_or_else(|_| "all".into());
-    // Unknown store mode is fatal BEFORE the runtime spins up. The mode
-    // is decided ONCE here as a typed value and threaded everywhere — no
-    // string comparisons, no runtime re-probing downstream.
-    let mode: antares_sql::StoreMode = std::env::var("ANTARES_STORE")
-        .unwrap_or_else(|_| "memory".into())
-        .parse()
-        .map_err(|e| format!("unknown ANTARES_STORE: {e}"))?;
+    // Unknown store backend is fatal BEFORE the runtime spins up, and the
+    // message names the shelf this binary was built with — never a silent
+    // fallback to memory.
+    let store_name = std::env::var("ANTARES_STORE").unwrap_or_else(|_| "memory".into());
+    if !store_shelf().contains(&store_name.as_str()) {
+        return Err(format!(
+            "unknown ANTARES_STORE {store_name:?}; built with {}",
+            store_shelf().join("|")
+        )
+        .into());
+    }
     // bus=local wires an in-process matcher into every process, so N
     // replicas over ONE shared database each fire their own copy of every
     // notification. Refused here — before any store connection is attempted
@@ -287,12 +291,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (Mirror of the nats arm's store check in `run`.)
     let bus_mode = std::env::var("ANTARES_BUS").unwrap_or_else(|_| "local".into());
     if bus_mode == "local"
-        && mode.is_pg()
+        && shared_state(&store_name)
         && !std::env::var("ANTARES_ALLOW_SHARED_LOCAL")
             .is_ok_and(|v| matches!(v.as_str(), "1" | "true"))
     {
         return Err(format!(
-            "ANTARES_BUS=local with ANTARES_STORE={mode} double-fires notifications when \
+            "ANTARES_BUS=local with ANTARES_STORE={store_name} double-fires notifications when \
              more than one broker process shares the database (each process runs its own \
              matcher). Use ANTARES_BUS=nats, or set ANTARES_ALLOW_SHARED_LOCAL=1 for a \
              strictly single-process deployment"
@@ -301,16 +305,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     runtime(max_connections()?)?.block_on(async {
-        let (store, temporal, maintenance, temporal_mode) = build_drivers(mode).await?;
+        let drivers = build_drivers(&store_name).await?;
         run(
             port,
             host_alias,
             roles,
-            store,
-            temporal,
-            mode,
-            temporal_mode,
-            maintenance,
+            drivers.store,
+            drivers.temporal,
+            store_name,
+            drivers.temporal_name,
+            drivers.maintenance,
             metrics_render,
             sweep_secs,
             drain_delay,
@@ -357,36 +361,63 @@ enum TemporalChoice {
     SameAsStore,
     /// History off: `NoTemporal`.
     None,
-    /// A second store instance of this mode, used only through its
+    /// A second store instance of this backend, used only through its
     /// temporal half.
-    Second(antares_sql::StoreMode),
+    Second(String),
 }
 
-/// The shelf this binary was built with, rendered from the mode list rather
-/// than spelled out: a backend added to `StoreMode` reaches every message
-/// that names the shelf without a second edit. Every mode is compiled in; a
-/// feature-gated backend would drop out of the list itself.
+/// The current-state backends this binary can build: the built-ins, plus
+/// any driver compiled in from outside this workspace. A list of NAMES and
+/// not an enum, because a plugin's driver is not one of `StoreMode`'s arms
+/// — adding a backend must never mean editing a core crate.
+fn store_shelf() -> Vec<&'static str> {
+    // Backends from outside this workspace, in selection order. Each is
+    // compiled in by its own feature; without one the list is empty and the
+    // shelf is exactly `StoreMode`.
+    const PLUGINS: &[&str] = &[
+        #[cfg(feature = "plugin-example")]
+        antares_plugin_example::NAME,
+    ];
+    antares_sql::StoreMode::ALL
+        .into_iter()
+        .map(|m| m.as_str())
+        .chain(PLUGINS.iter().copied())
+        .collect()
+}
+
+/// Does this backend keep its state where several broker processes can
+/// reach it? The precondition for `ANTARES_BUS=nats`, and the reason
+/// `bus=local` over one shared database double-fires notifications. Only
+/// the database backends qualify: a per-process store — memory, file, or a
+/// driver from outside the workspace — never does.
+fn shared_state(name: &str) -> bool {
+    name.parse::<antares_sql::StoreMode>()
+        .is_ok_and(|m| m.is_pg())
+}
+
+/// The shelf this binary was built with, rendered from the backend list
+/// rather than spelled out: a backend reaches every message that names the
+/// shelf without a second edit, whether it came from `StoreMode` or from a
+/// crate outside this workspace.
 fn built_with() -> String {
-    format!("{} (temporal also: none)", antares_sql::StoreMode::names())
+    format!("{} (temporal also: none)", store_shelf().join("|"))
 }
 
 /// ANTARES_TEMPORAL → driver choice. Absent or the store's own mode = one
 /// instance for both seams; `none` = no history; any other backend name =
 /// a second store. An unknown name is fatal and names the shelf.
-fn temporal_choice(
-    store_mode: antares_sql::StoreMode,
-    raw: Option<&str>,
-) -> Result<TemporalChoice, String> {
+fn temporal_choice(store_name: &str, raw: Option<&str>) -> Result<TemporalChoice, String> {
     match raw {
         None => Ok(TemporalChoice::SameAsStore),
-        Some(m) if m == store_mode.as_str() => Ok(TemporalChoice::SameAsStore),
+        Some(m) if m == store_name => Ok(TemporalChoice::SameAsStore),
         Some("none") => Ok(TemporalChoice::None),
-        Some(other) => other.parse().map(TemporalChoice::Second).map_err(|_| {
-            format!(
-                "ANTARES_TEMPORAL: unknown backend {other:?}; built with {}",
-                built_with()
-            )
-        }),
+        Some(other) if store_shelf().contains(&other) => {
+            Ok(TemporalChoice::Second(other.to_owned()))
+        }
+        Some(other) => Err(format!(
+            "ANTARES_TEMPORAL: unknown backend {other:?}; built with {}",
+            built_with()
+        )),
     }
 }
 
@@ -397,7 +428,13 @@ type SurfaceCtor = fn() -> Box<dyn antares_api::ApiSurface>;
 /// The HTTP surfaces this binary was built with, outside the NGSI-LD API
 /// root. Every one is compiled in, so the shelf is static; a feature-gated
 /// surface would drop out here.
-const SURFACE_SHELF: &[(&str, SurfaceCtor)] = &[("admin", || Box::new(antares_api::Admin))];
+const SURFACE_SHELF: &[(&str, SurfaceCtor)] = &[
+    ("admin", || Box::new(antares_api::Admin)),
+    #[cfg(feature = "plugin-example")]
+    ("example", || {
+        Box::new(antares_plugin_example::ExampleSurface)
+    }),
+];
 
 /// ANTARES_API_SURFACES → the surfaces mounted beside the NGSI-LD API,
 /// comma-separated; absent = `admin`. An unknown name is fatal and names
@@ -441,51 +478,108 @@ fn api_surfaces(raw: Option<&str>) -> Result<Vec<(&'static str, SurfaceCtor)>, S
 /// OperationNotSupported 422, Table 6.3.2-1; the recorder produces
 /// nothing), and a different backend name builds a second store used only
 /// through its temporal half.
-async fn build_drivers(
-    store_mode: antares_sql::StoreMode,
-) -> Result<
-    (
-        std::sync::Arc<antares_sql::store::any::AnyStore>,
-        std::sync::Arc<dyn antares_store::TemporalDriver>,
-        Vec<(
-            antares_sql::sqlx::PgPool,
-            antares_sql::store::pg::maintenance::TemporalBackend,
-        )>,
-        Option<antares_sql::StoreMode>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let (store, backend) = build_store(store_mode).await?;
+async fn build_drivers(store_name: &str) -> Result<Drivers, Box<dyn std::error::Error>> {
+    let built = build_store(store_name, false).await?;
     // Every pg half gets the maintenance job: partitions, retention and the
     // 4.22 reap belong to whichever database holds the history.
-    let mut maintenance = Vec::new();
-    if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) = (&store, backend) {
-        maintenance.push((p.docs.pool().clone(), backend));
-    }
-    let store = std::sync::Arc::new(store);
+    let mut maintenance = Vec::from_iter(built.maintenance);
     let raw = std::env::var("ANTARES_TEMPORAL").ok();
-    let (temporal, temporal_mode): (std::sync::Arc<dyn antares_store::TemporalDriver>, _) =
-        match temporal_choice(store_mode, raw.as_deref())? {
-            TemporalChoice::SameAsStore => (store.clone(), Some(store_mode)),
-            TemporalChoice::None => (std::sync::Arc::new(antares_store::NoTemporal), None),
-            TemporalChoice::Second(mode) => {
-                let (second, backend) = build_store(mode).await?;
-                if let (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) =
-                    (&second, backend)
-                {
-                    maintenance.push((p.docs.pool().clone(), backend));
-                }
-                (std::sync::Arc::new(second.temporal_only()), Some(mode))
-            }
-        };
-    Ok((store, temporal, maintenance, temporal_mode))
+    let (temporal, temporal_name) = match temporal_choice(store_name, raw.as_deref())? {
+        TemporalChoice::SameAsStore => {
+            let name = built.temporal.supported().then(|| store_name.to_owned());
+            (built.temporal.clone(), name)
+        }
+        TemporalChoice::None => (
+            std::sync::Arc::new(antares_store::NoTemporal)
+                as std::sync::Arc<dyn antares_store::TemporalDriver>,
+            None,
+        ),
+        TemporalChoice::Second(name) => {
+            let second = build_store(&name, true).await?;
+            maintenance.extend(second.maintenance);
+            (second.temporal, Some(name))
+        }
+    };
+    Ok(Drivers {
+        store: built.store,
+        temporal,
+        maintenance,
+        temporal_name,
+    })
+}
+
+/// The two storage seams a running broker holds, and what the maintenance
+/// job and `/q/health` need to know about them.
+struct Drivers {
+    store: std::sync::Arc<dyn antares_store::CurrentStateDriver>,
+    temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
+    maintenance: Vec<(
+        antares_sql::sqlx::PgPool,
+        antares_sql::store::pg::maintenance::TemporalBackend,
+    )>,
+    /// What `/q/health` calls the history backend; `None` = history off.
+    temporal_name: Option<String>,
+}
+
+/// One built backend: the two driver seams of a single store instance, and
+/// the Postgres handles its maintenance job needs.
+struct Built {
+    store: std::sync::Arc<dyn antares_store::CurrentStateDriver>,
+    temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
+    maintenance: Option<(
+        antares_sql::sqlx::PgPool,
+        antares_sql::store::pg::maintenance::TemporalBackend,
+    )>,
+}
+
+/// One backend by name. `temporal_only` builds an instance whose
+/// current-state half is never served — the second store of a split
+/// `ANTARES_TEMPORAL`. An unknown name is an error naming the shelf.
+async fn build_store(name: &str, temporal_only: bool) -> Result<Built, Box<dyn std::error::Error>> {
+    #[cfg(feature = "plugin-example")]
+    if name == antares_plugin_example::NAME {
+        // A driver from outside `crates/` mounts through exactly the two
+        // trait objects a built-in does; nothing downstream can tell them
+        // apart, and its history half is its own — no `temporal_only` flag
+        // to set, because the current-state half is simply never asked.
+        let store = std::sync::Arc::new(antares_plugin_example::ExampleStore::new());
+        return Ok(Built {
+            store: store.clone(),
+            temporal: store,
+            maintenance: None,
+        });
+    }
+    let mode: antares_sql::StoreMode = name.parse().map_err(|_| {
+        format!(
+            "unknown store backend {name:?}; built with {}",
+            store_shelf().join("|")
+        )
+    })?;
+    let (store, backend) = build_builtin(mode).await?;
+    let store = if temporal_only {
+        store.temporal_only()
+    } else {
+        store
+    };
+    let maintenance = match (&store, backend) {
+        (antares_sql::store::any::AnyStore::Pg(p), Some(backend)) => {
+            Some((p.docs.pool().clone(), backend))
+        }
+        _ => None,
+    };
+    let store = std::sync::Arc::new(store);
+    Ok(Built {
+        store: store.clone(),
+        temporal: store,
+        maintenance,
+    })
 }
 
 /// ANTARES_STORE → store construction: `file` requires ANTARES_DATA_DIR
 /// (never a default inside the image); postgres and timescale require
 /// ANTARES_DATABASE_URL, connect ONE shared pool, run the embedded
 /// migrations at start and serve from the Pg backend.
-async fn build_store(
+async fn build_builtin(
     mode: antares_sql::StoreMode,
 ) -> Result<
     (
@@ -635,12 +729,10 @@ async fn run(
     port: u16,
     host_alias: String,
     roles: String,
-    // the concrete handle stays for the backend-specific jobs; the
-    // AppState carries only the driver seam
-    store: std::sync::Arc<antares_sql::store::any::AnyStore>,
+    store: std::sync::Arc<dyn antares_store::CurrentStateDriver>,
     temporal: std::sync::Arc<dyn antares_store::TemporalDriver>,
-    store_mode: antares_sql::StoreMode,
-    temporal_mode: Option<antares_sql::StoreMode>,
+    store_name: String,
+    temporal_name: Option<String>,
     maintenance: Vec<(
         antares_sql::sqlx::PgPool,
         antares_sql::store::pg::maintenance::TemporalBackend,
@@ -666,22 +758,22 @@ async fn run(
             }
         }
         "nats" => {
-            if !store_mode.is_pg() {
+            if !shared_state(&store_name) {
                 return Err(format!(
                     "ANTARES_BUS=nats requires a shared store (ANTARES_STORE=postgres|timescale); \
-                     {store_mode} state is per-process and cannot back multiple instances"
+                     {store_name} state is per-process and cannot back multiple instances"
                 )
                 .into());
             }
         }
         other => return Err(format!("unknown ANTARES_BUS={other} (local|nats)").into()),
     }
-    tracing::info!(port, %store_mode, %bus_mode, ?roles, "starting antares");
+    tracing::info!(port, store = %store_name, %bus_mode, ?roles, "starting antares");
 
     // Trailing-slash tolerance: Table 6.2-1 spells collection resources with a
     // trailing '/'; normalize before routing.
-    let mut state = AppState::with_drivers(host_alias, store.clone(), temporal, store_mode);
-    state.temporal_mode = temporal_mode;
+    let mut state = AppState::with_drivers(host_alias, store, temporal, &store_name);
+    state.temporal_name = temporal_name;
     state.delivery = antares_api::DeliveryPolicy::from_env().unwrap_or_default();
     state.temporal_record = std::env::var("ANTARES_TEMPORAL_RECORD")
         .as_deref()
@@ -692,6 +784,12 @@ async fn run(
     // default mounting put there, before the state is shared.
     let selected = api_surfaces(std::env::var("ANTARES_API_SURFACES").ok().as_deref())?;
     state = state.with_surfaces(selected.iter().map(|(_, build)| build()).collect())?;
+    // A notification binding compiled in from outside the workspace mounts
+    // exactly like the two shipped ones: one registration, no core-crate
+    // edit. It is not in a release build — the feature is off by default,
+    // so the shipped binary serves network schemes only.
+    #[cfg(feature = "plugin-example")]
+    let mut state = state.with_sink(Box::new(antares_plugin_example::MemorySink::new()));
     // /q/metrics renders through this closure (None without the
     // `telemetry` feature — the endpoint answers 404); the sampler feeds
     // the process-level gauges the whole run.
@@ -741,23 +839,23 @@ async fn run(
     // 4.22 GC on the memory/file arm: reads already refuse expired entities;
     // this reaps them (spec-sanctioned lag). The Pg arm's sweep runs inside
     // the maintenance job below — one job per backend, mode-switched.
-    // ANTARES_SWEEP_SECS paces 4.22 GC identically across ALL store modes —
-    // the Mem/file sweep loop and the Pg/Timescale maintenance job below both
-    // tick on it (the ETSI stack runs at 2 s so transient TPs observe GC, not
-    // just the read filter); parsed at startup, default 15 min.
-    if matches!(store.as_ref(), antares_sql::store::any::AnyStore::Mem(_)) {
-        let store = state.store.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
-            loop {
-                tick.tick().await;
-                let n = store.sweep_expired();
-                if n > 0 {
-                    tracing::debug!("4.22 sweep reaped {n} expired entities");
-                }
+    // ANTARES_SWEEP_SECS paces 4.22 GC identically across ALL backends —
+    // this loop and the Pg/Timescale maintenance job below both tick on it
+    // (the ETSI stack runs at 2 s so transient TPs observe GC, not just the
+    // read filter); parsed at startup, default 15 min. The loop runs for
+    // every driver and asks it what it reaped: a backend whose GC lives
+    // elsewhere — the Pg arm's is inside the maintenance job — answers 0.
+    let sweeper = state.store.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
+        loop {
+            tick.tick().await;
+            let n = sweeper.sweep_expired();
+            if n > 0 {
+                tracing::debug!("4.22 sweep reaped {n} expired entities");
             }
-        });
-    }
+        }
+    });
     // Temporal maintenance — plain-mode partition pre-creation and the
     // (opt-in) retention horizon, single-winner via SKIP LOCKED.
     // One job per pg half (current state and/or history), PINNED to the
@@ -1285,12 +1383,13 @@ mod sweep_secs_tests {
 
 #[cfg(test)]
 mod driver_registry_tests {
-    use super::{built_with, temporal_choice, TemporalChoice};
+    use super::{built_with, shared_state, store_shelf, temporal_choice, TemporalChoice};
     use antares_sql::StoreMode;
 
-    /// The shelf in the message is rendered from the mode list, so a backend
-    /// added to `StoreMode` cannot go missing from what the broker claims to
-    /// have been built with.
+    /// The shelf in the message is rendered from the backend list, so a
+    /// backend added to `StoreMode` — or compiled in from outside this
+    /// workspace — cannot go missing from what the broker claims to have
+    /// been built with.
     #[test]
     fn the_shelf_names_every_store_mode() {
         let shelf = built_with();
@@ -1301,6 +1400,9 @@ mod driver_registry_tests {
             shelf.contains("none"),
             "temporal `none` is part of the shelf: {shelf}"
         );
+        for name in store_shelf() {
+            assert!(shelf.contains(name), "{shelf} omits {name}");
+        }
     }
 
     /// Absent, or the store's own name, means one instance serves both
@@ -1308,11 +1410,11 @@ mod driver_registry_tests {
     #[test]
     fn absent_or_same_name_shares_the_store() {
         assert_eq!(
-            temporal_choice(StoreMode::Postgres, None).expect("ok"),
+            temporal_choice("postgres", None).expect("ok"),
             TemporalChoice::SameAsStore
         );
         assert_eq!(
-            temporal_choice(StoreMode::Postgres, Some("postgres")).expect("ok"),
+            temporal_choice("postgres", Some("postgres")).expect("ok"),
             TemporalChoice::SameAsStore
         );
     }
@@ -1320,12 +1422,12 @@ mod driver_registry_tests {
     #[test]
     fn none_turns_history_off_and_other_names_build_a_second_store() {
         assert_eq!(
-            temporal_choice(StoreMode::Memory, Some("none")).expect("ok"),
+            temporal_choice("memory", Some("none")).expect("ok"),
             TemporalChoice::None
         );
         assert_eq!(
-            temporal_choice(StoreMode::Memory, Some("timescale")).expect("ok"),
-            TemporalChoice::Second(StoreMode::Timescale)
+            temporal_choice("memory", Some("timescale")).expect("ok"),
+            TemporalChoice::Second("timescale".to_owned())
         );
     }
 
@@ -1333,12 +1435,71 @@ mod driver_registry_tests {
     /// shelf this binary was built with — never a silent default.
     #[test]
     fn unknown_backend_is_fatal_and_lists_the_shelf() {
-        let err = temporal_choice(StoreMode::Memory, Some("mongo")).expect_err("must fail");
+        let err = temporal_choice("memory", Some("mongo")).expect_err("must fail");
         assert!(err.contains("mongo"), "{err}");
         assert!(err.contains(&built_with()), "{err}");
         assert!(
-            temporal_choice(StoreMode::Memory, Some("")).is_err(),
+            temporal_choice("memory", Some("")).is_err(),
             "an empty name is not a default"
+        );
+    }
+
+    /// Shared state is what `ANTARES_BUS=nats` needs and what `bus=local`
+    /// refuses: a per-process backend — the built-in memory and file arms,
+    /// and any driver from outside the workspace — is never shared.
+    #[test]
+    fn only_the_database_backends_hold_shared_state() {
+        assert!(shared_state("postgres"));
+        assert!(shared_state("timescale"));
+        assert!(!shared_state("memory"));
+        assert!(!shared_state("file"));
+        assert!(
+            !shared_state("mongo"),
+            "an unknown name is not shared state"
+        );
+    }
+
+    /// A driver compiled in from outside `crates/` is selected by name
+    /// exactly like a built-in, and serves both storage seams.
+    #[cfg(feature = "plugin-example")]
+    #[test]
+    fn a_plugin_backend_is_on_the_shelf_and_builds_both_seams() {
+        let name = antares_plugin_example::NAME;
+        assert!(
+            store_shelf().contains(&name),
+            "the shelf omits the compiled-in plugin: {:?}",
+            store_shelf()
+        );
+        assert_eq!(
+            temporal_choice(name, None).expect("ok"),
+            TemporalChoice::SameAsStore
+        );
+        let drivers = super::runtime(1)
+            .expect("runtime")
+            .block_on(super::build_drivers(name))
+            .expect("the plugin driver builds");
+        assert_eq!(drivers.temporal_name.as_deref(), Some(name));
+        assert!(
+            drivers.maintenance.is_empty(),
+            "a plugin backend brings no Postgres maintenance job"
+        );
+        let tenant = antares_model::TenantId::default();
+        drivers
+            .store
+            .create(
+                &tenant,
+                antares_store::Kind::Entity,
+                "urn:ngsi-ld:Probe:1",
+                serde_json::json!({"id": "urn:ngsi-ld:Probe:1"}),
+            )
+            .expect("create through the plugin driver");
+        assert_eq!(
+            drivers
+                .store
+                .list(&tenant, antares_store::Kind::Entity)
+                .expect("list")
+                .len(),
+            1
         );
     }
 }
@@ -1377,6 +1538,28 @@ mod api_surface_tests {
         for (name, _) in SURFACE_SHELF {
             assert!(err.contains(name), "the message lists {name}: {err}");
         }
+    }
+
+    /// A surface compiled in from outside `crates/` is selected by name
+    /// beside the operational one, and claims its own prefix under `/x`.
+    #[cfg(feature = "plugin-example")]
+    #[test]
+    fn a_plugin_surface_mounts_beside_admin() {
+        assert_eq!(names(Some("admin,example")), vec!["admin", "example"]);
+        let built: Vec<Box<dyn antares_api::ApiSurface>> = api_surfaces(Some("admin,example"))
+            .expect("selection")
+            .iter()
+            .map(|(_, build)| build())
+            .collect();
+        let example = built
+            .iter()
+            .find(|s| s.name() == "example")
+            .expect("the plugin surface is built");
+        assert!(
+            example.prefix().starts_with("/x/"),
+            "a plugin surface lives under /x, never under the NGSI-LD root: {}",
+            example.prefix()
+        );
     }
 
     /// An empty selection is fatal too: readiness, health and metrics are

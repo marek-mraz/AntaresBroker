@@ -56,7 +56,7 @@ fn file_state(dir: &std::path::Path) -> AppState {
     let mut st = AppState::with_store(
         "antares-durable".into(),
         Arc::new(AnyStore::Mem(store)),
-        antares_sql::StoreMode::File,
+        "file",
     );
     antares_api::notify::wire(&mut st);
     st

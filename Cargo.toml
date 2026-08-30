@@ -13,6 +13,9 @@ members = [
     "crates/antares-registry",
     "crates/antares-broker",
     "crates/antares-wasm",
+    # The reference plugin: built and tested with the workspace so the
+    # driver, routing and notification seams cannot drift from it.
+    "examples/plugin-example",
 ]
 # Fuzz harness: own lockfile/profile, built only by cargo-fuzz on
 # nightly (.github/workflows/fuzz.yml) — never part of the normal build.
@@ -35,6 +38,7 @@ antares-bus = { path = "crates/antares-bus" }
 antares-api = { path = "crates/antares-api", default-features = false }
 antares-matcher = { path = "crates/antares-matcher" }
 antares-notifier = { path = "crates/antares-notifier", default-features = false }
+antares-plugin-example = { path = "examples/plugin-example" }
 antares-registry = { path = "crates/antares-registry" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }

@@ -14,6 +14,80 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plugin-example:
+    # The reference plugin is the proof that the seams are usable from
+    # outside `crates/`: a broker built with it serves its store, its
+    # temporal history, its HTTP surface and its notification binding, and
+    # the whole conformance suite runs through that driver. A red run here
+    # means a seam changed shape without its documented extension point
+    # following.
+    name: Reference plugin (all suites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write # the drift alarm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the broker on the plugin driver
+        run: cargo build --locked -p antares-broker --features plugin-example
+
+      - name: The four seams are served from outside the workspace
+        run: |
+          ANTARES_HTTP_PORT=9090 ANTARES_STORE=example \
+            ANTARES_API_SURFACES=admin,example ANTARES_SWEEP_SECS=2 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true \
+            target/debug/antares & echo $! > broker.pid
+          for i in $(seq 100); do curl -sf localhost:9090/q/health >/dev/null && break; sleep 0.2; done
+          curl -sf localhost:9090/q/health | tee health.json
+          python3 - <<'EOF'
+          import json, sys
+          h = json.load(open("health.json"))
+          checks = {
+              "store": h.get("store") == "example",
+              "temporal": h.get("temporal") == "example",
+              "surface": "example" in (h.get("surfaces") or {}),
+              "sink": "memory" in (h.get("notificationSchemes") or []),
+          }
+          for seam, ok in checks.items():
+              print(f"{seam}: {'ok' if ok else 'MISSING'}")
+          sys.exit(0 if all(checks.values()) else 1)
+          EOF
+          curl -sf localhost:9090/x/example/entities/count
+
+      - name: The conformance suite through the plugin driver
+        # MQTT TPs need mosquitto and are the image cells' job; everything
+        # else runs, and STOP_ON_ERROR=0 reports the whole picture.
+        run: |
+          BROKER_URL=http://localhost:9090/ngsi-ld/v1 CALLBACK_HOST=127.0.0.1 \
+            RESULTS_DIR=results/plugin-example STOP_ON_ERROR=0 MQTT=0 \
+            dev/etsi-run.sh
+
+      - name: Stop the broker
+        if: always()
+        run: kill "$(cat broker.pid)" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: plugin-example-results
+          path: results/plugin-example/
+          if-no-files-found: warn
+
+      - name: File an issue on scheduled drift
+        if: failure() && github.event_name == 'schedule'
+        uses: ./.github/actions/failure-issue
+        with:
+          title: the reference plugin drifted red
+          body: >-
+            The reference plugin no longer serves the conformance suite. A
+            component seam changed shape without `examples/plugin-example`
+            following it, or the plugin driver broke a rule the API relies
+            on. The run log names the suite.
+
   examples:
     name: Run every example
     runs-on: ubuntu-latest

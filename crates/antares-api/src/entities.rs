@@ -4423,7 +4423,7 @@ mod clause_5_6_1_and_5_6_21 {
             std::sync::Arc::new(antares_sql::store::any::AnyStore::Pg(
                 antares_sql::store::any::PgBackend::new(pool),
             )),
-            antares_store::StoreMode::Postgres,
+            "postgres",
         );
         for doc in st.store.list(&tenant, Kind::Entity).expect("list") {
             if let Some(id) = doc["id"].as_str() {

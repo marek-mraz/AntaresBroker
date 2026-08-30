@@ -85,6 +85,7 @@ dependencies = [
  "antares-api",
  "antares-bus",
  "antares-model",
+ "antares-plugin-example",
  "antares-sql",
  "antares-store",
  "axum",
@@ -171,6 +172,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "antares-plugin-example"
+version = "0.1.0"
+dependencies = [
+ "antares-api",
+ "antares-model",
+ "antares-notifier",
+ "antares-store",
+ "axum",
+ "http-body-util",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

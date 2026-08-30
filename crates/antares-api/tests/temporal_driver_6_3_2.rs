@@ -23,12 +23,7 @@ use tower::ServiceExt;
 
 fn state_without_temporal() -> AppState {
     let store = Arc::new(AnyStore::Mem(Store::default()));
-    AppState::with_drivers(
-        "me".into(),
-        store,
-        Arc::new(NoTemporal),
-        antares_sql::StoreMode::Memory,
-    )
+    AppState::with_drivers("me".into(), store, Arc::new(NoTemporal), "memory")
 }
 
 async fn req(st: &AppState, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {

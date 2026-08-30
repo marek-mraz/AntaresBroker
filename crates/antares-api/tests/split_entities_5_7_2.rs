@@ -179,11 +179,7 @@ async fn clause_5_7_2_4_split_aggregate_filter_postgres() {
         .expect("connect");
     let store =
         antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(pool));
-    let st = AppState::with_store(
-        "antares1".into(),
-        std::sync::Arc::new(store),
-        antares_sql::StoreMode::Postgres,
-    );
+    let st = AppState::with_store("antares1".into(), std::sync::Arc::new(store), "postgres");
     let tenant = format!("sagg{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
     assert_aggregate_filter(&st, &tenant).await;
 }

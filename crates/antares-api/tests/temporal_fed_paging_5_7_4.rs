@@ -63,7 +63,7 @@ async fn clause_5_7_4_pages_partition_the_federated_union_on_pg() {
     let st = AppState::with_store(
         "fedpage.example".into(),
         Arc::new(AnyStore::Pg(PgBackend::new(pool))),
-        antares_sql::StoreMode::Postgres,
+        "postgres",
     );
 
     // unique type per run — the DB outlives the test process

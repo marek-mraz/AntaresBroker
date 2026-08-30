@@ -1,0 +1,28 @@
+[package]
+name = "antares-plugin-example"
+description = "Reference plugin: the storage, routing and notification seams implemented outside the broker's own crates."
+version.workspace = true
+edition.workspace = true
+publish = false
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+antares-model = { workspace = true }
+antares-store = { workspace = true }
+antares-api = { workspace = true }
+antares-notifier = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The plugin proves itself with the same function the built-in backends run.
+antares-store = { workspace = true, features = ["test-kit"] }
+# The seam tests drive the broker's own router, so they need what any
+# in-tree router test needs.
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+
+[lints]
+workspace = true

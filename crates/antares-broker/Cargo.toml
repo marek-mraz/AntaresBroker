@@ -42,6 +42,7 @@ opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
 console-subscriber = { workspace = true, optional = true }
+antares-plugin-example = { workspace = true, optional = true }
 
 [features]
 # tokio-console in dev — build with RUSTFLAGS="--cfg tokio_unstable"
@@ -55,6 +56,12 @@ default = ["mqtt"]
 # its TLS stack from the binary, MQTT endpoints then fail at subscription
 # creation.
 mqtt = ["antares-api/mqtt"]
+# The reference plugin: the storage, routing and notification seams from a
+# crate outside `crates/`. Off in every shipped build — it adds a backend
+# (`ANTARES_STORE=example`), a surface (`ANTARES_API_SURFACES=…,example`)
+# and a non-network notification binding, none of which belong in a release
+# image. It exists so the seams are proven from outside, not documented.
+plugin-example = ["dep:antares-plugin-example"]
 # Decay-purging allocator + heap stats (glibc malloc holds far more RSS).
 # Unix-only: the wasm target keeps the default allocator.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

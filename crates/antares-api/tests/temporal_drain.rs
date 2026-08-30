@@ -144,12 +144,7 @@ fn counting_state() -> (AppState, Arc<Counting>) {
         calls: AtomicUsize::new(0),
         events: AtomicUsize::new(0),
     });
-    let mut st = AppState::with_drivers(
-        "me".into(),
-        store,
-        counting.clone(),
-        antares_sql::StoreMode::Memory,
-    );
+    let mut st = AppState::with_drivers("me".into(), store, counting.clone(), "memory");
     antares_api::notify::wire(&mut st);
     (st, counting)
 }
@@ -258,12 +253,7 @@ async fn reads_never_drain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_drain_keeps_the_2xx_and_is_counted() {
     let store = Arc::new(AnyStore::Mem(Store::default()));
-    let mut st = AppState::with_drivers(
-        "me".into(),
-        store,
-        Arc::new(Failing),
-        antares_sql::StoreMode::Memory,
-    );
+    let mut st = AppState::with_drivers("me".into(), store, Arc::new(Failing), "memory");
     antares_api::notify::wire(&mut st);
     let before = antares_api::history::drain_errors();
     let (status, body) = req(&st, "POST", "/ngsi-ld/v1/entities", Some(entity(9))).await;

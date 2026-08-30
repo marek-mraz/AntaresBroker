@@ -51,11 +51,14 @@ pub struct AppState {
     /// Active store backend — reported by `/q/health` (NOT in
     /// `/info/sourceIdentity`, which is a spec resource). A typed value so
     /// mode-gated sections switch on an enum, never on strings.
-    pub store_mode: antares_store::StoreMode,
+    /// What the current-state driver is CALLED, for `/q/health` — a name,
+    /// not an enumeration: a driver from outside this workspace mounts the
+    /// same way as one from inside, and nothing here branches on it.
+    pub store_name: String,
     /// The temporal backend `/q/health` names: the store's own mode when one
     /// instance serves both seams, `None` when history is off (`NoTemporal`);
     /// a second backend overwrites it after construction.
-    pub temporal_mode: Option<antares_store::StoreMode>,
+    pub temporal_name: Option<String>,
     pub loader: Arc<Loader>,
     pub started: Instant,
     /// Startup timestamp (createdAt of the built-in core @context entry).
@@ -168,35 +171,27 @@ impl AppState {
                 .join("antares-test-store")
                 .join(uuid::Uuid::new_v4().simple().to_string());
             let store = Store::open_file(&dir).expect("open the redb test store");
-            return Self::with_store(
-                host_alias,
-                Arc::new(AnyStore::Mem(store)),
-                antares_store::StoreMode::File,
-            );
+            return Self::with_store(host_alias, Arc::new(AnyStore::Mem(store)), "file");
         }
         Self::with_store(
             host_alias,
             Arc::new(AnyStore::Mem(Store::default())),
-            antares_store::StoreMode::Memory,
+            "memory",
         )
     }
 
     /// Convenience over the built-in backends: one `AnyStore` serves as
     /// both drivers.
-    pub fn with_store(
-        host_alias: String,
-        store: Arc<AnyStore>,
-        store_mode: antares_store::StoreMode,
-    ) -> Self {
+    pub fn with_store(host_alias: String, store: Arc<AnyStore>, store_name: &str) -> Self {
         let temporal: Arc<dyn TemporalDriver> = store.clone();
-        Self::with_drivers(host_alias, store, temporal, store_mode)
+        Self::with_drivers(host_alias, store, temporal, store_name)
     }
 
     pub fn with_drivers(
         host_alias: String,
         store: Arc<dyn CurrentStateDriver>,
         temporal: Arc<dyn TemporalDriver>,
-        store_mode: antares_store::StoreMode,
+        store_name: &str,
     ) -> Self {
         // One policy value, read once, shared by every outbound path —
         // the gate (scheme/breakers) and the clients (DNS pinning, redirect
@@ -283,7 +278,7 @@ impl AppState {
                     _ => format!("http://{host_alias}"),
                 }
             });
-        let temporal_mode = temporal.supported().then_some(store_mode);
+        let temporal_name = temporal.supported().then(|| store_name.to_owned());
         // 6.3.8 is the mandatory binding; clause 7's MQTT one is optional and
         // registers only when compiled in. Both go through the registry, so
         // notification delivery never names a transport.
@@ -298,8 +293,8 @@ impl AppState {
         Self {
             store,
             temporal,
-            store_mode,
-            temporal_mode,
+            store_name: store_name.to_owned(),
+            temporal_name,
             loader,
             started: Instant::now(),
             started_at: now_iso(),

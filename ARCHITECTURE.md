@@ -209,7 +209,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | a new NGSI-LD resource | `<resource>.rs` + route in `lib.rs` | `Kind` in `antares-store` if it is stored |
 | an error status | `antares-model` `NgsiError` | Table 6.3.2-1 in the doc comment |
 | a cap | `bounds.rs` + env key + `docs/src/configuration.md` | `/q/health` test |
-| a store backend | implement both driver traits in a new crate | `StoreMode` in `antares-sql/src/lib.rs`, `ANTARES_STORE` parsing, a CI cell |
+| a store backend | implement both driver traits in a new crate | a name on `store_shelf()` behind its feature (`examples/plugin-example` is the worked one); a built-in also takes a `StoreMode` value, an `AnyStore` arm and a CI cell |
 | a notification transport | `NotificationSink` impl (own crate, or `antares-notifier`) | `SinkRegistry::register` at the composition root; `network()` false only if it opens no socket |
 | outbound HTTP anywhere | `antares_jsonld::client_builder` only | egress policy and breaker |
 | a schema change | a new numbered migration; never edit an applied one | RLS policy + `FORCE` on the table |

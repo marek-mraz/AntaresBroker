@@ -118,8 +118,8 @@ async fn delete(st: &AppState, uri: &str) -> StatusCode {
 async fn cached_context_bookkeeping_is_shared_across_instances() {
     allow_private();
     let store = Arc::new(antares_sql::store::any::AnyStore::Mem(Default::default()));
-    let a = AppState::with_store("podA".into(), store.clone(), antares_sql::StoreMode::Memory);
-    let b = AppState::with_store("podB".into(), store.clone(), antares_sql::StoreMode::Memory);
+    let a = AppState::with_store("podA".into(), store.clone(), "memory");
+    let b = AppState::with_store("podB".into(), store.clone(), "memory");
     let (url, fetches) = mock_ctx_server();
     let local_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string();
     let details = format!("/ngsi-ld/v1/jsonldContexts/{local_id}?details=true");
@@ -191,8 +191,8 @@ async fn cached_context_bookkeeping_is_shared_across_instances() {
 async fn deleted_row_recreated_when_peer_doc_cache_is_warm() {
     allow_private();
     let store = Arc::new(antares_sql::store::any::AnyStore::Mem(Default::default()));
-    let a = AppState::with_store("podA".into(), store.clone(), antares_sql::StoreMode::Memory);
-    let b = AppState::with_store("podB".into(), store.clone(), antares_sql::StoreMode::Memory);
+    let a = AppState::with_store("podA".into(), store.clone(), "memory");
+    let b = AppState::with_store("podB".into(), store.clone(), "memory");
     let (url, fetches) = mock_ctx_server();
     let local_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string();
     let details = format!("/ngsi-ld/v1/jsonldContexts/{local_id}?details=true");
@@ -232,7 +232,7 @@ async fn deleted_row_recreated_when_peer_doc_cache_is_warm() {
 #[tokio::test(flavor = "multi_thread")]
 async fn internal_context_fetch_does_not_count_as_serve_hit() {
     let store = Arc::new(antares_sql::store::any::AnyStore::Mem(Default::default()));
-    let a = AppState::with_store("podA".into(), store, antares_sql::StoreMode::Memory);
+    let a = AppState::with_store("podA".into(), store, "memory");
     let sc = post_ld(
         &a,
         "/ngsi-ld/v1/subscriptions",

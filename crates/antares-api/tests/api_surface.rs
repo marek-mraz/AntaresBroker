@@ -166,3 +166,26 @@ async fn health_names_the_engine_behind_each_driver() {
         "the temporal seam is the same store here and must report the same way: {v}"
     );
 }
+
+/// The state names its store; it does not enumerate it. A driver from
+/// outside the built-in shelf is mounted the same way as one from inside,
+/// and `/q/health` reports whatever it is called — an enum here would mean
+/// no driver could be added without editing a core crate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_from_outside_the_shelf_can_back_the_state() {
+    let st = AppState::with_store(
+        "surfaces".into(),
+        std::sync::Arc::new(antares_sql::store::any::AnyStore::Mem(
+            antares_sql::store::Store::default(),
+        )),
+        "example",
+    );
+    let (code, body) = get_path(&st, "/q/health").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).expect("health json");
+    assert_eq!(v["store"], "example", "{v}");
+    assert_eq!(
+        v["temporal"], "example",
+        "one driver serves both seams: {v}"
+    );
+}

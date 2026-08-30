@@ -359,11 +359,7 @@ async fn clause_5_7_4_4_scopeq_gates_the_sql_pushdown() {
     let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
         pool.clone(),
     ));
-    let st = AppState::with_store(
-        "me".into(),
-        std::sync::Arc::new(store),
-        antares_sql::StoreMode::Postgres,
-    );
+    let st = AppState::with_store("me".into(), std::sync::Arc::new(store), "postgres");
     // isolate this run's rows from earlier local runs
     let tenant = format!("scln{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
 

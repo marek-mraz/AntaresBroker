@@ -50,7 +50,6 @@ impl Broker {
         let store = antares_sql::store::any::AnyStore::Mem(store);
         // wasm compositions only ever carry the Mem arm — anything but a
         // known Mem-arm mode name is a caller bug, defaulted to memory.
-        let mode: antares_sql::StoreMode = mode.parse().unwrap_or_default();
         let mut state = antares_api::AppState::with_store(
             host_alias.unwrap_or_else(|| "antares-wasm".to_owned()),
             std::sync::Arc::new(store),

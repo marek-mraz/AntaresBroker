@@ -49,7 +49,7 @@ async fn concurrent_registration_creates_all_land_and_health_stays_up() {
     let st = AppState::with_store(
         "antares1".into(),
         Arc::new(AnyStore::Pg(PgBackend::new(pool))),
-        antares_sql::StoreMode::Postgres,
+        "postgres",
     );
 
     let mut tasks = Vec::new();

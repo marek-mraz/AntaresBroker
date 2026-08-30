@@ -27,6 +27,7 @@ Every optional capability is one cargo feature plus a registration in
 | `antares-notifier` | `mqtt` | on | `rumqttc` + `rustls` |
 | `antares-broker` | `console` | off | `tokio-console` support; only arms under `RUSTFLAGS="--cfg tokio_unstable"` |
 | `antares-broker` | `mqtt` | on | forwards `antares-api/mqtt`; off, MQTT endpoints fail at subscription creation. Measured on one release build: 27.2 → 26.0 MB binary, 58.1 → 55.4 MiB idle RSS |
+| `antares-broker` | `plugin-example` | off | the reference plugin (`examples/plugin-example`): one more backend, surface and notification binding, all from outside `crates/`. Never in a shipped build |
 
 The browser artifact (`antares-wasm`) is the one build with `postgres`
 off: it drives the same router over the memory store and the OPFS shadow.
@@ -50,7 +51,10 @@ persists; this section describes how one is selected and added.
 ### The registry
 
 `build_drivers` in `crates/antares-broker/src/main.rs` is the registry:
-a match from the configured names to constructors.
+a match from the configured names to constructors. The shelf it selects
+from is a list of NAMES, not an enumeration — `store_shelf()` chains the
+built-in `StoreMode` values with whatever backends were compiled in from
+outside the workspace, so adding one never edits a core crate.
 
 - `ANTARES_STORE` picks the current-state backend through `build_store`,
   one arm per backend.
@@ -125,42 +129,60 @@ changes.
 
 ### How to add a storage backend
 
-1. Copy `crates/antares-sql/src/store/mem/` to a new folder under
-   `store/`. One folder holds the whole backend.
-2. Implement `CurrentStateDriver` and `TemporalDriver` for it. Methods
-   the backend does not support keep the trait defaults, which return an
-   unsupported error instead of panicking.
-3. Add an arm to `AnyStore` (`store/any.rs`) and a value to `StoreMode`
-   (`crates/antares-store/src/lib.rs`).
-4. Add the `build_store` arm in `crates/antares-broker/src/main.rs`,
-   naming the environment variables the backend reads in its doc comment;
-   `dev/check-env-docs.sh` requires a row for each in
-   `docs/src/configuration.md`. Extend the `BUILT_WITH` listing.
-5. If the backend needs background jobs, add an arm next to the expiry
-   sweep and the maintenance job in `main.rs`.
-6. Hold it to the driver contract. `antares-store`'s `test-kit` feature
+`examples/plugin-example` is the worked answer: a crate outside `crates/`
+that implements `CurrentStateDriver`, `TemporalDriver`, one `ApiSurface`
+and one `NotificationSink`, and reaches a running broker through one
+cargo feature. Read it first — it is short, and it is built and tested
+with the workspace so it cannot drift from the seams it demonstrates.
+
+A backend from outside the workspace:
+
+1. A crate depending on `antares-store` (the two driver traits) and, if it
+   also brings a surface or a binding, `antares-api` and
+   `antares-notifier`. Nothing depends on it in return.
+2. Implement `CurrentStateDriver` and `TemporalDriver` for one type.
+   Methods the backend does not support keep the trait defaults, which
+   return an unsupported error instead of panicking. A driver may
+   over-return from `query_entities` — answering `decided: false` hands
+   every predicate back to the API — but it may never drop a matching row
+   and never cross a tenant.
+3. Hold it to the driver contract. `antares-store`'s `test-kit` feature
    exports `run_current_state_contract` and `run_temporal_contract`
    (`crates/antares-store/src/contract.rs`): the rules `antares-api` writes
    against and no backend decides for itself — a missing row answers `None`,
    a mutate never inserts (ADR-0005, ETSI 047_06), a rejected mutate commits
    nothing, batch results align with the input ids, `upsert` and
    `batch_upsert` answer opposite polarities, a query never drops a matching
-   row and never crosses a tenant. Call both from the backend's own tests,
-   the way `crates/antares-sql/tests/contract.rs` (memory, file) and
-   `tests/pg.rs` (postgres, timescale) do. A driver whose calls block on an
-   async runtime needs a multi-threaded runtime context.
-7. Add the restart-survival and per-kind tests the other backends carry
-   (`crates/antares-broker/tests/store_combos.rs` has one row per
-   store × temporal pairing). The API test suite itself runs once per
-   built-in store: `AppState::new` composes a fresh store per state from
-   `ANTARES_TEST_STORE` (`memory` by default, `file` for a redb directory
-   under the system temp dir), and `workspace.yml` runs
-   `cargo nextest -p antares-api` under each value. A backend that wants
-   the same proof adds its arm there and one more CI configuration.
-8. Add a cell to the matrix in `.github/workflows/etsi-matrix.yml`. The
-   full preset runs seven cells today: memory, file, postgres, timescale,
-   postgres-nats, timescale-nats and wasm-file; every cell must pass the
-   whole suite before the backend is part of a release.
+   row and never crosses a tenant. Call both from the crate's own tests, the
+   way `examples/plugin-example/tests/contract.rs` does. A driver whose calls
+   block on an async runtime needs a multi-threaded runtime context.
+4. Register it in `antares-broker`: an optional dependency, one feature that
+   turns it on, and the name in the three shelves it belongs to —
+   `store_shelf()` for the backend, `SURFACE_SHELF` for a surface,
+   `AppState::with_sink` for a binding. Each is one `#[cfg(feature = …)]`
+   line. Name the environment variables the backend reads in its doc
+   comment; `dev/check-env-docs.sh` requires a row for each in
+   `docs/src/configuration.md`.
+5. Prove it against the conformance suite, not only against the contract:
+   run the broker with `ANTARES_STORE=<name>` and put the ETSI suite
+   through it. `.github/workflows/examples.yml` does exactly that for the
+   reference plugin.
+
+A backend that wants to be a built-in instead — one of the arms the shipped
+binary carries — takes the same first three steps and then joins the store
+ladder: an arm in `AnyStore` (`crates/antares-sql/src/store/any.rs`), a
+value in `StoreMode` (`crates/antares-store/src/lib.rs`), an arm in
+`build_builtin`, a background job next to the expiry sweep if it needs one,
+a row per pairing in `crates/antares-broker/tests/store_combos.rs`, and a
+cell in `.github/workflows/etsi-matrix.yml`. The full preset runs seven
+cells today: memory, file, postgres, timescale, postgres-nats,
+timescale-nats and wasm-file; every cell must pass the whole suite before
+the backend is part of a release. The API test suite runs once per built-in
+store — `AppState::new` composes a fresh store per state from
+`ANTARES_TEST_STORE`, and `workspace.yml` runs `cargo nextest -p
+antares-api` under each value; that harness reaches only backends
+`antares-api` can construct, which is why an outside driver proves itself
+through the suite in step 5.
 
 SQL assembled at runtime stays inside `crates/antares-sql/src/`.
 `workspace.yml` fails the build on `AssertSqlSafe` or an `sqlx` query built
