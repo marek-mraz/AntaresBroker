@@ -142,49 +142,80 @@ impl EgressPolicy {
         })
     }
 
+    /// The IPv4 destination an IPv6 address stands for. Three spellings
+    /// reach one and the same host: `::ffff:a.b.c.d` (IPv4-mapped),
+    /// `::a.b.c.d` (IPv4-compatible, RFC 4291) and `64:ff9b::a.b.c.d` (the
+    /// well-known NAT64 prefix, RFC 6052, which an IPv6-only deployment
+    /// translates straight back to IPv4). Both classifiers below unwrap
+    /// through this one function, so a range denied in one spelling is
+    /// denied in every spelling.
+    fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+        let s = v6.segments();
+        if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+            return Some(std::net::Ipv4Addr::from(
+                (u32::from(s[6]) << 16) | u32::from(s[7]),
+            ));
+        }
+        v6.to_ipv4_mapped().or_else(|| v6.to_ipv4())
+    }
+
     /// The cloud instance-metadata endpoints — the IPv4 link-local range
-    /// (169.254.0.0/16, RFC 3927), its IPv6 spellings, and the IMDS-over-IPv6
-    /// ULA `fd00:ec2::254`. Refused whatever `allow_private` says: no
+    /// (169.254.0.0/16, RFC 3927) shared by AWS, Azure, GCP and OCI,
+    /// `100.100.100.200`, which sits in carrier-grade NAT rather than
+    /// link-local, the IMDS-over-IPv6 ULA `fd00:ec2::254`, and every IPv6
+    /// spelling of the IPv4 ones. Refused whatever `allow_private` says: no
     /// development box, compose stack or conformance mock lives there, so
     /// denying it costs nothing, while reaching it from a client-supplied
     /// @context URL or notification endpoint is the classic credential-theft
     /// SSRF.
     pub fn ip_is_metadata(ip: std::net::IpAddr) -> bool {
         match ip {
-            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets() == [100, 100, 100, 200],
             std::net::IpAddr::V6(v6) => {
                 v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254]
-                    || v6
-                        .to_ipv4_mapped()
-                        .or_else(|| v6.to_ipv4())
-                        .is_some_and(|v4| v4.is_link_local())
+                    || Self::embedded_v4(v6)
+                        .is_some_and(|v4| Self::ip_is_metadata(std::net::IpAddr::V4(v4)))
             }
         }
     }
 
-    /// The ranges the private-egress deny covers: loopback, RFC 1918,
-    /// link-local, unspecified and broadcast for IPv4; loopback,
-    /// unspecified, `fc00::/7` unique-local and `fe80::/10` link-local for
-    /// IPv6, with an IPv4-mapped address judged as its IPv4 self. Public
-    /// because every client-supplied destination is judged by this one
-    /// classifier — the @context fetch here and the MQTT endpoint in
-    /// `antares-notifier` — so a range added to it cannot be missing from
+    /// The ranges the private-egress deny covers. IPv4: loopback, RFC 1918,
+    /// link-local, `0.0.0.0/8`, carrier-grade NAT, the IETF assignment and
+    /// benchmarking blocks, and everything reserved above `240.0.0.0`.
+    /// IPv6: loopback, unspecified, `fc00::/7` unique-local and `fe80::/10`
+    /// link-local, with an embedded IPv4 destination judged as its IPv4
+    /// self. Public because every client-supplied destination is judged by
+    /// this one classifier — the @context fetch here and the MQTT endpoint
+    /// in `antares-notifier` — so a range added to it cannot be missing from
     /// one of the bindings.
     pub fn ip_is_private(ip: std::net::IpAddr) -> bool {
         match ip {
             std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
                 v4.is_loopback()
                     || v4.is_private()
                     || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || v4.is_broadcast()
+                    // 0.0.0.0/8 "this network", which a Linux stack routes to
+                    // the local host; subsumes the unspecified address
+                    || o[0] == 0
+                    // 100.64.0.0/10 carrier-grade NAT (RFC 6598), where a
+                    // cloud provider's internal services live
+                    || (o[0] == 100 && (64..128).contains(&o[1]))
+                    // 192.0.0.0/24 IETF protocol assignments (RFC 6890)
+                    || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                    // 198.18.0.0/15 benchmarking (RFC 2544)
+                    || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                    // 240.0.0.0/4 reserved; subsumes the broadcast address
+                    || o[0] >= 240
             }
             std::net::IpAddr::V6(v6) => {
-                // an IPv4-mapped address (::ffff:a.b.c.d) is the v4 target in
-                // v6 spelling — judge it as its v4 self, or ::ffff:127.0.0.1
-                // and ::ffff:169.254.169.254 slip past the v6 checks
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    return Self::ip_is_private(std::net::IpAddr::V4(v4));
+                // an IPv4 destination in IPv6 spelling is the same host —
+                // judge it as its IPv4 self, or ::ffff:127.0.0.1 and
+                // 64:ff9b::a9fe:a9fe slip past the IPv6 checks
+                if Self::embedded_v4(v6)
+                    .is_some_and(|v4| Self::ip_is_private(std::net::IpAddr::V4(v4)))
+                {
+                    return true;
                 }
                 v6.is_loopback()
                     || v6.is_unspecified()
@@ -1970,6 +2001,67 @@ mod tests {
                 .await
                 .expect_err("the metadata endpoint must be denied");
             assert!(err.contains("metadata"), "{host}: {err}");
+        }
+    }
+
+    /// The metadata deny is unconditional, so it has to cover every
+    /// provider's endpoint and not only the `169.254.169.254` the big four
+    /// share. `100.100.100.200` sits in carrier-grade NAT, which the default
+    /// `allow_private: true` posture does not deny, and an IPv6-only
+    /// deployment reaches the link-local endpoint through the NAT64 prefix.
+    #[tokio::test]
+    async fn metadata_deny_covers_the_cgnat_and_nat64_spellings() {
+        let allow = EgressPolicy {
+            allow_private: true,
+        };
+        for host in [
+            "100.100.100.200",
+            "[::ffff:100.100.100.200]",
+            // 64:ff9b::169.254.169.254
+            "[64:ff9b::a9fe:a9fe]",
+        ] {
+            let err = allow
+                .check_host(host, 80)
+                .await
+                .expect_err("the metadata endpoint must be denied");
+            assert!(err.contains("metadata"), "{host}: {err}");
+        }
+    }
+
+    /// ADR-0010 makes `allow_private: false` the internet-facing posture, so
+    /// the classifier has to cover the ranges an internal service actually
+    /// sits on: carrier-grade NAT (RFC 6598), `0.0.0.0/8`, which a Linux
+    /// stack routes to the local host, the IETF assignment and benchmarking
+    /// blocks, the reserved space above `240.0.0.0`, and the NAT64 prefix
+    /// (RFC 6052), which translates straight back to an IPv4 target.
+    #[tokio::test]
+    async fn private_deny_covers_the_ranges_internal_services_sit_on() {
+        let deny = EgressPolicy {
+            allow_private: false,
+        };
+        for host in [
+            "100.64.0.1",
+            "100.127.255.254",
+            "0.1.2.3",
+            "192.0.0.8",
+            "198.18.0.1",
+            "240.0.0.1",
+            "[::ffff:100.64.0.1]",
+            // 64:ff9b::10.1.1.1
+            "[64:ff9b::a01:101]",
+        ] {
+            let err = deny
+                .check_host(host, 80)
+                .await
+                .expect_err("an internal-range destination must be denied");
+            assert!(err.contains("denied"), "{host}: {err}");
+        }
+        // the widening stops at the public internet: 100.128.0.0 is the first
+        // address above carrier-grade NAT and stays reachable.
+        for host in ["93.184.216.34", "100.128.0.1", "[2606:2800:220::1]"] {
+            deny.check_host(host, 80)
+                .await
+                .unwrap_or_else(|e| panic!("{host} is public and must pass: {e}"));
         }
     }
 

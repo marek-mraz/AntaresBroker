@@ -45,7 +45,7 @@ here).
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ANTARES_EGRESS_ALLOW_PRIVATE` | `true` | Broker-initiated HTTP and MQTT (notifications, forwards, `@context` fetches) may reach loopback, link-local, RFC 1918 and cloud-metadata ranges. Set `false` (or `0`) on an internet-exposed deployment to deny them; the scheme allowlist, redirect cap, DNS pinning and response-size caps apply regardless. A refused delivery is booked as a failure (`lastFailure`, `status: failed`) and never retried. |
+| `ANTARES_EGRESS_ALLOW_PRIVATE` | `true` | Broker-initiated HTTP and MQTT (notifications, forwards, `@context` fetches) may reach loopback, link-local and RFC 1918 destinations. Set `false` (or `0`) on an internet-exposed deployment to deny those together with carrier-grade NAT (`100.64.0.0/10`), `0.0.0.0/8`, the IETF assignment and benchmarking blocks and the reserved space above `240.0.0.0`. The cloud instance-metadata endpoints are refused whatever this is set to, in every IPv6 spelling. The scheme allowlist, redirect cap, DNS pinning and response-size caps apply regardless. A refused delivery is booked as a failure (`lastFailure`, `status: failed`) and never retried. |
 | `ANTARES_FED_FANOUT` | `8` | Concurrent forwards per distributed read (4.3.6.1 orders the merge, not the requests). |
 | `ANTARES_FED_INFLIGHT` | `256` | Forwarded requests in flight for the whole process; callers over the cap wait. Bounds the buffers and connections open federated queries hold (6 000 open queries × 34 sources once reached 7.7 GB). |
 | `ANTARES_MAX_FED_RESPONSE_BYTES` | `16777216` (16 MiB) | Ceiling on one forwarded response body — one misbehaving peer cannot balloon broker memory. Over-cap parts fail as warning 111 (Table 6.3.17-1). |
