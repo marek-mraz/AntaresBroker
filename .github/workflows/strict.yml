@@ -61,10 +61,10 @@ jobs:
           done
 
   coverage:
-    # Line-coverage floor over the same live-service setup as ci.yml (so the
-    # pg/mqtt/nats integration tests count instead of skipping vacuously).
-    # The floor only ever ratchets UP: after a green run, raise it to just
-    # under the measured number. Never lower it to make a red run pass.
+    # Coverage floors over the same live-service setup as ci.yml (so the
+    # pg/mqtt/nats integration tests count instead of skipping vacuously),
+    # one floor per test source. dev/etsi-coverage.sh reports the same split
+    # per store, with the ETSI cells as further columns.
     name: Coverage floor (daily)
     if: github.event.schedule != '41 3 * * 0'
     runs-on: ubuntu-24.04-arm
@@ -102,12 +102,41 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # Initial floor 60 = deliberately under the first measured number;
-      # ratchet it up once the daily run reports the real figure.
-      - run: cargo llvm-cov --locked --workspace --fail-under-lines 60
-      - name: Coverage summary
+      # Coverage is gated per test source, never as one blended number: the
+      # in-crate unit surface and the integration binaries carry their own
+      # line AND function floors, so one of them rising can no longer hide
+      # the other falling. Floors only ratchet UP — after a green run raise
+      # them to just under the measured figure; never lower one to make a red
+      # run pass. The numbers below sit a couple of points under a run
+      # measured with a live Postgres but no MQTT or NATS, which this job
+      # has, so they are a floor and not a target.
+      # The summary is captured from the gated run itself. A bare
+      # `llvm-cov report` would total every file in the coverage map,
+      # including targets this step never ran, and print a number that is not
+      # the one being gated.
+      - name: Unit surface floor (lib + bins)
+        run: |
+          set -eo pipefail
+          rc=0
+          cargo llvm-cov --locked --workspace --lib --bins --summary-only \
+            --fail-under-lines 75 --fail-under-functions 73 > unit-cov.txt || rc=$?
+          { echo "### Coverage floor — unit (lib + bins)"; echo '```'
+            cat unit-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      # Named packages rather than --workspace: a package with no tests/
+      # directory has no target matching the glob and cargo refuses the whole
+      # invocation.
+      - name: API surface floor (integration binaries)
         if: always()
-        run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          set -eo pipefail
+          rc=0
+          cargo llvm-cov --locked -p antares-api -p antares-broker \
+            -p antares-bus -p antares-sql --test '*' --summary-only \
+            --fail-under-lines 63 --fail-under-functions 64 > api-cov.txt || rc=$?
+          { echo "### Coverage floor — api (integration binaries)"; echo '```'
+            cat api-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
   tsan:
     # ThreadSanitizer over the workspace tests — the machine check for the

@@ -2,7 +2,7 @@ name: etsi-coverage
 
 # ETSI-driven coverage, per store mode — which broker code NO test executes.
 #
-# strict.yml's daily floor covers the Rust unit tests. This workflow answers
+# strict.yml's daily floor covers the Rust tests. This workflow answers
 # the other half: it instruments the broker binary, runs the workspace tests
 # AND the full Robot suite against it (memory / file / postgres / timescale),
 # and publishes per-store + merged reports. A zero-count line in the merged
@@ -78,9 +78,14 @@ jobs:
           pct() { awk '/^TOTAL/ {print $(NF-3)}' "$1" 2>/dev/null || true; }
           {
             echo "## ETSI coverage — ${{ matrix.store }}"
-            echo "- unit (Rust tests only): $(pct "$R/unit/summary.txt")"
+            echo "- unit (lib + bins): $(pct "$R/unit/summary.txt")"
+            echo "- api (integration binaries): $(pct "$R/api/summary.txt")"
             echo "- robot (ETSI suite only): $(pct "$R/robot/summary.txt")"
             echo "- combined: $(pct "$R/summary.txt")"
+            echo
+            echo "### Coverage per test source"
+            cat "$R/summary.md" 2>/dev/null || echo "(no table)"
+            echo
             echo '```'
             cat "$R/summary.txt"
             echo '```'
@@ -130,17 +135,35 @@ jobs:
           }
           merge lcov.info merged.info
           merge unit/lcov.info merged-unit.info || true
+          merge api/lcov.info merged-api.info || true
           merge robot/lcov.info merged-robot.info || true
-          if [ -f merged-unit.info ] && [ -f merged-robot.info ]; then
-            python3 dev/coverage-attribution.py merged-unit.info merged-robot.info .
+          merge rust.info merged-rust.info || true
+          if [ -f merged-rust.info ] && [ -f merged-robot.info ]; then
+            python3 dev/coverage-attribution.py merged-rust.info merged-robot.info .
           fi
+          # One table, one column per test source: the two Rust sources, one
+          # per ETSI cell, and every profile merged. Tracefiles, not the JSON
+          # exports, because `lcov -a` is what unions the cells per line and
+          # per function.
+          TABLE=()
+          [ -f merged-unit.info ] && TABLE+=("unit=merged-unit.info")
+          [ -f merged-api.info ] && TABLE+=("api=merged-api.info")
+          for cell in memory file postgres timescale; do
+            f="cells/etsi-coverage-$cell/robot/lcov.info"
+            [ -f "$f" ] && TABLE+=("etsi-$cell=$f")
+          done
+          TABLE+=("combined=merged.info")
+          python3 dev/coverage-attribution.py --table . "${TABLE[@]}"
           {
             echo "## Merged coverage (memory ∪ file ∪ postgres ∪ timescale)"
+            echo "### Coverage per test source"
+            cat summary.md
+            echo
             echo '```'
             lcov --list merged.info --ignore-errors inconsistent
             echo '```'
             if [ -f attribution.txt ]; then
-              echo "### Attribution (unit vs robot, all stores)"
+              echo "### Attribution (Rust tests vs the Robot suite, all stores)"
               echo '```'
               head -20 attribution.txt
               echo '```'
@@ -170,7 +193,10 @@ jobs:
           path: |
             merged.info
             merged-unit.info
+            merged-api.info
             merged-robot.info
+            merged-rust.info
+            summary.md
             attribution.txt
             uncovered-lines.txt
             html

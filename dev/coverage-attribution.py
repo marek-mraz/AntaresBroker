@@ -15,6 +15,18 @@ Writes into <out-dir>:
                          coverage comes only from unit tests (surface the
                          conformance suite never reaches).
     uncovered-lines.txt  crate-path:line of code NO test of either kind ran.
+
+Second mode: the per-source coverage table.
+
+    python3 dev/coverage-attribution.py --table <out-dir> \
+        unit=<coverage.json> api=<coverage.json> etsi-memory=<coverage.json> ...
+
+Each argument names one test source and the coverage it produced, as an
+llvm-cov JSON export or an lcov tracefile (the suffix decides). Writes
+<out-dir>/summary.md: one row per crate plus TOTAL, two columns per
+source (line % and function %). Coverage is reported per source
+and never as one blended number, so a column that drops is visible even when
+the total rises.
 """
 
 import sys
@@ -39,7 +51,129 @@ def load(path):
     return files
 
 
+def crate_of(filename):
+    """The crate a compiled file belongs to, or None for anything outside."""
+    if "/crates/" not in filename:
+        return None
+    return filename.split("/crates/", 1)[1].split("/", 1)[0]
+
+
+def per_crate_json(json_path):
+    """llvm-cov JSON export -> {crate: [lines_total, lines_hit, fns, fns_hit]}."""
+    import json
+
+    acc = {}
+    data = json.load(open(json_path))
+    for export in data.get("data", []):
+        for entry in export.get("files", []):
+            crate = crate_of(entry.get("filename", ""))
+            if crate is None:
+                continue
+            summary = entry.get("summary", {})
+            lines = summary.get("lines", {})
+            fns = summary.get("functions", {})
+            row = acc.setdefault(crate, [0, 0, 0, 0])
+            row[0] += lines.get("count", 0)
+            row[1] += lines.get("covered", 0)
+            row[2] += fns.get("count", 0)
+            row[3] += fns.get("covered", 0)
+    return acc
+
+
+def per_crate_lcov(path):
+    """lcov tracefile -> the same shape. The merge job's inputs are tracefiles:
+    `lcov -a` unions the cells per line and per function, which per-file
+    summary counts cannot do."""
+    acc = {}
+    crate = None
+    seen_lines, seen_fns = set(), {}
+
+    def flush():
+        if crate is None:
+            return
+        row = acc.setdefault(crate, [0, 0, 0, 0])
+        row[0] += len(seen_lines)
+        row[1] += sum(1 for hit in seen_lines_hit.values() if hit)
+        row[2] += len(seen_fns)
+        row[3] += sum(1 for hit in seen_fns.values() if hit)
+
+    seen_lines_hit = {}
+    for raw in open(path):
+        line = raw.strip()
+        if line.startswith("SF:"):
+            flush()
+            crate = crate_of(line[3:])
+            seen_lines, seen_lines_hit, seen_fns = set(), {}, {}
+        elif crate is None:
+            continue
+        elif line.startswith("DA:"):
+            ln, cnt = line[3:].split(",")[:2]
+            seen_lines.add(ln)
+            seen_lines_hit[ln] = seen_lines_hit.get(ln, False) or int(cnt) > 0
+        elif line.startswith("FN:"):
+            name = line[3:].split(",", 1)[-1]
+            seen_fns.setdefault(name, False)
+        elif line.startswith("FNDA:"):
+            cnt, name = line[5:].split(",", 1)
+            seen_fns[name] = seen_fns.get(name, False) or int(cnt) > 0
+    flush()
+    return acc
+
+
+def per_crate(path):
+    """Read either input format; the suffix decides."""
+    return per_crate_json(path) if str(path).endswith(".json") else per_crate_lcov(path)
+
+
+def table(out_dir, sources):
+    """Render the per-source table. `sources` is [(name, json_path), ...]."""
+    measured = []
+    for name, path in sources:
+        if Path(path).is_file():
+            measured.append((name, per_crate(path)))
+        else:
+            measured.append((name, {}))
+
+    crates = sorted({c for _, acc in measured for c in acc})
+    head = "| crate |" + "".join(f" {n} lines | {n} fn |" for n, _ in measured)
+    rule = "|---|" + "---|" * (2 * len(measured))
+
+    def cell(row, hit_i, tot_i):
+        total = row[tot_i]
+        return "-" if not total else f"{100.0 * row[hit_i] / total:.1f}%"
+
+    body = []
+    for crate in crates:
+        cells = []
+        for _, acc in measured:
+            row = acc.get(crate)
+            cells += ["-", "-"] if row is None else [cell(row, 1, 0), cell(row, 3, 2)]
+        body.append(f"| {crate} |" + "".join(f" {c} |" for c in cells))
+
+    totals = []
+    for _, acc in measured:
+        agg = [0, 0, 0, 0]
+        for row in acc.values():
+            for i in range(4):
+                agg[i] += row[i]
+        totals += [cell(agg, 1, 0), cell(agg, 3, 2)]
+    body.append("| **TOTAL** |" + "".join(f" **{c}** |" for c in totals))
+
+    md = "\n".join([head, rule] + body) + "\n"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "summary.md").write_text(md)
+    print(md, end="")
+
+
 def main():
+    if sys.argv[1:2] == ["--table"]:
+        out_dir = Path(sys.argv[2])
+        sources = []
+        for arg in sys.argv[3:]:
+            name, _, path = arg.partition("=")
+            sources.append((name, path))
+        table(out_dir, sources)
+        return
     unit_path, robot_path, out_dir = sys.argv[1], sys.argv[2], Path(sys.argv[3])
     unit, robot = load(unit_path), load(robot_path)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -25,12 +25,12 @@
 #                          CI sets 1 (rule 8: MQTT is CI-only)
 #   RESULTS_DIR            default results/coverage-$STORE
 #
-# Output under $RESULTS_DIR (and mirrored in unit/ and robot/ for the
-# per-kind sets): lcov.info, html/ (line-level drill-down), coverage.json,
+# Output under $RESULTS_DIR (mirrored in unit/, api/ and robot/ for the
+# per-source sets): lcov.info, html/ (line-level drill-down), coverage.json,
 # summary.txt, uncovered-functions.txt (the point of it all), plus
-# attribution.txt + uncovered-lines.txt (per-line cross-view) and the
-# per-suite Robot logs. Report-only — no floor here; ratchet gates
-# belong in strict.yml once numbers stabilise.
+# summary.md (coverage per test source), attribution.txt +
+# uncovered-lines.txt (per-line cross-view) and the per-suite Robot logs.
+# Report-only — no floor here; the ratchet gates belong in strict.yml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -82,11 +82,23 @@ restore_profraw() { # copy the named sets back for the next report
 }
 
 if [ "${UNIT_TESTS:-0}" = 1 ]; then
-  echo "=== workspace tests (instrumented) ==="
+  # Two passes, stashed apart, because coverage is reported per test source:
+  # `unit` is the in-crate #[cfg(test)] surface, `api` the integration
+  # binaries under crates/*/tests. A blended number hides a column falling
+  # while the total rises.
+  echo "=== unit tests: lib + bins (instrumented) ==="
   # Failures don't abort: coverage measures what ran, the per-push gate for
   # test green is ci.yml. -j 2: default parallelism OOM-kills the linker here.
-  cargo test --workspace -j 2 || true
+  cargo test --workspace --lib --bins -j 2 || true
   stash_profraw unit
+  echo "=== api tests: the integration binaries (instrumented) ==="
+  # Named packages rather than --workspace: a package with no tests/
+  # directory has no target matching the glob and cargo refuses the whole
+  # invocation. antares-wasm's integration test is a wasm target and belongs
+  # to the wasm cell.
+  cargo test -p antares-api -p antares-broker -p antares-bus -p antares-sql \
+    --test '*' -j 2 || true
+  stash_profraw api
 fi
 
 echo "=== build instrumented broker ==="
@@ -161,11 +173,18 @@ mkdir -p "$RESULTS_DIR"
 if [ "${UNIT_TESTS:-0}" = 1 ]; then
   restore_profraw unit
   emit_reports "$RESULTS_DIR/unit"
+  restore_profraw api
+  emit_reports "$RESULTS_DIR/api"
+  # Both Rust sources as one tracefile: the attribution below contrasts Rust
+  # tests with the Robot suite, so splitting the Rust half must not make
+  # api-covered files look Robot-only.
+  restore_profraw unit api
+  cargo llvm-cov report --lcov --output-path "$RESULTS_DIR/rust.info"
 fi
 restore_profraw robot
 emit_reports "$RESULTS_DIR/robot"
 if [ "${UNIT_TESTS:-0}" = 1 ]; then
-  restore_profraw unit robot
+  restore_profraw unit api robot
 fi
 emit_reports "$RESULTS_DIR"
 
@@ -173,9 +192,15 @@ if [ "${UNIT_TESTS:-0}" = 1 ]; then
   # Per-line cross-view over the two sets: which kind of test covers what,
   # and the lines neither kind runs.
   python3 dev/coverage-attribution.py \
-    "$RESULTS_DIR/unit/lcov.info" "$RESULTS_DIR/robot/lcov.info" "$RESULTS_DIR"
+    "$RESULTS_DIR/rust.info" "$RESULTS_DIR/robot/lcov.info" "$RESULTS_DIR"
   echo "=== attribution ($STORE) ==="
   head -20 "$RESULTS_DIR/attribution.txt"
+  echo "=== coverage per test source ($STORE) ==="
+  python3 dev/coverage-attribution.py --table "$RESULTS_DIR" \
+    "unit=$RESULTS_DIR/unit/coverage.json" \
+    "api=$RESULTS_DIR/api/coverage.json" \
+    "etsi-$STORE=$RESULTS_DIR/robot/coverage.json" \
+    "combined=$RESULTS_DIR/coverage.json"
 fi
 echo "=== functions no test ran ($STORE): $(grep -c . "$RESULTS_DIR/uncovered-functions.txt" || true) ==="
 head -30 "$RESULTS_DIR/uncovered-functions.txt"
