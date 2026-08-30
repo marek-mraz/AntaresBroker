@@ -167,16 +167,20 @@ jobs:
 
       - name: Env-var docs check
         run: ./dev/check-env-docs.sh
-      # SQL-injection guard: dynamically assembled SQL (AssertSqlSafe) is
-      # allowed only inside the antares-sql store/compiler modules.
-      - name: no dynamic SQL outside the compiler
+      # SQL-injection guard: dynamically assembled SQL (AssertSqlSafe, or an
+      # sqlx query built with format!) belongs to the antares-sql backend
+      # source and nowhere else. Everything a request supplies reaches the
+      # database as a bind parameter.
+      - name: no dynamic SQL outside the backend
         run: |
           # the pattern must exist where expected (guard self-test) …
           grep -rqn 'AssertSqlSafe' crates/antares-sql/src/
-          # … and nowhere else in shipped code; a test that CREATEs its own
-          # scratch database has no bind-parameter alternative
-          ! grep -rn 'AssertSqlSafe\|sqlx::query(&format!' crates/ --include='*.rs' \
-            | grep -v 'crates/antares-sql/\|/tests/'
+          # … and nowhere else in shipped code, examples included; a test
+          # that CREATEs its own scratch database has no bind-parameter
+          # alternative
+          ! grep -rnE 'AssertSqlSafe|sqlx::query[a-z_]*\(&?format!' \
+              crates/ examples/ --include='*.rs' \
+            | grep -vE 'crates/antares-sql/src/|/tests/'
 
 
   msrv:

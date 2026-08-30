@@ -108,6 +108,14 @@ sink registration plus a router merge, with no change to a core crate.
    postgres-nats, timescale-nats and wasm-file; every cell must pass the
    whole suite before the backend is part of a release.
 
+SQL assembled at runtime stays inside `crates/antares-sql/src/`.
+`workspace.yml` fails the build on `AssertSqlSafe` or an `sqlx` query built
+with `format!` anywhere else under `crates/` or `examples/`. Integration
+tests under a `tests/` directory are exempt: a test that creates its own
+scratch database has no bind-parameter alternative. Everything a request
+supplies reaches the database as a bind parameter, and a new backend keeps
+that property.
+
 ## Layer 2: lifecycle hooks
 
 Five phases exist. Extensions attach to a phase; they never define one.
