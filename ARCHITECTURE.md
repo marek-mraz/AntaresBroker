@@ -110,8 +110,9 @@ store write commits
      match against SubMirror (in memory, per tenant; store list is the
      never-wired fallback) → group per subscription → JoinSet under
      DELIVERY_SLOTS (64)
- → deliver_as: bookkeeping writeback under the row lock (timesSent,
-   lastNotification, status), mirror updated from that document,
+ → deliver_as: one record_delivery per attempt (timesSent,
+   lastNotification, lastSuccess, status), mirror updated from the document
+   it returns,
    egress check + breaker for a binding that opens a socket, the
    NotificationSink the registry holds for the endpoint's scheme (never a
    fall-through, ADR-0016), retries as transport (ADR-0015), dead letter on
@@ -192,9 +193,13 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `deliver_as`. Split by member on touch.
 - Misplaced helpers: the error constructor `bad` lives in
   `snapshots.rs` and is used crate-wide; `is_meta` exists three times.
-- Per-notification cost is still one row update plus one lookup of the
-  subscription; batching the bookkeeping is what raises the update rate
-  a broker can notify at.
+- Per-notification cost is one row update. The Postgres arm writes it as
+  a single statement (`pg::doc::record_delivery`), so the row lock is held
+  for the statement rather than across a round trip and the Rust closure —
+  at fan-out that hold time is what serializes delivery on a hot
+  subscription. Batching several attempts into one statement is the next
+  lever and is unbuilt: `set_config` is the RLS context, so a batch is
+  per tenant by construction.
 - Registration candidate selection reads on the order of a thousand
   rows per federated query on a 10 000-registration registry; the
   `csource_index` needs a type-first shape.

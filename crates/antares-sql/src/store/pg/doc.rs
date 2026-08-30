@@ -436,6 +436,70 @@ impl PgDocStore {
     /// A missing row returns `None` and is NEVER inserted — a concurrent
     /// DELETE must win, not be resurrected by a bookkeeping writeback
     /// (the 047_06 leftover-subscription bug).
+    /// 5.2.14.2 delivery bookkeeping as ONE statement.
+    ///
+    /// The generic `mutate` takes an arbitrary closure, so it has to hold the
+    /// row under `FOR UPDATE` across a network round trip while Rust runs.
+    /// This mutation is fixed, so it can be expressed in SQL and the lock
+    /// lives only as long as the UPDATE. That is the point: at fan-out every
+    /// delivery on one subscription contends for the same row, so the lock
+    /// hold time is what serializes delivery, not the statement count.
+    ///
+    /// The CTE reads the pre-image in the statement's own snapshot, which is
+    /// how the overwritten `lastSuccess` comes back for the rollback a failed
+    /// attempt performs.
+    ///
+    /// `notification` is a mandatory member (5.2.12) and `jsonb_set` on a
+    /// path with no parent is a no-op, so a document that somehow lacks it is
+    /// left alone rather than grown a synthetic one.
+    pub fn record_delivery(
+        &self,
+        tenant: &TenantId,
+        kind: DocKind,
+        id: &str,
+        now: &str,
+    ) -> Result<Option<(Value, Option<Value>)>, sqlx::Error> {
+        let table = kind.table();
+        let col = kind.doc_column();
+        // literals from DocKind; every value is bound
+        let sql = format!(
+            "WITH prev AS (
+               SELECT {col} #> '{{notification,lastSuccess}}' AS ls
+                 FROM {table} WHERE tenant_id = $1 AND id = $2
+             )
+             UPDATE {table} SET
+               {col} = jsonb_set(jsonb_set(jsonb_set(jsonb_set(
+                   {col} - 'status',
+                   '{{notification,timesSent}}',
+                   to_jsonb(COALESCE(({col} #>> '{{notification,timesSent}}')::bigint, 0) + 1)),
+                   '{{notification,lastNotification}}', to_jsonb($3::text)),
+                   '{{notification,lastSuccess}}', to_jsonb($3::text)),
+                   '{{notification,status}}', '\"ok\"'::jsonb),
+               times_sent = COALESCE(times_sent, 0) + 1,
+               last_notification = $3::timestamptz,
+               last_success = $3::timestamptz
+             WHERE tenant_id = $1 AND id = $2
+             RETURNING {col}, (SELECT ls FROM prev)"
+        );
+        wait(async move {
+            let mut tx = self.pool.begin().await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(tenant.as_str())
+                .bind(id)
+                .bind(now)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let doc: Value = row.get(0);
+            let prev: Option<Value> = row.get(1);
+            tx.commit().await?;
+            Ok(Some((doc, prev)))
+        })
+    }
+
     pub fn mutate<T, E>(
         &self,
         tenant: &TenantId,

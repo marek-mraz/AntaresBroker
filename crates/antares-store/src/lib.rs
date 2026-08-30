@@ -146,6 +146,55 @@ pub type MutateFn<'a> = Box<dyn FnOnce(&mut Value) -> Result<(), ()> + 'a>;
 /// Per-id variant for batch mutation; the driver calls it once per PRESENT
 /// id, in input order — the ext trait's error slot depends on that order.
 pub type BatchMutateFn<'a> = Box<dyn FnMut(&str, &mut Value) -> Result<(), ()> + 'a>;
+/// The delivery stamp expressed as a `mutate`. This is the rule itself —
+/// what `timesSent`, `lastNotification`, `lastSuccess` and `status` become
+/// after one attempt (5.2.14.2) — so a backend that reimplements
+/// [`CurrentStateDriver::record_delivery`] in its own query language is
+/// reimplementing THIS, and the two must agree.
+pub fn record_delivery_via_mutate(
+    d: &(impl CurrentStateDriver + ?Sized),
+    tenant: &TenantId,
+    kind: Kind,
+    id: &str,
+    now: &str,
+) -> Result<Option<Delivery>, NgsiError> {
+    let mut out: Option<Delivery> = None;
+    d.mutate::<(), ()>(tenant, kind, id, |doc| {
+        let mut prev_success = None;
+        if let Some(o) = doc.as_object_mut() {
+            o.remove("status");
+        }
+        if let Some(n) = doc
+            .as_object_mut()
+            .and_then(|o| o.get_mut("notification"))
+            .and_then(Value::as_object_mut)
+        {
+            let sent = n.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
+            n.insert("timesSent".into(), serde_json::json!(sent + 1));
+            n.insert("lastNotification".into(), Value::String(now.to_owned()));
+            prev_success = n.insert("lastSuccess".into(), Value::String(now.to_owned()));
+            n.insert("status".into(), Value::String("ok".into()));
+        }
+        out = Some(Delivery {
+            doc: doc.clone(),
+            prev_success,
+        });
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// What one delivery attempt wrote: the stored subscription as it now
+/// stands (the mirror is fed from it) and the `lastSuccess` that was there
+/// before, which a failed attempt puts back.
+#[derive(Debug, Clone)]
+pub struct Delivery {
+    /// The subscription as it now stands, the shape the mirror is fed.
+    pub doc: Value,
+    /// The `notification.lastSuccess` this attempt overwrote, absent when
+    /// the subscription had never succeeded.
+    pub prev_success: Option<Value>,
+}
 
 /// Current-state storage: everything except the temporal evolution.
 ///
@@ -262,6 +311,27 @@ pub trait CurrentStateDriver: Send + Sync {
         ids: &[String],
         f: BatchMutateFn<'a>,
     ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError>;
+    /// 5.2.14.2 delivery bookkeeping: stamp one delivery attempt on a
+    /// subscription and hand back the stored document. `timesSent` moves by
+    /// one, `lastNotification` and `lastSuccess` take `now`, and the previous
+    /// `lastSuccess` comes back so a failed attempt can roll it back.
+    /// `None` means the row is gone — the subscription was deleted between
+    /// matching and delivery, and nothing may be sent (5.8.6).
+    ///
+    /// The default expresses it as a `mutate`, which is correct everywhere.
+    /// A backend whose `mutate` locks the row across a network round trip
+    /// should override it with one statement: at fan-out every delivery on
+    /// one subscription contends for that row, so the lock hold time — not
+    /// the statement count — is what serializes delivery.
+    fn record_delivery(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        now: &str,
+    ) -> Result<Option<Delivery>, NgsiError> {
+        record_delivery_via_mutate(self, tenant, kind, id, now)
+    }
     /// Reap expired docs/instances (backends with their own maintenance job
     /// return 0).
     fn sweep_expired(&self) -> usize {

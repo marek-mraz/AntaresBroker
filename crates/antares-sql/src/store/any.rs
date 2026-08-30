@@ -1135,6 +1135,25 @@ impl antares_store::CurrentStateDriver for AnyStore {
     ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
         AnyStore::batch_mutate(self, tenant, ids, |id, v| f(id, v))
     }
+    /// The Postgres arm answers this in ONE statement (see
+    /// `pg::doc::record_delivery`); every other arm runs the shared rule as a
+    /// `mutate`, which is what the one statement is a translation of.
+    fn record_delivery(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        now: &str,
+    ) -> Result<Option<antares_store::Delivery>, NgsiError> {
+        match (self, doc_kind(kind)) {
+            #[cfg(feature = "postgres")]
+            (AnyStore::Pg(p), Some(dk)) => {
+                let found = p.docs.record_delivery(tenant, dk, id, now).map_err(db)?;
+                Ok(found.map(|(doc, prev_success)| antares_store::Delivery { doc, prev_success }))
+            }
+            _ => antares_store::record_delivery_via_mutate(self, tenant, kind, id, now),
+        }
+    }
     fn sweep_expired(&self) -> usize {
         AnyStore::sweep_expired(self)
     }

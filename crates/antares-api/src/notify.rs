@@ -2074,28 +2074,12 @@ async fn deliver_as(
     // Optimistic ok; a failed attempt is corrected right below — the transient
     // window is the in-flight attempt itself, and the failure TPs wait for the
     // attempt to resolve before asserting.
-    let mut prev_success: Option<Value> = None;
-    let mut booked_doc: Option<Value> = None;
+    // One store call: the stamp is a fixed mutation, so a backend can write
+    // it as a single statement instead of locking the row across a round
+    // trip. At fan-out that lock is what serializes delivery.
     let booked = st
         .store
-        .mutate(tenant, kind, &sub_id, |doc| {
-            if let Some(o) = doc.as_object_mut() {
-                o.remove("status");
-            }
-            if let Some(n) = doc
-                .as_object_mut()
-                .and_then(|o| o.get_mut("notification"))
-                .and_then(Value::as_object_mut)
-            {
-                let sent = n.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
-                n.insert("timesSent".into(), json!(sent + 1));
-                n.insert("lastNotification".into(), Value::String(now.clone()));
-                prev_success = n.insert("lastSuccess".into(), Value::String(now.clone()));
-                n.insert("status".into(), Value::String("ok".into()));
-            }
-            booked_doc = Some(doc.clone());
-            Ok::<(), antares_model::NgsiError>(())
-        })
+        .record_delivery(tenant, kind, &sub_id, &now)
         .unwrap_or_else(|e| {
             tracing::warn!("bookkeeping writeback failed: {e}");
             None
@@ -2103,10 +2087,11 @@ async fn deliver_as(
     // 5.8.6: notifications are sent for the subscriptions the broker holds.
     // No row to book against means the subscription was deleted (or the
     // store failed) between matching and delivery — nothing may be sent.
-    if booked.is_none() {
+    let Some(booked) = booked else {
         return;
-    }
-    mirror_bookkeeping(st, tenant, kind, &sub_id, booked_doc);
+    };
+    let mut prev_success = booked.prev_success;
+    mirror_bookkeeping(st, tenant, kind, &sub_id, Some(booked.doc));
     // The notification endpoint is an egress destination like any other
     // — policy check once, breaker consulted before the attempt.
     // A refusal is a delivery failure for bookkeeping (status "failed",

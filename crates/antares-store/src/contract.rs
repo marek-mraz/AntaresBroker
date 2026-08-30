@@ -246,13 +246,71 @@ pub fn run_current_state_contract(
     // here is a tenant whose periodic notifications never fire and whose
     // subscriptions never reach the mirror, with no error anywhere.
     let sub = format!("urn:ngsi-ld:Subscription:{prefix}:1");
-    d.upsert(a, Kind::Subscription, &sub, doc(&sub))
+    let sub_doc = json!({
+        "id": &sub,
+        "type": "Subscription",
+        "status": "active",
+        "notification": {"endpoint": {"uri": "http://sink.invalid/n"}},
+    });
+    d.upsert(a, Kind::Subscription, &sub, sub_doc)
         .expect("upsert subscription");
     let domain = d.subscription_tenants().expect("subscription_tenants");
     assert!(
         domain.iter().any(|t| t == a.as_str()),
         "a tenant holding a subscription must appear in subscription_tenants: {domain:?}"
     );
+    // 5.2.14.2 delivery bookkeeping. A backend may write this as one
+    // statement instead of a read-modify-write; the result must not depend on
+    // which it chose, so the rule is pinned here rather than in one backend's
+    // own tests.
+    let t1 = "2020-01-01T00:00:00.000Z";
+    let t2 = "2020-01-02T00:00:00.000Z";
+    let first = d
+        .record_delivery(a, Kind::Subscription, &sub, t1)
+        .expect("record_delivery")
+        .expect("the subscription is there");
+    let n1 = &first.doc["notification"];
+    assert_eq!(n1["timesSent"], 1, "the first attempt moves timesSent to 1");
+    assert_eq!(
+        n1["lastNotification"], t1,
+        "lastNotification takes the stamp"
+    );
+    assert_eq!(n1["lastSuccess"], t1, "lastSuccess takes the stamp");
+    assert_eq!(n1["status"], "ok", "the attempt leaves the notification ok");
+    assert!(
+        first.doc.get("status").is_none(),
+        "the top-level status is a rendered member, not a stored one: {}",
+        first.doc
+    );
+    assert!(
+        first.prev_success.is_none(),
+        "a subscription that never succeeded has no previous lastSuccess"
+    );
+
+    let second = d
+        .record_delivery(a, Kind::Subscription, &sub, t2)
+        .expect("record_delivery")
+        .expect("the subscription is still there");
+    assert_eq!(
+        second.doc["notification"]["timesSent"], 2,
+        "timesSent counts attempts, it does not reset"
+    );
+    assert_eq!(
+        second.prev_success.as_ref().and_then(Value::as_str),
+        Some(t1),
+        "the overwritten lastSuccess comes back, or a failed attempt cannot \
+         roll it back"
+    );
+
+    // 5.8.6: a subscription deleted between matching and delivery has no row
+    // to book against, and nothing may be sent.
+    assert!(
+        d.record_delivery(a, Kind::Subscription, &gone, t1)
+            .expect("record_delivery")
+            .is_none(),
+        "an absent subscription books nothing"
+    );
+
     assert!(
         d.delete(a, Kind::Subscription, &sub).expect("delete"),
         "the contract's own subscription must be removable"
