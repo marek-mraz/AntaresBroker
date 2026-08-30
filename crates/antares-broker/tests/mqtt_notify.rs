@@ -57,7 +57,7 @@ const CTX: &str =
 fn mqtt_notification_carries_metadata_and_body() {
     let Ok(mqtt_url) = std::env::var("ANTARES_TEST_MQTT_URL") else {
         eprintln!(
-            "skipped: set ANTARES_TEST_MQTT_URL=mqtt://127.0.0.1:1883 (needs a live MQTT server)"
+            "SKIP: ANTARES_TEST_MQTT_URL not set (mqtt://127.0.0.1:1883, live server needed)"
         );
         return;
     };

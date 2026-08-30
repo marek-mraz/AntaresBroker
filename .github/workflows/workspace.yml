@@ -82,6 +82,25 @@ jobs:
         run: |
           docker run -d --name nats -p 4222:4222 nats:2-alpine -js
           echo "ANTARES_TEST_NATS_URL=nats://127.0.0.1:4222" >> "$GITHUB_ENV"
+      # Validity gate: a test that returns early on a missing variable passes
+      # vacuously and proves nothing, and no report can tell that apart from a
+      # real pass. Every `SKIP: <VAR> not set` marker in the tree must name a
+      # variable this job supplies, so a new gate either gets its service here
+      # or turns the build red.
+      - name: no test skips vacuously
+        run: |
+          vars=$(grep -rhoE 'SKIP: [A-Z_]+(( / )[A-Z_]+)* not set' crates/ \
+                   --include='*.rs' \
+                 | sed -E 's/^SKIP: //; s/ not set$//' \
+                 | tr ' ' '\n' | grep -E '^[A-Z][A-Z_]+$' | sort -u)
+          echo "$vars"
+          # the markers must still be findable (guard self-test)
+          [ "$(echo "$vars" | wc -l)" -ge 3 ]
+          rc=0
+          for v in $vars; do
+            [ -n "${!v:-}" ] || { echo "::error::$v gates a test and is unset here"; rc=1; }
+          done
+          exit $rc
       - run: cargo fmt --all --check
       # --locked everywhere below: the image builds with it (Dockerfile), so
       # without it CI would gate on a dependency set the shipped binary never
