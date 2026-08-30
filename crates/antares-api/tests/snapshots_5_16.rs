@@ -1004,3 +1004,53 @@ async fn clause_5_5_15_clone_respects_the_cap() {
     let (status, _) = send(&st, "GET", &cloc, None).await;
     assert_eq!(status, StatusCode::OK, "the clone is never its own victim");
 }
+
+/// 5.16.2.4 / 5.16.3.4 / 5.16.4.4 / 5.16.5.4 all open with the same SHALL:
+/// "If the Snapshot Id is not present or it is not a valid URI, then an error
+/// of type BadRequestData shall be raised." It binds before the snapshot is
+/// looked up, so a malformed id is 400 and never the 404 of an absent one.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_3_snapshot_id_must_be_a_uri() {
+    let st = state();
+    for bad in [
+        "notauri",
+        "snapshot",
+        ":nostem",
+        "urn:",
+        "urn:ngsi-ld:snap%20shot",
+    ] {
+        for (method, suffix, body) in [
+            ("GET", "", None),
+            ("DELETE", "", None),
+            (
+                "PATCH",
+                "",
+                Some(json!({"snapshotPriority": 3}).to_string()),
+            ),
+            // 5.16.2.3 makes the clone body optional — an empty one still
+            // needs its declared length, or the surface answers 411 first
+            ("POST", "/clone", Some(String::new())),
+        ] {
+            let (status, b) = send(
+                &st,
+                method,
+                &format!("/ngsi-ld/v1/snapshots/{bad}{suffix}"),
+                body,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{method} {bad}{suffix} -> {b}"
+            );
+            assert_eq!(
+                b["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+                "{method} {bad}{suffix} -> {b}"
+            );
+            // 6.3.2: the problem detail carries no internal member
+            for leaked in ["snapshotQueries", "endpoint", "receiverInfo", "tenant"] {
+                assert!(b.get(leaked).is_none(), "{leaked} leaked into {b}");
+            }
+        }
+    }
+}

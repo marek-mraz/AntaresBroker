@@ -186,6 +186,23 @@ fn expires_at(params: &HashMap<String, String>) -> Result<String, NgsiError> {
 
 // ---------- 5.14.1 / 5.14.2 / 5.14.3: /entityMaps/{id} (6.32) ----------
 
+/// 5.14.1.4 / 5.14.2.4 / 5.14.3.4: every /entityMaps/{id} method opens the
+/// same way — the tenant it runs in, `local` (6.3.18) as the only parameter
+/// this resource takes, and an id that must be a valid URI before the store
+/// is touched at all.
+fn open_map(
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    id: &str,
+) -> ApiResult<TenantId> {
+    let tenant = tenant_from(headers)?;
+    check_params(params, &["local"])?;
+    map_id_check(id)?;
+    Ok(tenant)
+}
+
+/// 5.14.1.4 / 5.14.3.4: "If the EntityMap id is not present or it is not a
+/// valid URI, then an error of type BadRequestData shall be raised."
 fn map_id_check(id: &str) -> Result<(), NgsiError> {
     antares_model::EntityId::new(id)
         .map(|_| ())
@@ -201,9 +218,7 @@ pub async fn retrieve_entity_map(
     headers: HeaderMap,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
-        map_id_check(&id)?;
+        let tenant = open_map(&params, &headers, &id)?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let doc = map_get(&st, &tenant, &id)
@@ -224,9 +239,7 @@ pub async fn update_entity_map(
     body: Bytes,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
-        map_id_check(&id)?;
+        let tenant = open_map(&params, &headers, &id)?;
         let frag: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let obj = frag.as_object().ok_or_else(|| {
@@ -255,9 +268,7 @@ pub async fn delete_entity_map(
     headers: HeaderMap,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
-        map_id_check(&id)?;
+        let tenant = open_map(&params, &headers, &id)?;
         if !map_delete(&st, &tenant, &id) {
             return Err(NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into());
         }
@@ -267,6 +278,64 @@ pub async fn delete_entity_map(
 }
 
 // ---------- 5.14.4: Create EntityMap for Query Entities (6.34) ----------
+
+/// 5.14.4.4 and 5.14.5.4 end the same way: "The mapping between the Context
+/// Source Registration and the EntityMap Id is added to the linkedMaps
+/// element of the local EntityMap and for the Entity ids included in the
+/// returned Entity Maps a mapping to the Context Source Registration is added
+/// to the entityMap element of the local EntityMap. The local EntityMap is
+/// stored and made accessible based on its identifier." The two operations
+/// differ only in which registration operation they ask for and which peer
+/// resource carries it.
+async fn merge_and_store_map(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &antares_jsonld::Context,
+    params: &HashMap<String, String>,
+    temporal: bool,
+    mut emap: Map<String, Value>,
+) -> ApiResult<Value> {
+    let (op, path) = if temporal {
+        ("createEntityMapQueryTemporal", "temporal/entityMaps")
+    } else {
+        ("createEntityMapQueryEntity", "entityMaps")
+    };
+    let mut linked = Map::new();
+    // 5.5.13 local=true: no Context Source Registration is considered, so
+    // nothing merges in and linkedMaps stays empty.
+    if params.get("local").map(String::as_str) != Some("true") {
+        let split = params.get("splitEntities").map(String::as_str) == Some("true");
+        for (reg_id, remote) in
+            crate::federation::fed_entity_maps(st, tenant, headers, ctx, params, split, op, path)
+                .await
+        {
+            if let Some(obj) = remote.get("entityMap").and_then(Value::as_object) {
+                for eid in obj.keys() {
+                    if let Some(a) = emap
+                        .entry(eid.clone())
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                    {
+                        a.push(json!(reg_id.clone()));
+                    }
+                }
+            }
+            if let Some(mid) = remote.get("id").and_then(Value::as_str) {
+                linked.insert(reg_id, json!(mid));
+            }
+        }
+    }
+    let doc = json!({
+        "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
+        "type": "EntityMap",
+        "expiresAt": expires_at(params)?,
+        "entityMap": Value::Object(emap),
+        "linkedMaps": Value::Object(linked),
+    });
+    map_put(st, tenant, doc.clone());
+    Ok(doc)
+}
 
 fn allowed_create_params() -> Vec<&'static str> {
     let mut v = crate::entities::QUERY_PARAMS.to_vec();
@@ -356,45 +425,7 @@ pub(crate) async fn build_query_map(
             emap.insert(id.to_owned(), json!(["@none"]));
         }
     }
-    let mut linked = Map::new();
-    if !local_scope {
-        for (reg_id, remote) in crate::federation::fed_entity_maps(
-            st,
-            tenant,
-            headers,
-            ctx,
-            params,
-            split,
-            "createEntityMapQueryEntity",
-            "entityMaps",
-        )
-        .await
-        {
-            if let Some(obj) = remote.get("entityMap").and_then(Value::as_object) {
-                for eid in obj.keys() {
-                    if let Some(a) = emap
-                        .entry(eid.clone())
-                        .or_insert_with(|| json!([]))
-                        .as_array_mut()
-                    {
-                        a.push(json!(reg_id.clone()));
-                    }
-                }
-            }
-            if let Some(mid) = remote.get("id").and_then(Value::as_str) {
-                linked.insert(reg_id, json!(mid));
-            }
-        }
-    }
-    let doc = json!({
-        "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
-        "type": "EntityMap",
-        "expiresAt": expires_at(params)?,
-        "entityMap": Value::Object(emap),
-        "linkedMaps": Value::Object(linked),
-    });
-    map_put(st, tenant, doc.clone());
-    Ok(doc)
+    merge_and_store_map(st, tenant, headers, ctx, params, false, emap).await
 }
 
 /// 5.7.1.4 / 5.7.3.4: the EntityMap created for a single-Entity retrieve —
@@ -529,21 +560,70 @@ fn created_response(
     resp
 }
 
+/// 5.14.4 / 5.14.5 Create EntityMap. The four resource methods are one
+/// operation: 6.34.3.2 and 6.35.3.2 carry the 5.2.23 Query object where
+/// 6.34.3.1 and 6.35.3.1 carry query parameters, and the temporal pair adds
+/// the 5.7.4 temporal query to the same pipeline.
+async fn create_map(
+    st: AppState,
+    params: HashMap<String, String>,
+    headers: HeaderMap,
+    body: Option<Bytes>,
+    temporal: bool,
+) -> Response {
+    let go = async {
+        let tenant = tenant_from(&headers)?;
+        let allowed = if temporal {
+            allowed_temporal_create_params()
+        } else {
+            allowed_create_params()
+        };
+        // The Query object is folded into the parameters BEFORE 6.3.20 runs:
+        // a member it carries is a parameter of this request.
+        let vp = match &body {
+            Some(b) => query_body_params(b, &params, temporal)?,
+            None => params,
+        };
+        check_params(&vp, &allowed)?;
+        let accept = parse_accept(&headers)?;
+        let ctx = request_context(&st.loader, &headers).await?;
+        let doc = if temporal {
+            build_temporal_map(&st, &tenant, &headers, &ctx, &vp).await?
+        } else {
+            build_query_map(&st, &tenant, &headers, &ctx, &vp).await?
+        };
+        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
+    };
+    go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.2.23: a Query object stands in for the query parameters. Its members are
+/// folded into them, so one rule serves both forms of every Create EntityMap.
+fn query_body_params(
+    body: &Bytes,
+    params: &HashMap<String, String>,
+    temporal: bool,
+) -> ApiResult<HashMap<String, String>> {
+    let q: Value = serde_json::from_slice(body)
+        .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
+    if q.get("type").and_then(Value::as_str) != Some("Query") {
+        return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
+    }
+    let qo = q
+        .as_object()
+        .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
+    let mut vp: HashMap<String, String> = params.clone();
+    crate::batch::query_doc_params(qo, temporal, &mut vp)?;
+    Ok(vp)
+}
+
 /// GET /entityMaps — Create EntityMap for Query Entities (6.34.3.1).
 pub async fn create_entity_map(
     State(st): State<AppState>,
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &allowed_create_params())?;
-        let accept = parse_accept(&headers)?;
-        let ctx = request_context(&st.loader, &headers).await?;
-        let doc = build_query_map(&st, &tenant, &headers, &ctx, &params).await?;
-        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
-    };
-    go.await.unwrap_or_else(|e| e.into_response())
+    create_map(st, params, headers, None, false).await
 }
 
 /// POST /entityMaps — the 5.2.23 Query-object form (6.34.3.2).
@@ -553,25 +633,7 @@ pub async fn create_entity_map_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let go = async {
-        let tenant = tenant_from(&headers)?;
-        let q: Value = serde_json::from_slice(&body)
-            .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
-        if q.get("type").and_then(Value::as_str) != Some("Query") {
-            return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
-        }
-        let qo = q
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
-        let mut vp: HashMap<String, String> = params.clone();
-        crate::batch::query_doc_params(qo, false, &mut vp)?;
-        check_params(&vp, &allowed_create_params())?;
-        let accept = parse_accept(&headers)?;
-        let ctx = request_context(&st.loader, &headers).await?;
-        let doc = build_query_map(&st, &tenant, &headers, &ctx, &vp).await?;
-        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
-    };
-    go.await.unwrap_or_else(|e| e.into_response())
+    create_map(st, params, headers, Some(body), false).await
 }
 
 // ------ 5.14.5: Create EntityMap for Query Temporal Evolution (6.35) ------
@@ -646,45 +708,7 @@ pub(crate) async fn build_temporal_map(
             }
         }
     }
-    let mut linked = Map::new();
-    if !local_scope {
-        for (reg_id, remote) in crate::federation::fed_entity_maps(
-            st,
-            tenant,
-            headers,
-            ctx,
-            params,
-            split,
-            "createEntityMapQueryTemporal",
-            "temporal/entityMaps",
-        )
-        .await
-        {
-            if let Some(obj) = remote.get("entityMap").and_then(Value::as_object) {
-                for eid in obj.keys() {
-                    if let Some(a) = emap
-                        .entry(eid.clone())
-                        .or_insert_with(|| json!([]))
-                        .as_array_mut()
-                    {
-                        a.push(json!(reg_id.clone()));
-                    }
-                }
-            }
-            if let Some(mid) = remote.get("id").and_then(Value::as_str) {
-                linked.insert(reg_id, json!(mid));
-            }
-        }
-    }
-    let doc = json!({
-        "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
-        "type": "EntityMap",
-        "expiresAt": expires_at(params)?,
-        "entityMap": Value::Object(emap),
-        "linkedMaps": Value::Object(linked),
-    });
-    map_put(st, tenant, doc.clone());
-    Ok(doc)
+    merge_and_store_map(st, tenant, headers, ctx, params, true, emap).await
 }
 
 /// GET /temporal/entityMaps — Create EntityMap for Query Temporal Evolution
@@ -694,15 +718,7 @@ pub async fn create_temporal_entity_map(
     CleanParams(params): CleanParams,
     headers: HeaderMap,
 ) -> Response {
-    let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &allowed_temporal_create_params())?;
-        let accept = parse_accept(&headers)?;
-        let ctx = request_context(&st.loader, &headers).await?;
-        let doc = build_temporal_map(&st, &tenant, &headers, &ctx, &params).await?;
-        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
-    };
-    go.await.unwrap_or_else(|e| e.into_response())
+    create_map(st, params, headers, None, true).await
 }
 
 /// POST /temporal/entityMaps — the Query-object form (6.35.3.2).
@@ -712,25 +728,7 @@ pub async fn create_temporal_entity_map_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let go = async {
-        let tenant = tenant_from(&headers)?;
-        let q: Value = serde_json::from_slice(&body)
-            .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
-        if q.get("type").and_then(Value::as_str) != Some("Query") {
-            return Err(NgsiError::BadRequestData("body type must be Query".into()).into());
-        }
-        let qo = q
-            .as_object()
-            .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
-        let mut vp: HashMap<String, String> = params.clone();
-        crate::batch::query_doc_params(qo, true, &mut vp)?;
-        check_params(&vp, &allowed_temporal_create_params())?;
-        let accept = parse_accept(&headers)?;
-        let ctx = request_context(&st.loader, &headers).await?;
-        let doc = build_temporal_map(&st, &tenant, &headers, &ctx, &vp).await?;
-        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
-    };
-    go.await.unwrap_or_else(|e| e.into_response())
+    create_map(st, params, headers, Some(body), true).await
 }
 
 #[cfg(test)]

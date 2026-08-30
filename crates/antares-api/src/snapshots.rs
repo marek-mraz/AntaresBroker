@@ -22,7 +22,7 @@
 
 use crate::negotiate::{
     check_params, created, no_content, parse_accept, parse_body, respond, tenant_from, ApiError,
-    BodyKind, CleanParams,
+    ApiResult, BodyKind, CleanParams,
 };
 use crate::state::{now_iso, AppState};
 use antares_model::{NgsiError, TenantId, API_ROOT};
@@ -801,6 +801,22 @@ pub async fn purge_snapshots(
     go.await.unwrap_or_else(|e| e.into_response())
 }
 
+/// 5.16.2.4 / 5.16.3.4 / 5.16.4.4 / 5.16.5.4: every /snapshots/{id} method
+/// opens the same way — the tenant it runs in, `local` (6.3.18) as the only
+/// parameter this resource takes, and an id that must be a valid URI before
+/// the store is touched at all.
+fn open_snapshot(
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    id: &str,
+) -> ApiResult<TenantId> {
+    let tenant = tenant_from(headers)?;
+    check_params(params, &["local"])?;
+    antares_model::EntityId::new(id)
+        .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
+    Ok(tenant)
+}
+
 // ---------- 5.16.3/5.16.4/5.16.5: /snapshots/{id} (6.37) ----------
 
 pub async fn retrieve_snapshot(
@@ -810,11 +826,8 @@ pub async fn retrieve_snapshot(
     headers: HeaderMap,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
+        let tenant = open_snapshot(&params, &headers, &id)?;
         let accept = parse_accept(&headers)?;
-        antares_model::EntityId::new(&id)
-            .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
         let meta = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
         let ctx = st.loader.core();
@@ -837,11 +850,8 @@ pub async fn update_snapshot(
     body: Bytes,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
+        let tenant = open_snapshot(&params, &headers, &id)?;
         let accept = parse_accept(&headers)?;
-        antares_model::EntityId::new(&id)
-            .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
         // 5.16.4.4 binds this operation to 5.5.4, hence to the 6.3.5 rules
         let v = parse_body(&st.loader, &headers, &body, BodyKind::Standard)
             .await?
@@ -898,10 +908,7 @@ pub async fn delete_snapshot(
     headers: HeaderMap,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
-        antares_model::EntityId::new(&id)
-            .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
+        let tenant = open_snapshot(&params, &headers, &id)?;
         let meta = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
         snap_remove(&st, &tenant, &id, &meta);
@@ -920,10 +927,7 @@ pub async fn clone_snapshot(
     body: Bytes,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
-        check_params(&params, &["local"])?;
-        antares_model::EntityId::new(&id)
-            .map_err(|_| bad(format!("snapshot id is not a valid URI: {id:?}")))?;
+        let tenant = open_snapshot(&params, &headers, &id)?;
         let src = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
         // 5.16.2.3 makes the clone body optional; a body that IS sent obeys
