@@ -396,9 +396,11 @@ impl PgDocStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            // INSERT … ON CONFLICT DO UPDATE … RETURNING always answers with
+            // the row; no row means the statement stopped being an upsert.
             let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)
                 .await?
-                .expect("DO UPDATE always returns the row");
+                .ok_or(sqlx::Error::RowNotFound)?;
             if matches!(kind, DocKind::Registration) {
                 rebuild_csource_index(&mut tx, tenant, id, doc).await?;
             }

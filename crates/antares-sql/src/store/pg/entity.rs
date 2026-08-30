@@ -579,8 +579,7 @@ impl PgEntityStore {
             // uncounted page: the extra row says a next page exists; the
             // total handed back is the smallest one consistent with that,
             // enough for the next/prev links and never shown as a count
-            if paged && !counted {
-                let p = f.page.as_ref().expect("paged implies a page");
+            if let Some(p) = f.page.as_ref().filter(|_| paged && !counted) {
                 let more = docs.len() as i64 > p.limit;
                 docs.truncate(p.limit as usize);
                 total = Some(p.offset + docs.len() as i64 + i64::from(more));
@@ -949,12 +948,13 @@ impl PgEntityStore {
             for r in &rows {
                 let id: String = r.get(0);
                 let inserted: bool = r.get(1);
-                if self.outbox_on() {
-                    let doc = items
-                        .iter()
-                        .find(|(i, _)| *i == id)
-                        .map(|(_, d)| d)
-                        .expect("row id came from items");
+                // the id came out of `items`, so the lookup answers; an
+                // outbox row for a document that is not there would carry no
+                // payload, so there is nothing to emit either way
+                if let (true, Some(doc)) = (
+                    self.outbox_on(),
+                    items.iter().find(|(i, _)| *i == id).map(|(_, d)| d),
+                ) {
                     let e = extract(doc);
                     events.push(change_event(
                         tenant,

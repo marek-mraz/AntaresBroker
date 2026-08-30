@@ -411,7 +411,7 @@ async fn batch_write(
                     .as_object()
                     .ok_or_else(|| NgsiError::BadRequestData("entity must be an object".into()))?;
                 let mut expanded = expand_entity(obj, &ctx, ExpandOpts::default())?;
-                let id = expanded["id"].as_str().expect("validated").to_owned();
+                let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
                 stamp_new(&mut expanded, &now_iso());
                 Ok((id, expanded))
             };
@@ -440,7 +440,7 @@ async fn batch_write(
                     ..Default::default()
                 },
             )?;
-            let id = expanded["id"].as_str().expect("validated").to_owned();
+            let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
             Ok((id, expanded))
         };
         match prep() {
@@ -533,8 +533,8 @@ async fn batch_write(
                     if mode == BatchMode::Update && no_overwrite {
                         // noOverwrite is instance-level: only instances
                         // whose datasetId already exists are skipped
-                        let target = doc.as_object_mut().expect("entity object");
-                        for (k, v) in expanded.as_object().expect("expanded") {
+                        let target = antares_store::stored_object(doc)?;
+                        for (k, v) in antares_jsonld::expanded_object(expanded)? {
                             if matches!(
                                 k.as_str(),
                                 "id" | "type" | "scope" | "createdAt" | "modifiedAt"

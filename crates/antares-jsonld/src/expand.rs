@@ -375,6 +375,23 @@ pub fn expand_types(v: &Value, ctx: &Context) -> Result<Vec<Value>, NgsiError> {
     }
 }
 
+/// An expanded document as the object it is. `expand_entity` and
+/// `expand_attr_fragment` both return a JSON object, so a value that is not
+/// one did not come from them: the caller wired the wrong value in, and the
+/// mistake stays inside the one request instead of taking the process down.
+pub fn expanded_object(v: &Value) -> Result<&serde_json::Map<String, Value>, NgsiError> {
+    v.as_object()
+        .ok_or_else(|| NgsiError::InternalError("expanded document is not a JSON object".into()))
+}
+
+/// The `id` of an expanded Entity. `expand_entity` validates it as a URI
+/// before it returns, so the same rule as `expanded_object` applies.
+pub fn expanded_id(v: &Value) -> Result<&str, NgsiError> {
+    v.get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| NgsiError::InternalError("expanded entity carries no id".into()))
+}
+
 /// 4.5.1/5.5.4: an Attribute or sub-Attribute name shall expand to an
 /// absolute IRI. A user @context is merged before the Core one (4.4), so a
 /// term defined as `{"@id": "id"}` stays RELATIVE and would otherwise land

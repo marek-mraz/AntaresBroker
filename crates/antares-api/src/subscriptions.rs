@@ -788,7 +788,7 @@ pub async fn update(
     check_jsonld_context(st, &norm).await?;
     let ts = now_iso();
     let res = st.store.mutate(&tenant, kind, id, |doc| {
-        let target = doc.as_object_mut().expect("subscription object");
+        let target = antares_store::stored_object(doc)?;
         crate::apply_doc_fragment(target, &norm, &ts);
         Ok::<(), NgsiError>(())
     })?;

@@ -524,19 +524,19 @@ impl PgTemporalStore {
         // qualification rule (≥1 instance, in-window when ranged). WHERE
         // binds come FIRST so the fallback count query (offset past the end)
         // can reuse them with identical numbering.
-        let range_compiled = f.range.is_none()
-            || f.range.as_ref().is_some_and(|r| {
-                crate::compile::temporal::compile_instance_range(r, "ai.data", 1).is_some()
-            });
+        // None: no range to compile. Some(None): a range that does not
+        // compile, which is the case page pushdown must not take — the SQL
+        // would qualify entities on a window it cannot express.
+        let compiled_range = f.range.as_ref().map(|r| {
+            crate::compile::temporal::compile_instance_range(r, "ai.data", binds.len() + 1)
+        });
         let mut paged = false;
-        if f.page.is_some() && range_compiled {
+        if f.page.is_some() && !matches!(compiled_range, Some(None)) {
             let mut qual = "EXISTS (SELECT 1 FROM attr_instances ai WHERE \
                             ai.tenant_id = m.tenant_id AND ai.entity_id = m.id"
                 .to_owned();
-            if let Some(r) = &f.range {
+            if let (Some(r), Some(Some(c))) = (&f.range, compiled_range) {
                 let n = binds.len() + 1;
-                let c = crate::compile::temporal::compile_instance_range(r, "ai.data", n)
-                    .expect("range_compiled checked above");
                 for b in c.binds {
                     binds.push(B::Text(b));
                 }

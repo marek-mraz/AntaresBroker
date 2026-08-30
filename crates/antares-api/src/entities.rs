@@ -122,7 +122,12 @@ pub fn mirror_delete_attr(
 ) -> bool {
     let mut had = false;
     let r = st.temporal.mutate(tenant, id, |doc| {
-        let target = doc.as_object_mut().expect("temporal doc");
+        // The mirror writes nothing into a document the temporal driver
+        // handed back in a shape the contract forbids; `had` stays false and
+        // the caller reports that nothing was mirrored.
+        let Some(target) = doc.as_object_mut() else {
+            return Ok::<(), std::convert::Infallible>(());
+        };
         if attr_iri == "scope" {
             // scope deletion: temporal scope becomes an instance array with
             // value [] (the 020_19/020_20 shape)
@@ -251,7 +256,7 @@ async fn create_entity_inner(
         "entity document must be a JSON object".into(),
     ))?;
     let mut expanded = expand_entity(obj, &parsed.ctx, ExpandOpts::default())?;
-    let id = expanded["id"].as_str().expect("validated id").to_owned();
+    let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
 
     // distributed create (4.3.6, 6.4.3.1)
     let types: Option<Vec<String>> = expanded["type"].as_array().map(|a| {
@@ -2075,7 +2080,7 @@ fn purge_locally(
         } else if prune {
             let mut changed = 0usize;
             st.store.batch_mutate(tenant, &ids, |_, doc| {
-                let target = doc.as_object_mut().expect("entity object");
+                let target = antares_store::stored_object(doc)?;
                 let attrs: Vec<String> = target.keys().filter(|k| !is_meta(k)).cloned().collect();
                 let before = target.len();
                 for a in attrs {

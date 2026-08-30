@@ -295,7 +295,7 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 _ => false,
             })
             .collect();
-        let instances: Vec<Value> = kept
+        let mut instances: Vec<Value> = kept
             .iter()
             .map(|inst| transform_instance(inst, r))
             .collect();
@@ -303,8 +303,8 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
             continue;
         }
         if r.key_values {
-            if instances.len() == 1 {
-                out.insert(k.clone(), instances.into_iter().next().expect("one"));
+            if let (1, Some(one)) = (instances.len(), instances.pop()) {
+                out.insert(k.clone(), one);
             } else {
                 // 4.5.4 multi-instance simplified form: a "dataset" map keyed
                 // by datasetId ("@none" for the default instance)
@@ -362,13 +362,8 @@ fn transform_instance(inst: &Value, r: &Repr) -> Value {
             _ => {}
         }
         // sub-attributes recurse
-        if v.is_array() && !is_reserved_member(k) {
-            let subs: Vec<Value> = v
-                .as_array()
-                .expect("array")
-                .iter()
-                .map(|i| transform_instance(i, r))
-                .collect();
+        if let Some(arr) = v.as_array().filter(|_| !is_reserved_member(k)) {
+            let subs: Vec<Value> = arr.iter().map(|i| transform_instance(i, r)).collect();
             out.insert(k.clone(), Value::Array(subs));
         } else {
             out.insert(k.clone(), v.clone());

@@ -72,7 +72,7 @@ pub async fn upsert_temporal(
             "temporal entity must be a JSON object".into(),
         ))?;
         let expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
-        let id = expanded["id"].as_str().expect("validated").to_owned();
+        let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
         // 5.6.11.4: exclusive/redirect registrations matching the input are
         // forwarded when "Create or Update Temporal" is supported; proxy
         // modes without it are an error of type Conflict; inclusive ones
@@ -186,7 +186,7 @@ fn upsert_temporal_local(
         let existed = st.temporal.get(tenant, id)?.is_some();
         if existed {
             let res = st.temporal.mutate(tenant, id, |doc| {
-                let target = doc.as_object_mut().expect("temporal object");
+                let target = antares_store::stored_object(doc)?;
                 // 5.6.11.4: new Entity Type names are added to the target
                 if let Some(new_types) = expanded.get("type").and_then(Value::as_array) {
                     let mut cur: Vec<Value> = target
@@ -201,7 +201,7 @@ fn upsert_temporal_local(
                     }
                     target.insert("type".into(), Value::Array(cur));
                 }
-                for (k, v) in expanded.as_object().expect("expanded") {
+                for (k, v) in antares_jsonld::expanded_object(&expanded)? {
                     if is_meta(k) {
                         continue;
                     }
@@ -652,21 +652,20 @@ fn content_range(
         return None;
     }
     let (data_min, data_max) = (ts_min?, ts_max?);
-    let timerel = tq.map(|t| t.timerel.as_str()).filter(|t| *t != "any");
+    // The window bound is the query's own when the query names one; matching
+    // on the pair keeps the timerel and the query that produced it together,
+    // so no arm can reach for a query that is not there.
+    let named = tq.filter(|t| t.timerel != "any");
     let (start, end) = if last_n.is_none() {
-        let start = match timerel {
-            Some("after") | Some("between") => tq.expect("tq").time_at.clone(),
+        let start = match named.map(|t| (t.timerel.as_str(), t)) {
+            Some(("after" | "between", t)) => t.time_at.clone(),
             _ => data_min.to_owned(),
         };
         (start, data_max.to_owned())
     } else {
-        let start = match timerel {
-            Some("before") => tq.expect("tq").time_at.clone(),
-            Some("between") => tq
-                .expect("tq")
-                .end_time_at
-                .clone()
-                .unwrap_or_else(|| data_max.to_owned()),
+        let start = match named.map(|t| (t.timerel.as_str(), t)) {
+            Some(("before", t)) => t.time_at.clone(),
+            Some(("between", t)) => t.end_time_at.clone().unwrap_or_else(|| data_max.to_owned()),
             _ => data_max.to_owned(),
         };
         (start, data_min.to_owned())
@@ -2552,7 +2551,7 @@ pub async fn delete_temporal_attr(
         let mut found = false;
         let ts = now_iso();
         let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = doc.as_object_mut().expect("temporal object");
+            let target = antares_store::stored_object(doc)?;
             if delete_all
                 || (want_ds.is_none()
                     && !target
@@ -2766,14 +2765,14 @@ pub async fn modify_temporal_instance(
         let ts = now_iso();
         let mut found = false;
         let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = doc.as_object_mut().expect("temporal object");
+            let target = antares_store::stored_object(doc)?;
             if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 if let Some(inst) = arr.iter_mut().find(|i| {
                     i.get("instanceId").and_then(Value::as_str) == Some(instance_id.as_str())
                 }) {
                     found = true;
-                    let t = inst.as_object_mut().expect("instance");
-                    for (k, v) in frag_inst.as_object().expect("fragment") {
+                    let t = antares_store::stored_object(inst)?;
+                    for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
                         if matches!(k.as_str(), "createdAt" | "instanceId") {
                             continue;
                         }
@@ -2829,7 +2828,7 @@ pub async fn delete_temporal_instance(
         let mut found = false;
         let ts = now_iso();
         let res = st.temporal.mutate(&tenant, &id, |doc| {
-            let target = doc.as_object_mut().expect("temporal object");
+            let target = antares_store::stored_object(doc)?;
             if let Some(arr) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 let before = arr.len();
                 arr.retain(|i| {

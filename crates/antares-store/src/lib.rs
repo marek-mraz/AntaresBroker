@@ -19,6 +19,16 @@ pub mod filter;
 use antares_model::{NgsiError, TenantId};
 use serde_json::Value;
 
+/// A stored document as the object it is. Every document a driver holds is a
+/// JSON object — `contract` asserts the shape on every backend — so a value
+/// that is not one means the driver returned something the contract forbids
+/// underneath a live request. That fails the one request; it never takes the
+/// process down, which is what an unwrap here would do.
+pub fn stored_object(doc: &mut Value) -> Result<&mut serde_json::Map<String, Value>, NgsiError> {
+    doc.as_object_mut()
+        .ok_or_else(|| NgsiError::InternalError("stored document is not a JSON object".into()))
+}
+
 /// Called with (tenant, before, after) on every entity write — the local-mode
 /// change feed: create ⇒ (None, Some), delete ⇒ (Some, None).
 pub type ChangeHook = Box<dyn Fn(&TenantId, Option<Value>, Option<Value>) + Send + Sync>;
@@ -443,14 +453,23 @@ impl<S: CurrentStateDriver + ?Sized> CurrentStateDriverExt for S {
             }),
         )?;
         let mut errs = errs.into_inner();
-        Ok(r.into_iter()
-            .map(|slot| {
-                slot.map(|flag| match flag {
-                    Ok(()) => Ok(()),
-                    Err(()) => Err(errs.pop_front().expect("one error per rejected id")),
-                })
-            })
-            .collect())
+        let mut out = Vec::with_capacity(r.len());
+        for slot in r {
+            out.push(match slot {
+                None => None,
+                Some(Ok(())) => Some(Ok(())),
+                // one queued error per rejected id is the trait contract; a
+                // driver that reports more rejections than the closure raised
+                // has broken it, and the batch fails rather than inventing an
+                // error for the caller to read.
+                Some(Err(())) => Some(Err(errs.pop_front().ok_or_else(|| {
+                    NgsiError::InternalError(
+                        "batch driver reported more rejections than were raised".into(),
+                    )
+                })?)),
+            });
+        }
+        Ok(out)
     }
 }
 

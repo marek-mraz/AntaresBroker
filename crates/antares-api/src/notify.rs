@@ -956,10 +956,11 @@ fn build_data(
     let internal = match after {
         Some(a) => {
             let mut doc = a.clone();
-            let obj = doc.as_object_mut().expect("entity object");
             if show {
-                // previous* on changed instances (046_31..33)
-                if let Some(b) = before {
+                // previous* on changed instances (046_31..33). An entity off
+                // the change feed is an object; one that is not carries
+                // nothing to decorate and travels on unchanged.
+                if let (Some(b), Some(obj)) = (before, doc.as_object_mut()) {
                     for (k, v) in obj.iter_mut() {
                         if ENTITY_META.contains(&k.as_str()) {
                             continue;
@@ -1015,9 +1016,10 @@ fn build_data(
                             .map(|di| tombstone(di, sys, show, now))
                             .collect()
                     };
-                    if let Some(arr) = doc
-                        .as_object_mut()
-                        .expect("entity object")
+                    let Some(target) = doc.as_object_mut() else {
+                        continue;
+                    };
+                    if let Some(arr) = target
                         .entry(attr.clone())
                         .or_insert_with(|| Value::Array(vec![]))
                         .as_array_mut()
@@ -1029,8 +1031,13 @@ fn build_data(
             doc
         }
         None => {
-            // entity deleted: tombstone entity (046_21) + per-trigger attrs
-            let b = before.expect("deletion carries before");
+            // entity deleted: tombstone entity (046_21) + per-trigger attrs.
+            // The caller returns early unless one of before/after is there,
+            // so this arm has a before; without one there is nothing to
+            // describe and nothing to notify about.
+            let Some(b) = before else {
+                return Vec::new();
+            };
             let mut m = Map::new();
             for k in ["id", "type"] {
                 if let Some(v) = b.get(k) {
@@ -1368,9 +1375,13 @@ fn claim_interval(
         if chrono::Utc::now().timestamp_millis() < due_at_ms(doc, interval) {
             return Err(());
         }
-        if let Some(n) = doc
-            .as_object_mut()
-            .expect("subscription object")
+        let Some(sub_doc) = doc.as_object_mut() else {
+            // a stored Subscription is an object; one that is not carries no
+            // notification member to stamp, and Err(()) is the same "nothing
+            // written" the not-due branch above returns
+            return Err(());
+        };
+        if let Some(n) = sub_doc
             .entry("notification")
             .or_insert_with(|| json!({}))
             .as_object_mut()

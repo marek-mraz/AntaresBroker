@@ -60,16 +60,22 @@ fn now_utc() -> String {
 }
 
 #[cfg(feature = "postgres")]
-fn doc_kind(kind: Kind) -> Option<DocKind> {
+fn doc_kind(kind: Kind) -> Result<DocKind, NgsiError> {
     match kind {
-        Kind::Subscription => Some(DocKind::Subscription),
-        Kind::Registration => Some(DocKind::Registration),
-        Kind::CSourceSubscription => Some(DocKind::CSourceSubscription),
-        Kind::Snapshot => Some(DocKind::Snapshot),
-        Kind::EntityMap => Some(DocKind::EntityMap),
-        Kind::DistSub => Some(DocKind::DistSub),
-        Kind::DeadLetter => Some(DocKind::DeadLetter),
-        Kind::Entity | Kind::Temporal => None,
+        Kind::Subscription => Ok(DocKind::Subscription),
+        Kind::Registration => Ok(DocKind::Registration),
+        Kind::CSourceSubscription => Ok(DocKind::CSourceSubscription),
+        Kind::Snapshot => Ok(DocKind::Snapshot),
+        Kind::EntityMap => Ok(DocKind::EntityMap),
+        Kind::DistSub => Ok(DocKind::DistSub),
+        Kind::DeadLetter => Ok(DocKind::DeadLetter),
+        // Entities and Temporal Representations have their own tables and
+        // never reach the document store. Every caller routes them to their
+        // own match arm first; one that does not has mismatched its arms,
+        // and the mistake stays inside the one request.
+        Kind::Entity | Kind::Temporal => Err(NgsiError::InternalError(format!(
+            "{kind:?} is not a document-store kind"
+        ))),
     }
 }
 
@@ -264,7 +270,7 @@ impl AnyStore {
                     Kind::Entity => p.entities.create(tenant, id, &doc).map_err(db)?,
                     Kind::Temporal => p.temporal.create(tenant, id, &doc).map_err(db)?,
                     _ => {
-                        let dk = doc_kind(kind).expect("doc kind");
+                        let dk = doc_kind(kind)?;
                         p.docs.create(tenant, dk, id, &doc).map_err(db)?
                     }
                 };
@@ -383,7 +389,7 @@ impl AnyStore {
                     }
                 }
                 _ => {
-                    let dk = doc_kind(kind).expect("doc kind");
+                    let dk = doc_kind(kind)?;
                     p.docs.upsert(tenant, dk, id, &doc).map_err(db)
                 }
             },
@@ -397,10 +403,7 @@ impl AnyStore {
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.get(tenant, id).map_err(db)?,
                 Kind::Temporal => p.temporal.get(tenant, id).map_err(db)?,
-                _ => p
-                    .docs
-                    .get(tenant, doc_kind(kind).expect("doc kind"), id)
-                    .map_err(db)?,
+                _ => p.docs.get(tenant, doc_kind(kind)?, id).map_err(db)?,
             },
         };
         // 4.22: an expired entity is invalid context — a read serves it to
@@ -434,10 +437,7 @@ impl AnyStore {
                     Ok(hit)
                 }
                 Kind::Temporal => p.temporal.delete(tenant, id).map_err(db),
-                _ => p
-                    .docs
-                    .delete(tenant, doc_kind(kind).expect("doc kind"), id)
-                    .map_err(db),
+                _ => p.docs.delete(tenant, doc_kind(kind)?, id).map_err(db),
             },
         }
     }
@@ -449,10 +449,7 @@ impl AnyStore {
             AnyStore::Pg(p) => match kind {
                 Kind::Entity => p.entities.list(tenant).map_err(db)?,
                 Kind::Temporal => p.temporal.list(tenant).map_err(db)?,
-                _ => p
-                    .docs
-                    .list(tenant, doc_kind(kind).expect("doc kind"))
-                    .map_err(db)?,
+                _ => p.docs.list(tenant, doc_kind(kind)?).map_err(db)?,
             },
         };
         if kind == Kind::Entity {
@@ -683,7 +680,7 @@ impl AnyStore {
                 _ => {
                     // FOR UPDATE + UPDATE in one tx: a bookkeeping writeback
                     // racing a DELETE must never resurrect the row (047_06).
-                    let dk = doc_kind(kind).expect("doc kind");
+                    let dk = doc_kind(kind)?;
                     match p.docs.mutate(tenant, dk, id, f).map_err(db)? {
                         Some(r) => Ok(Some(r)),
                         None => Ok(None),
@@ -1145,7 +1142,7 @@ impl antares_store::CurrentStateDriver for AnyStore {
         id: &str,
         now: &str,
     ) -> Result<Option<antares_store::Delivery>, NgsiError> {
-        match (self, doc_kind(kind)) {
+        match (self, doc_kind(kind).ok()) {
             #[cfg(feature = "postgres")]
             (AnyStore::Pg(p), Some(dk)) => {
                 let found = p.docs.record_delivery(tenant, dk, id, now).map_err(db)?;

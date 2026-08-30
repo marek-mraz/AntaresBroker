@@ -179,8 +179,8 @@ async fn write_attrs(
                     "entity {id} does not match the type selector"
                 )));
             }
-            let target = doc.as_object_mut().expect("entity object");
-            let frag = fragment.as_object().expect("fragment object");
+            let target = antares_store::stored_object(doc)?;
+            let frag = antares_jsonld::expanded_object(&fragment)?;
             // 5.6.2.4 / 5.6.3.4: Entity Type names not yet in the target are
             // added to its list
             if let Some(new_types) = frag.get("type").and_then(Value::as_array) {
@@ -835,7 +835,7 @@ async fn partial_update_inner(
                     "entity {id} does not match the type selector"
                 )));
             }
-            let target = doc.as_object_mut().expect("entity object");
+            let target = antares_store::stored_object(doc)?;
             if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 let pos = existing.iter().position(|ci| {
                     ci.get("datasetId").and_then(Value::as_str) == want_ds.as_deref()
@@ -856,8 +856,8 @@ async fn partial_update_inner(
                                 )));
                             }
                         }
-                        let t = existing[p].as_object_mut().expect("instance object");
-                        for (k, v) in frag_inst.as_object().expect("fragment instance") {
+                        let t = antares_store::stored_object(&mut existing[p])?;
+                        for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
                             if matches!(k.as_str(), "createdAt" | "modifiedAt") {
                                 continue;
                             }
@@ -991,7 +991,7 @@ pub async fn replace_attr(
                         "entity {id} does not match the type selector"
                     )));
                 }
-                let target = doc.as_object_mut().expect("entity object");
+                let target = antares_store::stored_object(doc)?;
                 if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                     // 5.6.19: only the instance with the matching datasetId is
                     // replaced; its createdAt survives (055_01/055_02)
@@ -1108,14 +1108,14 @@ async fn delete_attr_inner(
                 )));
             }
             if attr_iri == "scope" {
-                let target = doc.as_object_mut().expect("entity object");
+                let target = antares_store::stored_object(doc)?;
                 found = target.remove("scope").is_some();
                 if found {
                     target.insert("modifiedAt".into(), Value::String(ts.clone()));
                 }
                 return Ok(());
             }
-            let target = doc.as_object_mut().expect("entity object");
+            let target = antares_store::stored_object(doc)?;
             if let Some(existing) = target.get_mut(&attr_iri).and_then(Value::as_array_mut) {
                 if delete_all {
                     found = !existing.is_empty();

@@ -293,7 +293,15 @@ impl Store {
     /// section so redb order equals memory order).
     fn persist(&self, table: TableDefinition<&[u8], &[u8]>, key: &[u8], doc: Option<&Value>) {
         if let Some(shadow) = &self.shadow {
-            let bytes = doc.map(|d| serde_json::to_vec(d).expect("serialize doc"));
+            // None means DELETE the key, so a document that will not encode
+            // must skip the write rather than collapse into one.
+            let bytes = match doc {
+                Some(d) => match serde_json::to_vec(d) {
+                    Ok(b) => Some(b),
+                    Err(_) => return,
+                },
+                None => None,
+            };
             shadow.write(table, key, bytes.as_deref());
         }
     }
