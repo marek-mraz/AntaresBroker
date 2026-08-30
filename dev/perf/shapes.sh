@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Throughput table for the published request shapes: query at c50 and
-# c200, single-entity retrieve at c50, median of three 5 s runs, p99 from
-# the same runs. One broker, started here per store.
+# Throughput table for the published read shapes: query at c50 and c200,
+# single-entity retrieve at c50, median of three 5 s runs, p99 from the
+# same runs. One broker, started here per store. The write shapes are
+# writes.sh.
 #
 #   dev/perf/shapes.sh                          # memory
 #   DATABASE_URL=postgres://… dev/perf/shapes.sh   # + postgres

@@ -22,6 +22,8 @@ runs in CI; `k6` is the only tool it needs.
 |---|---|---|
 | startup and idle footprint | `startup.sh` | exec to the first `200` from `/q/health`, median of five, `VmRSS` right after, per store |
 | throughput per shape | `shapes.sh` | 100 five-attribute entities; `GET /entities?type=Vehicle&limit=20` at 50 and 200 concurrent clients, `GET /entities/{id}` at 50; five seconds, median of three runs, p99 from the same runs |
+| throughput per write shape | `writes.sh` | one shape at a time against a quiet broker: `PATCH /entities/{id}/attrs`, `PATCH` on one named attribute, `PATCH /entities/{id}`, `PUT /entities/{id}`, `POST /entities/{id}/attrs`, `POST /entities` and `POST /entityOperations/upsert` with twenty entities, at 50 and 200 concurrent clients. The set carries its own entity type, so no subscription matches it |
+| write shapes and reads together | `mix.sh` | the same shapes plus `GET /entities/{id}` and a twenty-entity delete, drawn from one weighted wheel in a tenant that carries its subscriptions; per-operation rates against what the sink received and what the broker dropped |
 | core scaling | `core-scale.sh` | broker pinned to 1, 2, 4, 8 physical cores with `taskset`, load generator on the remaining cores; refuses a step it cannot isolate |
 | saturation knee | `saturate.sh` | open model, +500 rps every 30 s until p99 passes 50 ms or errors pass 0.1 %; the knee is the last stage that held, the curve is a CSV |
 | noise profile | `variance.py` | the same commit measured ten times; the fence for a future regression gate is `Q3 + 3·IQR` of each metric's own history |
