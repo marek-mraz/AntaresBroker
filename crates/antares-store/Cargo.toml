@@ -13,6 +13,12 @@ antares-ql = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+# The driver contract as a runnable function (`contract.rs`), for the
+# backends in this workspace and for any driver built outside it. Off by
+# default: nothing in a serving binary calls it.
+test-kit = []
+
 [dev-dependencies]
 regex = { workspace = true }
 

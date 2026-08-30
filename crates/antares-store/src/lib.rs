@@ -12,6 +12,8 @@
 //! canonical instance.
 #![deny(missing_docs)]
 
+#[cfg(feature = "test-kit")]
+pub mod contract;
 pub mod filter;
 
 use antares_model::{NgsiError, TenantId};
@@ -211,7 +213,11 @@ pub trait CurrentStateDriver: Send + Sync {
         tenant: &TenantId,
         items: Vec<(String, Value)>,
     ) -> Result<Vec<bool>, NgsiError>;
-    /// Insert or replace a document; `true` if it was created.
+    /// Insert or replace a document. `true` means a document was ALREADY
+    /// there and this call replaced it; `false` means this call created it.
+    /// The polarity is the opposite of [`Self::batch_upsert`], which answers
+    /// created-flags — the batch path needs them to split 201 from 204
+    /// (5.6.8) while the single path ignores the value.
     fn upsert(
         &self,
         tenant: &TenantId,
@@ -522,7 +528,9 @@ pub trait TemporalDriver: Send + Sync {
     fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, NgsiError>;
     /// Insert a temporal document; `false` if the id already exists.
     fn create(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
-    /// Insert or replace a temporal document; `true` if it was created.
+    /// Insert or replace a temporal document. `true` means it was ALREADY
+    /// there and this call replaced it; `false` means this call created it,
+    /// the same polarity as the current-state seam.
     fn upsert(&self, tenant: &TenantId, id: &str, doc: Value) -> Result<bool, NgsiError>;
     /// Delete an entity's whole history; `false` if it had none.
     fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, NgsiError>;
@@ -645,7 +653,11 @@ mod tests {
     #[test]
     fn every_store_mode_round_trips_and_the_error_lists_them_all() {
         for m in StoreMode::ALL {
-            assert_eq!(m.as_str().parse::<StoreMode>().expect(m.as_str()), m);
+            let back = m
+                .as_str()
+                .parse::<StoreMode>()
+                .unwrap_or_else(|e| panic!("{m} must parse back: {e}"));
+            assert_eq!(back, m);
         }
         let err = "mongo".parse::<StoreMode>().expect_err("unknown mode");
         assert!(err.contains("mongo"), "{err}");

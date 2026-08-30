@@ -26,6 +26,10 @@ tokio = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
 
+[dev-dependencies]
+# The driver contract kit: the backends in this crate are held to it.
+antares-store = { workspace = true, features = ["test-kit"] }
+
 [features]
 # The Pg arm is the only part of this crate that cannot cross to wasm32
 # (sqlx needs sockets). Default-on everywhere else; the browser build turns

@@ -396,3 +396,28 @@ async fn the_server_version_is_probed_once_and_served_from_the_store() {
     );
     assert_eq!(probed_store.version_info(), probed);
 }
+
+/// The Postgres arms answer the same driver contract as the in-process ones
+/// (`antares_store::contract`). A backend's own tests assert what that
+/// backend does; this asserts what the seam promises, which is what
+/// `antares-api` was written against.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_postgres_store_keeps_the_driver_contract() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect+migrate");
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let a = TenantId::new(&format!("ctra{run}")).expect("tenant");
+    let b = TenantId::new(&format!("ctrb{run}")).expect("tenant");
+    for t in [&a, &b] {
+        pg::ensure_tenant(&pool, t).await.expect("tenant row");
+    }
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    let prefix = format!("pgctr{run}");
+    antares_store::contract::run_current_state_contract(&store, &a, &b, &prefix);
+    antares_store::contract::run_temporal_contract(&store, &a, &b, &prefix);
+}

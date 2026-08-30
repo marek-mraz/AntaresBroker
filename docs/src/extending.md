@@ -138,7 +138,18 @@ changes.
    `docs/src/configuration.md`. Extend the `BUILT_WITH` listing.
 5. If the backend needs background jobs, add an arm next to the expiry
    sweep and the maintenance job in `main.rs`.
-6. Add the restart-survival and per-kind tests the other backends carry
+6. Hold it to the driver contract. `antares-store`'s `test-kit` feature
+   exports `run_current_state_contract` and `run_temporal_contract`
+   (`crates/antares-store/src/contract.rs`): the rules `antares-api` writes
+   against and no backend decides for itself — a missing row answers `None`,
+   a mutate never inserts (ADR-0005, ETSI 047_06), a rejected mutate commits
+   nothing, batch results align with the input ids, `upsert` and
+   `batch_upsert` answer opposite polarities, a query never drops a matching
+   row and never crosses a tenant. Call both from the backend's own tests,
+   the way `crates/antares-sql/tests/contract.rs` (memory, file) and
+   `tests/pg.rs` (postgres, timescale) do. A driver whose calls block on an
+   async runtime needs a multi-threaded runtime context.
+7. Add the restart-survival and per-kind tests the other backends carry
    (`crates/antares-broker/tests/store_combos.rs` has one row per
    store × temporal pairing). The API test suite itself runs once per
    built-in store: `AppState::new` composes a fresh store per state from
@@ -146,7 +157,7 @@ changes.
    under the system temp dir), and `workspace.yml` runs
    `cargo nextest -p antares-api` under each value. A backend that wants
    the same proof adds its arm there and one more CI configuration.
-7. Add a cell to the matrix in `.github/workflows/etsi-matrix.yml`. The
+8. Add a cell to the matrix in `.github/workflows/etsi-matrix.yml`. The
    full preset runs seven cells today: memory, file, postgres, timescale,
    postgres-nats, timescale-nats and wasm-file; every cell must pass the
    whole suite before the backend is part of a release.
