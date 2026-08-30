@@ -387,10 +387,14 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
             // same shape as Policy::limited: a redirect error, is_redirect()==true
             return attempt.error(format!("exceeded {MAX_REDIRECTS} redirects"));
         }
+        // `Url` hands back an IPv6 host bracketed (`[::1]`), which
+        // `IpAddr::from_str` rejects — trim as `check_host` does, or every
+        // IPv6 literal hop skips the check.
         if let Ok(ip) = attempt
             .url()
             .host_str()
             .unwrap_or("")
+            .trim_matches(['[', ']'])
             .parse::<std::net::IpAddr>()
         {
             if EgressPolicy::ip_is_metadata(ip)
@@ -1516,6 +1520,67 @@ mod tests {
             hits.load(Ordering::SeqCst),
             1,
             "only the initial request; the private-IP hop was refused"
+        );
+    }
+
+    // SSRF: the same refusal for the IPv6 spelling of a literal. `Url`
+    // returns an IPv6 host BRACKETED (`[::1]`), which `IpAddr::from_str`
+    // rejects, so a hop check that parses `host_str()` as it comes waves the
+    // whole IPv6 literal space through — including `[::ffff:169.254.169.254]`.
+    // The redirect target here is a second server on IPv6 loopback: it must
+    // never be reached.
+    #[tokio::test]
+    async fn redirect_to_private_ipv6_literal_is_blocked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let target = tokio::net::TcpListener::bind("[::1]:0")
+            .await
+            .expect("bind v6");
+        let target_addr = target.local_addr().expect("addr");
+        let reached = Arc::new(AtomicUsize::new(0));
+        let hit = reached.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = target.accept().await {
+                hit.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let entry = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let entry_addr = entry.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = entry.accept().await {
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://[::1]:{}/internal\r\nContent-Length: 0\r\n\r\n",
+                    target_addr.port()
+                );
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let client = client_builder(EgressPolicy {
+            allow_private: false,
+        })
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client");
+        let resp = client
+            .get(format!("http://{entry_addr}/start"))
+            .send()
+            .await
+            .expect("stop returns the 3xx, not an error");
+        assert_eq!(resp.status().as_u16(), 302, "redirect was not followed");
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            0,
+            "the IPv6-literal hop was followed into loopback"
         );
     }
 
