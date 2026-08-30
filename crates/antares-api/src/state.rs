@@ -98,12 +98,17 @@ pub struct AppState {
     /// Change batches the matcher queue accepted and has not finished
     /// delivering. A shutdown drain waits for zero before the pool closes.
     pub pending_changes: Arc<std::sync::atomic::AtomicUsize>,
-    /// bus=nats: called after every Subscription CUD so the wiring can
-    /// push the change into the KV mirror bucket. `None` in local mode — this
-    /// process's store already IS the truth every consumer reads.
+    /// Called after every Subscription and Context Source Registration
+    /// Subscription CUD, so the mirror the matcher reads follows the store.
+    /// On the bus the wiring pushes the change into the KV mirror bucket;
+    /// in local mode it applies to this process's own mirror.
     #[allow(clippy::type_complexity)]
     pub sub_sync: Option<
-        Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
+        Arc<
+            dyn Fn(&antares_model::TenantId, antares_store::Kind, &str, Option<&serde_json::Value>)
+                + Send
+                + Sync,
+        >,
     >,
     /// bus=nats: the KV-watched compiled-subscription mirror the matcher
     /// reads, so the hot path never touches Postgres. `None` in local
@@ -390,15 +395,19 @@ impl AppState {
         self.temporal.supported()
     }
 
-    /// Fire the subscription-sync hook (no-op in local mode).
+    /// Fire the subscription-sync hook for one written row. `kind` decides
+    /// what the mirror does with it: a Subscription is indexed as a document,
+    /// a Context Source Registration Subscription only wakes the interval
+    /// sweep (5.11.7) — it is matched against registrations, not entities.
     pub fn sub_changed(
         &self,
         tenant: &antares_model::TenantId,
+        kind: antares_store::Kind,
         id: &str,
         doc: Option<&serde_json::Value>,
     ) {
         if let Some(h) = &self.sub_sync {
-            h(tenant, id, doc);
+            h(tenant, kind, id, doc);
         }
     }
 

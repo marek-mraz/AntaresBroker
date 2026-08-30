@@ -97,12 +97,20 @@ pub fn outbox_drain_enabled() -> Result<bool, String> {
     }
 }
 
-/// KV key for one subscription: tenant verbatim (token-safe by construction),
-/// id hashed (URNs carry `:` — illegal in KV keys). The VALUE carries the
-/// real tenant/id, so the key only needs uniqueness.
-fn kv_key(tenant: &str, id: &str) -> String {
+/// KV key for one mirrored subscription: tenant verbatim (token-safe by
+/// construction), id hashed (URNs carry `:` — illegal in KV keys). The VALUE
+/// carries the real tenant/id, so the key only needs uniqueness. Kind-scoped:
+/// a Subscription and a Context Source Registration Subscription may carry the
+/// same client-chosen id in one tenant (5.5.10), and sharing a key would let
+/// one overwrite the other's mirror entry.
+fn kv_key(tenant: &str, kind: Kind, id: &str) -> String {
     format!(
-        "{tenant}.{:016x}",
+        "{tenant}.{}{:016x}",
+        if kind == Kind::CSourceSubscription {
+            "c"
+        } else {
+            ""
+        },
         antares_bus::subjects::fnv1a64(id.as_bytes())
     )
 }
@@ -173,35 +181,38 @@ pub async fn wire_nats(
         // Subscription write side: subscription CUD → KV (tombstone = null doc).
         let kv = bus.subs_kv().await?;
         let kv_for_hook = kv.clone();
-        state.sub_sync = Some(Arc::new(move |tenant: &TenantId, id: &str, doc| {
-            let kv = kv_for_hook.clone();
-            let key = kv_key(tenant.as_str(), id);
-            let value = serde_json::json!({
-                "tenant": tenant.as_str(), "id": id, "doc": doc,
-            });
-            tokio::spawn(async move {
-                let bytes = serde_json::to_vec(&value).unwrap_or_default();
-                // The store row is already committed. A lost put leaves this
-                // subscription invisible to every matcher pod — silently, and
-                // until the next restart, because mirrors hydrate from the
-                // store only at process start. So retry rather than warn once.
-                // Named ceiling: after the last attempt the divergence stands
-                // until a restart; closing that needs periodic reconciliation.
-                for attempt in 0..MIRROR_SYNC_ATTEMPTS {
-                    match kv.put(key.clone(), bytes.clone().into()).await {
-                        Ok(_) => return,
-                        Err(e) => {
-                            tracing::warn!("sub KV sync attempt {} failed: {e}", attempt + 1);
-                            tokio::time::sleep(mirror_sync_backoff(attempt)).await;
+        state.sub_sync = Some(Arc::new(
+            move |tenant: &TenantId, kind: Kind, id: &str, doc| {
+                let kv = kv_for_hook.clone();
+                let key = kv_key(tenant.as_str(), kind, id);
+                let value = serde_json::json!({
+                    "tenant": tenant.as_str(), "id": id, "doc": doc,
+                    "csub": kind == Kind::CSourceSubscription,
+                });
+                tokio::spawn(async move {
+                    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+                    // The store row is already committed. A lost put leaves this
+                    // subscription invisible to every matcher pod — silently, and
+                    // until the next restart, because mirrors hydrate from the
+                    // store only at process start. So retry rather than warn once.
+                    // Named ceiling: after the last attempt the divergence stands
+                    // until a restart; closing that needs periodic reconciliation.
+                    for attempt in 0..MIRROR_SYNC_ATTEMPTS {
+                        match kv.put(key.clone(), bytes.clone().into()).await {
+                            Ok(_) => return,
+                            Err(e) => {
+                                tracing::warn!("sub KV sync attempt {} failed: {e}", attempt + 1);
+                                tokio::time::sleep(mirror_sync_backoff(attempt)).await;
+                            }
                         }
                     }
-                }
-                tracing::error!(
-                    "sub KV sync gave up for {key} — this subscription is not mirrored \
+                    tracing::error!(
+                        "sub KV sync gave up for {key} — this subscription is not mirrored \
                      until the next restart"
-                );
-            });
-        }));
+                    );
+                });
+            },
+        ));
 
         // Registration write side: registration CUD → ANTARES_REGISTRY delta.
         let bus_for_reg = bus.clone();
@@ -476,8 +487,15 @@ fn hydrate(
     }
 }
 
-/// Apply one `{tenant, id, doc|null}` delta to a mirror.
+/// Apply one `{tenant, id, doc|null, csub}` delta to a mirror. A Context
+/// Source Registration Subscription carries no document into the mirror: it
+/// is matched against registrations rather than entities, so the delta only
+/// wakes the interval sweep (5.11.7).
 fn apply_delta(mirror: &dyn antares_api::notify::Mirror, delta: &serde_json::Value) {
+    if delta.get("csub").and_then(serde_json::Value::as_bool) == Some(true) {
+        mirror.csub_written();
+        return;
+    }
     let (Some(tenant), Some(id)) = (
         delta.get("tenant").and_then(serde_json::Value::as_str),
         delta.get("id").and_then(serde_json::Value::as_str),
@@ -552,11 +570,18 @@ mod tests {
     }
 
     /// The KV key must be legal for a NATS KV bucket (`:` from a URN is not),
-    /// stable across calls, and collision-free per id.
+    /// stable across calls, and collision-free per id, per tenant and per
+    /// kind — 5.5.10 leaves the id to the client, so one URN can name both a
+    /// Subscription and a Context Source Registration Subscription.
     #[test]
     fn kv_key_is_bucket_legal_and_stable() {
-        let k = kv_key("default", "urn:ngsi-ld:Subscription:1");
-        assert_eq!(k, kv_key("default", "urn:ngsi-ld:Subscription:1"), "stable");
+        let sub = Kind::Subscription;
+        let k = kv_key("default", sub, "urn:ngsi-ld:Subscription:1");
+        assert_eq!(
+            k,
+            kv_key("default", sub, "urn:ngsi-ld:Subscription:1"),
+            "stable"
+        );
         assert!(
             k.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-'),
@@ -564,12 +589,40 @@ mod tests {
         );
         assert!(k.starts_with("default."), "tenant scoping lost: {k}");
         assert_ne!(
-            kv_key("default", "urn:ngsi-ld:Subscription:1"),
-            kv_key("default", "urn:ngsi-ld:Subscription:2")
+            kv_key("default", sub, "urn:ngsi-ld:Subscription:1"),
+            kv_key("default", sub, "urn:ngsi-ld:Subscription:2")
         );
         assert_ne!(
-            kv_key("t1", "urn:ngsi-ld:Subscription:1"),
-            kv_key("t2", "urn:ngsi-ld:Subscription:1")
+            kv_key("t1", sub, "urn:ngsi-ld:Subscription:1"),
+            kv_key("t2", sub, "urn:ngsi-ld:Subscription:1")
+        );
+        assert_ne!(
+            kv_key("default", sub, "urn:ngsi-ld:Subscription:1"),
+            kv_key(
+                "default",
+                Kind::CSourceSubscription,
+                "urn:ngsi-ld:Subscription:1"
+            ),
+            "one id naming both kinds must not share a mirror entry"
+        );
+    }
+
+    /// A Context Source Registration Subscription delta carries no document:
+    /// it wakes the interval sweep and touches nothing the matcher reads.
+    #[test]
+    fn a_csub_delta_only_wakes_the_sweep() {
+        let m = antares_api::notify::SubMirror::default();
+        apply_delta(
+            &m,
+            &serde_json::json!({
+                "tenant": "default", "id": "urn:ngsi-ld:CSourceSubscription:1",
+                "doc": {"id": "urn:ngsi-ld:CSourceSubscription:1", "timeInterval": 5},
+                "csub": true,
+            }),
+        );
+        assert!(
+            m.docs("default").is_empty(),
+            "a csource subscription must not enter the candidate index"
         );
     }
 

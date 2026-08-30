@@ -922,14 +922,20 @@ async fn tenant_purge(
                 "tenant holds active distributed subscriptions".into(),
             ));
         }
-        let mut subs = ids(Kind::Subscription)?;
-        subs.extend(ids(Kind::CSourceSubscription)?);
+        let subs = ids(Kind::Subscription)?;
+        let csubs = ids(Kind::CSourceSubscription)?;
         let regs = ids(Kind::Registration)?;
         st.temporal.purge_tenant(&tenant)?;
         st.store.purge_tenant(&tenant)?;
         if let Some(sync) = &st.sub_sync {
+            // Kept apart: the mirror entry is keyed per kind, so one id
+            // naming both a Subscription and a Context Source Registration
+            // Subscription needs a tombstone for each.
             for id in &subs {
-                sync(&tenant, id, None);
+                sync(&tenant, Kind::Subscription, id, None);
+            }
+            for id in &csubs {
+                sync(&tenant, Kind::CSourceSubscription, id, None);
             }
         }
         if let Some(sync) = &st.reg_sync {

@@ -139,9 +139,11 @@ notifications; a single entity larger than the cap is sent alone.
 
 Every 2 seconds the broker sends all matching entities, changed or not;
 five seconds after creation the receiver holds two notifications with all
-three sensors each. The smallest interval is one second. With NATS and
-several broker pods, one pod claims each tick, so an interval fires once
-per fleet.
+three sensors each. Any interval greater than zero is accepted, fractions
+included; the broker checks due subscriptions twice a second, so an
+interval below that is served at the tick rate. With NATS and several
+broker pods, one pod claims each tick, so an interval fires once per
+fleet.
 
 ## Throttling
 

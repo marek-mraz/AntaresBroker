@@ -91,6 +91,10 @@ pub struct DocMirror {
 /// wiring's hydrate/watch loops program against.
 pub trait Mirror: Send + Sync {
     fn apply(&self, tenant: &str, id: &str, doc: Option<Value>);
+
+    /// A Context Source Registration Subscription was written somewhere.
+    /// Mirrors that serve no interval sweep have nothing to do.
+    fn csub_written(&self) {}
 }
 
 impl Mirror for DocMirror {
@@ -123,19 +127,30 @@ pub struct SubMirror {
     /// periodic subscription is written, so a new one is never waited out.
     next_sub_sweep_ms: std::sync::atomic::AtomicI64,
     /// The same clock for Context Source Registration Subscriptions
-    /// (5.11.7). Their writes reach no mirror, so a sweep never trusts this
-    /// one for longer than `CSUB_SWEEP_HORIZON_MS`.
+    /// (5.11.7). They are not mirrored as documents — the sweep reads them
+    /// from the store — so a write signals this clock through
+    /// [`SubMirror::csub_written`] instead, and a sweep falls back to
+    /// `CSUB_SWEEP_BACKSTOP_MS` in case a signal was lost.
     next_csub_sweep_ms: std::sync::atomic::AtomicI64,
 }
 
-/// How long a sweep may skip the Context Source Registration Subscription
-/// half of the tick. A newly created one cannot be due sooner than its own
-/// `timeInterval` after creation, and the smallest interval the API defines
-/// is one second (`Subscription.Periodic.timeInterval`, minimum 1), so a
-/// second of blindness cannot delay a firing. Table 5.2.12-1 only bounds
-/// `timeInterval` by "greater than 0": for a sub-second one created between
-/// sweeps, this is the worst-case delay of its FIRST firing.
-const CSUB_SWEEP_HORIZON_MS: i64 = 1000;
+/// The longest a sweep parks the Context Source Registration Subscription
+/// half when nothing it saw is due.
+///
+/// A write clears the clock, so this is not the path a newly created
+/// periodic subscription waits on: it is the repair time for a lost signal,
+/// which on the bus is a KV put that exhausted its retries. Between sweeps
+/// the half costs one `list` per tenant, and the tenant target is 10 000, so
+/// polling it at the tick rate is the broker's whole idle cost with nothing
+/// periodic configured — which is the state most deployments are in.
+///
+/// Table 5.2.12-1 bounds `timeInterval` only by "greater than 0", so a
+/// sub-second interval is legal; the tick period bounds how closely any of
+/// them can be served, signal or no signal.
+// ponytail: one `list` per tenant per backstop, cross-tenant enumeration of
+// the periodic rows would replace it — that needs the RLS service escape
+// (`antares.service`) extended to the two subscription tables.
+const CSUB_SWEEP_BACKSTOP_MS: i64 = 60_000;
 
 #[derive(Default)]
 struct TenantIndex {
@@ -251,6 +266,15 @@ impl SubMirror {
         }
     }
 
+    /// 5.11.7: a Context Source Registration Subscription was written. Only
+    /// the clock moves — these are matched against registrations rather than
+    /// entities, so they are not carried in the candidate index, and the
+    /// sweep reads the tenant's rows from the store once it wakes.
+    pub fn csub_written(&self) {
+        self.next_csub_sweep_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The hot path: subscriptions that could possibly fire for a change
     /// touching these entity types and these changed attributes. Union of
     /// the type hits, the attr hits and the broad bucket — a superset of
@@ -320,6 +344,10 @@ impl SubMirror {
 impl Mirror for SubMirror {
     fn apply(&self, tenant: &str, id: &str, doc: Option<Value>) {
         SubMirror::apply(self, tenant, id, doc);
+    }
+
+    fn csub_written(&self) {
+        SubMirror::csub_written(self);
     }
 }
 
@@ -400,9 +428,12 @@ pub fn wire(state: &mut AppState) {
     }
     state.sub_mirror = Some(mirror.clone());
     let m = mirror.clone();
-    state.sub_sync = Some(Arc::new(move |tenant: &TenantId, id: &str, doc| {
-        m.apply(tenant.as_str(), id, doc.cloned());
-    }));
+    state.sub_sync = Some(Arc::new(
+        move |tenant: &TenantId, kind: Kind, id: &str, doc: Option<&Value>| match kind {
+            Kind::CSourceSubscription => m.csub_written(),
+            _ => m.apply(tenant.as_str(), id, doc.cloned()),
+        },
+    ));
 
     // The queue carries whole before+after payloads and is drained one
     // inline delivery at a time, so behind one slow subscriber an unbounded
@@ -1356,11 +1387,12 @@ fn claim_interval(
 /// The sweep runs on a fixed tick, so its idle cost is what has to stay
 /// small. Two things keep it off the store. A tick that cannot fire anything
 /// returns before enumerating tenants: each sweep records the earliest instant
-/// a subscription it saw can next be due, subscription writes zero that clock
-/// through the mirror, and the Context Source Registration Subscription half —
-/// whose writes reach no mirror — is never skipped for longer than
-/// `CSUB_SWEEP_HORIZON_MS`. And a due subscription reads only the Entities its
-/// own selector can match instead of its tenant's entity set.
+/// a subscription it saw can next be due, and a write zeroes that clock —
+/// through the mirror for Subscriptions, through `csub_written` for the
+/// Context Source Registration Subscription half, which is mirrored by clock
+/// rather than by document. A lost signal is repaired within
+/// `CSUB_SWEEP_BACKSTOP_MS`. And a due subscription reads only the Entities
+/// its own selector can match instead of its tenant's entity set.
 pub async fn interval_tick(st: &AppState) {
     use std::sync::atomic::Ordering::Relaxed;
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1553,7 +1585,7 @@ pub async fn interval_tick(st: &AppState) {
         if sweep_csubs {
             let _ = m.next_csub_sweep_ms.compare_exchange(
                 csub_clock,
-                next_csub.min(now_ms + CSUB_SWEEP_HORIZON_MS),
+                next_csub.min(now_ms + CSUB_SWEEP_BACKSTOP_MS),
                 Relaxed,
                 Relaxed,
             );
@@ -4109,6 +4141,53 @@ mod clause_5_8_6_periodic_sweep {
         assert!(
             mirror.next_sub_sweep_ms.load(Relaxed) > chrono::Utc::now().timestamp_millis(),
             "after firing, the clock points at the next due instant"
+        );
+    }
+
+    /// 5.11.7: a Context Source Registration Subscription with `timeInterval`
+    /// fires periodically. Its writes reach the sweep as a signal rather than
+    /// as a mirrored document, so a write must clear the clock the way a
+    /// Subscription write does — otherwise a new one waits out a clock
+    /// computed before it existed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_csource_subscription_clears_the_csub_sweep_clock() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (_st, mirror, _tenant) = state_with_mirror("antares-csub-clock");
+        let armed = chrono::Utc::now().timestamp_millis() + 600_000;
+        mirror.next_csub_sweep_ms.store(armed, Relaxed);
+        assert_eq!(
+            mirror.next_csub_sweep_ms.load(Relaxed),
+            armed,
+            "the clock stands until something writes"
+        );
+
+        mirror.csub_written();
+
+        assert_eq!(
+            mirror.next_csub_sweep_ms.load(Relaxed),
+            0,
+            "writing a Context Source Registration Subscription clears the sweep clock"
+        );
+    }
+
+    /// With nothing periodic to serve, the sweep must park past the next few
+    /// ticks instead of re-listing every tenant's Context Source Registration
+    /// Subscriptions every second: at the tenant target that poll is the
+    /// broker's whole idle cost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sweep_that_finds_nothing_periodic_parks_the_csub_clock() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (st, mirror, _tenant) = state_with_mirror("antares-csub-park");
+        mirror.next_csub_sweep_ms.store(0, Relaxed);
+
+        interval_tick(&st).await;
+
+        let parked = mirror.next_csub_sweep_ms.load(Relaxed);
+        let now = chrono::Utc::now().timestamp_millis();
+        assert!(
+            parked > now + 1_000,
+            "an idle sweep parked until {parked} ({} ms out) — the poll is still the fast path",
+            parked - now
         );
     }
 }

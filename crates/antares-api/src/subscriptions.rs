@@ -697,8 +697,8 @@ pub async fn create(
     if !st.store.create(&tenant, kind, &id, doc.clone())? {
         return Err(NgsiError::AlreadyExists(format!("subscription {id} already exists")).into());
     }
+    st.sub_changed(&tenant, kind, &id, Some(&doc));
     if kind == Kind::Subscription {
-        st.sub_changed(&tenant, &id, Some(&doc));
         // 5.8.1.4: a distributed Subscription creates its internal Context
         // Source Registration Subscription (consumer half)
         crate::distsub::on_subscription_created(st, &tenant, &doc);
@@ -843,9 +843,9 @@ pub async fn update(
                     crate::notify::csource_initial(&st2, &t2, &id2).await;
                 });
             }
-            if kind == Kind::Subscription && st.sub_sync.is_some() {
+            if st.sub_sync.is_some() {
                 let doc = st.store.get(&tenant, kind, id)?;
-                st.sub_changed(&tenant, id, doc.as_ref());
+                st.sub_changed(&tenant, kind, id, doc.as_ref());
             }
             if kind == Kind::Subscription {
                 // 5.8.2.4: the CSR subscription and the mapped remote
@@ -871,8 +871,8 @@ pub async fn delete(
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
     if st.store.delete(&tenant, kind, id)? {
+        st.sub_changed(&tenant, kind, id, None);
         if kind == Kind::Subscription {
-            st.sub_changed(&tenant, id, None);
             // 5.8.5.4: forward the delete to every mapped Context Source
             // and drop the internal CSR subscription (5.11.6)
             crate::distsub::on_subscription_deleted(st, &tenant, id);
@@ -1276,11 +1276,14 @@ mod tests {
 
     /// Table 5.2.12-1: throttling and timeInterval are Numbers "Greater
     /// than 0"; throttling allows fractional values, and neither accepts a
-    /// stringified number.
+    /// stringified number. The table sets no lower bound on `timeInterval`
+    /// beyond that, so a sub-second one is a legal Subscription and is
+    /// rejected by nothing.
     #[test]
     fn clause_5_2_12_throttling_and_time_interval_value_space() {
         assert!(norm(&sub(json!({"throttling": 0.5}))).is_ok());
         assert!(norm(&sub(json!({"timeInterval": 5}))).is_ok());
+        assert!(norm(&sub(json!({"timeInterval": 0.5}))).is_ok());
         for bad in [json!(0), json!(-1), json!("5"), json!(true), json!(null)] {
             assert!(
                 norm(&sub(json!({ "throttling": bad }))).is_err(),
