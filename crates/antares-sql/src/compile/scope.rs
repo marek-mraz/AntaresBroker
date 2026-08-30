@@ -19,12 +19,7 @@
 //! The generated regex is OURS; the only client-supplied text inside it is a
 //! literal segment, which is regex-escaped and then travels as a bind.
 
-/// A compiled `scopeQ`: a SQL boolean expression plus the regex binds it
-/// references, numbered from the offset passed to [`compile_scope_q`].
-pub struct CompiledScope {
-    pub sql: String,
-    pub binds: Vec<String>,
-}
+use antares_ql::sql::CompiledSql;
 
 /// Longest `scopeQ` compiled. One pattern is one bind and the whole thing is
 /// unbounded upstream (a POST query body carries it too), so past this ceiling
@@ -34,7 +29,7 @@ const MAX_SCOPE_Q_BYTES: usize = 4096;
 
 /// Compile `scope_q` into a predicate over `col` (a `text[]`).
 /// `None` = outside the exact subset; the caller filters in memory.
-pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<CompiledScope> {
+pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<CompiledSql> {
     if scope_q.len() > MAX_SCOPE_Q_BYTES {
         return None;
     }
@@ -68,7 +63,7 @@ pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<Co
     if or_parts.is_empty() {
         return None;
     }
-    Some(CompiledScope {
+    Some(CompiledSql {
         sql: format!("({})", or_parts.join(" OR ")),
         binds,
     })

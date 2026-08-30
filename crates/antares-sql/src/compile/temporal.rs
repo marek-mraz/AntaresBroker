@@ -20,12 +20,9 @@
 /// before|after|between|any ("any" = bare timeproperty: presence filter).
 pub use antares_store::filter::InstanceRange;
 
-/// SQL predicate over one jsonb instance (`el`) + its binds, numbered from
-/// `first_bind`. Bind 0 is always the timeproperty name.
-pub struct CompiledRange {
-    pub sql: String,
-    pub binds: Vec<String>,
-}
+// The compiled range is the shared fragment shape; its bind 0 is always the
+// timeproperty name.
+use antares_ql::sql::CompiledSql;
 
 /// 4.6.3 DateTime → canonical lexicographic key, the SQL twin of the
 /// arbiter's `dt_key`: for a `Z`-terminated stamp of at least 19 characters,
@@ -59,7 +56,7 @@ pub fn compile_instance_range(
     r: &InstanceRange<'_>,
     el: &str,
     first_bind: usize,
-) -> Option<CompiledRange> {
+) -> Option<CompiledSql> {
     let tp = format!("${first_bind}");
     let present = format!("jsonb_typeof({el} -> {tp}) = 'string'");
     let ts = dt_key_sql(&format!("({el} ->> {tp})"));
@@ -89,7 +86,7 @@ pub fn compile_instance_range(
         }
         _ => return None,
     };
-    Some(CompiledRange { sql, binds })
+    Some(CompiledSql { sql, binds })
 }
 
 /// Widened, index-serving COLUMN bound for the 4.11 window. Returns SQL only

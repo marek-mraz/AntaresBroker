@@ -43,12 +43,17 @@ const VALUE_KEYS: &[&str] = &[
     "objectList",
 ];
 
-/// A compiled `q=`: a SQL boolean expression plus the jsonpath binds it
-/// references. `sql` contains `$n` placeholders numbered from `first_bind`.
-pub struct CompiledQ {
+/// A compiled SQL fragment: a boolean expression carrying `$n` placeholders
+/// numbered from the `first_bind` its compiler was given, plus the texts
+/// those placeholders bind to, in order. What a bind MEANS belongs to the
+/// compiler that produced it -- a jsonpath for `q=`, a regex for `scopeQ`, a
+/// timeproperty name and a boundary for a temporal range -- but the shape
+/// and the numbering contract are one, which is what lets a caller
+/// concatenate fragments from different compilers into a single statement.
+pub struct CompiledSql {
     /// The boolean SQL expression, with `$n` placeholders.
     pub sql: String,
-    /// The jsonpath texts the placeholders bind to, in order.
+    /// The texts the placeholders bind to, in order.
     pub binds: Vec<String>,
 }
 
@@ -60,10 +65,10 @@ pub fn compile_q(
     col: &str,
     first_bind: usize,
     expand: &dyn Fn(&str) -> String,
-) -> Option<CompiledQ> {
+) -> Option<CompiledSql> {
     let mut binds = Vec::new();
     let sql = emit(node, col, first_bind, expand, &mut binds)?;
-    Some(CompiledQ { sql, binds })
+    Some(CompiledSql { sql, binds })
 }
 
 /// One 4.9 leaf over a SINGLE stored attribute instance (a temporal
@@ -75,10 +80,10 @@ pub fn compile_instance_leaf(
     cmp: Option<(CmpOp, &QValue)>,
     col: &str,
     first: usize,
-) -> Option<CompiledQ> {
+) -> Option<CompiledSql> {
     let mut binds = Vec::new();
     let sql = value_or("$", cmp, col, first, &mut binds)?;
-    Some(CompiledQ { sql, binds })
+    Some(CompiledSql { sql, binds })
 }
 
 fn emit(
@@ -350,7 +355,7 @@ mod tests {
         format!("https://uri.etsi.org/ngsi-ld/default-context/{t}")
     }
 
-    fn c(q: &str) -> Option<CompiledQ> {
+    fn c(q: &str) -> Option<CompiledSql> {
         compile_q(&parse_q(q).expect("parse"), "entity", 2, &ex)
     }
 

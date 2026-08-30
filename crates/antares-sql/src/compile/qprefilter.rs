@@ -31,7 +31,7 @@
 
 use antares_ql::{CmpOp, QNode, QPath, QValue};
 
-use super::q::{compile_instance_leaf, CompiledQ};
+use super::q::{compile_instance_leaf, CompiledSql};
 use super::temporal::{column_range_bound, InstanceRange};
 
 /// Compile `node` into a SQL predicate over the entity row aliased `entity`
@@ -43,9 +43,9 @@ pub fn compile_prefilter(
     entity: &str,
     first_bind: usize,
     expand: &dyn Fn(&str) -> String,
-) -> Option<CompiledQ> {
+) -> Option<CompiledSql> {
     let (sql, binds, _) = emit(node, range, entity, first_bind, expand)?;
-    Some(CompiledQ { sql, binds })
+    Some(CompiledSql { sql, binds })
 }
 
 /// Did the whole filter compile EXACTLY — no member dropped, no branch
@@ -274,13 +274,13 @@ mod tests {
         }
     }
 
-    fn pf(q: &str) -> Option<CompiledQ> {
+    fn pf(q: &str) -> Option<CompiledSql> {
         let r = between();
         compile_prefilter(&parse_q(q).expect("parse"), Some(&r), "m", 3, &ex)
     }
 
     /// max `$n` referenced must equal first-1+binds.len(), all dense
-    fn assert_dense(c: &CompiledQ, first: usize) {
+    fn assert_dense(c: &CompiledSql, first: usize) {
         for n in first..first + c.binds.len() {
             assert!(c.sql.contains(&format!("${n}")), "missing ${n}: {}", c.sql);
         }
