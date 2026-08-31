@@ -211,7 +211,7 @@ document.getElementById("legend").innerHTML =
 
 const markers = new Map();   // id -> L.circleMarker
 const prevKpi = new Map();   // line -> last p95, to flash the row on change
-const destOf = new Map();    // route id -> most recent headsign seen live
+const destOf = new Map();    // route id -> most recent headsign received
 let trail = null;
 
 // HSL route ids encode the public line number: <mode digit><3-digit line><variant>.

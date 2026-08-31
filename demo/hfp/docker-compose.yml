@@ -1,4 +1,4 @@
-# HSL HFP → Antares demo (2026-08-12): live vehicle positions from
+# HSL HFP → Antares demo: live vehicle positions from
 # mqtt.hsl.fi ingested as NGSI-LD entities with a 3-minute expiresAt,
 # broker on timescale with a 10 s expiry flush (ANTARES_SWEEP_SECS).
 # Broker published on host port 42010 (Mac: http://localhost:42010).

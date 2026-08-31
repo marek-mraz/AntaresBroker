@@ -276,7 +276,7 @@ stack: SIGTERM → `/q/health` flips 503 → haproxy ejects within 400 ms →
 in-flight requests finish → recreate on the current image → wait healthy +
 rise window before the next instance. Preconditions and env are documented
 in the script header. **file mode cannot roll** (redb allows one process per
-volume — K10): use a `Recreate` strategy there, as `broker-file.yaml` does.
+volume): use a `Recreate` strategy there, as `broker-file.yaml` does.
 
 **Role fleet:** `ROLES_SPLIT=1 dev/rolling-update.sh` rolls all 10 pods of
 the role-split stack in role-group order — the same-group peer must be

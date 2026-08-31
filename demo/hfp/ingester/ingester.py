@@ -26,7 +26,8 @@ TTL_SECS = int(os.environ.get("TTL_SECS", "180"))
 ATTR_TTL_SECS = int(os.environ.get("ATTR_TTL_SECS", "600"))
 FLUSH_MS = int(os.environ.get("FLUSH_MS", "1000"))
 BATCH_LIMIT = int(os.environ.get("BATCH_LIMIT", "1000"))
-# concurrent chunked posts cut full-fleet flush ~2x vs one serial batch (measured 2026-08-16)
+# measured: concurrent chunked posts cut a full-fleet flush about 2x
+# against one serial batch
 WORKERS = int(os.environ.get("WORKERS", "4"))
 
 pending = {}  # entity id -> entity doc (latest wins)

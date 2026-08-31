@@ -52,7 +52,7 @@ x-worker-env: &worker-env
   ANTARES_DATABASE_URL: postgresql://antares:antares@localhost:5433/antares
   ANTARES_EGRESS_ALLOW_PRIVATE: "true"
   ANTARES_SWEEP_SECS: "2"
-  # Shorter rolls (user ask 2026-08-15): behind haproxy an api pod always
+  # Shorter rolls: behind haproxy an api pod always
   # pays the FULL drain deadline (idle keep-alive conns never close), so the
   # default 20 s dominates roll time. 10 s is the safe floor — it must stay
   # above the 8 s federation egress deadline or a roll can cut a live
