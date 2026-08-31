@@ -523,9 +523,23 @@ fn validate_auxiliary_ops(doc: &Map<String, Value>) -> Result<(), NgsiError> {
     Ok(())
 }
 
-/// 5.9.2.4 registration-vs-entity conflicts: an exclusive registration
-/// conflicts with an existing entity that carries any registered Attribute;
-/// a redirect registration conflicts with any existing matching entity.
+/// 5.9.2.4 registration-vs-entity conflicts. Exclusive: "If an Entity
+/// already exists for the supplied Entity ID (URI) and the existing Entity
+/// contains any of the Attributes defined in the registration, an error of
+/// type Conflict shall be raised." Redirect: "If an existing Entity already
+/// matches the Context Source Registration, an error of type Conflict shall
+/// be raised."
+///
+/// Read shape, not read volume: this runs under the process-wide
+/// registration write lock, so a fold of the tenant here stalls every other
+/// registration write on the broker, and a whole-tenant query above the
+/// store's row ceiling (5.5.6) would refuse a registration create that has
+/// no TooManyResults to raise. An EntityInfo that names a concrete id is
+/// answered by reading that Entity — the only shape an exclusive
+/// registration has, since 4.3.6.3 requires an entity id. Everything else
+/// (an `idPattern`, or a type alone) is answered by walking the tenant a
+/// page at a time, asking every EntityInfo about each Entity as it arrives
+/// rather than re-reading the tenant per EntityInfo.
 fn check_entity_conflict(
     st: &AppState,
     tenant: &antares_model::TenantId,
@@ -558,45 +572,26 @@ fn check_entity_conflict(
         if ents.is_empty() {
             continue;
         }
-        // 5.9.2.4 asks whether an Entity already exists for the registered
-        // scope — a narrowed read, not a fold of the tenant (this runs under
-        // the registration write lock). The loop below stays the arbiter, as
-        // query_entities' contract requires, so a predicate is offered only
-        // where it cannot hide a candidate: ids when every EntityInfo names
-        // one and none carries an idPattern, types when every EntityInfo
-        // names one, and the registered Attributes only in exclusive mode,
-        // where an Entity carrying none of them cannot conflict.
-        let ids: Vec<&str> = ents
+        // Every selector of this RegistrationInfo, its idPattern compiled
+        // once: an Entity is read at most once and asked about all of them.
+        let wants: Vec<_> = ents
             .iter()
-            .filter_map(|e| e.get("id").and_then(Value::as_str))
+            .map(|e| {
+                (
+                    e.get("id").and_then(Value::as_str),
+                    // 5.2.8: an EntityInfo type is a String or a String[]
+                    ei_types(e),
+                    e.get("idPattern")
+                        .and_then(Value::as_str)
+                        .and_then(|p| crate::regexcache::compile(p).ok()),
+                )
+            })
             .collect();
-        let ids_narrow =
-            ids.len() == ents.len() && ents.iter().all(|e| e.get("idPattern").is_none());
-        let type_groups: Vec<Vec<String>> = ents
-            .iter()
-            .flat_map(ei_types)
-            .map(|t| vec![t.to_owned()])
-            .collect();
-        let types_narrow = ents.iter().all(|e| !ei_types(e).is_empty());
-        let filter = antares_store::filter::EntityFilter {
-            ids: ids_narrow.then_some(ids.as_slice()),
-            types: types_narrow.then_some(type_groups.as_slice()),
-            attrs: (mode == "exclusive" && !attrs.is_empty()).then_some(attrs.as_slice()),
-            ..Default::default()
-        };
-        let candidates = st.store.query_entities(tenant, &filter)?;
-        for e in ents {
-            let want_id = e.get("id").and_then(Value::as_str);
-            // 5.2.8: an EntityInfo type is a String or a String[]
-            let want_types = ei_types(e);
-            let pattern = e
-                .get("idPattern")
-                .and_then(Value::as_str)
-                .and_then(|p| crate::regexcache::compile(p).ok());
-            for existing in &candidates.rows {
-                let eid = existing.get("id").and_then(Value::as_str).unwrap_or("");
-                let id_hit = match (want_id, &pattern) {
-                    (Some(w), _) => w == eid,
+        let hit = |existing: &Value| -> Option<NgsiError> {
+            let eid = existing.get("id").and_then(Value::as_str).unwrap_or("");
+            for (want_id, want_types, pattern) in &wants {
+                let id_hit = match (want_id, pattern) {
+                    (Some(w), _) => *w == eid,
                     (None, Some(re)) => re.is_match(eid),
                     (None, None) => true,
                 };
@@ -625,11 +620,40 @@ fn check_entity_conflict(
                     _ => true,
                 };
                 if conflict {
-                    return Err(NgsiError::Conflict(format!(
+                    return Some(NgsiError::Conflict(format!(
                         "existing entity {eid} conflicts with the {mode} registration (5.9.2.4)"
                     )));
                 }
             }
+            None
+        };
+
+        let ids: Vec<&str> = ents
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str))
+            .collect();
+        if ids.len() == ents.len() && ents.iter().all(|e| e.get("idPattern").is_none()) {
+            // Every selector names one Entity, so the read is those Entities
+            // and nothing else — bounded by the registration, not by the
+            // tenant, whatever the tenant holds.
+            for id in &ids {
+                if let Some(existing) = st.store.get(tenant, Kind::Entity, id)? {
+                    if let Some(conflict) = hit(&existing) {
+                        return Err(conflict);
+                    }
+                }
+            }
+        } else {
+            // A pattern (or a type alone) can only be answered by the
+            // Entities of the tenant. The walk stops at the first conflict.
+            // ponytail: O(tenant) reads under the registration write lock for
+            // a pattern selector; narrow the walk to the id range of
+            // `filter::id_pattern_literal` when every selector of the
+            // RegistrationInfo carries an anchored literal.
+            walk_docs(st, tenant, Kind::Entity, |existing| match hit(&existing) {
+                Some(conflict) => Err(conflict),
+                None => Ok(()),
+            })?;
         }
     }
     Ok(())
@@ -738,7 +762,7 @@ pub fn check_proxied_overlap(
         .unwrap_or_default();
     // Fail closed: treating a lookup failure as "no conflicts" would admit a
     // second exclusive registration for the same scope.
-    walk_registrations(st, tenant, |other| {
+    walk_docs(st, tenant, Kind::Registration, |other| {
         let other = &other;
         if other.get("id").and_then(Value::as_str) == self_id {
             return Ok(());
@@ -1149,27 +1173,30 @@ pub async fn query_registrations(
 /// allocation on top of the match set.
 const SCAN_PAGE: usize = 1_000;
 
-/// Visit every registration of one tenant, a page at a time. An `Err` from
-/// `visit` ends the walk and is the walk's own result, which is how the
-/// 5.9.2.4 conflict check stops at the registration it conflicts with.
+/// Visit every document of one kind in one tenant, a page at a time. An
+/// `Err` from `visit` ends the walk and is the walk's own result, which is
+/// how the 5.9.2.4 conflict checks stop at the document they conflict with.
 ///
-/// The whole-tenant `list` carries the row ceiling meant for client queries
-/// (5.5.6). Both callers below must see EVERY registration — one to answer
-/// a query over them, one to refuse a second exclusive registration for the
-/// same scope — so that ceiling refused them outright once a tenant held
-/// more than it, whatever the query narrowed to and however few conflicts
-/// existed. A page bounds the allocation by construction and carries no
-/// ceiling, so a large tenant costs time here rather than a permanent 403.
-fn walk_registrations(
+/// The whole-tenant `list` and `query_entities` carry the row ceiling meant
+/// for client queries (5.5.6). Every caller below must see EVERY document —
+/// to answer a query over the registrations, to refuse a second exclusive
+/// registration for the same scope, or to find the Entity a redirect
+/// registration would shadow — so that ceiling refused them outright once a
+/// tenant held more than it, whatever the read narrowed to and however few
+/// conflicts existed. A page bounds the allocation by construction and
+/// carries no ceiling, so a large tenant costs time here rather than a
+/// permanent 403.
+fn walk_docs(
     st: &AppState,
     tenant: &antares_model::TenantId,
+    kind: Kind,
     mut visit: impl FnMut(Value) -> Result<(), NgsiError>,
 ) -> Result<(), NgsiError> {
     let mut after: Option<String> = None;
     loop {
         let page = st
             .store
-            .list_page(tenant, Kind::Registration, after.as_deref(), SCAN_PAGE)?;
+            .list_page(tenant, kind, after.as_deref(), SCAN_PAGE)?;
         let short = page.len() < SCAN_PAGE;
         let before = after.clone();
         for doc in page {
@@ -1195,7 +1222,7 @@ fn collect_matching(
     keep: impl Fn(&Value) -> bool,
 ) -> Result<Vec<Value>, NgsiError> {
     let mut matches = Vec::new();
-    walk_registrations(st, tenant, |doc| {
+    walk_docs(st, tenant, Kind::Registration, |doc| {
         if keep(&doc) {
             matches.push(doc);
         }
@@ -1959,6 +1986,113 @@ mod csi_tests {
             "the conflict names the existing entity: {hit}"
         );
         assert!(err(json!("Building")).is_some(), "same, string spelling");
+    }
+
+    /// 5.9.2.4 redirect: "If an existing Entity already matches the
+    /// `Context Source Registration`, an error of type Conflict shall be
+    /// raised." An EntityInfo may identify its Entities by `idPattern`
+    /// alone (5.2.8) — a predicate no store can decide — and a
+    /// RegistrationInfo may carry several EntityInfo entries, so each
+    /// Entity read is asked about all of them.
+    #[test]
+    fn clause_5_9_2_4_redirect_conflict_matches_an_id_pattern() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        for (id, ty) in [
+            ("urn:ngsi-ld:Vehicle:v1", "Vehicle"),
+            ("urn:ngsi-ld:Device:d1", "Device"),
+        ] {
+            let mut e = Map::new();
+            e.insert("id".into(), json!(id));
+            e.insert("type".into(), json!([ctx.expand_key(ty)]));
+            st.store
+                .create(&tenant, Kind::Entity, id, Value::Object(e))
+                .expect("seed");
+        }
+        let err = |ents: Value| {
+            let doc = json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:pat1",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "mode": "redirect",
+                "information": [{"entities": ents}]
+            });
+            let norm = normalize_registration(doc.as_object().expect("object"), &ctx, false)
+                .expect("valid");
+            match check_entity_conflict(&st, &tenant, &norm) {
+                Err(NgsiError::Conflict(m)) => Some(m),
+                Err(other) => panic!("unexpected error {other:?}"),
+                Ok(()) => None,
+            }
+        };
+        assert_eq!(
+            err(json!([{"idPattern": "^urn:ngsi-ld:Nothing:.*"}])),
+            None,
+            "a pattern no entity matches does not conflict"
+        );
+        let hit = err(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*"}]))
+            .expect("the Vehicle matches the pattern");
+        assert!(hit.contains("urn:ngsi-ld:Vehicle:v1"), "{hit}");
+        assert_eq!(
+            err(json!([{"idPattern": "^urn:ngsi-ld:Vehicle:.*", "type": "Device"}])),
+            None,
+            "the pattern and the type must both hold: the Vehicle is not a Device"
+        );
+        // The second EntityInfo is the one that matches: every selector of
+        // the RegistrationInfo is asked about every Entity, not only the first.
+        let hit = err(json!([
+            {"idPattern": "^urn:ngsi-ld:Nothing:.*"},
+            {"idPattern": "^urn:ngsi-ld:Device:.*"}
+        ]))
+        .expect("the Device matches the second EntityInfo");
+        assert!(hit.contains("urn:ngsi-ld:Device:d1"), "{hit}");
+    }
+
+    /// The Entities of the tenant are read a page at a time (a whole-tenant
+    /// read is refused above the store's row ceiling, 5.5.6, and this check
+    /// has no TooManyResults to raise), so a conflict that sits beyond the
+    /// first page must still be found.
+    #[test]
+    fn clause_5_9_2_4_a_conflict_past_the_first_page_is_found() {
+        let st = crate::state::AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        let device = ctx.expand_key("Device");
+        for i in 0..SCAN_PAGE {
+            let id = format!("urn:ngsi-ld:Device:{i:06}");
+            let mut e = Map::new();
+            e.insert("id".into(), json!(id));
+            e.insert("type".into(), json!([device]));
+            st.store
+                .create(&tenant, Kind::Entity, &id, Value::Object(e))
+                .expect("seed");
+        }
+        // sorts after every Device above, so it is only reached on page two
+        let mut zebra = Map::new();
+        zebra.insert("id".into(), json!("urn:ngsi-ld:Zebra:z1"));
+        zebra.insert("type".into(), json!([ctx.expand_key("Zebra")]));
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Zebra:z1",
+                Value::Object(zebra),
+            )
+            .expect("seed");
+        let doc = json!({
+            "id": "urn:ngsi-ld:ContextSourceRegistration:pat2",
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://peer:9090",
+            "mode": "redirect",
+            "information": [{"entities": [{"idPattern": "^urn:ngsi-ld:Zebra:.*"}]}]
+        });
+        let norm =
+            normalize_registration(doc.as_object().expect("object"), &ctx, false).expect("valid");
+        match check_entity_conflict(&st, &tenant, &norm) {
+            Err(NgsiError::Conflict(m)) => assert!(m.contains("urn:ngsi-ld:Zebra:z1"), "{m}"),
+            other => panic!("the conflict on page two was missed: {other:?}"),
+        }
     }
 
     /// 5.9.2.4: an exclusive registration conflicts with an existing Entity
