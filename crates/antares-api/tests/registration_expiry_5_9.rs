@@ -55,7 +55,12 @@ async fn send(st: &AppState, method: &str, path: &str, body: Option<Value>) -> (
 /// future: 5.9.2.4 makes a past `expiresAt` a BadRequestData at creation, so
 /// the only honest way to reach the expired state is to wait for it.
 fn doc_expiring_in(ms: i64) -> Value {
-    let at = chrono::Utc::now() + chrono::Duration::milliseconds(ms);
+    // The margin scales with the runner, like every wait below: creation
+    // validates `expiresAt` against the clock at the moment it runs, so on a
+    // loaded machine a fixed few hundred milliseconds can already be past by
+    // then and 5.9.2.4 rejects the document the test needs.
+    let at = chrono::Utc::now()
+        + chrono::Duration::milliseconds(ms * antares_api::state::slow_factor() as i64);
     json!({
         "id": ID,
         "type": "ContextSourceRegistration",
