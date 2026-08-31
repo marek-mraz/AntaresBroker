@@ -1199,6 +1199,23 @@ pub(crate) fn query_doc_params(
     vp: &mut HashMap<String, String>,
 ) -> Result<(), NgsiError> {
     let bad = NgsiError::BadRequestData;
+    // A member lifted out of the body becomes the same parameter the GET twin
+    // carries in the URI, where it is capped at MAX_URI_BYTES (6.3.4 bare
+    // 414). Without the same cap here the POST form is the cheap way to hand
+    // the query and projection parsers a multi-megabyte string. That includes
+    // the three parameters assembled from the `entities` selectors below:
+    // there is no cap on the selector array, so a body inside MAX_BODY_BYTES
+    // holds hundreds of thousands of them, each costing one expanded IRI and
+    // one store bind.
+    let capped = |k: &str, s: String| -> Result<String, NgsiError> {
+        if s.len() > crate::bounds::MAX_URI_BYTES {
+            return Err(bad(format!(
+                "Query {k} exceeds the {} byte limit",
+                crate::bounds::MAX_URI_BYTES
+            )));
+        }
+        Ok(s)
+    };
     match q.get("entities") {
         None => {}
         Some(Value::Array(es)) if !es.is_empty() => {
@@ -1254,7 +1271,7 @@ pub(crate) fn query_doc_params(
                 }
             }
             if !types.is_empty() {
-                vp.insert("type".into(), types.join(","));
+                vp.insert("type".into(), capped("entities type", types.join(","))?);
             }
             // 5.2.33: the selectors are a union, and "id takes precedence over
             // idPattern" holds PER selector. These flat params carry a single
@@ -1264,10 +1281,13 @@ pub(crate) fn query_doc_params(
             // selects on its own. Where they disagree the type predicate alone
             // stands, which over-matches rather than losing Entities.
             if with_id == es.len() && !ids.is_empty() {
-                vp.insert("id".into(), ids.join(","));
+                vp.insert("id".into(), capped("entities id", ids.join(","))?);
             }
             if with_id == 0 && with_pat == es.len() && !pats.is_empty() {
-                vp.insert("idPattern".into(), pats.join("|"));
+                vp.insert(
+                    "idPattern".into(),
+                    capped("entities idPattern", pats.join("|"))?,
+                );
             }
         }
         Some(_) => {
@@ -1276,19 +1296,6 @@ pub(crate) fn query_doc_params(
             ))
         }
     }
-    // A member lifted out of the body becomes the same parameter the GET twin
-    // carries in the URI, where it is capped at MAX_URI_BYTES (6.3.4 bare
-    // 414). Without the same cap here the POST form is the cheap way to hand
-    // the query and projection parsers a multi-megabyte string.
-    let capped = |k: &str, s: String| -> Result<String, NgsiError> {
-        if s.len() > crate::bounds::MAX_URI_BYTES {
-            return Err(bad(format!(
-                "Query {k} exceeds the {} byte limit",
-                crate::bounds::MAX_URI_BYTES
-            )));
-        }
-        Ok(s)
-    };
     for k in [
         "q",
         "scopeQ",
@@ -1364,11 +1371,15 @@ pub(crate) fn query_doc_params(
                 match g.get(k) {
                     None => {}
                     Some(Value::String(s)) => {
-                        vp.insert(k.into(), s.clone());
+                        vp.insert(k.into(), capped(k, s.clone())?);
                     }
                     Some(_) => return Err(bad(format!("geoQ {k} must be a string (5.2.13)"))),
                 }
             }
+            // `coordinates` is the one lifted member NOT capped in bytes: its
+            // ceiling is MAX_GEO_VERTICES (1024), which a legal polygon can
+            // spend more than MAX_URI_BYTES on. One cap per parameter, the
+            // one that governs it.
             if let Some(c) = g.get("coordinates") {
                 vp.insert(
                     "coordinates".into(),
@@ -1694,6 +1705,119 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The same cap, for the three parameters the `entities` selectors are
+    /// lifted into. 5.2.33 makes `entities` an array of EntitySelectors, and
+    /// `query_doc_params` folds their `type`, `id` and `idPattern` members
+    /// into the flat parameters the GET twin carries in its URI — where
+    /// 6.3.4's bare 414 caps them at `MAX_URI_BYTES`. They went into the map
+    /// before the cap existed in the function, so the POST form handed the
+    /// expansion and store layers a string the GET form cannot express:
+    /// ~320 000 selectors fit inside `MAX_BODY_BYTES`, one expanded IRI and
+    /// one bind parameter each, past PostgreSQL's 65 535-parameter limit.
+    #[tokio::test]
+    async fn entity_selector_members_are_capped_like_the_uri() {
+        let app = app();
+        let many_types: Vec<Value> = (0..600)
+            .map(|i| json!({"type": format!("VeryLongTypeNameForTheCap{i:04}")}))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": many_types}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the joined type parameter is capped like its GET twin"
+        );
+
+        let many_ids: Vec<Value> = (0..400)
+            .map(|i| json!({"id": format!("urn:ngsi-ld:Vehicle:a-fairly-long-identifier-{i:06}")}))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": many_ids}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the joined id parameter is capped like its GET twin"
+        );
+
+        let many_pats: Vec<Value> = (0..400)
+            .map(|i| json!({"idPattern": format!("^urn:ngsi-ld:Vehicle:pattern-{i:06}.*$")}))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": many_pats}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the joined idPattern parameter is capped like its GET twin"
+        );
+
+        // The GeoQuery strings are lifted the same way (5.2.13).
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                   "geoQ": {"georel": format!("near;maxDistance=={}", "9".repeat(
+                       crate::bounds::MAX_URI_BYTES + 1)),
+                            "geometry": "Point", "coordinates": [0, 0]}}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "geoQ georel is capped like its GET twin"
+        );
+
+        // …but `coordinates` keeps its own ceiling: MAX_GEO_VERTICES, which a
+        // legal polygon can spend more than MAX_URI_BYTES on. Capping it in
+        // bytes too would refuse a geometry the broker advertises support for.
+        let ring: Vec<Value> = (0..600)
+            .map(|i| json!([f64::from(i) / 10_000.0, f64::from(i) / 10_000.0]))
+            .chain(std::iter::once(json!([0.0, 0.0])))
+            .collect();
+        let coords = json!([ring]);
+        assert!(
+            coords.to_string().len() > crate::bounds::MAX_URI_BYTES,
+            "the polygon has to exceed the byte cap for this to prove anything"
+        );
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                   "geoQ": {"georel": "within", "geometry": "Polygon",
+                            "coordinates": coords}}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a polygon under MAX_GEO_VERTICES is served whatever it weighs"
+        );
+
+        // The cap may not cost an ordinary multi-selector query: 5.2.33's
+        // union of a handful of selectors stays well inside it.
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [
+                {"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:1"},
+                {"type": "Vehicle", "id": "urn:ngsi-ld:Vehicle:2"}
+            ]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "a normal union still works");
     }
 
     async fn get_entity(app: &Router, id: &str) -> Value {
