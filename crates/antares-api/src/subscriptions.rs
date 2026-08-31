@@ -215,12 +215,18 @@ pub fn normalize_subscription(
                         return Err(bad(format!("invalid notification join {j:?} (5.2.14)")));
                     }
                 }
+                // Table 5.2.14.1-1: a positive integer. The depth it names is
+                // the same Linked Entity traversal (4.5.23) a query drives, so
+                // it carries the same ceiling — every notification of this
+                // Subscription pays that traversal, and an unbounded level
+                // makes one accepted Subscription an amplification lever.
                 if let Some(jl) = n.get("joinLevel") {
-                    let ok = jl.as_u64().map(|v| v >= 1).unwrap_or(false);
+                    let cap = crate::bounds::MAX_JOIN_LEVEL as u64;
+                    let ok = jl.as_u64().is_some_and(|v| (1..=cap).contains(&v));
                     if !ok {
-                        return Err(bad(
-                            "notification.joinLevel must be a positive integer (5.2.14)".into(),
-                        ));
+                        return Err(bad(format!(
+                            "notification.joinLevel must be an integer in 1..={cap} (5.2.14)"
+                        )));
                     }
                 }
                 for key in ["sysAttrs", "showChanges"] {
@@ -1473,13 +1479,26 @@ mod tests {
         for good in ["flat", "inline", "@none"] {
             assert!(norm(&mk(json!({ "join": good }))).is_ok(), "{good}");
         }
-        for bad in [json!(0), json!(-1), json!("2"), json!(1.5)] {
+        // Table 5.2.14.1-1 restricts joinLevel to a positive integer, and the
+        // depth it names is the same Linked Entity traversal the query
+        // parameter drives — so the ceiling this deployment publishes as
+        // maxJoinLevel bounds it on both surfaces, not on the query alone.
+        let cap = crate::bounds::MAX_JOIN_LEVEL;
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!("2"),
+            json!(1.5),
+            json!(cap + 1),
+            json!(u64::MAX),
+        ] {
             assert!(
                 norm(&mk(json!({ "joinLevel": bad }))).is_err(),
                 "joinLevel {bad}"
             );
         }
         assert!(norm(&mk(json!({"joinLevel": 1}))).is_ok());
+        assert!(norm(&mk(json!({ "joinLevel": cap }))).is_ok(), "at the cap");
         for key in ["sysAttrs", "showChanges"] {
             assert!(
                 norm(&mk(json!({ key: "true" }))).is_err(),

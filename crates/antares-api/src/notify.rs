@@ -925,10 +925,14 @@ pub(crate) fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
         .and_then(Value::as_str)
         .filter(|j| *j == "inline" || *j == "flat")
         .map(|j| {
-            let level = n
+            // the stored member is bounded at creation, but a Subscription
+            // written before that bound existed is still on disk, so the
+            // traversal takes the ceiling from here too
+            let level = (n
                 .and_then(|n| n.get("joinLevel"))
                 .and_then(Value::as_u64)
-                .unwrap_or(1) as usize;
+                .unwrap_or(1) as usize)
+                .min(crate::bounds::MAX_JOIN_LEVEL);
             (j.to_owned(), level)
         });
     NotifShape {
