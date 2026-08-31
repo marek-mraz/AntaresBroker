@@ -27,7 +27,12 @@ metadata:
 type: Opaque
 stringData:
   # Dev-grade credentials for the kind smoke; production MUST replace this
-  # Secret with a real one (non-superuser role, see the RLS note below).
+  # Secret with a real one (non-superuser role, see the RLS note below), or
+  # point the Deployments at CNPG's generated antares-pg-app credentials.
+  # No sslmode: inside the namespace this is a plaintext connection. A
+  # cluster that does not treat its pod network as trusted terminates TLS at
+  # the database and appends `?sslmode=verify-full` here; the broker passes
+  # the DSN through untouched, so nothing else changes.
   url: postgresql://antares:antares@antares-pg-rw.antares.svc:5432/antares
 ---
 apiVersion: apps/v1

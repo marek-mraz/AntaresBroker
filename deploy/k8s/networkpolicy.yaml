@@ -1,0 +1,91 @@
+# Ingress is deny-by-default inside the namespace; each flow the other
+# manifests actually use is opened by name. Egress is deliberately NOT
+# restricted: a broker calls out to notification endpoints, registered
+# Context Sources and `@context` URLs that are client data, so the egress
+# boundary is `ANTARES_EGRESS_ALLOW_PRIVATE` and the scheme allowlist in the
+# broker, not a CIDR list here.
+#
+# kind's default CNI does not enforce NetworkPolicy, so the smoke proves
+# these apply and lint, not that they block. A cluster with Calico, Cilium
+# or the equivalent is what enforces them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: antares
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# The API pods are the entry point: 9090 is the NGSI-LD surface plus /q.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: antares-api-ingress
+  namespace: antares
+spec:
+  podSelector:
+    matchLabels: { app: antares, role: api }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: 9090, protocol: TCP }
+---
+# The file-mode broker serves the same surface from its own Deployment.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: antares-file-ingress
+  namespace: antares
+spec:
+  podSelector:
+    matchLabels: { app: antares-file }
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: 9090, protocol: TCP }
+---
+# Worker pods hold no inbound surface, so the deny above is all they need;
+# the kubelet's probes reach every pod over the node, which NetworkPolicy
+# does not gate.
+#
+# Only the postgres-mode pods speak to the database — the file-mode broker
+# has no DSN at all, so its label is deliberately absent here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-dev-ingress
+  namespace: antares
+spec:
+  podSelector:
+    matchLabels: { app: postgres-dev }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: antares }
+      ports:
+        - { port: 5432, protocol: TCP }
+---
+# Brokers reach NATS on the client port; the cluster port is peer-to-peer
+# between the StatefulSet's own pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-ingress
+  namespace: antares
+spec:
+  podSelector:
+    matchLabels: { app: nats }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: antares }
+      ports:
+        - { port: 4222, protocol: TCP }
+    - from:
+        - podSelector:
+            matchLabels: { app: nats }
+      ports:
+        - { port: 6222, protocol: TCP }

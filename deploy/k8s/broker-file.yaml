@@ -1,9 +1,9 @@
 # `file`-mode broker: ONE replica, strategy Recreate — HARD-CODED, not a
 # preference: redb takes an exclusive file lock per volume
-# (K10 proved the refusal), so a RollingUpdate would spawn a second pod that
+# and refuses a second opener, so a RollingUpdate would spawn a pod that
 # dies on "Database already open. Cannot acquire lock." forever. The restart
 # gap is the price of this rung and it is small: rebuild measured at 257k
-# entities/s + ~1 s process start (K10).
+# entities/s + ~1 s process start.
 apiVersion: v1
 kind: Service
 metadata:
@@ -44,10 +44,23 @@ spec:
       # Must exceed ANTARES_DRAIN_DELAY_MS + ANTARES_DRAIN_DEADLINE_SECS,
       # or the kubelet turns a drain into a kill.
       terminationGracePeriodSeconds: 30
+      # Runtime hardening, the same set the postgres-mode manifest carries:
+      # non-root (the image is uid 65532), read-only rootfs — file mode
+      # writes to the PVC at /data and nowhere else, with /tmp a tmpfs — all
+      # capabilities dropped, no privilege escalation.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: antares
           image: antares-local:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           env:
             - { name: ANTARES_STORE, value: file }
             - { name: ANTARES_DATA_DIR, value: /data }
@@ -62,10 +75,13 @@ spec:
             periodSeconds: 10
           resources:
             requests: { memory: 128Mi, cpu: 100m }
-            # the same ceiling the CI RSS gate enforces (R1/R2 lesson)
+            # the same ceiling the CI RSS gate enforces
             limits: { memory: 350Mi }
           volumeMounts:
             - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: antares-file-data }
+        - name: tmp
+          emptyDir: {}

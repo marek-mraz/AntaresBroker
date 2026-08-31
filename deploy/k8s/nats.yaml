@@ -28,9 +28,22 @@ spec:
     metadata:
       labels: { app: nats }
     spec:
+      # The image declares no USER, so the uid is pinned here; nats-server
+      # needs no privileges and writes only to the volumeClaimTemplate, which
+      # fsGroup makes writable for that uid.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: nats
           image: nats:2-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           args:
             - "-js"
             - "--name=$(POD_NAME)"

@@ -50,9 +50,23 @@ spec:
     metadata:
       labels: { app: postgres-dev }
     spec:
+      # Started directly as the image's own postgres uid: as root the
+      # entrypoint chowns PGDATA and drops privileges, which needs the
+      # capabilities dropped below, and refuses to start without them. PGDATA
+      # is inside the image and world-writable, so as uid 999 the entrypoint
+      # skips that path. The root filesystem stays writable — the server
+      # writes PGDATA, its socket and its logs there.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: postgres
           image: ghcr.io/baosystems/postgis:17-3.5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
           volumeMounts:
             - { name: init, mountPath: /docker-entrypoint-initdb.d }
           env:
