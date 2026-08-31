@@ -238,7 +238,11 @@ impl AppState {
                     "body": {"@context": ctx_value},
                 });
                 if let Err(e) = store.context_put(&id.to_string(), doc) {
-                    tracing::warn!("@context write-through failed for {url}: {e}");
+                    // a client-named @context URL may carry userinfo
+                    tracing::warn!(
+                        "@context write-through failed for {}: {e}",
+                        antares_notifier::redact_userinfo(url)
+                    );
                 }
             }));
         }
@@ -263,7 +267,10 @@ impl AppState {
                         doc["numberOfHits"] = serde_json::json!(hits);
                         doc["lastUsage"] = serde_json::json!(now_iso());
                         if let Err(e) = store.context_put(&id, doc) {
-                            tracing::warn!("@context hit bump failed for {url}: {e}");
+                            tracing::warn!(
+                                "@context hit bump failed for {}: {e}",
+                                antares_notifier::redact_userinfo(url)
+                            );
                         }
                         true
                     }

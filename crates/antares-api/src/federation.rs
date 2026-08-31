@@ -799,11 +799,20 @@ pub async fn forward(
     // One policy for every outbound class — scheme allowlist,
     // private-range deny, per-destination circuit breaker.
     if let Err(e) = st.egress.check_url(&url).await {
-        tracing::warn!("federation forward to {url} refused: {e}");
+        // 5.2.9 allows any URI as the registered endpoint, and a URI's
+        // authority may carry credentials reqwest sends as basic auth, so a
+        // peer URL loses its userinfo on the way into the log.
+        tracing::warn!(
+            "federation forward to {} refused: {e}",
+            crate::notify::redact_userinfo(&url)
+        );
         return (502, Value::Null, Vec::new());
     }
     if st.egress.is_open(&url) {
-        tracing::debug!("federation forward to {url} short-circuited (breaker open)");
+        tracing::debug!(
+            "federation forward to {} short-circuited (breaker open)",
+            crate::notify::redact_userinfo(&url)
+        );
         return (503, Value::Null, Vec::new());
     }
     // 5.2.34 cooldown (per REGISTRATION, distinct from the host:port
@@ -2244,7 +2253,10 @@ pub async fn forward_part(
     // can already read from /csourceRegistrations; the registered endpoint
     // is internal topology and stays in the log, so that a client able to
     // provoke a partial failure cannot enumerate the peers.
-    tracing::debug!("distributed operation to {url} returned {status}");
+    tracing::debug!(
+        "distributed operation to {} returned {status}",
+        crate::notify::redact_userinfo(&url)
+    );
     let detail = format!(
         "distributed operation to registration {} returned {status}",
         reg.reg_id
