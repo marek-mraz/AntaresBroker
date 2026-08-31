@@ -13,7 +13,17 @@ pub const JSONLD_CONTEXT_REL: &str = "http://www.w3.org/ns/json-ld#context";
 
 /// Query-string extractor that drops empty-valued parameters — the Robot
 /// suite's keywords frequently send `datasetId=`/`options=` as empty strings
-/// meaning "absent".
+/// meaning "absent". A parameter with no value carries nothing that could be
+/// "incompatible with the operation" (6.3.20), so an unknown one spelled
+/// that way is absent too, not an InvalidRequest.
+///
+/// `+` decodes to a space, the x-www-form-urlencoded convention every browser
+/// query builder (`URLSearchParams`) writes. RFC 3986 clause 3.4 also allows
+/// a literal `+` in a query, so a client that means one percent-encodes it —
+/// the two readings cannot both be served, and no clause picks either. The
+/// DateTime parameters are unaffected whichever way it goes: 4.6.3 fixes them
+/// to the UTC "Z" form, so an offset spelling is refused before its `+`
+/// matters.
 pub struct CleanParams(pub std::collections::HashMap<String, String>);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
