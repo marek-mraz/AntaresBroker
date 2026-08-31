@@ -23,6 +23,7 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0015](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0015-notification-delivery-policy.md) | Notification delivery policy: one attempt by default, retries as transport, dead letters in the store | accepted, implemented |
 | [ADR-0016](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0016-notification-bindings-behind-the-sink-registry.md) | Notification bindings behind the sink registry | accepted, implemented |
 | [ADR-0017](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0017-drivers-are-named-not-enumerated.md) | A driver is identified by its name, not by an enum value | accepted, implemented |
+| [ADR-0018](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0018-ci-actions-pinned-by-tag.md) | CI actions are pinned by tag, third-party binaries by version | accepted, implemented |
 
 ## Format
 
