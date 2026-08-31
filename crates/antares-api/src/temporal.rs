@@ -2822,7 +2822,21 @@ pub async fn modify_temporal_instance(
                     i.get("instanceId").and_then(Value::as_str) == Some(instance_id.as_str())
                 }) {
                     found = true;
+                    // 5.6.14.4: "Replace the target Attribute instance
+                    // identified by the instanceId with the Attribute instance
+                    // in the EntityTemporal Fragment. The createdAt property
+                    // of the concerned instance shall remain unchanged, but
+                    // the modifiedAt property shall be set to the timestamp
+                    // corresponding to this modification." A replace, so a
+                    // member only the stored instance carries does not survive
+                    // it; the instance keeps the identity it is addressed by.
                     let t = antares_store::stored_object(inst)?;
+                    let kept: Vec<(String, Value)> = ["createdAt", "instanceId"]
+                        .iter()
+                        .filter_map(|k| t.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                        .collect();
+                    t.clear();
+                    t.extend(kept);
                     for (k, v) in antares_jsonld::expanded_object(&frag_inst)? {
                         if matches!(k.as_str(), "createdAt" | "instanceId") {
                             continue;

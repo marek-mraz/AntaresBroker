@@ -183,7 +183,10 @@ async fn clause_5_6_15_delete_instance_separates_unknown_entity_from_unknown_ins
 async fn clause_5_6_14_modify_instance_is_not_found_without_a_target() {
     let st = seeded().await;
     let iid = instance_id(&st).await;
-    let frag = json!({"type": "Property", "value": 42}).to_string();
+    // 5.6.14.4 replaces the instance, so the fragment carries the whole
+    // instance the Context Producer wants stored — `observedAt` included.
+    let frag =
+        json!({"type": "Property", "value": 42, "observedAt": "2026-01-01T09:00:00Z"}).to_string();
     let patch = |uri: String, body: String| {
         Request::builder()
             .method("PATCH")
@@ -242,5 +245,102 @@ async fn clause_5_6_14_modify_instance_is_not_found_without_a_target() {
     assert!(
         inst["modifiedAt"].as_str() >= inst["createdAt"].as_str(),
         "modifiedAt moves, createdAt does not: {inst}"
+    );
+}
+
+const REPLACED: &str = "urn:ngsi-ld:Vehicle:tw-replace";
+
+/// 5.6.14.4: "Replace the target Attribute instance identified by the
+/// instanceId with the Attribute instance in the EntityTemporal Fragment. The
+/// createdAt property of the concerned instance shall remain unchanged, but
+/// the modifiedAt property shall be set to the timestamp corresponding to this
+/// modification." Replace, not merge — a member the stored instance carries
+/// and the fragment does not is gone — and the instance keeps the identity the
+/// request addressed it by.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_14_modify_instance_replaces_the_instance_rather_than_merging_into_it() {
+    let mut st = AppState::new("me".into());
+    antares_api::notify::wire(&mut st);
+    let body = json!({
+        "id": REPLACED, "type": "Vehicle",
+        "speed": [{
+            "type": "Property", "value": 120, "observedAt": "2020-09-01T12:03:00Z",
+            "unitCode": "KMH",
+            "accuracy": {"type": "Property", "value": 0.5}
+        }]
+    })
+    .to_string();
+    let (status, b) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await;
+    assert!(status.is_success(), "seed: {status} {b}");
+
+    let read = || async {
+        let (status, body) = send(
+            &st,
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ngsi-ld/v1/temporal/entities/{REPLACED}\
+                     ?timerel=after&timeAt=2000-01-01T00:00:00Z&options=sysAttrs"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["speed"][0].clone()
+    };
+    let before = read().await;
+    let iid = before["instanceId"]
+        .as_str()
+        .expect("instanceId")
+        .to_owned();
+
+    let fragment =
+        json!({"type": "Property", "value": 129, "observedAt": "2020-09-01T12:03:00Z"}).to_string();
+    let (status, b) = send(
+        &st,
+        Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/ngsi-ld/v1/temporal/entities/{REPLACED}/attrs/speed/{iid}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", fragment.len())
+            .body(Body::from(fragment))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+
+    let after = read().await;
+    assert_eq!(after["value"], json!(129), "{after}");
+    for gone in ["unitCode", "accuracy"] {
+        assert!(
+            after.get(gone).is_none(),
+            "{gone} survived a replace: {after}"
+        );
+    }
+    assert_eq!(
+        after["instanceId"], before["instanceId"],
+        "the replaced instance lost the id it was addressed by: {after}"
+    );
+    assert_eq!(
+        after["createdAt"], before["createdAt"],
+        "createdAt shall remain unchanged: {after}"
+    );
+    assert_ne!(
+        after["modifiedAt"],
+        Value::Null,
+        "modifiedAt shall be set: {after}"
     );
 }
