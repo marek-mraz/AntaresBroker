@@ -523,10 +523,15 @@ impl Store {
             .inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Registrations belong to this domain: one of the hydrations that
+        // walks it fills the registration mirror, which the federation path
+        // then reads alone. Without them a tenant holding registrations and
+        // no subscription forwarded to no Context Source.
         let mut out: Vec<String> = inner
             .subscriptions
             .iter()
             .chain(inner.csource_subscriptions.iter())
+            .chain(inner.registrations.iter())
             .filter(|(_, m)| !m.is_empty())
             .map(|(t, _)| t.clone())
             .collect();

@@ -259,6 +259,33 @@ pub fn run_current_state_contract(
         domain.iter().any(|t| t == a.as_str()),
         "a tenant holding a subscription must appear in subscription_tenants: {domain:?}"
     );
+    // A REGISTRATION puts a tenant in the domain too. One of the hydrations
+    // that walks this domain fills the registration mirror, and the
+    // federation path reads that mirror alone once it is installed — so a
+    // tenant holding registrations and no subscription is a tenant that
+    // silently forwards to no Context Source.
+    let reg_only = TenantId::new(&format!("{prefix}regonly")).expect("tenant");
+    let reg = format!("urn:ngsi-ld:ContextSourceRegistration:{prefix}:1");
+    d.upsert(
+        &reg_only,
+        Kind::Registration,
+        &reg,
+        json!({
+            "id": &reg,
+            "type": "ContextSourceRegistration",
+            "endpoint": "http://cs.invalid/ngsi-ld/v1",
+            "information": [{"entities": [{"type": "Vehicle"}]}],
+        }),
+    )
+    .expect("upsert registration");
+    let domain = d.subscription_tenants().expect("subscription_tenants");
+    assert!(
+        domain.iter().any(|t| t == reg_only.as_str()),
+        "a tenant holding only a registration must appear in the mirror-hydration \
+         domain, or its registration mirror hydrates empty: {domain:?}"
+    );
+    d.delete(&reg_only, Kind::Registration, &reg)
+        .expect("delete");
     // `list_page` is how the readers that must see EVERY document read —
     // the mirror seed above all — so a backend may not refuse it for volume
     // the way `list` may (5.5.6 licenses TooManyResults for a query

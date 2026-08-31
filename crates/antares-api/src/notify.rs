@@ -419,9 +419,9 @@ fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) 
     }
 }
 
-/// Fill the mirror from the store, or say why it could not be filled.
+/// Fill a mirror from the store, or say why it could not be filled.
 ///
-/// Every subscription of every tenant has to be in the mirror before it is
+/// Every document of every tenant has to be in the mirror before it is
 /// installed. `CurrentStateDriver::subscription_tenants` states the rule for
 /// the data path — "A SUBSET is a silent outage: a tenant missing here never
 /// fires a periodic notification and never reaches the mirror" — and an
@@ -432,18 +432,30 @@ fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) 
 /// Paged, not `list`: 5.5.6 licenses TooManyResults for "a query operation
 /// … producing so many results that can potentially exhaust client or
 /// server resources", and the seed is not one — it must see every
-/// subscription of every tenant or it is the silent outage above. Reading
-/// it through the ceiling `list` carries for client queries made one
-/// tenant's stored volume decide whether OTHER tenants are matched at all.
-fn seed_mirror(
+/// document of every tenant or it is the silent outage above. Reading it
+/// through the ceiling `list` carries for client queries made one tenant's
+/// stored volume decide whether OTHER tenants are matched at all.
+///
+/// One function for every mirror and both bus modes. `bus=local` seeds the
+/// subscription mirror here; `bus=nats` seeds a subscription mirror and a
+/// registration mirror, and re-seeds the registration one after a consumer
+/// gap. Those were a second copy of this walk that kept the ceiling and
+/// swallowed the error into an empty list, which is how a rule fixed in one
+/// place stayed broken in the others.
+///
+/// The domain is `subscription_tenants`, whose contract covers every kind a
+/// mirror is built from. A tenant holding nothing of this kind costs one
+/// empty page.
+pub fn seed_mirror(
     store: &dyn antares_store::CurrentStateDriver,
-    mirror: &SubMirror,
+    mirror: &dyn Mirror,
+    kind: Kind,
 ) -> Result<(), antares_model::NgsiError> {
     for tenant_str in store.subscription_tenants()? {
         let tenant = TenantId::new(&tenant_str)?;
         let mut after: Option<String> = None;
         loop {
-            let page = store.list_page(&tenant, Kind::Subscription, after.as_deref(), SEED_PAGE)?;
+            let page = store.list_page(&tenant, kind, after.as_deref(), SEED_PAGE)?;
             let short = page.len() < SEED_PAGE;
             let before = after.clone();
             for doc in page {
@@ -476,7 +488,7 @@ pub fn wire(state: &mut AppState) {
     // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
-    match seed_mirror(state.store.as_ref(), &mirror) {
+    match seed_mirror(state.store.as_ref(), mirror.as_ref(), Kind::Subscription) {
         Ok(()) => state.sub_mirror = Some(mirror.clone()),
         // Not installed, so `subs_for` takes the store scan it documents as
         // the missing-mirror fallback. Installing what the seed managed to

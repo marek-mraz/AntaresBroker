@@ -266,8 +266,22 @@ pub async fn wire_nats(
         // delta can fall between them; last-writer-wins per key converges.
         let reg_mirror = Arc::new(antares_api::notify::DocMirror::default());
         let reg_consumer = bus.consume_registry_broadcast().await?;
-        hydrate(reg_mirror.as_ref(), &*state.store, Kind::Registration);
-        state.reg_mirror = Some(reg_mirror.clone());
+        // Installed only if it is whole. A mirror that is present and SHORT
+        // is read as the truth — `reg_docs` asks it and never the store — so
+        // half a hydrate silently drops Context Sources for the life of the
+        // process. Left uninstalled, federation matching falls back to the
+        // store's own indexed narrowing: correct, and merely slower.
+        match antares_api::notify::seed_mirror(
+            &*state.store,
+            reg_mirror.as_ref(),
+            Kind::Registration,
+        ) {
+            Ok(()) => state.reg_mirror = Some(reg_mirror.clone()),
+            Err(e) => tracing::error!(
+                "registration mirror hydrate failed ({e}); \
+                 federation matching falls back to a store read per request"
+            ),
+        }
         let egress_for_cool = state.egress.clone();
         let store_for_reg = state.store.clone();
         tokio::spawn(async move {
@@ -300,7 +314,20 @@ pub async fn wire_nats(
                 }
                 tracing::warn!("registry broadcast consumer stream ended — reopening");
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                hydrate(reg_mirror.as_ref(), &*store_for_reg, Kind::Registration);
+                // Already installed, so this one cannot be withheld. A failed
+                // re-hydrate leaves the mirror holding what it had before the
+                // gap, which the federation path will serve as current: say
+                // so at error level rather than let it pass as a warning.
+                if let Err(e) = antares_api::notify::seed_mirror(
+                    &*store_for_reg,
+                    reg_mirror.as_ref(),
+                    Kind::Registration,
+                ) {
+                    tracing::error!(
+                        "registration mirror re-hydrate failed ({e}); \
+                         this pod is matching against registrations from before the gap"
+                    );
+                }
             }
         });
 
@@ -373,8 +400,21 @@ pub async fn wire_nats(
         let sub_mirror = Arc::new(antares_api::notify::SubMirror::default());
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
-        hydrate(sub_mirror.as_ref(), &*state.store, Kind::Subscription);
-        state.sub_mirror = Some(sub_mirror.clone());
+        // Same rule as the registration mirror, and the same one `bus=local`
+        // applies in `notify::wire`: a subscription absent from an installed
+        // mirror never fires again, because the matcher reads candidates
+        // from the mirror alone.
+        match antares_api::notify::seed_mirror(
+            &*state.store,
+            sub_mirror.as_ref(),
+            Kind::Subscription,
+        ) {
+            Ok(()) => state.sub_mirror = Some(sub_mirror.clone()),
+            Err(e) => tracing::error!(
+                "subscription mirror hydrate failed ({e}); \
+                 matching falls back to a store scan per change"
+            ),
+        }
         tokio::spawn(async move {
             // Same restart contract as the registry consumer: the watch ends
             // on a NATS restart, and a task that returns there stops seeing
@@ -466,26 +506,6 @@ const MIRROR_SYNC_ATTEMPTS: u32 = 5;
 /// minutes.
 fn mirror_sync_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(200u64 << attempt.min(4))
-}
-
-fn hydrate(
-    mirror: &dyn antares_api::notify::Mirror,
-    store: &dyn antares_store::CurrentStateDriver,
-    kind: Kind,
-) {
-    // The domain may be a superset (the Pg arm answers every known tenant);
-    // a tenant holding neither kind costs one empty list.
-    let tenants = store.subscription_tenants().unwrap_or_default();
-    for tenant_str in tenants {
-        let Ok(tenant) = TenantId::new(&tenant_str) else {
-            continue;
-        };
-        for doc in store.list(&tenant, kind).unwrap_or_default() {
-            if let Some(id) = doc.get("id").and_then(serde_json::Value::as_str) {
-                mirror.apply(&tenant_str, id, Some(doc.clone()));
-            }
-        }
-    }
 }
 
 /// Apply one `{tenant, id, doc|null, csub}` delta to a mirror. A Context

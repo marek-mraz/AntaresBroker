@@ -392,3 +392,71 @@ async fn a_tenant_over_the_list_ceiling_does_not_take_the_mirror_down_for_everyo
         "{n}"
     );
 }
+
+/// The same walk fills the registration mirror, on the same terms.
+///
+/// `bus=nats` wires two mirrors and re-fills one of them after a consumer
+/// gap. Those three sites carried a second copy of this walk that read
+/// through the ceiling `list` carries for client queries AND turned every
+/// error into an empty list, so a tenant past the ceiling hydrated as zero
+/// documents with nothing logged. The nats path cannot degrade the way the
+/// local one does: `subs_for` and `reg_docs` fall back to the store only
+/// when the mirror is ABSENT, so a mirror installed and SHORT is served as
+/// the truth — that tenant's subscriptions never fire and its registrations
+/// never forward, for the life of the process.
+///
+/// One function now fills every mirror in both bus modes, which is what
+/// keeps the rule from being fixed in one copy and left broken in the rest.
+/// This pins the half the local-bus test cannot reach: a different `Kind`
+/// and a different `Mirror` implementation.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_seed_fills_a_registration_mirror_past_a_refused_list() {
+    let st = AppState::new("me".into());
+    let tenant = TenantId::new("me").expect("tenant");
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:seeded",
+        "type": "ContextSourceRegistration",
+        "endpoint": "http://cs.invalid/ngsi-ld/v1",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+    });
+    st.store
+        .create(
+            &tenant,
+            Kind::Registration,
+            "urn:ngsi-ld:ContextSourceRegistration:seeded",
+            reg.clone(),
+        )
+        .expect("seed a registration");
+
+    // Refuses every `list`, the way the Postgres arm refuses one past its
+    // ceiling. The paged read it leaves uncapped still answers.
+    let store = FlakyList::new(st.store.clone(), usize::MAX);
+    assert!(
+        store.list(&tenant, Kind::Registration).is_err(),
+        "the double must actually refuse the read this is about"
+    );
+
+    let mirror = antares_api::notify::DocMirror::default();
+    antares_api::notify::seed_mirror(&store, &mirror, Kind::Registration)
+        .expect("a refused `list` is not a reason to serve an empty registration mirror");
+
+    let docs = mirror.docs("me");
+    assert_eq!(
+        docs.len(),
+        1,
+        "the registration never reached the mirror, so this tenant forwards to no Context Source: {docs:?}"
+    );
+    assert_eq!(
+        docs[0]["id"], reg["id"],
+        "the mirror holds something other than the stored registration: {docs:?}"
+    );
+
+    // A mirror for a tenant that holds nothing is empty, not an error: the
+    // domain may be a superset of the tenants holding this kind.
+    assert!(
+        antares_api::notify::DocMirror::default()
+            .docs("nobody")
+            .is_empty(),
+        "an unseeded tenant must read empty rather than borrow another tenant's rows"
+    );
+}
