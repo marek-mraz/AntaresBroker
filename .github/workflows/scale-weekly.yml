@@ -71,6 +71,11 @@ jobs:
           REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
             | jq -r .token)
+          # Nothing is rented before the registration token is in hand: an
+          # empty one still produces a machine, and a machine whose runner
+          # never registers is an hour of rent and a job queued against a
+          # label that will never appear.
+          [ -n "$REG" ] && [ "$REG" != null ] || { echo "no runner registration token"; exit 1; }
           EXPIRY=$(( $(date +%s) + TTL_HOURS * 3600 ))
           # last resort below the API: the box halts itself after the TTL
           USERDATA=$(cat <<EOF

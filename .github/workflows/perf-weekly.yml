@@ -58,6 +58,11 @@ jobs:
           REG=$(curl -sf -X POST -H "Authorization: Bearer $RUNNER_PAT" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
             | jq -r .token)
+          # Nothing is rented before the registration token is in hand: an
+          # empty one still produces a machine, and a machine whose runner
+          # never registers is an hour of rent and a job queued against a
+          # label that will never appear.
+          [ -n "$REG" ] && [ "$REG" != null ] || { echo "no runner registration token"; exit 1; }
           EXPIRY=$(( $(date +%s) + TTL_HOURS * 3600 ))
           USERDATA=$(cat <<EOF
           #cloud-config
@@ -79,11 +84,13 @@ jobs:
             '{name:$name, server_type:$type, image:$image, location:$loc,
               user_data:$ud,
               labels:{role:"perf-runner", expiry:$exp}}' \
-            | curl -sf -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            | curl -sS --fail-with-body -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" \
               -H "Content-Type: application/json" -d @- \
-              https://api.hetzner.cloud/v1/servers)
+              https://api.hetzner.cloud/v1/servers) || { echo "server refused: $RESP"; exit 1; }
+          SERVER_ID=$(echo "$RESP" | jq -r .server.id)
+          [ -n "$SERVER_ID" ] && [ "$SERVER_ID" != null ] || { echo "server id missing: $RESP"; exit 1; }
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
-          echo "server_id=$(echo "$RESP" | jq -r .server.id)" >> "$GITHUB_OUTPUT"
+          echo "server_id=$SERVER_ID" >> "$GITHUB_OUTPUT"
           # Expected cost for this run, from the price list, at the TTL cap.
           PRICE=$(curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
             https://api.hetzner.cloud/v1/server_types \
