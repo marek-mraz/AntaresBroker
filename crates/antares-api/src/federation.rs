@@ -612,17 +612,7 @@ pub fn matching_regs(
                 tenant,
                 alias,
                 csi,
-                // 5.2.34: management.localOnly; the top-level spelling is
-                // kept for compatibility (4.3.6.4 wording / older payloads)
-                local_only: doc
-                    .get("localOnly")
-                    .and_then(Value::as_bool)
-                    .or_else(|| {
-                        doc.get("management")
-                            .and_then(|m| m.get("localOnly"))
-                            .and_then(Value::as_bool)
-                    })
-                    .unwrap_or(false),
+                local_only: local_only_of(doc),
                 timeout_ms: doc
                     .get("management")
                     .and_then(|m| m.get("timeout"))
@@ -1165,6 +1155,21 @@ pub(crate) fn doc_supports(reg: &Value, op: &str) -> bool {
     fed_reg_of(reg.get("id").and_then(Value::as_str).unwrap_or(""), reg).supports(op)
 }
 
+/// 5.2.34 `management.localOnly`; the top-level spelling is kept for
+/// compatibility (4.3.6.4 wording / older payloads). Read here so every
+/// FedReg of one document agrees on it — a view that reads it and a view
+/// that does not send the same peer two different questions.
+fn local_only_of(reg: &Value) -> bool {
+    reg.get("localOnly")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            reg.get("management")
+                .and_then(|m| m.get("localOnly"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
 /// A minimal FedReg view of a raw registration document — enough for
 /// `forward` (endpoint/tenant/csi/alias) and `supports`.
 /// 4.3.6.6 contextSourceInfo, as the key/value pairs a forward applies.
@@ -1226,7 +1231,7 @@ pub(crate) fn fed_reg_of(reg_id: &str, reg: &Value) -> FedReg {
         // forward, including the subscription operations that build their
         // registration view from this function.
         csi: csi_of(reg),
-        local_only: false,
+        local_only: local_only_of(reg),
         timeout_ms: reg
             .get("management")
             .and_then(|m| m.get("timeout"))

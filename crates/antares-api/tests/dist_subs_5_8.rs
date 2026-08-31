@@ -760,6 +760,82 @@ async fn clause_5_8_1_4_local_only_subscription_stays_local() {
 /// inbound notification entities are re-filtered against the ORIGINAL
 /// Subscription's entities selector before forwarding: an id the selector's
 /// idPattern does not match reaches the subscriber in NO payload.
+/// 4.3.6.4: "It is necessary to include a binding-specific mechanism to
+/// request operations only on the registered endpoint itself to avoid
+/// cascades of an excessive lengths, duplicates or loops", and Table 5.2.9-1
+/// `localOnly`: "distributed operations associated to this Context Source
+/// Registration will act only on data held directly by the registered
+/// Context Source itself". A forwarded Subscription create is one of those
+/// operations, so the copy has to carry the 6.3.18 `local` parameter — the
+/// reduced copy cannot say it in the body, because the body's own
+/// `localOnly` is stripped before forwarding. Without it the peer creates a
+/// DISTRIBUTED subscription and fans out again: the cascade the clause
+/// exists to stop, bought by a registration that asked for the opposite.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_3_6_4_local_only_registration_bounds_the_forwarded_subscription() {
+    allow_private();
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-lo-reg".into());
+    antares_api::notify::wire(&mut st);
+
+    let (remote_port, remote_seen) = recording_mock();
+
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:lo-reg",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "localOnly": true,
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:lo-reg-own",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "notification": {"endpoint": {"uri": "http://127.0.0.1:9998/original"}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let line = {
+        let seen = remote_seen.lock().expect("seen");
+        seen.iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert!(
+        line.contains("local=true"),
+        "a localOnly registration must not buy a cascading remote subscription: {line}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
     allow_private();
