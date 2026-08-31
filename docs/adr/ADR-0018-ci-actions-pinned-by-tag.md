@@ -75,5 +75,5 @@ holding a version nobody has looked at.
 Every `uses:` in `.github/` either names a path inside this repository
 or carries a `@ref`; no `run:` step asks a release API which version is
 newest; and parsing every workflow finds no job without a `permissions:`
-block, at the job or at the file. The three branch references above are
-the only refs that are not tags.
+block, at the job or at the file. The four references above are the only
+ones that do not name a version.

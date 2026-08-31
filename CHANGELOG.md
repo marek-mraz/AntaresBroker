@@ -3,8 +3,7 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning per CONTRIBUTING "Versioning & releases". Release images are
 published by CI: `:dev` on every green master run, `:dev-<run>` per run,
-`:<version>` + `:latest` on `v*` tags. No `v*` tag has been cut yet — the
-first tagged release will move the Unreleased section under its heading.
+`:<version>` + `:latest` on `v*` tags.
 
 ## [Unreleased]
 

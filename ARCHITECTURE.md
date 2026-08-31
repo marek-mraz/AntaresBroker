@@ -78,6 +78,12 @@ module's header comment.
 | `surface.rs` | 90 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
 | `state.rs` | 590 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
+`geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
+own nothing: each is a handful of lines re-exporting `antares_ql::geo`,
+`::eval` and `::regex` so the broker-side paths (`crate::geo::GeoQuery`,
+`crate::qeval::eval_q`, `crate::regexcache::compile`) stay stable while the
+evaluation itself lives in the crate a gateway can use on its own.
+
 ## 4. A request, end to end
 
 ```
@@ -128,8 +134,8 @@ interval firings are claimed through the store so one pod fires.
 ## 6. Storage
 
 `ANTARES_STORE=memory|file|postgres|timescale` (ADR-0004), one trait
-pair, one schema (`crates/antares-sql/migrations/0001_init.sql`,
-`0002_dead_letters.sql`).
+pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
+`0002_dead_letters.sql`, `0003_comma_seconds_fraction.sql`).
 
 - Tenancy: one shared schema, `tenant_id` on every row, Row-Level
   Security with `FORCE` on every tenant table (ADR-0001). RLS is a belt
