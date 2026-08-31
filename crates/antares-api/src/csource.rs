@@ -5,7 +5,7 @@ use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
 use antares_model::operations::{OPERATION_GROUPS, OPERATION_NAMES};
-use antares_model::NgsiError;
+use antares_model::{NgsiError, TenantId};
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
 use axum::body::Bytes;
@@ -649,6 +649,30 @@ pub fn reg_expired(doc: &Value) -> bool {
         })
 }
 
+/// The stored registration for `id`, with 5.9.2.4's deletion applied: "If
+/// expiresAt is a date and time in the future, implementations shall delete
+/// the Registration when this point in time is reached." The sweep is lazy
+/// — "final deletion will always lag the expiresAt timestamp" — so the first
+/// operation to name an expired registration performs the deletion and then
+/// sees what every later one sees. A read raises ResourceNotFound (5.9.3.4,
+/// 5.9.4.4) and a create takes the id back, because 5.9.2.4 raises
+/// AlreadyExists only for a registration that exists. Unlike a Subscription
+/// (5.8.6), a Registration has no `status` member that keeps an expired one
+/// visible.
+fn take_live_registration(
+    st: &AppState,
+    tenant: &TenantId,
+    id: &str,
+) -> Result<Option<Value>, NgsiError> {
+    match st.store.get(tenant, Kind::Registration, id)? {
+        Some(doc) if reg_expired(&doc) => {
+            st.store.delete(tenant, Kind::Registration, id)?;
+            Ok(None)
+        }
+        live => Ok(live),
+    }
+}
+
 pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
     if doc.get("mode").and_then(Value::as_str) != Some("exclusive") {
         return Ok(());
@@ -903,6 +927,7 @@ pub async fn create_registration(
         validate_auxiliary_ops(&norm)?;
         let doc = {
             let _serialized = registration_write_lock().await;
+            take_live_registration(&st, &tenant, &id)?;
             check_entity_conflict(&st, &tenant, &norm)?;
             check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
             let ts = now_iso();
@@ -1469,7 +1494,7 @@ pub async fn update_registration(
         // invalidate the checks between them.
         let (before, res) = {
             let _serialized = registration_write_lock().await;
-            let before = st.store.get(&tenant, Kind::Registration, &id)?;
+            let before = take_live_registration(&st, &tenant, &id)?;
             if let Some(prev) = before.as_ref().and_then(Value::as_object) {
                 // validate the post-merge document (4.3.6.3) BEFORE mutating:
                 // a patch may flip the mode or rewrite information
@@ -1528,7 +1553,7 @@ pub async fn delete_registration(
         antares_model::EntityId::new(&id)
             .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
-        let before = st.store.get(&tenant, Kind::Registration, &id)?;
+        let before = take_live_registration(&st, &tenant, &id)?;
         if st.store.delete(&tenant, Kind::Registration, &id)? {
             st.reg_changed(&tenant, &id, None);
             crate::notify::csource_fanout(&st, &tenant, before, None).await;
