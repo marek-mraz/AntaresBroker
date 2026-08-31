@@ -192,8 +192,32 @@ pub async fn bounds_layer(
         return next.run(req).await;
     }
     let (parts, body) = req.into_parts();
+    // Size-check before parse means before buffering too: a body that
+    // DECLARES more than the cap is refused without reading a byte of it.
+    let declared = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > *MAX_BODY_BYTES) {
+        st.limits.body_too_large.fetch_add(1, Ordering::Relaxed);
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response(); // bare 413
+    }
     let bytes: Bytes = match axum::body::to_bytes(body, *MAX_BODY_BYTES).await {
         Ok(b) => b,
+        // `to_bytes` reports the length limit and any transport failure the
+        // same way. A body whose declared length fits the cap cannot have
+        // exceeded it, so what failed was the delivery: that is a bad request
+        // and NOT a size rejection — counting it as one would make
+        // `rejectedBodyTooLarge` read client aborts as clients hitting the
+        // cap. Without a declared length (chunked) the cap is the only thing
+        // the read can have hit.
+        Err(_) if declared.is_some() => {
+            return crate::negotiate::ApiError::from(antares_model::NgsiError::InvalidRequest(
+                "request body was not delivered completely".into(),
+            ))
+            .into_response();
+        }
         Err(_) => {
             st.limits.body_too_large.fetch_add(1, Ordering::Relaxed);
             return StatusCode::PAYLOAD_TOO_LARGE.into_response(); // bare 413
@@ -348,6 +372,63 @@ mod tests {
                 "an over-deep body must not reach the handler (content-type {ct:?})"
             );
         }
+    }
+
+    /// 6.3.4's 413 is about size, and `/q/health` publishes how often it
+    /// fired. A body the client abandoned mid-flight is a different event: it
+    /// is not over the cap, it must not be counted as one, and a declared
+    /// length over the cap must be refused before the broker buffers a byte
+    /// of it.
+    #[tokio::test]
+    async fn a_broken_body_is_not_an_over_cap_body() {
+        use tower::ServiceExt;
+        let st = crate::AppState::new("http://localhost:0".into());
+        let app = axum::Router::new()
+            .route(
+                "/x",
+                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                st.clone(),
+                bounds_layer,
+            ));
+
+        // the transport gave up: a declared length the body never delivers
+        let broken = Body::from_stream(futures_util::stream::once(async {
+            Err::<axum::body::Bytes, std::io::Error>(std::io::Error::other("reset"))
+        }));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/x")
+                    .header(axum::http::header::CONTENT_LENGTH, "100")
+                    .body(broken)
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            st.limits.body_too_large.load(Ordering::Relaxed),
+            0,
+            "a client abort is not a size rejection"
+        );
+
+        // over the cap by its own declaration: refused without buffering
+        let resp = app
+            .oneshot(
+                Request::post("/x")
+                    .header(
+                        axum::http::header::CONTENT_LENGTH,
+                        (*MAX_BODY_BYTES + 1).to_string(),
+                    )
+                    .body(Body::from("{}"))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(st.limits.body_too_large.load(Ordering::Relaxed), 1);
     }
 
     #[test]
