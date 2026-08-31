@@ -2357,21 +2357,25 @@ pub async fn delete_temporal(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local"])?;
-        let deleted = st.temporal.delete(&tenant, &id)?;
         // 5.6.16.4: forward to registrations supporting the operation;
         // unsupported proxy modes are Conflict.
         let ctx = st.loader.core();
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+            Ok(regs) => regs,
+            Err(refused) => return Ok(refused),
+        };
+        let deleted = st.temporal.delete(&tenant, &id)?;
         answer_temporal_attr_write(
             &st,
             &tenant,
             &headers,
             &ctx,
-            &params,
             &id,
             "deleteTemporal",
             reqwest::Method::DELETE,
             "",
             None,
+            regs,
             LocalWrite {
                 res: deleted.then_some(Ok(())),
                 found: deleted,
@@ -2563,6 +2567,10 @@ pub async fn delete_temporal_attr(
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
         let want_ds = params.get("datasetId").cloned();
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+            Ok(regs) => regs,
+            Err(refused) => return Ok(refused),
+        };
         let mut found = false;
         let ts = now_iso();
         let res = st.temporal.mutate(&tenant, &id, |doc| {
@@ -2597,12 +2605,12 @@ pub async fn delete_temporal_attr(
             &tenant,
             &headers,
             &ctx,
-            &params,
             &id,
             "deleteAttrsTemporal",
             reqwest::Method::DELETE,
             &format!("/attrs/{}", crate::federation::path_segment(&attr)),
             None,
+            regs,
             LocalWrite {
                 res,
                 found,
@@ -2643,33 +2651,48 @@ struct LocalWrite {
 /// With no registration to forward to — the common case — the local result
 /// is the whole answer. The four operations differ in what they change and
 /// in what they forward, never in how the two halves are answered together.
-#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
-async fn answer_temporal_attr_write(
+/// The registrations a 5.6.13/5.6.14/5.6.15/5.6.16 write forwards to, with
+/// 6.3.17/6.3.18 loop handling already applied. The check belongs here,
+/// ahead of the local write: 508 Loop Detected is an error status, so the
+/// request it answers has to leave the Temporal Evolution as it found it.
+fn temporal_write_regs(
     st: &AppState,
     tenant: &antares_model::TenantId,
     headers: &HeaderMap,
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     id: &str,
-    op: &str,
-    method: reqwest::Method,
-    path_suffix: &str,
-    body: Option<Value>,
-    local: LocalWrite,
-) -> ApiResult<Response> {
+) -> Result<Vec<crate::federation::FedReg>, Response> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
     let mut regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers);
-    if let Some(r) = crate::federation::handle_via_loop(
+    match crate::federation::handle_via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, tenant),
         tenant,
         &mut regs,
     ) {
-        return Ok(r);
+        Some(refused) => Err(refused),
+        None => Ok(regs),
     }
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
+async fn answer_temporal_attr_write(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    headers: &HeaderMap,
+    ctx: &antares_jsonld::Context,
+    id: &str,
+    op: &str,
+    method: reqwest::Method,
+    path_suffix: &str,
+    body: Option<Value>,
+    regs: Vec<crate::federation::FedReg>,
+    local: LocalWrite,
+) -> ApiResult<Response> {
     if regs.is_empty() {
         return match local.res {
             None => {
@@ -2777,6 +2800,10 @@ pub async fn modify_temporal_instance(
             .and_then(|a| a.first())
             .cloned()
             .ok_or_else(|| NgsiError::BadRequestData("invalid instance fragment".into()))?;
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &parsed.ctx, &params, &id) {
+            Ok(regs) => regs,
+            Err(refused) => return Ok(refused),
+        };
         let ts = now_iso();
         let mut found = false;
         let res = st.temporal.mutate(&tenant, &id, |doc| {
@@ -2803,7 +2830,6 @@ pub async fn modify_temporal_instance(
             &tenant,
             &headers,
             &parsed.ctx,
-            &params,
             &id,
             "updateAttrInstanceTemporal",
             reqwest::Method::PATCH,
@@ -2813,6 +2839,7 @@ pub async fn modify_temporal_instance(
                 crate::federation::path_segment(&instance_id)
             ),
             Some(parsed.value.clone()),
+            regs,
             LocalWrite {
                 res,
                 found,
@@ -2840,6 +2867,10 @@ pub async fn delete_temporal_instance(
         check_params(&params, &["local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
+        let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
+            Ok(regs) => regs,
+            Err(refused) => return Ok(refused),
+        };
         let mut found = false;
         let ts = now_iso();
         let res = st.temporal.mutate(&tenant, &id, |doc| {
@@ -2864,7 +2895,6 @@ pub async fn delete_temporal_instance(
             &tenant,
             &headers,
             &ctx,
-            &params,
             &id,
             "deleteAttrInstanceTemporal",
             reqwest::Method::DELETE,
@@ -2874,6 +2904,7 @@ pub async fn delete_temporal_instance(
                 crate::federation::path_segment(&instance_id)
             ),
             None,
+            regs,
             LocalWrite {
                 res,
                 found,

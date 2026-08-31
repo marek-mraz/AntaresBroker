@@ -1978,3 +1978,169 @@ async fn clause_5_6_18_replace_type_selector_and_unsupported() {
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "never contacted");
 }
+
+/// 5.6.13-5.6.16 answer through the same 6.3.17/6.3.18 loop check as every
+/// other distributed write. A 508 is an error status: it tells the client the
+/// operation did not take place, so the local Temporal Evolution has to be
+/// exactly what it was before the request arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_loop_leaves_the_temporal_evolution_untouched() {
+    let st = state();
+    let body = serde_json::json!({
+        "id": ENTITY,
+        "type": "Vehicle",
+        "speed": [{"type": "Property", "value": 120, "observedAt": "2020-09-01T12:03:00Z"}],
+    })
+    .to_string();
+    let res = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/temporal/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED, "temporal create");
+
+    let read = || async {
+        let res = send(
+            &st,
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ngsi-ld/v1/temporal/entities/{ENTITY}\
+                     ?timerel=before&timeAt=2030-01-01T00:00:00Z&options=sysAttrs"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+
+    let before = read().await;
+    let iid = before["speed"][0]["instanceId"]
+        .as_str()
+        .expect("instanceId")
+        .to_owned();
+
+    // A Via chain past the broker's hop ceiling is refused before any source
+    // is consulted, so the 508 is reachable without a registration at all.
+    let via = vec!["1.1 a"; 33].join(", ");
+    let fragment = serde_json::json!({"type": "Property", "value": 129}).to_string();
+    let cases = [
+        (
+            "DELETE",
+            format!("/ngsi-ld/v1/temporal/entities/{ENTITY}"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed?deleteAll=true"),
+            None,
+        ),
+        (
+            "PATCH",
+            format!("/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/{iid}"),
+            Some(fragment),
+        ),
+        (
+            "DELETE",
+            format!("/ngsi-ld/v1/temporal/entities/{ENTITY}/attrs/speed/{iid}"),
+            None,
+        ),
+    ];
+    for (method, uri, payload) in cases {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(&uri)
+            .header("Via", &via);
+        let sent = match payload {
+            Some(p) => {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", p.len());
+                Body::from(p)
+            }
+            None => Body::empty(),
+        };
+        let res = send(&st, req.body(sent).expect("request")).await;
+        assert_eq!(res.status(), StatusCode::LOOP_DETECTED, "{method} {uri}");
+        assert_eq!(
+            read().await,
+            before,
+            "a refused {method} {uri} still changed the stored Temporal Evolution"
+        );
+    }
+}
+
+/// 5.6.21 Purge Entities answers through the same loop check, and it deletes
+/// a whole page rather than one Entity — the same 508 that means "nothing
+/// happened" was returned over an emptied store.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_loop_leaves_the_purged_entities_in_place() {
+    let st = state();
+    for i in 0..3 {
+        let body =
+            serde_json::json!({"id": format!("urn:ngsi-ld:Vehicle:p{i}"), "type": "Vehicle"})
+                .to_string();
+        let res = send(
+            &st,
+            Request::builder()
+                .method("POST")
+                .uri("/ngsi-ld/v1/entities")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED, "seed {i}");
+    }
+    let count = || async {
+        let res = send(
+            &st,
+            Request::builder()
+                .method("GET")
+                .uri("/ngsi-ld/v1/entities?type=Vehicle")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.as_array().map(Vec::len))
+            .unwrap_or_default()
+    };
+    assert_eq!(count().await, 3, "seeded");
+
+    let res = send(
+        &st,
+        Request::builder()
+            .method("DELETE")
+            .uri("/ngsi-ld/v1/entities?type=Vehicle")
+            .header("Via", vec!["1.1 a"; 33].join(", "))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::LOOP_DETECTED,
+        "purge under a loop"
+    );
+    assert_eq!(
+        count().await,
+        3,
+        "a refused purge still emptied the Entity store"
+    );
+}

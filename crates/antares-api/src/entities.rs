@@ -2289,9 +2289,9 @@ async fn purge_inner(
     let drop: Option<Vec<String>> = params
         .get("drop")
         .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect());
-    purge_locally(st, &tenant, params, &ctx, &keep, &drop)?;
-
-    // distributed purge (5.6.21 / 6.4.3.3)
+    // distributed purge (5.6.21 / 6.4.3.3). Matching and the 6.3.17/6.3.18
+    // loop check come first: 508 Loop Detected is an error status, so the
+    // request it answers must not have deleted a page of Entities already.
     let spec = crate::csource::CsrSpec {
         types: params
             .get("type")
@@ -2313,6 +2313,7 @@ async fn purge_inner(
     ) {
         return Ok(r);
     }
+    purge_locally(st, &tenant, params, &ctx, &keep, &drop)?;
     if !regs.is_empty() {
         let mut parts = vec![crate::federation::Part {
             status: 204,
