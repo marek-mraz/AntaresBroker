@@ -65,17 +65,29 @@ async fn outbox_enqueue_is_transactional() {
     // Drain ack removes EXACTLY the published row: acking one seq must delete
     // one row. `>= 1` would also pass an over-deleting range ack, which is
     // precisely the regression the sibling test above exists to catch.
-    let before = outbox::peek(&pool, 1000).expect("peek before ack").len();
+    //
+    // Counted over THIS tenant's rows, straight from the table. The shared
+    // outbox is not a quantity this test can assert: sibling tests both
+    // enqueue and ack on it concurrently, so a whole-table page shrinks for
+    // reasons that are not this ack, and `peek`'s own LIMIT can truncate the
+    // page before our rows are even in it. `pgoutbox` is used by no other
+    // test, so its count is exact whatever the siblings are doing, and a
+    // difference of one is a stronger statement than the page ever made.
+    let mine = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox WHERE tenant_id = 'pgoutbox'")
+            .fetch_one(&pool)
+            .await
+            .expect("count")
+    };
+    let before = mine().await;
     let acked = outbox::ack(&pool, &[seq]).expect("ack");
     assert_eq!(acked, 1, "acking one seq deleted {acked} rows");
     let page = outbox::peek(&pool, 1000).expect("peek3");
     assert!(!page.iter().any(|(s, _, _)| *s == seq));
-    // sibling tests enqueue concurrently, so the page can only GROW past the
-    // one row we removed — it must never shrink by more than that
-    assert!(
-        page.len() + 1 >= before,
-        "the ack took {} extra rows with it",
-        before - page.len() - 1
+    assert_eq!(
+        mine().await,
+        before - 1,
+        "the ack took rows of this tenant with it beyond the one seq acked"
     );
 }
 
