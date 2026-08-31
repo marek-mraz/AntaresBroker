@@ -10,7 +10,9 @@ services:
       POSTGRES_PASSWORD: antares
       POSTGRES_DB: antares
     ports:
-      - "5432:5432"
+      # loopback only: the stack is a dev database with a placeholder
+      # credential, and the broker it serves runs on this host
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U antares"]
       interval: 5s
@@ -25,7 +27,7 @@ services:
     image: nats:2.10-alpine
     command: ["-js"]
     ports:
-      - "4222:4222"
+      - "127.0.0.1:4222:4222"
     deploy:
       resources:
         limits:
