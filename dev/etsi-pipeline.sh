@@ -112,9 +112,6 @@ esac
 export BACKED_NOTE
 export STORE DB_IMAGE
 COMPOSE=(docker compose -f compose-files/docker-compose-etsi.yml)
-# CTX_MOCK=1: serve the suite's @context files from a local TLS mock so a
-# raw.githubusercontent.com rate limit cannot fail a run (local harness only).
-[ "${CTX_MOCK:-0}" = 1 ] && COMPOSE+=(-f compose-files/docker-compose-ctxmock.yml)
 # The HA overlay moves antares1 behind an LB on 9090; with
 # ROLL_DURING_RUN the replicas roll continuously under the running suite.
 if [ "${ROLES_SPLIT:-0}" = 1 ]; then
