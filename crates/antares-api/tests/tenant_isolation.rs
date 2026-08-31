@@ -276,3 +276,62 @@ async fn clause_5_5_10_nonexistent_tenant_on_non_create_ops() {
     let (status, _) = send(&st, "GET", "/ngsi-ld/v1/entities?type=T", None, None).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+/// 6.3.14: the broker mints tenants of its own — `snap-index` holds the
+/// synthetic-tenant reverse index, `snap-<uuid>` holds one snapshot's frozen
+/// copy, `distsub-index` holds the distributed-subscription inbound index. A
+/// client-supplied NGSILD-Tenant naming one would write request-shaped
+/// documents into the keyspace the broker keeps that state in, and read and
+/// delete another tenant's snapshot bookkeeping. Every one is refused, and
+/// the refusal happens before the write: a create implicitly creates its
+/// tenant (5.5.10), so a guard that let one through would leave the internal
+/// tenant listed.
+#[tokio::test(flavor = "multi_thread")]
+async fn internal_tenants_are_not_addressable_by_a_client() {
+    let st = AppState::new("test".into());
+    let doc = r#"{"id":"urn:ngsi-ld:Isolation:probe","type":"Isolation"}"#;
+    for t in [
+        "snap-index",
+        "snap-0123456789abcdef0123456789abcdef",
+        "distsub-index",
+    ] {
+        let (status, body) = send(&st, "POST", "/ngsi-ld/v1/entities", Some(t), Some(doc)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{t} was accepted: {body}");
+        assert!(
+            body.contains("BadRequestData"),
+            "{t}: expected BadRequestData, got {body}"
+        );
+        // and a read is refused the same way, not answered as an empty tenant
+        let (status, _) = send(
+            &st,
+            "GET",
+            "/ngsi-ld/v1/entities?type=Isolation",
+            Some(t),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{t} readable");
+    }
+
+    // The guard is the `snap-` PREFIX and the one exact name, matched
+    // literally: a name that merely starts with the same letters, or differs
+    // only in case, is an ordinary tenant and keeps its own keyspace. A guard
+    // that over-rejected would take legal names away from clients.
+    for t in ["snap", "snapshot-data", "SNAP-index", "distsub-index-2"] {
+        let (status, body) = send(&st, "POST", "/ngsi-ld/v1/entities", Some(t), Some(doc)).await;
+        assert_eq!(status, StatusCode::CREATED, "{t} was refused: {body}");
+    }
+
+    let (status, tenants) = send(&st, "GET", "/q/tenants", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    for t in ["\"snap-index\"", "\"distsub-index\""] {
+        assert!(
+            !tenants.contains(t),
+            "a refused create still made the tenant: {tenants}"
+        );
+    }
+    assert!(
+        tenants.contains("\"SNAP-index\""),
+        "the case-different tenant is a normal one: {tenants}"
+    );
+}

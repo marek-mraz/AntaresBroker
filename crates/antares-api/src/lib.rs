@@ -399,13 +399,19 @@ pub fn router(state: AppState) -> Router {
                     state.clone(),
                     history::layer,
                 ))
-                // 5.5.10: non-create operations targeting a non-existing
-                // Tenant answer NonexistentTenant 404; create operations
-                // implicitly create the Tenant.
+                // 6.3.22 / 5.5.15: NGSILD-Snapshot resolves to the
+                // snapshot's synthetic tenant, so the handlers below serve
+                // the frozen copy.
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     snapshots::snapshot_layer,
                 ))
+                // 5.5.10: non-create operations targeting a non-existing
+                // Tenant answer NonexistentTenant 404; create operations
+                // implicitly create the Tenant. Outside the snapshot layer,
+                // so a client naming one of the broker's own internal
+                // tenants is refused before that layer legitimately sets
+                // one.
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     tenant_exists_layer,
