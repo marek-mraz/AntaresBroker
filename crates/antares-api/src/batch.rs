@@ -77,14 +77,45 @@ async fn parse_batch(
         .into());
     }
     let mut out = Vec::new();
+    // The loader caps ONE @context resolution at MAX_CONTEXT_FETCHES fetched
+    // documents. A batch resolves once per item, so without a ceiling here
+    // the item count multiplies that cap: a body inside the 4 MiB limit can
+    // name a thousand different @contexts and buy a thousand crawls of a
+    // chosen host from one request. Distinct values are what cost a crawl —
+    // repeats hit the loader's merged cache, and an inline object fetches
+    // nothing — so only those are counted.
+    let mut named_contexts: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut count_context = |c: &Value| -> Result<(), ApiError> {
+        if matches!(c, Value::Object(_) | Value::Null) {
+            return Ok(());
+        }
+        let key = c.to_string();
+        if named_contexts.contains(&key) {
+            return Ok(());
+        }
+        // At the ceiling nothing more is remembered either: the set is keyed
+        // by client-supplied text, so it may not grow past the cap it guards.
+        if named_contexts.len() >= crate::bounds::MAX_CONTEXT_FETCHES {
+            return Err(NgsiError::BadRequestData(format!(
+                "batch names more than {} distinct @contexts",
+                crate::bounds::MAX_CONTEXT_FETCHES
+            ))
+            .into());
+        }
+        named_contexts.insert(key);
+        Ok(())
+    };
     for item in items {
         let ctx = if ld {
             match item.get("@context") {
-                Some(c) => st
-                    .loader
-                    .resolve_for(tenant, c)
-                    .await
-                    .map_err(ApiError::from),
+                Some(c) => match count_context(c) {
+                    Err(e) => Err(e),
+                    Ok(()) => st
+                        .loader
+                        .resolve_for(tenant, c)
+                        .await
+                        .map_err(ApiError::from),
+                },
                 None => Err(NgsiError::BadRequestData(
                     "ld+json batch entity without @context".into(),
                 )

@@ -66,6 +66,73 @@ async fn context_cache_size_cap_holds_under_client_keyed_load() {
     );
 }
 
+/// One batch may not multiply the per-resolution @context fetch cap by its
+/// item count. The loader stops ONE resolution at `MAX_CONTEXT_FETCHES`
+/// fetched documents; a batch resolves once per item, so a body inside the
+/// 4 MiB limit that names a different @context URL per item would buy a
+/// fetch per item at a host the client chooses — egress amplification, and
+/// a port scan of whatever the deployment lets the broker reach. The
+/// listener below counts connections, so the assertion is on what left the
+/// process, not on what the response says.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_batch_cannot_multiply_the_context_fetch_cap() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            seen.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let body = r#"{"@context":{"t":"https://example.org/t"}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+
+    const ITEMS: usize = 200;
+    let items: Vec<serde_json::Value> = (0..ITEMS)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("urn:ngsi-ld:Batch:{i}"),
+                "type": "t",
+                "@context": format!("http://127.0.0.1:{}/c{i}.jsonld", addr.port()),
+            })
+        })
+        .collect();
+    let body = serde_json::Value::Array(items).to_string();
+    let st = AppState::new("test".into());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entityOperations/create")
+        .header("Content-Type", "application/ld+json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let status = send(&st, req).await;
+    assert!(
+        status.is_success() || status == StatusCode::MULTI_STATUS,
+        "the batch answers per item, it does not fail as a whole: {status}"
+    );
+
+    let fetched = hits.load(Ordering::SeqCst);
+    assert!(
+        fetched <= antares_api::bounds::MAX_CONTEXT_FETCHES,
+        "one request fetched {fetched} @context documents, cap is {}",
+        antares_api::bounds::MAX_CONTEXT_FETCHES
+    );
+    assert!(
+        fetched < ITEMS,
+        "every item fetched its own @context — the cap did not apply"
+    );
+}
+
 /// After DELETE, a subscription's state is GONE — later matching
 /// changes produce no delivery attempt. (Scorpio orphaned callback UUIDs
 /// forever; the wrong-typed-key NPE meant the delete path never cleaned up.)

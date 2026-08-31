@@ -545,8 +545,11 @@ const MAX_USAGE_ENTRIES: usize = 4096;
 
 /// Fetch-count cap per @context resolution — a hostile context tree must
 /// not turn one request into an unbounded crawl. Checked BEFORE each
-/// fetch, so at most this many URLs are ever contacted.
-const MAX_CONTEXT_URLS: usize = 32;
+/// fetch, so at most this many URLs are ever contacted. Public because
+/// `/q/health` publishes the caps a request runs under, and a second
+/// constant carrying the same number is one that can drift from the one
+/// actually enforced.
+pub const MAX_CONTEXT_URLS: usize = 32;
 
 /// The merged-context cache is keyed by the SERIALIZED user @context, which
 /// an `application/ld+json` body may carry inline up to the body cap — 256

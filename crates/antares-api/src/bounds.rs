@@ -82,7 +82,11 @@ pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new
         .unwrap_or(8)
 });
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
-pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
+/// → 400 BadRequestData. Documents one @context resolution may fetch, owned
+/// by the loader that enforces it (`antares_jsonld`), and the ceiling on how
+/// many DISTINCT @contexts one batch may name — without the second, the item
+/// count multiplies the first.
+pub use antares_jsonld::MAX_CONTEXT_URLS as MAX_CONTEXT_FETCHES;
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
 /// Linked-entity lookup budget per `q=`, owned by the shared evaluator.
 pub use antares_ql::eval::MAX_Q_LINK_LOOKUPS;
