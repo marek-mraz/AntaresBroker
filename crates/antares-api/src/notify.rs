@@ -1326,9 +1326,25 @@ fn due_at_ms(sub: &Value, interval: f64) -> i64 {
         .and_then(Value::as_str)
         .or_else(|| sub.get("createdAt").and_then(Value::as_str));
     match anchor.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
-        Some(last) => last.timestamp_millis() + (interval * 1000.0) as i64,
+        Some(last) => last
+            .timestamp_millis()
+            .saturating_add(interval_offset_ms(interval)),
         None => i64::MIN,
     }
+}
+
+/// One period of a periodic Subscription (5.2.12 `timeInterval`) in
+/// milliseconds.
+///
+/// Table 5.2.12-1 bounds the member only as greater than 0, so the seconds a
+/// client names can exceed what epoch milliseconds hold. The cast saturates,
+/// and every caller adds it with `saturating_add`, which puts an interval the
+/// broker cannot schedule at the end of representable time. Adding it plainly
+/// wraps the sum negative, and a negative firing instant reads as permanently
+/// due: the subscription then fires its whole query on every tick, and the
+/// same value poisons the process-wide sweep clock those minima feed.
+fn interval_offset_ms(interval: f64) -> i64 {
+    (interval * 1000.0) as i64
 }
 
 /// The exact Entity ids a subscription's `entities` selector pins down, or
@@ -1457,7 +1473,7 @@ pub async fn interval_tick(st: &AppState) {
             // the claim, so a pod that LOSES the race (another one is firing
             // this subscription right now) keeps sweeping on the interval
             // instead of parking on an anchor only the winner advanced.
-            next_sub = next_sub.min(now_ms + (interval * 1000.0) as i64);
+            next_sub = next_sub.min(now_ms.saturating_add(interval_offset_ms(interval)));
             if st.nats && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
                 continue;
             }
@@ -1552,7 +1568,7 @@ pub async fn interval_tick(st: &AppState) {
                 next_csub = next_csub.min(due_at);
                 continue;
             }
-            next_csub = next_csub.min(now_ms + (interval * 1000.0) as i64);
+            next_csub = next_csub.min(now_ms.saturating_add(interval_offset_ms(interval)));
             if st.nats && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval) {
                 continue;
             }
@@ -2488,6 +2504,55 @@ mod deleted_subscription_delivery {
             0,
             "a deleted subscription's endpoint must receive NO notification"
         );
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 5.2.12 Table 5.2.12-1 bounds `Subscription.timeInterval` only as
+    /// "greater than 0", so a client may name an interval whose milliseconds
+    /// do not fit in the epoch arithmetic. A firing instant the broker cannot
+    /// represent must read as far in the future, never as far in the past: a
+    /// wrapped anchor is a NEGATIVE instant, which reports the subscription
+    /// as permanently due and fires it on every tick, each firing running the
+    /// subscription's whole query.
+    #[test]
+    fn an_interval_too_large_to_schedule_is_never_due_rather_than_always() {
+        let sub = json!({
+            "id": "urn:ngsi-ld:Subscription:huge",
+            "type": "Subscription",
+            "createdAt": "2026-01-01T00:00:00Z",
+        });
+        let now = chrono::Utc::now().timestamp_millis();
+        for interval in [1e18, 1e30, f64::MAX] {
+            let due = due_at_ms(&sub, interval);
+            assert!(
+                due > now,
+                "timeInterval {interval} is due at {due}, which is not after {now}"
+            );
+        }
+        // and an interval that DOES fit still schedules exactly one interval
+        // past the anchor, so the guard costs the ordinary case nothing
+        let anchor = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("anchor")
+            .timestamp_millis();
+        assert_eq!(due_at_ms(&sub, 30.0), anchor + 30_000);
+    }
+
+    /// The sweep's own clock takes the same offset, so the same overflow
+    /// would park (or un-park) every tenant's sweep, not just this
+    /// subscription: `next_sub`/`next_csub` are process-wide minima.
+    #[test]
+    fn the_sweep_clock_offset_survives_an_unschedulable_interval() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for interval in [1e18, f64::MAX] {
+            let next = now_ms.saturating_add(interval_offset_ms(interval));
+            assert!(next > now_ms, "sweep clock went backwards for {interval}");
+        }
+        assert_eq!(interval_offset_ms(1.5), 1500);
     }
 }
 
