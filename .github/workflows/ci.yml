@@ -99,10 +99,14 @@ jobs:
           name: antares-image-arm64
 
       - name: Push amd64 (the EXACT image the matrix tested) + arm64, stitch the manifest
+        env:
+          # through the environment, never spliced into the script text:
+          # `${{ }}` is substituted before the shell parses the line
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           docker load < antares-image.tgz
           docker load < antares-image-arm64.tgz
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG=ghcr.io/${{ github.repository_owner }}/antares-broker
           SHA=${GITHUB_SHA::7}
           docker tag antares-local:latest "$IMG:$SHA-amd64"
