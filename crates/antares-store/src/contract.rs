@@ -341,6 +341,71 @@ pub fn run_current_state_contract(
             .is_empty(),
         "a tenant with no subscriptions pages empty, whatever another tenant holds"
     );
+    // Entities page like every other kind. 5.9.2.4's registration-vs-entity
+    // conflict check reads them this way — it must see every Entity of the
+    // tenant and has no TooManyResults to raise — so a backend may not refuse
+    // this walk for volume either, and may not build the page by
+    // materializing the tenant first.
+    //
+    // 4.22 applies INSIDE the page: an expired Entity is not there to be
+    // served, and dropping one after the limit was applied would hand back a
+    // short page, which every walker reads as the end of the tenant.
+    let stem = format!("urn:ngsi-ld:{prefix}:page:");
+    let live: Vec<String> = (0..4).map(|i| format!("{stem}live{i}")).collect();
+    // sorts between live1 and live2, so it falls inside the first page below
+    let expired = format!("{stem}live1x");
+    for id in &live {
+        d.upsert(a, Kind::Entity, id, doc(id))
+            .expect("upsert page entity");
+    }
+    let mut gone_doc = doc(&expired);
+    gone_doc["expiresAt"] = json!("2000-01-01T00:00:00.000Z");
+    d.upsert(a, Kind::Entity, &expired, gone_doc)
+        .expect("upsert expired entity");
+
+    let page = d
+        .list_page(a, Kind::Entity, Some(&stem), 3)
+        .expect("list_page entities");
+    let served: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
+    assert_eq!(
+        served,
+        [live[0].as_str(), live[1].as_str(), live[2].as_str()],
+        "an expired entity may neither be served nor consume a slot of the page"
+    );
+
+    let mut walked: Vec<String> = Vec::new();
+    let mut after = stem.clone();
+    loop {
+        let page = d
+            .list_page(a, Kind::Entity, Some(&after), 2)
+            .expect("list_page entities");
+        let short = page.len() < 2;
+        let mut moved = false;
+        for doc in &page {
+            let id = doc["id"].as_str().expect("a stored entity keeps its id");
+            assert!(
+                id > after.as_str(),
+                "`after` is exclusive: {id} after {after}"
+            );
+            after = id.to_owned();
+            moved = true;
+            if id.starts_with(stem.as_str()) {
+                walked.push(id.to_owned());
+            }
+        }
+        if short || !moved || !after.starts_with(stem.as_str()) {
+            break;
+        }
+    }
+    assert_eq!(
+        walked, live,
+        "the walk must serve every live entity of the tenant exactly once, in id \
+         order, and never the expired one"
+    );
+    for id in live.iter().chain(std::iter::once(&expired)) {
+        d.delete(a, Kind::Entity, id).expect("delete page entity");
+    }
+
     // `list_slice` is the window a 5.5.9.2 limit/offset listing serves from,
     // and it must agree with the walk above on both the order and the set:
     // the same ids, the same order, and a total that counts the whole match

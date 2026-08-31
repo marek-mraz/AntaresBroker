@@ -55,7 +55,7 @@ pub(crate) fn db(e: sqlx::Error) -> NgsiError {
 /// 4.22: the read-boundary "now" — every entity read strips expired docs and
 /// instances against this stamp (UTC Z, millisecond precision, the same form
 /// the broker writes into system timestamps).
-fn now_utc() -> String {
+pub(crate) fn now_utc() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -478,11 +478,27 @@ impl AnyStore {
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
                 // Not doc kinds: they live in their own tables, behind their
-                // own readers, and `doc_kind` refuses them. Sliced from the
-                // whole list rather than left unpaged — a caller that asked
-                // for a page and got a tenant would walk the same rows for
-                // as long as its cursor kept moving.
-                Kind::Entity | Kind::Temporal => {
+                // own readers, and `doc_kind` refuses them.
+                Kind::Entity => {
+                    let mut rows = p
+                        .entities
+                        .list_page(tenant, after, i64::try_from(limit).unwrap_or(i64::MAX))
+                        .map_err(db)?;
+                    // 4.22: the statement excluded expired ENTITIES, so no
+                    // document leaves this page and its length still means
+                    // what the caller reads it as; expired INSTANCES are
+                    // stripped here, at the read boundary, as everywhere else.
+                    let now = now_utc();
+                    rows.retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
+                    Ok(rows)
+                }
+                // Temporal has no keyset reader of its own: its documents are
+                // reconstructed from the instance rows, where the volume that
+                // needs bounding is instances and not entities. Sliced from
+                // the whole list, and so still refusable for volume — the one
+                // kind that does not yet honour `list_page`'s contract, and
+                // the reason nothing internal walks temporal state.
+                Kind::Temporal => {
                     let mut rows = AnyStore::list(self, tenant, kind)?;
                     rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
                     Ok(rows

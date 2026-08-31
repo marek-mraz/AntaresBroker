@@ -693,3 +693,119 @@ async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_d
     let _ = s.delete(&t, &id);
     let _ = s.delete(&t, single);
 }
+
+/// 5.5.6 licenses TooManyResults for "a query operation … producing so many
+/// results that can potentially exhaust client or server resources", and
+/// `list` carries that ceiling. `list_page` exists for the readers that are
+/// not query operations and must see every row — 5.9.2.4's
+/// registration-vs-entity conflict check among them, which has no
+/// TooManyResults to raise and would otherwise refuse every redirect
+/// registration on a tenant that outgrew the ceiling. A page bounds the
+/// allocation by construction, so it is served whatever the tenant holds,
+/// and it is read with a keyset rather than built by materializing the
+/// tenant and slicing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
+    use antares_sql::store::pg::entity::{ngsi_error, MAX_UNDECIDED_ROWS};
+
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgpagewalk").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    let over = MAX_UNDECIDED_ROWS + 500;
+    let mut tx = pool.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &t).await.expect("set_tenant");
+    sqlx::query("DELETE FROM entities WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&mut *tx)
+        .await
+        .expect("clean");
+    sqlx::query(
+        "INSERT INTO entities (tenant_id, id, entity, types, created_at, modified_at)
+         SELECT $1, 'urn:ngsi-ld:Ceiling:' || lpad(i::text, 6, '0'),
+                jsonb_build_object('id', 'urn:ngsi-ld:Ceiling:' || lpad(i::text, 6, '0'),
+                                   'type', 'Test'),
+                '{Test}', now(), now()
+           FROM generate_series(1, $2) AS i",
+    )
+    .bind(t.as_str())
+    .bind(over)
+    .execute(&mut *tx)
+    .await
+    .expect("bulk insert");
+    tx.commit().await.expect("commit");
+
+    let refused = s
+        .list(&t)
+        .expect_err("a tenant over the ceiling refuses `list`");
+    assert_eq!(
+        ngsi_error(&refused).map(antares_model::NgsiError::kind),
+        Some("TooManyResults"),
+        "the ceiling is the 5.5.6 error, not a driver failure"
+    );
+
+    let page = s
+        .list_page(&t, None, 1_000)
+        .expect("a page is never refused");
+    assert_eq!(page.len(), 1_000, "a full page is a full page");
+    let first: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
+    assert_eq!(
+        first[0], "urn:ngsi-ld:Ceiling:000001",
+        "id-ordered from the start"
+    );
+    assert!(first.windows(2).all(|w| w[0] < w[1]), "ascending id order");
+
+    // The cursor is exclusive and the walk keeps moving past the ceiling.
+    let next = s
+        .list_page(&t, Some(first[999]), 3)
+        .expect("a page is never refused");
+    let next: Vec<&str> = next.iter().filter_map(|d| d["id"].as_str()).collect();
+    assert_eq!(
+        next,
+        [
+            "urn:ngsi-ld:Ceiling:001001",
+            "urn:ngsi-ld:Ceiling:001002",
+            "urn:ngsi-ld:Ceiling:001003"
+        ]
+    );
+
+    // The last page is short, which is how a walker learns it is done.
+    let tail = s
+        .list_page(
+            &t,
+            Some(&format!("urn:ngsi-ld:Ceiling:{:06}", over - 2)),
+            1_000,
+        )
+        .expect("a page is never refused");
+    assert_eq!(tail.len(), 2, "the tail page is short, not padded");
+
+    // The same, through the seam `antares-api` calls: the driver trait, not
+    // the store type. This is the read the conflict check makes.
+    let store = antares_sql::store::any::AnyStore::Pg(antares_sql::store::any::PgBackend::new(
+        pool.clone(),
+    ));
+    let page = antares_store::CurrentStateDriver::list_page(
+        &store,
+        &t,
+        antares_sql::store::Kind::Entity,
+        None,
+        1_000,
+    )
+    .expect("the seam serves a page of a tenant over the ceiling");
+    assert_eq!(
+        page.len(),
+        1_000,
+        "a full page is a full page at the seam too"
+    );
+
+    let mut tx = pool.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &t).await.expect("set_tenant");
+    sqlx::query("DELETE FROM entities WHERE tenant_id = $1")
+        .bind(t.as_str())
+        .execute(&mut *tx)
+        .await
+        .expect("clean");
+    tx.commit().await.expect("commit");
+}

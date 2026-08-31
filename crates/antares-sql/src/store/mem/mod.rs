@@ -686,6 +686,11 @@ impl Store {
     /// One id-ordered page of docs: ids strictly greater than `after`, at
     /// most `limit`. The per-tenant map is a `BTreeMap` keyed by id, so this
     /// is a range walk, not a scan-and-sort.
+    ///
+    /// 4.22 applies to entities inside the walk, BEFORE the page is cut: an
+    /// expired document is not there to be paged, and dropping one after the
+    /// cut would hand the caller a short page — which every walker reads as
+    /// the end of the tenant.
     pub fn list_page(
         &self,
         tenant: &TenantId,
@@ -702,12 +707,20 @@ impl Store {
             Some(a) => Bound::Excluded(a.to_owned()),
             None => Bound::Unbounded,
         };
+        let now = crate::store::any::now_utc();
         Self::map(&inner, kind)
             .get(tenant.as_str())
             .map(|m| {
                 m.range((lo, Bound::Unbounded))
+                    .filter_map(|(_, v)| {
+                        let mut v = v.clone();
+                        if kind == Kind::Entity && crate::store::filter::strip_expired(&mut v, &now)
+                        {
+                            return None;
+                        }
+                        Some(v)
+                    })
                     .take(limit)
-                    .map(|(_, v)| v.clone())
                     .collect()
             })
             .unwrap_or_default()

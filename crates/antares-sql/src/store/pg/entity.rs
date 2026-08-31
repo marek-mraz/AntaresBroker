@@ -683,6 +683,44 @@ impl PgEntityStore {
         })
     }
 
+    /// One id-ordered page of entities: ids strictly greater than `after`,
+    /// at most `limit`.
+    ///
+    /// No ceiling, and no fold of the tenant to build the page.
+    /// `MAX_UNDECIDED_ROWS` on `list` exists so a large tenant cannot be
+    /// materialized into one `Vec`; a page bounds that by construction, so
+    /// refusing here would only break the readers that must see every row
+    /// and have no TooManyResults to raise — 5.9.2.4's registration-vs-entity
+    /// conflict check among them. Keyset over the primary key, not OFFSET:
+    /// the walk runs against a table being written to.
+    ///
+    /// 4.22 at the entity level is in the statement, so a full page is a
+    /// full page: the caller reads a short page as the end of the tenant,
+    /// and a filter applied after the LIMIT would end the walk early.
+    pub fn list_page(
+        &self,
+        tenant: &TenantId,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(
+                "SELECT entity FROM entities WHERE tenant_id = $1 AND id > $2
+                       AND (expires_at IS NULL OR expires_at > now())
+                 ORDER BY id LIMIT $3",
+            )
+            .bind(tenant.as_str())
+            .bind(after.unwrap_or(""))
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+        })
+    }
+
     /// Read-modify-write: row lock via `SELECT … FOR UPDATE`, closure
     /// applied in Rust, `version` bumped under the lock. Two racing PATCHes
     /// serialize in Postgres, neither is lost. `Ok(None)` = entity absent.
