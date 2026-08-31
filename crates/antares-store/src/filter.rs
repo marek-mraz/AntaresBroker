@@ -229,7 +229,13 @@ pub fn canonical_datetime(s: &str) -> std::borrow::Cow<'_, str> {
 
 /// Apply 4.22 invalidity to a read: `true` = the ENTITY is expired (caller
 /// drops it entirely); otherwise expired attribute INSTANCES are stripped in
-/// place (an attribute left with zero instances disappears).
+/// place (an attribute left with zero instances disappears). The stamp marks
+/// "a certain Entity, Property or Relationship", and a sub-Attribute is a
+/// Property or a Relationship as well, so the pass recurses through the
+/// instances it keeps. Only Attribute names are walked: 5.5.7 expansion makes
+/// every one an absolute IRI, so a member without a colon is either a
+/// reserved instance member or Entity metadata, and user JSON under `value`
+/// or `json` — which may spell `expiresAt` itself — is never entered.
 pub fn strip_expired(doc: &mut Value, now: &str) -> bool {
     if expired_at(doc, now) {
         return true;
@@ -237,12 +243,13 @@ pub fn strip_expired(doc: &mut Value, now: &str) -> bool {
     if let Some(obj) = doc.as_object_mut() {
         let mut empty: Vec<String> = Vec::new();
         for (k, v) in obj.iter_mut() {
-            if let Some(arr) = v.as_array_mut() {
-                let before = arr.len();
-                arr.retain(|inst| !expired_at(inst, now));
-                if before > 0 && arr.is_empty() {
-                    empty.push(k.clone());
-                }
+            let Some(arr) = v.as_array_mut().filter(|_| k.contains(':')) else {
+                continue;
+            };
+            let before = arr.len();
+            arr.retain_mut(|inst| !strip_expired(inst, now));
+            if before > 0 && arr.is_empty() {
+                empty.push(k.clone());
             }
         }
         for k in empty {
@@ -503,6 +510,35 @@ mod tests {
         assert!(doc.get("https://a/gone").is_none(), "emptied attr removed");
         // meta arrays (type) are never instance-filtered
         assert_eq!(doc["type"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// 4.22 draws no line at depth 1: a sub-Attribute is a Property or a
+    /// Relationship, so its own `expiresAt` takes it out of the served
+    /// document while its live siblings and the Attribute carrying it stay.
+    /// Only expanded Attribute names are walked, so a `value` that happens to
+    /// spell `expiresAt` is user JSON and survives untouched.
+    #[test]
+    fn expired_sub_attributes_leave_and_user_json_stays() {
+        let mut doc = serde_json::json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [{
+                "value": [{"expiresAt": "2026-08-08T00:00:00Z", "keep": 1}],
+                "instanceId": "i1",
+                "https://a/gone": [{"value": 2,
+                                    "expiresAt": "2026-08-08T11:00:00Z"}],
+                "https://a/live": [{"value": 3,
+                                    "expiresAt": "2999-01-01T00:00:00Z"}]
+            }]
+        });
+        assert!(!strip_expired(&mut doc, NOW));
+        let inst = &doc["https://a/attr"][0];
+        assert!(inst.get("https://a/gone").is_none(), "expired sub stripped");
+        assert_eq!(inst["https://a/live"][0]["value"], 3, "live sub kept");
+        assert_eq!(
+            inst["value"],
+            serde_json::json!([{"expiresAt": "2026-08-08T00:00:00Z", "keep": 1}]),
+            "user JSON is not an Attribute"
+        );
     }
 
     #[test]

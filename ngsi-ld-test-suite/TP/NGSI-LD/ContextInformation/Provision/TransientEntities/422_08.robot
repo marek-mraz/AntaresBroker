@@ -23,6 +23,7 @@ Suite Teardown      Purge Matrix State
 ${eid}=         urn:ngsi-ld:Vehicle:42208-types
 ${eid2}=        urn:ngsi-ld:Vehicle:42208-datasets
 ${eid3}=        urn:ngsi-ld:Vehicle:42208-past
+${eid4}=        urn:ngsi-ld:Vehicle:42208-sub
 ${csr_id}=      urn:ngsi-ld:ContextSourceRegistration:42208
 ${sub_id}=      urn:ngsi-ld:Subscription:42208
 ${future}=      2100-01-01T00:00:00Z
@@ -143,9 +144,28 @@ ${JSONH}=       ${{ {"Content-Type": "application/json"} }}
     Should Be Equal As Integers    ${response.status_code}    404
 
 
+422_08_09 An Expired Sub-Attribute Is Not Served
+    [Documentation]    4.22: expiresAt marks "a certain Entity, Property or
+    ...    Relationship" as invalid, and a sub-Attribute is a Property or a
+    ...    Relationship too — a sub-Attribute past its stamp leaves the served
+    ...    Attribute while its live siblings and the Attribute itself stay.
+    [Tags]    transient    4_22    since_v1.9.1
+    ${soon}=    Evaluate    (__import__('datetime').datetime.now(__import__('datetime').timezone.utc) + __import__('datetime').timedelta(seconds=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    ${payload}=    Evaluate    {"id": "${eid4}", "type": "Vehicle", "speed": {"type": "Property", "value": 10, "accuracy": {"type": "Property", "value": 1, "expiresAt": "${soon}"}, "source": {"type": "Property", "value": "gps", "expiresAt": "${future}"}}}
+    ${response}=    POST    url=${url}/entities/    json=${payload}    headers=${JSONH}    expected_status=201
+    ${response}=    GET    url=${url}/entities/${eid4}    expected_status=200
+    Should Contain    ${response.text}    accuracy
+    Sleep    4s
+    ${response}=    GET    url=${url}/entities/${eid4}    expected_status=200
+    ${body}=    Set Variable    ${response.json()}
+    Should Not Contain    ${response.text}    accuracy    msg=expired sub-Attribute must vanish
+    Should Be Equal As Integers    ${body}[speed][value]    10
+    Should Be Equal    ${body}[speed][source][value]    gps    msg=live sub-Attribute must survive
+
+
 *** Keywords ***
 Purge Matrix State
-    FOR    ${id}    IN    ${eid}    ${eid2}    ${eid3}
+    FOR    ${id}    IN    ${eid}    ${eid2}    ${eid3}    ${eid4}
         ${response}=    DELETE    url=${url}/entities/${id}    expected_status=any
     END
     ${response}=    DELETE    url=${url}/csourceRegistrations/${csr_id}    expected_status=any
