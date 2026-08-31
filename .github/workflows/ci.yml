@@ -5,10 +5,10 @@ name: ci
 #   workspace tests ──→ [image build → quick matrix (file postgres timescale) → summary]
 #                   └──→ build arm64 image ──────────────→ publish :dev (master, all green)
 #
-# Branch model: feature branches PR into `master` (this workflow is the
-# required check); `v*` tags run full.yml, the release gate.
-# master is merge-only — protection lives in GitHub rulesets
-# (dev/branch-protection.sh), not here.
+# Branch model: one long-lived branch, `master`. Feature branches PR into
+# it and this workflow is the required check; `v*` tags run full.yml, the
+# release gate. Protection, where it is configured, lives in GitHub
+# rulesets rather than here.
 #
 # No wasm here: the browser bundle is built and ETSI-tested (wasm-file
 # cell) by full.yml, and a commit that only touches native code doesn't

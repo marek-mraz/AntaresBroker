@@ -1,9 +1,9 @@
 name: full
 
 # The EVERYTHING pipeline — twice a week on schedule, on every v* tag, on
-# every PR into main (the dev → main PROMOTION GATE: main is merge-only and
-# this workflow is its required check, so nothing reaches main without the
-# whole grid green), and on manual dispatch: workspace tests, the
+# every PR into master (where it is the wider gate beside ci.yml's quick
+# preset, so a branch cannot merge without the whole grid green), and on
+# manual dispatch: workspace tests, the
 # browser/wasm artifact proven in both runtimes, the wasm Node tier, and
 # the reusable cell matrix at the FULL preset (all seven cells — memory/file/postgres/timescale, both
 # rolling -nats fleets, wasm-file — each serial-all-suites against one
@@ -30,7 +30,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    branches: [master] # the release gate for a promotion PR
+    branches: [master] # the wider gate beside ci.yml on the same PR
   workflow_dispatch:
 
 # The default for every job here; the ones that publish an image, cut a

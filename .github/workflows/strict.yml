@@ -9,7 +9,7 @@ name: strict
 #                      the pure parsing crates
 #
 # workflow_dispatch runs everything. Scheduled workflows only run on the
-# default branch, so this always tests dev.
+# default branch, so this always tests master.
 on:
   schedule:
     - cron: "41 2 * * *" # daily — hygiene + fuzz-regression + coverage

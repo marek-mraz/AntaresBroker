@@ -15,7 +15,7 @@ on:
   pull_request:
     paths: ["docs/**", "book.toml", "*.md", ".vale.ini"]
   push:
-    branches: [master, dev]
+    branches: [master]
     paths: ["docs/**", "book.toml", "*.md", ".vale.ini"]
   schedule:
     - cron: "23 5 * * 3"
