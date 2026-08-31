@@ -449,7 +449,7 @@ pub async fn parse_body(
             .resolve_for(&tenant_from(headers)?, &user_ctx)
             .await?
     } else {
-        if body_has_context(&value) {
+        if body_context_member(&value).is_some() {
             return Err(NgsiError::BadRequestData(
                 "application/json request must not carry an @context member (6.3.5)".into(),
             )
@@ -468,14 +468,6 @@ pub async fn parse_body(
         }
     };
     Ok(ParsedBody { value, ctx })
-}
-
-fn body_has_context(v: &Value) -> bool {
-    match v {
-        Value::Object(o) => o.contains_key("@context"),
-        Value::Array(a) => a.iter().any(body_has_context),
-        _ => false,
-    }
 }
 
 /// The @context member for a single-document body.
