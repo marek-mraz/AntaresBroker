@@ -499,3 +499,87 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
     );
     clean().await;
 }
+
+/// 4.22 through the batch paths.
+///
+/// 5.6.7.4 (p.170): "For each of the NGSI-LD Entities included in the input
+/// Array execute the behaviour defined by clause 5.6.1, but limited to a
+/// local operation". 5.6.8.4 (p.172): "Create the Entity locally if it does
+/// not exist … executing the behaviour defined by clause 5.6.1". 5.6.10.4
+/// (p.176): "For each of the NGSI-LD Entity IDs included in the input Array
+/// execute the behaviour defined by clause 5.6.6". Each batch operation is
+/// defined as its single-entity clause run per item, so the two paths may
+/// not answer differently about the same id — and 4.22 makes an entity past
+/// its expiry absent to both, whatever the reaping lag.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_do() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgexpiry").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    fn expired(id: &str) -> serde_json::Value {
+        let mut d = doc(id, 1);
+        d["expiresAt"] = json!("2020-01-01T00:00:00Z");
+        d
+    }
+    let seed = |id: &str| {
+        let _ = s.delete(&t, id);
+        assert!(s.create(&t, id, &expired(id)).expect("seed"));
+        // The row is there and already invalid: absent to a read, which is
+        // what makes every answer below about expiry and not about absence.
+        assert!(
+            s.get(&t, id).expect("get").is_none(),
+            "an expired entity must read as absent"
+        );
+    };
+
+    // The single-entity answers this batch is measured against.
+    let single = "urn:ngsi-ld:Test:exp-single";
+    seed(single);
+    assert!(
+        s.create(&t, single, &doc(single, 2)).expect("create"),
+        "5.6.1: creating over an expired entity creates"
+    );
+    seed(single);
+    assert!(
+        s.delete(&t, single).expect("delete").is_none(),
+        "5.6.6: deleting an expired entity finds nothing"
+    );
+
+    let id = "urn:ngsi-ld:Test:exp-batch".to_owned();
+
+    seed(&id);
+    assert_eq!(
+        s.batch_create(&t, &[(id.clone(), doc(&id, 3))])
+            .expect("batch_create"),
+        vec![true],
+        "5.6.7.4: the batch create of an expired id is the 5.6.1 create, which creates"
+    );
+
+    seed(&id);
+    let deleted = s
+        .batch_delete(&t, std::slice::from_ref(&id))
+        .expect("batch_delete");
+    assert!(
+        deleted.is_empty(),
+        "5.6.10.4: the batch delete of an expired id is the 5.6.6 delete, which finds nothing: {deleted:?}"
+    );
+
+    seed(&id);
+    let upserted = s
+        .batch_upsert_replace(&t, &[(id.clone(), doc(&id, 4))])
+        .expect("batch_upsert");
+    assert_eq!(
+        upserted
+            .iter()
+            .map(|(created, _)| *created)
+            .collect::<Vec<_>>(),
+        vec![true],
+        "5.6.8.4: an expired entity does not exist, so the batch upsert creates it"
+    );
+
+    let _ = s.delete(&t, &id);
+    let _ = s.delete(&t, single);
+}

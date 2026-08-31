@@ -747,9 +747,15 @@ impl PgEntityStore {
     /// Batch create: ONE multi-row INSERT for the whole batch (the jsonb
     /// elements form of UNNEST), one transaction, one commit.
     /// Returns a created-flag per input item, input order preserved.
-    /// Duplicate ids within one batch are pre-deduped here: `ON CONFLICT DO
-    /// NOTHING` raises "cannot affect row a second time" otherwise — the
-    /// later duplicate reports `false` (5.5.11.1: the first instance wins).
+    /// Duplicate ids within one batch are pre-deduped here: `ON CONFLICT`
+    /// raises "cannot affect row a second time" otherwise — the later
+    /// duplicate reports `false` (5.5.11.1: the first instance wins).
+    ///
+    /// 5.6.7.4: "For each of the NGSI-LD Entities included in the input
+    /// Array execute the behaviour defined by clause 5.6.1, but limited to a
+    /// local operation" — so the conflict clause is `create`'s, and an
+    /// entity past its `expiresAt` is absent (4.22) and gets created over
+    /// rather than reported as an id that already exists.
     pub fn batch_create(
         &self,
         tenant: &TenantId,
@@ -786,7 +792,14 @@ impl PgEntityStore {
                           OR (e->>'location' IS NOT NULL
                               AND NOT COALESCE(ST_IsValid(try_geomfromgeojson(e->>'location')), false))
                  FROM jsonb_array_elements($2::jsonb) AS e
-                 ON CONFLICT (tenant_id, id) DO NOTHING
+                 ON CONFLICT (tenant_id, id) DO UPDATE SET
+                        entity = EXCLUDED.entity, types = EXCLUDED.types,
+                        scopes = EXCLUDED.scopes, created_at = EXCLUDED.created_at,
+                        modified_at = EXCLUDED.modified_at,
+                        expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
+                        location_ambiguous = EXCLUDED.location_ambiguous,
+                        version = 1
+                 WHERE entities.expires_at IS NOT NULL AND entities.expires_at <= now()
                  RETURNING id",
             )
             .bind(tenant.as_str())
@@ -827,6 +840,11 @@ impl PgEntityStore {
 
     /// Batch delete: ONE statement, returning each deleted row's previous
     /// document (the change-hook before-image).
+    ///
+    /// 5.6.10.4: "For each of the NGSI-LD Entity IDs included in the input
+    /// Array execute the behaviour defined by clause 5.6.6, but limited to a
+    /// local operation" — so an entity past its `expiresAt` is absent (4.22)
+    /// and is not deleted here either, exactly as `delete` refuses it.
     pub fn batch_delete(
         &self,
         tenant: &TenantId,
@@ -837,6 +855,7 @@ impl PgEntityStore {
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                   AND (expires_at IS NULL OR expires_at > now())
                  RETURNING id, entity, types, version, created_at::text",
             )
             .bind(tenant.as_str())
@@ -879,6 +898,13 @@ impl PgEntityStore {
     /// captured by a single `FOR UPDATE` select in the same transaction.
     /// Returns per input item: (created?, before-image) — the before-image is
     /// for the caller's change hook and comes from the same-tx FOR UPDATE.
+    ///
+    /// 5.6.8.4: "Create the Entity locally if it does not exist (i.e. no
+    /// Entity with the same Entity ID is present) executing the behaviour
+    /// defined by clause 5.6.1, but limited to a local operation" — an
+    /// entity past its `expiresAt` does not exist (4.22), so it takes the
+    /// creation branch: fresh `created_at`, `version` back to 1 and a
+    /// created-flag, which is what splits 201 from 204 at the API.
     pub fn batch_upsert_replace(
         &self,
         tenant: &TenantId,
@@ -903,15 +929,22 @@ impl PgEntityStore {
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // lock + before-images in one statement (ordered: stable lock order)
             let prev_rows = sqlx::query(
-                "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                "SELECT id, entity,
+                        (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+                 FROM entities WHERE tenant_id = $1 AND id = ANY($2)
                  ORDER BY id FOR UPDATE",
             )
             .bind(tenant.as_str())
             .bind(&ids)
             .fetch_all(&mut *tx)
             .await?;
+            // 4.22: an expired row is already invalid, so it is not a
+            // before-image — the upsert that replaces it is a creation and
+            // its change event has nothing before it. The lock still covers
+            // the row, so the stable lock order is unchanged.
             let prevs: std::collections::HashMap<String, Value> = prev_rows
                 .into_iter()
+                .filter(|r| !r.get::<bool, _>(2))
                 .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
                 .collect();
             let rows = sqlx::query(
@@ -935,8 +968,15 @@ impl PgEntityStore {
                         scopes = EXCLUDED.scopes, modified_at = EXCLUDED.modified_at,
                         expires_at = EXCLUDED.expires_at, location = EXCLUDED.location,
                         location_ambiguous = EXCLUDED.location_ambiguous,
-                        version = entities.version + 1
-                 RETURNING id, (xmax = 0) AS inserted, version, created_at::text",
+                        created_at = CASE WHEN entities.expires_at IS NOT NULL
+                                           AND entities.expires_at <= now()
+                                          THEN EXCLUDED.created_at
+                                          ELSE entities.created_at END,
+                        version = CASE WHEN entities.expires_at IS NOT NULL
+                                        AND entities.expires_at <= now()
+                                       THEN 1 ELSE entities.version + 1 END
+                 RETURNING id, (xmax = 0 OR version = 1) AS inserted,
+                           version, created_at::text",
             )
             .bind(tenant.as_str())
             .bind(Value::Array(payload))
