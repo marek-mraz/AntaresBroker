@@ -303,11 +303,14 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
             continue;
         }
         if r.key_values {
-            if let (1, Some(one)) = (instances.len(), instances.pop()) {
-                out.insert(k.clone(), one);
+            if instances.len() == 1 {
+                // 4.5.4: a lone instance simplifies to its bare value
+                out.extend(instances.pop().map(|one| (k.clone(), one)));
             } else {
-                // 4.5.4 multi-instance simplified form: a "dataset" map keyed
-                // by datasetId ("@none" for the default instance)
+                // 4.5.4 multi-attribute case: a "dataset" map holding one
+                // key-value pair for each datasetId, "@none" for the default
+                // instance. The pairing below is positional, so `kept` and
+                // `instances` must both still be whole here.
                 let mut ds = Map::new();
                 for (orig, simple) in kept.iter().zip(instances.iter()) {
                     let key = orig
@@ -850,7 +853,8 @@ mod clause_6_3_7 {
 
     /// 4.5.4: with several instances the simplified form is a dataset map
     /// keyed by datasetId, "@none" standing for the default instance — a bare
-    /// array of values would lose which instance is which.
+    /// array of values would lose which instance is which. The map carries one
+    /// pair for each datasetId, so a dropped instance is a dropped datasetId.
     #[test]
     fn simplified_multi_instance_uses_the_dataset_map() {
         let out = apply(
@@ -874,6 +878,29 @@ mod clause_6_3_7 {
             },
         );
         assert_eq!(one["https://example.org/a"], json!(1));
+        // 4.5.4 EXAMPLE 2 is three instances; the map is built by pairing
+        // instances with the rows they came from, so an instance lost on the
+        // way leaves a map one pair short rather than an error
+        let three = apply(
+            &json!({"https://example.org/name": [
+                {"type": "Property", "value": "David Robert Jones"},
+                {"type": "Property", "value": "David Bowie",
+                 "datasetId": "urn:ngsi-ld:datasetId:001"},
+                {"type": "Property", "value": "Ziggy Stardust",
+                 "datasetId": "urn:ngsi-ld:datasetId:002"}
+            ]}),
+            &Repr {
+                key_values: true,
+                ..Repr::default()
+            },
+        );
+        let ds = three["https://example.org/name"]["dataset"]
+            .as_object()
+            .expect("dataset map");
+        assert_eq!(ds.len(), 3, "one pair for each datasetId");
+        assert_eq!(ds["@none"], "David Robert Jones");
+        assert_eq!(ds["urn:ngsi-ld:datasetId:001"], "David Bowie");
+        assert_eq!(ds["urn:ngsi-ld:datasetId:002"], "Ziggy Stardust");
     }
 
     /// datasetId= selects instances; "@none" selects the default one. An
