@@ -31,8 +31,9 @@ pub struct PgTemporalStore {
 /// sweep. One shared literal so `query`, its count fallback and `get_range`
 /// can never disagree.
 ///
-/// The stamp is jsonb TEXT, so it goes through `try_timestamptz` (migration
-/// 0011): a bare cast RAISES on anything it cannot parse, and these reads are
+/// The stamp is jsonb TEXT, so it goes through `try_timestamptz`
+/// (0001_init.sql): a bare cast RAISES on anything it cannot parse, and
+/// these reads are
 /// tenant-wide — one bad stamp would take down the whole tenant's temporal
 /// API rather than hide one entity. An unusable stamp reads as no expiry, the
 /// same direction the memory arm takes in `filter::expired_at`.
@@ -141,7 +142,7 @@ async fn insert_rows(
         return Ok(());
     }
     // geo_value: extracted per instance when the value LOOKS like a GeoJSON
-    // geometry; try_geomfromgeojson (0009) maps anything PostGIS rejects to
+    // geometry; try_geomfromgeojson (0001_init.sql) maps anything PostGIS rejects to
     // NULL, which the S3 prefilter treats as "reaches the evaluator".
     sqlx::query(
         "INSERT INTO attr_instances
@@ -596,7 +597,7 @@ impl PgTemporalStore {
         }
         // 5.7.4.4 S3 superset prefilter: entities with no windowed instance
         // of the geoproperty possibly satisfying the geoquery are never
-        // reconstructed. NULL geo_value (unextracted / pre-0009 rows) always
+        // reconstructed. NULL geo_value (rows with no extracted geometry) always
         // survives; GeoQuery::matches stays the arbiter.
         if let Some((spec, iri)) = f.geo {
             let attr_bind = binds.len() + 1;

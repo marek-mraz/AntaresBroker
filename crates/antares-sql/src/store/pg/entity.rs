@@ -616,7 +616,7 @@ impl PgEntityStore {
 
     /// One cheap probe: is the client's query geometry OGC-valid? Unparseable
     /// GeoJSON counts as invalid — same outcome, no pushdown — and reaches
-    /// that answer through `try_geomfromgeojson` (migration 0009), so the
+    /// that answer through `try_geomfromgeojson` (0001_init.sql), so the
     /// probe itself can never raise.
     fn geometry_is_valid(&self, spec: &crate::compile::geo::GeoSpec<'_>) -> bool {
         let geojson = serde_json::to_string(&serde_json::json!({

@@ -119,7 +119,8 @@ pub async fn temporal_maintenance(
     if claimed.is_none() {
         return Ok("skipped: another instance holds the claim".into());
     }
-    // retention DML is cross-tenant service work (see migration 0005)
+    // retention DML is cross-tenant service work (the `antares.service`
+    // escape in 0001_init.sql)
     crate::store::pg::set_service(&mut tx).await?;
     let mut done: Vec<String> = Vec::new();
     // The 4.22 reaps run in their own transactions AFTER this one commits: both
@@ -330,7 +331,7 @@ async fn default_partition_load(pool: &PgPool) -> Result<Option<String>, sqlx::E
 
 /// The 4.22 expired-entity DELETE, isolated so a reap that outruns
 /// `statement_timeout` costs only itself. Served by the partial index on
-/// `expires_at` (migration 0010) — without it this is a sequential scan of
+/// `expires_at` (0001_init.sql) — without it this is a sequential scan of
 /// every entity in the deployment. Service role: the reap is cross-tenant work
 /// (RLS would hide other tenants' rows).
 async fn reap_expired_entities(pool: &PgPool) -> Result<u64, sqlx::Error> {
@@ -384,7 +385,7 @@ async fn reap_expired_instances(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     crate::store::pg::set_service(&mut tx).await?;
     let n = sqlx::query(
-        // try_timestamptz (migration 0011), not a bare cast: `expiresAt` is
+        // try_timestamptz (0001_init.sql), not a bare cast: `expiresAt` is
         // jsonb TEXT and a stamp PostgreSQL cannot parse would abort this
         // DELETE for the whole deployment, every tick, forever.
         "DELETE FROM attr_instances

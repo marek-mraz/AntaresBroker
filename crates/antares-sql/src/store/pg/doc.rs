@@ -234,7 +234,7 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
 /// never a version behind the document. Shared by `upsert` and `mutate` —
 /// the row lock lives in here, so no caller can do it atomically itself.
 ///
-/// The geometry goes through `try_geomfromgeojson` (migration 0009): a
+/// The geometry goes through `try_geomfromgeojson` (0001_init.sql): a
 /// location PostGIS cannot parse leaves the column NULL instead of aborting
 /// the write.
 async fn rebuild_csource_index(

@@ -164,7 +164,7 @@ fn bypasses(probe: Result<bool, sqlx::Error>) -> bool {
     })
 }
 
-/// Arm the transaction-scoped `antares.service` escape (migration 0005) for
+/// Arm the transaction-scoped `antares.service` escape (0001_init.sql) for
 /// the two internal cross-tenant jobs: outbox drain and temporal retention.
 /// NEVER call from a request path — request queries carry explicit tenant
 /// predicates and run under `set_tenant` only.

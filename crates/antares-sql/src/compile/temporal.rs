@@ -102,10 +102,10 @@ pub fn compile_instance_range(
 /// Only timeproperties with a parsed column compile; others prune by text
 /// alone (`None`).
 pub fn column_range_bound(r: &InstanceRange<'_>, alias: &str, time_bind: usize) -> Option<String> {
-    // deleted_at is nullable AND was unfilled before migration 0009's era —
-    // its bound must let NULL rows through to the text predicate (which
-    // decides membership either way); the other columns are NOT NULL since
-    // schema 0003, so their bounds stay bare.
+    // `deleted_at` is the one nullable column of the four (0001_init.sql):
+    // its bound must let NULL rows through to the text predicate, which
+    // decides membership either way. `observed_at`, `created_at` and
+    // `modified_at` are NOT NULL, so their bounds stay bare.
     let (col, nullable) = match r.timeproperty {
         "observedAt" => ("observed_at", false),
         "createdAt" => ("created_at", false),

@@ -59,8 +59,8 @@ async fn migrations_apply_and_indexes_exist() {
     let pool = pg::connect(&url, 5).await.expect("connect+migrate");
 
     // The LIVE index set on entities — the exact indexes the compiled
-    // statements route through (0005 dropped the dead scopes/modified pair;
-    // pg_explain.rs proves usability, this proves existence).
+    // statements route through (pg_explain.rs proves usability, this proves
+    // existence).
     for idx in [
         "i_entities_location",
         "i_entities_jsonb",

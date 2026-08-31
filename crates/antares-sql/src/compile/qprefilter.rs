@@ -517,8 +517,8 @@ mod tests {
         let c = compile_prefilter(&ast, None, "m", 1, &ex).expect("compiles");
         assert!(!c.sql.contains("observed_at"), "{}", c.sql);
         assert_dense(&c, 1);
-        // deletedAt now HAS a column bound — NULL-tolerant, because the
-        // column was unfilled before migration 0009's era
+        // deletedAt now HAS a column bound — NULL-tolerant, because
+        // `deleted_at` is the one nullable column of the four
         let r = InstanceRange {
             timeproperty: "deletedAt",
             ..between()

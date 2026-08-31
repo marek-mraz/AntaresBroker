@@ -65,8 +65,8 @@ pub fn compile_geo(spec: &GeoSpec<'_>, col: &str, first_bind: usize) -> Option<C
 
 /// The same predicate over a PER-INSTANCE geometry column
 /// (`attr_instances.geo_value`, 5.7.4.4 S3): each row is one instance, so
-/// there is no ambiguity flag — a NULL `geo_value` (unextracted value or a
-/// pre-0009 row) is the "reaches the evaluator" arm instead. No geoproperty
+/// there is no ambiguity flag — a NULL `geo_value` (a value the extractor
+/// could not take) is the "reaches the evaluator" arm instead. No geoproperty
 /// restriction: the caller binds the attr IRI itself.
 pub fn compile_geo_instance(
     spec: &GeoSpec<'_>,
@@ -424,7 +424,7 @@ mod tests {
         .expect("compiles");
         assert!(
             c.sql.ends_with(" OR gi.geo_value IS NULL)"),
-            "a NULL (unextracted / pre-0009) instance must reach the evaluator: {}",
+            "an instance with an unextracted geometry must reach the evaluator: {}",
             c.sql
         );
         assert!(c.sql.contains("ST_Within(gi.geo_value,"), "{}", c.sql);
