@@ -536,13 +536,22 @@ impl CurrentStateDriver for ExampleStore {
             .is_some())
     }
 
-    fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
+    /// Rows without their `body`: a body may be 5 MiB and only the `Cached`
+    /// rows are capped in number, so a plugin that returned whole rows here
+    /// would put gigabytes on the boot path.
+    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
         Ok(self
             .contexts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .cloned()
+            .map(|v| {
+                let mut row = v.clone();
+                if let Some(o) = row.as_object_mut() {
+                    o.remove("body");
+                }
+                row
+            })
             .collect())
     }
 }

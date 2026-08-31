@@ -168,11 +168,33 @@ async fn jsonld_contexts_cross_tenant_roundtrip() {
     s.context_put(id, &json!({"@context": {"n": "https://x/n"}}), "Cached")
         .expect("put");
     assert!(s.context_get(id).expect("get").is_some());
-    assert!(s
-        .context_list()
-        .expect("list")
+    // The listing read carries metadata and never the stored document: a
+    // body is accepted up to 5 MiB and only the Cached rows are capped in
+    // number, so a read that carried bodies was gigabytes on the boot path.
+    // The row is found by id, and the document comes back only from `get`.
+    s.context_put(
+        "urn:meta:probe",
+        &json!({"localId": "urn:meta:probe", "kind": "Hosted",
+                "body": {"@context": {"big": "https://x/big"}}}),
+        "Hosted",
+    )
+    .expect("put");
+    let meta = s.context_list_meta().expect("list");
+    let probe = meta
         .iter()
-        .any(|c| c["@context"]["n"] == "https://x/n"));
+        .find(|c| c["localId"] == "urn:meta:probe")
+        .expect("the row is listed by its metadata");
+    assert!(
+        probe.get("body").is_none(),
+        "the metadata read carried the @context document: {probe}"
+    );
+    assert_eq!(probe["kind"], "Hosted", "the metadata itself survives");
+    assert_eq!(
+        s.context_get("urn:meta:probe").expect("get").expect("row")["body"]["@context"]["big"],
+        "https://x/big",
+        "the document is still readable by id"
+    );
+    assert!(s.context_delete("urn:meta:probe").expect("delete"));
     assert!(s.context_delete(id).expect("delete"));
     assert!(s.context_get(id).expect("get").is_none());
 }

@@ -442,7 +442,16 @@ pub trait CurrentStateDriver: Send + Sync {
     /// Delete a stored @context document; `false` if it was absent.
     fn context_delete(&self, id: &str) -> Result<bool, NgsiError>;
     /// Every stored @context document.
-    fn context_list(&self) -> Result<Vec<Value>, NgsiError>;
+    /// Every stored `@context` row WITHOUT its `body` member — the url,
+    /// localId, kind, owner and usage counters, and not the document.
+    ///
+    /// There is deliberately no read that returns every row WITH its body.
+    /// A body is accepted up to `MAX_CONTEXT_BYTES` (5 MiB) and only the
+    /// `Cached` rows are capped in number, so one such read materializes
+    /// gigabytes — on the boot path, where it decides whether the broker
+    /// starts at all. The callers that need one body ask for it by id
+    /// ([`Self::context_get`]); nothing needs them all at once.
+    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError>;
 }
 
 /// Typed sugar over the boxed mutate seam — call sites keep their
@@ -954,7 +963,7 @@ mod tests {
         fn context_delete(&self, _id: &str) -> Result<bool, NgsiError> {
             Ok(false)
         }
-        fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
+        fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
             Ok(Vec::new())
         }
     }

@@ -829,13 +829,22 @@ impl Store {
         })
     }
 
-    pub fn context_list(&self) -> Vec<Value> {
+    /// Every row without its `body` member (the `@context` document itself).
+    /// A body may be 5 MiB and only the `Cached` rows are capped in number,
+    /// so cloning whole rows here was a multi-gigabyte copy on the boot path.
+    pub fn context_list_meta(&self) -> Vec<Value> {
         self.inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contexts
             .values()
-            .cloned()
+            .map(|v| {
+                let mut row = v.clone();
+                if let Some(o) = row.as_object_mut() {
+                    o.remove("body");
+                }
+                row
+            })
             .collect()
     }
 }
@@ -1388,7 +1397,7 @@ mod tests {
             );
         }
         let cached = |s: &Store| {
-            s.context_list()
+            s.context_list_meta()
                 .iter()
                 .filter(|d| d["kind"] == "Cached")
                 .count()

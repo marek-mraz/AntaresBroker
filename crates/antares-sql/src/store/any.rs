@@ -1058,11 +1058,11 @@ impl AnyStore {
         }
     }
 
-    pub fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
+    pub fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.context_list()),
+            AnyStore::Mem(s) => Ok(s.context_list_meta()),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_list().map_err(db),
+            AnyStore::Pg(p) => p.docs.context_list_meta().map_err(db),
         }
     }
 }
@@ -1285,8 +1285,8 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
         AnyStore::context_delete(self, id)
     }
-    fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::context_list(self)
+    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::context_list_meta(self)
     }
 }
 

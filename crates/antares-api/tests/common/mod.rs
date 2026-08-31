@@ -173,7 +173,7 @@ impl CurrentStateDriver for FlakyList {
     fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
         self.inner.context_delete(id)
     }
-    fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
-        self.inner.context_list()
+    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
+        self.inner.context_list_meta()
     }
 }

@@ -144,7 +144,7 @@ fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
 // ponytail: one scan of jsonld_contexts per purge, which is an admin
 // operation; a tenant column and an index if it ever runs hot.
 pub async fn purge_tenant(st: &AppState, tenant: &TenantId) -> Result<(), NgsiError> {
-    for row in st.store.context_list()? {
+    for row in st.store.context_list_meta()? {
         if row["kind"].as_str() == Some("Cached") || !row_visible(&row, tenant) {
             continue;
         }
@@ -299,7 +299,7 @@ pub async fn list_contexts(
             String,
             Option<antares_jsonld::CtxUsage>,
         )> = Vec::new();
-        for c in st.store.context_list()? {
+        for c in st.store.context_list_meta()? {
             let kind = c["kind"].as_str().unwrap_or("Hosted").to_owned();
             if !keep(&kind) || !row_visible(&c, &tenant) {
                 continue;

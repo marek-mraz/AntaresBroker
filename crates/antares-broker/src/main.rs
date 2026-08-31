@@ -819,7 +819,11 @@ async fn run(
     // what a previous life already downloaded. (The writer itself is wired in
     // AppState::with_store — rows are the 5.13 source of truth.)
     {
-        for row in state.store.context_list().unwrap_or_default() {
+        // Metadata first, then ONE body at a time. Reading every row whole
+        // put up to MAX_CONTEXT_BYTES per row in memory at once, capped only
+        // for Cached rows and not at all for the rest — a boot that a client
+        // could make impossible by storing large @contexts.
+        for row in state.store.context_list_meta().unwrap_or_default() {
             if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
                 continue;
             }
@@ -830,7 +834,10 @@ async fn run(
             ) else {
                 continue;
             };
-            if let Some(v) = row.pointer("/body/@context") {
+            let Some(full) = state.store.context_get(id).ok().flatten() else {
+                continue;
+            };
+            if let Some(v) = full.pointer("/body/@context") {
                 state.loader.seed_cached(url, id, created, v.clone()).await;
             }
         }

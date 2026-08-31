@@ -871,9 +871,14 @@ impl PgDocStore {
         })
     }
 
-    pub fn context_list(&self) -> Result<Vec<Value>, sqlx::Error> {
+    /// Every row without its `@context` document: `- 'body'` drops that
+    /// member in the database, so the bodies are never on the wire, never
+    /// decoded and never resident. A row's body may be 5 MiB and only the
+    /// `Cached` rows are capped in number, so selecting whole rows here was
+    /// a multi-gigabyte read on the boot path.
+    pub fn context_list_meta(&self) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
-            let rows = sqlx::query("SELECT body FROM jsonld_contexts ORDER BY id")
+            let rows = sqlx::query("SELECT body - 'body' FROM jsonld_contexts ORDER BY id")
                 .fetch_all(&self.pool)
                 .await?;
             Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
