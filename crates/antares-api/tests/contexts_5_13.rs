@@ -505,3 +505,128 @@ async fn clause_5_5_10_hosted_context_does_not_resolve_for_another_tenant() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "nothing was stored: {body}");
 }
+
+/// 5.5.10 again, on the Subscription surface: `jsonldContext` (Table 5.2.12-1)
+/// is the @context a Notification is compacted against, so resolving it
+/// outside the Tenant hands the subscriber the term mappings another Tenant
+/// stored under 5.13.1. Creation is where the URL is dereferenced, so that is
+/// where the Tenant has to be in scope.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_10_a_subscription_does_not_resolve_another_tenants_context() {
+    let st = state();
+    let loc = add_hosted_as(&st, "alpha", "A1").await;
+    let (_, _, meta) = send(
+        &st,
+        tenant_req("GET", &format!("{loc}?details=true"), "alpha", None),
+    )
+    .await;
+    let url = meta["URL"].as_str().expect("stored @context URL");
+
+    let sub = |id: &str| {
+        json!({
+            "id": id,
+            "type": "Subscription",
+            "entities": [{"type": "Device"}],
+            "jsonldContext": url,
+            "notification": {"endpoint": {"uri": "http://127.0.0.1:9/n"}},
+        })
+    };
+    let create = |tenant: &str, id: &str| {
+        tenant_req("POST", "/ngsi-ld/v1/subscriptions", tenant, Some(sub(id)))
+    };
+
+    // the owner dereferences its own @context
+    let (status, _, body) = send(&st, create("alpha", "urn:ngsi-ld:Subscription:ctx-own")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // 5.5.6: for any other Tenant the @context is as absent as one that
+    // never existed, so the member is unresolvable rather than private data
+    let (status, _, body) = send(&st, create("beta", "urn:ngsi-ld:Subscription:ctx-other")).await;
+    assert_eq!(
+        status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "another Tenant must not resolve a Hosted @context it does not own: {body}"
+    );
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable",
+        "{body}"
+    );
+    let (status, _, body) = send(
+        &st,
+        tenant_req(
+            "GET",
+            "/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:ctx-other",
+            "beta",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nothing was stored: {body}");
+}
+
+/// 5.5.10 on the batch write path: 5.6.7 and its siblings resolve the
+/// `@context` of every item (or the Link header standing in for it) before
+/// expanding the Entity, so an unscoped resolution there lets one Tenant
+/// store Entities expanded through another Tenant's Hosted @context.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_5_10_a_batch_does_not_resolve_another_tenants_context() {
+    let st = state();
+    let loc = add_hosted_as(&st, "alpha", "A1").await;
+    let (_, _, meta) = send(
+        &st,
+        tenant_req("GET", &format!("{loc}?details=true"), "alpha", None),
+    )
+    .await;
+    let url = meta["URL"].as_str().expect("stored @context URL");
+    let link = format!(
+        "<{url}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
+    );
+
+    let batch = |tenant: &str, id: &str| {
+        let body = json!([{"id": id, "type": "Device", "A1": {"type": "Property", "value": 1}}])
+            .to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entityOperations/create")
+            .header("NGSILD-Tenant", tenant)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .header("Link", &link)
+            .body(Body::from(body))
+            .expect("request")
+    };
+
+    let own = "urn:ngsi-ld:Device:batch-own";
+    let (status, _, body) = send(&st, batch("alpha", own)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_, _, stored) = send(
+        &st,
+        tenant_req("GET", &format!("/ngsi-ld/v1/entities/{own}"), "alpha", None),
+    )
+    .await;
+    assert!(
+        stored.get("urn:ngsi-ld:attributes:A1").is_some(),
+        "the owner's term must have expanded through its own @context: {stored}"
+    );
+
+    // beta names the same URL: the @context does not resolve for it, so the
+    // item fails and nothing is stored under beta
+    let other = "urn:ngsi-ld:Device:batch-other";
+    let (status, _, body) = send(&st, batch("beta", other)).await;
+    assert_ne!(
+        status,
+        StatusCode::CREATED,
+        "another Tenant's Hosted @context resolved in a batch: {body}"
+    );
+    let (status, _, body) = send(
+        &st,
+        tenant_req(
+            "GET",
+            &format!("/ngsi-ld/v1/entities/{other}"),
+            "beta",
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nothing was stored: {body}");
+}

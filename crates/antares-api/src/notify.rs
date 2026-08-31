@@ -765,15 +765,19 @@ pub(crate) use antares_matcher::{
 
 /// The @context governing a subscription's notifications (5.8.6): the
 /// jsonldContext member if set, else the @context of the creating request.
-pub(crate) async fn sub_context(st: &AppState, sub: &Value) -> Arc<Context> {
+pub(crate) async fn sub_context(st: &AppState, tenant: &TenantId, sub: &Value) -> Arc<Context> {
     let source = sub
         .get("jsonldContext")
         .cloned()
         .or_else(|| sub.get("__context").cloned());
     match source {
+        // 5.5.10: the Subscription belongs to one Tenant, so the @context it
+        // names resolves within that Tenant — a Hosted @context another Tenant
+        // stored (5.13.1) is not in scope here and falls back to the core
+        // context rather than compacting this Notification against it.
         Some(v) if !v.is_null() => st
             .loader
-            .resolve_quiet(&v)
+            .resolve_quiet_for(tenant, &v)
             .await
             .unwrap_or_else(|_| st.loader.core()),
         _ => st.loader.core(),
@@ -1273,7 +1277,7 @@ async fn matches_for(
         if !attr_trigger_fired && !entity_trigger_fired {
             continue;
         }
-        let ctx = sub_context(st, &sub).await;
+        let ctx = sub_context(st, &tenant, &sub).await;
         if !selector_match(&sub, eval_doc, &ctx) {
             continue;
         }
@@ -1477,7 +1481,7 @@ pub async fn interval_tick(st: &AppState) {
             if st.nats && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
                 continue;
             }
-            let ctx = sub_context(st, &sub).await;
+            let ctx = sub_context(st, &tenant, &sub).await;
             let now = now_iso();
             // 5.8.6: the periodic Notification "shall include all the
             // subscribed Entities that match the query, geoquery and Scope
@@ -1572,7 +1576,7 @@ pub async fn interval_tick(st: &AppState) {
             if st.nats && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval) {
                 continue;
             }
-            let ctx = sub_context(st, &sub).await;
+            let ctx = sub_context(st, &tenant, &sub).await;
             let spec = crate::csource::spec_for_subscription(&sub);
             let data: Vec<Value> = st
                 .store
@@ -1737,7 +1741,7 @@ pub async fn prepare_csource_jobs(
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
         }
-        let ctx = sub_context(st, &sub).await;
+        let ctx = sub_context(st, tenant, &sub).await;
         let Some(reason) = csource_trigger(&sub, before.as_ref(), after.as_ref(), &ctx) else {
             continue;
         };
@@ -1847,7 +1851,7 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     if !is_active(&sub) {
         return;
     }
-    let ctx = sub_context(st, &sub).await;
+    let ctx = sub_context(st, tenant, &sub).await;
     let spec = crate::csource::spec_for_subscription(&sub);
     let data: Vec<Value> = st
         .store

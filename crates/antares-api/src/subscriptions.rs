@@ -6,7 +6,7 @@
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{parse_datetime, Context};
-use antares_model::NgsiError;
+use antares_model::{NgsiError, TenantId};
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
 use axum::body::Bytes;
@@ -594,7 +594,21 @@ fn check_endpoint(st: &AppState, norm: &Map<String, Value>) -> Result<(), NgsiEr
     st.sinks.require(uri, &notifier_info)
 }
 
-async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Result<(), ApiError> {
+/// 5.2.12 `jsonldContext`: the @context a Notification of this Subscription
+/// is compacted against, so the member is dereferenced here rather than at
+/// first delivery — a shape that is not a URL or an array of URLs is 400,
+/// one that does not resolve is 504.
+///
+/// Resolution is Tenant-scoped (5.5.10): a Hosted @context belongs to the
+/// Tenant that stored it (5.13.1), and resolving the URL outside that Tenant
+/// would compact every Notification of this Subscription against another
+/// Tenant's term mappings. For any other Tenant the URL is as absent as one
+/// that never existed.
+async fn check_jsonld_context(
+    st: &AppState,
+    tenant: &TenantId,
+    norm: &Map<String, Value>,
+) -> Result<(), ApiError> {
     let Some(v) = norm.get("jsonldContext") else {
         return Ok(());
     };
@@ -610,7 +624,7 @@ async fn check_jsonld_context(st: &AppState, norm: &Map<String, Value>) -> Resul
         ))
         .into());
     }
-    st.loader.resolve(v).await?;
+    st.loader.resolve_for(tenant, v).await?;
     Ok(())
 }
 
@@ -629,7 +643,7 @@ pub async fn create(
     ))?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
     check_endpoint(st, &norm)?;
-    check_jsonld_context(st, &norm).await?;
+    check_jsonld_context(st, &tenant, &norm).await?;
     let id = match norm.get("id").and_then(Value::as_str) {
         Some(id) => id.to_owned(),
         None => {
@@ -785,7 +799,7 @@ pub async fn update(
     }
     let norm = normalize_subscription(obj, &parsed.ctx, true)?;
     check_endpoint(st, &norm)?;
-    check_jsonld_context(st, &norm).await?;
+    check_jsonld_context(st, &tenant, &norm).await?;
     let ts = now_iso();
     let res = st.store.mutate(&tenant, kind, id, |doc| {
         let target = antares_store::stored_object(doc)?;

@@ -850,13 +850,16 @@ pub async fn forward(
         query.push(("local".into(), "true".into()));
     }
     if let Some(reg_ctx_url) = csi_get("jsonldContext") {
+        // 5.5.10: both URLs are Tenant data — the caller's own @context and one
+        // the Registration names — so they resolve within the forwarding
+        // Tenant, never against a Hosted @context another Tenant stored.
         let orig = st
             .loader
-            .resolve_quiet(&Value::String(ctx_url.to_owned()))
+            .resolve_quiet_for(tenant, &Value::String(ctx_url.to_owned()))
             .await;
         let target = st
             .loader
-            .resolve_quiet(&Value::String(reg_ctx_url.to_owned()))
+            .resolve_quiet_for(tenant, &Value::String(reg_ctx_url.to_owned()))
             .await;
         if let (Ok(orig), Ok(target)) = (orig, target) {
             if let Some(b) = body.as_mut() {

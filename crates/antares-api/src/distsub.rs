@@ -336,7 +336,7 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
         let (st2, t2, sub2) = (st.clone(), tenant.clone(), sub.clone());
         let ctx_url = sub_ctx_url(st, &sub);
         crate::spawn(async move {
-            let ctx = crate::notify::sub_context(&st2, &sub2).await;
+            let ctx = crate::notify::sub_context(&st2, &t2, &sub2).await;
             let Some(mut copy) = reduced_copy(&st2, &sub2, &reg, &remote_id, &ctx) else {
                 return;
             };
@@ -453,7 +453,7 @@ pub(crate) async fn on_csource_notification(
     if !distributed(&sub) {
         return;
     }
-    let ctx = crate::notify::sub_context(st, &sub).await;
+    let ctx = crate::notify::sub_context(st, tenant, &sub).await;
     let ctx_url = sub_ctx_url(st, &sub);
     let via = sub_via_headers(&sub);
     let seen = crate::federation::via_tokens(&via);
@@ -740,7 +740,7 @@ async fn split_merge(
     origin_reg: Option<&str>,
     data: Vec<Value>,
 ) -> Vec<Value> {
-    let ctx = crate::notify::sub_context(st, sub).await;
+    let ctx = crate::notify::sub_context(st, tenant, sub).await;
     let headers = HeaderMap::new();
     let mut out = Vec::new();
     for ent in data {
@@ -883,7 +883,7 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
     // scope, which may be broader than the original Subscription's own
     // entities selector — re-filter inbound entities against the original
     // selector (id over idPattern precedence included) before forwarding.
-    let sel_ctx = crate::notify::sub_context(st, &sub).await;
+    let sel_ctx = crate::notify::sub_context(st, &tenant, &sub).await;
     data.retain(|e| {
         let id = e.get("id").and_then(Value::as_str).unwrap_or("");
         let types: Vec<Value> = match e.get("type") {
@@ -916,7 +916,7 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
     // 5.8.6: forward to the original subscriber under the OWN subscriptionId
     let (st2, sub2, t2) = (st.clone(), sub.clone(), tenant.clone());
     crate::spawn(async move {
-        let ctx = crate::notify::sub_context(&st2, &sub2).await;
+        let ctx = crate::notify::sub_context(&st2, &t2, &sub2).await;
         crate::notify::deliver(&st2, &t2, &sub2, data, &ctx).await;
     });
     Ok(StatusCode::OK.into_response())

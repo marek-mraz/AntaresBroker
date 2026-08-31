@@ -31,8 +31,14 @@ fn parse_batch_body(body: &[u8]) -> Result<Value, String> {
     serde_json::from_slice(body).map_err(|e| e.to_string())
 }
 
+/// One batch body into (item, its resolved @context) pairs. Each item's
+/// `@context` — or the Link header standing in for it — resolves within the
+/// requesting Tenant (5.5.10): a Hosted @context belongs to the Tenant that
+/// stored it (5.13.1), so for any other Tenant the URL is unresolvable rather
+/// than a set of term mappings the Entity would be expanded through.
 async fn parse_batch(
     st: &AppState,
+    tenant: &antares_model::TenantId,
     headers: &HeaderMap,
     body: &[u8],
 ) -> ApiResult<Vec<(Value, ApiResult<std::sync::Arc<antares_jsonld::Context>>)>> {
@@ -74,7 +80,11 @@ async fn parse_batch(
     for item in items {
         let ctx = if ld {
             match item.get("@context") {
-                Some(c) => st.loader.resolve(c).await.map_err(ApiError::from),
+                Some(c) => st
+                    .loader
+                    .resolve_for(tenant, c)
+                    .await
+                    .map_err(ApiError::from),
                 None => Err(NgsiError::BadRequestData(
                     "ld+json batch entity without @context".into(),
                 )
@@ -86,7 +96,7 @@ async fn parse_batch(
             match &link {
                 Some(url) => st
                     .loader
-                    .resolve(&Value::String(url.clone()))
+                    .resolve_for(tenant, &Value::String(url.clone()))
                     .await
                     .map_err(ApiError::from),
                 None => Ok(st.loader.core()),
@@ -321,7 +331,7 @@ async fn batch_write(
     };
     let update_mode = has_option("update");
     let no_overwrite = has_option("noOverwrite");
-    let items = parse_batch(st, headers, body).await?;
+    let items = parse_batch(st, &tenant, headers, body).await?;
     // distributed batch (4.3.6): one forwarded request per matching source
     let mut fwd_items: Vec<(
         serde_json::Map<String, Value>,
