@@ -17,6 +17,12 @@ use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
 
+/// The fully qualified name of the Entity `scope` member (core @context).
+/// The stored document keeps it under the short name, so the attribute
+/// operations that address it (5.6.4.4, 5.6.5.4, 5.6.19.4) compare against
+/// both spellings.
+const SCOPE_IRI: &str = "https://uri.etsi.org/ngsi-ld/scope";
+
 /// Attribute names in paths must be valid terms/IRIs (4.6.2) — 400 otherwise.
 pub(crate) fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
     // 4.6.2 supported names: no '@' (keyword territory), no parens/quotes/etc.
@@ -834,7 +840,7 @@ async fn partial_update_inner(
     let attr_iri = antares_jsonld::expand_attr_name(attr, &parsed.ctx)?;
     // 5.6.4.4: "If the target Attribute is scope, then an error of type
     // BadRequestData shall be raised."
-    if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
+    if attr == "scope" || attr_iri == SCOPE_IRI {
         return Err(NgsiError::BadRequestData(
             "scope cannot be the target of a partial attribute update (5.6.4)".into(),
         )
@@ -967,7 +973,7 @@ pub async fn replace_attr(
         // is scope, then an error of type BadRequestData shall be raised" —
         // the target is the expanded name, so the IRI spelling counts too.
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &parsed.ctx)?;
-        if attr == "scope" || attr_iri == "https://uri.etsi.org/ngsi-ld/scope" {
+        if attr == "scope" || attr_iri == SCOPE_IRI {
             return Err(NgsiError::BadRequestData(
                 "scope cannot be the target of a replace attribute (5.6.19)".into(),
             )
@@ -1108,13 +1114,18 @@ async fn delete_attr_inner(
     check_attr_name(attr)?;
     check_params(params, &["datasetId", "deleteAll", "local", "type"])?;
     let ctx = request_context(&st.loader, headers).await?;
-    // 5.6.5.4 expands the path name the same way 5.6.4.4 does; `scope` is
-    // the one name the clause addresses as itself rather than as an
-    // Attribute, so it is answered before the expansion.
+    // 5.6.5.4 expands the path name the same way 5.6.4.4 does, and then
+    // addresses `scope` as itself rather than as an Attribute. The target is
+    // what the name expands to, so both spellings — the reserved short name
+    // and the fully qualified one a client @context can map a term to —
+    // address the member the document stores under its short name.
     let attr_iri = if attr == "scope" {
         "scope".to_owned()
     } else {
-        antares_jsonld::expand_attr_name(attr, &ctx)?
+        match antares_jsonld::expand_attr_name(attr, &ctx)? {
+            iri if iri == SCOPE_IRI => "scope".to_owned(),
+            iri => iri,
+        }
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
