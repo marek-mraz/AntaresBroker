@@ -55,14 +55,15 @@ jobs:
         run: |
           kubectl apply -f deploy/k8s/namespace.yaml
           kubectl apply -f deploy/k8s/nats.yaml -f deploy/k8s/postgres-dev.yaml
-          # kind has one PG: point the brokers at postgres-dev (a superuser,
-          # so the RLS gate is lifted for the smoke) instead of CNPG,
-          # and a single-node NATS quorum: R1 streams
-          sed -e 's|antares-pg-rw.antares.svc|postgres.antares.svc|' \
-              -e 's|value: "3"|value: "1"|' \
-              -e '/ANTARES_REQUIRE_RLS/d' deploy/k8s/broker-postgres.yaml \
+          # kind has one PG: point the brokers at postgres-dev's antares_app
+          # role — non-superuser, no BYPASSRLS, so ANTARES_REQUIRE_RLS=1 stays
+          # on and the smoke boots under the gate it ships with. Single-node
+          # NATS quorum: R1 streams.
+          sed -e 's|antares:antares@antares-pg-rw.antares.svc|antares_app:antares_app@postgres.antares.svc|' \
+              -e 's|value: "3"|value: "1"|' deploy/k8s/broker-postgres.yaml \
             | kubectl apply -f -
           kubectl apply -f deploy/k8s/broker-file.yaml
+          kubectl apply -f deploy/k8s/networkpolicy.yaml
       - name: Wait for every rollout
         run: |
           kubectl -n antares rollout status statefulset/nats --timeout=180s

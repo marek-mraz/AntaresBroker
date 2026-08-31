@@ -1,6 +1,31 @@
 # kind/CI smoke ONLY: one PostGIS pod, no HA, no failover — the real shape is
 # postgres-cnpg.yaml. Recreate on purpose: two postgres pods on one PVC would
-# corrupt.
+# corrupt. The credentials here are throwaway; nothing outside a kind cluster
+# reads this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-dev-init
+  namespace: antares
+data:
+  # The official entrypoint runs this once, as the superuser, before the
+  # server accepts outside connections.
+  10-antares-app.sql: |
+    -- The broker connects as this role, which is deliberately neither a
+    -- superuser nor BYPASSRLS: ANTARES_REQUIRE_RLS=1 refuses to boot on a
+    -- role that escapes the tenant-isolation policies, and the migration
+    -- marks every tenant table FORCE ROW LEVEL SECURITY so the owner obeys
+    -- them too.
+    CREATE ROLE antares_app LOGIN PASSWORD 'antares_app';
+    GRANT ALL ON DATABASE antares TO antares_app;
+    GRANT ALL ON SCHEMA public TO antares_app;
+    -- postgis and btree_gin are not trusted extensions, so only a superuser
+    -- can install them. Installed here, the migration's own
+    -- CREATE EXTENSION IF NOT EXISTS finds them present and skips, which a
+    -- non-superuser is allowed to do.
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    CREATE EXTENSION IF NOT EXISTS btree_gin;
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -28,6 +53,8 @@ spec:
       containers:
         - name: postgres
           image: ghcr.io/baosystems/postgis:17-3.5
+          volumeMounts:
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
           env:
             - { name: POSTGRES_USER, value: antares }
             - { name: POSTGRES_PASSWORD, value: antares }
@@ -41,3 +68,6 @@ spec:
           resources:
             requests: { memory: 256Mi, cpu: 100m }
             limits: { memory: 1Gi }
+      volumes:
+        - name: init
+          configMap: { name: postgres-dev-init }
