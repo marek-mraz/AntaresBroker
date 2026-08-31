@@ -248,7 +248,9 @@ const BUCKET_TS: &str = r#"to_char({} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:
 /// reconstruct instead so the API keeps every other class and the
 /// eligibility errors. Buckets: `period_secs` wide from the anchor (the
 /// request's timeAt, else the attribute's first instant); no period = one
-/// bucket from the anchor to the last instant + 1 s — the API's own rule.
+/// bucket spanning the query's whole time range (4.5.19.1 PT0S), with the
+/// edge 4.11 leaves open closed by the attribute's own first or last
+/// instant — the API's own rule.
 fn aggregate_expr(
     f: &TemporalFilter<'_>,
     agg: &crate::store::filter::Aggregate<'_>,
@@ -270,10 +272,33 @@ fn aggregate_expr(
         None => format!("min(ai.{col}) OVER (PARTITION BY ai.attr_id)"),
     };
     let (bs, be) = match agg.period_secs {
-        None => (
-            "s0.anchor".to_owned(),
-            "s0.last + interval '1 second'".to_owned(),
-        ),
+        None => {
+            // 4.5.19.1: a zero duration "is interpreted as a duration
+            // spanning the whole time range specified by the temporal
+            // query". `before` names only the range's end and `after` only
+            // its start (4.11), so the data closes the other edge.
+            let (qs, qe) = match &f.range {
+                Some(r) if r.timerel == "before" => (None, Some(r.time_at)),
+                Some(r) if r.timerel == "between" => (Some(r.time_at), r.end_time_at),
+                Some(r) if r.timerel == "after" => (Some(r.time_at), None),
+                _ => (None, None),
+            };
+            let start = match qs {
+                Some(v) => {
+                    binds.push(v.to_owned());
+                    format!("${}::timestamptz", first_bind + binds.len() - 1)
+                }
+                None => "s0.first_ts".to_owned(),
+            };
+            let end = match qe {
+                Some(v) => {
+                    binds.push(v.to_owned());
+                    format!("${}::timestamptz", first_bind + binds.len() - 1)
+                }
+                None => "s0.last + interval '1 second'".to_owned(),
+            };
+            (start, end)
+        }
         Some(sc) => {
             binds.push(sc.to_string());
             let n = first_bind + binds.len() - 1;
@@ -322,6 +347,7 @@ fn aggregate_expr(
                                    jsonb_typeof(ai.data -> 'value') IS DISTINCT FROM 'number' \
                                      AND jsonb_typeof(ai.data -> 'value') IS DISTINCT FROM 'boolean' AS bad, \
                                    ai.{col} AS ts, {anchor} AS anchor, \
+                                   min(ai.{col}) OVER (PARTITION BY ai.attr_id) AS first_ts, \
                                    max(ai.{col}) OVER (PARTITION BY ai.attr_id) AS last \
                                   FROM attr_instances ai \
                                   WHERE ai.tenant_id = m.tenant_id AND ai.entity_id = m.id \

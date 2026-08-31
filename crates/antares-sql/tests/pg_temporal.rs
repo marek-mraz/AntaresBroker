@@ -558,6 +558,64 @@ async fn aggregation_pushdown_buckets_like_the_api() {
         )]
     );
 
+    // 4.5.19.1: with a temporal query the PT0S period spans THAT range, not
+    // the instants that happen to fall in it. `before` names only the end.
+    let before = InstanceRange {
+        timerel: "before",
+        time_at: "2030-01-01T00:00:00Z",
+        end_time_at: None,
+        timeproperty: "observedAt",
+    };
+    let fb = TemporalFilter {
+        ids: Some(&[id]),
+        range: Some(before),
+        expand: &expand,
+        aggregate: Some(Aggregate {
+            methods: &methods,
+            period_secs: None,
+            anchor: Some("2030-01-01T00:00:00Z"),
+        }),
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&t, &fb).expect("query");
+    assert!(out.aggregated);
+    assert_eq!(
+        rows(&out.rows[0][speed]["totalCount"]),
+        vec![(
+            4.0,
+            "2025-12-31T23:00:00Z".to_owned(),
+            "2030-01-01T00:00:00Z".to_owned()
+        )],
+        "a before query's whole period ends at timeAt and starts at the data"
+    );
+    // `between` names both edges, so neither comes from the data
+    let between = InstanceRange {
+        timerel: "between",
+        time_at: "2025-12-01T00:00:00Z",
+        end_time_at: Some("2026-02-01T00:00:00Z"),
+        timeproperty: "observedAt",
+    };
+    let fbt = TemporalFilter {
+        ids: Some(&[id]),
+        range: Some(between),
+        expand: &expand,
+        aggregate: Some(Aggregate {
+            methods: &methods,
+            period_secs: None,
+            anchor: Some("2025-12-01T00:00:00Z"),
+        }),
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&t, &fbt).expect("query");
+    assert_eq!(
+        rows(&out.rows[0][speed]["totalCount"]),
+        vec![(
+            4.0,
+            "2025-12-01T00:00:00Z".to_owned(),
+            "2026-02-01T00:00:00Z".to_owned()
+        )]
+    );
+
     // a string-valued windowed instance: not the store's class to judge —
     // plain instance rows come back and the API decides eligibility
     let r = s.mutate(&t, id, |d| {

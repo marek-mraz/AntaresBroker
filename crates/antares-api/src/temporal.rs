@@ -1222,14 +1222,30 @@ fn render_aggregated(
         let anchor = tq
             .and_then(|tq| DateTime::parse_from_rfc3339(&tq.time_at).ok())
             .unwrap_or(times[0].0);
+        // 4.5.19.1: "A duration of 0 second (e.g. expressed as "PT0S" or
+        // "P0D") is valid and is interpreted as a duration spanning the whole
+        // time range specified by the temporal query." The query names one
+        // edge of that range; 4.11 leaves the other open for `before` and
+        // `after`, so the data closes the open one.
+        let whole = {
+            let at = |s: &str| DateTime::parse_from_rfc3339(s).ok();
+            let first = times[0].0;
+            let last = times.last().expect("nonempty").0 + chrono::Duration::seconds(1);
+            match tq {
+                Some(q) if q.timerel == "before" => (first, at(&q.time_at).unwrap_or(last)),
+                Some(q) if q.timerel == "between" => (
+                    at(&q.time_at).unwrap_or(first),
+                    q.end_time_at.as_deref().and_then(at).unwrap_or(last),
+                ),
+                Some(q) if q.timerel == "after" => (at(&q.time_at).unwrap_or(first), last),
+                _ => (first, last),
+            }
+        };
         // bucket boundaries
         let bucket_of =
             |t: DateTime<FixedOffset>| -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
                 match r.aggr_period {
-                    AggrPeriod::Whole => {
-                        let last = times.last().expect("nonempty").0;
-                        (anchor, last + chrono::Duration::seconds(1))
-                    }
+                    AggrPeriod::Whole => whole,
                     AggrPeriod::Seconds(sc) => {
                         // checked throughout: an offset no representable
                         // date can hold puts the instant in one final
@@ -3654,6 +3670,62 @@ mod clause_4_5_19 {
                 .to_string()
                 .contains("2020-04-01T00:00:00Z\",\""),
             "a period starting at timeAt contains no instance of a before query"
+        );
+    }
+
+    /// 4.5.19.1: "A duration of 0 second (e.g. expressed as "PT0S" or
+    /// "P0D") is valid and is interpreted as a duration spanning the whole
+    /// time range specified by the temporal query." The query names one
+    /// edge of that range and 4.11 leaves the other open, so the period
+    /// runs from `timeAt` only when `timeAt` is where the range starts.
+    #[test]
+    fn the_zero_duration_period_spans_the_time_range_the_query_asked_for() {
+        let w = windowed(&["2020-09-01T12:03:00Z", "2020-09-01T12:05:00Z"]);
+        let one = |tq: &TemporalQ| {
+            let out = render_aggregated(
+                &w,
+                Some(tq),
+                &repr("PT0S"),
+                &antares_jsonld::Context::default(),
+                "observedAt",
+            )
+            .expect("aggregated");
+            out["speed"]["totalCount"].as_array().expect("rows").clone()
+        };
+
+        // before: timeAt ENDS the range (4.11 makes the start open, so the
+        // data supplies it). The period must not run backwards.
+        assert_eq!(
+            one(&TemporalQ {
+                timerel: "before".to_owned(),
+                time_at: "2030-01-01T00:00:00Z".to_owned(),
+                end_time_at: None,
+                timeproperty: "observedAt".to_owned(),
+            }),
+            vec![json!([2, "2020-09-01T12:03:00Z", "2030-01-01T00:00:00Z"])]
+        );
+
+        // between: both edges are named, and the period is exactly them —
+        // not the last instant the data happens to hold.
+        assert_eq!(
+            one(&TemporalQ {
+                timerel: "between".to_owned(),
+                time_at: "2020-09-01T12:00:00Z".to_owned(),
+                end_time_at: Some("2020-09-01T13:00:00Z".to_owned()),
+                timeproperty: "observedAt".to_owned(),
+            }),
+            vec![json!([2, "2020-09-01T12:00:00Z", "2020-09-01T13:00:00Z"])]
+        );
+
+        // after: timeAt STARTS the range, the data closes it.
+        assert_eq!(
+            one(&TemporalQ {
+                timerel: "after".to_owned(),
+                time_at: "2020-01-01T00:00:00Z".to_owned(),
+                end_time_at: None,
+                timeproperty: "observedAt".to_owned(),
+            }),
+            vec![json!([2, "2020-01-01T00:00:00Z", "2020-09-01T12:05:01Z"])]
         );
     }
 
