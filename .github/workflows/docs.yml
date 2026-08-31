@@ -79,7 +79,7 @@ jobs:
           git show "origin/${{ github.base_ref }}:docs/openapi/ngsi-ld-api.yaml" > /tmp/base.yaml
           docker run --rm -v /tmp/base.yaml:/base.yaml \
             -v "$PWD/docs/openapi/ngsi-ld-api.yaml:/rev.yaml" \
-            tufin/oasdiff breaking --fail-on ERR /base.yaml /rev.yaml
+            tufin/oasdiff:v1.30.0 breaking --fail-on ERR /base.yaml /rev.yaml
 
   links-external:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

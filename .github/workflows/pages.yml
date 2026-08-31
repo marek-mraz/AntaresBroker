@@ -87,7 +87,7 @@ jobs:
         # fail-soft: a renderer hiccup must not take the whole report deploy
         # down with it — the page then says so instead of 404ing
         run: |
-          npx --yes @redocly/cli build-docs docs/openapi/ngsi-ld-api.yaml -o site/docs/api.html \
+          npx --yes @redocly/cli@2.49.0 build-docs docs/openapi/ngsi-ld-api.yaml -o site/docs/api.html \
             || echo '<!doctype html><title>NGSI-LD API</title><p>ReDoc render failed this deploy — see docs/openapi/ngsi-ld-api.yaml in the repo.' > site/docs/api.html
 
       # API reference beside the book: book at /docs, rustdoc at /api.

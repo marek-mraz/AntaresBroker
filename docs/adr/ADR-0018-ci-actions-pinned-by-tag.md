@@ -35,16 +35,25 @@ The actions used here are `actions/*`, `docker/*`, `sigstore/*`,
 of a pin that nothing renews, a moving major tag on this set is the
 smaller risk for a project with no dependency-update automation.
 
-Three references are branches, not tags, and stay that way because the
-branch name is the argument: `dtolnay/rust-toolchain@stable`, `@nightly`
-and `@master` select a Rust channel, and `taiki-e/install-action@nextest`
-selects the tool. Pinning those to a commit would freeze the channel
+Four references name a channel or a tool rather than a version, and stay
+that way because the name is the argument: `dtolnay/rust-toolchain@stable`,
+`@nightly` and `@master` select a Rust channel, and
+`taiki-e/install-action@nextest` selects the tool. Pinning those to a commit would freeze the channel
 resolution, not just the action.
 
 **Binaries fetched in a `run:` step are pinned to an exact version**, in
-the URL, with no lookup against a `latest` endpoint. This binds
-cargo-deny, kubeconform, k6, mdBook and the Actions runner. The version
-is a literal in the workflow, so changing it is a reviewable diff.
+the URL, the package specifier or the image tag, with no lookup against a
+`latest` endpoint. This binds cargo-deny, kubeconform, k6, mdBook, the
+Actions runner, cargo-fuzz, the ReDoc renderer that builds the published
+API page and the oasdiff image that gates the vendored OpenAPI. The
+version is a literal in the workflow, so changing it is a reviewable diff.
+
+The service containers a job starts to test against — PostGIS, TimescaleDB,
+NATS, mosquitto — are pinned as far as the upstream tag is meaningful and no
+further, because moving them is what keeps the broker proven against the
+databases and brokers people actually run. The exception is the rented
+perf runner, where the containers share a machine with the Hetzner and
+runner-registration secrets: mosquitto there names a patch version.
 
 **Every job declares `permissions:`**, so a compromised action holds the
 smallest token the job can do its work with.

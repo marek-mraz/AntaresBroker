@@ -147,7 +147,7 @@ jobs:
             -c shared_buffers=4GB -c work_mem=64MB -c maintenance_work_mem=2GB \
             -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c max_connections=300 \
             -c shared_preload_libraries=pg_stat_statements
-          docker run -d --name mqtt --network host eclipse-mosquitto:2 \
+          docker run -d --name mqtt --network host eclipse-mosquitto:2.0.22 \
             sh -c 'printf "listener 1883\nallow_anonymous true\n" > /mosquitto/config/perf.conf && exec mosquitto -c /mosquitto/config/perf.conf'
           until docker exec pg pg_isready -q; do sleep 1; done
           until (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null; do sleep 1; done

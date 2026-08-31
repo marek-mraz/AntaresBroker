@@ -58,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo install cargo-fuzz --locked
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Replay committed crash inputs
         run: |
           for t in parse_q scope_q geo_params expand_entity; do
