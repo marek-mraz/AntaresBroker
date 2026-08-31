@@ -113,6 +113,108 @@ async fn post(st: &AppState, uri: &str, body: String) -> u16 {
     .await
 }
 
+/// Accepts, waits `delay_ms`, then answers 200 — alive, but slower than an
+/// impatient subscriber's deadline. Records every delivered Vehicle id so a
+/// test can ask which TENANT's notification arrived.
+fn mock_slow(
+    delay_ms: u64,
+) -> (
+    u16,
+    Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>> = Arc::default();
+    let seen = ids.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let body = read_request(&mut s);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                for hit in body.match_indices("urn:ngsi-ld:Vehicle:") {
+                    let rest = &body[hit.0..];
+                    let end = rest.find('"').unwrap_or(rest.len());
+                    if let Ok(mut g) = seen.lock() {
+                        g.insert(rest[..end].to_owned());
+                    }
+                }
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = s.flush();
+            });
+        }
+    });
+    (port, ids)
+}
+
+async fn post_as(st: &AppState, tenant: &str, uri: &str, body: String) -> u16 {
+    send(
+        st,
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .header("NGSILD-Tenant", tenant)
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await
+}
+
+async fn subscribe_as(st: &AppState, tenant: &str, id: &str, port: u16, timeout_ms: u32) {
+    let status = post_as(
+        st,
+        tenant,
+        "/ngsi-ld/v1/subscriptions",
+        serde_json::json!({
+            "id": format!("urn:ngsi-ld:Subscription:{id}"),
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {
+                "uri": format!("http://127.0.0.1:{port}/notify"),
+                "timeout": timeout_ms,
+            }},
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, 201, "subscribe as {tenant}");
+}
+
+async fn create_vehicle_as(st: &AppState, tenant: &str, n: usize) {
+    let status = post_as(
+        st,
+        tenant,
+        "/ngsi-ld/v1/entities",
+        serde_json::json!({
+            "id": format!("urn:ngsi-ld:Vehicle:brk{n}"),
+            "type": "Vehicle",
+            "speed": {"type": "Property", "value": n},
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, 201, "create as {tenant}");
+}
+
+async fn wait_id(
+    ids: &std::sync::Mutex<std::collections::HashSet<String>>,
+    want: &str,
+    ms: u64,
+) -> bool {
+    for _ in 0..(ms / 100) {
+        if ids.lock().is_ok_and(|g| g.contains(want)) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
 async fn subscribe(st: &AppState, id: &str, port: u16, timeout_ms: u32) {
     let status = post(
         st,
@@ -213,5 +315,67 @@ async fn stalling_endpoint_still_trips_the_breaker() {
         hits.load(Ordering::SeqCst),
         before,
         "a timing-out destination must stay short-circuited within the cooldown"
+    );
+}
+
+/// 4.14: "the NGSI-LD API operations for managing, retrieving and subscribing
+/// to entity information, but also any context source related operations only
+/// apply to the information of the specified `Tenant` in isolation and never
+/// have any effect on the information of other `Tenants`."
+///
+/// Tenants share destinations — one consumer host, one MQTT broker — and the
+/// breaker is keyed by `scheme://host:port` alone. So a tenant whose own
+/// `endpoint.timeout` is too short for that host (the 6.3.8 floor is 100 ms)
+/// trips the breaker for every other tenant pointing at it, and the victim
+/// sees no evidence at all: a suppressed delivery deliberately does not move
+/// `timesSent`, `lastNotification` or `status`.
+///
+/// The sibling map one struct field over was given exactly this treatment —
+/// `reg_key` scopes the 5.2.34 cooldown "PER TENANT (5.5.10)" — and the
+/// breaker beside it was not.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_tenants_timeouts_never_suppress_another_tenants_notifications() {
+    let st = state();
+    // Alive, and answers well inside tenant-b's deadline — but not inside
+    // tenant-a's, which sits at the 6.3.8 floor.
+    let (port, ids) = mock_slow(600);
+    subscribe_as(&st, "brk-tenant-a", "impatient", port, 100).await;
+
+    // Tenant A earns its own breaker: each delivery must finish timing out
+    // before the next, so the failures count as consecutive.
+    for n in 200..205 {
+        create_vehicle_as(&st, "brk-tenant-a", n).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            900 * antares_api::state::slow_factor(),
+        ))
+        .await;
+    }
+    // The premise, established the way a client would see it: tenant A's own
+    // next notification is now suppressed. Without this the test could pass
+    // on a breaker that never tripped.
+    create_vehicle_as(&st, "brk-tenant-a", 205).await;
+    assert!(
+        !wait_id(
+            &ids,
+            "urn:ngsi-ld:Vehicle:brk205",
+            2_000 * antares_api::state::slow_factor()
+        )
+        .await,
+        "tenant A did not trip its own breaker, so the rest proves nothing"
+    );
+
+    // Tenant B is patient, and its subscription is active. Its notification
+    // has to be attempted.
+    subscribe_as(&st, "brk-tenant-b", "patient", port, 5_000).await;
+    create_vehicle_as(&st, "brk-tenant-b", 900).await;
+    assert!(
+        wait_id(
+            &ids,
+            "urn:ngsi-ld:Vehicle:brk900",
+            10_000 * antares_api::state::slow_factor()
+        )
+        .await,
+        "4.14: one tenant's failing endpoint must never suppress another \
+         tenant's notification to the same host:port"
     );
 }

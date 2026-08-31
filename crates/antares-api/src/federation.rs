@@ -798,7 +798,7 @@ pub async fn forward(
         );
         return (502, Value::Null, Vec::new());
     }
-    if st.egress.is_open(&url) {
+    if st.egress.is_open(tenant.as_str(), &url) {
         tracing::debug!(
             "federation forward to {} short-circuited (breaker open)",
             crate::notify::redact_userinfo(&url)
@@ -988,7 +988,7 @@ pub async fn forward(
         let sent = match sent {
             Some(r) => r,
             None => {
-                st.egress.record_failure(&url);
+                st.egress.record_failure(tenant.as_str(), &url);
                 if reg.cooldown_ms.is_some() {
                     st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
                 }
@@ -1003,7 +1003,7 @@ pub async fn forward(
                 // responding-but-erroring peer must keep being attempted,
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
-                st.egress.record_success(&url);
+                st.egress.record_success(tenant.as_str(), &url);
                 if reg.cooldown_ms.is_some() {
                     // 5.2.9 Table 5.2.9-2 failure definition: any response
                     // code other than 2xx
@@ -1019,7 +1019,7 @@ pub async fn forward(
                 (status, body, peer_warnings)
             }
             Err(e) if e.is_timeout() => {
-                st.egress.record_failure(&url);
+                st.egress.record_failure(tenant.as_str(), &url);
                 if reg.cooldown_ms.is_some() {
                     st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
                 }
@@ -1032,7 +1032,7 @@ pub async fn forward(
                 // path classifies it under Table 6.3.17-1 code 199 ("No
                 // response was received from the registration endpoint"),
                 // never 299 ("An error response ... was received").
-                st.egress.record_success(&url);
+                st.egress.record_success(tenant.as_str(), &url);
                 if reg.cooldown_ms.is_some() {
                     st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
                 }

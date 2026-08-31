@@ -2045,7 +2045,7 @@ async fn deliver_as(
     // A binding that opens no socket has no destination for the policy or
     // the breaker to judge; every network binding is policed below.
     let policed = st.sinks.sink_for_uri(uri).is_some_and(|s| s.network());
-    if policed && st.egress.is_open(uri) {
+    if policed && st.egress.is_open(tenant.as_str(), uri) {
         tracing::debug!(
             "notification to {} short-circuited (breaker open)",
             redact_userinfo(uri)
@@ -2192,13 +2192,13 @@ async fn deliver_as(
     };
     if policed && !refused {
         if ok {
-            st.egress.record_success(uri);
+            st.egress.record_success(tenant.as_str(), uri);
         } else if timed_out {
-            st.egress.record_failure(uri);
+            st.egress.record_failure(tenant.as_str(), uri);
         } else {
             // the destination responded (or refused fast): alive — clear
             // any stale consecutive-timeout state
-            st.egress.record_success(uri);
+            st.egress.record_success(tenant.as_str(), uri);
         }
     }
     // Delivery counters by binding (facade — no-op without the broker's
@@ -2352,7 +2352,7 @@ async fn retry_and_settle(
         made += 1;
         match send_outbound(st, uri, timeout_ms, &outbound).await {
             Ok(()) => {
-                st.egress.record_success(uri);
+                st.egress.record_success(tenant.as_str(), uri);
                 metrics::counter!("antares_notifications_retried_total", "outcome" => "ok")
                     .increment(1);
                 let ts = now_iso();
@@ -2382,9 +2382,9 @@ async fn retry_and_settle(
             }
             Err((timed_out, e)) => {
                 if timed_out {
-                    st.egress.record_failure(uri);
+                    st.egress.record_failure(tenant.as_str(), uri);
                 } else {
-                    st.egress.record_success(uri);
+                    st.egress.record_success(tenant.as_str(), uri);
                 }
                 last_err = e;
             }
@@ -3643,9 +3643,12 @@ mod clause_5_2_14_2_bookkeeping {
         let tenant = TenantId::new("default").expect("tenant");
         let sub = subscribe(&st, &tenant, &uri);
         for _ in 0..crate::egress::TRIP_AFTER {
-            st.egress.record_failure(&uri);
+            st.egress.record_failure(tenant.as_str(), &uri);
         }
-        assert!(st.egress.is_open(&uri), "the destination is open-circuit");
+        assert!(
+            st.egress.is_open(tenant.as_str(), &uri),
+            "the destination is open-circuit"
+        );
 
         send(&st, &tenant, &sub).await;
         let n = stored_notification(&st, &tenant);
@@ -3661,7 +3664,7 @@ mod clause_5_2_14_2_bookkeeping {
 
         // Positive control: with the circuit closed the same call delivers,
         // so the assertions above cannot pass vacuously.
-        st.egress.record_success(&uri);
+        st.egress.record_success(tenant.as_str(), &uri);
         send(&st, &tenant, &sub).await;
         let n = stored_notification(&st, &tenant);
         assert_eq!(hits.load(Ordering::SeqCst), 1);

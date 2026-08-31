@@ -142,8 +142,22 @@ impl Egress {
         self.policy.check_host(&host, port).await
     }
 
-    fn key(url: &str) -> String {
-        reqwest::Url::parse(url)
+    /// The breaker key: one destination, within one tenant. 4.14 puts the
+    /// tenant in it — "the NGSI-LD API operations for managing, retrieving
+    /// and subscribing to entity information, but also any context source
+    /// related operations only apply to the information of the specified
+    /// `Tenant` in isolation and never have any effect on the information of
+    /// other `Tenants`". Tenants share destinations (one consumer host, one
+    /// MQTT broker), so a destination-only key lets one tenant's failing
+    /// endpoint suppress another tenant's notifications to the same
+    /// host:port, and the victim sees no evidence: a suppressed delivery
+    /// deliberately does not move `timesSent`, `lastNotification` or
+    /// `status`. Same reasoning, and the same separator, as `reg_key`.
+    ///
+    /// Userinfo, path and topic stay out: they are the credentials and the
+    /// destination WITHIN a peer, and it is the peer that goes unresponsive.
+    fn key(tenant: &str, url: &str) -> String {
+        let dest = reqwest::Url::parse(url)
             .ok()
             .map(|u| {
                 format!(
@@ -153,17 +167,18 @@ impl Egress {
                     u.port_or_known_default().unwrap_or(0)
                 )
             })
-            .unwrap_or_else(|| url.to_owned())
+            .unwrap_or_else(|| url.to_owned());
+        format!("{tenant}\u{1f}{dest}")
     }
 
-    /// Is this destination currently open-circuit? A tripped destination
-    /// admits ONE probe per cooldown window (half-open).
-    pub fn is_open(&self, url: &str) -> bool {
+    /// Is this destination currently open-circuit FOR THIS TENANT? A tripped
+    /// destination admits ONE probe per cooldown window (half-open).
+    pub fn is_open(&self, tenant: &str, url: &str) -> bool {
         let mut map = self
             .breakers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(b) = map.get_mut(&Self::key(url)) else {
+        let Some(b) = map.get_mut(&Self::key(tenant, url)) else {
             return false;
         };
         match b.tripped_at {
@@ -176,19 +191,19 @@ impl Egress {
         }
     }
 
-    pub fn record_success(&self, url: &str) {
+    pub fn record_success(&self, tenant: &str, url: &str) {
         self.breakers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&Self::key(url));
+            .remove(&Self::key(tenant, url));
     }
 
-    pub fn record_failure(&self, url: &str) {
+    pub fn record_failure(&self, tenant: &str, url: &str) {
         let mut map = self
             .breakers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let k = Self::key(url);
+        let k = Self::key(tenant, url);
         if !map.contains_key(&k) {
             evict_oldest(&mut map, |b: &Breaker| b.touched_at);
         }
@@ -268,17 +283,45 @@ mod tests {
     #[test]
     fn breaker_trips_after_consecutive_failures() {
         let e = Egress::default();
+        let t = "tenant-a";
         let url = "http://dead.example:9090/notify";
         for _ in 0..(TRIP_AFTER - 1) {
-            e.record_failure(url);
-            assert!(!e.is_open(url), "not tripped before the threshold");
+            e.record_failure(t, url);
+            assert!(!e.is_open(t, url), "not tripped before the threshold");
         }
-        e.record_failure(url);
-        assert!(e.is_open(url), "tripped at the threshold");
+        e.record_failure(t, url);
+        assert!(e.is_open(t, url), "tripped at the threshold");
         // per-destination, not global
-        assert!(!e.is_open("http://healthy.example:9090/notify"));
-        e.record_success(url);
-        assert!(!e.is_open(url), "success clears the breaker");
+        assert!(!e.is_open(t, "http://healthy.example:9090/notify"));
+        e.record_success(t, url);
+        assert!(!e.is_open(t, url), "success clears the breaker");
+    }
+
+    /// 4.14 + 5.5.10: the breaker a failing endpoint earns belongs to the
+    /// tenant whose delivery earned it. Tenants share destinations, and
+    /// whether a destination answers inside the deadline is a property of the
+    /// pair, not of the host: the same host is a timeout for a subscription
+    /// at the 6.3.8 100 ms floor and healthy for one that allows 5 s.
+    #[test]
+    fn a_tripped_destination_is_tripped_only_for_the_tenant_that_tripped_it() {
+        let e = Egress::default();
+        let url = "http://shared-consumer.example:8080/notify";
+        for _ in 0..TRIP_AFTER {
+            e.record_failure("tenant-a", url);
+        }
+        assert!(e.is_open("tenant-a", url), "the failing tenant is tripped");
+        assert!(
+            !e.is_open("tenant-b", url),
+            "one tenant's failing endpoint must not suppress another \
+             tenant's notifications to the same host:port"
+        );
+        // and clearing one tenant's breaker leaves the other's alone
+        for _ in 0..TRIP_AFTER {
+            e.record_failure("tenant-b", url);
+        }
+        e.record_success("tenant-a", url);
+        assert!(!e.is_open("tenant-a", url));
+        assert!(e.is_open("tenant-b", url));
     }
 
     /// Both maps are keyed by client-supplied strings (notification endpoints,
@@ -289,7 +332,7 @@ mod tests {
     fn destination_maps_stay_bounded_under_distinct_keys() {
         let e = Egress::default();
         for i in 0..(MAX_TRACKED + 500) {
-            e.record_failure(&format!("http://dead-{i}.example:9090/notify"));
+            e.record_failure("t", &format!("http://dead-{i}.example:9090/notify"));
             e.reg_record(&format!("urn:ngsi-ld:CSR:{i}"), false);
         }
         assert!(
@@ -304,8 +347,8 @@ mod tests {
         // most recently recorded failure is still tracked.
         let live = format!("http://dead-{}.example:9090/notify", MAX_TRACKED + 499);
         for _ in 0..TRIP_AFTER {
-            e.record_failure(&live);
+            e.record_failure("t", &live);
         }
-        assert!(e.is_open(&live), "recent destination still trips");
+        assert!(e.is_open("t", &live), "recent destination still trips");
     }
 }
