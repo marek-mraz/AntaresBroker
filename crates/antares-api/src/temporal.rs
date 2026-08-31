@@ -2369,7 +2369,7 @@ pub async fn delete_temporal(
         let ctx = st.loader.core();
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
             Ok(regs) => regs,
-            Err(refused) => return Ok(refused),
+            Err(refused) => return Ok(*refused),
         };
         let deleted = st.temporal.delete(&tenant, &id)?;
         answer_temporal_attr_write(
@@ -2576,7 +2576,7 @@ pub async fn delete_temporal_attr(
         let want_ds = params.get("datasetId").cloned();
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
             Ok(regs) => regs,
-            Err(refused) => return Ok(refused),
+            Err(refused) => return Ok(*refused),
         };
         let mut found = false;
         let ts = now_iso();
@@ -2662,6 +2662,8 @@ struct LocalWrite {
 /// 6.3.17/6.3.18 loop handling already applied. The check belongs here,
 /// ahead of the local write: 508 Loop Detected is an error status, so the
 /// request it answers has to leave the Temporal Evolution as it found it.
+/// The refusal travels boxed — a whole `Response` in an `Err` makes every
+/// `Ok` of this function carry its width.
 fn temporal_write_regs(
     st: &AppState,
     tenant: &antares_model::TenantId,
@@ -2669,7 +2671,7 @@ fn temporal_write_regs(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     id: &str,
-) -> Result<Vec<crate::federation::FedReg>, Response> {
+) -> Result<Vec<crate::federation::FedReg>, Box<Response>> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
@@ -2681,7 +2683,7 @@ fn temporal_write_regs(
         tenant,
         &mut regs,
     ) {
-        Some(refused) => Err(refused),
+        Some(refused) => Err(Box::new(refused)),
         None => Ok(regs),
     }
 }
@@ -2809,7 +2811,7 @@ pub async fn modify_temporal_instance(
             .ok_or_else(|| NgsiError::BadRequestData("invalid instance fragment".into()))?;
         let regs = match temporal_write_regs(&st, &tenant, &headers, &parsed.ctx, &params, &id) {
             Ok(regs) => regs,
-            Err(refused) => return Ok(refused),
+            Err(refused) => return Ok(*refused),
         };
         let ts = now_iso();
         let mut found = false;
@@ -2876,7 +2878,7 @@ pub async fn delete_temporal_instance(
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
             Ok(regs) => regs,
-            Err(refused) => return Ok(refused),
+            Err(refused) => return Ok(*refused),
         };
         let mut found = false;
         let ts = now_iso();
