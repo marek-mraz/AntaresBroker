@@ -483,8 +483,12 @@ fn outbound_client(
 /// 5.13.1: an @context this broker HOSTS (Hosted or ImplicitlyCreated) is
 /// identified by its stored row, never by the URL's shape — a peer broker or
 /// an attacker can serve a document under the same resource path, and such a
-/// URL is external to us (a Cached entry). Returns the local row id when the
-/// trailing path segment names a stored @context.
+/// URL is external to us (a Cached entry). The row records the URL it was
+/// minted under, so that is what decides: a URL whose trailing segment names
+/// a stored row but whose origin is somebody else's names a document this
+/// broker does not host, and the stored row — another Tenant's, as often as
+/// not — must not be read, counted or rewritten for it. Returns the local
+/// row id when the URL is the one the row was minted under.
 fn hosted_row_id(store: &dyn CurrentStateDriver, url: &str) -> Option<String> {
     let (_, seg) = url.rsplit_once("/ngsi-ld/v1/jsonldContexts/")?;
     let seg = seg.split(['?', '#']).next().unwrap_or(seg);
@@ -495,6 +499,7 @@ fn hosted_row_id(store: &dyn CurrentStateDriver, url: &str) -> Option<String> {
         .context_get(seg)
         .ok()
         .flatten()
+        .filter(|row| row["url"].as_str() == Some(url))
         .map(|_| seg.to_owned())
 }
 
@@ -606,6 +611,47 @@ mod jsonld_context_locality_5_13 {
             fetch_count(&fetches),
             1,
             "the hosted row exists, so nothing is evicted or refetched"
+        );
+    }
+
+    /// 5.13.1 again, with the local id of a row that exists: what this broker
+    /// hosts is the row MINTED under that URL, so a document served from
+    /// somewhere else under the same resource path — with the local id of a
+    /// Hosted @context another Tenant added — is external. It becomes a
+    /// Cached row of its own, and the Tenant's row is neither read for its
+    /// mappings nor counted against.
+    #[tokio::test]
+    async fn a_peer_url_reusing_a_stored_local_id_leaves_that_row_alone() {
+        let st = AppState::new("me".into());
+        let (url, _) = context_server("/ngsi-ld/v1/jsonldContexts/alpha-1");
+        let row = serde_json::json!({
+            "url": "https://broker.example/ngsi-ld/v1/jsonldContexts/alpha-1",
+            "localId": "alpha-1",
+            "kind": "Hosted",
+            "createdAt": now_iso(),
+            "owner": "alpha",
+            "body": {"@context": {"a": "http://example.org/a"}},
+        });
+        st.store
+            .context_put("alpha-1", row.clone())
+            .expect("seed hosted row");
+        st.loader
+            .resolve(&serde_json::json!(url))
+            .await
+            .expect("resolve");
+        assert_eq!(
+            st.store
+                .context_get("alpha-1")
+                .expect("store")
+                .expect("row"),
+            row,
+            "another Tenant's row must be untouched by a peer URL"
+        );
+        let cached = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string();
+        assert_eq!(
+            st.store.context_get(&cached).expect("store").expect("row")["kind"],
+            serde_json::json!("Cached"),
+            "the fetched document is this broker's Cached copy (5.13.1)"
         );
     }
 }
