@@ -116,6 +116,21 @@ const UPDATE: AttrWrite = AttrWrite {
     method: reqwest::Method::PATCH,
 };
 
+/// Why an attribute write never reached the store. `Untouched` is not a
+/// failure: 5.6.3.4 leaves an Attribute that may not be overwritten
+/// "untouched", and a write that applied nothing modified nothing -- there is
+/// no `modifiedAt` to move (4.8) and no change to hand to the store.
+enum Unwritten {
+    Failed(NgsiError),
+    Untouched,
+}
+
+impl From<NgsiError> for Unwritten {
+    fn from(e: NgsiError) -> Self {
+        Self::Failed(e)
+    }
+}
+
 /// One entity-level attribute write. `merge` is the clause's own algorithm
 /// for the Entity Fragment's `scope` and its Attributes; the Entity Type
 /// union above it is the same rule in both clauses ("added to the list of
@@ -177,7 +192,8 @@ async fn write_attrs(
             if !matches_type_param(doc, params, &parsed.ctx) {
                 return Err(NgsiError::ResourceNotFound(format!(
                     "entity {id} does not match the type selector"
-                )));
+                ))
+                .into());
             }
             let target = antares_store::stored_object(doc)?;
             let frag = antares_jsonld::expanded_object(&fragment)?;
@@ -189,22 +205,30 @@ async fn write_attrs(
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                let known = cur.len();
                 for t in new_types {
                     if !cur.contains(t) {
                         cur.push(t.clone());
                     }
                 }
-                target.insert("type".into(), Value::Array(cur));
-                updated.push("type".into());
+                if cur.len() > known {
+                    target.insert("type".into(), Value::Array(cur));
+                    updated.push("type".into());
+                }
             }
             merge(target, frag, &ts, &mut updated, &mut not_updated);
+            if updated.is_empty() {
+                return Err(Unwritten::Untouched);
+            }
             target.insert("modifiedAt".into(), Value::String(ts.clone()));
-            Ok::<(), NgsiError>(())
+            Ok::<(), Unwritten>(())
         })?;
         Some(match res {
             None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
-            Some(Err(e)) => Err(e.into()),
-            Some(Ok(())) => Ok(update_result(&tenant, updated.clone(), not_updated.clone())),
+            Some(Err(Unwritten::Failed(e))) => Err(e.into()),
+            Some(Ok(())) | Some(Err(Unwritten::Untouched)) => {
+                Ok(update_result(&tenant, updated.clone(), not_updated.clone()))
+            }
         })
     };
     if regs.is_empty() {
@@ -269,16 +293,20 @@ async fn append_attrs_inner(
                         .and_then(Value::as_array)
                         .cloned()
                         .unwrap_or_default();
+                    let known = cur.len();
                     for sc in new_scope.as_array().cloned().unwrap_or_default() {
                         if !cur.contains(&sc) {
                             cur.push(sc);
                         }
                     }
-                    target.insert("scope".into(), Value::Array(cur));
+                    if cur.len() > known {
+                        target.insert("scope".into(), Value::Array(cur));
+                        updated.push("scope".into());
+                    }
                 } else {
                     target.insert("scope".into(), new_scope.clone());
+                    updated.push("scope".into());
                 }
-                updated.push("scope".into());
             }
             for (k, v) in frag {
                 if is_fragment_meta(k) {
