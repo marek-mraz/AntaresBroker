@@ -533,11 +533,28 @@ async fn retrieve_entity_inner(
     if let Some((mode, level)) = &join {
         let held = contained_by(params);
         let complete = match mode.as_str() {
-            "inline" => inline_join_beyond(st, &tenant, &ctx, &repr, &mut payload, *level, &held),
+            "inline" => inline_join_beyond(
+                st,
+                &tenant,
+                &ctx,
+                &repr,
+                &mut payload,
+                *level,
+                &held,
+                &mut { MAX_JOIN_LOOKUPS },
+            ),
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
-                let complete =
-                    collect_flat_beyond(st, &tenant, &repr, &doc, *level, &mut linked, &held);
+                let complete = collect_flat_beyond(
+                    st,
+                    &tenant,
+                    &repr,
+                    &doc,
+                    *level,
+                    &mut linked,
+                    &held,
+                    &mut { MAX_JOIN_LOOKUPS },
+                );
                 if !linked.is_empty() {
                     let mut arr = vec![payload];
                     for (_, (ldoc, lrepr)) in linked {
@@ -558,7 +575,7 @@ async fn retrieve_entity_inner(
         }
     }
     let payload = if accept == Accept::GeoJson {
-        to_geojson_feature(payload, params.get("geometryProperty"), &ctx)
+        to_geojson_feature(payload, params.get("geometryProperty"))
     } else {
         payload
     };
@@ -692,15 +709,18 @@ struct JoinWalk {
 impl JoinWalk {
     /// The Linking Entity is already part of the response, so it counts as
     /// resolved before the walk starts — and so does every id the client
-    /// passed in `containedBy`.
-    fn rooted(root: Option<&str>, contained_by: &[String]) -> Self {
+    /// passed in `containedBy`. `budget` is what is LEFT of the request's
+    /// allowance: a page walks one entity at a time and each walk hands the
+    /// remainder to the next, so the ceiling bounds the request rather than
+    /// each of its entities.
+    fn rooted(root: Option<&str>, contained_by: &[String], budget: usize) -> Self {
         let mut seen: std::collections::BTreeSet<String> = contained_by.iter().cloned().collect();
         if let Some(id) = root {
             seen.insert(id.to_owned());
         }
         JoinWalk {
             seen,
-            budget: MAX_JOIN_LOOKUPS,
+            budget,
             complete: true,
         }
     }
@@ -736,7 +756,9 @@ pub fn inline_join(
     compacted: &mut Value,
     level: usize,
 ) -> bool {
-    inline_join_beyond(st, tenant, ctx, repr, compacted, level, &[])
+    inline_join_beyond(st, tenant, ctx, repr, compacted, level, &[], &mut {
+        MAX_JOIN_LOOKUPS
+    })
 }
 
 /// Same, continuing an Entity Graph the client is already holding: the
@@ -750,9 +772,15 @@ pub fn inline_join_beyond(
     compacted: &mut Value,
     level: usize,
     contained_by: &[String],
+    budget: &mut usize,
 ) -> bool {
-    let mut walk = JoinWalk::rooted(compacted.get("id").and_then(Value::as_str), contained_by);
+    let mut walk = JoinWalk::rooted(
+        compacted.get("id").and_then(Value::as_str),
+        contained_by,
+        *budget,
+    );
     inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk);
+    *budget = walk.budget;
     walk.complete
 }
 
@@ -901,7 +929,9 @@ pub fn collect_flat(
     level: usize,
     out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
 ) -> bool {
-    collect_flat_beyond(st, tenant, repr, internal_doc, level, out, &[])
+    collect_flat_beyond(st, tenant, repr, internal_doc, level, out, &[], &mut {
+        MAX_JOIN_LOOKUPS
+    })
 }
 
 /// Same, continuing an Entity Graph the client is already holding: the
@@ -915,10 +945,16 @@ pub fn collect_flat_beyond(
     level: usize,
     out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
     contained_by: &[String],
+    budget: &mut usize,
 ) -> bool {
-    let mut walk = JoinWalk::rooted(internal_doc.get("id").and_then(Value::as_str), contained_by);
+    let mut walk = JoinWalk::rooted(
+        internal_doc.get("id").and_then(Value::as_str),
+        contained_by,
+        *budget,
+    );
     walk.seen.extend(out.keys().cloned());
     collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk);
+    *budget = walk.budget;
     walk.complete
 }
 
@@ -1362,17 +1398,32 @@ async fn query_entities_inner(
     if let Some((mode, level)) = &join {
         let mut complete = true;
         let held = contained_by(params);
+        // 4.5.23.1 bounds the WIDTH of the retrieval per request, so one
+        // allowance is spent across the whole page: minting a fresh budget per
+        // payload Entity multiplied it by the page size, and a page of
+        // max_limit densely linked Entities bought MAX_JOIN_LOOKUPS lookups
+        // each.
+        let mut budget = MAX_JOIN_LOOKUPS;
         match mode.as_str() {
             "inline" => {
                 for p in &mut payload {
-                    complete &= inline_join_beyond(st, &tenant, &ctx, &repr, p, *level, &held);
+                    complete &=
+                        inline_join_beyond(st, &tenant, &ctx, &repr, p, *level, &held, &mut budget);
                 }
             }
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 for doc in &page {
-                    complete &=
-                        collect_flat_beyond(st, &tenant, &repr, doc, *level, &mut linked, &held);
+                    complete &= collect_flat_beyond(
+                        st,
+                        &tenant,
+                        &repr,
+                        doc,
+                        *level,
+                        &mut linked,
+                        &held,
+                        &mut budget,
+                    );
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
@@ -1392,7 +1443,7 @@ async fn query_entities_inner(
         }
     }
     let mut resp = if accept == Accept::GeoJson {
-        let fc = to_geojson_collection(payload, params.get("geometryProperty"), &ctx);
+        let fc = to_geojson_collection(payload, params.get("geometryProperty"));
         respond_prefer(StatusCode::OK, fc, &ctx, accept, &tenant, headers)
     } else {
         crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant)
@@ -1878,7 +1929,7 @@ fn paginate_impl(
     Ok((page, count.then_some(total), links))
 }
 
-// ---------- DELETE /entities/{id} (5.6.6) ----------// ---------- DELETE /entities/{id} (5.6.6) ----------
+// ---------- DELETE /entities/{id} (5.6.6) ----------
 
 pub async fn delete_entity(
     State(st): State<AppState>,
@@ -3106,15 +3157,10 @@ pub fn order_entities(
 /// GeoProperty's value or null (4.5.16.1: geometryProperty parameter,
 /// default "location"), properties = the 5.2.31 FeatureProperties (entity
 /// type + attributes). The @context member is added by respond() (6.3.6).
-pub fn to_geojson_feature(
-    entity: Value,
-    geometry_property: Option<&String>,
-    ctx: &antares_jsonld::Context,
-) -> Value {
+pub fn to_geojson_feature(entity: Value, geometry_property: Option<&String>) -> Value {
     let geom_term = geometry_property
         .cloned()
         .unwrap_or_else(|| "location".into());
-    let _ = ctx;
     let geometry = entity
         .get(&geom_term)
         .map(geo_value_of)
@@ -3163,14 +3209,10 @@ fn geo_value_of(attr: &Value) -> Value {
 /// FeatureCollection): fixed type "FeatureCollection" + features array of
 /// 4.5.16.2 Feature objects — empty array when no matches, no per-Feature
 /// @context; the top-level @context is added by respond() (6.3.6).
-pub fn to_geojson_collection(
-    entities: Vec<Value>,
-    geometry_property: Option<&String>,
-    ctx: &antares_jsonld::Context,
-) -> Value {
+pub fn to_geojson_collection(entities: Vec<Value>, geometry_property: Option<&String>) -> Value {
     let features: Vec<Value> = entities
         .into_iter()
-        .map(|e| to_geojson_feature(e, geometry_property, ctx))
+        .map(|e| to_geojson_feature(e, geometry_property))
         .collect();
     serde_json::json!({"type": "FeatureCollection", "features": features})
 }
@@ -3375,7 +3417,6 @@ mod tests {
     fn geojson_feature_selection_and_shape() {
         use super::{to_geojson_collection, to_geojson_feature};
         use serde_json::Value;
-        let ctx = antares_jsonld::Loader::new().core();
         let entity = json!({
             "id": "urn:ngsi-ld:V:1", "type": "Vehicle",
             "location": [
@@ -3385,7 +3426,7 @@ mod tests {
             ],
             "speed": {"type": "Property", "value": 5}
         });
-        let f = to_geojson_feature(entity.clone(), None, &ctx);
+        let f = to_geojson_feature(entity.clone(), None);
         assert_eq!(f["type"], "Feature");
         assert_eq!(f["id"], "urn:ngsi-ld:V:1");
         // default instance (no datasetId) wins over the first array element
@@ -3401,10 +3442,10 @@ mod tests {
         assert!(f["properties"].get("speed").is_some());
 
         // geometryProperty naming a non-geometry Property -> null geometry
-        let f2 = to_geojson_feature(entity.clone(), Some(&"speed".to_string()), &ctx);
+        let f2 = to_geojson_feature(entity.clone(), Some(&"speed".to_string()));
         assert_eq!(f2["geometry"], Value::Null);
         // absent GeoProperty -> null geometry
-        let f3 = to_geojson_feature(entity.clone(), Some(&"missing".to_string()), &ctx);
+        let f3 = to_geojson_feature(entity.clone(), Some(&"missing".to_string()));
         assert_eq!(f3["geometry"], Value::Null);
 
         // 4.5.17.1: simplified multi-instance GeoProperty = dataset map;
@@ -3417,14 +3458,14 @@ mod tests {
             }},
             "speed": 5
         });
-        let fs = to_geojson_feature(simplified, None, &ctx);
+        let fs = to_geojson_feature(simplified, None);
         assert_eq!(
             fs["geometry"],
             json!({"type": "Point", "coordinates": [3.0, 4.0]})
         );
         assert_eq!(fs["properties"]["speed"], 5);
 
-        let fc = to_geojson_collection(vec![entity], None, &ctx);
+        let fc = to_geojson_collection(vec![entity], None);
         assert_eq!(fc["type"], "FeatureCollection");
         assert_eq!(fc["features"].as_array().map(Vec::len), Some(1));
         assert!(
@@ -3433,7 +3474,7 @@ mod tests {
         );
         // Table 5.2.30-1: "In the case that no matches are found, features
         // will be an empty array"
-        let empty = to_geojson_collection(vec![], None, &ctx);
+        let empty = to_geojson_collection(vec![], None);
         assert_eq!(empty["type"], "FeatureCollection");
         assert_eq!(empty["features"], json!([]));
     }

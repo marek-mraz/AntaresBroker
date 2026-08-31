@@ -2067,7 +2067,7 @@ async fn deliver_as(
                 })
             });
         let entities = body["data"].as_array().cloned().unwrap_or_default();
-        let mut fc = crate::entities::to_geojson_collection(entities, None, ctx);
+        let mut fc = crate::entities::to_geojson_collection(entities, None);
         if !prefer_body_json {
             fc["@context"] = crate::negotiate::served_context(ctx);
         }

@@ -5,7 +5,7 @@ use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::compact::compact_instance;
 use antares_jsonld::{expand_entity, parse_datetime, Context, ExpandOpts};
-use antares_model::{NgsiError, TenantId};
+use antares_model::NgsiError;
 use antares_ql::parse_q;
 use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
@@ -2895,12 +2895,16 @@ pub async fn batch_temporal_query(
     body: Bytes,
 ) -> Response {
     let go = async {
-        let tenant = tenant_from(&headers)?;
+        // 6.3.14 and 6.3.4: a Tenant outside the grammar and an Accept the
+        // operation cannot serve are both refused here. Neither VALUE is
+        // needed — the inner query reads the headers again — but the request
+        // must not reach it having skipped either check.
+        tenant_from(&headers)?;
         check_params(
             &params,
             &["limit", "offset", "count", "options", "format", "local"],
         )?;
-        let accept = parse_accept(&headers)?;
+        parse_accept(&headers)?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let q = parsed.object(NgsiError::BadRequestData(
             "query body must be an object".into(),
@@ -2913,19 +2917,9 @@ pub async fn batch_temporal_query(
         // and aggrParams (5.2.44).
         let mut vp: HashMap<String, String> = params.clone();
         crate::batch::query_doc_params(q, true, &mut vp)?;
-        let _ = accept;
-        query_temporal_inner_with(&st, &vp, &headers, &tenant).await
+        query_temporal_inner(&st, &vp, &headers).await
     };
     go.await.unwrap_or_else(|e| e.into_response())
-}
-
-async fn query_temporal_inner_with(
-    st: &AppState,
-    params: &HashMap<String, String>,
-    headers: &HeaderMap,
-    _tenant: &TenantId,
-) -> ApiResult<Response> {
-    query_temporal_inner(st, params, headers).await
 }
 
 #[cfg(test)]

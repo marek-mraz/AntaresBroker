@@ -1608,7 +1608,7 @@ async fn batch_query_inner(
         }
     }
     let out = if accept == Accept::GeoJson {
-        crate::entities::to_geojson_collection(payload, None, &parsed.ctx)
+        crate::entities::to_geojson_collection(payload, None)
     } else {
         Value::Array(payload)
     };
