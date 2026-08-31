@@ -204,3 +204,25 @@ validators (e.g. openapi-spec-validator) reject the document with
 "Duplicate parameter 'options'". Suggest merging the two component
 definitions (their enum sets appear to have been split between temporal
 and non-temporal option values) or renaming one.
+
+## 9. [suite] three temporal TPs assert a Content-Range unit the clause does not define
+
+**Title:** ngsi-ld-test-suite: `Content-Range` unit asserted as `date-time`,
+CIM 009 6.3.10 mandates `DateTime`
+
+**Body:**
+
+GS CIM 009 V1.9.1 clause 6.3.10 (p. 275) specifies the temporal Partial
+Content response verbatim as: `"unit"` shall be equal to `"DateTime"`.
+
+Three test purposes assert the lowercase spelling instead:
+
+- `TP/NGSI-LD/ContextInformation/Consumption/TemporalEntity/RetrieveTemporalEvolutionOfEntity/020_13.robot:91`
+- `TP/NGSI-LD/ContextInformation/Consumption/TemporalEntity/QueryTemporalEvolutionOfEntities/021_15.robot:88`
+- `TP/NGSI-LD/ContextInformation/Consumption/TemporalEntity/QueryTemporalEvolutionOfEntities/021_16.robot:46`
+
+IETF RFC 7233 clause 4.2 makes the range unit a token matched literally, so
+the two spellings are not interchangeable: an implementation that follows
+6.3.10 fails all three TPs, and one that passes them emits a unit the clause
+does not define. Suggest correcting the three assertions to `DateTime`, or,
+if the lowercase form is the intent, correcting 6.3.10.

@@ -2893,3 +2893,19 @@ query over a type returns only the entities one TP created). Either narrow
 the query — a `q` on the seeded `name` values, or an `id` list — or assert
 that the three appear in the expected relative order within the answer. Not
 worked around in the broker: nothing here is a broker behaviour.
+
+## Content-Range unit: three TPs assert `date-time`, 6.3.10 says `DateTime`
+
+`RetrieveTemporalEvolutionOfEntity/020_13.robot:91`,
+`QueryTemporalEvolutionOfEntities/021_15.robot:88` and `021_16.robot:46` all
+assert `Check Content Range Part Equal    ${unit}    date-time`.
+
+6.3.10 (p. 275) is verbatim: `"unit"` shall be equal to `"DateTime"`. The
+lowercase spelling appears nowhere in the clause, and the header is not a
+place RFC 7233 permits a case-insensitive unit — the range unit is a token
+compared literally. A broker that follows the clause fails all three TPs.
+
+Antares keeps the lowercase spelling for now so the conformance gate stays
+green; the correct fix is in the suite (and, if the intent really is the
+lowercase form, in the clause). Raised in `docs/upstream/etsi-raises.md`.
+Do not change the broker until one of the two moves.
