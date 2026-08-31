@@ -290,24 +290,75 @@ pub fn content_type(headers: &HeaderMap) -> String {
         .to_ascii_lowercase()
 }
 
-/// Extract the JSON-LD context URL from Link headers (6.3.5).
+/// Extract the JSON-LD context URL from Link headers (6.3.5, which takes the
+/// header "as mandated by JSON-LD, section 6.2" and through it RFC 8288
+/// clause 3). A field value is a comma-separated list of link-values, each a
+/// URI-Reference in angle brackets followed by `;`-separated parameters. The
+/// brackets are there so that `,` and `;` may appear in the URI, so neither
+/// separates inside them or inside a quoted parameter value. What marks the
+/// JSON-LD @context is the `rel` PARAMETER — case-insensitive name, a
+/// space-separated list of relation types as its value — never the target's
+/// own text: a link whose URL merely spells the relation is a different link,
+/// and resolving it would fetch a document the client never designated.
 pub fn link_context(headers: &HeaderMap) -> Option<String> {
     for link in headers.get_all(header::LINK) {
         let Ok(s) = link.to_str() else { continue };
-        for part in s.split(',') {
-            let part = part.trim();
-            if !part.contains(JSONLD_CONTEXT_REL) {
+        for value in split_unquoted(s, ',') {
+            let mut parts = split_unquoted(value, ';').into_iter();
+            let Some(target) = parts
+                .next()
+                .map(str::trim)
+                .and_then(|t| t.strip_prefix('<'))
+                .and_then(|t| t.strip_suffix('>'))
+            else {
                 continue;
-            }
-            if let Some(url) = part.split(';').next() {
-                let url = url.trim();
-                if url.starts_with('<') && url.ends_with('>') {
-                    return Some(url[1..url.len() - 1].to_owned());
-                }
+            };
+            let is_context = parts.any(|p| {
+                let Some((k, v)) = p.split_once('=') else {
+                    return false;
+                };
+                k.trim().eq_ignore_ascii_case("rel")
+                    && unquote(v.trim())
+                        .split_ascii_whitespace()
+                        .any(|rel| rel == JSONLD_CONTEXT_REL)
+            });
+            if is_context {
+                return Some(target.to_owned());
             }
         }
     }
     None
+}
+
+/// Split on `sep` only where it separates: not inside a bracketed
+/// URI-Reference and not inside a quoted-string, where `\` escapes the next
+/// character (RFC 9110 clause 5.6.4).
+fn split_unquoted(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut angle, mut quoted, mut escaped) = (0, false, false, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            c if c == sep && !quoted && !angle => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// The value of a header parameter with its quoting removed.
+fn unquote(v: &str) -> &str {
+    v.strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(v)
 }
 
 /// The media types a request body may carry per endpoint class.
@@ -1263,6 +1314,58 @@ mod negotiation {
         assert_eq!(
             link_context(&h),
             Some("https://example.org/c.jsonld".to_owned())
+        );
+    }
+
+    /// RFC 8288 clause 3, which JSON-LD 1.1 clause 6.2 (and through it 6.3.5)
+    /// defers to: the target lives in angle brackets so that `,` and `;` may
+    /// appear inside it, the relation is the `rel` PARAMETER and never the
+    /// target's text, parameter names are case-insensitive, and one `rel`
+    /// may list several relation types.
+    #[test]
+    fn link_header_is_parsed_as_rfc_8288_link_values() {
+        let link = |v: &str| hdr("link", v);
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://example.org/c.jsonld?v=1,2;a=b>; rel=\"{JSONLD_CONTEXT_REL}\""
+            ))),
+            Some("https://example.org/c.jsonld?v=1,2;a=b".to_owned()),
+            "a separator inside the bracketed target is part of the URI"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://example.org/x#{JSONLD_CONTEXT_REL}>; rel=\"describedby\""
+            ))),
+            None,
+            "the relation is the rel parameter, not the target's text"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://a/s.css>; rel=\"stylesheet {JSONLD_CONTEXT_REL}\""
+            ))),
+            Some("https://a/s.css".to_owned()),
+            "rel is a space-separated list of relation types"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://example.org/c.jsonld>; REL={JSONLD_CONTEXT_REL}"
+            ))),
+            Some("https://example.org/c.jsonld".to_owned()),
+            "parameter names are case-insensitive and the value may be bare"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://a/x>; rel=\"self\", <https://example.org/c.jsonld>; rel=\"{JSONLD_CONTEXT_REL}\""
+            ))),
+            Some("https://example.org/c.jsonld".to_owned()),
+            "one field line may carry several link-values"
+        );
+        assert_eq!(
+            link_context(&link(&format!(
+                "<https://a/x>; title=\"a, b; rel=\\\"{JSONLD_CONTEXT_REL}\\\"\""
+            ))),
+            None,
+            "a quoted parameter value is not a link-value boundary"
         );
     }
 
