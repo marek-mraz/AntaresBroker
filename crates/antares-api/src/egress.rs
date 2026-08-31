@@ -38,16 +38,29 @@ struct Breaker {
 
 /// Drop the least recently written entry once the map is at its ceiling, so a
 /// new key always has room. Called before inserting, never on lookup.
-fn evict_oldest<V>(map: &mut HashMap<String, V>, stamp: impl Fn(&V) -> Option<Instant>) {
+///
+/// The ceiling is shared by every tenant, so the eviction stays inside the
+/// tenant that is filling it (both maps are keyed `tenant\u{1f}rest`): one
+/// tenant pointing subscriptions at thousands of dead hosts would otherwise
+/// drop another tenant's tripped breaker, and that tenant's notifications go
+/// back to spending a full timeout on a destination already known dead. A key
+/// whose tenant holds no entry yet takes the globally oldest one, so a tenant
+/// arriving at a full map still gets in.
+// ponytail: a linear scan per eviction, which happens only at the ceiling on
+// a new key; a per-tenant LRU list if a profile ever shows it.
+fn evict_oldest<V>(map: &mut HashMap<String, V>, key: &str, stamp: impl Fn(&V) -> Option<Instant>) {
+    let prefix = format!("{}\u{1f}", key.split('\u{1f}').next().unwrap_or(""));
     while map.len() >= MAX_TRACKED {
-        let Some(oldest) = map
-            .iter()
-            .min_by_key(|(_, v)| stamp(v))
-            .map(|(k, _)| k.clone())
-        else {
+        let oldest = |mine: bool| {
+            map.iter()
+                .filter(|(k, _)| k.starts_with(&prefix) == mine)
+                .min_by_key(|(_, v)| stamp(v))
+                .map(|(k, _)| k.clone())
+        };
+        let Some(victim) = oldest(true).or_else(|| oldest(false)) else {
             return;
         };
-        map.remove(&oldest);
+        map.remove(&victim);
     }
 }
 
@@ -107,7 +120,7 @@ impl Egress {
             m.remove(reg_key);
         } else {
             if !m.contains_key(reg_key) {
-                evict_oldest(&mut m, |t: &Instant| Some(*t));
+                evict_oldest(&mut m, reg_key, |t: &Instant| Some(*t));
             }
             m.insert(reg_key.to_owned(), Instant::now());
         }
@@ -212,7 +225,7 @@ impl Egress {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let k = Self::key(tenant, url);
         if !map.contains_key(&k) {
-            evict_oldest(&mut map, |b: &Breaker| b.touched_at);
+            evict_oldest(&mut map, &k, |b: &Breaker| b.touched_at);
         }
         let b = map.entry(k).or_default();
         b.failures += 1;
@@ -377,6 +390,27 @@ mod tests {
 
     /// Both maps are keyed by client-supplied strings (notification endpoints,
     /// registration ids), so neither may grow without a ceiling: a client that
+    /// The ceiling is shared; the isolation must not be. A tenant churning
+    /// destinations past it evicts its OWN oldest entry — another tenant's
+    /// tripped breaker survives, or every later notification to that
+    /// tenant's dead endpoint goes back to spending a full timeout.
+    #[test]
+    fn filling_the_ceiling_leaves_another_tenants_breaker_tripped() {
+        let e = Egress::default();
+        let victim = "http://dead-peer.example:9090/notify";
+        for _ in 0..TRIP_AFTER {
+            e.record_failure("b", victim);
+        }
+        assert!(e.is_open("b", victim), "the breaker starts tripped");
+        for i in 0..(MAX_TRACKED + 500) {
+            e.record_failure("a", &format!("http://churn-{i}.example:9090/notify"));
+        }
+        assert!(
+            e.is_open("b", victim),
+            "one tenant's churn cleared another tenant's breaker"
+        );
+    }
+
     /// points subscriptions at thousands of dead hosts must not be able to
     /// spend the broker's memory one entry at a time.
     #[test]
