@@ -37,9 +37,10 @@ Three properties, each backed by a number CI reproduces on every full run:
    complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
    where a JVM broker's heap alone would not.
 2. **Conformance** — 1786/1786 ETSI CIM 009 V1.9.1 test cases green in
-   every cell of the seven-cell matrix (six native store cells and the
-   browser build), including the two cells where a 10-container
-   role-split fleet rolls continuously under the suite
+   every one of the six native store cells, and 1774/1774 in the browser
+   cell, where the twelve MQTT cases have no broker socket to run against
+   — including the two cells where a 10-container role-split fleet rolls
+   continuously under the suite
    ([per-store report with Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
    The methodology is a per-clause ledger over the whole spec text
    (`docs/spec/`, 947 clause files), not just the official TP list.
@@ -121,16 +122,18 @@ project does not have yet.
 |---|---|
 | Entities | 100,000,000 — current-state, one PostgreSQL cluster |
 | Tenants | 10,000 — **one shared schema**, `tenant_id` + Row-Level Security |
-| Subscriptions | 10,000 per broker (HTTP + MQTT delivery) |
-| CSource registrations | 10,000+ per broker — matching stays index-shaped, fan-out bounded |
+| Subscriptions | 100,000 per broker (HTTP + MQTT delivery) |
+| CSource registrations | 100,000+ per broker — matching stays index-shaped, fan-out bounded |
 | Storage | PostgreSQL with PostGIS, **TimescaleDB optional** (two temporal modes) |
 | Compliance | full NGSI-LD (ETSI CIM 009 V1.9.1), gated on the ETSI Robot suite + this repo's extension TPs |
 | HA | stateless broker pods, NATS JetStream, Postgres primary/replica |
 
-Measured against these rows by the weekly `scale-weekly` run on `master`
-(100 M entities, 10 k tenants, 100 k subscriptions, 100 k registrations on
-one rented box, broker and Postgres resident set and CPU sampled per phase): the tables and
-CSVs of the newest run are at
+The weekly `scale-weekly` run on `master` measures a fixed fraction of
+these rows: 1 % of the entity and tenant targets (1 M entities over 100
+tenants) with 10,000 subscriptions and 10,000 registrations, on one rented
+box, broker and Postgres resident set and CPU sampled per phase. The full
+targets need more than the one hour that box lives, so no run has reached
+them. The tables and CSVs of the newest run are at
 <https://antares-ngsi-ld-demo.marek-mraz.com/reports/perf/latest/>, and the
 [Performance](docs/src/performance.md) chapter says how each number is made.
 

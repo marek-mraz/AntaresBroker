@@ -44,7 +44,7 @@ DistributedOperations, jsonldContext}`. 555 carry ETSI's numbering
 normative surface the official set leaves untested (`566_01` for 5.6.6,
 `5510_01` for 5.5.10, `586_01` for 5.8.6), following the same conventions
 and tagged with their clause so the ledger picks them up. Every file
-expands to test cases; one full run is 1786 test cases:
+expands to test cases; one full run of a native cell is 1786 test cases:
 
 | suite | test cases |
 |---|---|
@@ -61,8 +61,9 @@ expands to test cases; one full run is 1786 test cases:
 
 ## The matrix
 
-The same 1786 cases run once per cell. Every push gates on the quick
-preset; the full preset runs twice a week, on `v*` tags and on dispatch,
+The same 1786 cases run once per native cell; `wasm-file` runs 1774 of
+them, the twelve MQTT cases having no broker socket to run against in the
+browser build. Every push gates on the quick preset; the full preset runs twice a week, on `v*` tags and on dispatch,
 and is what the report page and the badges render.
 
 | cell | store | preset | what it adds |
@@ -75,7 +76,7 @@ and is what the report page and the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A cell passes at 1786/1786. `dev/etsi-matrix-summary.py` folds the
+A native cell passes at 1786/1786, `wasm-file` at 1774/1774. `dev/etsi-matrix-summary.py` folds the
 per-cell results into one table and lists every failure across the
 matrix; a release requires that list to be empty.
 

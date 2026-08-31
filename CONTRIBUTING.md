@@ -33,8 +33,10 @@ Integration tests that need services are env-gated and skip loudly:
   ```
 
 - **ETSI validation.** `STORE=<mode> dev/etsi-local.sh` runs the suite for
-  ONE store mode locally (the one you touched); CI's 4×8 store × suite
-  matrix is the authority.
+  ONE store mode locally (the one you touched); the CI cell matrix is the
+  authority — the quick preset (file, postgres, timescale) runs all eight
+  suites per cell on every dispatch, the full seven-cell preset twice a
+  week and on `v*` tags.
 - `cargo fmt` on touched crates; clippy is a CI wall
   (`unwrap_used`/`expect_used` denied outside tests, `unsafe_code` forbidden).
 - Naming comes from the spec: types verbatim from CIM 009 §5.2, one public
