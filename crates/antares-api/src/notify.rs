@@ -403,11 +403,46 @@ impl DocMirror {
 fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) -> Vec<Value> {
     match &st.sub_mirror {
         Some(m) => m.candidates(tenant.as_str(), types, changed),
-        None => st
-            .store
-            .list(tenant, Kind::Subscription)
-            .unwrap_or_default(),
+        // The scan is the fallback, so its own failure may not be read as
+        // "this tenant has no subscriptions" either: that is the silence
+        // the mirror seed refuses to install.
+        None => match st.store.list(tenant, Kind::Subscription) {
+            Ok(subs) => subs,
+            Err(e) => {
+                tracing::error!(
+                    "subscription scan failed for tenant {}: {e}; no candidate matched this change",
+                    tenant.as_str()
+                );
+                Vec::new()
+            }
+        },
     }
+}
+
+/// Fill the mirror from the store, or say why it could not be filled.
+///
+/// Every subscription of every tenant has to be in the mirror before it is
+/// installed. `CurrentStateDriver::subscription_tenants` states the rule for
+/// the data path — "A SUBSET is a silent outage: a tenant missing here never
+/// fires a periodic notification and never reaches the mirror" — and an
+/// error absorbed into an empty list is the same subset by another route.
+/// The Postgres arm refuses `list` with TooManyResults at its row ceiling
+/// and a connection failure at startup refuses it too, so this is reachable
+/// rather than theoretical.
+fn seed_mirror(
+    store: &dyn antares_store::CurrentStateDriver,
+    mirror: &SubMirror,
+) -> Result<(), antares_model::NgsiError> {
+    for tenant_str in store.subscription_tenants()? {
+        let tenant = TenantId::new(&tenant_str)?;
+        for doc in store.list(&tenant, Kind::Subscription)? {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                let id = id.to_owned();
+                mirror.apply(&tenant_str, &id, Some(doc));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Wire the store hook and background tasks. Call once at startup.
@@ -415,21 +450,18 @@ pub fn wire(state: &mut AppState) {
     // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
-    for tenant_str in state.store.subscription_tenants().unwrap_or_default() {
-        if let Ok(tenant) = TenantId::new(&tenant_str) {
-            for doc in state
-                .store
-                .list(&tenant, Kind::Subscription)
-                .unwrap_or_default()
-            {
-                if let Some(id) = doc.get("id").and_then(Value::as_str) {
-                    let id = id.to_owned();
-                    mirror.apply(&tenant_str, &id, Some(doc));
-                }
-            }
-        }
+    match seed_mirror(state.store.as_ref(), &mirror) {
+        Ok(()) => state.sub_mirror = Some(mirror.clone()),
+        // Not installed, so `subs_for` takes the store scan it documents as
+        // the missing-mirror fallback. Installing what the seed managed to
+        // read would be the one outcome that is neither correct nor slow:
+        // the matcher reads candidates from the mirror alone, so a
+        // subscription absent from it never fires again in this process.
+        Err(e) => tracing::error!(
+            "subscription mirror seed failed ({e}); \
+             matching falls back to a store scan per change"
+        ),
     }
-    state.sub_mirror = Some(mirror.clone());
     let m = mirror.clone();
     state.sub_sync = Some(Arc::new(
         move |tenant: &TenantId, kind: Kind, id: &str, doc: Option<&Value>| match kind {

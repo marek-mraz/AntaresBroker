@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: EUPL-1.2
+//! The subscription mirror is the only place the matcher reads candidates
+//! from, so what happens when it cannot be filled decides whether a tenant
+//! is notified at all.
+//!
+//! `CurrentStateDriver::subscription_tenants` says it of the data path: "A
+//! SUBSET is a silent outage: a tenant missing here never fires a periodic
+//! notification and never reaches the mirror." A store error absorbed into
+//! an empty list is that same subset, reached from the error path — and it
+//! is reachable, because the Postgres arm refuses `list` with
+//! `TooManyResults` once a tenant holds `MAX_UNDECIDED_ROWS` documents, and
+//! any connection failure at startup does the same.
+//!
+//! `subs_for` documents the intended degradation: the store scan is there
+//! "as the never-wired fallback so a missing mirror degrades to
+//! correct-but-slow". A half-filled mirror is the one state that is neither
+//! correct nor slow, so a seed that cannot complete must leave the mirror
+//! uninstalled rather than install what it managed to read.
+
+#![allow(clippy::unwrap_used)]
+
+use antares_api::AppState;
+use antares_model::{NgsiError, TenantId};
+use antares_store::{CurrentStateDriver, Kind};
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+/// set_var once: a sibling test reading the env while another rewrites it
+/// saw the policy missing and refused the loopback forward.
+fn allow_private() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+}
+
+/// A store whose `list` fails its first `n` calls and then behaves. It
+/// stands for both reachable causes at once: the transient connection
+/// failure, and the `TooManyResults` ceiling a tenant crosses and then
+/// drops back under. Everything else delegates, so the data it guards is
+/// the real store's.
+struct FlakyList {
+    inner: Arc<dyn CurrentStateDriver>,
+    fail_next: AtomicUsize,
+}
+
+impl FlakyList {
+    fn new(inner: Arc<dyn CurrentStateDriver>, fail_next: usize) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(fail_next),
+        }
+    }
+}
+
+impl CurrentStateDriver for FlakyList {
+    fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+        if self
+            .fail_next
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(NgsiError::TooManyResults("list refused".into()));
+        }
+        self.inner.list(tenant, kind)
+    }
+
+    fn ping(&self) -> Result<(), NgsiError> {
+        self.inner.ping()
+    }
+    fn close<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.inner.close()
+    }
+    fn set_change_hook(&self, h: antares_store::ChangeHook) {
+        self.inner.set_change_hook(h);
+    }
+    fn create(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        doc: Value,
+    ) -> Result<bool, NgsiError> {
+        self.inner.create(tenant, kind, id, doc)
+    }
+    fn batch_create(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        self.inner.batch_create(tenant, items)
+    }
+    fn batch_delete(&self, tenant: &TenantId, ids: &[String]) -> Result<Vec<bool>, NgsiError> {
+        self.inner.batch_delete(tenant, ids)
+    }
+    fn batch_upsert(
+        &self,
+        tenant: &TenantId,
+        items: Vec<(String, Value)>,
+    ) -> Result<Vec<bool>, NgsiError> {
+        self.inner.batch_upsert(tenant, items)
+    }
+    fn upsert(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        doc: Value,
+    ) -> Result<bool, NgsiError> {
+        self.inner.upsert(tenant, kind, id, doc)
+    }
+    fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+        self.inner.get(tenant, kind, id)
+    }
+    fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+        self.inner.delete(tenant, kind, id)
+    }
+    fn matching_registrations(
+        &self,
+        tenant: &TenantId,
+        ids: Option<&[String]>,
+        types: Option<&[String]>,
+    ) -> Result<Vec<Value>, NgsiError> {
+        self.inner.matching_registrations(tenant, ids, types)
+    }
+    fn query_entities(
+        &self,
+        tenant: &TenantId,
+        f: &antares_store::filter::EntityFilter<'_>,
+    ) -> Result<antares_store::filter::QueryOutcome, NgsiError> {
+        self.inner.query_entities(tenant, f)
+    }
+    fn mutate_boxed<'a>(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        f: antares_store::MutateFn<'a>,
+    ) -> Result<Option<Result<(), ()>>, NgsiError> {
+        self.inner.mutate_boxed(tenant, kind, id, f)
+    }
+    fn batch_mutate_boxed<'a>(
+        &self,
+        tenant: &TenantId,
+        ids: &[String],
+        f: antares_store::BatchMutateFn<'a>,
+    ) -> Result<Vec<Option<Result<(), ()>>>, NgsiError> {
+        self.inner.batch_mutate_boxed(tenant, ids, f)
+    }
+    fn record_delivery(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        id: &str,
+        now: &str,
+    ) -> Result<Option<antares_store::Delivery>, NgsiError> {
+        self.inner.record_delivery(tenant, kind, id, now)
+    }
+    fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        self.inner.tenant_exists(tenant)
+    }
+    fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
+        self.inner.subscription_tenants()
+    }
+    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
+        self.inner.context_put(id, doc)
+    }
+    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
+        self.inner.context_get(id)
+    }
+    fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
+        self.inner.context_delete(id)
+    }
+    fn context_list(&self) -> Result<Vec<Value>, NgsiError> {
+        self.inner.context_list()
+    }
+}
+
+async fn send(st: &AppState, path: &str, doc: Value) -> (StatusCode, String) {
+    let body = doc.to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/ngsi-ld/v1/{path}"))
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("req");
+    let resp = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("resp");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn capture_server() -> (String, tokio::sync::mpsc::Receiver<Value>) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Value>(4);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = axum::Router::new().route(
+        "/notify",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let tx = tx.clone();
+            async move {
+                let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let _ = tx.send(v).await;
+                StatusCode::OK
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (format!("http://{addr}/notify"), rx)
+}
+
+async fn expect_notification(rx: &mut tokio::sync::mpsc::Receiver<Value>, why: &str) -> Value {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5 * antares_api::state::slow_factor()),
+        rx.recv(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{why}"))
+    .expect("one notification")
+}
+
+/// A restart whose mirror seed cannot read the store still notifies: the
+/// mirror is left uninstalled and matching takes the store-scan fallback,
+/// rather than the process running for its whole life against a mirror that
+/// silently holds none of the tenant's subscriptions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mirror_seed_that_cannot_read_the_store_does_not_silence_the_tenant() {
+    allow_private();
+
+    let mut first = AppState::new("me".into());
+    antares_api::notify::wire(&mut first);
+
+    let (uri, mut rx) = capture_server().await;
+    let (status, body) = send(
+        &first,
+        "subscriptions",
+        json!({"type": "Subscription", "entities": [{"type": "Vehicle"}],
+               "notification": {"endpoint": {"uri": uri}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The subscription works before the restart, so a later silence is the
+    // seed and nothing else.
+    let (status, body) = send(
+        &first,
+        "entities",
+        json!({"id": "urn:ngsi-ld:Vehicle:seed-1", "type": "Vehicle",
+               "speed": {"type": "Property", "value": 1}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    expect_notification(&mut rx, "the subscription never fired before the restart").await;
+
+    // The restart: a fresh state over the same documents, whose first `list`
+    // is refused the way the Postgres arm refuses one past its ceiling.
+    let mut restarted = AppState::new("me".into());
+    restarted.store = Arc::new(FlakyList::new(first.store.clone(), 1));
+    antares_api::notify::wire(&mut restarted);
+
+    let (status, body) = send(
+        &restarted,
+        "entities",
+        json!({"id": "urn:ngsi-ld:Vehicle:seed-2", "type": "Vehicle",
+               "speed": {"type": "Property", "value": 2}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let n = expect_notification(
+        &mut rx,
+        "the tenant was silenced by a seed that could not read the store",
+    )
+    .await;
+    assert_eq!(
+        n["data"][0]["id"].as_str(),
+        Some("urn:ngsi-ld:Vehicle:seed-2"),
+        "{n}"
+    );
+}
+
+/// The seed that CAN read the store still installs the mirror — the
+/// fallback is for the failure, not a replacement for the index.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seed_that_reads_the_store_installs_the_mirror() {
+    allow_private();
+
+    let mut first = AppState::new("me".into());
+    antares_api::notify::wire(&mut first);
+
+    let (uri, _rx) = capture_server().await;
+    let (status, body) = send(
+        &first,
+        "subscriptions",
+        json!({"type": "Subscription", "entities": [{"type": "Vehicle"}],
+               "notification": {"endpoint": {"uri": uri}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let mut restarted = AppState::new("me".into());
+    restarted.store = Arc::new(FlakyList::new(first.store.clone(), 0));
+    antares_api::notify::wire(&mut restarted);
+
+    assert!(
+        restarted.sub_mirror.is_some(),
+        "a complete seed must install the mirror it filled"
+    );
+}
