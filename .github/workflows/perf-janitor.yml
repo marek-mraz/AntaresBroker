@@ -27,11 +27,20 @@ jobs:
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
         run: |
           NOW=$(date +%s)
-          LEAKED=0
-          curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
-            "https://api.hetzner.cloud/v1/servers?label_selector=role=perf-runner" \
+          # A sweep that cannot list is not a clean sweep. Without this the
+          # listing failing (expired token, API outage) leaves the loops with
+          # no input, no leaked.txt and a green job — while the servers the
+          # janitor exists to catch keep billing.
+          servers=$(curl -sS --fail-with-body -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers?label_selector=role=perf-runner") \
+            || { echo "server listing refused: $servers"; exit 1; }
+          volumes=$(curl -sS --fail-with-body -H "Authorization: Bearer $HCLOUD_TOKEN" \
+            "https://api.hetzner.cloud/v1/volumes?label_selector=role=perf-runner") \
+            || { echo "volume listing refused: $volumes"; exit 1; }
+          echo "$servers" \
             | jq -r '.servers[] | "\(.id) \(.labels.expiry // 0) \(.name)"' \
             | while read -r id expiry name; do
+                case $expiry in ''|*[!0-9]*) echo "server $name ($id) has an unusable expiry label '$expiry' — treating as expired"; expiry=0 ;; esac
                 if [ "$expiry" -lt "$NOW" ]; then
                   echo "leaked server $name ($id, expired $expiry) — deleting"
                   curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
@@ -41,10 +50,10 @@ jobs:
               done
           # volumes carry the same labels (scale-weekly); a volume outlives
           # its server when the delete job never ran
-          curl -sf -H "Authorization: Bearer $HCLOUD_TOKEN" \
-            "https://api.hetzner.cloud/v1/volumes?label_selector=role=perf-runner" \
+          echo "$volumes" \
             | jq -r '.volumes[] | "\(.id) \(.labels.expiry // 0) \(.name)"' \
             | while read -r id expiry name; do
+                case $expiry in ''|*[!0-9]*) echo "volume $name ($id) has an unusable expiry label '$expiry' — treating as expired"; expiry=0 ;; esac
                 if [ "$expiry" -lt "$NOW" ]; then
                   echo "leaked volume $name ($id, expired $expiry) — deleting"
                   curl -sf -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
