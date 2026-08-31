@@ -205,8 +205,7 @@ fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String
             // 4.11 lastN keeps the N most recent INSTANTS, so the rank orders
             // on the same canonical key the window compares on — raw bytes
             // put "…00.000Z" after "…00Z" and kept the wrong N.
-            let order_key =
-                crate::compile::temporal::dt_key_sql(&format!("(ai.data ->> ${tp})"));
+            let order_key = crate::compile::temporal::dt_key_sql(&format!("(ai.data ->> ${tp})"));
             format!(
                 "COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (\
                    SELECT s.attr_id, jsonb_agg(s.data ORDER BY s.created_at, s.observed_at, s.instance_id) AS insts \

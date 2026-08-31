@@ -11,7 +11,6 @@
 //! (tenant, watched attribute)); every predicate here evaluates one
 //! candidate self-contained.
 #![cfg_attr(not(test), warn(clippy::expect_used))]
-
 #![deny(missing_docs)]
 
 use antares_jsonld::Context;

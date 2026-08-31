@@ -9,7 +9,6 @@
 //! gateway can inspect or rewrite a query (strip an attribute, AND in an
 //! authorization predicate) and forward it with the broker's own semantics.
 #![cfg_attr(not(test), warn(clippy::expect_used))]
-
 #![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
