@@ -205,10 +205,25 @@ pub fn expired_at(v: &Value, now: &str) -> bool {
     let Some(e) = v.get("expiresAt").and_then(Value::as_str) else {
         return false;
     };
-    let instant = |s: &str| chrono::DateTime::parse_from_rfc3339(&s.replacen(',', ".", 1)).ok();
+    let instant = |s: &str| chrono::DateTime::parse_from_rfc3339(&canonical_datetime(s)).ok();
     match (instant(e), instant(now)) {
         (Some(exp), Some(n)) => exp < n,
         _ => e < now,
+    }
+}
+
+/// 4.6.3: "In requests, also a comma instead of a decimal point may be used
+/// as separator for compatibility reasons." Nothing downstream of the request
+/// boundary accepts it — not RFC 3339 parsing, not PostgreSQL's
+/// `::timestamptz` cast, not byte comparison, where ',' (0x2C) sorts before
+/// both '.' and 'Z'. A comma cannot appear anywhere else in a DateTime of
+/// that shape, so the first one IS the fraction separator and rewriting it
+/// is total: a stamp with no comma is returned untouched, and a string that
+/// is not a DateTime at all is not made into one.
+pub fn canonical_datetime(s: &str) -> std::borrow::Cow<'_, str> {
+    match s.find(',') {
+        Some(_) => std::borrow::Cow::Owned(s.replacen(',', ".", 1)),
+        None => std::borrow::Cow::Borrowed(s),
     }
 }
 
@@ -430,6 +445,37 @@ mod tests {
                                 "expiresAt": "2999-01-01T00:00:00Z"}]
         });
         assert!(strip_expired(&mut doc, NOW));
+    }
+
+    /// 4.6.3: the comma is a request-side separator only — every consumer
+    /// past that boundary wants the point form. The rewrite is first-comma
+    /// only, and leaves anything that is not a DateTime alone: a `datasetId`
+    /// or any other URI travels through the same code paths.
+    #[test]
+    fn canonical_datetime_rewrites_only_the_fraction_separator() {
+        assert_eq!(
+            canonical_datetime("2026-01-01T00:00:00,500Z"),
+            "2026-01-01T00:00:00.500Z"
+        );
+        assert_eq!(
+            canonical_datetime("2026-01-01T00:00:00.500Z"),
+            "2026-01-01T00:00:00.500Z"
+        );
+        assert_eq!(
+            canonical_datetime("2026-01-01T00:00:00Z"),
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(canonical_datetime(""), "");
+        // only the first: a second comma is not a fraction separator, so the
+        // string stays something the cast will reject rather than becoming a
+        // stamp that was never sent.
+        assert_eq!(canonical_datetime("a,b,c"), "a.b,c");
+        // borrowed when there is nothing to do, so the common path allocates
+        // nothing
+        assert!(matches!(
+            canonical_datetime("2026-01-01T00:00:00Z"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

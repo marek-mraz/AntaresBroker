@@ -67,17 +67,17 @@ pub fn compile_instance_range(
     let sql = match r.timerel {
         "any" => present,
         "before" => {
-            binds.push(r.time_at.to_owned());
+            binds.push(antares_store::filter::canonical_datetime(r.time_at).into_owned());
             format!("{present} AND {ts} < {}", at(first_bind + 1))
         }
         "after" => {
-            binds.push(r.time_at.to_owned());
+            binds.push(antares_store::filter::canonical_datetime(r.time_at).into_owned());
             format!("{present} AND {ts} >= {}", at(first_bind + 1))
         }
         "between" => {
             let end = r.end_time_at?;
-            binds.push(r.time_at.to_owned());
-            binds.push(end.to_owned());
+            binds.push(antares_store::filter::canonical_datetime(r.time_at).into_owned());
+            binds.push(antares_store::filter::canonical_datetime(end).into_owned());
             format!(
                 "{present} AND {ts} >= {} AND {ts} < {}",
                 at(first_bind + 1),

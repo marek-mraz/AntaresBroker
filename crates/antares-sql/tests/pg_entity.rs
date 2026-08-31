@@ -27,6 +27,88 @@ fn doc(id: &str, n: i64) -> serde_json::Value {
     })
 }
 
+/// 4.6.3: "The Seconds component may optionally contain a decimal fraction.
+/// In this case the string shall contain two integer digits, followed by a
+/// decimal point and then one or more fractional digits, up to a maximum of
+/// six. ... In requests, also a comma instead of a decimal point may be used
+/// as separator for compatibility reasons."
+///
+/// The broker accepts that form deliberately — `parse_datetime` has an
+/// explicit branch for it and `filter::expired_at` rewrites the comma before
+/// parsing, with a comment saying why. The store then handed the raw text to
+/// a bare `::timestamptz` cast, which PostgreSQL refuses: a legal request
+/// became a 500 on the postgres and timescale arms while the memory and file
+/// arms accepted it.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_6_3_a_comma_seconds_fraction_is_stored_like_a_point() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgcomma").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Test:comma1";
+    let _ = s.delete(&t, id);
+
+    let with_comma = json!({
+        "id": id, "type": "Test",
+        "createdAt": "2026-08-04T09:00:00,500Z",
+        "modifiedAt": "2026-08-04T09:00:00,500Z",
+        "expiresAt": "2099-01-01T00:00:00,500Z",
+        "n": {"type": "Property", "value": 1}
+    });
+    assert!(
+        s.create(&t, id, &with_comma)
+            .expect("4.6.3: the comma form is legal"),
+        "created"
+    );
+
+    // The extracted columns are the point form of the same instant, so every
+    // predicate built on them (4.22 expiry, ordering, the sysAttrs windows)
+    // sees the timestamp the client meant.
+    // Compared as instants against the point form of the same stamps: the
+    // two spellings 4.6.3 allows have to land on the same timestamptz.
+    let (created_ok, expires_ok): (bool, Option<bool>) = sqlx::query_as(
+        "SELECT created_at = $3::timestamptz, expires_at = $4::timestamptz
+           FROM entities WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(t.as_str())
+    .bind(id)
+    .bind("2026-08-04T09:00:00.500Z")
+    .bind("2099-01-01T00:00:00.500Z")
+    .fetch_one(&pool)
+    .await
+    .expect("row");
+    assert!(created_ok, "the comma and point forms are the same instant");
+    assert_eq!(
+        expires_ok,
+        Some(true),
+        "the expiry the client set is the expiry the store holds"
+    );
+
+    // A future expiry means present; the entity is readable, not a 4.22 ghost.
+    assert!(s.get(&t, id).expect("get").is_some(), "still valid");
+
+    // And the past-comma form actually expires, rather than reading as no
+    // expiry at all: the meta-side `try_timestamptz` returns NULL for text it
+    // cannot parse, which would silently make the entity immortal.
+    let gone = "urn:ngsi-ld:Test:comma2";
+    let _ = s.delete(&t, gone);
+    let expired = json!({
+        "id": gone, "type": "Test",
+        "createdAt": "2020-01-01T00:00:00,250Z", "modifiedAt": "2020-01-01T00:00:00,250Z",
+        "expiresAt": "2020-01-01T00:00:00,250Z",
+        "n": {"type": "Property", "value": 2}
+    });
+    assert!(s.create(&t, gone, &expired).expect("create expired"));
+    assert!(
+        s.get(&t, gone).expect("get").is_none(),
+        "4.22 + 4.6.3: a comma-stamped expiry in the past is still an expiry"
+    );
+
+    let _ = s.delete(&t, id);
+    let _ = s.delete(&t, gone);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn entity_crud_roundtrip_with_extracted_columns() {
     let url = require_db!();

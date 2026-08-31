@@ -51,7 +51,12 @@ fn extract(doc: &Value) -> (Vec<String>, Option<Vec<String>>, String, String) {
             _ => vec![],
         }
     };
-    let ts = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
+    // 4.6.3 comma fraction: both feed `::timestamptz` binds.
+    let ts = |k: &str| {
+        doc.get(k)
+            .and_then(Value::as_str)
+            .map(|s| antares_store::filter::canonical_datetime(s).into_owned())
+    };
     let now = || "1970-01-01T00:00:00Z".to_owned();
     (
         doc.get("type").map(&as_vec).unwrap_or_default(),
@@ -104,25 +109,33 @@ fn decompose(doc: &Value) -> Vec<Value> {
             };
             for i in arr {
                 let s = |k: &str| i.get(k).and_then(Value::as_str);
+                // 4.6.3: a comma seconds-fraction is legal in a request and
+                // these stamps go straight into `::timestamptz` casts, which
+                // refuse it — and the raise lands in the temporal drain,
+                // which absorbs it, so the whole request's history would be
+                // lost with a 2xx already returned. Timestamps only:
+                // `datasetId` is a URI, where a comma is an ordinary
+                // character and rewriting it would corrupt the id.
+                let ts = |k: &str| s(k).map(antares_store::filter::canonical_datetime);
                 let Some(instance_id) = s("instanceId") else {
                     continue; // stamped by the API layer; belt only
                 };
                 // observed_at falls back through the instance's own
                 // timestamps — deletion instances carry only deletedAt and
                 // must NOT collapse onto the epoch (retention would reap them)
-                let observed = s("observedAt")
-                    .or_else(|| s("modifiedAt"))
-                    .or_else(|| s("deletedAt"))
-                    .or_else(|| s("createdAt"))
-                    .unwrap_or("1970-01-01T00:00:00Z");
+                let observed = ts("observedAt")
+                    .or_else(|| ts("modifiedAt"))
+                    .or_else(|| ts("deletedAt"))
+                    .or_else(|| ts("createdAt"))
+                    .unwrap_or(std::borrow::Cow::Borrowed("1970-01-01T00:00:00Z"));
                 rows.push(serde_json::json!({
                     "attr_id": attr,
                     "instance_id": instance_id,
                     "dataset_id": s("datasetId"),
                     "observed_at": observed,
-                    "created_at": s("createdAt").unwrap_or(observed),
-                    "modified_at": s("modifiedAt").unwrap_or(observed),
-                    "deleted_at": s("deletedAt"),
+                    "created_at": ts("createdAt").unwrap_or_else(|| observed.clone()),
+                    "modified_at": ts("modifiedAt").unwrap_or(observed),
+                    "deleted_at": ts("deletedAt"),
                     "data": i,
                 }));
             }
@@ -267,7 +280,7 @@ fn aggregate_expr(
     };
     let anchor = match agg.anchor {
         Some(a) => {
-            binds.push(a.to_owned());
+            binds.push(antares_store::filter::canonical_datetime(a).into_owned());
             format!("${}::timestamptz", first_bind + binds.len() - 1)
         }
         None => format!("min(ai.{col}) OVER (PARTITION BY ai.attr_id)"),
@@ -286,14 +299,14 @@ fn aggregate_expr(
             };
             let start = match qs {
                 Some(v) => {
-                    binds.push(v.to_owned());
+                    binds.push(antares_store::filter::canonical_datetime(v).into_owned());
                     format!("${}::timestamptz", first_bind + binds.len() - 1)
                 }
                 None => "s0.first_ts".to_owned(),
             };
             let end = match qe {
                 Some(v) => {
-                    binds.push(v.to_owned());
+                    binds.push(antares_store::filter::canonical_datetime(v).into_owned());
                     format!("${}::timestamptz", first_bind + binds.len() - 1)
                 }
                 None => "s0.last + interval '1 second'".to_owned(),

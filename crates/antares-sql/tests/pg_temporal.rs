@@ -459,6 +459,94 @@ async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
     }
 }
 
+/// 4.6.3: "In requests, also a comma instead of a decimal point may be used
+/// as separator for compatibility reasons." On the temporal side that form is
+/// the dangerous one. The instance stamps go straight into `::timestamptz`
+/// casts, and the raise lands in the temporal drain, which absorbs it — the
+/// entity write has already committed and answered 2xx, and because a whole
+/// request folds into one append per entity, one attribute with a comma
+/// stamp took the history of every attribute in that request with it.
+///
+/// The `expiresAt` half is the mirror image: the temporal meta keeps the
+/// stamp as jsonb TEXT and reads it back through `try_timestamptz`, which
+/// answers NULL for anything it cannot parse — and NULL means "no expiry", so
+/// a comma-stamped expiry made the entity immortal instead of loud.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_6_3_a_comma_seconds_fraction_records_and_expires() {
+    let url = require_db!();
+    let _ddl = PARTITION_DDL.lock().await;
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgtempcomma").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempcomma'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("clean");
+    }
+    let s = PgTemporalStore::new(pool.clone());
+    let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+
+    let id = "urn:t:comma";
+    let doc = json!({
+        "id": id, "type": ["T"],
+        "createdAt": "2026-08-04T09:00:00,125Z", "modifiedAt": "2026-08-04T09:00:00,125Z",
+        attr: [{"type": "Property", "value": 1,
+                "observedAt": "2026-08-04T09:00:00,125Z",
+                "instanceId": "urn:ngsi-ld:Instance:comma"}]
+    });
+    assert!(s
+        .create(&t, id, &doc)
+        .expect("4.6.3: the comma form is legal"));
+
+    // The instance landed, and its column holds the instant the client meant.
+    let observed: Vec<bool> = sqlx::query_scalar(
+        "SELECT observed_at = $1::timestamptz FROM attr_instances
+          WHERE tenant_id = 'pgtempcomma'",
+    )
+    .bind("2026-08-04T09:00:00.125Z")
+    .fetch_all(&pool)
+    .await
+    .expect("rows");
+    assert_eq!(observed.len(), 1, "the history was not silently dropped");
+    assert!(
+        observed[0],
+        "the comma and point forms are the same instant"
+    );
+    assert!(
+        s.get(&t, id).expect("get").is_some(),
+        "and the evolution reads back"
+    );
+
+    // 4.22 through a comma stamp: an expiry in the past is an expiry, not a
+    // stamp the store quietly reads as absent.
+    let gone = "urn:t:commagone";
+    let expired = json!({
+        "id": gone, "type": ["T"],
+        "createdAt": "2020-01-01T00:00:00,750Z", "modifiedAt": "2020-01-01T00:00:00,750Z",
+        "expiresAt": "2020-01-01T00:00:00,750Z",
+        attr: [{"type": "Property", "value": 2,
+                "observedAt": "2020-01-01T00:00:00,750Z",
+                "instanceId": "urn:ngsi-ld:Instance:commagone"}]
+    });
+    assert!(s.create(&t, gone, &expired).expect("create expired"));
+    assert!(
+        s.get(&t, gone).expect("get").is_none(),
+        "4.22 + 4.6.3: a comma-stamped expiry in the past is still an expiry"
+    );
+
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempcomma'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+    }
+}
+
 /// Regression: the append fast-path's shell insert was ON CONFLICT DO
 /// NOTHING — an entity that gained a type after first touch stayed frozen
 /// with its original types and was invisible to type-filtered temporal

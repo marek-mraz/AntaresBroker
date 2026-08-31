@@ -65,7 +65,12 @@ fn bookkeeping(
     Option<String>,
     Option<String>,
 ) {
-    let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_owned);
+    // 4.6.3: a comma seconds-fraction is legal in a request; every one of
+    // these becomes a `::timestamptz` bind.
+    let s = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(|t| antares_store::filter::canonical_datetime(t).into_owned())
+    };
     let n = doc.get("notification");
     (
         s(doc.get("expiresAt")),
@@ -166,7 +171,10 @@ pub fn index_rows(reg: &Value) -> Vec<Value> {
                 Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
                 _ => vec![],
             }),
-            "expires_at": reg.get("expiresAt").and_then(Value::as_str),
+            // 4.6.3 comma fraction: this row's `expires_at` is cast with a
+            // bare `::timestamptz` in the INSERT below.
+            "expires_at": reg.get("expiresAt").and_then(Value::as_str)
+                             .map(antares_store::filter::canonical_datetime),
             "endpoint": endpoint,
             "mode": mode_code(reg),
             "ops": ops_mask(reg),

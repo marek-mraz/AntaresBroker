@@ -91,7 +91,14 @@ fn extract(doc: &Value) -> Extracted {
             _ => vec![],
         }
     };
-    let ts = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
+    // 4.6.3 allows a comma seconds-fraction in requests; these three feed
+    // `::timestamptz` casts, which refuse it. Canonicalised here so every
+    // extracted column holds the instant the client meant.
+    let ts = |k: &str| {
+        doc.get(k)
+            .and_then(Value::as_str)
+            .map(|s| antares_store::filter::canonical_datetime(s).into_owned())
+    };
     let now = || "1970-01-01T00:00:00Z".to_owned(); // caller always stamps; belt only
     let location = crate::compile::geo::extract_location(doc);
     let location_ambiguous =
