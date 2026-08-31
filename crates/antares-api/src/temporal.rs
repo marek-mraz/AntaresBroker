@@ -716,7 +716,14 @@ fn present_temporal(
                 .is_some_and(|a| a.first().is_some_and(Value::is_object));
         if is_meta(k) && !scope_instances {
             match k.as_str() {
-                "createdAt" | "modifiedAt" if !r.sys => continue,
+                // Table 6.3.11-1: `sysAttrs` is what admits "the system
+                // generated temporal attributes createdAt, modifiedAt and
+                // the system temporal attribute expiresAt … In the case of
+                // temporal representations, also the system generated
+                // temporal attribute deletedAt". Without it none of them is
+                // in the payload — the same set `repr.rs` gates on the
+                // current-state path.
+                "createdAt" | "modifiedAt" | "expiresAt" | "deletedAt" if !r.sys => continue,
                 _ => {}
             }
             if !crate::repr::meta_projected(r.pick.as_deref(), r.omit.as_deref(), k) {
