@@ -48,12 +48,10 @@ pub struct AppState {
     /// The temporal driver — by default the same backend instance as
     /// `store`; a deployment may load a different one (or none).
     pub temporal: Arc<dyn TemporalDriver>,
-    /// Active store backend — reported by `/q/health` (NOT in
-    /// `/info/sourceIdentity`, which is a spec resource). A typed value so
-    /// mode-gated sections switch on an enum, never on strings.
-    /// What the current-state driver is CALLED, for `/q/health` — a name,
-    /// not an enumeration: a driver from outside this workspace mounts the
-    /// same way as one from inside, and nothing here branches on it.
+    /// What the current-state driver is CALLED, reported by `/q/health` (NOT
+    /// by `/info/sourceIdentity`, which is a spec resource) — a name, not an
+    /// enumeration: a driver from outside this workspace mounts the same way
+    /// as one from inside, and nothing here branches on it.
     pub store_name: String,
     /// The temporal backend `/q/health` names: the store's own mode when one
     /// instance serves both seams, `None` when history is off (`NoTemporal`);
