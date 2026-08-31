@@ -418,7 +418,6 @@ async fn batch_write(
     };
     let mut created_ids: Vec<String> = vec![];
     let mut any_created = false;
-    let mut any_updated = false;
     let proxies: Vec<&crate::federation::FedReg> =
         fed_regs.iter().filter(|r| r.is_proxy()).collect();
     // Creates are collected and written as ONE multi-row statement;
@@ -526,7 +525,6 @@ async fn batch_write(
                         match r {
                             Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
                             Some(Ok(())) => {
-                                any_updated = true;
                                 if !out.success.contains(&Value::String(id.clone())) {
                                     out.success.push(Value::String(id.clone()));
                                 }
@@ -552,8 +550,6 @@ async fn batch_write(
                             if !created_ids.contains(id) {
                                 created_ids.push(id.clone());
                             }
-                        } else {
-                            any_updated = true;
                         }
                         if !out.success.contains(&Value::String(id.clone())) {
                             out.success.push(Value::String(id.clone()));
@@ -615,7 +611,6 @@ async fn batch_write(
                         )),
                         Some(Err(e)) => out.errors.push(err_entry(Some(id), &e)),
                         Some(Ok(())) => {
-                            any_updated = true;
                             if skipped.get(id).copied().unwrap_or(false) {
                                 out.errors.push(err_entry(
                                     Some(id),
@@ -853,8 +848,6 @@ async fn batch_write(
             if was_created {
                 any_created = true;
                 created_ids.push(id.clone());
-            } else {
-                any_updated = true;
             }
             if !out.success.iter().any(|v| v.as_str() == Some(id.as_str())) {
                 out.success.push(Value::String(id));
@@ -876,7 +869,6 @@ async fn batch_write(
             if any_created {
                 (StatusCode::CREATED, true)
             } else {
-                let _ = any_updated;
                 (StatusCode::NO_CONTENT, false)
             }
         }

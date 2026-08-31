@@ -1488,16 +1488,6 @@ pub(crate) fn qualifies_non_wide(
         || params.get("local").map(String::as_str) == Some("true")
 }
 
-/// Shared entity filtering for query + purge.
-pub fn filter_entities(
-    st: &AppState,
-    tenant: &TenantId,
-    params: &HashMap<String, String>,
-    ctx: &antares_jsonld::Context,
-) -> ApiResult<Vec<Value>> {
-    filter_entities_fed(st, tenant, params, ctx, Vec::new())
-}
-
 /// Same, with federated candidate docs merged in before filtering (4.3.6.7).
 pub fn filter_entities_fed(
     st: &AppState,
