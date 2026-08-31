@@ -433,16 +433,27 @@ impl CurrentStateDriver for ExampleStore {
                 .contains(tenant.as_str()))
     }
 
+    /// The iteration domain of the interval sweep and of every mirror
+    /// hydration. All three kinds a mirror is built from, not just
+    /// subscriptions: the registration mirror hydrates from this domain too,
+    /// and the federation path reads that mirror alone once it is installed,
+    /// so a tenant missing here forwards to no Context Source and never
+    /// fires a periodic notification — with no error anywhere. A superset is
+    /// allowed and a subset is a silent outage, so when in doubt a backend
+    /// returns more.
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
-        let k = slot(Kind::Subscription);
-        let mut out: Vec<String> = self
+        let kinds = [
+            slot(Kind::Subscription),
+            slot(Kind::CSourceSubscription),
+            slot(Kind::Registration),
+        ];
+        let out: BTreeSet<String> = self
             .read()
             .keys()
-            .filter(|(_, kind, _)| *kind == k)
+            .filter(|(_, kind, _)| kinds.contains(kind))
             .map(|(t, _, _)| t.clone())
             .collect();
-        out.dedup();
-        Ok(out)
+        Ok(out.into_iter().collect())
     }
 
     fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {

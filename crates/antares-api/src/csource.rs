@@ -738,13 +738,13 @@ pub fn check_proxied_overlap(
         .unwrap_or_default();
     // Fail closed: treating a lookup failure as "no conflicts" would admit a
     // second exclusive registration for the same scope.
-    let existing = st.store.list(tenant, Kind::Registration)?;
-    for other in &existing {
+    walk_registrations(st, tenant, |other| {
+        let other = &other;
         if other.get("id").and_then(Value::as_str) == self_id {
-            continue;
+            return Ok(());
         }
         if reg_expired(other) {
-            continue;
+            return Ok(());
         }
         let omode = other
             .get("mode")
@@ -756,7 +756,7 @@ pub fn check_proxied_overlap(
             _ => omode == "exclusive",
         };
         if !guarded {
-            continue;
+            return Ok(());
         }
         for info in infos {
             let attrs: Vec<String> = ["propertyNames", "relationshipNames"]
@@ -802,8 +802,8 @@ pub fn check_proxied_overlap(
                 )));
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// The 5.9.2.4 conflict rules ("if an exclusive or redirect Context Source
@@ -1080,41 +1080,51 @@ pub async fn query_registrations(
         // temporal query: validate + interval presence rules (5.10.2.4)
         let temporal =
             crate::temporal::TemporalQ::from_params(&params, false)?.filter(|t| t.timerel != "any");
-        let all = st.store.list(&tenant, Kind::Registration)?;
-        let matches: Vec<Value> = all
-            .into_iter()
-            .filter(|doc| {
-                if reg_expired(doc) {
+        // 5.10.2.4 fixes the order: run the query returning the
+        // registrations that "meet all the applicable conditions", THEN
+        // "Pagination logic shall be in place as mandated by clause 5.5.9".
+        // Filter first, page second — so the window 5.8.4 pushes into the
+        // store cannot be pushed here, where it would cut the page out of
+        // the stored rows and serve registrations the query never matched.
+        //
+        // What CAN be bounded is the read. Walking the tenant in pages keeps
+        // the peak at one page plus the matches, and moves the ceiling from
+        // what the tenant STORES to what the query MATCHES; 5.5.6 licenses
+        // TooManyResults for "a query operation ... producing so many
+        // results that can potentially exhaust client or server resources",
+        // which is a statement about the result and not about the store.
+        let keep = |doc: &Value| {
+            if reg_expired(doc) {
+                return false;
+            }
+            let has_interval =
+                doc.get("observationInterval").is_some() || doc.get("managementInterval").is_some();
+            match &temporal {
+                None if has_interval => return false,
+                Some(tq) if !temporal_interval_matches(doc, tq) => return false,
+                _ => {}
+            }
+            // 5.10.2.4: csf vs Context Source Properties, Scope query vs
+            // the registration scope, geoquery vs its location
+            if let Some(csf) = &csf {
+                if !csf_matches(csf, doc, &ctx) {
                     return false;
                 }
-                let has_interval = doc.get("observationInterval").is_some()
-                    || doc.get("managementInterval").is_some();
-                match &temporal {
-                    None if has_interval => return false,
-                    Some(tq) if !temporal_interval_matches(doc, tq) => return false,
-                    _ => {}
+            }
+            if let Some(sq) = &scope_q {
+                if !crate::scope_matches(sq, doc) {
+                    return false;
                 }
-                // 5.10.2.4: csf vs Context Source Properties, Scope query vs
-                // the registration scope, geoquery vs its location
-                if let Some(csf) = &csf {
-                    if !csf_matches(csf, doc, &ctx) {
-                        return false;
-                    }
+            }
+            if let Some(g) = &geo {
+                match doc.get("location") {
+                    Some(geom) if g.matches_geometry(geom) => {}
+                    _ => return false,
                 }
-                if let Some(sq) = &scope_q {
-                    if !crate::scope_matches(sq, doc) {
-                        return false;
-                    }
-                }
-                if let Some(g) = &geo {
-                    match doc.get("location") {
-                        Some(geom) if g.matches_geometry(geom) => {}
-                        _ => return false,
-                    }
-                }
-                csr_matches(&spec, doc, &ctx)
-            })
-            .collect();
+            }
+            csr_matches(&spec, doc, &ctx)
+        };
+        let matches = collect_matching(&st, &tenant, keep)?;
         let (page, count_hdr, links) = crate::entities::paginate_accept(
             &st,
             &params,
@@ -1133,6 +1143,65 @@ pub async fn query_registrations(
         Ok::<_, ApiError>(resp)
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// Registrations per page of the 5.10.2.4 walk: the peak transient
+/// allocation on top of the match set.
+const SCAN_PAGE: usize = 1_000;
+
+/// Visit every registration of one tenant, a page at a time. An `Err` from
+/// `visit` ends the walk and is the walk's own result, which is how the
+/// 5.9.2.4 conflict check stops at the registration it conflicts with.
+///
+/// The whole-tenant `list` carries the row ceiling meant for client queries
+/// (5.5.6). Both callers below must see EVERY registration — one to answer
+/// a query over them, one to refuse a second exclusive registration for the
+/// same scope — so that ceiling refused them outright once a tenant held
+/// more than it, whatever the query narrowed to and however few conflicts
+/// existed. A page bounds the allocation by construction and carries no
+/// ceiling, so a large tenant costs time here rather than a permanent 403.
+fn walk_registrations(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    mut visit: impl FnMut(Value) -> Result<(), NgsiError>,
+) -> Result<(), NgsiError> {
+    let mut after: Option<String> = None;
+    loop {
+        let page = st
+            .store
+            .list_page(tenant, Kind::Registration, after.as_deref(), SCAN_PAGE)?;
+        let short = page.len() < SCAN_PAGE;
+        let before = after.clone();
+        for doc in page {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                after = Some(id.to_owned());
+            }
+            visit(doc)?;
+        }
+        // A short page ends the walk, and so does a cursor that did not
+        // move: only a document carrying an `id` advances it, so a full page
+        // without one would otherwise be re-read forever.
+        if short || after == before {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Every registration of one tenant that `keep` accepts.
+fn collect_matching(
+    st: &AppState,
+    tenant: &antares_model::TenantId,
+    keep: impl Fn(&Value) -> bool,
+) -> Result<Vec<Value>, NgsiError> {
+    let mut matches = Vec::new();
+    walk_registrations(st, tenant, |doc| {
+        if keep(&doc) {
+            matches.push(doc);
+        }
+        Ok(())
+    })?;
+    Ok(matches)
 }
 
 /// Root attribute names referenced by a q= expression (5.10.2.4: they count
