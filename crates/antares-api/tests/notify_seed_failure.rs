@@ -68,6 +68,18 @@ impl CurrentStateDriver for FlakyList {
         self.inner.list(tenant, kind)
     }
 
+    /// The paged read is the one the Postgres arm leaves uncapped, so it
+    /// keeps working past the ceiling that refuses `list`.
+    fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, NgsiError> {
+        self.inner.list_page(tenant, kind, after, limit)
+    }
+
     fn ping(&self) -> Result<(), NgsiError> {
         self.inner.ping()
     }
@@ -315,5 +327,68 @@ async fn a_seed_that_reads_the_store_installs_the_mirror() {
     assert!(
         restarted.sub_mirror.is_some(),
         "a complete seed must install the mirror it filled"
+    );
+}
+
+/// 5.5.6 licenses TooManyResults for "a **query operation** … producing so
+/// many results that can potentially exhaust client or server resources".
+/// The mirror seed is not a query operation, and it must see every
+/// subscription of every tenant: `subscription_tenants` states the rule —
+/// "A SUBSET is a silent outage: a tenant missing here never fires a
+/// periodic notification and never reaches the mirror."
+///
+/// Borrowing the client-query row ceiling for it turned one tenant's stored
+/// volume into every OTHER tenant's outage. The document list refuses at
+/// `MAX_UNDECIDED_ROWS` (10 000, a tenth of the 100 000-per-broker target),
+/// the seed aborted its whole loop on that error, and the mirror was left
+/// uninstalled process-wide — so on the next restart, every tenant fell back
+/// to a full store scan per change, and the tenant over the ceiling fired
+/// nothing at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_over_the_list_ceiling_does_not_take_the_mirror_down_for_everyone() {
+    allow_private();
+
+    let mut first = AppState::new("me".into());
+    antares_api::notify::wire(&mut first);
+
+    let (uri, mut rx) = capture_server().await;
+    let (status, body) = send(
+        &first,
+        "subscriptions",
+        json!({"type": "Subscription", "entities": [{"type": "Vehicle"}],
+               "notification": {"endpoint": {"uri": uri}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // A store that refuses EVERY `list`, the way the Postgres arm refuses one
+    // past its ceiling, while the paged read it leaves uncapped still works.
+    let mut restarted = AppState::new("me".into());
+    restarted.store = Arc::new(FlakyList::new(first.store.clone(), usize::MAX));
+    antares_api::notify::wire(&mut restarted);
+
+    assert!(
+        restarted.sub_mirror.is_some(),
+        "the seed must read what it cannot be refused: a client-query ceiling \
+         is not a reason to leave every tenant unmatched"
+    );
+
+    let (status, body) = send(
+        &restarted,
+        "entities",
+        json!({"id": "urn:ngsi-ld:Vehicle:ceiling-1", "type": "Vehicle",
+               "speed": {"type": "Property", "value": 3}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let n = expect_notification(
+        &mut rx,
+        "a tenant past the document ceiling never fired again",
+    )
+    .await;
+    assert_eq!(
+        n["data"][0]["id"].as_str(),
+        Some("urn:ngsi-ld:Vehicle:ceiling-1"),
+        "{n}"
     );
 }

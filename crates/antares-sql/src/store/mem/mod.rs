@@ -678,6 +678,36 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// One id-ordered page of docs: ids strictly greater than `after`, at
+    /// most `limit`. The per-tenant map is a `BTreeMap` keyed by id, so this
+    /// is a range walk, not a scan-and-sort.
+    pub fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Vec<Value> {
+        use std::ops::Bound;
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lo = match after {
+            Some(a) => Bound::Excluded(a.to_owned()),
+            None => Bound::Unbounded,
+        };
+        Self::map(&inner, kind)
+            .get(tenant.as_str())
+            .map(|m| {
+                m.range((lo, Bound::Unbounded))
+                    .take(limit)
+                    .map(|(_, v)| v.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Read-modify-write on one document. Returns `None` when absent; the
     /// closure's error aborts without writing.
     pub fn mutate<T, E>(

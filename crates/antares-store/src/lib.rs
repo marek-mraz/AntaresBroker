@@ -289,7 +289,32 @@ pub trait CurrentStateDriver: Send + Sync {
     /// Delete one document; `false` if it was absent.
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError>;
     /// Every document of this kind in the tenant.
+    ///
+    /// A backend may refuse a tenant that holds too many to materialize
+    /// (5.5.6 TooManyResults). That is right for a client query and wrong
+    /// for a reader that must see ALL of them — use [`Self::list_page`].
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError>;
+    /// One id-ordered page of documents, for the internal readers that must
+    /// see every one of them and so cannot be refused: ids strictly greater
+    /// than `after`, at most `limit`. A short page means the end.
+    ///
+    /// Keyset, not offset: the caller walks a tenant that is being written
+    /// to underneath it, where OFFSET skips and repeats rows. The peak cost
+    /// is one page, not the whole tenant, which is what the row ceiling on
+    /// `list` was protecting — so this carries no ceiling of its own, and a
+    /// backend may not refuse it for volume.
+    ///
+    /// Required, deliberately: the obvious default is `list` sliced, and
+    /// `list` is the read that may refuse. A backend inheriting that would
+    /// silently reacquire the outage this method exists to prevent, with no
+    /// compile error to say so.
+    fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, NgsiError>;
     /// Registrations that can match these ids/types (a backend may narrow;
     /// returning the full tenant list is always correct).
     fn matching_registrations(
@@ -788,6 +813,15 @@ mod tests {
             _t: &TenantId,
             _items: Vec<(String, Value)>,
         ) -> Result<Vec<bool>, NgsiError> {
+            unimplemented!()
+        }
+        fn list_page(
+            &self,
+            _t: &TenantId,
+            _k: Kind,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<Value>, NgsiError> {
             unimplemented!()
         }
         fn batch_delete(&self, _t: &TenantId, _ids: &[String]) -> Result<Vec<bool>, NgsiError> {

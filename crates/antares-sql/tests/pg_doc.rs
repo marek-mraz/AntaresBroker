@@ -19,6 +19,81 @@ macro_rules! require_db {
     };
 }
 
+/// `list_page` is the read the must-see-everything callers use, so its
+/// contract is: ids strictly greater than `after`, id-ordered, at most
+/// `limit`, a short page means the end — and NO row ceiling, because a page
+/// bounds the allocation by construction and refusing here would let one
+/// tenant's stored volume decide whether another tenant is served at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let s = PgDocStore::new(pool.clone());
+    let t = TenantId::new("pgpage").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    sqlx::query("DELETE FROM subscriptions WHERE tenant_id = 'pgpage'")
+        .execute(&pool)
+        .await
+        .expect("clean");
+
+    for i in 0..25 {
+        let id = format!("urn:ngsi-ld:Subscription:page-{i:03}");
+        s.upsert(
+            &t,
+            DocKind::Subscription,
+            &id,
+            &json!({"id": id, "type": "Subscription"}),
+        )
+        .expect("insert");
+    }
+
+    // Walk it the way the mirror seed does.
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = s
+            .list_page(&t, DocKind::Subscription, after.as_deref(), 10)
+            .expect("page");
+        let short = page.len() < 10;
+        for d in &page {
+            let id = d["id"].as_str().expect("id").to_owned();
+            after = Some(id.clone());
+            seen.push(id);
+        }
+        if short {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 25, "every row, exactly once: {}", seen.len());
+    let mut sorted = seen.clone();
+    sorted.sort();
+    assert_eq!(seen, sorted, "id order");
+    sorted.dedup();
+    assert_eq!(sorted.len(), 25, "no row served twice");
+
+    // `after` is EXCLUSIVE: the row it names is not repeated.
+    let page = s
+        .list_page(&t, DocKind::Subscription, Some(&seen[0]), 5)
+        .expect("page");
+    assert_eq!(page[0]["id"].as_str(), Some(seen[1].as_str()), "{page:?}");
+
+    // Past the end is empty, not an error.
+    let page = s
+        .list_page(
+            &t,
+            DocKind::Subscription,
+            Some("urn:ngsi-ld:Subscription:zzz"),
+            10,
+        )
+        .expect("page");
+    assert!(page.is_empty(), "{page:?}");
+
+    sqlx::query("DELETE FROM subscriptions WHERE tenant_id = 'pgpage'")
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
     let url = require_db!();

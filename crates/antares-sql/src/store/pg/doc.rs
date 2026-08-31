@@ -601,6 +601,41 @@ impl PgDocStore {
         })
     }
 
+    /// One id-ordered page of docs: ids strictly greater than `after`, at
+    /// most `limit`.
+    ///
+    /// No ceiling, deliberately. `list`'s `MAX_UNDECIDED_ROWS` exists so a
+    /// large tenant cannot be materialized into one `Vec`; a page bounds
+    /// that by construction, so refusing here would only break the readers
+    /// that must see every row — and one tenant's stored volume would
+    /// decide whether another tenant's subscriptions are ever matched.
+    /// Keyset, not OFFSET: the walk runs against a table being written to.
+    pub fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: DocKind,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE tenant_id = $1 AND id > $2 ORDER BY id LIMIT $3",
+            kind.doc_column(),
+            kind.table()
+        );
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                .bind(tenant.as_str())
+                .bind(after.unwrap_or(""))
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
+        })
+    }
+
     /// Every doc of one kind for one tenant, id-ordered.
     ///
     /// Bounded: without a LIMIT this statement materializes a whole tenant's

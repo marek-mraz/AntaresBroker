@@ -259,6 +259,65 @@ pub fn run_current_state_contract(
         domain.iter().any(|t| t == a.as_str()),
         "a tenant holding a subscription must appear in subscription_tenants: {domain:?}"
     );
+    // `list_page` is how the readers that must see EVERY document read —
+    // the mirror seed above all — so a backend may not refuse it for volume
+    // the way `list` may (5.5.6 licenses TooManyResults for a query
+    // operation, which an internal bootstrap is not). Every arm must agree
+    // on the walk, including the one that takes the trait default: ids
+    // strictly greater than `after`, id-ordered, at most `limit`, a short
+    // page means the end, and every stored document served exactly once.
+    let mut ids: Vec<String> = (0..7)
+        .map(|i| format!("urn:ngsi-ld:Subscription:{prefix}:page:{i}"))
+        .collect();
+    for id in &ids {
+        d.upsert(
+            a,
+            Kind::Subscription,
+            id,
+            json!({"id": id, "type": "Subscription"}),
+        )
+        .expect("upsert page subscription");
+    }
+    ids.push(sub.clone());
+    ids.sort();
+
+    let mut walked: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = d
+            .list_page(a, Kind::Subscription, after.as_deref(), 3)
+            .expect("list_page");
+        assert!(page.len() <= 3, "a page may not exceed its limit: {page:?}");
+        let short = page.len() < 3;
+        for doc in &page {
+            let id = doc["id"].as_str().expect("a stored doc keeps its id");
+            assert!(
+                after.as_deref().is_none_or(|prev| id > prev),
+                "`after` is exclusive and the walk ascends: {id} after {after:?}"
+            );
+            after = Some(id.to_owned());
+            walked.push(id.to_owned());
+        }
+        if short {
+            break;
+        }
+    }
+    assert_eq!(
+        walked, ids,
+        "the walk must serve every subscription of the tenant exactly once, in id order"
+    );
+    // The other tenant's documents are not on this walk. 4.14: operations
+    // "only apply to the information of the specified `Tenant` in isolation".
+    assert!(
+        d.list_page(b, Kind::Subscription, None, 100)
+            .expect("list_page")
+            .is_empty(),
+        "a tenant with no subscriptions pages empty, whatever another tenant holds"
+    );
+    for id in ids.iter().filter(|i| *i != &sub) {
+        d.delete(a, Kind::Subscription, id).expect("delete");
+    }
+
     // 5.2.14.2 delivery bookkeeping. A backend may write this as one
     // statement instead of a read-modify-write; the result must not depend on
     // which it chose, so the rule is pinned here rather than in one backend's

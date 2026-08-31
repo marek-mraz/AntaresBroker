@@ -137,6 +137,12 @@ pub enum AnyStore {
     Pg(PgBackend),
 }
 
+/// A row's `id`, or `""` for one without: an id-less row sorts first and is
+/// never skipped past, so a keyset walk over it cannot lose it.
+fn row_id(v: &Value) -> &str {
+    v.get("id").and_then(Value::as_str).unwrap_or_default()
+}
+
 impl AnyStore {
     /// Readiness ping: can the store answer a trivial request
     /// RIGHT NOW? Memory/file are in-process (always ready); the Pg arm runs
@@ -457,6 +463,45 @@ impl AnyStore {
             rows.retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
         }
         Ok(rows)
+    }
+
+    /// One id-ordered page of documents (see `CurrentStateDriver::list_page`).
+    pub fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.list_page(tenant, kind, after, limit)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => match kind {
+                // Not doc kinds: they live in their own tables, behind their
+                // own readers, and `doc_kind` refuses them. Sliced from the
+                // whole list rather than left unpaged — a caller that asked
+                // for a page and got a tenant would walk the same rows for
+                // as long as its cursor kept moving.
+                Kind::Entity | Kind::Temporal => {
+                    let mut rows = AnyStore::list(self, tenant, kind)?;
+                    rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
+                    Ok(rows
+                        .into_iter()
+                        .skip_while(|r| after.is_some_and(|a| row_id(r) <= a))
+                        .take(limit)
+                        .collect())
+                }
+                _ => p
+                    .docs
+                    .list_page(
+                        tenant,
+                        doc_kind(kind)?,
+                        after,
+                        i64::try_from(limit).unwrap_or(i64::MAX),
+                    )
+                    .map_err(db),
+            },
+        }
     }
 
     /// 5.12 registration candidates for these entity ids / types. The Pg arm
@@ -1099,6 +1144,15 @@ impl antares_store::CurrentStateDriver for AnyStore {
     }
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         AnyStore::list(self, tenant, kind)
+    }
+    fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::list_page(self, tenant, kind, after, limit)
     }
     fn matching_registrations(
         &self,

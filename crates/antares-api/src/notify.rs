@@ -426,24 +426,50 @@ fn subs_for(st: &AppState, tenant: &TenantId, types: &[&str], changed: &[&str]) 
 /// the data path — "A SUBSET is a silent outage: a tenant missing here never
 /// fires a periodic notification and never reaches the mirror" — and an
 /// error absorbed into an empty list is the same subset by another route.
-/// The Postgres arm refuses `list` with TooManyResults at its row ceiling
-/// and a connection failure at startup refuses it too, so this is reachable
-/// rather than theoretical.
+/// A connection failure at startup refuses it, so this is reachable rather
+/// than theoretical.
+///
+/// Paged, not `list`: 5.5.6 licenses TooManyResults for "a query operation
+/// … producing so many results that can potentially exhaust client or
+/// server resources", and the seed is not one — it must see every
+/// subscription of every tenant or it is the silent outage above. Reading
+/// it through the ceiling `list` carries for client queries made one
+/// tenant's stored volume decide whether OTHER tenants are matched at all.
 fn seed_mirror(
     store: &dyn antares_store::CurrentStateDriver,
     mirror: &SubMirror,
 ) -> Result<(), antares_model::NgsiError> {
     for tenant_str in store.subscription_tenants()? {
         let tenant = TenantId::new(&tenant_str)?;
-        for doc in store.list(&tenant, Kind::Subscription)? {
-            if let Some(id) = doc.get("id").and_then(Value::as_str) {
-                let id = id.to_owned();
-                mirror.apply(&tenant_str, &id, Some(doc));
+        let mut after: Option<String> = None;
+        loop {
+            let page = store.list_page(&tenant, Kind::Subscription, after.as_deref(), SEED_PAGE)?;
+            let short = page.len() < SEED_PAGE;
+            let before = after.clone();
+            for doc in page {
+                if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                    let id = id.to_owned();
+                    after = Some(id.clone());
+                    mirror.apply(&tenant_str, &id, Some(doc));
+                }
+            }
+            // A short page is the end. A cursor that did not move is also the
+            // end, and it is the load-bearing half: only a document carrying
+            // an `id` can advance it, so a full page without one would
+            // otherwise re-read the same page forever. No write path stores
+            // such a document — which is exactly why the loop may not depend
+            // on that staying true.
+            if short || after == before {
+                break;
             }
         }
     }
     Ok(())
 }
+
+/// Documents per mirror-seed page: the peak transient allocation of the
+/// walk, paid once per tenant at startup.
+const SEED_PAGE: usize = 1_000;
 
 /// Wire the store hook and background tasks. Call once at startup.
 pub fn wire(state: &mut AppState) {
