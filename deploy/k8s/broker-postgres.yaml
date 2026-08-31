@@ -94,6 +94,12 @@ spec:
             - { name: ANTARES_NATS_URL, value: "nats://nats.antares.svc:4222" }
             - { name: ANTARES_NATS_REPLICAS, value: "3" }
             - { name: ANTARES_ROLES, value: api }
+            # Paired with the memory limit below: a served connection can hold
+            # a forwarded read, and one measures about 1.8 MiB of broker
+            # memory while it runs. The 10 000 default admits twenty times
+            # what this pod's limit holds, so an overload would be an
+            # OOMKill instead of a refused connection.
+            - { name: ANTARES_MAX_CONNECTIONS, value: "512" }
           ports:
             - { containerPort: 9090 }
           readinessProbe:
@@ -104,8 +110,13 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
+            # Measured on the shipped image under load, not borrowed from the
+            # ETSI pipeline's gate: about 100 MiB serving queries and
+            # retrieves, 809 MiB peak at the highest federated rate the broker
+            # still answers within a second. Past that rate what grows is the
+            # queue of requests it has not finished, not a working set.
             requests: { memory: 128Mi, cpu: 100m }
-            limits: { memory: 350Mi } # the CI RSS gate's ceiling
+            limits: { memory: 1Gi }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -167,5 +178,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
+            # Matching and delivery: 786 MiB peak at 500 updates/s against
+            # 10 000 subscriptions.
             requests: { memory: 128Mi, cpu: 100m }
-            limits: { memory: 350Mi }
+            limits: { memory: 1Gi }

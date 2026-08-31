@@ -18,6 +18,27 @@ The CI resource gate enforces 350 MiB during the suite. Postgres sizing
 follows standard PostgreSQL tuning; the weekly scale run publishes the
 measured resident set of both.
 
+## Sizing under load (measured, weekly scale run)
+
+One broker process holding every role, 1 000 000 entities over 100 tenants,
+10 000 subscriptions and 10 000 registrations, on eight cores:
+
+| Workload | broker RSS peak |
+|---|---|
+| Queries and retrieves, saturated | 102 MiB |
+| Notifications, 100–500 updates/s | 388 → 786 MiB |
+| Forwarded reads, 50 queries/s (34 sources each) | 809 MiB |
+| Forwarded reads, 500 queries/s | 5297 MiB |
+
+The last row is a queue of unfinished requests, not a working set: the p99
+is 34 s and one query in seven answers 5xx, while 50 queries/s answers every
+one with a p99 of 385 ms. Between those rows the broker's resident set grows
+by about 1.8 MiB per forwarded read in flight, and what bounds that number is
+`ANTARES_MAX_CONNECTIONS` — so a pod's memory limit and its connection
+ceiling are one decision, not two. The default ceiling of 10 000 admits far
+more than a small pod can hold: the reference manifests set 512 against a
+1 GiB limit.
+
 ## Single node, no database
 
 ```bash

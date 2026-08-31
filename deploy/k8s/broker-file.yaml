@@ -64,6 +64,9 @@ spec:
           env:
             - { name: ANTARES_STORE, value: file }
             - { name: ANTARES_DATA_DIR, value: /data }
+            # Paired with the memory limit below, as in the postgres-mode
+            # manifest: one forwarded read in flight measures about 1.8 MiB.
+            - { name: ANTARES_MAX_CONNECTIONS, value: "512" }
           ports:
             - { containerPort: 9090 }
           readinessProbe:
@@ -74,9 +77,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
+            # One pod runs every role, so it carries the widest measured
+            # envelope: 786 MiB at 500 updates/s against 10 000
+            # subscriptions, 809 MiB at the highest federated rate answered
+            # within a second.
             requests: { memory: 128Mi, cpu: 100m }
-            # the same ceiling the CI RSS gate enforces
-            limits: { memory: 350Mi }
+            limits: { memory: 1Gi }
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: tmp, mountPath: /tmp }

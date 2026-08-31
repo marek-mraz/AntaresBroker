@@ -14,8 +14,10 @@ store mode DICTATES baked in — not chosen per deployment:
 | `networkpolicy.yaml` | deny-by-default ingress + one allow per flow | — | egress stays open: notification endpoints, Context Sources and `@context` URLs are client data, gated by `ANTARES_EGRESS_ALLOW_PRIVATE` and the scheme allowlist, not by a CIDR list |
 
 Every pod carries explicit memory limits (the Scorpio lesson: no
-manifest ships without them) and the broker's limit is the same 350 MiB the
-CI RSS gate enforces. Readiness probe `/q/ready`, liveness `/q/health`;
+manifest ships without them), taken from a scale run of the shipped image
+rather than from the ETSI pipeline's gate: about 100 MiB serving queries,
+786 MiB at 500 updates/s against 10 000 subscriptions, 809 MiB at the
+highest federated rate the broker still answers within a second. Readiness probe `/q/ready`, liveness `/q/health`;
 drain wired:
 `terminationGracePeriodSeconds` exceeds `ANTARES_DRAIN_DELAY_MS` +
 `ANTARES_DRAIN_DEADLINE_SECS`, so a pod termination is a drain, never a kill.
