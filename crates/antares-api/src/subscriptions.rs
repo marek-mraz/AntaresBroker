@@ -629,7 +629,7 @@ fn check_endpoint(st: &AppState, norm: &Map<String, Value>) -> Result<(), NgsiEr
 /// Tenant's term mappings. For any other Tenant the URL is as absent as one
 /// that never existed.
 /// RFC 7230 `field-name`: a `token`, one or more `tchar`.
-fn is_field_name(s: &str) -> bool {
+pub(crate) fn is_field_name(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
@@ -639,7 +639,7 @@ fn is_field_name(s: &str) -> bool {
 /// leading or trailing whitespace. Empty is legal; `obs-text` and the
 /// deprecated `obs-fold` are not generated, so a byte outside that set — a
 /// bare CR or LF above all — makes the pair unsendable as a header.
-fn is_field_value(s: &str) -> bool {
+pub(crate) fn is_field_value(s: &str) -> bool {
     !s.starts_with([' ', '\t'])
         && !s.ends_with([' ', '\t'])
         && s.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))

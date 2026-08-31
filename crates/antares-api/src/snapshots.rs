@@ -62,7 +62,10 @@ fn expires_at(meta: &Map<String, Value>) -> Result<String, NgsiError> {
                     "snapshotLifetime is not an ISO 8601 duration: {d:?}"
                 ))
             })?
-            .min(MAX_LIFETIME_SECS),
+            // A zero or negative suggestion would answer 201 with a Location
+            // that is already expired, so the broker floor applies as well as
+            // the ceiling — the same reasoning the EntityMap lifetime carries.
+            .clamp(1, MAX_LIFETIME_SECS),
         None => DEFAULT_LIFETIME_SECS,
     };
     Ok((chrono::Utc::now() + chrono::Duration::seconds(secs))
@@ -309,9 +312,33 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
             ));
         }
     }
+    // Table 5.2.41-1: endpoint is a "Dereferenceable URI", so a string that is
+    // no URI at all names nothing the 5.16.6 notification could be sent to.
     if let Some(e) = o.get("endpoint") {
-        if e.as_str().is_none() {
-            return Err(bad("endpoint must be a URI string (5.2.41)".into()));
+        let uri = e
+            .as_str()
+            .ok_or_else(|| bad("endpoint must be a URI string (5.2.41)".into()))?;
+        antares_model::EntityId::new(uri)
+            .map_err(|_| bad(format!("endpoint is not a valid URI: {uri:?} (5.2.41)")))?;
+    }
+    // Table 5.2.41-1: receiverInfo is a KeyValuePair[] (5.2.22 — both members
+    // Strings), and 5.16.6 renders each pair as one header on the
+    // SnapshotNotification POST. 6.3.8 binds those to RFC 7230 for the same
+    // reason it binds a Subscription's: a pair that cannot be a header leaves
+    // a Snapshot whose notification can only ever fail, silently.
+    if let Some(ri) = o.get("receiverInfo") {
+        let pairs = ri
+            .as_array()
+            .ok_or_else(|| bad("receiverInfo must be a KeyValuePair array (5.2.41)".into()))?;
+        for kv in pairs {
+            let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
+            if !k.is_some_and(crate::subscriptions::is_field_name)
+                || !v.is_some_and(crate::subscriptions::is_field_value)
+            {
+                return Err(bad(format!(
+                    "receiverInfo entry {kv} is not a valid HTTP header (RFC 7230, 6.3.8)"
+                )));
+            }
         }
     }
     Ok(o)

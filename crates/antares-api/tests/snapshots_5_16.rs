@@ -209,6 +209,25 @@ async fn clause_5_2_41_create_validation() {
             "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
         json!({"type": "NotASnapshot",
             "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
+        // Table 5.2.41-1 types endpoint as a Dereferenceable URI ...
+        json!({"type": "Snapshot", "endpoint": "not a uri",
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
+        // ... and receiverInfo as KeyValuePair[] (5.2.22: both members Strings)
+        json!({"type": "Snapshot", "endpoint": "http://127.0.0.1:9/n",
+            "receiverInfo": "not an array",
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
+        json!({"type": "Snapshot", "endpoint": "http://127.0.0.1:9/n",
+            "receiverInfo": [{"key": "k"}],
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
+        // each pair is rendered as a header on the 5.16.6 notification, so
+        // 6.3.8's RFC 7230 requirement binds it exactly as it binds a
+        // Subscription's receiverInfo
+        json!({"type": "Snapshot", "endpoint": "http://127.0.0.1:9/n",
+            "receiverInfo": [{"key": "Bad Key", "value": "v"}],
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
+        json!({"type": "Snapshot", "endpoint": "http://127.0.0.1:9/n",
+            "receiverInfo": [{"key": "X", "value": "a\r\nInjected: 1"}],
+            "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]}),
     ] {
         let (status, body) =
             send(&st, "POST", "/ngsi-ld/v1/snapshots", Some(bad.to_string())).await;
@@ -218,6 +237,30 @@ async fn clause_5_2_41_create_validation() {
             "{body}"
         );
     }
+}
+
+/// 5.2.41 + 5.5.14's own reasoning: a lifetime the broker rounds to nothing
+/// answers 201 with a Location that is already gone. The EntityMap surface
+/// floors the same suggestion at one second; a Snapshot is no different.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_2_41_a_zero_lifetime_does_not_create_a_snapshot_nobody_can_read() {
+    let st = state();
+    let body = json!({"type": "Snapshot", "snapshotLifetime": "PT0S",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "V"}]}]})
+    .to_string();
+    let (status, headers, b) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(body), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+    let loc = headers
+        .get("Location")
+        .and_then(|l| l.to_str().ok())
+        .expect("Location")
+        .to_owned();
+    let (status, b) = send(&st, "GET", &loc, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the created snapshot must be readable: {b}"
+    );
 }
 
 /// 5.16.4: PATCH updates lifetime/priority/endpoint; the read-only
