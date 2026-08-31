@@ -230,7 +230,27 @@ fn upsert_temporal_local(
                                         && key.1.is_some()
                                 });
                                 match pos {
-                                    Some(p) => cur[p] = ni,
+                                    // A correction, not a new instance: it
+                                    // keeps the instanceId its client was
+                                    // handed and the createdAt it was created
+                                    // at, which is 5.6.14.4's rule for the
+                                    // same kind of in-place change ("The
+                                    // createdAt property of the concerned
+                                    // instance shall remain unchanged").
+                                    // `stamp_instances` has already put a
+                                    // fresh pair on the incoming instance.
+                                    Some(p) => {
+                                        let mut ni = ni;
+                                        for keep in ["instanceId", "createdAt"] {
+                                            let Some(had) = cur[p].get(keep).cloned() else {
+                                                continue;
+                                            };
+                                            if let Some(o) = ni.as_object_mut() {
+                                                o.insert(keep.to_owned(), had);
+                                            }
+                                        }
+                                        cur[p] = ni;
+                                    }
                                     None => cur.push(ni),
                                 }
                             }
