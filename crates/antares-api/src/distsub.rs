@@ -696,6 +696,21 @@ fn reduced_copy(
         for k in ["attributes", "pick", "omit"] {
             n.remove(k);
         }
+        // Table 5.2.14.2-1: the delivery bookkeeping is this broker's own
+        // record of notifying ITS subscriber. It lives inside `notification`,
+        // it is output-only on a create ("implementations shall ignore
+        // them"), and it says nothing the Context Source may act on — so it
+        // stays here, like the top-level members stripped above.
+        for k in [
+            "status",
+            "timesSent",
+            "timesFailed",
+            "lastNotification",
+            "lastSuccess",
+            "lastFailure",
+        ] {
+            n.remove(k);
+        }
         n.insert(
             "endpoint".into(),
             json!({"uri": format!("{}/ngsi-ld/ex/remote-notify", st.public_url)}),
@@ -968,11 +983,20 @@ mod tests {
             "modifiedAt": "2026-01-02T00:00:00Z",
             "__context": "http://example.org/ctx.jsonld",
             "__via": "1.1 upstream-broker",
+            // Table 5.2.14.2-1 keeps the delivery bookkeeping HERE, not at
+            // the top level: this is the shape `record_delivery` leaves
+            // behind, and the shape a forward is built from.
             "notification": {
                 "attributes": [format!("{DC}speed")],
                 "pick": ["speed"],
                 "omit": ["brand"],
                 "endpoint": {"uri": "http://subscriber.example.org/cb"},
+                "status": "ok",
+                "timesSent": 7,
+                "timesFailed": 2,
+                "lastNotification": "2026-01-03T00:00:00Z",
+                "lastSuccess": "2026-01-03T00:00:00Z",
+                "lastFailure": "2026-01-02T00:00:00Z",
             },
         })
     }
@@ -1028,6 +1052,23 @@ mod tests {
             "localOnly",
         ] {
             assert!(copy.get(k).is_none(), "{k} must not be forwarded: {copy}");
+        }
+        // Table 5.2.14.2-1: the same bookkeeping the store keeps under
+        // `notification` is this broker's alone — it says how often IT has
+        // notified ITS subscriber, is output-only on a create, and has no
+        // meaning to the Context Source receiving the copy.
+        for k in [
+            "status",
+            "timesSent",
+            "timesFailed",
+            "lastNotification",
+            "lastSuccess",
+            "lastFailure",
+        ] {
+            assert!(
+                copy["notification"].get(k).is_none(),
+                "notification.{k} must not be forwarded: {copy}"
+            );
         }
         let n = &copy["notification"];
         for k in ["attributes", "pick", "omit"] {
