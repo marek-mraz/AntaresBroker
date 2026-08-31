@@ -1804,8 +1804,17 @@ pub async fn fed_query(
             if let Some(t) = params.get("type") {
                 query.push(("type".into(), t.clone()));
             }
-            if let Some(list) = &ids {
-                query.push(("id".into(), list.clone()));
+            // Table 6.4.3.2-1, and 5.2.33 for the body rendering below:
+            // `id` takes precedence over `idPattern`, so a pattern travels
+            // only when no id list survived the narrowing. The two
+            // renderings ask the peer the same question.
+            match &ids {
+                Some(list) => query.push(("id".into(), list.clone())),
+                None => {
+                    if let Some(p) = params.get("idPattern") {
+                        query.push(("idPattern".into(), p.clone()));
+                    }
+                }
             }
             if let Some(a) = &attrs {
                 query.push(("attrs".into(), a.clone()));

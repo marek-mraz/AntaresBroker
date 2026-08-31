@@ -229,6 +229,43 @@ async fn query_batch_forwards_the_clients_query_not_the_registrations() {
     assert_eq!(sent["geoQ"]["coordinates"], serde_json::json!([8.6, 41.2]));
 }
 
+/// 4.3.6.1 asks a forward to respect the selection it was given, and this
+/// function decides that selection once and then renders it two ways — as
+/// query parameters for a `queryEntity` source (5.7.2) and as a 5.2.23
+/// Query body for a `queryBatch` one. `idPattern` (Table 6.4.3.2-1, and
+/// 5.2.33 on the body's EntitySelector) travelled on the body and not on
+/// the parameters, so a peer reached over Query Entities was asked for its
+/// whole population of the type. The local re-check still filters the
+/// answer, so the client sees the right entities — what is unbounded is
+/// what the broker reads, buffers and expands per source.
+#[tokio::test(flavor = "multi_thread")]
+async fn query_forwards_the_id_pattern_on_both_renderings() {
+    let st = state();
+    let by_params = mock_source(false);
+    let by_body = mock_source(false);
+    register(&st, by_params.port, &["queryEntity"], None, None).await;
+    register(&st, by_body.port, &["queryBatch"], None, None).await;
+
+    let body = get(
+        &st,
+        "/ngsi-ld/v1/entities?type=Vehicle&idPattern=%5Eurn%3Angsi-ld%3AVehicle%3Apush",
+    )
+    .await;
+    assert!(body.contains(REMOTE_ID), "remote data still flows: {body}");
+
+    let head = by_params.last_head.lock().expect("lock").clone();
+    assert!(
+        head.contains("idPattern="),
+        "the query-parameter rendering must carry idPattern: {head}"
+    );
+    let sent: serde_json::Value =
+        serde_json::from_str(&by_body.last_body.lock().expect("lock").clone()).expect("Query body");
+    assert_eq!(
+        sent["entities"][0]["idPattern"], "^urn:ngsi-ld:Vehicle:push",
+        "and the Query body rendering asks the same question"
+    );
+}
+
 /// 5.7.2.4 split: "the filters … shall be removed before forwarding".
 #[tokio::test(flavor = "multi_thread")]
 async fn split_query_strips_filters_before_forwarding() {
