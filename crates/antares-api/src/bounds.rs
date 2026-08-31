@@ -194,17 +194,16 @@ pub async fn bounds_layer(
         return next.run(req).await;
     }
     let (parts, body) = req.into_parts();
-    // Size-check before parse means before buffering too: a body that
-    // DECLARES more than the cap is refused without reading a byte of it.
-    let declared = parts
+    // What the client says it is sending. The read below still decides — a
+    // declared length is a claim, and answering on the claim alone would cut
+    // the client off mid-body, where the RST that follows can take the
+    // response with it.
+    let fits_its_claim = parts
         .headers
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|n| n > *MAX_BODY_BYTES) {
-        st.limits.body_too_large.fetch_add(1, Ordering::Relaxed);
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response(); // bare 413
-    }
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some_and(|n| n <= *MAX_BODY_BYTES);
     let bytes: Bytes = match axum::body::to_bytes(body, *MAX_BODY_BYTES).await {
         Ok(b) => b,
         // `to_bytes` reports the length limit and any transport failure the
@@ -212,9 +211,9 @@ pub async fn bounds_layer(
         // exceeded it, so what failed was the delivery: that is a bad request
         // and NOT a size rejection — counting it as one would make
         // `rejectedBodyTooLarge` read client aborts as clients hitting the
-        // cap. Without a declared length (chunked) the cap is the only thing
-        // the read can have hit.
-        Err(_) if declared.is_some() => {
+        // cap. A body that declared more than the cap, or declared nothing
+        // (chunked), can only have hit the cap.
+        Err(_) if fits_its_claim => {
             return crate::negotiate::ApiError::from(antares_model::NgsiError::InvalidRequest(
                 "request body was not delivered completely".into(),
             ))
@@ -429,15 +428,13 @@ mod tests {
             "a client abort is not a size rejection"
         );
 
-        // over the cap by its own declaration: refused without buffering
+        // over the cap for real: 6.3.4's 413, counted
+        let over = vec![b'x'; *MAX_BODY_BYTES + 1];
         let resp = app
             .oneshot(
                 Request::post("/x")
-                    .header(
-                        axum::http::header::CONTENT_LENGTH,
-                        (*MAX_BODY_BYTES + 1).to_string(),
-                    )
-                    .body(Body::from("{}"))
+                    .header(axum::http::header::CONTENT_LENGTH, over.len().to_string())
+                    .body(Body::from(over))
                     .expect("req"),
             )
             .await
