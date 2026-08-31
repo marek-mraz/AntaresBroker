@@ -1659,6 +1659,14 @@ mod tests {
             .expect("resp")
     }
 
+    async fn get_status(app: &Router, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(Request::get(uri).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp")
+            .status()
+    }
+
     async fn body_json(resp: Response) -> Value {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
@@ -1865,6 +1873,69 @@ mod tests {
         assert_eq!(
             doc["brand"]["value"], "acme",
             "update mode keeps attributes not in the payload: {doc}"
+        );
+    }
+
+    /// 4.22 + 5.6.9.4 end to end. 5.6.9.4 (PDF p.175): "For each of the
+    /// NGSI-LD Entities included in the input Array execute the behaviour
+    /// defined by clause 5.6.3, but limited to a local operation… If the
+    /// Entity update failed, then a new BatchEntityError shall be added to E
+    /// containing the failed Entity ID and the ProblemDetails associated."
+    /// 4.22 makes an entity past its `expiresAt` invalid, so 5.6.3 answers
+    /// ResourceNotFound and the batch has to report it in E — not in S, and
+    /// not by writing to it.
+    #[tokio::test]
+    async fn batch_update_of_an_expired_entity_is_an_error_not_a_success() {
+        let app = app();
+        let id = "urn:ngsi-ld:Building:expired-batch-update";
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/create",
+            json!([{"id": id, "type": "Building", "expiresAt": "2020-01-01T00:00:00Z",
+                    "speed": {"type": "Property", "value": 1}}]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The premise the client can see: it is already absent to a read.
+        assert_eq!(
+            get_status(&app, &format!("/ngsi-ld/v1/entities/{id}")).await,
+            StatusCode::NOT_FOUND,
+            "4.22: an expired entity does not exist"
+        );
+
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/update",
+            json!([{"id": id, "type": "Building",
+                    "speed": {"type": "Property", "value": 2}}]),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::MULTI_STATUS,
+            "5.6.9.5: none updated, so S and E are reported"
+        );
+        let outcome = body_json(resp).await;
+        assert!(
+            outcome["success"].as_array().is_none_or(|a| a.is_empty()),
+            "an entity every read refuses may not be reported as updated: {outcome}"
+        );
+        let errors = outcome["errors"].as_array().expect("E array");
+        assert_eq!(errors.len(), 1, "{outcome}");
+        assert_eq!(errors[0]["entityId"], id, "{outcome}");
+        assert!(
+            errors[0]["error"]["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("ResourceNotFound")),
+            "5.6.3 on an absent entity is ResourceNotFound: {outcome}"
+        );
+
+        // and the write did not happen behind the error
+        assert_eq!(
+            get_status(&app, &format!("/ngsi-ld/v1/entities/{id}")).await,
+            StatusCode::NOT_FOUND,
+            "still absent"
         );
     }
 

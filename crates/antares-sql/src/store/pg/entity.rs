@@ -1052,7 +1052,15 @@ impl PgEntityStore {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
-                "SELECT id, entity FROM entities WHERE tenant_id = $1 AND id = ANY($2)
+                // 4.22: an expired entity is invalid, so it is not a row this
+                // update can find — 5.6.9.4 is clause 5.6.3 run per item, and
+                // 5.6.3 on an absent entity is ResourceNotFound. Without the
+                // predicate the batch reported the id as updated, wrote to
+                // it, and emitted a change event for an entity every read
+                // refuses. ORDER BY id keeps the lock order stable.
+                "SELECT id, entity FROM entities
+                  WHERE tenant_id = $1 AND id = ANY($2)
+                    AND (expires_at IS NULL OR expires_at > now())
                  ORDER BY id FOR UPDATE",
             )
             .bind(tenant.as_str())

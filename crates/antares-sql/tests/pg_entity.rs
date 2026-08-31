@@ -662,6 +662,34 @@ async fn the_batch_paths_see_an_expired_entity_the_way_the_single_entity_paths_d
         "5.6.8.4: an expired entity does not exist, so the batch upsert creates it"
     );
 
+    // 5.6.9.4 (p.175): "For each of the NGSI-LD Entities included in the
+    // input Array execute the behaviour defined by clause 5.6.3, but limited
+    // to a local operation" — and 5.6.3 on an absent entity is
+    // ResourceNotFound, which this seam reports as `None`. `batch_mutate`
+    // carries `entityOperations/update` and `/merge`; without the guard both
+    // reported the id in the SUCCESS array for an entity every read calls
+    // absent, wrote to it, and emitted a change notification for it — the
+    // merge form able to set a future `expiresAt` and resurrect an entity
+    // the single-entity PATCH cannot touch.
+    seed(&id);
+    let single_patch = s.mutate(&t, single, |_d| Ok::<(), ()>(())).expect("mutate");
+    seed(single);
+    assert!(
+        s.mutate(&t, single, |_d| Ok::<(), ()>(()))
+            .expect("mutate")
+            .is_none(),
+        "5.6.3: an expired entity cannot be updated ({single_patch:?})"
+    );
+    let mutated = s
+        .batch_mutate(&t, std::slice::from_ref(&id), |_id, _d| Ok::<(), ()>(()))
+        .expect("batch_mutate");
+    assert_eq!(mutated.len(), 1, "one id in, one answer out: {mutated:?}");
+    assert!(
+        mutated[0].is_none(),
+        "5.6.9.4: the batch update of an expired id is the 5.6.3 update, \
+         which finds nothing: {mutated:?}"
+    );
+
     let _ = s.delete(&t, &id);
     let _ = s.delete(&t, single);
 }
