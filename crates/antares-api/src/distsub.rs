@@ -865,7 +865,13 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
                     .ok()
                     .flatten()
             });
-            let ctx = st.loader.core();
+            // 5.8.1.4: the csf is written in the Subscription's own @context,
+            // and 5.11.2.4 already read it in that @context when it chose the
+            // sources this Subscription was forwarded to. Reading it in the
+            // core context here would let the two disagree, and a source the
+            // broker deliberately subscribed to would have every notification
+            // dropped.
+            let ctx = crate::notify::sub_context(st, &tenant, &sub).await;
             let matches =
                 origin_reg.is_some_and(|reg| crate::csource::csf_matches(&ast, &reg, &ctx));
             if !matches {

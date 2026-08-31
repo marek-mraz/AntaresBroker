@@ -31,6 +31,32 @@ async fn send(
     send_via(st, method, path, body, None).await
 }
 
+/// Same as [`send`], with the JSON-LD media type so the body's own
+/// `@context` is the one the request is expanded and stored under (5.5.7).
+async fn send_ld(st: &AppState, method: &str, path: &str, body: String) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Content-Type", "application/ld+json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let res = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("response");
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, body)
+}
+
 /// Same as [`send`], with an inbound `Via` header — the shape of a request
 /// arriving from a peer broker (6.3.17/6.3.18).
 async fn send_via(
@@ -1222,4 +1248,104 @@ async fn clause_6_3_18_registration_already_in_the_via_chain_receives_no_copy() 
         via_line.contains("peer-origin") && via_line.contains("antares-via-reg"),
         "the chain keeps the inbound hop and appends this broker: {via_line}"
     );
+}
+
+/// 5.8.6 gates an inbound Notification on the origin Context Source matching
+/// the Subscription's csf, and 5.8.1.4 fixes the terms that filter is written
+/// in: "the @context to be used for … this Subscription shall be the one
+/// specified in the jsonldContext field". 5.11.2.4 already reads the csf in
+/// that @context when it decides which sources the Subscription is forwarded
+/// to. Reading it in the core context on the way back in makes the two
+/// disagree: the broker subscribes to a source and then drops everything it
+/// sends, with a 200 and no warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_8_6_the_inbound_csf_is_read_in_the_subscriptions_own_context() {
+    allow_private();
+    let mut st = AppState::new("antares-distsub-csfctx".into());
+    antares_api::notify::wire(&mut st);
+    let (sensor_port, sensor_seen) = recording_mock();
+    // The Context Source Property as the source itself spells it.
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(
+            json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:csfctx-sensor",
+                "type": "ContextSourceRegistration",
+                "information": [{"entities": [{"type": "Vehicle"}]}],
+                "operations": ["federationOps"],
+                "endpoint": format!("http://127.0.0.1:{sensor_port}"),
+                "srcType": {"type": "Property", "value": "sensor"},
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The subscriber spells the same Property its own way; its @context maps
+    // both spellings onto one IRI, which is what makes the filter match.
+    let (orig_port, orig_seen) = recording_mock();
+    let (status, body) = send_ld(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        json!({
+            "@context": {
+                "sourceType": "https://uri.etsi.org/ngsi-ld/default-context/srcType",
+            },
+            "id": "urn:ngsi-ld:Subscription:csfctx-own",
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "csf": "sourceType==\"sensor\"",
+            "notification": {"endpoint": {"uri": format!("http://127.0.0.1:{orig_port}/notify")}},
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // 5.11.2.4 read the csf in that @context and decided this source belongs
+    // to the Subscription: its copy is at the source.
+    wait_for("the forwarded remote subscription", || {
+        sensor_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let remote_id: String = {
+        let seen = sensor_seen.lock().expect("seen");
+        let r = seen
+            .iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .clone();
+        serde_json::from_str::<Value>(r.split("\n\n").nth(1).expect("body")).expect("json")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned()
+    };
+
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(
+            json!({
+                "type": "Notification",
+                "subscriptionId": remote_id,
+                "data": [{"id": "urn:ngsi-ld:Vehicle:csfctx", "type": "Vehicle"}],
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for("the subscriber notification", || {
+        !orig_seen.lock().expect("seen").is_empty()
+    })
+    .await;
 }
