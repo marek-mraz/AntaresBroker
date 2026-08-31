@@ -584,10 +584,7 @@ fn check_entity_conflict(
             attrs: (mode == "exclusive" && !attrs.is_empty()).then_some(attrs.as_slice()),
             ..Default::default()
         };
-        let candidates = st
-            .store
-            .query_entities(tenant, &filter)
-            .map_err(|_| NgsiError::InternalError("entity lookup failed".into()))?;
+        let candidates = st.store.query_entities(tenant, &filter)?;
         for e in ents {
             let want_id = e.get("id").and_then(Value::as_str);
             // 5.2.8: an EntityInfo type is a String or a String[]
@@ -741,10 +738,7 @@ pub fn check_proxied_overlap(
         .unwrap_or_default();
     // Fail closed: treating a lookup failure as "no conflicts" would admit a
     // second exclusive registration for the same scope.
-    let existing = st
-        .store
-        .list(tenant, Kind::Registration)
-        .map_err(|_| NgsiError::InternalError("registration lookup failed".into()))?;
+    let existing = st.store.list(tenant, Kind::Registration)?;
     for other in &existing {
         if other.get("id").and_then(Value::as_str) == self_id {
             continue;
