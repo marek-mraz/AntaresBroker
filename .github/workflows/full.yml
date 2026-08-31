@@ -57,8 +57,8 @@ jobs:
     # then prove it in BOTH runtimes (dev/wasm-test.sh): the
     # Node shim does a create + a real-HTTP notification; headless Chromium
     # runs the React playground — OPFS worker broker, entity, subscription,
-    # in-page notification, second tab, federation. Same scripts as local
-    # runs (§E).
+    # in-page notification, second tab, federation. The same scripts a
+    # local run uses.
     name: Browser build (wasm32)
     # GATE: builds start only after the workspace suite is green (the same
     # workspace -> builds -> matrix graph as ci.yml / etsi-full.yml).

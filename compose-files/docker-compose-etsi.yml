@@ -4,7 +4,7 @@
 #
 # Store modes (env, set by the pipeline script):
 #   STORE=memory     brokers only, no DB containers        (docker compose up)
-#   STORE=file       brokers only, one data volume each    (redb, §B)
+#   STORE=file       brokers only, one data volume each    (redb)
 #   STORE=postgres   DB_IMAGE=ghcr.io/baosystems/postgis:17-3.5 (--profile db; multi-arch)
 #   STORE=timescale  DB_IMAGE=timescale/timescaledb-ha:pg17 (--profile db)
 #
@@ -13,9 +13,9 @@
 # from broker to broker, and back to the runner's notification mocks.
 #
 # Each broker gets its own data volume (file mode) AND its own Postgres
-# (postgres://…@localhost:543N). The broker stores in-memory today (v0
-# skeleton); ANTARES_STORE / ANTARES_DATA_DIR / ANTARES_DATABASE_URL are wired
-# now so the §B and §C stores land with zero compose changes.
+# (postgres://…@localhost:543N). ANTARES_STORE picks which store the stack
+# runs on; the data dir and the database URL are wired for every broker in
+# every mode, so switching modes costs no compose change.
 x-broker: &broker
   image: antares-local:latest
   network_mode: host
