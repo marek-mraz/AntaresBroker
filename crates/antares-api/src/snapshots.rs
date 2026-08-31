@@ -148,7 +148,7 @@ fn snap_put(st: &AppState, tenant: &TenantId, meta: Value) {
 }
 
 /// Remove a snapshot everywhere: doc, synth-tenant index, data purge.
-fn snap_remove(st: &AppState, tenant: &TenantId, id: &str, meta: &Value) {
+pub(crate) fn snap_remove(st: &AppState, tenant: &TenantId, id: &str, meta: &Value) {
     let _ = st.store.delete(tenant, Kind::Snapshot, id);
     if let (Some(synth), Some(idx)) = (
         meta.get("__tenant").and_then(Value::as_str),
@@ -170,27 +170,17 @@ fn synth_tenant(meta: &Value) -> Option<TenantId> {
 /// documents of ANY kind under the synthetic tenant — once the snapshot is
 /// gone none of them is reachable (no client may name the internal tenant),
 /// so every kind is dropped, not only the filled data.
+///
+/// The tenant purge, not a per-document sweep: it covers every kind rather
+/// than a list that has to be kept in step with `Kind`, and it removes the
+/// tenant itself. A sweep leaves the empty tenant behind, and `/q/tenants`
+/// reports what the store holds a tenant entry for — so every snapshot ever
+/// deleted would leave a `snap-<uuid>` name in the inventory for the life of
+/// the deployment.
 fn purge_synth(st: &AppState, synth: &TenantId) {
-    for kind in [
-        Kind::Entity,
-        Kind::Subscription,
-        Kind::Registration,
-        Kind::CSourceSubscription,
-        Kind::EntityMap,
-        Kind::DistSub,
-    ] {
-        for doc in st.store.list(synth, kind).unwrap_or_default() {
-            if let Some(id) = doc.get("id").and_then(Value::as_str) {
-                let _ = st.store.delete(synth, kind, id);
-            }
-        }
-    }
     // history lives behind its own driver seam
-    for doc in st.temporal.list(synth).unwrap_or_default() {
-        if let Some(id) = doc.get("id").and_then(Value::as_str) {
-            let _ = st.temporal.delete(synth, id);
-        }
-    }
+    let _ = st.temporal.purge_tenant(synth);
+    let _ = st.store.purge_tenant(synth);
 }
 
 fn purge_data_bg(st: &AppState, meta: &Value) {

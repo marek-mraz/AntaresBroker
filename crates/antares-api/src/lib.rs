@@ -989,6 +989,17 @@ async fn tenant_purge(
         let subs = ids(Kind::Subscription)?;
         let csubs = ids(Kind::CSourceSubscription)?;
         let regs = ids(Kind::Registration)?;
+        // 5.2.41: a Snapshot's isolated copy does not live under the Tenant.
+        // It lives under the synthetic tenant its internal `__tenant` member
+        // names, and the Snapshot document is the only pointer to it — so the
+        // two purges below would delete that pointer and leave the copy
+        // behind, reachable by nothing and freeable by nothing. Each snapshot
+        // goes through the same removal a DELETE of it does, first.
+        for meta in st.store.list(&tenant, Kind::Snapshot)? {
+            if let Some(id) = meta.get("id").and_then(|v| v.as_str()) {
+                crate::snapshots::snap_remove(&st, &tenant, id, &meta);
+            }
+        }
         st.temporal.purge_tenant(&tenant)?;
         st.store.purge_tenant(&tenant)?;
         if let Some(sync) = &st.sub_sync {

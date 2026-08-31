@@ -241,6 +241,147 @@ async fn purge_removes_one_tenant_and_leaves_the_other() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
+/// The synthetic tenants a Snapshot's isolated copy lives under, as the
+/// inventory sees them. `snap-index` is the reverse index, not a copy.
+async fn synth_tenants(st: &AppState) -> Vec<String> {
+    let (_, list) = send(st, "GET", "/q/tenants", None, None).await;
+    list.as_array()
+        .expect("array")
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|t| t.starts_with("snap-") && *t != "snap-index")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 5.2.41 + 4.14: `DELETE /q/tenants/{tenant}` answers 204, which asserts the
+/// tenant's information is gone. A Snapshot's isolated copy is NOT stored
+/// under the Tenant — it goes under a synthetic `snap-<uuid>` tenant named in
+/// the Snapshot's internal `__tenant` member, and only the snapshot-delete
+/// path frees it. The purge removed the Snapshot document, which is the only
+/// pointer to that synthetic tenant, so the copied Entities and their history
+/// stayed behind with nothing left that could ever reach them: a 204
+/// asserting an erasure that did not happen. The Hosted `@context` is handled
+/// for exactly this reason already — "`jsonld_contexts` has no tenant column,
+/// so the tenant-keyed purge above cannot see it".
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_frees_the_snapshot_copies_the_tenant_left_behind() {
+    let st = state();
+    assert!(
+        synth_tenants(&st).await.is_empty(),
+        "a fresh state holds no snapshot copies"
+    );
+    seed(&st, "purgesnap", "urn:ngsi-ld:Room:9").await;
+
+    let snap = json!({"type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Room"}]}]});
+    let (s, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/snapshots",
+        Some(snap),
+        Some("purgesnap"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+
+    // 5.16.1.4 fills the copy in the background; the synthetic tenant shows up
+    // in the inventory once it lands. Waiting for it IS the premise — without
+    // a copy there is nothing for the purge to leave behind.
+    let mut before = Vec::new();
+    for _ in 0..100 {
+        before = synth_tenants(&st).await;
+        if !before.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(before.len(), 1, "one snapshot, one synthetic tenant");
+
+    let (s, body) = send(&st, "DELETE", "/q/tenants/purgesnap", None, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+
+    // The free runs in the background, like the snapshot-delete path it shares.
+    let mut after = before.clone();
+    for _ in 0..100 {
+        after = synth_tenants(&st).await;
+        if after.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        after.is_empty(),
+        "the purge left the tenant's snapshot copies behind, unreachable and \
+         unfreeable: {after:?}"
+    );
+}
+
+/// The same leak on the ordinary path. Removing a Snapshot frees the copy,
+/// and has to free the synthetic tenant with it: `/q/tenants` reports what
+/// the store holds a tenant entry for, so a free that empties the documents
+/// but leaves the tenant adds one permanent `snap-<uuid>` name per snapshot
+/// ever deleted — an inventory that only grows, against the 10 000 tenant
+/// target of ADR-0001. Every removal path (6.37 delete, 6.36 purge, the
+/// expiry reaper and the over-cap eviction) goes through the one helper this
+/// exercises.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_snapshot_leaves_no_tenant_behind() {
+    let st = state();
+    seed(&st, "snapghost", "urn:ngsi-ld:Room:8").await;
+
+    let snap = json!({"type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Room"}]}]});
+    let (s, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/snapshots",
+        Some(snap),
+        Some("snapghost"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+
+    let mut before = Vec::new();
+    for _ in 0..100 {
+        before = synth_tenants(&st).await;
+        if !before.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(before.len(), 1, "one snapshot, one synthetic tenant");
+
+    let (s, body) = send(
+        &st,
+        "DELETE",
+        // 5.16.7.4: the purge is scoped by a q over Snapshot members;
+        // the default priority is the one every snapshot here carries.
+        "/ngsi-ld/v1/snapshots?q=snapshotPriority==5",
+        None,
+        Some("snapghost"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+
+    let mut after = before.clone();
+    for _ in 0..100 {
+        after = synth_tenants(&st).await;
+        if after.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        after.is_empty(),
+        "a deleted snapshot left its synthetic tenant in the inventory: {after:?}"
+    );
+
+    // and the tenant that owned it is untouched
+    let (_, b) = send(&st, "GET", "/q/tenants/snapghost", None, None).await;
+    assert_eq!(b["counts"]["entities"], 1, "{b}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn purge_rejects_unknown_and_malformed_tenants() {
     let st = state();
