@@ -13,5 +13,11 @@ FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172
 WORKDIR /app
 COPY www/pkg ./pkg
 COPY www/node-shim.mjs ./node-shim.mjs
+# The shim needs nothing but read access to its own bundle, so it runs as the
+# image's unprivileged user. `file` mode writes to /data: a fresh named volume
+# inherits the mountpoint's ownership, so the directory is pre-created for
+# that user — nothing chowns at runtime.
+RUN mkdir /data && chown node:node /data
+USER node
 ENTRYPOINT ["node", "node-shim.mjs"]
 CMD ["9090"]
