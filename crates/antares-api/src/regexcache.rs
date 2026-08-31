@@ -25,5 +25,4 @@
 //! included, bounded in entries and in bytes, because the key is client
 //! input and an unbounded map of it is a memory attack, not a cache.
 
-pub use antares_ql::regex::{cached, compile, compiles, len, retained_bytes};
-pub use antares_ql::regex::{geo_query, q_node};
+pub use antares_ql::regex::{compile, geo_query, q_node};
