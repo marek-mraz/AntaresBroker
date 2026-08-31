@@ -3,6 +3,7 @@
 //!
 //! Config: ANTARES_* env vars only for v0 (antares.toml layering can land
 //! later via figment). Unknown ANTARES_* keys are fatal.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 mod shutdown;
 mod telemetry;

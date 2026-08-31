@@ -10,9 +10,13 @@
 //! that does not support an operation answers with an error (or a benign
 //! no-op for internal bookkeeping), never a panic — `NoTemporal` is the
 //! canonical instance.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 #![deny(missing_docs)]
 
 #[cfg(feature = "test-kit")]
+/// The shared driver contract every backend runs as a test. It asserts, so
+/// it panics on a store that breaks an invariant — that is the point.
+#[allow(clippy::expect_used)]
 pub mod contract;
 pub mod filter;
 

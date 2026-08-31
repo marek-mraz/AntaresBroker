@@ -11,6 +11,7 @@
 //! driver may over-return but never drop a matching row and never cross a
 //! tenant. What it may NOT skip is the contract in
 //! `antares_store::contract`, which `tests/contract.rs` runs against it.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use antares_model::{NgsiError, TenantId};
 use antares_store::{

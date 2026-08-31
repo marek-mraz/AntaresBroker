@@ -3143,7 +3143,12 @@ pub fn order_entities(
                     o
                 }
                 Dir::DistAsc | Dir::DistDesc => {
-                    let refg = refg.as_ref().expect("checked above");
+                    // Set whenever a Dist ordering was accepted. Without it
+                    // there is no distance to compare, and every pair being
+                    // equal leaves the previous order untouched.
+                    let Some(refg) = refg.as_ref() else {
+                        return std::cmp::Ordering::Equal;
+                    };
                     let da =
                         order_value(a, k, ctx).and_then(|v| crate::geo::order_distance_m(refg, &v));
                     let db =

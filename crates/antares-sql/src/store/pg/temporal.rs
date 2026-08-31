@@ -217,13 +217,23 @@ fn attr_object_expr(f: &TemporalFilter<'_>, first_bind: usize) -> Option<(String
                    WHERE s.rk <= ${n_bind}::bigint GROUP BY s.attr_id) g), '{{}}'::jsonb)"
             )
         }
-        None => format!(
-            "COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (\
-               SELECT ai.attr_id, jsonb_agg(ai.data ORDER BY ai.created_at, ai.observed_at, ai.instance_id) AS insts \
-               FROM attr_instances ai \
-               WHERE ai.tenant_id = m.tenant_id AND ai.entity_id = m.id{range_and} \
-               GROUP BY ai.attr_id) g), '{{}}'::jsonb)"
-        ),
+        None => {
+            // No range and no lastN: nothing names the timeproperty, so the
+            // bind `window_sql` reserved for it is not a parameter of the
+            // statement the caller assembles. Handing it back anyway would
+            // make every plain Retrieve Temporal Evolution bind one argument
+            // more than its SQL declares.
+            if f.range.is_none() {
+                binds.clear();
+            }
+            format!(
+                "COALESCE((SELECT jsonb_object_agg(g.attr_id, g.insts) FROM (\
+                   SELECT ai.attr_id, jsonb_agg(ai.data ORDER BY ai.created_at, ai.observed_at, ai.instance_id) AS insts \
+                   FROM attr_instances ai \
+                   WHERE ai.tenant_id = m.tenant_id AND ai.entity_id = m.id{range_and} \
+                   GROUP BY ai.attr_id) g), '{{}}'::jsonb)"
+            )
+        }
     };
     Some((expr, binds))
 }
@@ -702,7 +712,11 @@ impl PgTemporalStore {
             Some((e, b)) => (format!("jsonb_build_object('$agg', {e})"), b),
             None => match attr_object_expr(f, n_where + 1) {
                 Some(v) => v,
-                // refused range shape: reconstruct unpruned, window arbitrates
+                // refused range shape: reconstruct unpruned, window arbitrates.
+                // The default filter has neither range nor lastN, the two
+                // shapes the compiler can refuse: pinned by
+                // `the_unpruned_fallback_always_compiles`.
+                #[allow(clippy::expect_used)]
                 None => attr_object_expr(&TemporalFilter::default(), n_where + 1)
                     .expect("no range/lastN always compiles"),
             },
@@ -710,8 +724,9 @@ impl PgTemporalStore {
         binds.extend(extra.into_iter().map(B::Text));
         let mut select_total = String::new();
         let mut tail = " ORDER BY m.id".to_owned();
-        if paged {
-            let page = f.page.as_ref().expect("paged implies page");
+        // `paged` is set only inside `if f.page.is_some()`, so binding the
+        // two together says that in the type system instead of in a comment.
+        if let (true, Some(page)) = (paged, f.page.as_ref()) {
             select_total = ", count(*) OVER () AS total".into();
             binds.push(B::Num(page.limit));
             tail.push_str(&format!(" LIMIT ${}", binds.len()));
@@ -804,6 +819,9 @@ impl PgTemporalStore {
         id: &str,
         f: &TemporalFilter<'_>,
     ) -> Result<Option<Value>, sqlx::Error> {
+        // Same unpruned fallback as `query_inner`, and compiling for the
+        // same reason: no range and no lastN is the shape that never refuses.
+        #[allow(clippy::expect_used)]
         let (attr_expr, binds) = match attr_object_expr(f, 3) {
             Some(v) => v,
             None => attr_object_expr(&TemporalFilter::default(), 3)
@@ -958,6 +976,35 @@ impl PgTemporalStore {
 mod tests {
     use super::*;
     use crate::compile::temporal::InstanceRange;
+
+    /// Two callers fall back to `attr_object_expr(&TemporalFilter::default())`
+    /// when a range is outside the compiler's exact subset, and unwrap it:
+    /// the default filter has no range and no `lastN`, and `None` is returned
+    /// only for a range the compiler refuses. That is the reconstruct-unpruned
+    /// path, so if it ever stopped compiling the broker would panic on
+    /// precisely the queries the fallback exists to serve. Pinned here rather
+    /// than argued in a comment.
+    #[test]
+    fn the_unpruned_fallback_always_compiles() {
+        let f = TemporalFilter::default();
+        assert!(f.range.is_none(), "the default filter carries no range");
+        assert!(f.last_n.is_none(), "the default filter carries no lastN");
+        for first_bind in [1, 3, 4, 17] {
+            let built = attr_object_expr(&f, first_bind);
+            let (sql, binds) = built.unwrap_or_else(|| {
+                panic!("the unpruned fallback failed to compile at bind {first_bind}")
+            });
+            assert!(!sql.is_empty(), "empty SQL at bind {first_bind}");
+            assert!(
+                !sql.contains('$'),
+                "the unpruned fragment names no placeholder: {sql}"
+            );
+            assert!(
+                binds.is_empty(),
+                "a fragment that names no placeholder must hand back no bind: {binds:?}"
+            );
+        }
+    }
 
     fn between<'a>() -> TemporalFilter<'a> {
         TemporalFilter {

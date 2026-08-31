@@ -54,6 +54,9 @@ pub(crate) fn wait<T>(fut: impl std::future::Future<Output = T>) -> T {
             tokio::task::block_in_place(|| h.block_on(fut))
         }
         Ok(h) => h.block_on(fut),
+        // A current-thread runtime fails to build only when the OS refuses
+        // the reactor's own descriptors; no database call can proceed then.
+        #[allow(clippy::expect_used)]
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

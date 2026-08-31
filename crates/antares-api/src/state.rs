@@ -175,6 +175,9 @@ impl AppState {
             let dir = std::env::temp_dir()
                 .join("antares-test-store")
                 .join(uuid::Uuid::new_v4().simple().to_string());
+            // reachable only through the harness variable read above; a
+            // harness that cannot open its own store has nothing to run
+            #[allow(clippy::expect_used)]
             let store = Store::open_file(&dir).expect("open the redb test store");
             return Self::with_store(host_alias, Arc::new(AnyStore::Mem(store)), "file");
         }
@@ -470,7 +473,11 @@ fn outbound_client(
     // case-sensitively ("Link", "X-Additional-Key")
     #[cfg(not(target_arch = "wasm32"))]
     let b = b.http1_title_case_headers();
-    antares_jsonld::wrap_client(b.build().expect("http client"))
+    // reqwest fails to build only when the process cannot initialise its TLS
+    // backend: no outbound request of any kind can be made after that
+    #[allow(clippy::expect_used)]
+    let c = b.build().expect("http client");
+    antares_jsonld::wrap_client(c)
 }
 
 /// 5.13.1: an @context this broker HOSTS (Hosted or ImplicitlyCreated) is

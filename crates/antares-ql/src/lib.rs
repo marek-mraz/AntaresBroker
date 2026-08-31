@@ -8,6 +8,7 @@
 //! and `Clone`, and renders back to `q=` syntax through `Display`, so a
 //! gateway can inspect or rewrite a query (strip an attribute, AND in an
 //! authorization predicate) and forward it with the broker's own semantics.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 #![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
@@ -291,26 +292,28 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn or_expr(&mut self) -> Result<QNode, NgsiError> {
-        let mut items = vec![self.and_expr()?];
+        let first = self.and_expr()?;
+        let mut rest = Vec::new();
         while self.eat('|') {
-            items.push(self.and_expr()?);
+            rest.push(self.and_expr()?);
         }
-        Ok(if items.len() == 1 {
-            items.pop().expect("non-empty")
+        Ok(if rest.is_empty() {
+            first
         } else {
-            QNode::Or(items)
+            QNode::Or(std::iter::once(first).chain(rest).collect())
         })
     }
 
     fn and_expr(&mut self) -> Result<QNode, NgsiError> {
-        let mut items = vec![self.term()?];
+        let first = self.term()?;
+        let mut rest = Vec::new();
         while self.eat(';') {
-            items.push(self.term()?);
+            rest.push(self.term()?);
         }
-        Ok(if items.len() == 1 {
-            items.pop().expect("non-empty")
+        Ok(if rest.is_empty() {
+            first
         } else {
-            QNode::And(items)
+            QNode::And(std::iter::once(first).chain(rest).collect())
         })
     }
 

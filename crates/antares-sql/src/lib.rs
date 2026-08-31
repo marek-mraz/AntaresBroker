@@ -4,6 +4,7 @@
 //! The q= compiler emits parameterized SQL — structure from the
 //! compiler, values as binds ONLY. The sqlx store implementations live in
 //! `store`; migrations live in `migrations/`.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compile;

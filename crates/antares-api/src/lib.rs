@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! NGSI-LD HTTP binding: axum routers, thin
 //! handlers per spec operation.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 // the Send proof of the spawned snapshot fill walks temporal → entity map
 // futures deeper than the default 128 (nightly: recursion_depth_exceeding_limit)

@@ -1252,7 +1252,8 @@ fn render_aggregated(
         if times.is_empty() {
             continue;
         }
-        let class = class.expect("set with first instance");
+        // Set alongside the first instance, and `times` is non-empty here.
+        let Some(class) = class else { continue };
         // 5.7.4.4 p.211: "If an aggregated temporal representation is
         // requested and any of the requested Attributes is not eligible for
         // at least one of the aggregation methods specified in the request
@@ -1277,8 +1278,10 @@ fn render_aggregated(
         // `after`, so the data closes the open one.
         let whole = {
             let at = |s: &str| DateTime::parse_from_rfc3339(s).ok();
-            let first = times[0].0;
-            let last = times.last().expect("nonempty").0 + chrono::Duration::seconds(1);
+            let (Some(&(first, _)), Some(&(last_at, _))) = (times.first(), times.last()) else {
+                continue;
+            };
+            let last = last_at + chrono::Duration::seconds(1);
             match tq {
                 Some(q) if q.timerel == "before" => (first, at(&q.time_at).unwrap_or(last)),
                 Some(q) if q.timerel == "between" => (

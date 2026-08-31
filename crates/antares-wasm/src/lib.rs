@@ -11,6 +11,7 @@
 //! What the browser build is NOT: no NATS, no MQTT, no Postgres, no
 //! roles. `bus=local` and the memory store are the only shapes that exist
 //! here, which is why this crate turns `antares-api`'s default features off.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use axum::body::Body;
 use http_body_util::BodyExt;

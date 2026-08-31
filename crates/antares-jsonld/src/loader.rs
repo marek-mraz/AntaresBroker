@@ -672,25 +672,29 @@ impl Loader {
     }
 
     /// A loader with an explicit policy over a freshly built HTTP client.
+    #[allow(clippy::expect_used)]
     pub fn with_policy(policy: EgressPolicy) -> Self {
-        Self::with_client(
-            policy,
-            with_timeouts(
-                client_builder(policy),
-                std::time::Duration::from_secs(5 * slow_factor()),
-                std::time::Duration::from_secs(10 * slow_factor()),
-            )
-            .build()
-            .expect("reqwest client"),
+        // TLS backend initialisation is the only failure reqwest reports
+        // here; without it no @context can ever be fetched.
+        let client = with_timeouts(
+            client_builder(policy),
+            std::time::Duration::from_secs(5 * slow_factor()),
+            std::time::Duration::from_secs(10 * slow_factor()),
         )
+        .build()
+        .expect("reqwest client");
+        Self::with_client(policy, client)
     }
 }
 
 /// The pinned core `@context`, parsed and frozen, with no loader, client or
 /// cache behind it: the value every `Loader` pins, and what a test of
 /// expansion or matching needs on its own.
+#[allow(clippy::expect_used)]
 pub fn core_context() -> Context {
     let mut core = Context::default();
+    // PINNED holds CORE_CONTEXT and every entry parses: pinned by
+    // `every_pinned_context_parses_and_carries_an_at_context`
     merge_context_value(&mut core, &pinned(CORE_CONTEXT).expect("pinned core"));
     core.freeze();
     core.source = Value::String(CORE_CONTEXT.to_owned());
@@ -969,7 +973,11 @@ impl Loader {
             }
         }
         // Core context last: its (protected) terms win — CIM 009 4.4.
-        merge_context_value(&mut ctx, &pinned(CORE_CONTEXT).expect("pinned core"));
+        // CORE_CONTEXT is a PINNED entry and every entry parses: pinned by
+        // `every_pinned_context_parses_and_carries_an_at_context`.
+        #[allow(clippy::expect_used)]
+        let core = pinned(CORE_CONTEXT).expect("pinned core");
+        merge_context_value(&mut ctx, &core);
         ctx.freeze();
         ctx.source = user.clone();
         let arc = Arc::new(ctx);
@@ -1126,11 +1134,10 @@ impl Loader {
         // document's own references — held across a whole recursive
         // resolution instead, a handful of slow context trees would stall
         // every cold resolution in the process.
-        let _permit = self
-            .resolve_permits
-            .acquire()
-            .await
-            .expect("semaphore never closed");
+        // `acquire` fails only on a closed semaphore, which nothing closes.
+        // If that ever changed, proceeding without the permit costs the
+        // concurrency bound and not the fetch, so it is not worth a panic.
+        let _permit = self.resolve_permits.acquire().await.ok();
         // The whole HTTP interaction is one Send unit (http_interaction);
         // only Send data (ttl + bytes) crosses back out.
         let interact = async {
@@ -1301,11 +1308,14 @@ impl Loader {
     }
 }
 
+/// The `@context` of a compiled-in document, or `None` for a URL that is not
+/// pinned. The bodies are `include_str!`-ed at build time, so a body that
+/// does not parse or carries no `@context` is a build defect rather than
+/// anything a request can cause — `every_pinned_context_parses` fails on it.
 fn pinned(url: &str) -> Option<Value> {
-    PINNED.iter().find(|(u, _)| *u == url).map(|(_, body)| {
-        let doc: Value = serde_json::from_str(body).expect("pinned context parses");
-        doc.get("@context").cloned().expect("pinned has @context")
-    })
+    let (_, body) = PINNED.iter().find(|(u, _)| *u == url)?;
+    let doc: Value = serde_json::from_str(body).ok()?;
+    doc.get("@context").cloned()
 }
 
 fn merge_context_value(ctx: &mut Context, v: &Value) {
@@ -1325,6 +1335,33 @@ fn merge_context_value(ctx: &mut Context, v: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `core_context` and the merge tail unwrap `pinned(CORE_CONTEXT)`,
+    /// because a broker without the Core @context cannot expand anything and
+    /// has no useful degraded mode. That is only safe while the compiled-in
+    /// table really does carry a parseable `@context` for every URL in it —
+    /// which is a property of the build, so it is checked here rather than
+    /// left to a comment. A pinned document that stops parsing fails this
+    /// test instead of the first request after deploy.
+    #[test]
+    fn every_pinned_context_parses_and_carries_an_at_context() {
+        assert!(!PINNED.is_empty(), "the pinned table is empty");
+        for (url, _) in PINNED {
+            assert!(
+                pinned(url).is_some(),
+                "pinned document {url} does not parse, or carries no @context"
+            );
+        }
+        let core = pinned(CORE_CONTEXT).expect("the Core @context is pinned");
+        assert!(
+            core.is_object() || core.is_array() || core.is_string(),
+            "the Core @context is not a usable @context value: {core}"
+        );
+        assert!(
+            PINNED.iter().any(|(u, _)| *u == CORE_CONTEXT),
+            "CORE_CONTEXT must be in the pinned table by URL, not merely resolvable"
+        );
+    }
 
     /// 4.4: "the Core @context is protected and shall remain immutable and
     /// invariant during expansion or compaction of terms. […] implementations

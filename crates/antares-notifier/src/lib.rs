@@ -12,6 +12,7 @@
 //! The egress policy (allowlist, private-range deny, per-destination
 //! breakers) runs in the caller before `deliver`, so a sink registered from
 //! outside this workspace cannot step around it.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 use antares_model::NgsiError;
 use serde_json::Value;

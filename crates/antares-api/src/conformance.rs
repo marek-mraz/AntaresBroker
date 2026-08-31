@@ -329,12 +329,11 @@ pub async fn prefer_version_layer(req: Request<Body>, next: Next) -> Response {
         }
         Err(_) => bytes,
     };
-    parts.headers.insert(
-        "Preference-Applied",
-        format!("ngsi-ld={}.{}", conformant.0, conformant.1)
-            .parse()
-            .expect("header value"),
-    );
+    // Two integers and a dot are always a legal header value; if that ever
+    // stopped being true, omitting the header beats taking the response down.
+    if let Ok(v) = format!("ngsi-ld={}.{}", conformant.0, conformant.1).parse() {
+        parts.headers.insert("Preference-Applied", v);
+    }
     if altered {
         // The response tables' "altered Entity" rows: 203 Non-Authoritative.
         parts.status = StatusCode::NON_AUTHORITATIVE_INFORMATION;

@@ -1234,7 +1234,7 @@ pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
 pub fn parse_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     // shortest legal form is 19 chars + the mandatory Z
-    if b.len() < 20 || *b.last().expect("non-empty") != b'Z' {
+    if b.len() < 20 || b.last() != Some(&b'Z') {
         return false;
     }
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);

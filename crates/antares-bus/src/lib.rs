@@ -8,6 +8,7 @@
 //! subscription mirror) that makes multi-instance roles possible, and
 //! becomes mandatory only on scale-out. The composition root
 //! (`antares-broker/src/wiring.rs`) is the only place that names either.
+#![cfg_attr(not(test), warn(clippy::expect_used))]
 
 pub mod nats;
 pub mod subjects;
