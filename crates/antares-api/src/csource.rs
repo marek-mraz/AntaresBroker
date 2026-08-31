@@ -73,9 +73,11 @@ pub fn normalize_registration(
                 // element, materialised in memory before any SQL runs. Under
                 // only the 4 MiB body cap that is ~10^10 objects — an OOM from
                 // one request. Cardinality is capped at the validation
-                // boundary, where the error is a 400 and not a dead pod.
+                // boundary, where the error is a 400 and not a dead pod:
+                // there is no query here to be too complex, and 5.9.2.4 gives
+                // BadRequestData for a registration whose content is refused.
                 if arr.len() > MAX_INFORMATION {
-                    return Err(NgsiError::TooComplexQuery(format!(
+                    return Err(bad(format!(
                         "information has {} entries (limit {MAX_INFORMATION})",
                         arr.len()
                     )));
@@ -88,7 +90,7 @@ pub fn normalize_registration(
                     for key in ["entities", "propertyNames", "relationshipNames"] {
                         if let Some(n) = io.get(key).and_then(Value::as_array).map(Vec::len) {
                             if n > MAX_INFO_MEMBERS {
-                                return Err(NgsiError::TooComplexQuery(format!(
+                                return Err(bad(format!(
                                     "information.{key} has {n} entries (limit {MAX_INFO_MEMBERS})"
                                 )));
                             }
@@ -2253,14 +2255,15 @@ mod csi_tests {
         };
         let many = |n: usize| Value::Array((0..n).map(|_| info(1)).collect());
         assert!(mk(many(MAX_INFORMATION)).is_ok(), "the cap itself is legal");
-        assert!(matches!(
-            mk(many(MAX_INFORMATION + 1)),
-            Err(NgsiError::TooComplexQuery(_))
-        ));
+        let over = mk(many(MAX_INFORMATION + 1)).expect_err("over the cap");
+        assert!(matches!(over, NgsiError::BadRequestData(_)), "{over:?}");
+        // the status is what the client sees, and 403 would tell it to
+        // narrow a query it never sent
+        assert_eq!(over.status(), 400);
         assert!(mk(json!([info(MAX_INFO_MEMBERS)])).is_ok());
         assert!(matches!(
             mk(json!([info(MAX_INFO_MEMBERS + 1)])),
-            Err(NgsiError::TooComplexQuery(_))
+            Err(NgsiError::BadRequestData(_))
         ));
         let entities = |n: usize| {
             json!([{"entities": (0..n)
@@ -2270,7 +2273,7 @@ mod csi_tests {
         assert!(mk(entities(MAX_INFO_MEMBERS)).is_ok());
         assert!(matches!(
             mk(entities(MAX_INFO_MEMBERS + 1)),
-            Err(NgsiError::TooComplexQuery(_))
+            Err(NgsiError::BadRequestData(_))
         ));
         let rels = |n: usize| {
             json!([{"entities": [{"type": "Vehicle"}], "relationshipNames":
@@ -2279,7 +2282,7 @@ mod csi_tests {
         assert!(mk(rels(MAX_INFO_MEMBERS)).is_ok());
         assert!(matches!(
             mk(rels(MAX_INFO_MEMBERS + 1)),
-            Err(NgsiError::TooComplexQuery(_))
+            Err(NgsiError::BadRequestData(_))
         ));
     }
 

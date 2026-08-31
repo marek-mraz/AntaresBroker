@@ -2352,7 +2352,8 @@ mod tests {
     /// (propertyNames + relationshipNames)` was expanded into an in-memory Vec
     /// before any SQL ran, with no cardinality cap — a 4 MiB body produced on
     /// the order of 10^10 objects and OOM-killed the process. Capped at the
-    /// validation boundary so it is a 403, not a dead pod.
+    /// validation boundary so it is a 400, not a dead pod: the request's
+    /// content is what is refused, and 5.9.2.4 raises BadRequestData for it.
     #[tokio::test]
     async fn registration_cardinality_is_capped_before_expansion() {
         let app = app();
@@ -2378,8 +2379,9 @@ mod tests {
             .expect("resp");
         assert_eq!(
             resp.status(),
-            StatusCode::FORBIDDEN,
-            "TooComplexQuery = 403"
+            StatusCode::BAD_REQUEST,
+            "an oversized registration body is BadRequestData, not a query \
+             the client is told to narrow"
         );
 
         // a registration of ordinary size is untouched by the cap
