@@ -529,6 +529,17 @@ pub fn respond(
     accept: Accept,
     tenant: &TenantId,
 ) -> Response {
+    // A JSON array is a page, whichever operation produced it, so it takes
+    // the streaming path: the served @context is the request's own, an
+    // inline object as large as the body cap allows, and under ld+json it is
+    // copied onto EVERY element — buffering the whole array first turns one
+    // request into page-size times that. GeoJSON is one object with one
+    // top-level @context and stays here.
+    if accept != Accept::GeoJson {
+        if let Value::Array(docs) = payload {
+            return respond_list(status, docs, ctx, accept, tenant);
+        }
+    }
     let mut resp = match accept {
         Accept::Json => {
             let mut r = (
@@ -1465,6 +1476,43 @@ mod negotiation {
             .expect("body");
         let doc: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(doc["@context"], json!(CORE_CONTEXT));
+    }
+
+    /// A page is a page however it was asked for: an array payload streams,
+    /// so the body never exists as one contiguous buffer and the echoed
+    /// @context — client-sized, up to the whole body cap, and copied onto
+    /// every element under ld+json — is one element's worth of memory at a
+    /// time rather than one page's.
+    #[tokio::test]
+    async fn an_array_payload_streams_whatever_asked_for_it() {
+        let mut ctx = Context::default();
+        ctx.source = json!({"a": "http://example.org/a"});
+        let t = TenantId::default();
+        let docs = vec![
+            json!({"id": "urn:a", "type": "T"}),
+            json!({"id": "urn:b", "type": "T"}),
+        ];
+
+        for accept in [Accept::Json, Accept::LdJson] {
+            let resp = respond(StatusCode::OK, Value::Array(docs.clone()), &ctx, accept, &t);
+            use axum::body::HttpBody as _;
+            assert!(
+                resp.body().size_hint().exact().is_none(),
+                "a page is streamed, not buffered whole ({accept:?})"
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let arr: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(arr[0]["id"], json!("urn:a"));
+            assert_eq!(arr[1]["id"], json!("urn:b"));
+            if accept == Accept::LdJson {
+                assert_eq!(arr[0]["@context"], json!({"a": "http://example.org/a"}));
+                assert_eq!(arr[1]["@context"], json!({"a": "http://example.org/a"}));
+            } else {
+                assert!(arr[0].get("@context").is_none());
+            }
+        }
     }
 
     /// The streamed list response is a JSON array in both media types, with
