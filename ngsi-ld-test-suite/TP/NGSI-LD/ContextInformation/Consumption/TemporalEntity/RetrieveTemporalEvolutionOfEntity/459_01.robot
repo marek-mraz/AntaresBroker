@@ -67,3 +67,35 @@ Test Teardown       Delete Temporal Representation Of Entity    ${entity_id}
     Should Be Empty    ${leaks_list}
     ${leaks_route}=    Evaluate    [k for k in $body['route'] if k not in ('type', 'datasetId', 'objectLists')]
     Should Be Empty    ${leaks_route}
+
+459_02 Simplified Temporal Pairs Keep The Value The Property Holds
+    [Documentation]    4.5.9: "the first element shall be a Property value" — the
+    ...    value the instance holds. An integer stays an integer, a float stays a
+    ...    float, and an integer past 2^53 keeps every digit (a f64 round trip
+    ...    turns 9007199254740993 into 9007199254740992.0).
+    [Tags]    te-retrieve    4_5_9    since_v1.9.1
+    ${entity_id}=    Generate Random Vehicle Entity Id
+    Set Test Variable    ${entity_id}
+    ${payload}=    Evaluate
+    ...    {"id": $entity_id, "type": "Vehicle", "@context": [$ngsild_test_suite_context], "speed": {"type": "Property", "value": 120, "observedAt": "2026-08-10T00:00:01Z"}, "fuelLevel": {"type": "Property", "value": 1.5, "observedAt": "2026-08-10T00:00:01Z"}, "serialNumber": {"type": "Property", "value": 9007199254740993, "observedAt": "2026-08-10T00:00:01Z"}}
+    &{headers}=    Create Dictionary    Content-Type=application/ld+json
+    ${response}=    POST
+    ...    url=${url}/${TEMPORAL_ENTITIES_ENDPOINT_PATH}
+    ...    json=${payload}
+    ...    headers=${headers}
+    ...    expected_status=any
+    Check Response Status Code    201    ${response.status_code}
+    ${response}=    Retrieve Temporal Representation Of Entity
+    ...    temporal_entity_representation_id=${entity_id}
+    ...    options=temporalValues
+    ...    context=${ngsild_test_suite_context}
+    Check Response Status Code    200    ${response.status_code}
+    ${body}=    Set Variable    ${response.json()}
+    ${speed_type}=    Evaluate    type($body['speed']['values'][0][0]).__name__
+    Should Be Equal    ${speed_type}    int
+    ${speed}=    Evaluate    $body['speed']['values'][0][0]
+    Should Be Equal As Integers    ${speed}    120
+    ${fuel_type}=    Evaluate    type($body['fuelLevel']['values'][0][0]).__name__
+    Should Be Equal    ${fuel_type}    float
+    ${serial}=    Evaluate    $body['serialNumber']['values'][0][0] == 9007199254740993
+    Should Be True    ${serial}

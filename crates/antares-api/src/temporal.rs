@@ -796,7 +796,11 @@ fn present_temporal(
                             // value/object; other attribute kinds wrap it under
                             // their member name.
                             let v = if let Some(v) = inst.get("value") {
-                                ts_float(v)
+                                // 4.5.9: "the first element shall be a
+                                // Property value" — the one the instance
+                                // holds. A f64 round trip would retype an
+                                // integer and drop a digit past 2^53.
+                                v.clone()
                             } else if let Some(o) = inst.get("object") {
                                 o.clone()
                             } else if let Some(lm) = inst.get("languageMap") {
@@ -1119,13 +1123,6 @@ fn selection(r: &TRepr) -> Option<Vec<String>> {
             .map(|n| n.iri.clone())
             .collect()
     })
-}
-
-fn ts_float(v: &Value) -> Value {
-    match v.as_f64() {
-        Some(f) => serde_json::json!(f),
-        None => v.clone(),
-    }
 }
 
 /// Aggregated representation (4.5.19): attr → `{type, <method>: [[v,start,end]]}`.
