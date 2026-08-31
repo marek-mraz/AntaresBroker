@@ -1969,27 +1969,27 @@ pub async fn delete_entity(
             return Ok(r);
         }
         // 5.6.6.4: the ?type selector narrows the target — an entity of a
-        // non-matching type is "not known" for this delete.
-        let type_gate = |doc: Option<Value>| -> Option<Value> {
-            doc.filter(|d| crate::attrs::matches_type_param(d, &params, &ctx))
-        };
+        // non-matching type is "not known" for this delete. The selector is
+        // tested inside the delete, under the row lock: read first and delete
+        // after, and the document that answered the test is not necessarily
+        // the one the delete removes.
+        let keep = |d: &Value| crate::attrs::matches_type_param(d, &params, &ctx);
         if !regs.is_empty() {
-            let local_exists = type_gate(st.store.get(&tenant, Kind::Entity, &id)?).is_some();
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
-            if local_exists || !proxy_match {
-                if local_exists && st.store.delete(&tenant, Kind::Entity, &id)? {
-                    mirror_delete_entity(&st, &tenant, &id);
-                    parts.push(crate::federation::Part {
-                        status: 204,
-                        detail: "deleted locally".into(),
-                    });
-                } else {
-                    parts.push(crate::federation::Part {
-                        status: 404,
-                        detail: format!("entity {id} not found locally"),
-                    });
-                }
+            if st.store.delete_entity_if(&tenant, &id, &keep)? {
+                mirror_delete_entity(&st, &tenant, &id);
+                parts.push(crate::federation::Part {
+                    status: 204,
+                    detail: "deleted locally".into(),
+                });
+            } else if !proxy_match {
+                // nothing local to delete, and no proxy that owns it: the
+                // local half of this operation is the 404
+                parts.push(crate::federation::Part {
+                    status: 404,
+                    detail: format!("entity {id} not found locally"),
+                });
             }
             let ctx_url = crate::federation::ctx_link_url(&headers, &ctx.source);
             let seg = crate::federation::path_segment(&id);
@@ -2024,9 +2024,7 @@ pub async fn delete_entity(
                 &tenant,
             ));
         }
-        if type_gate(st.store.get(&tenant, Kind::Entity, &id)?).is_some()
-            && st.store.delete(&tenant, Kind::Entity, &id)?
-        {
+        if st.store.delete_entity_if(&tenant, &id, &keep)? {
             mirror_delete_entity(&st, &tenant, &id);
             Ok::<_, ApiError>(no_content(&tenant))
         } else {

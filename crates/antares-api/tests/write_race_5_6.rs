@@ -16,6 +16,7 @@ use antares_api::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::Double;
+use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -88,5 +89,65 @@ async fn a_replace_does_not_resurrect_an_entity_deleted_under_it() {
         after,
         StatusCode::NOT_FOUND,
         "a deleted entity may not come back as the loser of a race"
+    );
+}
+
+/// 5.6.6.4 Delete Entity: the `?type` selector narrows the target — an
+/// Entity of another type "is not known" for this delete. Tested on the
+/// document that was read, and then deleted by id, the verdict applies to a
+/// document that may no longer be there: a write landing in that window
+/// swaps in an Entity the selector excludes, and the delete removes it
+/// anyway. Deciding inside the store, under the row lock, is the only place
+/// where the document judged and the document deleted are the same one.
+#[tokio::test]
+async fn a_typed_delete_does_not_remove_an_entity_the_selector_excludes() {
+    let mut st = AppState::new("antares-test".into());
+    let created = send(
+        &st,
+        json_req(
+            "POST",
+            "/ngsi-ld/v1/entities",
+            format!(r#"{{"id":"{ID}","type":"Vehicle"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED);
+
+    // what the concurrent write leaves behind: the same id, another type
+    let building = json!({
+        "id": ID,
+        "type": ["https://uri.etsi.org/ngsi-ld/default-context/Building"],
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "modifiedAt": "2026-01-01T00:00:00.000Z",
+    });
+    st.store = Arc::new(Double::racing_write(st.store.clone(), building));
+
+    let deleted = send(
+        &st,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/ngsi-ld/v1/entities/{ID}?type=Vehicle"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        deleted,
+        StatusCode::NOT_FOUND,
+        "the Entity under that id is a Building: not known for a Vehicle delete"
+    );
+
+    let after = send(
+        &st,
+        Request::builder()
+            .uri(format!("/ngsi-ld/v1/entities/{ID}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        after,
+        StatusCode::OK,
+        "an Entity the selector excludes may not be deleted by it"
     );
 }

@@ -292,6 +292,23 @@ pub trait CurrentStateDriver: Send + Sync {
     fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError>;
     /// Delete one document; `false` if it was absent.
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError>;
+    /// Delete one Entity, but only if `keep` accepts the stored document.
+    /// `false` = absent OR refused; the caller cannot tell the two apart and
+    /// does not need to, because 5.6.6.4 gives the same answer to both: an
+    /// Entity the selector excludes "is not known" for this operation.
+    ///
+    /// The read and the delete happen under one lock. Required, deliberately:
+    /// the obvious default is `get` then `delete`, and that pair is the race
+    /// this method exists to remove — between the two the Entity can be
+    /// deleted and recreated under the same id, and the delete then lands on
+    /// a document the caller never inspected. A backend inheriting a default
+    /// would keep the race with no compile error to say so.
+    fn delete_entity_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<bool, NgsiError>;
     /// Every document of this kind in the tenant.
     ///
     /// A backend may refuse a tenant that holds too many to materialize
@@ -902,6 +919,14 @@ mod tests {
             Ok(self.0.lock().expect("lock").clone())
         }
         fn delete(&self, _t: &TenantId, _k: Kind, _id: &str) -> Result<bool, NgsiError> {
+            unimplemented!()
+        }
+        fn delete_entity_if(
+            &self,
+            _t: &TenantId,
+            _id: &str,
+            _keep: &dyn Fn(&Value) -> bool,
+        ) -> Result<bool, NgsiError> {
             unimplemented!()
         }
         fn list(&self, _t: &TenantId, _k: Kind) -> Result<Vec<Value>, NgsiError> {

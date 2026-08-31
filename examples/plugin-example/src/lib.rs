@@ -268,6 +268,36 @@ impl CurrentStateDriver for ExampleStore {
         Ok(existed)
     }
 
+    /// The read and the removal share one hold of the map's lock, so nothing
+    /// can replace the Entity between the decision and the delete. A backend
+    /// that reads first and deletes after keeps that window open, which is
+    /// why the trait requires this method rather than defaulting it.
+    fn delete_entity_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<bool, NgsiError> {
+        let now = now();
+        let key = (
+            tenant.as_str().to_owned(),
+            slot(Kind::Entity),
+            id.to_owned(),
+        );
+        let prev = {
+            let mut rows = self.write();
+            match rows.get(&key) {
+                Some(d) if !gone(Kind::Entity, d, &now) && keep(d) => rows.remove(&key),
+                _ => None,
+            }
+        };
+        let existed = prev.is_some();
+        if existed {
+            self.emit(tenant, prev, None);
+        }
+        Ok(existed)
+    }
+
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         Ok(self.rows(tenant, kind))
     }

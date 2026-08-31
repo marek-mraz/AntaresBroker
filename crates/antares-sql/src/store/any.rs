@@ -451,6 +451,37 @@ impl AnyStore {
         }
     }
 
+    /// Delete one entity only if `keep` accepts the stored document, read
+    /// and removed under one lock (see the driver trait).
+    pub fn delete_entity_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<bool, NgsiError> {
+        // 4.22 is applied to the document `keep` judges, exactly as `get`
+        // applies it: an expired instance is not there to be matched on.
+        let now = now_utc();
+        let judge = |d: &Value| {
+            let mut d = d.clone();
+            !crate::store::filter::strip_expired(&mut d, &now) && keep(&d)
+        };
+        match self {
+            AnyStore::Mem(s) => Ok(s.delete_if(tenant, id, &judge).is_some()),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => {
+                // the before-image comes from the DELETE's own RETURNING —
+                // same transaction, never a separate racy read
+                let prev = p.entities.delete_if(tenant, id, &judge).map_err(db)?;
+                let hit = prev.is_some();
+                if hit {
+                    p.emit(tenant, prev, None);
+                }
+                Ok(hit)
+            }
+        }
+    }
+
     pub fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         let mut rows = match self {
             AnyStore::Mem(s) => s.list(tenant, kind),
@@ -1196,6 +1227,14 @@ impl antares_store::CurrentStateDriver for AnyStore {
     }
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         AnyStore::delete(self, tenant, kind, id)
+    }
+    fn delete_entity_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<bool, NgsiError> {
+        AnyStore::delete_entity_if(self, tenant, id, keep)
     }
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         AnyStore::list(self, tenant, kind)

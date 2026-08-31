@@ -406,6 +406,50 @@ pub fn run_current_state_contract(
         d.delete(a, Kind::Entity, id).expect("delete page entity");
     }
 
+    // `delete_entity_if` decides and deletes under one lock, and it decides
+    // on the STORED document. 5.6.6.4: an Entity the caller's selector
+    // excludes "is not known" for the operation, which is the same answer an
+    // absent Entity gets — so a refusal and a miss are both `false`, and a
+    // refusal must leave the document exactly where it was.
+    let cond = format!("urn:ngsi-ld:{prefix}:cond");
+    d.upsert(a, Kind::Entity, &cond, doc(&cond))
+        .expect("upsert conditional-delete entity");
+    assert!(
+        !d.delete_entity_if(a, &cond, &|_| false)
+            .expect("delete_entity_if"),
+        "a refused predicate reports no deletion"
+    );
+    assert!(
+        d.get(a, Kind::Entity, &cond).expect("get").is_some(),
+        "a refused delete leaves the document in place"
+    );
+    // 4.14: the predicate never even runs for another tenant's document.
+    assert!(
+        !d.delete_entity_if(b, &cond, &|_| panic!(
+            "another tenant's document reached the predicate"
+        ))
+        .expect("delete_entity_if"),
+        "an Entity of another tenant is absent here"
+    );
+    assert!(
+        d.get(a, Kind::Entity, &cond).expect("get").is_some(),
+        "a delete addressed to another tenant may not touch this one"
+    );
+    assert!(
+        d.delete_entity_if(a, &cond, &|v| v["id"] == cond.as_str())
+            .expect("delete_entity_if"),
+        "the predicate is handed the stored document, not the id"
+    );
+    assert!(
+        d.get(a, Kind::Entity, &cond).expect("get").is_none(),
+        "an accepted predicate deletes"
+    );
+    assert!(
+        !d.delete_entity_if(a, &cond, &|_| true)
+            .expect("delete_entity_if"),
+        "an absent Entity is not deleted, whatever the predicate answers"
+    );
+
     // `list_slice` is the window a 5.5.9.2 limit/offset listing serves from,
     // and it must agree with the walk above on both the order and the set:
     // the same ids, the same order, and a total that counts the whole match

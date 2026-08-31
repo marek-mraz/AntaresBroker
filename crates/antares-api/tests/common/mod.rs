@@ -9,7 +9,7 @@
 use antares_model::{NgsiError, TenantId};
 use antares_store::{CurrentStateDriver, Kind};
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// One delegating driver, misbehaving in whichever single way a test asks
@@ -19,6 +19,8 @@ pub struct Double {
     inner: Arc<dyn CurrentStateDriver>,
     fail_next: AtomicUsize,
     delete_on_get: bool,
+    racing_write: Option<Value>,
+    raced: AtomicBool,
 }
 
 impl Double {
@@ -30,6 +32,8 @@ impl Double {
             inner,
             fail_next: AtomicUsize::new(fail_next),
             delete_on_get: false,
+            racing_write: None,
+            raced: AtomicBool::new(false),
         }
     }
 
@@ -42,7 +46,38 @@ impl Double {
             inner,
             fail_next: AtomicUsize::new(0),
             delete_on_get: true,
+            racing_write: None,
+            raced: AtomicBool::new(false),
         }
+    }
+
+    /// One concurrent write, landing in the window a handler leaves between
+    /// its read and its write: after a `get` has answered, and before a
+    /// conditional delete reaches the store. It replaces the document under
+    /// the same id and fires once, whichever entry point comes first. A
+    /// handler that decides on what it read cannot see it; one that decides
+    /// inside the store cannot miss it.
+    pub fn racing_write(inner: Arc<dyn CurrentStateDriver>, replacement: Value) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: false,
+            racing_write: Some(replacement),
+            raced: AtomicBool::new(false),
+        }
+    }
+
+    fn race(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<(), NgsiError> {
+        let Some(doc) = &self.racing_write else {
+            return Ok(());
+        };
+        if kind != Kind::Entity || self.raced.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        if self.inner.get(tenant, kind, id)?.is_some() {
+            self.inner.upsert(tenant, kind, id, doc.clone())?;
+        }
+        Ok(())
     }
 }
 
@@ -131,10 +166,20 @@ impl CurrentStateDriver for Double {
         if self.delete_on_get && doc.is_some() {
             self.inner.delete(tenant, kind, id)?;
         }
+        self.race(tenant, kind, id)?;
         Ok(doc)
     }
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         self.inner.delete(tenant, kind, id)
+    }
+    fn delete_entity_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<bool, NgsiError> {
+        self.race(tenant, Kind::Entity, id)?;
+        self.inner.delete_entity_if(tenant, id, keep)
     }
     fn matching_registrations(
         &self,

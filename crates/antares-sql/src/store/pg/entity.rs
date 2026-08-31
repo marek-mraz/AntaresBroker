@@ -420,6 +420,63 @@ impl PgEntityStore {
         })
     }
 
+    /// Delete one entity only if `keep` accepts the stored document, under
+    /// one lock: the DELETE itself takes the row lock and produces the
+    /// document that decides, and a refusal rolls the transaction back
+    /// instead of committing it. A `SELECT` followed by a `DELETE` would
+    /// leave the window this exists to close — between them the row can be
+    /// deleted and recreated under the same id, and the delete then lands on
+    /// a document nobody inspected.
+    ///
+    /// 4.22 as in `delete`: an already-expired row is invalid, so it is
+    /// absent here too.
+    pub fn delete_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<Option<Value>, sqlx::Error> {
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let row = sqlx::query(
+                "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
+                   AND (expires_at IS NULL OR expires_at > now())
+                 RETURNING entity, types, version, created_at::text",
+            )
+            .bind(tenant.as_str())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(r) = &row else {
+                tx.commit().await?;
+                return Ok(None);
+            };
+            let prev: Value = r.get(0);
+            if !keep(&prev) {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+            if self.outbox_on() {
+                let types: Vec<String> = r.get(1);
+                enqueue_change(
+                    &mut tx,
+                    tenant,
+                    "delete",
+                    id,
+                    &types,
+                    Some(&prev),
+                    None,
+                    r.get::<i64, _>(2),
+                    r.get::<&str, _>(3),
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(Some(prev))
+        })
+    }
+
     /// Query pushdown. The predicates that compile EXACTLY go to
     /// Postgres; everything else is simply left out of the WHERE clause, so
     /// the result is always a superset of the answer and the caller's

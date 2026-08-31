@@ -671,6 +671,42 @@ impl Store {
         hit
     }
 
+    /// Delete one entity only if `keep` accepts the stored document. The
+    /// read and the removal happen under one hold of the write lock, so
+    /// nothing can replace the document between the decision and the delete.
+    /// `None` = absent, expired (4.22, as in `delete`) or refused.
+    pub fn delete_if(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Option<Value> {
+        let _order = self.emit_ordered();
+        let removed = on_blocking(|| {
+            let mut inner = self.write_inner();
+            if self.is_expired(&inner, Kind::Entity, tenant.as_str(), id) {
+                return None;
+            }
+            let m = Self::map_mut(&mut inner, Kind::Entity).get_mut(tenant.as_str())?;
+            if !m.get(id).is_some_and(keep) {
+                return None;
+            }
+            let removed = m.remove(id);
+            if removed.is_some() {
+                self.persist(
+                    table_for(Kind::Entity),
+                    &key_bytes(tenant.as_str(), id),
+                    None,
+                );
+            }
+            removed
+        });
+        if let Some(old) = &removed {
+            self.emit(tenant, Some(old.clone()), None);
+        }
+        removed
+    }
+
     /// Snapshot of all docs of a kind for one tenant (id order).
     pub fn list(&self, tenant: &TenantId, kind: Kind) -> Vec<Value> {
         let inner = self
