@@ -149,16 +149,27 @@ fn negotiate(
             }
             let mut q = 1.0f32;
             for p in segs {
-                if let Some(v) = p.trim().strip_prefix("q=") {
-                    // A malformed or non-finite weight is not one of the HTTP
-                    // Accept processing rules, so it must not decide the
-                    // outcome — the range keeps the default weight.
-                    q = v
-                        .parse()
-                        .ok()
-                        .filter(|f: &f32| f.is_finite())
-                        .unwrap_or(1.0);
+                // RFC 9110 clause 5.6.6: parameter names are
+                // case-insensitive, so `Q=0` refuses this range as `q=0`
+                // does.
+                let Some((name, v)) = p.split_once('=') else {
+                    continue;
+                };
+                if !name.trim().eq_ignore_ascii_case("q") {
+                    continue;
                 }
+                // A weight outside the RFC 9110 clause 12.4.2 qvalue range
+                // (0 to 1) — or one that is not a number at all — is not one
+                // of the HTTP Accept processing rules, so it must not decide
+                // the outcome: the range keeps the default weight. Without
+                // the range check `q=-1` removed a representation and `q=5`
+                // outranked every legal weight.
+                q = v
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|f: &f32| (0.0..=1.0).contains(f))
+                    .unwrap_or(1.0);
             }
             Some((mt, q))
         })
@@ -1181,13 +1192,20 @@ mod negotiation {
             Accept::LdJson,
             "the exact range is the more specific match, so json stays refused"
         );
-        for weird in ["q=NaN", "q=inf", "q=", "q=abc", "q=1.0.0"] {
+        for weird in ["q=NaN", "q=inf", "q=", "q=abc", "q=1.0.0", "q=-1", "q=5"] {
             assert_eq!(
                 acc(&format!("application/ld+json;{weird}")),
                 Accept::LdJson,
                 "{weird} is not a usable weight — the type stays acceptable"
             );
         }
+        // RFC 9110 clause 5.6.6: parameter NAMES are case-insensitive, so a
+        // client refusing json with Q=0 is refusing it.
+        assert_eq!(
+            acc("application/json;Q=0, application/ld+json"),
+            Accept::LdJson,
+            "the q parameter is named case-insensitively"
+        );
     }
 
     /// 6.3.15 restricts application/geo+json to Retrieve/Query Entity. On
