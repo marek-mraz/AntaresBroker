@@ -12,10 +12,6 @@ pub mod operations;
 pub use error::{NgsiError, ProblemDetails};
 pub use id::{EntityId, TenantId};
 
-/// The NGSI-LD core @context URL this broker targets.
-pub const CORE_CONTEXT_URL: &str =
-    "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
-
 /// API root path (CIM 009 clause 6.2).
 pub const API_ROOT: &str = "/ngsi-ld/v1";
 
