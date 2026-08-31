@@ -661,7 +661,7 @@ async fn health(
         "store": state.store_name,
         "temporal": state.temporal_name.as_deref().unwrap_or("none"),
         // Version surface: workspace version + build-time git hash
-        // (build.rs), asserted by the release smoke test.
+        // (build.rs), both asserted against the checkout by health_is_up.
         "version": env!("CARGO_PKG_VERSION"),
         "commit": env!("ANTARES_GIT_HASH"),
     });
@@ -1170,10 +1170,23 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["status"], "UP");
-        // Version surface: release smoke asserts these two fields.
+        // Version surface. The commit must be the one this binary was BUILT
+        // from, so it is compared against the checkout rather than merely
+        // checked for being a non-empty string: a build script that stops
+        // rerunning bakes in a hash from an older commit, and /q/health then
+        // names a build that is not the one running. Outside a git checkout
+        // the build script reports "unknown" and there is nothing to compare.
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
-        assert!(body["commit"].is_string(), "commit hash missing");
-        assert_ne!(body["commit"], "", "commit hash empty");
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok());
+        match head {
+            Some(h) => assert_eq!(body["commit"], h.trim(), "stale build hash"),
+            None => assert_eq!(body["commit"], "unknown"),
+        }
     }
 
     /// /q/health names the temporal backend next to the store: the store's
