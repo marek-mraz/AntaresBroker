@@ -87,12 +87,14 @@ pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 /// many DISTINCT @contexts one batch may name — without the second, the item
 /// count multiplies the first.
 pub use antares_jsonld::MAX_CONTEXT_URLS as MAX_CONTEXT_FETCHES;
-pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
 /// Linked-entity lookup budget per `q=`, owned by the shared evaluator.
 pub use antares_ql::eval::MAX_Q_LINK_LOOKUPS;
 /// Regex compile ceiling and retention caps, owned by the shared cache
 /// (`antares_ql::regex`).
 pub use antares_ql::regex::{MAX_REGEX_CACHE, MAX_REGEX_CACHE_BYTES, MAX_REGEX_PROGRAM_BYTES};
+/// → 403 TooComplexQuery. The AST size cap, owned by the parser that
+/// enforces it (`antares_ql::parse_q`).
+pub use antares_ql::MAX_Q_NODES;
 
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
@@ -283,6 +285,19 @@ mod tests {
             json_depth(over.as_bytes()) > MAX_JSON_DEPTH,
             "one over is rejected"
         );
+    }
+
+    /// A cap `/q/health` publishes is the cap that fires: an OR chain of
+    /// `MAX_Q_NODES - 1` terms (the chain node plus its terms) parses, one
+    /// term more is 5.5.6 TooComplexQuery.
+    #[test]
+    fn the_published_q_node_cap_is_the_enforced_one() {
+        let chain = |k: usize| vec!["a==1"; k].join("|");
+        assert!(antares_ql::parse_q(&chain(MAX_Q_NODES - 1)).is_ok());
+        assert!(matches!(
+            antares_ql::parse_q(&chain(MAX_Q_NODES)),
+            Err(antares_model::NgsiError::TooComplexQuery(_))
+        ));
     }
 
     /// /q/health publishes the caps and the rejection counters — and nothing

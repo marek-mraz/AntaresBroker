@@ -244,8 +244,10 @@ const MAX_Q_BYTES: usize = 4096;
 const MAX_Q_DEPTH: usize = 64;
 
 /// AST size cap — checked after parsing, which is safe once depth and
-/// length are bounded first.
-const MAX_Q_NODES: usize = 512;
+/// length are bounded first. Public because `/q/health` publishes it: a
+/// second constant carrying the same number is one that can drift from the
+/// one actually enforced.
+pub const MAX_Q_NODES: usize = 512;
 
 /// Parse an NGSI-LD `q=` expression. Complexity ceilings raise
 /// TooComplexQuery per 5.5.6 ("a query operation … so complex that cannot
