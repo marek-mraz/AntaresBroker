@@ -457,11 +457,6 @@ pub fn normalize_registration(
     Ok(out)
 }
 
-/// 4.3.6.3 Proxied Registrations: "An exclusive registration shall always
-/// relate to specific Attributes found on a single Entity. Thus, the
-/// registration shall define both: an entity id (i.e. an id pattern or Entity
-/// type defining a group of entities is not supported for exclusive
-/// registrations) `[and]` Attributes."
 /// ISO 8601 duration (5.2.9 refreshRate): `P[nY][nM][nW][nD][T[nH][nM][nS]]`,
 /// at least one component, digits (fraction allowed in seconds).
 fn valid_iso8601_duration(s: &str) -> bool {
@@ -696,6 +691,11 @@ fn take_live_registration(
     }
 }
 
+/// 4.3.6.3 Proxied Registrations: "An exclusive registration shall always
+/// relate to specific Attributes found on a single Entity. Thus, the
+/// registration shall define both: an entity id (i.e. an id pattern or Entity
+/// type defining a group of entities is not supported for exclusive
+/// registrations) `[and]` Attributes."
 pub fn validate_exclusive(doc: &Map<String, Value>) -> Result<(), NgsiError> {
     if doc.get("mode").and_then(Value::as_str) != Some("exclusive") {
         return Ok(());
