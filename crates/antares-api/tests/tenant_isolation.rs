@@ -335,3 +335,184 @@ async fn internal_tenants_are_not_addressable_by_a_client() {
         "the case-different tenant is a normal one: {tenants}"
     );
 }
+
+/// 4.14: "any information related to one `Tenant` (e.g. Entities,
+/// Subscriptions, `Context Source Registrations`) are only visible to users
+/// of the same `Tenant`, but not to users of a different `Tenant`" — and the
+/// operations of one Tenant "only apply to the information of the specified
+/// `Tenant` in isolation and never have any effect on the information of
+/// other `Tenants`".
+///
+/// The probe above covers the reading half. This is the writing half, which
+/// is the one that loses data rather than leaking it: a cross-tenant PATCH,
+/// PUT or DELETE that quietly succeeds leaves no trace for the owning tenant
+/// beyond the damage. Every mutating shape the router exposes for a document
+/// addressed by id is tried from the wrong tenant, and the owner's copy is
+/// compared byte for byte afterwards — a 404 alone would not catch an
+/// operation that answers 404 and mutates anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_operation_of_one_tenant_touches_another_tenants_document() {
+    let mut st = AppState::new("test-write-isolation".into());
+    // the temporal attacks below need a Temporal Evolution to attack: the
+    // auto-record hook is what writes one, and AppState::new installs none
+    antares_api::notify::wire(&mut st);
+    const A: &str = "tenant-owner";
+    const B: &str = "tenant-intruder";
+    const ENT: &str = "urn:ngsi-ld:Isolation:owned";
+    const SUB: &str = "urn:ngsi-ld:Subscription:owned";
+    const REG: &str = "urn:ngsi-ld:ContextSourceRegistration:owned";
+
+    // tenant B must exist, or every answer is NonexistentTenant (6.3.14) and
+    // the test proves nothing about the document dimension
+    create_entity(&st, B, "urn:ngsi-ld:Isolation:intruder-seed").await;
+
+    let seeds: [(&str, &str); 3] = [
+        (
+            "/ngsi-ld/v1/entities",
+            r#"{"id":"urn:ngsi-ld:Isolation:owned","type":"Isolation",
+                "speed":{"type":"Property","value":10,
+                         "observedAt":"2026-08-01T00:00:00Z"}}"#,
+        ),
+        (
+            "/ngsi-ld/v1/subscriptions",
+            r#"{"id":"urn:ngsi-ld:Subscription:owned","type":"Subscription",
+                "entities":[{"type":"Isolation"}],
+                "notification":{"endpoint":{"uri":"http://localhost:9/never"}}}"#,
+        ),
+        (
+            "/ngsi-ld/v1/csourceRegistrations",
+            r#"{"id":"urn:ngsi-ld:ContextSourceRegistration:owned",
+                "type":"ContextSourceRegistration",
+                "information":[{"entities":[{"type":"Isolation"}]}],
+                "endpoint":"http://localhost:9/never"}"#,
+        ),
+    ];
+    for (path, doc) in seeds {
+        let (status, body) = send(&st, "POST", path, Some(A), Some(doc)).await;
+        assert_eq!(status, StatusCode::CREATED, "seed {path}: {body}");
+    }
+
+    let owner_view = |path: String| {
+        let st = st.clone();
+        async move { send(&st, "GET", &path, Some(A), None).await }
+    };
+    let ent_path = format!("/ngsi-ld/v1/entities/{ENT}");
+    let sub_path = format!("/ngsi-ld/v1/subscriptions/{SUB}");
+    let reg_path = format!("/ngsi-ld/v1/csourceRegistrations/{REG}");
+    let before = (
+        owner_view(ent_path.clone()).await,
+        owner_view(sub_path.clone()).await,
+        owner_view(reg_path.clone()).await,
+    );
+    assert_eq!(before.0 .0, StatusCode::OK, "{}", before.0 .1);
+    // the two temporal attacks only mean something against a Temporal
+    // Evolution that exists — pin that it does, in the owning tenant
+    let temporal_path =
+        format!("/ngsi-ld/v1/temporal/entities/{ENT}?timerel=after&timeAt=2020-01-01T00:00:00Z");
+    let (status, temporal_before) = send(&st, "GET", &temporal_path, Some(A), None).await;
+    assert_eq!(status, StatusCode::OK, "{temporal_before}");
+    assert!(
+        temporal_before.contains("speed"),
+        "the owner has a Temporal Evolution to attack: {temporal_before}"
+    );
+
+    // every mutating shape the API offers for a document named by id
+    let attacks: Vec<(&str, String, Option<&str>)> = vec![
+        // 5.6.16 delete the Temporal Evolution, 5.6.13 delete its attribute.
+        // Ordered ahead of the Entity deletes: run against its own tenant
+        // to check the list is load-bearing, a delete earlier in the list
+        // takes the target of every later one away.
+        (
+            "DELETE",
+            format!("/ngsi-ld/v1/temporal/entities/{ENT}"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/ngsi-ld/v1/temporal/entities/{ENT}/attrs/speed"),
+            None,
+        ),
+        // 5.6.2 append / 5.6.4 partial update / 5.6.5 delete attribute
+        (
+            "POST",
+            format!("{ent_path}/attrs"),
+            Some(r#"{"planted":{"type":"Property","value":"x"}}"#),
+        ),
+        (
+            "PATCH",
+            format!("{ent_path}/attrs"),
+            Some(r#"{"speed":{"type":"Property","value":999}}"#),
+        ),
+        (
+            "PATCH",
+            format!("{ent_path}/attrs/speed"),
+            Some(r#"{"type":"Property","value":999}"#),
+        ),
+        ("DELETE", format!("{ent_path}/attrs/speed"), None),
+        // 5.6.18 replace, 5.6.6 delete
+        (
+            "PUT",
+            ent_path.clone(),
+            Some(r#"{"id":"urn:ngsi-ld:Isolation:owned","type":"Isolation"}"#),
+        ),
+        ("DELETE", ent_path.clone(), None),
+        // 5.8.3 update subscription, 5.8.4 delete
+        (
+            "PATCH",
+            sub_path.clone(),
+            Some(r#"{"notification":{"endpoint":{"uri":"http://localhost:9/stolen"}}}"#),
+        ),
+        ("DELETE", sub_path.clone(), None),
+        // 5.9.3 update registration, 5.9.4 delete
+        (
+            "PATCH",
+            reg_path.clone(),
+            Some(r#"{"endpoint":"http://localhost:9/stolen"}"#),
+        ),
+        ("DELETE", reg_path.clone(), None),
+    ];
+    // collected, not asserted per iteration: one run names every shape that
+    // crosses the boundary instead of stopping at the first
+    let mut crossed: Vec<String> = Vec::new();
+    for (method, path, body) in &attacks {
+        let (status, resp) = send(&st, method, path, Some(B), *body).await;
+        if !status.is_client_error() {
+            crossed.push(format!("{method} {path} -> {status} {resp}"));
+        }
+    }
+    assert!(
+        crossed.is_empty(),
+        "these operations crossed the tenant boundary:\n{}",
+        crossed.join("\n")
+    );
+
+    let after = (
+        owner_view(ent_path).await,
+        owner_view(sub_path).await,
+        owner_view(reg_path).await,
+    );
+    assert_eq!(before.0, after.0, "the owner's Entity changed");
+    assert_eq!(before.1, after.1, "the owner's Subscription changed");
+    assert_eq!(before.2, after.2, "the owner's Registration changed");
+    let (status, temporal_after) = send(&st, "GET", &temporal_path, Some(A), None).await;
+    assert_eq!(status, StatusCode::OK, "{temporal_after}");
+    assert_eq!(
+        temporal_before, temporal_after,
+        "the owner's Temporal Evolution changed"
+    );
+
+    // and nothing was conjured into the intruder's own tenant on the way
+    let (status, listing) = send(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Isolation",
+        Some(B),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert!(
+        !listing.contains(ENT),
+        "a refused cross-tenant write must not create a local copy: {listing}"
+    );
+}
