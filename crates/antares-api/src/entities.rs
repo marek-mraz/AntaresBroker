@@ -1810,6 +1810,19 @@ pub fn paginate_pre(
     paginate_impl(st, params, page, path, Accept::Json, Some(total))
 }
 
+/// `paginate_pre` for a caller that negotiated a media type: the store
+/// already applied ORDER BY id + LIMIT/OFFSET and counted the match set.
+pub fn paginate_pre_accept(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    page: Vec<Value>,
+    path: &str,
+    accept: Accept,
+    total: usize,
+) -> ApiResult<(Vec<Value>, Option<usize>, Vec<String>)> {
+    paginate_impl(st, params, page, path, accept, Some(total))
+}
+
 /// 4.12 Pagination: clients specify a limit (page size), the server defines
 /// a default page size, and a hard ceiling is rejected with TooManyResults
 /// rather than silently clamped. The limit/offset/count triple of 6.3.10,

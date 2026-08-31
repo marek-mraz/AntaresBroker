@@ -341,6 +341,54 @@ pub fn run_current_state_contract(
             .is_empty(),
         "a tenant with no subscriptions pages empty, whatever another tenant holds"
     );
+    // `list_slice` is the window a 5.5.9.2 limit/offset listing serves from,
+    // and it must agree with the walk above on both the order and the set:
+    // the same ids, the same order, and a total that counts the whole match
+    // set rather than the page. A backend may not refuse it for volume — the
+    // window bounds the result by construction.
+    let (page, total) = d
+        .list_slice(a, Kind::Subscription, 0, 3)
+        .expect("list_slice");
+    assert_eq!(total, ids.len(), "the total counts the set, not the page");
+    assert_eq!(page.len(), 3, "limit is a maximum, and 3 were available");
+    for (i, doc) in page.iter().enumerate() {
+        assert_eq!(
+            doc["id"].as_str(),
+            Some(ids[i].as_str()),
+            "the window is the id-ordered prefix: {page:?}"
+        );
+    }
+    // Every single-element window lands on the element the walk has there.
+    for (i, want) in ids.iter().enumerate() {
+        let (page, _) = d
+            .list_slice(a, Kind::Subscription, i, 1)
+            .expect("list_slice");
+        assert_eq!(
+            page.first().and_then(|d| d["id"].as_str()),
+            Some(want.as_str()),
+            "offset {i} served the wrong element: {page:?}"
+        );
+    }
+    // limit 0 is legal (6.3.10, with count): the count without the page.
+    let (page, total) = d
+        .list_slice(a, Kind::Subscription, 0, 0)
+        .expect("list_slice");
+    assert!(page.is_empty(), "limit 0 returns no elements: {page:?}");
+    assert_eq!(total, ids.len(), "limit 0 still counts the whole set");
+    // An offset past the end is an empty page, not an error, and the total
+    // is unchanged by where the client asked to start.
+    let (page, total) = d
+        .list_slice(a, Kind::Subscription, ids.len() + 10, 5)
+        .expect("list_slice");
+    assert!(page.is_empty(), "past the end is empty: {page:?}");
+    assert_eq!(total, ids.len(), "an offset does not change the match set");
+    // 4.14 again: the window is inside one tenant.
+    let (page, total) = d.list_slice(b, Kind::Subscription, 0, 100).expect("slice");
+    assert!(
+        page.is_empty() && total == 0,
+        "another tenant's rows reached this window: {page:?} / {total}"
+    );
+
     for id in ids.iter().filter(|i| *i != &sub) {
         d.delete(a, Kind::Subscription, id).expect("delete");
     }

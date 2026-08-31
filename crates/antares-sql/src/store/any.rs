@@ -504,6 +504,42 @@ impl AnyStore {
         }
     }
 
+    /// One id-ordered window of documents and the total (see
+    /// `CurrentStateDriver::list_slice`).
+    pub fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Value>, usize), NgsiError> {
+        match self {
+            AnyStore::Mem(s) => Ok(s.list_slice(tenant, kind, offset, limit)),
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(p) => match kind {
+                // Not doc kinds; sliced from the whole list, like `list_page`.
+                Kind::Entity | Kind::Temporal => {
+                    let mut rows = AnyStore::list(self, tenant, kind)?;
+                    rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
+                    let total = rows.len();
+                    Ok((rows.into_iter().skip(offset).take(limit).collect(), total))
+                }
+                _ => {
+                    let (page, total) = p
+                        .docs
+                        .list_slice(
+                            tenant,
+                            doc_kind(kind)?,
+                            i64::try_from(offset).unwrap_or(i64::MAX),
+                            i64::try_from(limit).unwrap_or(i64::MAX),
+                        )
+                        .map_err(db)?;
+                    Ok((page, usize::try_from(total).unwrap_or(usize::MAX)))
+                }
+            },
+        }
+    }
+
     /// 5.12 registration candidates for these entity ids / types. The Pg arm
     /// reads the `csource_index` rows (an indexed narrowing); `memory`/`file`
     /// have nothing to push into and return the same snapshot `list` does.
@@ -1153,6 +1189,15 @@ impl antares_store::CurrentStateDriver for AnyStore {
         limit: usize,
     ) -> Result<Vec<Value>, NgsiError> {
         AnyStore::list_page(self, tenant, kind, after, limit)
+    }
+    fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Value>, usize), NgsiError> {
+        AnyStore::list_slice(self, tenant, kind, offset, limit)
     }
     fn matching_registrations(
         &self,

@@ -271,6 +271,54 @@ impl CurrentStateDriver for ExampleStore {
         Ok(self.rows(tenant, kind))
     }
 
+    /// One id-ordered page, ids strictly greater than `after`. This is the
+    /// read the broker's mirror hydration uses, and it must never refuse a
+    /// tenant for its size: a mirror filled from a short page silently stops
+    /// matching that tenant's subscriptions. The map is ordered by
+    /// `(tenant, kind, id)`, so the walk is a range and the cursor is a
+    /// comparison on the key — no row is cloned before it is wanted.
+    fn list_page(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Value>, NgsiError> {
+        let now = now();
+        Ok(self
+            .read()
+            .range(range(tenant, kind))
+            .filter(|(k, _)| after.is_none_or(|a| k.2.as_str() > a))
+            .filter_map(|(_, v)| {
+                let mut d = v.clone();
+                (!hidden(kind, &mut d, &now)).then_some(d)
+            })
+            .take(limit)
+            .collect())
+    }
+
+    /// 5.5.9.2's `limit`/`offset` window, and the size of the whole set for
+    /// 6.3.10's `count`. Both come from one read so they describe the same
+    /// set; taken separately they can disagree under a concurrent write.
+    ///
+    /// ponytail: the window is sliced from the tenant's rows, so this walks
+    /// the tenant once per call. The storage here is a single in-process map
+    /// that is resident anyway, which is why that is acceptable in a
+    /// reference plugin and would not be in a database-backed one — copy the
+    /// semantics, not the strategy: a backend with a query language pushes
+    /// LIMIT/OFFSET and count(*) down and reads neither more nor less.
+    fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Value>, usize), NgsiError> {
+        let all = self.rows(tenant, kind);
+        let total = all.len();
+        Ok((all.into_iter().skip(offset).take(limit).collect(), total))
+    }
+
     fn matching_registrations(
         &self,
         tenant: &TenantId,

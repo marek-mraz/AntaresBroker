@@ -713,6 +713,31 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// One id-ordered window of docs and the size of the whole set. The
+    /// per-tenant map is a `BTreeMap` keyed by id, so the window is a skip
+    /// over an already-ordered iterator.
+    pub fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<Value>, usize) {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::map(&inner, kind)
+            .get(tenant.as_str())
+            .map(|m| {
+                (
+                    m.values().skip(offset).take(limit).cloned().collect(),
+                    m.len(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     /// Read-modify-write on one document. Returns `None` when absent; the
     /// closure's error aborts without writing.
     pub fn mutate<T, E>(

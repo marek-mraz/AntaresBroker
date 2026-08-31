@@ -794,13 +794,21 @@ pub async fn list(
     )?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
-    let all = st.store.list(&tenant, kind)?;
-    let (page, count_hdr, links) = crate::entities::paginate_accept(
+    // 5.5.9.1: "only up to a maximum of L NGSI-LD Elements are RETRIEVED
+    // and returned". 5.8.4 takes no filter parameters — `check_params`
+    // above is the whole list — so the tenant IS the match set and the
+    // window is the store's to apply. Reading the tenant and slicing it
+    // here made a tenant at the document ceiling unable to list at all,
+    // because that read is the one carrying the ceiling for client queries.
+    let (offset, limit, _) = crate::entities::page_params(st, params)?;
+    let (page_docs, total) = st.store.list_slice(&tenant, kind, offset, limit)?;
+    let (page, count_hdr, links) = crate::entities::paginate_pre_accept(
         st,
         params,
-        all,
+        page_docs,
         &format!("/ngsi-ld/v1/{}", resource_path(kind)),
         accept,
+        total,
     )?;
     let sys = sys_attrs_asked(params);
     let payload: Vec<Value> = page

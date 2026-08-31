@@ -636,6 +636,49 @@ impl PgDocStore {
         })
     }
 
+    /// One id-ordered window of docs and the size of the whole set:
+    /// elements `offset..offset + limit`, plus the count 6.3.10 reports.
+    ///
+    /// No ceiling, and no `check_ceiling`, for the same reason `list_page`
+    /// has none: the window bounds the result by construction, so refusing
+    /// here would only refuse a page the client is entitled to. Both
+    /// statements run in one transaction under the same `set_tenant`, so
+    /// the count and the page describe the same set — a count taken outside
+    /// it could report a total no page of this read ever adds up to.
+    pub fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: DocKind,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Value>, i64), sqlx::Error> {
+        let page_sql = format!(
+            "SELECT {} FROM {} WHERE tenant_id = $1 ORDER BY id LIMIT $2 OFFSET $3",
+            kind.doc_column(),
+            kind.table()
+        );
+        let count_sql = format!("SELECT count(*) FROM {} WHERE tenant_id = $1", kind.table());
+        wait(async {
+            let mut tx = self.pool.begin().await?;
+            crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
+                .bind(tenant.as_str())
+                .fetch_one(&mut *tx)
+                .await?;
+            let rows = sqlx::query(sqlx::AssertSqlSafe(page_sql))
+                .bind(tenant.as_str())
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok((
+                rows.into_iter().map(|r| r.get::<Value, _>(0)).collect(),
+                total,
+            ))
+        })
+    }
+
     /// Every doc of one kind for one tenant, id-ordered.
     ///
     /// Bounded: without a LIMIT this statement materializes a whole tenant's

@@ -315,6 +315,32 @@ pub trait CurrentStateDriver: Send + Sync {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Value>, NgsiError>;
+    /// One id-ordered window of documents and the size of the whole set:
+    /// elements `offset..offset + limit`, plus the count 6.3.10's `count`
+    /// parameter reports. `limit` 0 is a legal request for the count alone.
+    ///
+    /// 5.5.9.1: "the query resolution mechanisms of the NGSI-LD System shall
+    /// ensure that only up to a maximum of L NGSI-LD Elements are RETRIEVED
+    /// and returned to the NGSI-LD client". Reading a whole tenant to serve
+    /// one page of it is what that sentence rules out, and it is why this
+    /// carries no row ceiling: the window bounds the result by construction,
+    /// so the only thing a ceiling could refuse is a page the client is
+    /// entitled to.
+    ///
+    /// Offset, not the keyset of [`Self::list_page`], because this serves
+    /// 5.5.9.2's `limit`/`offset`, which lets a client "jump to a desired
+    /// set of elements". A cursor cannot answer that; the two reads exist
+    /// for different callers and neither replaces the other.
+    ///
+    /// Required for the same reason `list_page` is: the obvious default
+    /// slices `list`, and `list` is the read that may refuse.
+    fn list_slice(
+        &self,
+        tenant: &TenantId,
+        kind: Kind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Value>, usize), NgsiError>;
     /// Registrations that can match these ids/types (a backend may narrow;
     /// returning the full tenant list is always correct).
     fn matching_registrations(
@@ -829,6 +855,15 @@ mod tests {
             _after: Option<&str>,
             _limit: usize,
         ) -> Result<Vec<Value>, NgsiError> {
+            unimplemented!()
+        }
+        fn list_slice(
+            &self,
+            _t: &TenantId,
+            _k: Kind,
+            _offset: usize,
+            _limit: usize,
+        ) -> Result<(Vec<Value>, usize), NgsiError> {
             unimplemented!()
         }
         fn batch_delete(&self, _t: &TenantId, _ids: &[String]) -> Result<Vec<bool>, NgsiError> {
