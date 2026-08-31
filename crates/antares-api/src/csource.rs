@@ -1069,10 +1069,12 @@ pub async fn query_registrations(
             .unwrap_or_default();
         // attributes referenced in q / geoQ count as query projection
         // attributes for matching (5.10.2.4)
-        let q = params
-            .get("q")
-            .map(|s| crate::negotiate::percent_decode(s.as_bytes()));
-        if let Some(q) = &q {
+        // `CleanParams` percent-decodes every value once, at the extractor
+        // (6.3.1). Decoding again here reads escapes that are part of the
+        // value, so a `q` legitimately containing `%22` became one carrying a
+        // bare quote and 4.9's parser refused a legal query. `csf` below
+        // takes the extractor's form, and so does this.
+        if let Some(q) = params.get("q") {
             let ast = antares_ql::parse_q(q)?;
             let mut roots = Vec::new();
             q_attr_roots(&ast, &mut roots);

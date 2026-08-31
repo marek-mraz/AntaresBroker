@@ -276,3 +276,34 @@ async fn an_exclusive_registration_is_creatable_past_the_document_ceiling() {
          (5.9.2.4) — a walk that stopped early would admit it"
     );
 }
+
+/// 6.3.1: the query parameters of a request arrive percent-encoded and are
+/// decoded ONCE, at the extractor. A second decode of `q` reads the escapes
+/// that were part of the value: a query whose decoded text legitimately
+/// contains `%22` becomes one carrying a bare quote, and 4.9's parser
+/// refuses it. `csf`, the other 4.9 query on this operation, is decoded once
+/// and answers the same request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_percent_escape_inside_q_is_not_decoded_a_second_time() {
+    let st = AppState::new("antares-test".into());
+    seed(&st, 1, "Vehicle");
+    // the client asks for the literal text `%22`: on the wire the percent
+    // itself is escaped, so one decode yields q = speed=="%22"
+    let (status, body, _) = get(
+        &st,
+        "/ngsi-ld/v1/csourceRegistrations?type=Vehicle&q=speed%3D%3D%22%2522%22",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a legal q must not be re-decoded into an unparseable one: {body}"
+    );
+    // the same text through csf, which was never double-decoded
+    let (status, body, _) = get(
+        &st,
+        "/ngsi-ld/v1/csourceRegistrations?type=Vehicle&csf=endpoint%3D%3D%22%2522%22",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
