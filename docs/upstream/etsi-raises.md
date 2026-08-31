@@ -226,3 +226,39 @@ the two spellings are not interchangeable: an implementation that follows
 6.3.10 fails all three TPs, and one that passes them emits a unit the clause
 does not define. Suggest correcting the three assertions to `DateTime`, or,
 if the lowercase form is the intent, correcting 6.3.10.
+
+## 10. [spec] 4.5.19.0's period count contradicts the aggregation test fixtures
+
+**Title:** CIM 009 V1.9.1 4.5.19.0: "as many array elements as there are
+periods in the time range of the query" is unbounded and contradicts the
+CTI aggregation expectations
+
+**Body:**
+
+Clause 4.5.19.0 (p. 71) states that each aggregation-method member's value
+"shall be a JSON-LD Array that shall contain as many array elements as there
+are periods in the time range of the query".
+
+Two problems follow.
+
+1) The ETSI test suite requires the opposite. Test case `021_17_01`
+(`QueryTemporalEvolutionOfEntities/021_17.robot`) queries
+`timerel=after&timeAt=2020-01-01T12:03:00Z` with `aggrPeriodDuration=PT1H`
+over an Entity whose only `speed` instances are at 12:03, 12:05 and 12:07
+on 2020-08-01. Its expectation file
+`vehicle-temporal-representation-aggregated-avg-PT1H.json` contains exactly
+one array element. The query's time range spans roughly 5 200 hourly
+periods, so an implementation following 4.5.19.0 literally fails the test
+purpose. `020_11.robot` has the same shape.
+
+2) The literal reading has no ceiling. `timerel=between` with
+`aggrPeriodDuration=PT1S` over one year asks for 31 536 000 array elements
+per method per Attribute, and no clause defines a limit or an error type for
+refusing it (unlike the pagination limits of 6.3.10 or the `TooManyResults`
+of Table 6.3.2-1, neither of which is referenced here).
+
+Suggest either restating 4.5.19.0 as "as many array elements as there are
+periods holding at least one Attribute instance", or defining both the
+padding value for an empty period and the error an implementation raises
+when the requested period count is beyond what it will serve, and updating
+the CTI fixtures to match.

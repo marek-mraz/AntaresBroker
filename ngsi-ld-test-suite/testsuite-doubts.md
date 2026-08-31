@@ -2909,3 +2909,30 @@ Antares keeps the lowercase spelling for now so the conformance gate stays
 green; the correct fix is in the suite (and, if the intent really is the
 lowercase form, in the clause). Raised in `docs/upstream/etsi-raises.md`.
 Do not change the broker until one of the two moves.
+
+## 4.5.19.0's "as many periods as the query range" vs the aggregation expectations
+
+4.5.19.0 (p. 71) is verbatim: the value of each aggregation-method member
+"shall be a JSON-LD Array that shall contain as many array elements as there
+are periods in the time range of the query."
+
+`QueryTemporalEvolutionOfEntities/021_17.robot` and
+`RetrieveTemporalEvolutionOfEntity/020_11.robot` require the opposite. Case
+`021_17_01` queries `timerel=after&timeAt=2020-01-01T12:03:00Z` with
+`aggrPeriodDuration=PT1H` over data whose only `speed` instances sit at
+12:03, 12:05 and 12:07 on 2020-08-01, and its expectation
+`vehicle-temporal-representation-aggregated-avg-PT1H.json` holds exactly
+ONE row. Counted the way 4.5.19.0 reads, that query's range holds about
+5 200 hourly periods; the fixture accepts one — the populated one. The
+`fuelLevel` rows in the same fixture are contiguous only because that
+attribute has an instance in each of its three hours.
+
+The literal reading is also unbounded by construction: `timerel=between`
+with `PT1S` over a year is 31 million periods in one response body, and no
+clause names a ceiling or an error for it.
+
+Antares emits populated periods only, which is what the fixtures assert.
+Raised in `docs/upstream/etsi-raises.md`: either 4.5.19.0 means "as many as
+there are periods holding data", or the fixtures and a response ceiling both
+need to change. Do not add a TP asserting either behaviour until it is
+settled, and do not change the broker.
