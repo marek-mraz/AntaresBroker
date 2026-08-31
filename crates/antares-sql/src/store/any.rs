@@ -138,7 +138,10 @@ pub enum AnyStore {
 }
 
 /// A row's `id`, or `""` for one without: an id-less row sorts first and is
-/// never skipped past, so a keyset walk over it cannot lose it.
+/// never skipped past, so a keyset walk over it cannot lose it. Only the
+/// Postgres arm sorts rows it read whole; the memory arm's maps are already
+/// keyed by id.
+#[cfg(feature = "postgres")]
 fn row_id(v: &Value) -> &str {
     v.get("id").and_then(Value::as_str).unwrap_or_default()
 }

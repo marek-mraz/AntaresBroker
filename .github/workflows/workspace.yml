@@ -262,7 +262,10 @@ jobs:
       # antares-sql without its Postgres arm — the shape the wasm and fuzz
       # builds get. A workspace build unifies the feature back on from
       # antares-api, so only a per-crate check sees a break in the gated code.
-      - run: cargo check --locked -p antares-sql --no-default-features -j 2
+      # -D warnings because the failure mode here is code that no longer has
+      # a caller once the arm is off, which is a warning and would otherwise
+      # accumulate unseen until something in this shape stops compiling.
+      - run: RUSTFLAGS="-D warnings" cargo check --locked -p antares-sql --no-default-features -j 2
         if: matrix.crate == 'antares-store'
       # The public surface a gateway author reads: every item documented
       # (#![deny(missing_docs)] in the crate) and no broken intra-doc link.
