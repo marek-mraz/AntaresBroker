@@ -3,7 +3,7 @@
 #
 # cargo-chef splits the build so the ~400 dependency crates compile in their
 # own layer, keyed by Cargo.lock via recipe.json — a source-only commit reuses
-# it and rebuilds just the antares-* crates. CI persists the layer with a
+# it and rebuilds only the antares-* crates. CI persists the layer with a
 # BuildKit gha cache (etsi-matrix.yml), cutting the image build ~10 min → ~3.
 FROM rust:1-slim@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS chef
 WORKDIR /src

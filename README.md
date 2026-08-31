@@ -43,7 +43,7 @@ Three properties, each backed by a number CI reproduces on every full run:
    continuously under the suite
    ([per-store report with Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/)).
    The methodology is a per-clause ledger over the whole spec text
-   (`docs/spec/`, 947 clause files), not just the official TP list.
+   (`docs/spec/`, 947 clause files), not only the official TP list.
 3. **The browser build** — the same broker compiles to a 4.05 MB wasm
    artifact (1.55 MB gzipped) and serves `/ngsi-ld/v1/*` from a Service
    Worker inside a web page: an NGSI-LD broker with zero installation, for
@@ -324,7 +324,7 @@ test-side fixes (fixtures and keywords the clause text contradicts), each
 with its rationale and the issue text ready to file upstream in
 [`docs/upstream/etsi-raises.md`](docs/upstream/etsi-raises.md); no test is
 weakened to fit the broker. The suite as published by ETSI is not
-currently aligned with CIM 009 V1.9.1: some TPs assert behaviour the clause
+aligned with CIM 009 V1.9.1: some TPs assert behaviour the clause
 text contradicts and some do not run as shipped, so a 100 % pass rate is
 only meaningful against a fork that names every test-side change.
 
