@@ -2878,7 +2878,7 @@ pub async fn replace_entity(
 /// via CollatorPreferences; the -u-ks strength keyword maps onto
 /// CollatorOptions. Invalid/unsupported tags are BadRequestData.
 /// 5.7.2.4 / 5.7.4.4: "If a preferred collation setting is present and it
-/// does not conform to a valid ICU collation (see IETF RFC 6067 [36]) then an
+/// does not conform to a valid ICU collation (see IETF RFC 6067 \[36\]) then an
 /// error of type BadRequestData shall be raised." The clause names the
 /// parameter's presence, not an `orderBy` that happens to consume it, so the
 /// check runs on every operation that accepts `collation`.

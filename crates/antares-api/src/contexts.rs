@@ -140,7 +140,7 @@ fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
 /// owner inside the document — `jsonld_contexts` is keyed by local id
 /// alone and has no tenant column — so the store's tenant-keyed purge
 /// cannot reach it. A Cached row is a copy of a public document and belongs
-/// to no Tenant (see [`row_visible`]), so it stays.
+/// to no Tenant (see `row_visible`), so it stays.
 // ponytail: one scan of jsonld_contexts per purge, which is an admin
 // operation; a tenant column and an index if it ever runs hot.
 pub async fn purge_tenant(st: &AppState, tenant: &TenantId) -> Result<(), NgsiError> {
