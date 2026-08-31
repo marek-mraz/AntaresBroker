@@ -26,7 +26,7 @@ use antares_model::TenantId;
 use antares_store::{CurrentStateDriver, Kind};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::FlakyList;
+use common::Double;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -126,7 +126,7 @@ async fn a_mirror_seed_that_cannot_read_the_store_does_not_silence_the_tenant() 
     // The restart: a fresh state over the same documents, whose first `list`
     // is refused the way the Postgres arm refuses one past its ceiling.
     let mut restarted = AppState::new("me".into());
-    restarted.store = Arc::new(FlakyList::new(first.store.clone(), 1));
+    restarted.store = Arc::new(Double::flaky_list(first.store.clone(), 1));
     antares_api::notify::wire(&mut restarted);
 
     let (status, body) = send(
@@ -169,7 +169,7 @@ async fn a_seed_that_reads_the_store_installs_the_mirror() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
     let mut restarted = AppState::new("me".into());
-    restarted.store = Arc::new(FlakyList::new(first.store.clone(), 0));
+    restarted.store = Arc::new(Double::flaky_list(first.store.clone(), 0));
     antares_api::notify::wire(&mut restarted);
 
     assert!(
@@ -212,7 +212,7 @@ async fn a_tenant_over_the_list_ceiling_does_not_take_the_mirror_down_for_everyo
     // A store that refuses EVERY `list`, the way the Postgres arm refuses one
     // past its ceiling, while the paged read it leaves uncapped still works.
     let mut restarted = AppState::new("me".into());
-    restarted.store = Arc::new(FlakyList::new(first.store.clone(), usize::MAX));
+    restarted.store = Arc::new(Double::flaky_list(first.store.clone(), usize::MAX));
     antares_api::notify::wire(&mut restarted);
 
     assert!(
@@ -278,7 +278,7 @@ async fn the_same_seed_fills_a_registration_mirror_past_a_refused_list() {
 
     // Refuses every `list`, the way the Postgres arm refuses one past its
     // ceiling. The paged read it leaves uncapped still answers.
-    let store = FlakyList::new(st.store.clone(), usize::MAX);
+    let store = Double::flaky_list(st.store.clone(), usize::MAX);
     assert!(
         store.list(&tenant, Kind::Registration).is_err(),
         "the double must actually refuse the read this is about"

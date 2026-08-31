@@ -2764,9 +2764,13 @@ pub async fn replace_entity(
             return Ok(r);
         }
         if regs.is_empty() {
-            // 5.6.18: an unknown target is 404 before body validation (057_03)
-            let old = local_doc
-                .ok_or_else(|| NgsiError::ResourceNotFound(format!("entity {id} not found")))?;
+            // 5.6.18: an unknown target is 404 before body validation (057_03).
+            // The read above answers that; the write below decides again
+            // under the row lock, because between the two the target can be
+            // deleted and a replace that writes anyway puts it back.
+            if local_doc.is_none() {
+                return Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into());
+            }
             let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
             let obj = parsed.object(NgsiError::BadRequestData(
                 "entity must be a JSON object".into(),
@@ -2777,12 +2781,31 @@ pub async fn replace_entity(
             }
             let ts = now_iso();
             stamp_new(&mut expanded, &ts);
-            if let (Some(o), Some(created)) = (expanded.as_object_mut(), old.get("createdAt")) {
-                o.insert("createdAt".into(), created.clone());
-            }
-            st.store
-                .upsert(&tenant, Kind::Entity, &id, expanded.clone())?;
-            return Ok::<_, ApiError>(no_content(&tenant));
+            let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
+                // 5.6.18.4: the ?type selector narrows the target here too —
+                // the type of the row being written is the one that counts
+                if !crate::attrs::matches_type_param(doc, &params, &ctx0) {
+                    return Err(NgsiError::ResourceNotFound(format!(
+                        "entity {id} does not match the type selector"
+                    )));
+                }
+                // 4.8: "createdAt ... shall be the date and time at which the
+                // Entity was created" — the target's own stamp, read under
+                // the lock rather than from a snapshot another write may
+                // already have replaced.
+                if let (Some(o), Some(created)) =
+                    (expanded.as_object_mut(), doc.get("createdAt").cloned())
+                {
+                    o.insert("createdAt".into(), created);
+                }
+                *doc = expanded.clone();
+                Ok::<(), NgsiError>(())
+            })?;
+            return match res {
+                None => Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into()),
+                Some(Err(e)) => Err(e.into()),
+                Some(Ok(())) => Ok::<_, ApiError>(no_content(&tenant)),
+            };
         }
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let obj = parsed.object(NgsiError::BadRequestData(
@@ -2797,28 +2820,40 @@ pub async fn replace_entity(
             regs.iter().filter(|r| r.is_proxy()).collect();
         let proxy_match = !proxies.is_empty();
         if local_doc.is_some() || !proxy_match {
-            match &local_doc {
-                Some(old) => {
-                    let (rest, _) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
-                    let mut local_exp = expand_entity(&rest, &parsed.ctx, ExpandOpts::default())?;
-                    let ts = now_iso();
-                    stamp_new(&mut local_exp, &ts);
-                    if let (Some(o), Some(created)) =
-                        (local_exp.as_object_mut(), old.get("createdAt"))
-                    {
-                        o.insert("createdAt".into(), created.clone());
+            let gone = crate::federation::Part {
+                status: 404,
+                detail: format!("entity {id} not found locally"),
+            };
+            if local_doc.is_none() {
+                parts.push(gone);
+            } else {
+                let (rest, _) = crate::federation::strip_proxied(obj, &proxies, &parsed.ctx);
+                let mut local_exp = expand_entity(&rest, &parsed.ctx, ExpandOpts::default())?;
+                let ts = now_iso();
+                stamp_new(&mut local_exp, &ts);
+                // the same row lock as the local-only path above: the read
+                // that found the target is not the write that replaces it
+                let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
+                    if !crate::attrs::matches_type_param(doc, &params, &ctx0) {
+                        return Err(NgsiError::ResourceNotFound(format!(
+                            "entity {id} does not match the type selector"
+                        )));
                     }
-                    st.store
-                        .upsert(&tenant, Kind::Entity, &id, local_exp.clone())?;
-                    parts.push(crate::federation::Part {
+                    if let (Some(o), Some(created)) =
+                        (local_exp.as_object_mut(), doc.get("createdAt").cloned())
+                    {
+                        o.insert("createdAt".into(), created);
+                    }
+                    *doc = local_exp.clone();
+                    Ok::<(), NgsiError>(())
+                })?;
+                match res {
+                    Some(Ok(())) => parts.push(crate::federation::Part {
                         status: 204,
                         detail: "replaced locally".into(),
-                    });
+                    }),
+                    _ => parts.push(gone),
                 }
-                None => parts.push(crate::federation::Part {
-                    status: 404,
-                    detail: format!("entity {id} not found locally"),
-                }),
             }
         }
         let ctx_url = crate::federation::ctx_link_url(&headers, &parsed.ctx.source);

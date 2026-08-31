@@ -16,7 +16,7 @@ use antares_model::TenantId;
 use antares_store::Kind;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::FlakyList;
+use common::Double;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -78,7 +78,7 @@ async fn a_tenant_over_the_document_ceiling_can_still_list_a_page_of_subscriptio
     seed(&st, 6);
     // Refuses every whole-tenant `list`, the way the Postgres arm refuses
     // one past its ceiling. The windowed read is not refused.
-    st.store = Arc::new(FlakyList::new(st.store.clone(), usize::MAX));
+    st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
 
     let (status, body, count) =
         get(&st, "/ngsi-ld/v1/subscriptions?limit=2&offset=2&count=true").await;

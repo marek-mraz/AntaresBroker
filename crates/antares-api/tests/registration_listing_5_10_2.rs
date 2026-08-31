@@ -18,7 +18,7 @@ use antares_model::TenantId;
 use antares_store::Kind;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::FlakyList;
+use common::Double;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -81,7 +81,7 @@ fn seed(st: &AppState, n: usize, ty: &str) {
 async fn a_tenant_over_the_document_ceiling_can_still_list_its_registrations() {
     let mut st = AppState::new("me".into());
     seed(&st, 4, "Vehicle");
-    st.store = Arc::new(FlakyList::new(st.store.clone(), usize::MAX));
+    st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
 
     let (status, body, count) = get(
         &st,
@@ -215,7 +215,7 @@ async fn the_walk_never_reaches_another_tenants_registrations() {
 async fn an_exclusive_registration_is_creatable_past_the_document_ceiling() {
     let mut st = AppState::new("me".into());
     seed(&st, 3, "Vehicle");
-    st.store = Arc::new(FlakyList::new(st.store.clone(), usize::MAX));
+    st.store = Arc::new(Double::flaky_list(st.store.clone(), usize::MAX));
 
     let body = json!({
         "id": "urn:ngsi-ld:ContextSourceRegistration:excl-1",

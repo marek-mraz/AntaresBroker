@@ -12,26 +12,41 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// A store whose `list` fails its first `n` calls and then behaves. It
-/// stands for both reachable causes at once: the transient connection
-/// failure, and the `TooManyResults` ceiling a tenant crosses and then
-/// drops back under. Everything else delegates, so the data it guards is
+/// One delegating driver, misbehaving in whichever single way a test asks
+/// for. Everything it does not intercept delegates, so the data it guards is
 /// the real store's.
-pub struct FlakyList {
+pub struct Double {
     inner: Arc<dyn CurrentStateDriver>,
     fail_next: AtomicUsize,
+    delete_on_get: bool,
 }
 
-impl FlakyList {
-    pub fn new(inner: Arc<dyn CurrentStateDriver>, fail_next: usize) -> Self {
+impl Double {
+    /// `list` fails its first `n` calls and then behaves. It stands for both
+    /// reachable causes at once: the transient connection failure, and the
+    /// `TooManyResults` ceiling a tenant crosses and then drops back under.
+    pub fn flaky_list(inner: Arc<dyn CurrentStateDriver>, fail_next: usize) -> Self {
         Self {
             inner,
             fail_next: AtomicUsize::new(fail_next),
+            delete_on_get: false,
+        }
+    }
+
+    /// Every `get` answers with the document and then deletes it — the
+    /// concurrent DELETE that lands between a handler's read and its write,
+    /// scheduled instead of hoped for. A handler that reads, decides, and
+    /// then writes without the row lock resurrects what this deleted.
+    pub fn deleting_get(inner: Arc<dyn CurrentStateDriver>) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: true,
         }
     }
 }
 
-impl CurrentStateDriver for FlakyList {
+impl CurrentStateDriver for Double {
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
         if self
             .fail_next
@@ -112,7 +127,11 @@ impl CurrentStateDriver for FlakyList {
         self.inner.upsert(tenant, kind, id, doc)
     }
     fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
-        self.inner.get(tenant, kind, id)
+        let doc = self.inner.get(tenant, kind, id)?;
+        if self.delete_on_get && doc.is_some() {
+            self.inner.delete(tenant, kind, id)?;
+        }
+        Ok(doc)
     }
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
         self.inner.delete(tenant, kind, id)
