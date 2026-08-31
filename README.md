@@ -53,7 +53,7 @@ Three properties, each backed by a number CI reproduces on every full run:
 ## 60-second quickstart
 
 ```bash
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
 ```
 
 Create an entity and query it back (no infrastructure — the default is the
@@ -180,7 +180,7 @@ ceiling.
 ## Run with Docker
 
 ```bash
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
 curl -s localhost:9090/q/health
 ```
 
@@ -192,13 +192,13 @@ Other store modes via env:
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=file -e ANTARES_DATA_DIR=/data \
   -v antares-data:/data \
-  ghcr.io/marek-mraz/antares-broker:latest
+  ghcr.io/marek-mraz/antares-broker:dev
 
 # postgres / timescale store
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=postgres \
   -e ANTARES_DATABASE_URL=postgresql://antares:antares@db:5432/antares \
-  ghcr.io/marek-mraz/antares-broker:latest
+  ghcr.io/marek-mraz/antares-broker:dev
 ```
 
 Or the local compose stacks (broker + PostGIS + NATS + mosquitto):
@@ -229,7 +229,9 @@ the duplicated matcher/notifier pods, single-winner interval firings,
 exactly-once temporal recording.
 
 Tags: `:dev` = latest green master, `:dev-<run>` = a specific CI run,
-`:latest` = latest release. Images are multi-arch (linux/amd64 + linux/arm64).
+`:latest` = latest release. Pre-1.0 there is no release, so `:latest` does
+not resolve yet and every command here pulls `:dev`. Images are multi-arch
+(linux/amd64 + linux/arm64).
 The amd64 image is the exact bytes the ETSI gates tested; the arm64 half is
 built natively but not gated (the workspace tests run natively on arm).
 Idle RSS ≈ 9 MiB.

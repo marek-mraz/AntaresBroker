@@ -20,7 +20,7 @@ services:
     # cpuset/cpu/pids (threaded-mode), so the memory controller is absent
 
   antares:
-    image: ghcr.io/marek-mraz/antares-broker:latest
+    image: ghcr.io/marek-mraz/antares-broker:dev
     environment:
       ANTARES_HTTP_PORT: "9090"
       ANTARES_STORE: timescale

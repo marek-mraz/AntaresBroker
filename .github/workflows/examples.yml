@@ -103,7 +103,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          tags: ghcr.io/marek-mraz/antares-broker:latest # the tag the examples reference; a local load wins over the registry
+          tags: ghcr.io/marek-mraz/antares-broker:dev # the tag the examples reference; a local load wins over the registry
           load: true
           cache-from: type=gha
           build-args: |
@@ -112,9 +112,9 @@ jobs:
 
       - name: The image says what it is
         run: |
-          L=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.licenses"}}' ghcr.io/marek-mraz/antares-broker:latest)
+          L=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.licenses"}}' ghcr.io/marek-mraz/antares-broker:dev)
           [ "$L" = EUPL-1.2 ] || { echo "licence label: '$L'"; exit 1; }
-          R=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' ghcr.io/marek-mraz/antares-broker:latest)
+          R=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' ghcr.io/marek-mraz/antares-broker:dev)
           [ "$R" = "${{ github.sha }}" ] || { echo "revision label: '$R'"; exit 1; }
 
       - name: quickstart
@@ -134,7 +134,7 @@ jobs:
         run: |
           docker run -d --rm --name sub-broker --network host \
             -e ANTARES_EGRESS_ALLOW_PRIVATE=true \
-            ghcr.io/marek-mraz/antares-broker:latest
+            ghcr.io/marek-mraz/antares-broker:dev
           for i in $(seq 50); do curl -sf localhost:9090/q/health >/dev/null && break; sleep 0.2; done
           (cd examples/subscriptions && BROKER_URL=http://localhost:9090 ./run.sh)
           docker stop sub-broker

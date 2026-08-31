@@ -43,13 +43,13 @@ more than a small pod can hold: the reference manifests set 512 against a
 
 ```bash
 # memory: state dies with the process — tests, demos
-docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:latest
+docker run --rm -p 9090:9090 ghcr.io/marek-mraz/antares-broker:dev
 
 # file: durable via redb, fsync-before-ack; the data dir MUST be a volume
 docker run --rm -p 9090:9090 \
   -e ANTARES_STORE=file -e ANTARES_DATA_DIR=/data \
   -v antares-data:/data \
-  ghcr.io/marek-mraz/antares-broker:latest
+  ghcr.io/marek-mraz/antares-broker:dev
 ```
 
 `file` mode constraints (measured, documented in the README store table):
