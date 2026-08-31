@@ -99,9 +99,16 @@ plus a router merge, with no change to a core crate.
 
 The egress policy — allowlist, private-range and metadata-address deny,
 per-destination circuit breaker — runs in the caller before `deliver`, so a
-sink cannot step around it. A sink that opens no socket says so by returning
-`false` from `network()`; every binding shipped here returns the default
-`true`, and a unit test holds that.
+sink cannot step around the verdict on the endpoint as written. What that
+check cannot do is judge a name it does not resolve: under the default
+`ANTARES_EGRESS_ALLOW_PRIVATE=true` an endpoint host given as a name passes
+it, and the addresses the name stands for are judged where they are dialled.
+A sink that opens its own socket therefore owes that filter —
+`EgressPolicy::ip_is_metadata` and `ip_is_private` over the resolved answer,
+before connecting, as the MQTT binding does in `connect_addr` and every
+reqwest client does through `PolicyResolver`. A sink that opens no socket
+says so by returning `false` from `network()`; every binding shipped here
+returns the default `true`, and a unit test holds that.
 
 ### API surfaces
 

@@ -128,9 +128,16 @@ impl Egress {
 
     /// The host policy for the destination of any notification binding. The
     /// scheme belongs to the sink (6.3.8, clause 7, or one a deployment
-    /// registered); the host and port belong here, and every private-range,
-    /// metadata-address and allowlist rule applies unchanged. A URI with no
-    /// host names no destination that can be cleared, so it is refused.
+    /// registered); the host and port belong here. A URI with no host names
+    /// no destination that can be cleared, so it is refused.
+    ///
+    /// This is the verdict on the destination as WRITTEN. A destination
+    /// written as a name, under the default `ANTARES_EGRESS_ALLOW_PRIVATE`,
+    /// is not resolved here — the addresses a name stands for are judged by
+    /// the transport that dials them, and a binding that opens its own
+    /// socket owes that filter (`EgressPolicy::ip_is_metadata` and
+    /// `ip_is_private` over the resolved answer, as `connect_addr` does for
+    /// MQTT and `PolicyResolver` for every reqwest client).
     pub async fn check_destination(&self, url: &str) -> Result<(), String> {
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad URL {url}: {e}"))?;
         let host = parsed
@@ -254,6 +261,50 @@ mod tests {
             .is_err());
         assert!(allow.check_destination("file:///etc/passwd").await.is_err());
         assert!(allow.check_destination("memory://").await.is_err());
+    }
+
+    /// The metadata denial does not depend on `ANTARES_EGRESS_ALLOW_PRIVATE`
+    /// — but this check judges the destination as WRITTEN. A literal
+    /// metadata address is refused in every spelling with private egress
+    /// allowed; a host written as a NAME is not resolved here under that
+    /// switch, and the classifier below is what the transports apply to the
+    /// addresses the name turns out to stand for.
+    #[tokio::test]
+    async fn a_literal_metadata_address_is_refused_with_private_egress_allowed() {
+        let allow = Egress::new(antares_jsonld::EgressPolicy {
+            allow_private: true,
+        });
+        for u in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.100.100.200/latest",
+            "http://[fd00:ec2::254]/latest",
+            "http://[::ffff:169.254.169.254]/latest",
+            "http://[64:ff9b::a9fe:a9fe]/latest",
+        ] {
+            assert!(
+                allow.check_url(u).await.is_err(),
+                "{u} reached the instance-metadata range"
+            );
+            assert!(
+                allow.check_destination(u).await.is_err(),
+                "{u} reached the instance-metadata range as a binding endpoint"
+            );
+        }
+        // The same addresses, as an answer a NAME resolves to: this is the
+        // classifier `PolicyResolver` and the MQTT connect run before they
+        // dial, and it is what covers the case the check above cannot see.
+        for ip in [
+            "169.254.169.254",
+            "100.100.100.200",
+            "fd00:ec2::254",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+        ] {
+            assert!(
+                antares_jsonld::EgressPolicy::ip_is_metadata(ip.parse().expect("address")),
+                "{ip} not classified as instance metadata"
+            );
+        }
     }
 
     /// 5.2.34 + 5.5.10: the cooldown a failing registration earns belongs to

@@ -239,9 +239,17 @@ impl EgressPolicy {
         port: u16,
         dns_timeout: std::time::Duration,
     ) -> Result<(), String> {
-        // The metadata range is refused before the private-egress switch is
-        // consulted, so a deployment that allows private egress (the default)
-        // still cannot be steered at its own instance credentials.
+        // What this function can judge: a host given as a literal address,
+        // in any spelling. A metadata address is refused before the
+        // private-egress switch is consulted, so a deployment that allows
+        // private egress (the default) cannot be steered at its own instance
+        // credentials by IP. A host given as a NAME is only resolved here
+        // when private egress is denied; with it allowed the name passes and
+        // the verdict on what it resolves to belongs to the transport, which
+        // judges the addresses it is about to dial: `PolicyResolver` for
+        // every reqwest client, `connect_addr` for MQTT. Both drop a
+        // metadata address whatever the switch says. A binding that dials
+        // without such a filter is not covered by this check alone.
         if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
             if Self::ip_is_metadata(ip) {
                 return Err(format!("egress to {ip} denied (instance metadata)"));
