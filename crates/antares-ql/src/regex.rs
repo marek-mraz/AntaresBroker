@@ -14,78 +14,113 @@
 //! therefore pays `Regex::new` again for every candidate; compiling through
 //! here pays it once per distinct pattern and hands out a shared program.
 //!
-//! The cache changes no outcome. `compile` accepts and rejects exactly what
-//! `regex::Regex::new` accepts and rejects, and returns that call's own
-//! `regex::Error`, so an invalid `idPattern` keeps the 400 BadRequestData its
-//! call site already returns (Table 6.3.2-1) and an invalid `~=` operand
-//! keeps having no L(R), i.e. matching nothing (4.9).
+//! One compile has to be bounded and a pattern has to be compiled at most
+//! once, because both numbers are multiplied by the candidate count.
+//! `regex` builds an automaton whose size follows counted repetition of a
+//! character class rather than pattern length, so a 21-byte pattern can ask
+//! for a 16 MiB program and the tenth of a second that costs;
+//! `MAX_REGEX_PROGRAM_BYTES` is the ceiling on that, and a pattern above it
+//! is refused with the builder's own error — the error every call site
+//! already maps, so an over-large `idPattern` keeps the 400 BadRequestData
+//! its call site returns (Table 6.3.2-1) and an over-large `~=` operand
+//! keeps having no L(R), i.e. matching nothing (4.9), exactly as a
+//! syntactically invalid one does.
 //!
-//! Retention is bounded in both dimensions — entries and compiled program
-//! size, `MAX_REGEX_CACHE` and `MAX_REGEX_PROGRAM_BYTES` —
-//! because the key is client input and an unbounded map of it is a memory
-//! attack, not a cache.
+//! Every outcome is retained, refusals included, so no pattern is compiled
+//! twice. Retention is bounded in entries and in bytes —
+//! `MAX_REGEX_CACHE` and `MAX_REGEX_CACHE_BYTES` — because the key is
+//! client input and an unbounded map of it is a memory attack, not a cache.
 
-/// Compiled regular expressions the process retains. The pattern is
-/// client input — the `patternOp`/`notPatternOp` operand of a query term
-/// (4.9) and the `idPattern` of an EntitySelector (5.2.33), an EntityInfo
-/// (5.2.8) or a query parameter (Table 6.4.3.2-1) — so retention is capped
-/// in BOTH dimensions: at most this many distinct patterns, each compiled to
-/// at most `MAX_REGEX_PROGRAM_BYTES`. The worst case a client mix can reach
-/// is therefore 32 MiB of compiled programs, whatever patterns are sent.
-/// Nothing is rejected by these caps: a pattern whose program does not fit
-/// is still compiled (acceptance stays exactly `Regex::new`'s), it is only
-/// not retained.
+/// Ceiling on the automaton compiled for one pattern, and with it on what
+/// one compile costs. The pattern is client input — the
+/// `patternOp`/`notPatternOp` operand of a query term (4.9) and the
+/// `idPattern` of an EntitySelector (5.2.33), an EntityInfo (5.2.8) or a
+/// query parameter (Table 6.4.3.2-1) — and program size does not follow
+/// pattern length: `(?:\p{Any}{100}){100}` is 21 bytes and compiles to
+/// 16 MiB. Ordinary patterns sit far below the ceiling —
+/// `^urn:ngsi-ld:Vehicle:.*$` compiles to 2 KiB,
+/// `^urn:ngsi-ld:(Vehicle|Sensor|Building):[A-Za-z0-9_-]{1,64}$` to 16 KiB,
+/// a fifty-way alternation of URNs to 128 KiB — and one above it is refused
+/// rather than compiled, so no request can buy an unbounded automaton.
+pub const MAX_REGEX_PROGRAM_BYTES: usize = 256 * 1024;
+/// Distinct patterns retained. A `q` is capped at 4 KiB and so carries at
+/// most a low hundreds of distinct patterns, which the cache holds whole:
+/// one request never evicts its own working set.
 pub const MAX_REGEX_CACHE: usize = 1024;
-/// Upper bound on one retained compiled program, see [`MAX_REGEX_CACHE`].
-pub const MAX_REGEX_PROGRAM_BYTES: usize = 32 * 1024;
+/// Retained program bytes. Each entry is charged the tier it compiled
+/// within, not its true size, so the number is an upper bound on what the
+/// map holds.
+pub const MAX_REGEX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A program that fits this is charged this much against
+/// [`MAX_REGEX_CACHE_BYTES`]; anything larger is charged the full
+/// [`MAX_REGEX_PROGRAM_BYTES`]. Almost every pattern a deployment writes
+/// lands in the first tier, so the byte budget holds thousands of
+/// Subscription `idPattern`s and still bounds a mix of the largest programs
+/// the ceiling admits.
+const PROGRAM_TIER_BYTES: usize = 32 * 1024;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
-static CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<regex::Regex>>>> =
+/// What a pattern compiled to, or the refusal it earned. A refusal is
+/// retained as its message so the pattern is not rebuilt per candidate.
+type Outcome = Result<Arc<regex::Regex>, Box<str>>;
+
+static CACHE: LazyLock<RwLock<HashMap<Box<str>, Outcome>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static COMPILES: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn build(pattern: &str, limit: usize) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern).size_limit(limit).build()
+}
 
 /// The compiled program for `pattern`, shared with every other caller that
-/// asked for the same pattern text. `Err` is `Regex::new(pattern)`'s error,
-/// unchanged, so each call site keeps mapping it to its own spec error.
-pub fn compile(pattern: &str) -> Result<Arc<regex::Regex>, regex::Error> {
-    if let Some(hit) = cached(pattern) {
-        return Ok(hit);
+/// asked for the same pattern text. `Err` carries the builder's own message
+/// — a syntax error, or the refusal of a program above
+/// [`MAX_REGEX_PROGRAM_BYTES`] — and each call site keeps mapping it to its
+/// own spec error.
+pub fn compile(pattern: &str) -> Result<Arc<regex::Regex>, String> {
+    if let Some(hit) = CACHE.read().ok().and_then(|c| c.get(pattern).cloned()) {
+        return hit.map_err(String::from);
     }
     COMPILES.fetch_add(1, Ordering::Relaxed);
     // Compiled OUTSIDE the lock — a pattern compile must never serialize the
     // matcher — and a poisoned lock degrades to "compile every time", never
     // to a failed request.
-    match regex::RegexBuilder::new(pattern)
-        .size_limit(MAX_REGEX_PROGRAM_BYTES)
-        .build()
-    {
-        Ok(re) => {
-            let re = Arc::new(re);
-            if let Ok(mut c) = CACHE.write() {
-                // A generational flush, not an LRU: the patterns the next
-                // requests use re-enter immediately, and the hit path pays no
-                // bookkeeping for the eviction order.
-                if c.len() >= MAX_REGEX_CACHE {
-                    c.clear();
-                }
-                c.insert(pattern.into(), Arc::clone(&re));
-            }
-            Ok(re)
+    let (outcome, charge): (Outcome, usize) = match build(pattern, PROGRAM_TIER_BYTES) {
+        Ok(re) => (Ok(Arc::new(re)), PROGRAM_TIER_BYTES),
+        Err(_) => match build(pattern, MAX_REGEX_PROGRAM_BYTES) {
+            Ok(re) => (Ok(Arc::new(re)), MAX_REGEX_PROGRAM_BYTES),
+            // A refusal retains a message, not a program.
+            Err(e) => (Err(e.to_string().into()), 0),
+        },
+    };
+    if let Ok(mut c) = CACHE.write() {
+        // A generational flush, not an LRU: the patterns the next requests
+        // use re-enter immediately, and the hit path pays no bookkeeping for
+        // the eviction order.
+        if c.len() >= MAX_REGEX_CACHE
+            || BYTES.load(Ordering::Relaxed).saturating_add(charge) > MAX_REGEX_CACHE_BYTES
+        {
+            c.clear();
+            BYTES.store(0, Ordering::Relaxed);
         }
-        // Either the pattern is invalid — the error is the same under any
-        // size limit — or its program is above the retention ceiling. Compile
-        // it with the crate's own default limit so what is accepted stays
-        // exactly what `Regex::new` accepts, and leave it out of the cache.
-        Err(_) => regex::Regex::new(pattern).map(Arc::new),
+        BYTES.fetch_add(charge, Ordering::Relaxed);
+        c.insert(pattern.into(), outcome.clone());
     }
+    outcome.map_err(String::from)
 }
 
-/// The retained program for `pattern`, without compiling anything.
+/// The retained program for `pattern`, without compiling anything. A
+/// retained refusal holds no program and reads as `None` here.
 pub fn cached(pattern: &str) -> Option<Arc<regex::Regex>> {
-    CACHE.read().ok().and_then(|c| c.get(pattern).cloned())
+    CACHE
+        .read()
+        .ok()
+        .and_then(|c| c.get(pattern).and_then(|o| o.as_ref().ok()).cloned())
 }
 
 /// Compilations performed since process start (i.e. cache misses).
@@ -98,8 +133,11 @@ pub fn len() -> usize {
     CACHE.read().map(|c| c.len()).unwrap_or(0)
 }
 
-/// Test-only serialization: a test that flushes the shared cache must not
-/// race the tests asserting what is retained.
+/// Program bytes currently charged — never above `MAX_REGEX_CACHE_BYTES`.
+pub fn retained_bytes() -> usize {
+    BYTES.load(Ordering::Relaxed)
+}
+
 static Q_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<crate::QNode>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static GEO_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<crate::geo::GeoQuery>>>> =
@@ -147,6 +185,8 @@ pub fn geo_query(
     Some(gq)
 }
 
+/// Test-only serialization: a test that flushes the shared cache must not
+/// race the tests asserting what is retained.
 #[cfg(test)]
 pub(crate) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -188,7 +228,7 @@ mod tests {
     /// An invalid pattern yields `Regex::new`'s own error, verbatim, so the
     /// spec error each call site maps it to is unchanged — an `idPattern`
     /// stays 400 BadRequestData (Table 6.3.2-1) and never becomes a 500.
-    /// Nothing invalid is retained.
+    /// What is retained for it is the refusal, never a program.
     #[test]
     fn invalid_pattern_keeps_the_error_regex_new_returns() {
         let _serial = serial_lock();
@@ -201,7 +241,7 @@ mod tests {
                 want.map(|_| ()),
                 "the cache must return the same error text for {p:?}"
             );
-            assert!(cached(p).is_none(), "an invalid pattern is never retained");
+            assert!(cached(p).is_none(), "an invalid pattern yields no program");
             assert!(
                 compile(p).is_err(),
                 "and it stays an error on the second call for {p:?}"
@@ -210,9 +250,10 @@ mod tests {
         assert!(compile("^ok$").is_ok(), "a valid pattern is not rejected");
     }
 
-    /// Retention is bounded: distinct patterns are client input, so many of
-    /// them must not grow the map past `bounds::MAX_REGEX_CACHE`, and the
-    /// programs handed out across an eviction stay correct.
+    /// Retention is bounded in both dimensions: distinct patterns are
+    /// client input, so many of them must grow the map past neither
+    /// `MAX_REGEX_CACHE` nor `MAX_REGEX_CACHE_BYTES`, and the programs
+    /// handed out across an eviction stay correct.
     #[test]
     fn cache_stays_bounded_under_many_distinct_patterns() {
         let _serial = serial_lock();
@@ -226,34 +267,67 @@ mod tests {
                 "retained {} patterns after {i} distinct ones",
                 len()
             );
+            assert!(
+                retained_bytes() <= MAX_REGEX_CACHE_BYTES,
+                "charged {} bytes after {i} distinct patterns",
+                retained_bytes()
+            );
         }
         assert!(len() > 0, "the cache must still be caching after a flush");
     }
 
-    /// A program above the retention ceiling is still compiled — acceptance
-    /// is `Regex::new`'s, not the cache's — but it is not retained, so the
-    /// 32 MiB worst case documented in `bounds` holds.
+    /// 4.9 evaluates a `patternOp` per candidate Entity and 5.2.33 an
+    /// `idPattern` per event per Subscription, so an unbounded compile is
+    /// multiplied by the candidate count. Program size follows counted
+    /// repetition of a character class, not pattern length, so the bound
+    /// has to be on the program: above the ceiling the pattern is refused,
+    /// and the refusal is remembered so it costs one build pass, ever.
     #[test]
-    fn oversized_program_compiles_but_is_not_retained() {
+    fn a_program_above_the_ceiling_is_refused_once_not_rebuilt_per_candidate() {
         let _serial = serial_lock();
-        let p = format!("^(?:{})$", "a{255}".repeat(64));
+        let p = r"(?:\p{Any}{100}){100}";
+        assert_eq!(p.len(), 21, "the fixture is what a client can send");
         assert!(
-            regex::RegexBuilder::new(&p)
-                .size_limit(MAX_REGEX_PROGRAM_BYTES)
-                .build()
-                .is_err(),
-            "fixture must exceed the retention ceiling"
+            build(p, MAX_REGEX_PROGRAM_BYTES).is_err(),
+            "fixture must ask for a program above the ceiling"
         );
-        assert!(regex::Regex::new(&p).is_ok(), "…while still being valid");
-        let first = compile(&p).expect("valid pattern");
-        let second = compile(&p).expect("valid pattern");
-        assert!(cached(&p).is_none(), "an oversized program is not retained");
+        let before = compiles();
         assert!(
-            !Arc::ptr_eq(&first, &second),
-            "each call compiles its own — nothing is shared, nothing is held"
+            compile(p).is_err(),
+            "a program above the ceiling is refused, not compiled"
         );
-        assert!(first.is_match(&"a".repeat(255 * 64)));
-        assert!(!first.is_match("a"), "and it is the pattern that was asked");
+        let after = compiles();
+        assert_eq!(after, before + 1, "one refusal costs one build pass");
+        for _ in 0..64 {
+            assert!(compile(p).is_err(), "and it stays refused");
+        }
+        assert_eq!(
+            compiles(),
+            after,
+            "the refusal is remembered, not rebuilt for the next candidate"
+        );
+        assert!(cached(p).is_none(), "a refusal retains no program");
+    }
+
+    /// The ceiling bounds the automaton, not the expressiveness a
+    /// deployment needs: the patterns an `idPattern` or a `~=` operand
+    /// actually carries compile well inside it and are retained.
+    #[test]
+    fn the_ceiling_admits_the_patterns_a_deployment_writes() {
+        let _serial = serial_lock();
+        for p in [
+            r"^urn:ngsi-ld:Vehicle:.*$",
+            r"^urn:ngsi-ld:(Vehicle|Sensor|Building):[A-Za-z0-9_-]{1,64}$",
+            r"^urn:ngsi-ld:Device:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            r"(?i)^urn:ngsi-ld:vehicle:.*$",
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        ] {
+            assert!(compile(p).is_ok(), "the ceiling must not refuse {p:?}");
+            assert!(
+                cached(p).is_some(),
+                "what the ceiling admits, the cache retains: {p:?}"
+            );
+        }
     }
 
     /// The same q text parses once and every caller shares the tree; an

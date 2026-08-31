@@ -143,7 +143,7 @@ pub fn normalize_registration(
                                                 let p = ev.as_str().ok_or_else(|| {
                                                     bad("idPattern must be a string".into())
                                                 })?;
-                                                regex::Regex::new(p).map_err(|_| {
+                                                crate::regexcache::compile(p).map_err(|_| {
                                                     bad(format!("invalid idPattern {p:?}"))
                                                 })?;
                                                 ne.insert("idPattern".into(), ev.clone());
@@ -1008,7 +1008,7 @@ pub async fn query_registrations(
         spec.id_pattern = params
             .get("idPattern")
             .map(|p| {
-                regex::Regex::new(p)
+                crate::regexcache::compile(p)
                     .map(|_| p.clone())
                     .map_err(|_| bad(format!("invalid idPattern {p:?}")))
             })

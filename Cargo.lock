@@ -64,7 +64,6 @@ dependencies = [
  "icu_collator",
  "icu_locale_core",
  "metrics",
- "regex",
  "reqwest 0.12.28",
  "send_wrapper",
  "serde_json",

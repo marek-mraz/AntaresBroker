@@ -86,8 +86,9 @@ pub const MAX_CONTEXT_FETCHES: usize = 32; // → 504 LdContextNotAvailable
 pub const MAX_Q_NODES: usize = 512; // → 403 TooComplexQuery
 /// Linked-entity lookup budget per `q=`, owned by the shared evaluator.
 pub use antares_ql::eval::MAX_Q_LINK_LOOKUPS;
-/// Regex retention caps, owned by the shared cache (`antares_ql::regex`).
-pub use antares_ql::regex::{MAX_REGEX_CACHE, MAX_REGEX_PROGRAM_BYTES};
+/// Regex compile ceiling and retention caps, owned by the shared cache
+/// (`antares_ql::regex`).
+pub use antares_ql::regex::{MAX_REGEX_CACHE, MAX_REGEX_CACHE_BYTES, MAX_REGEX_PROGRAM_BYTES};
 
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
@@ -113,6 +114,7 @@ impl LimitStats {
             "maxQNodes": MAX_Q_NODES,
             "maxQLinkLookups": MAX_Q_LINK_LOOKUPS,
             "maxRegexCache": MAX_REGEX_CACHE,
+            "maxRegexCacheBytes": MAX_REGEX_CACHE_BYTES,
             "maxRegexProgramBytes": MAX_REGEX_PROGRAM_BYTES,
             "rejectedUriTooLong": self.uri_too_long.load(Ordering::Relaxed),
             "rejectedBodyTooLarge": self.body_too_large.load(Ordering::Relaxed),
@@ -273,6 +275,7 @@ mod tests {
                 "maxQLinkLookups",
                 "maxQNodes",
                 "maxRegexCache",
+                "maxRegexCacheBytes",
                 "maxRegexProgramBytes",
                 "maxUriBytes",
                 "rejectedBodyTooDeep",

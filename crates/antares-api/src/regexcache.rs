@@ -16,16 +16,14 @@
 //! therefore pays `Regex::new` again for every candidate; compiling through
 //! here pays it once per distinct pattern and hands out a shared program.
 //!
-//! The cache changes no outcome. `compile` accepts and rejects exactly what
-//! `regex::Regex::new` accepts and rejects, and returns that call's own
-//! `regex::Error`, so an invalid `idPattern` keeps the 400 BadRequestData its
-//! call site already returns (Table 6.3.2-1) and an invalid `~=` operand
-//! keeps having no L(R), i.e. matching nothing (4.9).
-//!
-//! Retention is bounded in both dimensions — entries and compiled program
-//! size, `MAX_REGEX_CACHE` and `MAX_REGEX_PROGRAM_BYTES` —
-//! because the key is client input and an unbounded map of it is a memory
-//! attack, not a cache.
+//! One compile has to be bounded and a pattern has to be compiled at most
+//! once, because both numbers are multiplied by the candidate count. A
+//! pattern whose compiled automaton is above `MAX_REGEX_PROGRAM_BYTES` is
+//! refused with the builder's own error, which every call site already maps
+//! — 400 BadRequestData for an `idPattern` (Table 6.3.2-1), no L(R) and so
+//! no match for a `~=` operand (4.9). Every outcome is retained, refusals
+//! included, bounded in entries and in bytes, because the key is client
+//! input and an unbounded map of it is a memory attack, not a cache.
 
-pub use antares_ql::regex::{cached, compile, compiles, len};
+pub use antares_ql::regex::{cached, compile, compiles, len, retained_bytes};
 pub use antares_ql::regex::{geo_query, q_node};

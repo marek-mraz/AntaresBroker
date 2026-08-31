@@ -117,7 +117,7 @@ pub fn normalize_subscription(
                                 let p = ev
                                     .as_str()
                                     .ok_or_else(|| bad("idPattern must be a string".into()))?;
-                                regex::Regex::new(p)
+                                crate::regexcache::compile(p)
                                     .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
                                 ne.insert("idPattern".into(), ev.clone());
                             }
@@ -1428,6 +1428,9 @@ mod tests {
             json!([{"type": "Building", "id": "not a uri"}]),
             json!([{"type": "Building", "id": ["urn:ngsi-ld:B:1", 7]}]),
             json!([{"type": "Building", "idPattern": "["}]),
+            // 21 bytes, a 16 MiB automaton: above the compile ceiling the
+            // pattern is refused here rather than compiled per event
+            json!([{"type": "Building", "idPattern": r"(?:\p{Any}{100}){100}"}]),
             json!([{"type": "Building", "idPattern": 7}]),
             json!(["Building"]),
         ] {
