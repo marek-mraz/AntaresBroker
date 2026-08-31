@@ -189,3 +189,35 @@ async fn a_store_from_outside_the_shelf_can_back_the_state() {
         "one driver serves both seams: {v}"
     );
 }
+
+/// The documented caps are the broker's, not one nest's: a registered
+/// surface is a route of this process like any other, so the bounds wall
+/// (6.3.4's bare 414/411 and the body cap `/q/health` advertises) applies
+/// there too. Without it a deployment's own `/x` routes — and the built-in
+/// `/q` ones, which delete tenants and replay dead letters — are the one
+/// place where no documented limit holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_surface_is_behind_the_bounds_wall() {
+    let st = AppState::new("surfaces".into())
+        .with_surface(Box::new(Ping("/x")))
+        .expect("register");
+    let long = "a".repeat(9 * 1024);
+    let (status, _) = get_path(&st, &format!("/x/ping?pad={long}")).await;
+    assert_eq!(
+        status,
+        StatusCode::URI_TOO_LONG,
+        "an over-long URI is refused on every route"
+    );
+    let (status, _) = get_path(&st, &format!("/q/health?pad={long}")).await;
+    assert_eq!(status, StatusCode::URI_TOO_LONG, "the admin surface too");
+
+    // 6.3.4: a POST without Content-Length is a bare 411 wherever it lands.
+    let req = Request::post("/q/dead-letters/nope/replay")
+        .body(Body::empty())
+        .expect("req");
+    let resp = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::LENGTH_REQUIRED);
+}

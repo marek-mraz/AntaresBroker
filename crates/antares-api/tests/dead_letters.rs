@@ -18,6 +18,10 @@ async fn send(st: &AppState, method: &str, path: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
         .uri(path)
+        // what every HTTP/1.1 client sends for a bodyless request: the
+        // bounds wall in front of this surface answers a POST without a
+        // length with 6.3.4's bare 411.
+        .header(axum::http::header::CONTENT_LENGTH, "0")
         .body(Body::empty())
         .expect("request");
     let res = antares_api::router(st.clone())

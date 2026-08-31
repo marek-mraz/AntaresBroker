@@ -378,10 +378,22 @@ pub fn router(state: AppState) -> Router {
     // Every registered surface, each under its own reserved prefix — the
     // admin one by default. `with_surface` already refused a prefix outside
     // /q and /x and any overlap, so the merge here cannot shadow a route.
+    // The caps are the broker's, not the API nest's: these routes carry the
+    // bounds wall and the body limit for the same reason the peer-facing
+    // notification endpoint above does — /q deletes Tenants and replays dead
+    // letters, and a deployment's own /x routes are no less a way in.
     let mut surfaces = Router::new();
     for s in state.surfaces.iter() {
         surfaces = surfaces.nest(s.prefix(), s.router(state.clone()));
     }
+    let surfaces = surfaces
+        .layer(axum::extract::DefaultBodyLimit::max(
+            *bounds::MAX_BODY_BYTES,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bounds::bounds_layer,
+        ));
 
     surfaces
         .merge(remote_notify)
