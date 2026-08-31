@@ -105,3 +105,37 @@ async fn refuses_hops_accepts_flat(st: &AppState, base: &str) {
     let (status, body) = get(st, &format!("{base}&pick=speed")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+/// 5.7.3.5: "If a restrictive list of Entity member names is present, every
+/// Entity within the payload body is reduced down to only contain the defined
+/// Entity members." 5.7.3.3 says that list holds "a restrictive list of Entity
+/// member names (`"id"`, `"type"`, `"scope"` or an Attribute name)", so a pick
+/// naming only core members selects no Attribute — which is the reduced answer,
+/// not a Temporal Evolution that holds none of what was asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_3_5_a_core_only_pick_reduces_the_entity_rather_than_hiding_it() {
+    let st = seeded().await;
+    for (pick, kept) in [("id", "id"), ("type", "type"), ("id,type", "id")] {
+        let (status, body) = get(
+            &st,
+            &format!("/ngsi-ld/v1/temporal/entities/{ID}?{WINDOW}&pick={pick}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "pick={pick}: {body}");
+        assert!(
+            body.get(kept).is_some(),
+            "pick={pick} dropped {kept}: {body}"
+        );
+        assert!(
+            body.get("speed").is_none(),
+            "pick={pick} kept an Attribute it did not name: {body}"
+        );
+    }
+    // An Attribute name the Entity does not carry is still the 404 of 5.7.3.4.
+    let (status, body) = get(
+        &st,
+        &format!("/ngsi-ld/v1/temporal/entities/{ID}?{WINDOW}&pick=colour"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}

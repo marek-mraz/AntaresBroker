@@ -2212,9 +2212,16 @@ async fn retrieve_temporal_inner(
             })?
         };
         let attrs_filter = selection(&trepr);
-        // 5.7.3: attrs matching nothing ⇒ 404
+        // 5.7.3: attrs matching nothing ⇒ 404. A `pick` may name core members
+        // instead — 5.7.3.3 admits "id", "type", "scope" or an Attribute name
+        // — and then it selects no Attribute at all. 5.7.3.5 still reduces the
+        // Entity to the members it names, so that empty selection is the
+        // answer rather than a Temporal Evolution holding none of it.
+        let core_only_pick = trepr.attrs.is_none()
+            && trepr.pick.is_some()
+            && attrs_filter.as_ref().is_some_and(Vec::is_empty);
         if let Some(want) = &attrs_filter {
-            if !want.iter().any(|a| doc.get(a).is_some()) {
+            if !core_only_pick && !want.iter().any(|a| doc.get(a).is_some()) {
                 return Err(NgsiError::ResourceNotFound(format!(
                     "temporal entity {id} has none of the requested attributes"
                 ))
