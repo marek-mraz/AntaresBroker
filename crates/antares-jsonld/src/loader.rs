@@ -1014,8 +1014,14 @@ impl Loader {
             None => false,
             Some(urls) => urls.iter().all(|url| match self.fetched.get(url) {
                 Some(doc) => doc.serves(tenant) && !doc.is_stale(),
-                // dropped from the document cache: nothing marks it stale
-                None => true,
+                // Dropped from the document cache (it is a bounded LRU, and
+                // a locally stored @context is as evictable as any other):
+                // its OWNER is now unknown, and unknown is not public, so the
+                // entry is rebuilt — a rebuild re-reads the ownership and
+                // refuses what this Tenant may not have. A pinned core
+                // context has no cache entry by design and belongs to no
+                // Tenant, so it never forces one.
+                None => Self::is_pinned_core(url),
             }),
         }
     }
@@ -2305,6 +2311,52 @@ mod tests {
             "https://uri.etsi.org/ngsi-ld/default-context/secret",
             "the owner's term mapping must not expand another Tenant's payload"
         );
+    }
+
+    /// The merged cache is keyed by the user @context alone, so the Tenant
+    /// gate on a hit is the ONLY thing keeping one Tenant's locally stored
+    /// mappings out of another Tenant's resolution — and it reads the
+    /// ownership off the document cache, a bounded LRU that evicts under
+    /// load. A source document that is no longer there has unknown
+    /// ownership, which is not the same as public: the hit must be rebuilt,
+    /// not handed over.
+    #[tokio::test]
+    async fn an_evicted_source_document_does_not_open_a_merged_hit_to_another_tenant() {
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        // dead port: nothing can be re-fetched, so anything served can only
+        // have come from the caches under test
+        let url =
+            "http://127.0.0.1:9/ngsi-ld/v1/jsonldContexts/3f3e1a00-0000-4000-8000-000000000003";
+        let user = Value::String(url.to_owned());
+        loader
+            .put_local_for(
+                &alpha,
+                url.to_owned(),
+                serde_json::json!({"secret": "https://alpha.example/secret"}),
+            )
+            .await;
+        let ctx = loader
+            .resolve_for(&alpha, &user)
+            .await
+            .expect("the owning Tenant resolves its own @context");
+        assert_eq!(ctx.expand_key("secret"), "https://alpha.example/secret");
+
+        // the document leaves the bounded cache; the merged entry it fed
+        // stays, as an LRU eviction leaves it
+        loader.fetched.invalidate(url);
+
+        match loader.resolve_for(&beta, &user).await {
+            Err(_) => {}
+            Ok(ctx) => assert_ne!(
+                ctx.expand_key("secret"),
+                "https://alpha.example/secret",
+                "another Tenant's mappings were served from the merged cache"
+            ),
+        }
     }
 
     /// Adding one @context must not throw away every Tenant's merged
