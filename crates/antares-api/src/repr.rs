@@ -338,17 +338,7 @@ fn transform_instance(inst: &Value, r: &Repr) -> Value {
     // lang filter first: LanguageProperty → Property under a selected language
     let mut obj = obj.clone();
     if let Some(lang) = &r.lang {
-        if obj.get("type").and_then(Value::as_str) == Some("LanguageProperty") {
-            if let Some(lm) = obj.get("languageMap").and_then(Value::as_object).cloned() {
-                let pick = select_lang(&lm, lang);
-                if let Some((chosen_lang, value)) = pick {
-                    obj.remove("languageMap");
-                    obj.insert("type".into(), Value::String("Property".into()));
-                    obj.insert("value".into(), value);
-                    obj.insert("lang".into(), Value::String(chosen_lang));
-                }
-            }
-        }
+        apply_lang(&mut obj, lang);
     }
 
     if r.key_values {
@@ -381,6 +371,25 @@ fn transform_instance(inst: &Value, r: &Repr) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// 4.15 Language Filter on one attribute instance (5.7.2.5, and the `lang`
+/// rows of Tables 6.18.3.2-1 / 6.19.3.1 for the temporal forms): a
+/// LanguageProperty "shall be converted into a Property" holding the chosen
+/// languageMap entry, with the non-reified `lang` member naming it.
+pub(crate) fn apply_lang(obj: &mut Map<String, Value>, lang: &str) {
+    if obj.get("type").and_then(Value::as_str) != Some("LanguageProperty") {
+        return;
+    }
+    let Some(lm) = obj.get("languageMap").and_then(Value::as_object) else {
+        return;
+    };
+    if let Some((chosen_lang, value)) = select_lang(lm, lang) {
+        obj.remove("languageMap");
+        obj.insert("type".into(), Value::String("Property".into()));
+        obj.insert("value".into(), value);
+        obj.insert("lang".into(), Value::String(chosen_lang));
+    }
 }
 
 /// 4.15 Language Filter: pick one languageMap entry for a lang priority
