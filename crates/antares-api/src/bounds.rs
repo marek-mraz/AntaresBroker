@@ -202,7 +202,15 @@ pub async fn bounds_layer(
     let is_json = parts
         .headers
         .get(axum::http::header::CONTENT_TYPE)
-        .is_none_or(|v| v.to_str().is_ok_and(|ct| ct.contains("json")));
+        .is_none_or(|v| match v.to_str() {
+            Ok(ct) => ct.contains("json"),
+            // A header the parser cannot read is not a header naming another
+            // media type: `negotiate::content_type` reports it as the empty
+            // string, which every route that tolerates an absent
+            // Content-Type reads as absent and parses. Scanning it is what
+            // keeps the cap ahead of the parser on those routes.
+            Err(_) => true,
+        });
     if is_json && json_depth(&bytes) > MAX_JSON_DEPTH {
         st.limits.body_too_deep.fetch_add(1, Ordering::Relaxed);
         return crate::negotiate::ApiError::from(antares_model::NgsiError::BadRequestData(
@@ -306,10 +314,23 @@ mod tests {
             )
             .layer(axum::middleware::from_fn_with_state(st, bounds_layer));
         let deep = "[".repeat(MAX_JSON_DEPTH + 5) + &"]".repeat(MAX_JSON_DEPTH + 5);
-        for ct in [None, Some("application/json")] {
+        // The third case is the one a header map can hold and `to_str`
+        // cannot read: a Content-Type carrying a byte outside UTF-8. Every
+        // route reads it as an absent Content-Type, so the scan must too.
+        let unreadable = axum::http::HeaderValue::from_bytes(b"application/\xffjson")
+            .expect("header value from raw bytes");
+        assert!(
+            unreadable.to_str().is_err(),
+            "the case under test is a header value that cannot be read as text"
+        );
+        for ct in [
+            None,
+            Some(axum::http::HeaderValue::from_static("application/json")),
+            Some(unreadable),
+        ] {
             let mut req = Request::post("/x")
                 .header(axum::http::header::CONTENT_LENGTH, deep.len().to_string());
-            if let Some(ct) = ct {
+            if let Some(ct) = ct.clone() {
                 req = req.header(axum::http::header::CONTENT_TYPE, ct);
             }
             let resp = app

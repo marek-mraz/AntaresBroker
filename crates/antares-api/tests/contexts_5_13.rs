@@ -31,6 +31,59 @@ async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, axum::http::Hea
     (status, headers, body)
 }
 
+/// 5.13.2.4 + 6.3.5: the media types this resource accepts are
+/// `application/json` and `application/ld+json`, and an ABSENT Content-Type
+/// is tolerated so a body that is JSON reports its own error rather than a
+/// bare 415. A header that is PRESENT and unreadable as text is neither: it
+/// names a media type this resource does not serve, so it is a 415, and it
+/// must not be read as absent — the bounds wall reads an unreadable header
+/// the same way, and a route that parsed it would be parsing a body the
+/// nesting cap had not judged.
+#[tokio::test]
+async fn an_unreadable_content_type_is_unsupported_not_absent() {
+    let st = state();
+    let body = json!({"@context": {"t": "https://example.org/t"}}).to_string();
+    let mk = |ct: Option<axum::http::HeaderValue>| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/jsonldContexts")
+            .header("Content-Length", body.len());
+        if let Some(ct) = ct {
+            req = req.header("Content-Type", ct);
+        }
+        req.body(Body::from(body.clone())).expect("request")
+    };
+
+    let unreadable =
+        axum::http::HeaderValue::from_bytes(b"application/\xffjson").expect("raw header value");
+    assert!(
+        unreadable.to_str().is_err(),
+        "the header under test is unreadable"
+    );
+    let (status, _, _) = send(&st, mk(Some(unreadable))).await;
+    assert_eq!(
+        status,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "an unreadable Content-Type must not be read as an absent one"
+    );
+
+    // The two readings it must not be confused with, unchanged: absent is
+    // accepted, and a media type this resource does not serve is a 415.
+    let (status, _, _) = send(&st, mk(None)).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an absent Content-Type is still accepted"
+    );
+    let (status, _, body_v) = send(
+        &st,
+        mk(Some(axum::http::HeaderValue::from_static("text/plain"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(body_v, Value::Null, "6.3.5: a bare 415 carries no payload");
+}
+
 async fn post_ctx(st: &AppState, body: Value) -> (StatusCode, axum::http::HeaderMap, Value) {
     let body = body.to_string();
     send(
