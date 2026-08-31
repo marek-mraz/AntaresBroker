@@ -657,6 +657,9 @@ pub struct Loader {
     /// use; a missing row reports a cross-instance delete. `None` in
     /// compositions without a store (bare loader tests).
     usage_bump: std::sync::RwLock<Option<UsageBump>>,
+    /// Store-backed lookup for the @contexts this broker hosts. Set once at
+    /// wiring; None in tests.
+    local_lookup: std::sync::RwLock<Option<LocalLookup>>,
 }
 
 /// Request header marking a broker-internal @context fetch (this loader
@@ -669,6 +672,11 @@ pub const INTERNAL_FETCH_HEADER: &str = "x-antares-ctx-fetch";
 pub type CacheWriter = Box<dyn Fn(&str, &Value) + Send + Sync>;
 /// url -> "the shared row still exists" (after bumping its hit counter).
 pub type UsageBump = Box<dyn Fn(&str) -> bool + Send + Sync>;
+/// url -> the `@context` value of the row this broker HOSTS under it, with
+/// the Tenant that owns it (5.13.1 Hosted/ImplicitlyCreated; `None` = owned
+/// by no Tenant). The store is where a broker-local @context comes from —
+/// see [`Loader::set_local_lookup`].
+pub type LocalLookup = Box<dyn Fn(&str) -> Option<(Option<TenantId>, Value)> + Send + Sync>;
 
 impl Default for Loader {
     fn default() -> Self {
@@ -730,6 +738,7 @@ impl Loader {
             resolve_permits: tokio::sync::Semaphore::new(32),
             cache_writer: std::sync::RwLock::new(None),
             usage_bump: std::sync::RwLock::new(None),
+            local_lookup: std::sync::RwLock::new(None),
         }
     }
 
@@ -739,6 +748,22 @@ impl Loader {
             .cache_writer
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
+    }
+
+    /// Wire the store as the source of the @contexts this broker HOSTS
+    /// (5.13.1 Hosted and ImplicitlyCreated). The in-process copy those
+    /// resources leave behind is a CACHE: it is lost on a restart (only
+    /// `Cached` rows are preloaded) and evictable from the bounded document
+    /// cache at any time. Without this hook such a miss becomes an outbound
+    /// GET of a URL the broker minted from a request's `Host` header — a
+    /// client can then name the host its own @context is fetched from, and
+    /// with it the term mappings that expand its Tenant's payloads. The row
+    /// carries the owning Tenant, so 5.5.10 still decides who resolves it.
+    pub fn set_local_lookup(&self, f: LocalLookup) {
+        *self
+            .local_lookup
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
     }
 
     /// Wire the shared-store usage bump (5.13.3.5): called on every
@@ -1134,6 +1159,27 @@ impl Loader {
             } else {
                 return Ok(hit.value);
             }
+        }
+        // A URL this broker hosts is served from its row, never fetched:
+        // the warm copy is only a cache (see `set_local_lookup`).
+        let hosted = self
+            .local_lookup
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|f| f(url));
+        if let Some((owner, value)) = hosted {
+            let doc = FetchedDoc {
+                value: Arc::new(value),
+                stale_at: None, // hosted locally: no 6.3.16 lifetime
+                owner,
+            };
+            if !doc.serves(tenant) {
+                return Err(err(format!("@context {url} is not available")));
+            }
+            let arc = Arc::clone(&doc.value);
+            self.fetched.insert(url.to_owned(), doc);
+            return Ok(arc);
         }
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(err(format!("unsupported @context URL: {url}")));

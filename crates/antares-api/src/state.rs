@@ -281,6 +281,25 @@ impl AppState {
                 }
             }));
         }
+        // 5.13.1: an @context this broker HOSTS is served from its row, not
+        // fetched. Its warm copy in the loader is only a cache — a restart
+        // reloads Cached rows alone, and the bounded cache may evict it at
+        // any moment — and the URL under it is minted from the request Host
+        // header, so a miss would otherwise send the broker to whatever
+        // address a client put there for the term mappings of its own
+        // Tenant's payloads. The row carries the owner, so 5.5.10 still
+        // decides who may resolve it.
+        {
+            let store = store.clone();
+            loader.set_local_lookup(Box::new(move |url| {
+                let id = hosted_row_id(&*store, url)?;
+                let row = store.context_get(&id).ok().flatten()?;
+                let owner = row["owner"]
+                    .as_str()
+                    .and_then(|o| antares_model::TenantId::new(o).ok());
+                Some((owner, row["body"]["@context"].clone()))
+            }));
+        }
         // 5.8.1.4: this URL is handed to peer brokers as the notification
         // endpoint for distributed subscriptions — the default must carry
         // the HTTP port or peers dial port 80 (ETSI-matrix ADV_02 shape).
@@ -573,7 +592,8 @@ mod jsonld_context_locality_5_13 {
     }
 
     /// 5.13.3.5 counts uses of an @context this broker hosts on its own
-    /// stored row — no second, Cached copy of the same document.
+    /// stored row — no second, Cached copy of the same document, and no
+    /// fetch of its URL: the row holds the document (5.13.1 "Hosted").
     #[tokio::test]
     async fn a_hosted_context_is_counted_on_its_own_row() {
         let st = AppState::new("me".into());
@@ -607,8 +627,55 @@ mod jsonld_context_locality_5_13 {
         );
         assert_eq!(
             fetch_count(&fetches),
-            1,
-            "the hosted row exists, so nothing is evicted or refetched"
+            0,
+            "a hosted @context is read from its row, never fetched over the network"
+        );
+    }
+
+    /// 5.13.1: what this broker HOSTS comes from its own store, not from the
+    /// network. The in-process copy is a cache, and a miss — a restart (only
+    /// `Cached` rows are preloaded) or an eviction from the bounded document
+    /// cache — must not turn into an outbound GET of a URL a client chose:
+    /// the URL is minted from the request's `Host` header when
+    /// `ANTARES_PUBLIC_URL` is unset, so a spoofed one would send the broker
+    /// to the spoofer for the term mappings that expand that Tenant's
+    /// payloads. 5.5.10 still holds through the store: the row's owner is
+    /// the only Tenant it resolves for.
+    #[tokio::test]
+    async fn a_hosted_context_resolves_from_the_store_after_its_copy_is_gone() {
+        let st = AppState::new("me".into());
+        let alpha = antares_model::TenantId::new("alpha").expect("tenant");
+        let beta = antares_model::TenantId::new("beta").expect("tenant");
+        // a dead port: anything resolved can only have come from the row
+        let url = "http://127.0.0.1:9/ngsi-ld/v1/jsonldContexts/hosted-1";
+        st.store
+            .context_put(
+                "hosted-1",
+                serde_json::json!({
+                    "url": url,
+                    "localId": "hosted-1",
+                    "kind": "Hosted",
+                    "createdAt": now_iso(),
+                    "owner": "alpha",
+                    "body": {"@context": {"secret": "https://alpha.example/secret"}},
+                }),
+            )
+            .expect("seed hosted row");
+        let user = serde_json::json!(url);
+        let ctx = st
+            .loader
+            .resolve_for(&alpha, &user)
+            .await
+            .expect("the owning Tenant resolves its stored @context");
+        assert_eq!(ctx.expand_key("secret"), "https://alpha.example/secret");
+        let err = st
+            .loader
+            .resolve_for(&beta, &user)
+            .await
+            .expect_err("another Tenant may not resolve it (5.5.10)");
+        assert!(
+            matches!(err, antares_model::NgsiError::LdContextNotAvailable(_)),
+            "got {err:?}"
         );
     }
 
