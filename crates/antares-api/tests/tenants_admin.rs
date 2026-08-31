@@ -398,3 +398,73 @@ async fn purge_of_one_tenant_does_not_touch_a_same_prefixed_tenant() {
     .await;
     assert_eq!(s, StatusCode::OK, "history of the neighbour tenant kept");
 }
+
+/// A Hosted @context (5.13.1) is a document of the Tenant that stored it:
+/// it holds term mappings authored through that Tenant's requests, and
+/// 5.5.7 makes those mappings decide what every payload of that Tenant
+/// means. `jsonld_contexts` carries no tenant column — the owner lives
+/// inside the row — so the store's tenant-keyed purge cannot see it and the
+/// row outlives the Tenant it belongs to.
+///
+/// The consequence is inheritance rather than leakage, and it is worse for
+/// it: tenant names are client-chosen and come to exist implicitly (5.5.10),
+/// so the next holder of a purged name expands its terms through the
+/// previous holder's mappings, silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn purging_a_tenant_takes_its_hosted_contexts_with_it() {
+    let st = state();
+    seed(&st, "ctxowner", "urn:ngsi-ld:Room:ctx1").await;
+    seed(&st, "ctxother", "urn:ngsi-ld:Room:ctx2").await;
+
+    let store_context = |tenant: &'static str, iri: &'static str| {
+        let st = st.clone();
+        async move {
+            let (s, _) = send(
+                &st,
+                "POST",
+                "/ngsi-ld/v1/jsonldContexts",
+                Some(json!({"@context": {"Vehicle": iri}})),
+                Some(tenant),
+            )
+            .await;
+            assert_eq!(s, StatusCode::CREATED);
+        }
+    };
+    store_context("ctxowner", "https://first.example/Vehicle").await;
+    store_context("ctxother", "https://other.example/Vehicle").await;
+
+    let hosted = |tenant: &'static str| {
+        let st = st.clone();
+        async move {
+            let (s, list) = send(
+                &st,
+                "GET",
+                "/ngsi-ld/v1/jsonldContexts?kind=Hosted",
+                None,
+                Some(tenant),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{list}");
+            list.as_array().map(Vec::len).unwrap_or(0)
+        }
+    };
+    assert_eq!(hosted("ctxowner").await, 1, "the owner stored one");
+    assert_eq!(hosted("ctxother").await, 1, "so did the other tenant");
+
+    let (s, body) = send(&st, "DELETE", "/q/tenants/ctxowner", None, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+
+    // the name is free again, and comes back the way any tenant does (5.5.10)
+    seed(&st, "ctxowner", "urn:ngsi-ld:Room:ctx1").await;
+    assert_eq!(
+        hosted("ctxowner").await,
+        0,
+        "the purged tenant's Hosted @context outlived the purge, and its \
+         term mappings now apply to whoever holds the name next"
+    );
+    assert_eq!(
+        hosted("ctxother").await,
+        1,
+        "and no other tenant's @context was taken with it"
+    );
+}

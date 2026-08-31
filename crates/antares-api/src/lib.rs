@@ -529,8 +529,11 @@ async fn tenant_exists_layer(
                 | "/csourceSubscriptions"
         );
     // tenant-independent resources: broker identity (6.33) answers for any
-    // tenant (the per-tenant alias exists before any data does), and hosted
-    // @contexts are stored tenant-less (5.13).
+    // tenant (the per-tenant alias exists before any data does), and the
+    // @context resources are keyed by local id across tenants (5.13) — a
+    // Cached row belongs to no tenant, so the existence of the requesting
+    // one decides nothing here. Ownership of a Hosted row is still enforced,
+    // by `contexts::row_visible` on every serve, list and delete.
     let tenant_free = path.starts_with("/info/") || path.starts_with("/jsonldContexts");
     if !implicit_create && !tenant_free {
         if let Some(t) = req
@@ -1006,10 +1009,16 @@ async fn tenant_purge(
         }
         Ok(())
     };
-    match run() {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => ApiError::from(e).into_response(),
+    if let Err(e) = run() {
+        return ApiError::from(e).into_response();
     }
+    // 5.13.1: a Hosted @context belongs to the Tenant that stored it, and
+    // the row carries that owner inside the document — `jsonld_contexts`
+    // has no tenant column, so the tenant-keyed purge above cannot see it.
+    if let Err(e) = crate::contexts::purge_tenant(&st, &tenant).await {
+        return ApiError::from(e).into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn ready(

@@ -134,6 +134,31 @@ fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
         || doc["owner"].as_str().unwrap_or(TenantId::DEFAULT) == tenant.as_str()
 }
 
+/// 5.13.1: a Hosted or ImplicitlyCreated @context holds term mappings
+/// authored through one Tenant's requests, so it is one of that Tenant's
+/// documents and a purge of the Tenant takes it too. The row carries its
+/// owner inside the document — `jsonld_contexts` is keyed by local id
+/// alone and has no tenant column — so the store's tenant-keyed purge
+/// cannot reach it. A Cached row is a copy of a public document and belongs
+/// to no Tenant (see [`row_visible`]), so it stays.
+// ponytail: one scan of jsonld_contexts per purge, which is an admin
+// operation; a tenant column and an index if it ever runs hot.
+pub async fn purge_tenant(st: &AppState, tenant: &TenantId) -> Result<(), NgsiError> {
+    for row in st.store.context_list()? {
+        if row["kind"].as_str() == Some("Cached") || !row_visible(&row, tenant) {
+            continue;
+        }
+        let Some(local_id) = row["localId"].as_str() else {
+            continue;
+        };
+        st.store.context_delete(local_id)?;
+        if let Some(url) = row["url"].as_str() {
+            st.loader.usage_remove(url).await;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve an id to the @context it names (5.13.4.4). Every probe is a keyed
 /// lookup: a store failure is an error, never "not found" — answering 404 for
 /// a hiccup would tell the client to add the @context a second time.
