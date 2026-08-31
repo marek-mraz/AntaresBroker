@@ -1286,6 +1286,7 @@ async fn query_entities_inner(
     // The subject is the EXECUTION: a query nothing federates to runs locally
     // regardless of `local=true`, which is why this asks would_federate rather
     // than active (ETSI 019_19 orders without local).
+    crate::entities::check_collation(params)?;
     if params.contains_key("orderBy")
         && crate::federation::would_federate(st, &tenant, &ctx, params, headers)
     {
@@ -2873,6 +2874,18 @@ pub async fn replace_entity(
 /// (e.g. und-u-ks-identic, de-u-co-phonebk). The co/kf/kn keywords travel
 /// via CollatorPreferences; the -u-ks strength keyword maps onto
 /// CollatorOptions. Invalid/unsupported tags are BadRequestData.
+/// 5.7.2.4 / 5.7.4.4: "If a preferred collation setting is present and it
+/// does not conform to a valid ICU collation (see IETF RFC 6067 [36]) then an
+/// error of type BadRequestData shall be raised." The clause names the
+/// parameter's presence, not an `orderBy` that happens to consume it, so the
+/// check runs on every operation that accepts `collation`.
+pub fn check_collation(params: &HashMap<String, String>) -> Result<(), NgsiError> {
+    match params.get("collation") {
+        Some(tag) => build_collator(tag).map(|_| ()),
+        None => Ok(()),
+    }
+}
+
 fn build_collator(tag: &str) -> Result<icu_collator::CollatorBorrowed<'static>, NgsiError> {
     let bad = |m: String| NgsiError::BadRequestData(m);
     let locale: icu_locale_core::Locale = tag.parse().map_err(|_| {

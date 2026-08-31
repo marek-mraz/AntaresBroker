@@ -716,6 +716,26 @@ fn present_temporal(
         return Ok(Value::Object(out));
     }
     for (k, instances) in &w.attrs {
+        // Table 6.18.3.2-1 / 6.19.3.1 `lang`: each LanguageProperty
+        // instance becomes a Property in the chosen language (4.15) before
+        // either representation renders it.
+        let reduced: Vec<Value>;
+        let instances: &[Value] = match &r.lang {
+            Some(lang) => {
+                reduced = instances
+                    .iter()
+                    .map(|inst| {
+                        let mut inst = inst.clone();
+                        if let Some(o) = inst.as_object_mut() {
+                            crate::repr::apply_lang(o, lang);
+                        }
+                        inst
+                    })
+                    .collect();
+                &reduced
+            }
+            None => instances,
+        };
         if instances.is_empty() {
             // gap-cut leftovers render as empty arrays
             out.insert(ctx.compact_iri(k), Value::Array(vec![]));
@@ -849,6 +869,7 @@ struct TRepr {
     attrs: Option<Vec<String>>,
     aggr_methods: Vec<String>,
     aggr_period: AggrPeriod,
+    lang: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -941,7 +962,10 @@ fn reject_linked_projection(trepr: &TRepr, clause: &str) -> Result<(), NgsiError
 }
 
 fn parse_trepr(params: &HashMap<String, String>, ctx: &Context) -> Result<TRepr, NgsiError> {
-    let mut r = TRepr::default();
+    let mut r = TRepr {
+        lang: params.get("lang").cloned(),
+        ..TRepr::default()
+    };
     if let Some(opts) = params.get("options") {
         for o in opts.split(',') {
             match o.trim() {
@@ -1627,13 +1651,26 @@ pub(crate) async fn query_temporal_inner(
         )
         .into());
     }
-    // 5.7.4.4: a syntactically invalid context source filter is 400. Named
-    // gap: csf is validated but not applied to Context Source matching.
+    // 5.7.4.4: a syntactically invalid context source filter is 400; the
+    // filter itself gates registrations in federation::reg_matches.
     if let Some(csf) = params.get("csf") {
         parse_q(csf)?;
     }
-    // 5.7.4.4: temporal ordering may only refer to the "id" entity member
+    crate::entities::check_collation(params)?;
+    // 5.7.4.4: temporal ordering may only refer to the "id" entity member,
+    // and only where the execution "is limited to the local scope (see
+    // clause 5.5.13)" — 4.23.1 gives the reason: "Sort ordering is never
+    // applied to distributed operations." The subject is the EXECUTION, so a
+    // query nothing would federate to orders without `local=true`.
     if let Some(spec) = params.get("orderBy") {
+        if crate::federation::would_federate(st, &tenant, &ctx, params, headers) {
+            return Err(NgsiError::BadRequestData(
+                "orderBy requires local scope — ordering is never applied to \
+                 distributed operations (5.7.4.4, 4.23.1)"
+                    .into(),
+            )
+            .into());
+        }
         let non_id = spec.split(',').any(|part| {
             let m = part.trim().split(';').next().unwrap_or("").trim();
             m.split('[').next().unwrap_or(m) != "id"

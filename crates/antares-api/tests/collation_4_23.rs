@@ -160,3 +160,76 @@ async fn clause_5_2_43_post_query_collation_member() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(names(&body), vec!["á", "b"], "{body}");
 }
+
+/// 5.7.2.4 and 5.7.4.4: "If a preferred collation setting is present and it
+/// does not conform to a valid ICU collation (see IETF RFC 6067 [36]) then an
+/// error of type BadRequestData shall be raised." The sentence is about the
+/// parameter being present, not about an `orderBy` happening to consume it.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_4_4_an_invalid_collation_is_refused_without_an_order_by() {
+    let st = AppState::new("me".into());
+    seed(&st, "c1", "a").await;
+    for uri in [
+        "/ngsi-ld/v1/entities?type=Vehicle&collation=!!nope",
+        "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after\
+         &timeAt=2000-01-01T00:00:00Z&collation=!!nope",
+    ] {
+        let (status, body) = get(&st, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(
+            body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "{uri}: {body}"
+        );
+    }
+}
+
+/// 5.7.4.4: "If the ordering parameter is present and the execution of the
+/// operation is not limited to the local scope (see clause 5.5.13) then an
+/// error of type BadRequestData shall be raised." 4.23.1 gives the reason —
+/// sort ordering is never applied to distributed operations — and the
+/// current-state query already refuses it; the temporal one has to agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_4_4_temporal_ordering_requires_local_scope() {
+    let st = AppState::new("me".into());
+    seed(&st, "o1", "a").await;
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:order",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        // TEST-NET-3: never contacted, the request is refused before any forward
+        "endpoint": "http://203.0.113.7:9999",
+    })
+    .to_string();
+    let (status, b) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", reg.len())
+            .body(Body::from(reg))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+
+    let window = "type=Vehicle&timerel=after&timeAt=2000-01-01T00:00:00Z";
+    let (status, body) = get(
+        &st,
+        &format!("/ngsi-ld/v1/temporal/entities?{window}&orderBy=id"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+        "{body}"
+    );
+
+    // limited to the local scope, the same ordering is served (5.5.13)
+    let (status, body) = get(
+        &st,
+        &format!("/ngsi-ld/v1/temporal/entities?{window}&orderBy=id&local=true"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
