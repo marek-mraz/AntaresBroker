@@ -406,6 +406,81 @@ pub fn run_current_state_contract(
         d.delete(a, Kind::Entity, id).expect("delete page entity");
     }
 
+    // 4.22 at the read boundary, the part a backend must not decide for
+    // itself. The stamp marks "a certain Entity, Property or Relationship"
+    // invalid; it is not a store-wide rule that hides any document carrying
+    // one, and it reaches every Attribute of an Entity, sub-Attributes
+    // included.
+    let exp_e = format!("urn:ngsi-ld:{prefix}:expiry:entity");
+    let mut expired_entity = doc(&exp_e);
+    expired_entity["expiresAt"] = json!("2000-01-01T00:00:00.000Z");
+    d.upsert(a, Kind::Entity, &exp_e, expired_entity)
+        .expect("upsert expired entity");
+    assert!(
+        d.get(a, Kind::Entity, &exp_e).expect("get").is_none(),
+        "an Entity past its expiresAt reads absent, not just out of a page"
+    );
+    d.delete(a, Kind::Entity, &exp_e).expect("delete");
+
+    // An Attribute whose every instance expired leaves; the Entity carrying
+    // it does not, and neither does a live sibling.
+    let exp_a = format!("urn:ngsi-ld:{prefix}:expiry:attr");
+    let iri = |n: &str| format!("https://uri.etsi.org/ngsi-ld/default-context/{n}");
+    let mut with_attrs = doc(&exp_a);
+    with_attrs[iri("gone")] = json!([{"value": 1, "expiresAt": "2000-01-01T00:00:00.000Z"}]);
+    with_attrs[iri("kept")] = json!([{
+        "value": 2,
+        iri("subgone"): [{"value": 3, "expiresAt": "2000-01-01T00:00:00.000Z"}],
+        iri("subkept"): [{"value": 4}],
+    }]);
+    d.upsert(a, Kind::Entity, &exp_a, with_attrs)
+        .expect("upsert entity with an expired attribute");
+    let served = d
+        .get(a, Kind::Entity, &exp_a)
+        .expect("get")
+        .expect("an Entity outlives the expiry of one of its Attributes");
+    assert!(
+        served.get(iri("gone")).is_none(),
+        "an Attribute whose only instance expired is not served"
+    );
+    assert_eq!(
+        served[iri("kept")][0]["value"],
+        json!(2),
+        "a live Attribute survives its sibling's expiry"
+    );
+    assert!(
+        served[iri("kept")][0].get(iri("subgone")).is_none(),
+        "a sub-Attribute is a Property or Relationship too: past its stamp it \
+         is not served"
+    );
+    assert_eq!(
+        served[iri("kept")][0][iri("subkept")][0]["value"],
+        json!(4),
+        "a live sub-Attribute survives its sibling's expiry"
+    );
+    d.delete(a, Kind::Entity, &exp_a).expect("delete");
+
+    // 5.8.6: an expired SUBSCRIPTION is not deleted and stays retrievable —
+    // the API turns the stamp into status "expired" and keeps it updatable.
+    // A backend that hid every document with a past expiresAt would lose it.
+    let exp_s = format!("urn:ngsi-ld:{prefix}:expiry:sub");
+    d.upsert(
+        a,
+        Kind::Subscription,
+        &exp_s,
+        json!({
+            "id": exp_s,
+            "type": "Subscription",
+            "expiresAt": "2000-01-01T00:00:00.000Z",
+        }),
+    )
+    .expect("upsert expired subscription");
+    assert!(
+        d.get(a, Kind::Subscription, &exp_s).expect("get").is_some(),
+        "an expired Subscription stays retrievable (5.8.6)"
+    );
+    d.delete(a, Kind::Subscription, &exp_s).expect("delete");
+
     // `delete_entity_if` decides and deletes under one lock, and it decides
     // on the STORED document. 5.6.6.4: an Entity the caller's selector
     // excludes "is not known" for the operation, which is the same answer an
