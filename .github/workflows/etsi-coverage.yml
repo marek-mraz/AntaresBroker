@@ -179,6 +179,15 @@ jobs:
           new=$(lcov --summary merged.info --ignore-errors inconsistent 2>/dev/null                 | awk '/lines/ {gsub("%","",$2); print $2}')
           old=$(curl -sf https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage-badge.json                 | python3 -c 'import json,sys,re; m=re.search(r"[0-9.]+", json.load(sys.stdin)["message"]); print(m.group(0) if m else "")' || true)
           echo "merged lines: ${new}% (published baseline: ${old:-none}%)"
+          # The baseline lives off-tree, on the published report. When it
+          # cannot be read the ratchet has nothing to compare against — say
+          # so loudly, because a silent pass here is indistinguishable from a
+          # run that held the line.
+          if [ -z "$old" ] || [ -z "$new" ]; then
+            echo "::warning::coverage ratchet did not run — no baseline (published report unreachable) or no measurement"
+            echo "> Coverage ratchet SKIPPED this run: baseline \`${old:-unreadable}\`, measured \`${new:-none}\`." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -n "$old" ] && [ -n "$new" ]; then
             python3 -c "import sys; n, o = float(sys.argv[1]), float(sys.argv[2]); print(f'delta: {n-o:+.1f}pt'); sys.exit(1 if o - n > 1.0 else 0)" "$new" "$old"
           fi
