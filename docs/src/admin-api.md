@@ -136,7 +136,7 @@ Background in [operations](operations.md#tenants).
 
 | Call | Effect |
 |---|---|
-| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (the default tenant when `tenant` is absent), newest first, `limit` 100 by default; `400` for a `limit` that is not a positive integer or a tenant outside the grammar. Endpoint userinfo is redacted. |
+| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (the default tenant when `tenant` is absent), newest first, `limit` 100 by default; `400` for a `limit` that is not a positive integer or a tenant outside the grammar. Endpoint userinfo, `receiverInfo`, `notifierInfo` and the rendered `headers` of an older letter are shown blanked; the stored letter keeps them so a replay still authenticates. |
 | `POST /q/dead-letters/{id}/replay?tenant=` | One attempt through the same binding under the egress policy of the moment: `204` and the letter is gone, `502` with the failure text and the letter kept, `404` when the tenant holds no such letter. |
 | `DELETE /q/dead-letters/{id}?tenant=` | `204`, or `404` when the tenant holds no such letter. |
 

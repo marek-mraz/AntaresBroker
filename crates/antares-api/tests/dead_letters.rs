@@ -466,3 +466,44 @@ async fn dead_letter_routes_are_not_under_the_api_root_and_health_counts_them() 
     assert_eq!(s, StatusCode::OK);
     assert!(b["deadLetters"].is_u64(), "{b}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_listing_blanks_every_credential_a_letter_carries() {
+    let st = state();
+    let t = TenantId::new("acme").expect("tenant");
+    let id = "urn:ngsi-ld:DeadLetter:9";
+    let mut l = letter(
+        id,
+        "urn:s:9",
+        "http://127.0.0.1:9/n",
+        "2026-01-01T00:00:01Z",
+    );
+    // 5.2.22: a KeyValuePair's example content is "the HTTP Authentication
+    // Header", so receiverInfo is where a subscriber's endpoint credential
+    // lives. notifierInfo is opaque to every sink but the endpoint's own, so
+    // the broker cannot tell which of its keys names a secret.
+    l["receiverInfo"] = json!([["Authorization", "Bearer s3cret-token"]]);
+    l["notifierInfo"] = json!([["MQTT-QoS", "1"], ["MQTT-Password", "hunter2"]]);
+    // a letter written before the bindings moved behind the registry carries
+    // the same values already rendered into headers
+    l["headers"] = json!([
+        ["Content-Type", "application/json"],
+        ["Authorization", "Bearer legacy-token"]
+    ]);
+    assert!(st.store.create(&t, Kind::DeadLetter, id, l).expect("seed"));
+
+    let (_, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
+    let shown = b.to_string();
+    for secret in ["s3cret-token", "hunter2", "legacy-token"] {
+        assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+    }
+    // the keys stay: an operator has to see which parameters were set
+    for key in ["Authorization", "MQTT-QoS", "Content-Type"] {
+        assert!(shown.contains(key), "{key} lost: {shown}");
+    }
+    // the stored letter keeps what a replay has to send
+    let kept = stored(&st, "acme", id).expect("kept");
+    assert_eq!(kept["receiverInfo"][0][1], "Bearer s3cret-token");
+    assert_eq!(kept["notifierInfo"][1][1], "hunter2");
+    assert_eq!(kept["headers"][1][1], "Bearer legacy-token");
+}

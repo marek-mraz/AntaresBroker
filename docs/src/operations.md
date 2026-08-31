@@ -96,7 +96,7 @@ the subscription's tenant in every store mode.
 
 | Call | Effect |
 |---|---|
-| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (default tenant when `tenant` is absent), newest first, `limit` 100 by default. Endpoint userinfo is redacted in the listing. |
+| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (default tenant when `tenant` is absent), newest first, `limit` 100 by default. Endpoint userinfo and every credential the letter carries (`receiverInfo`, `notifierInfo`, the rendered `headers` of an older letter) are blanked in the listing; the stored letter keeps them for a replay. |
 | `POST /q/dead-letters/{id}/replay?tenant=` | One more attempt through the same binding under the egress policy of the moment: `204` and the letter is deleted, or `502` with the failure text and the letter kept (`attempts`, `lastError`, `lastAt` extended). |
 | `DELETE /q/dead-letters/{id}?tenant=` | Drop the letter. `404` when the tenant holds no such letter. |
 

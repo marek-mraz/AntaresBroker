@@ -741,9 +741,37 @@ fn admin_tenant(q: &std::collections::HashMap<String, String>) -> Result<TenantI
     TenantId::new(raw).map_err(|_| bad())
 }
 
+/// One dead letter as the listing may show it: everything on it that can be
+/// a credential is blanked, the keys are not.
+///
+/// `receiverInfo` and `notifierInfo` are KeyValuePair arrays (5.2.22), and
+/// the example content the datatype names is the HTTP Authentication header;
+/// a letter written before the bindings moved behind the registry carries the
+/// same values already rendered into `headers`. `notifierInfo` is opaque to
+/// every sink but the endpoint's own, so the broker cannot tell which of its
+/// keys names a secret and blanks them all. The stored letter keeps the
+/// values a replay has to send — only what leaves through this route loses
+/// them.
+fn redact_letter(l: &mut serde_json::Value) {
+    if let Some(u) = l["uri"].as_str() {
+        l["uri"] = serde_json::Value::String(notify::redact_userinfo(u));
+    }
+    for member in ["receiverInfo", "notifierInfo", "headers"] {
+        let Some(pairs) = l[member].as_array_mut() else {
+            continue;
+        };
+        for pair in pairs {
+            if let Some(v) = pair.get_mut(1) {
+                *v = serde_json::Value::String("[redacted]".into());
+            }
+        }
+    }
+}
+
 /// Dead letters of one tenant, newest first; `subscription=` narrows to one
-/// subscription, `limit=` bounds the page (default 100). The endpoint URI
-/// is shown with its userinfo redacted.
+/// subscription, `limit=` bounds the page (default 100). The endpoint URI is
+/// shown with its userinfo redacted and every credential the letter carries
+/// is blanked.
 async fn dead_letters_list(
     axum::extract::State(st): axum::extract::State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -774,9 +802,7 @@ async fn dead_letters_list(
     letters.sort_by(|a, b| b["lastAt"].as_str().cmp(&a["lastAt"].as_str()));
     letters.truncate(limit);
     for l in &mut letters {
-        if let Some(u) = l["uri"].as_str() {
-            l["uri"] = serde_json::Value::String(notify::redact_userinfo(u));
-        }
+        redact_letter(l);
     }
     (
         StatusCode::OK,
