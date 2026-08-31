@@ -1890,7 +1890,11 @@ pub async fn delete_entity(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
-        let ctx = st.loader.core();
+        // 5.5.7: `type` is a term, so the request's own @context expands it.
+        // Under the core context the same word names a different type than
+        // the client meant, and the delete then removes an Entity the
+        // client's selector excluded.
+        let ctx = request_context(&st.loader, &headers).await?;
         // 4.17/5.6.6.4: the type selector gates the target — a registration
         // for a different type must not receive the forwarded delete.
         let spec = crate::csource::CsrSpec {
@@ -2679,7 +2683,11 @@ pub async fn replace_entity(
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
         check_params(&params, &["local", "type"])?;
-        let ctx0 = st.loader.core();
+        // 5.5.7 again: the selector is expanded with the request's @context,
+        // not the core one. The target is judged before the body is parsed
+        // (5.6.18: an unknown target is 404 before body validation), so the
+        // header context is resolved on its own here.
+        let ctx0 = request_context(&st.loader, &headers).await?;
         // 5.6.18.4: the ?type selector narrows the target — a non-matching
         // entity is "not known" for this replace.
         let local_doc = st
