@@ -333,29 +333,64 @@ fn outbound_via(headers: &HeaderMap, alias: &str) -> String {
 /// resource — `.../entities/urn:x%23/attrs/speed` would reach the peer as
 /// Delete Entity (5.6.6) instead of Delete Attribute (5.6.5).
 pub(crate) fn path_segment(s: &str) -> String {
+    pct_encode(s, |b| {
+        matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+        )
+    })
+}
+
+/// Percent-encode one client-controlled value for use as a query-string
+/// value (RFC 3986 clause 3.4: a query is made of `pchar`, `/` and `?`).
+/// Parameters reach a handler already percent-decoded, so a value spliced
+/// back into a URI raw would change the query it belongs to (`&` and `=`
+/// start another parameter, `%` re-decodes, `+` reads back as a space) and,
+/// in a Link header, `>` would end the link-value (RFC 8288 clause 3).
+pub(crate) fn query_value(s: &str) -> String {
+    pct_encode(s, |b| {
+        matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b','
+                | b';'
+                | b':'
+                | b'@'
+                | b'/'
+                | b'?'
+        )
+    })
+}
+
+/// RFC 3986 clause 2.1: every byte the caller does not keep becomes its
+/// percent-encoded triplet; ASCII letters and digits are always kept.
+fn pct_encode(s: &str, keep: impl Fn(u8) -> bool) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        let keep = b.is_ascii_alphanumeric()
-            || matches!(
-                b,
-                b'-' | b'.'
-                    | b'_'
-                    | b'~'
-                    | b'!'
-                    | b'$'
-                    | b'&'
-                    | b'\''
-                    | b'('
-                    | b')'
-                    | b'*'
-                    | b'+'
-                    | b','
-                    | b';'
-                    | b'='
-                    | b':'
-                    | b'@'
-            );
-        if keep {
+        if b.is_ascii_alphanumeric() || keep(b) {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -2487,6 +2522,27 @@ mod tests {
         assert_eq!(path_segment(".."), "..");
         // non-ASCII is percent-encoded per its UTF-8 bytes
         assert_eq!(path_segment("é"), "%C3%A9");
+    }
+
+    /// RFC 3986 clause 3.4 + RFC 8288 clause 3: a value spliced back into a
+    /// query string must not be able to start another parameter, decode a
+    /// second time, or end the link-value it is carried in. The characters an
+    /// NGSI-LD filter legitimately uses (`urn:`, `.`, `*`, `-`) survive, or
+    /// every pagination link would run a different query than the one that
+    /// produced it.
+    #[test]
+    fn query_value_encodes_what_would_change_the_query() {
+        assert_eq!(
+            query_value("urn:ngsi-ld:Building:01931.*"),
+            "urn:ngsi-ld:Building:01931.*"
+        );
+        assert_eq!(query_value("cat>1"), "cat%3E1");
+        assert_eq!(query_value(r#"cat=="a&b""#), "cat%3D%3D%22a%26b%22");
+        // a value already carrying a percent must not decode twice
+        assert_eq!(query_value("a%26b"), "a%2526b");
+        // `+` reads back as a space in a query string
+        assert_eq!(query_value("a+b"), "a%2Bb");
+        assert_eq!(query_value("é"), "%C3%A9");
     }
 
     /// RFC 7230 received-by is a TOKEN compared for equality:

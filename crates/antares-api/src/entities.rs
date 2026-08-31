@@ -1195,7 +1195,7 @@ async fn query_entities_outer(
         let mut qp: Vec<String> = link_params
             .iter()
             .filter(|(k, _)| k.as_str() != "offset")
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(k, v)| format!("{k}={}", crate::federation::query_value(v)))
             .collect();
         qp.push(format!("offset={off}"));
         qp.sort(); // deterministic order — the suite string-compares links
@@ -1897,7 +1897,7 @@ fn paginate_impl(
             qp = params
                 .iter()
                 .filter(|(k, _)| !matches!(k.as_str(), "offset" | "limit"))
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|(k, v)| format!("{k}={}", crate::federation::query_value(v)))
                 .collect();
             qp.sort();
             if let Some(l) = params.get("limit") {
@@ -1908,7 +1908,7 @@ fn paginate_impl(
             qp = params
                 .iter()
                 .filter(|(k, _)| k.as_str() != "offset")
-                .map(|(k, v)| format!("{k}={v}"))
+                .map(|(k, v)| format!("{k}={}", crate::federation::query_value(v)))
                 .collect();
             qp.push(format!("offset={off}"));
             qp.sort(); // deterministic order — the suite string-compares links
