@@ -60,6 +60,19 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v5
+      # Five feature-set builds run below, and cargo keeps each one's
+      # artifacts side by side in target/ — the last of them linked the
+      # broker binary onto a full filesystem and the linker died with
+      # `ld terminated with signal 7 [Bus error]`, which reads as a compiler
+      # crash and is not one. Reclaim the runtimes this job never uses, and
+      # print the free space before and after so the margin is a number in
+      # the log rather than something a future run rediscovers as a SIGBUS.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/graalvm /usr/share/swift || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -161,6 +174,8 @@ jobs:
           # the broker's store×temporal combos too: their timescale rows skip
           # against the plain PostGIS service and only run here for real
           dev/unit-junit.sh timescale-store -p antares-sql -p antares-broker --test store_combos
+          # The margin the reclaim left, after the build that fills the most.
+          df -h /
       # Uploaded even on a red job: a failing config is exactly the one the
       # reports page must render, and fold-reports.sh takes the NEWEST bundle.
       - name: Unit JUnit bundle (folded into /reports/unit/)
