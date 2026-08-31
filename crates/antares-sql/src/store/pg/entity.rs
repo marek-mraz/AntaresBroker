@@ -207,7 +207,14 @@ fn query_sql(
             } else {
                 ""
             };
-            binds.push(Bind::Int(if p.count { p.limit } else { p.limit + 1 }));
+            // Saturating: the caller's limit is only bounded by `i64::MAX`
+            // (`ANTARES_DISCOVERY_SCAN_MAX` clamps to exactly that), and one
+            // past the largest page is still the largest page.
+            binds.push(Bind::Int(if p.count {
+                p.limit
+            } else {
+                p.limit.saturating_add(1)
+            }));
             let lim = binds.len();
             binds.push(Bind::Int(p.offset));
             (
@@ -1346,6 +1353,29 @@ mod tests {
         assert!(sql.contains("LIMIT $2 OFFSET $3"), "{sql}");
         assert!(matches!(binds[1], Bind::Int(11)), "limit + 1 must be bound");
         assert!(matches!(binds[2], Bind::Int(20)));
+    }
+
+    /// The largest page a caller can build still has to produce a usable
+    /// LIMIT. `types_attrs.rs` clamps its discovery scan to `i64::MAX` on
+    /// purpose so the cast is safe; the uncounted path then binds
+    /// `limit + 1`, which is where that clamp stops being enough. The
+    /// addition overflows: a panic in a debug build, and in release a wrap
+    /// to `i64::MIN`, which Postgres refuses as a negative LIMIT.
+    #[test]
+    fn the_largest_page_still_binds_a_usable_limit() {
+        let mut binds = vec![Bind::Text("t".to_owned())];
+        let p = Page {
+            offset: 0,
+            limit: i64::MAX,
+            count: false,
+        };
+        let (sql, paged) = query_sql("entity", &wheres(), Some(&p), true, &mut binds);
+        assert!(paged);
+        assert!(sql.contains("LIMIT $2"), "{sql}");
+        assert!(
+            matches!(binds[1], Bind::Int(i64::MAX)),
+            "the bound limit must stay positive"
+        );
     }
 
     /// The undecided path must never leave the statement unbounded: SQL only
