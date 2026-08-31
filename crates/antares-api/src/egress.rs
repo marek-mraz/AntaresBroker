@@ -79,6 +79,14 @@ impl Default for Egress {
     }
 }
 
+/// A URI as it may be repeated back to a caller. Every reason string this
+/// module returns is interpolated into a log line beside a URI the caller
+/// already redacted, so it carries the same redaction: 5.2.9 puts no limit on
+/// a registered endpoint's URI and reqwest sends its userinfo as credentials.
+fn redacted(url: &str) -> String {
+    antares_notifier::redact_userinfo(url)
+}
+
 /// The 5.2.34 cooldown key. The registration id is client-chosen PER TENANT
 /// (5.5.10), so the bare id would let one tenant's failing registration put
 /// another tenant's same-id registration into timeout. The unit separator
@@ -131,7 +139,7 @@ impl Egress {
     pub async fn check_url(&self, url: &str) -> Result<(), String> {
         let scheme = reqwest::Url::parse(url)
             .map(|u| u.scheme().to_owned())
-            .map_err(|e| format!("bad URL {url}: {e}"))?;
+            .map_err(|e| format!("bad URL {}: {e}", redacted(url)))?;
         match scheme.as_str() {
             "http" | "https" => {}
             other => return Err(format!("scheme {other:?} is not allowed for egress")),
@@ -152,11 +160,12 @@ impl Egress {
     /// `ip_is_private` over the resolved answer, as `connect_addr` does for
     /// MQTT and `PolicyResolver` for every reqwest client).
     pub async fn check_destination(&self, url: &str) -> Result<(), String> {
-        let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad URL {url}: {e}"))?;
+        let parsed =
+            reqwest::Url::parse(url).map_err(|e| format!("bad URL {}: {e}", redacted(url)))?;
         let host = parsed
             .host_str()
             .filter(|h| !h.is_empty())
-            .ok_or_else(|| format!("endpoint {url} names no host"))?
+            .ok_or_else(|| format!("endpoint {} names no host", redacted(url)))?
             .to_owned();
         let port = parsed.port_or_known_default().unwrap_or(443);
         self.policy.check_host(&host, port).await
@@ -239,6 +248,24 @@ impl Egress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason string is interpolated into a caller's log line next to a
+    /// URI that caller redacted (`notify.rs`, `federation.rs`), so it may not
+    /// smuggle back what the redaction removed: 5.2.9 allows any URI as a
+    /// registered endpoint and reqwest sends its userinfo as basic auth.
+    #[tokio::test]
+    async fn a_refused_url_never_repeats_its_userinfo() {
+        let e = Egress::new(antares_jsonld::EgressPolicy {
+            allow_private: false,
+        });
+        for url in [
+            "http://alice:s3cret@[not-an-ip]/x",
+            "http://alice:s3cret@/x",
+        ] {
+            let err = e.check_url(url).await.expect_err("refused");
+            assert!(!err.contains("s3cret"), "userinfo in the reason: {err}");
+        }
+    }
 
     #[tokio::test]
     async fn scheme_allowlist_and_private_deny() {
