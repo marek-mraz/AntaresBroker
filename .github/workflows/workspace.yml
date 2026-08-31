@@ -244,6 +244,11 @@ jobs:
       # the smallest broker build (every optional feature off) must compile
       - run: cargo check --locked -p antares-broker --no-default-features -j 2
         if: matrix.crate == 'antares-store'
+      # antares-sql without its Postgres arm — the shape the wasm and fuzz
+      # builds get. A workspace build unifies the feature back on from
+      # antares-api, so only a per-crate check sees a break in the gated code.
+      - run: cargo check --locked -p antares-sql --no-default-features -j 2
+        if: matrix.crate == 'antares-store'
       # The public surface a gateway author reads: every item documented
       # (#![deny(missing_docs)] in the crate) and no broken intra-doc link.
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items -p ${{ matrix.crate }}

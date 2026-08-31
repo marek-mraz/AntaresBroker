@@ -1142,14 +1142,19 @@ impl antares_store::CurrentStateDriver for AnyStore {
         id: &str,
         now: &str,
     ) -> Result<Option<antares_store::Delivery>, NgsiError> {
-        match (self, doc_kind(kind).ok()) {
-            #[cfg(feature = "postgres")]
-            (AnyStore::Pg(p), Some(dk)) => {
+        // `doc_kind` exists only with the Postgres arm, so its call lives
+        // inside the gate with it: outside the feature this function is the
+        // shared rule and nothing else.
+        #[cfg(feature = "postgres")]
+        {
+            if let (AnyStore::Pg(p), Ok(dk)) = (self, doc_kind(kind)) {
                 let found = p.docs.record_delivery(tenant, dk, id, now).map_err(db)?;
-                Ok(found.map(|(doc, prev_success)| antares_store::Delivery { doc, prev_success }))
+                return Ok(
+                    found.map(|(doc, prev_success)| antares_store::Delivery { doc, prev_success })
+                );
             }
-            _ => antares_store::record_delivery_via_mutate(self, tenant, kind, id, now),
         }
+        antares_store::record_delivery_via_mutate(self, tenant, kind, id, now)
     }
     fn sweep_expired(&self) -> usize {
         AnyStore::sweep_expired(self)
