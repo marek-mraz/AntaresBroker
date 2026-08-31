@@ -1578,6 +1578,23 @@ async fn batch_query_inner(
     if let Some(l) = params.get("local") {
         vp.insert("local".into(), l.clone());
     }
+    // 5.7.2.4 (p. 201): "At least one of the following input data shall be
+    // provided: a) selector of Entity Types; b) list of Attribute names,
+    // including at least one non-system Attribute; c) NGSI-LD Query,
+    // including at least one non-system Attribute; d) NGSI-LD GeoQuery;
+    // e) local scope. If none of the above is provided, then an error of type
+    // BadRequestData shall be raised (too wide query)." Query Entities is ONE
+    // operation: the resource that carries the Query in a body answers to the
+    // same behaviour clause as the one that carries it in the URI, and
+    // without this a bare `{"type":"Query"}` reads the whole tenant and fans
+    // the filterless query out to every matching registration.
+    let q_ast = vp.get("q").map(|q| antares_ql::parse_q(q)).transpose()?;
+    if !crate::entities::qualifies_non_wide(&vp, q_ast.as_ref()) {
+        return Err(NgsiError::BadRequestData(
+            "query needs at least one of type, attrs, q, georel (5.7.2.4)".into(),
+        )
+        .into());
+    }
     let fed = if crate::federation::active(&vp)
         && !crate::federation::via_loop(
             headers,
@@ -1727,6 +1744,58 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    /// 5.7.2.4 (p. 201): "At least one of the following input data shall be
+    /// provided: a) selector of Entity Types; b) list of Attribute names,
+    /// including at least one non-system Attribute; c) NGSI-LD Query,
+    /// including at least one non-system Attribute; d) NGSI-LD GeoQuery;
+    /// e) local scope. If none of the above is provided, then an error of
+    /// type BadRequestData shall be raised (too wide query)." Query Entities
+    /// is one operation, so the resource that carries the Query in a body is
+    /// bound by it exactly as the one that carries it in the URI.
+    #[tokio::test]
+    async fn a_too_wide_query_body_is_refused_like_its_uri_twin() {
+        let app = app();
+        for wide in [
+            json!({"type": "Query"}),
+            // ids and an id pattern alone are the case the clause names as
+            // insufficient ("it is not possible to retrieve a set of entities
+            // by only specifying desired Entity identifiers")
+            json!({"type": "Query", "entities": [{"id": "urn:ngsi-ld:Vehicle:1"}]}),
+            json!({"type": "Query", "entities": [{"idPattern": ".*"}]}),
+            // a system Attribute qualifies neither as an attrs list nor as q
+            json!({"type": "Query", "attrs": ["createdAt"]}),
+            json!({"type": "Query", "q": "createdAt>\"2020-01-01T00:00:00Z\""}),
+        ] {
+            let resp = post(&app, "/ngsi-ld/v1/entityOperations/query", wide.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "too wide query accepted: {wide}"
+            );
+            let body = body_json(resp).await;
+            assert_eq!(
+                body["type"], "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+                "{body}"
+            );
+        }
+
+        // Each of the five qualifying inputs on its own is still served.
+        for ok in [
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}]}),
+            json!({"type": "Query", "attrs": ["speed"]}),
+            json!({"type": "Query", "q": "speed>100"}),
+            json!({"type": "Query", "geoQ": {"georel": "near;maxDistance==2000",
+                   "geometry": "Point", "coordinates": "[1,2]"}}),
+        ] {
+            let resp = post(&app, "/ngsi-ld/v1/entityOperations/query", ok.clone()).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "qualifying query refused: {ok}"
+            );
+        }
     }
 
     /// A Query member lifted out of the body becomes the parameter its GET
