@@ -121,3 +121,79 @@ async fn the_lookup_ceiling_bounds_the_request_not_each_entity_on_the_page() {
          retrieval was truncated: {headers:?}"
     );
 }
+/// The POST twin of the same rule. `POST /entityOperations/query` answers a
+/// page exactly as `GET /entities` does, so it spends the same one
+/// allowance across it. 6.3.17 scopes the truncation warning to the GET
+/// resource, so what the answer carries is counted instead: with two roots
+/// naming DISJOINT target sets, an allowance per request cannot return more
+/// linked Entities than the ceiling, and an allowance per Entity returns all
+/// of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_post_query_spends_one_allowance_across_its_page() {
+    const CEILING: usize = 1000; // entities::MAX_JOIN_LOOKUPS
+    let st = AppState::new("antares-join-budget-post".into());
+
+    // Two disjoint target sets, created in one batch each: together they ask
+    // for more lookups than the ceiling, and neither alone reaches it.
+    for tag in ["A", "B"] {
+        let items: Vec<Value> = (0..WIDTH)
+            .map(|i| json!({"id": format!("urn:ngsi-ld:{tag}:{i}"), "type": "T"}))
+            .collect();
+        let body = Value::Array(items).to_string();
+        let (status, _, b) = send(
+            &st,
+            Request::builder()
+                .method("POST")
+                .uri("/ngsi-ld/v1/entityOperations/create")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert!(status.is_success(), "batch create {tag}: {status} {b}");
+    }
+    for (root, tag) in [("a", "A"), ("b", "B")] {
+        let mut doc = serde_json::Map::new();
+        doc.insert("id".into(), json!(format!("urn:ngsi-ld:PostRoot:{root}")));
+        doc.insert("type".into(), json!("PostRoot"));
+        for i in 0..WIDTH {
+            doc.insert(
+                format!("r{i}"),
+                json!({"type": "Relationship", "object": format!("urn:ngsi-ld:{tag}:{i}")}),
+            );
+        }
+        create(&st, Value::Object(doc)).await;
+    }
+
+    let body = json!({
+        "type": "Query",
+        "entities": [{"type": "PostRoot"}],
+        "join": "flat",
+        "joinLevel": 1,
+    })
+    .to_string();
+    let (status, _, out) = send(
+        &st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entityOperations/query")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let returned = out.as_array().map(Vec::len).unwrap_or(0);
+    // the two roots plus the Linked Entities the request was allowed to buy
+    assert!(
+        returned <= CEILING + 2,
+        "one request returned {returned} Entities; the ceiling is {CEILING}          lookups plus the 2 roots"
+    );
+    assert!(
+        returned < 2 * WIDTH + 2,
+        "the page returned every target of both roots ({returned}) — the          allowance was minted per Entity, not per request"
+    );
+    assert!(returned > 2, "the join returned nothing at all: {returned}");
+}

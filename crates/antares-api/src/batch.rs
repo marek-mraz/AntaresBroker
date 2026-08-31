@@ -1613,6 +1613,7 @@ async fn batch_query_inner(
     // exactly like their 6.3.7 query-parameter twins
     let repr = parse_repr(&page_params, &parsed.ctx)?;
     let join = crate::entities::parse_join(&vp)?;
+    crate::entities::check_linked_projection(&repr, &join)?;
     let mut payload: Vec<Value> = page
         .iter()
         .filter_map(|doc| {
@@ -1624,16 +1625,41 @@ async fn batch_query_inner(
         })
         .collect();
     if let Some((mode, level)) = &join {
+        // 4.5.23.1 bounds the WIDTH of the retrieval per REQUEST, so one
+        // allowance is spent across the whole page, exactly as the GET twin
+        // spends it. Minting a fresh allowance per payload Entity multiplies
+        // the ceiling by the page size, which is the request the ceiling
+        // exists to bound: a page of densely linked Entities.
+        let held = crate::entities::contained_by(&page_params);
+        let mut budget = crate::entities::MAX_JOIN_LOOKUPS;
         match mode.as_str() {
             "inline" => {
                 for p in &mut payload {
-                    crate::entities::inline_join(st, &tenant, &parsed.ctx, &repr, p, *level);
+                    crate::entities::inline_join_beyond(
+                        st,
+                        &tenant,
+                        &parsed.ctx,
+                        &repr,
+                        p,
+                        *level,
+                        &held,
+                        &mut budget,
+                    );
                 }
             }
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 for doc in &page {
-                    crate::entities::collect_flat(st, &tenant, &repr, doc, *level, &mut linked);
+                    crate::entities::collect_flat_beyond(
+                        st,
+                        &tenant,
+                        &repr,
+                        doc,
+                        *level,
+                        &mut linked,
+                        &held,
+                        &mut budget,
+                    );
                 }
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {

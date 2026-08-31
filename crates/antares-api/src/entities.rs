@@ -596,7 +596,7 @@ pub fn attach_warnings(resp: &mut Response, warnings: &[String]) {
 
 /// 5.7.1.4 / 5.7.2.4: a `{…}` projection selects into Linked Entities —
 /// it must be requested via join, and may not select deeper than joinLevel.
-fn check_linked_projection(
+pub(crate) fn check_linked_projection(
     repr: &crate::repr::Repr,
     join: &Option<(String, usize)>,
 ) -> ApiResult<()> {
@@ -694,7 +694,7 @@ fn joined_repr(parent: &crate::repr::Repr, key_compact: &str, key_iri: &str) -> 
 /// joinLevel bounds the DEPTH of the walk; this bounds its WIDTH — the total
 /// number of Linked Entity reads a single request may buy, so that a densely
 /// linked graph cannot turn one retrieval into an unbounded store scan.
-const MAX_JOIN_LOOKUPS: usize = 1_000;
+pub(crate) const MAX_JOIN_LOOKUPS: usize = 1_000;
 
 /// State of one Linked Entity Retrieval walk (4.5.23.1): the entity ids
 /// already resolved — a loop or a duplicate is never walked a second time —
