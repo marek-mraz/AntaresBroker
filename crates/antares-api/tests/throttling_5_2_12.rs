@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! 5.2.12 `throttling`: "Minimal period of time in seconds which shall
-//! elapse between two consecutive notifications" — audit P0-7: the matcher
+//! elapse between two consecutive notifications" — the matcher
 //! reads subscriptions from the SubMirror, but the bookkeeping writeback
 //! only went through the store, so the mirror copy never carried
 //! `notification.lastNotification` and throttling suppressed nothing.

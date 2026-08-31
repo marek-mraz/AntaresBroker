@@ -45,7 +45,7 @@ if ! "$VENV/bin/python" -c "import HttpCtrl" >/dev/null 2>&1; then
 fi
 
 # Point the suite at this broker (same sed recipe as Scorpio's runner).
-# Restore the sed-ed file on exit (E7): a dirty suite tree should mean a real
+# Restore the sed-ed file on exit: a dirty suite tree should mean a real
 # change, not a leftover run configuration.
 trap 'git -C "$SUITE" checkout -- resources/variables.py 2>/dev/null || true' EXIT
 ( cd "$SUITE/resources"

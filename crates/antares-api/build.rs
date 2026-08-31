@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2
-// E5 version surface: bake the short git hash in at build time so
+// Bake the short git hash in at build time so
 // /q/health and --version can report it. "unknown" outside a git checkout
 // (e.g. a source tarball) — never a build failure.
 fn main() {

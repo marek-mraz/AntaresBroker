@@ -550,8 +550,9 @@ pub(crate) fn sys_attrs_asked(params: &std::collections::HashMap<String, String>
         .is_some_and(|o| o.split(',').any(|s| s.trim() == "sysAttrs"))
 }
 
-/// Build a list response that STREAMS entity-by-entity (J5; the J3/J11c
-/// lesson: the serialized page must never exist as one contiguous buffer).
+/// Build a list response that STREAMS entity-by-entity: the serialized
+/// page must never exist as one contiguous buffer, so a large page costs
+/// one entity of memory rather than the whole body.
 /// Json and LdJson only — GeoJSON wraps a FeatureCollection object and takes
 /// the buffered `respond` path.
 pub fn respond_list(
