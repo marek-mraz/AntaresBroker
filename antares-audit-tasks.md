@@ -56,3 +56,145 @@ commit, large stays on the list until measured.
   inverted, so some other path sets `any_created` there. Find that path
   first, then write the fixture that separates a local creation from a
   forwarded one. Robot covers the behaviour; the crate does not.
+
+- [B] `SubMirror::candidates` answers every change from the type/attribute
+  index, but the `broad` set — subscriptions with neither a type nor a
+  watched-attribute selector — is added whole to every lookup and each
+  candidate is a deep `Value` clone. One drain of N changes therefore clones
+  the broad set N times, so a tenant that keeps many selector-free
+  subscriptions turns a batch write into O(N x B) clones. The same shape is
+  already documented one function down for `periodic_docs`. Not changed:
+  the cost is a measurement question, and `scale-weekly` is what says
+  whether the broad set is large enough in practice to be worth an Arc or a
+  per-drain cache. Measure first, then decide.
+
+- [B] `EgressPolicy::check_host_within` refuses the instance-metadata range
+  only for a host spelled as an IP literal. Its own comment claims the
+  refusal happens "before the private-egress switch is consulted, so a
+  deployment that allows private egress (the default) still cannot be
+  steered at its own instance credentials" — under `allow_private` a DNS
+  name returns `Ok` with no lookup at all, so the claim holds only for
+  literals. For every HTTP destination the gap is closed downstream:
+  `PolicyResolver` drops metadata addresses from the resolver answer
+  unconditionally, and the redirect policy re-checks each hop's literal, so
+  the connection never happens. It is open for a binding that dials the host
+  itself — the MQTT sink, and any plugin sink that declares `network()`. The
+  reachable effect is a TCP connect and an MQTT CONNECT to the metadata
+  service; nothing comes back to the client, so it is a connect primitive,
+  not a read one. Not changed: the fix is a `lookup_host` inside
+  `check_host_within` on the `allow_private` path, which puts a
+  `getaddrinfo` on the notification delivery hot path in the DEFAULT
+  configuration for every binding, to close a hole only two bindings have.
+  Either measure that cost first, or fix the comment to say what the code
+  does and let `PolicyResolver` own the invariant.
+
+- [B] The snapshot fill materialises the whole match set before the result
+  ceiling is applied. `snapshots.rs` `run_query` strips `limit`/`offset`/
+  `count` and calls the unpaged `filter_entities_fed`, then compares
+  `docs.len()` against `fill_cap` — so the cap bounds what is COPIED, never
+  what is READ, and one `POST /snapshots` over a broad query pulls every
+  matching Entity of the tenant into broker memory (the capacity target is
+  100 M). The temporal twin adds `to_bytes(resp.into_body(), usize::MAX)`
+  just to read the ids back out of a rendered temporal representation. The
+  same `usize::MAX` buffering of an internal response appears in
+  `entity_maps.rs` and in the temporal EntityMap recheck. Not changed: the
+  fix is a chunked fill (the shape `purge_locally` already uses), which
+  changes the fill's store-access pattern and its federated fan-out — worth
+  a `scale-weekly` number before and after rather than a guess.
+
+- [B] `entity_maps.rs` disables the paged fetch whenever `idPattern` is
+  present (the pushdown is impossible, which the comment says), then reads
+  the whole tenant match set and `.truncate`s it to `max_limit`. The
+  truncation is right; the read before it is not bounded. Same remedy and
+  same reason to measure first as the snapshot fill above.
+
+- [B] `merge_same_source` unions the `operations` of two registrations that
+  name the same Context Source and applies that union to the union of their
+  scopes. Two registrations for one endpoint — one offering `federationOps`
+  over `speed`, one offering `retrieveOps` over `brakeFluid` — fold into a
+  view that forwards a write of `brakeFluid`, which the registration owning
+  that Attribute never offered. 4.3.6.1 ("Context Brokers shall respect
+  this, to avoid unnecessarily sending distributed operation requests") is
+  what the union widens. The answer is still filtered locally, so this is an
+  over-ask, not a disclosure. Not changed: adding `ops` to the identity
+  predicate un-folds sources whose operation sets differ only in a write op
+  and gives one query two identical answers from one peer — the duplication
+  the fold exists to prevent. The correct shape decides per registration
+  which operation may travel for which scope, which is a change to the
+  fan-out unit itself; it wants its own box and an ETSI cell to prove the
+  duplicate case, not a predicate tweak.
+
+- [B] `reg_docs` narrows the registration set by ids and Entity Types on the
+  store arm and not on the mirror arm: `DocMirror::docs` returns
+  `values().cloned()` — every registration document of the tenant, deep
+  cloned, per distributed request. The mirror is wired only for `bus=nats`,
+  which is the deployment shape the 100 000+ registrations target names.
+  Tenant isolation holds (the mirror is keyed by tenant). Not changed: the
+  fix is an id/type index inside the mirror, which duplicates the store's
+  `matching_registrations` in a second place and wants a measured number
+  first — the same reason the snapshot-fill items above are open.
+
+- [B] A `redirect` registration whose every EntityInfo carries only an
+  `idPattern` satisfies neither `ids_narrow` nor `types_narrow`, so the
+  5.9.2.4 overlap check reads the tenant's entities up to
+  `MAX_UNDECIDED_ROWS` (10 000) and walks them once per EntityInfo (up to
+  `MAX_INFORMATION` = 128) — while holding `REGISTRATION_WRITE`, which is
+  one process-global mutex shared by every tenant. Bounded, but it is a
+  registration write of one tenant stalling every other tenant's. Not
+  changed: narrowing by idPattern needs the pattern's forced literal prefix
+  (`antares-store/src/filter.rs` already computes one for query paths) and
+  the lock wants to be per tenant; both are measurable changes that should
+  be proven on a scale run rather than guessed.
+
+- [B] `fed_entity_maps` destructures the forward result as
+  `let (status, body, _)`, dropping the peer's `NGSILD-Warning` values that
+  every other fan-out path surfaces through `usable_payload` (6.3.17). Its
+  acceptance test is `body.get("entityMap").is_some()` with no check that
+  the member is an object, and the caller inserts the peer's keys verbatim
+  into the locally stored EntityMap. Nothing escapes into a header — an
+  invalid `HeaderValue` fails the send — but peer-chosen content is
+  persisted and re-served without a shape check.
+
+- [B] `usable_payload` appends every `NGSILD-Warning` field a peer sent to
+  the response warning list with no count or length cap, and
+  `attach_warnings` turns each into a response header. Injection is not
+  possible (`HeaderValue::from_str` rejects controls, and the value already
+  survived hyper's parser), and the count is bounded per peer by hyper's
+  header limit and per request by `MAX_FED_FANOUT` — so the ceiling is a
+  large but finite header block on a client GET. 6.3.17 asks for one warning
+  per abnormal outcome, not a relay of a peer's whole list.
+
+- [B] `jsonld_contexts` is the one tenant-bearing table with no `tenant_id`
+  column ("deliberately cross-tenant", `0001_init.sql:108`): ownership of a
+  Hosted or ImplicitlyCreated row lives inside the JSON document as `owner`
+  and is enforced only in Rust, by `contexts::row_visible`. Every other such
+  table carries `tenant_id` with RLS (ADR-0001), so this one has no database
+  backstop — a future read path that forgets `row_visible` crosses the
+  boundary with nothing behind it to stop it. The Z1 rule ("every table with
+  `tenant_id` has RLS") is satisfied only by the absence of the column.
+  The data-loss half of this — a tenant purge could not reach those rows —
+  is fixed; this is the defence-in-depth half. Not changed: adding
+  `tenant_id` + an RLS policy means a Cached row (shared, owned by no
+  tenant) needs a representable owner, the URL-derived id lookup stops being
+  a single keyed read, and every context path changes shape. That is a
+  schema decision with an ADR behind it, not a bug fix, and it wants the
+  Cached/Hosted split settled first.
+
+- [B] FIXED, commit pending (repr::apply_lang + TRepr.lang; tests/temporal_lang_5_7_4.rs 5/5, Robot 5744_07 5/5, IOP_EXT_TMP_04 8/8) — `lang` on the temporal endpoints was accepted and silently ignored.
+  Table 6.18.3.2-1 (p.327) and 6.19.3.1 list `lang` with the same semantics
+  as 5.7.2.5: reduce every `languageMap` to a string/string array in the
+  chosen language plus a non-reified `lang` member. `temporal.rs` only
+  allow-lists the name (`check_params`, lines 1569 and 2134); `TRepr` has
+  no `lang` field and `present_temporal` renders `languageMap` /
+  `languageMaps` unreduced. `GET /temporal/entities?…&lang=en` returns the
+  full map. No unit test, no Robot TP covers it (020_12/020_17 only check
+  the unreduced LanguageProperty). Fix: carry `lang` into `TRepr`, apply
+  `repr::select_lang` per instance in `present_temporal`, ledger 5.7.3.5
+  and 5.7.4.5 → `partial` until then.
+
+- [B] FIXED, same change — stale comment: `temporal.rs` ~line 1631 said "csf is validated but not
+  applied to Context Source matching". It is applied: `federation::query_spec`
+  parses `csf` (federation.rs:1616) and `reg_matches` gates every
+  registration on `csf_matches` (federation.rs:447), and `fed_query_temporal`
+  goes through that path. Drop the "Named gap" sentence; the 5.7.4.4 ledger
+  already records csf as closed.
