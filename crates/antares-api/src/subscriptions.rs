@@ -323,6 +323,24 @@ pub fn normalize_subscription(
                         }
                     }
                 }
+                // 6.3.8 and 6.3.9: each receiverInfo pair becomes one custom
+                // header on the notification POST, and "'Key' and 'value'
+                // members shall adhere to IETF RFC 7230 ... definitions
+                // concerning HTTP headers". A pair that cannot be a header is
+                // input the operation cannot meet (5.8.1.4), so it is refused
+                // here rather than accepted into a Subscription that can only
+                // ever dead-letter. notifierInfo is not headers — its own
+                // binding validates it through the sink.
+                if let Some(arr) = ep.get("receiverInfo").and_then(Value::as_array) {
+                    for kv in arr {
+                        let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
+                        if !k.is_some_and(is_field_name) || !v.is_some_and(is_field_value) {
+                            return Err(bad(format!(
+                                "endpoint.receiverInfo entry {kv} is not a valid HTTP header                                  (RFC 7230, 6.3.8)"
+                            )));
+                        }
+                    }
+                }
                 // Table 5.2.15-1: cooldown and timeout are Numbers "Greater
                 // than 0"
                 for key in ["cooldown", "timeout"] {
@@ -610,6 +628,23 @@ fn check_endpoint(st: &AppState, norm: &Map<String, Value>) -> Result<(), NgsiEr
 /// would compact every Notification of this Subscription against another
 /// Tenant's term mappings. For any other Tenant the URL is as absent as one
 /// that never existed.
+/// RFC 7230 `field-name`: a `token`, one or more `tchar`.
+fn is_field_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// RFC 7230 `field-value`: visible ASCII, space and horizontal tab, with no
+/// leading or trailing whitespace. Empty is legal; `obs-text` and the
+/// deprecated `obs-fold` are not generated, so a byte outside that set — a
+/// bare CR or LF above all — makes the pair unsendable as a header.
+fn is_field_value(s: &str) -> bool {
+    !s.starts_with([' ', '\t'])
+        && !s.ends_with([' ', '\t'])
+        && s.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
+}
+
 async fn check_jsonld_context(
     st: &AppState,
     tenant: &TenantId,
@@ -1443,6 +1478,37 @@ mod tests {
                 json!({"uri": "http://a/x", key: [{"key": "k", "value": "v"}]})
             ))
             .is_ok());
+        }
+        // 6.3.8/6.3.9: each receiverInfo pair becomes one custom HTTP header,
+        // and "'Key' and 'value' members shall adhere to IETF RFC 7230 ...
+        // definitions concerning HTTP headers" — so a pair that cannot be a
+        // header is input the operation cannot meet, not a delivery that fails
+        // later.
+        for bad in [
+            json!([{"key": "", "value": "v"}]),
+            json!([{"key": "Bad Key", "value": "v"}]),
+            json!([{"key": "X:Y", "value": "v"}]),
+            json!([{"key": "X\r\nInjected", "value": "v"}]),
+            json!([{"key": "X", "value": "a\r\nInjected: 1"}]),
+            json!([{"key": "X", "value": "tab\u{7f}del"}]),
+            json!([{"key": "X", "value": " leading"}]),
+            json!([{"key": "X", "value": "trailing "}]),
+        ] {
+            assert!(
+                norm(&mk(json!({"uri": "http://a/x", "receiverInfo": bad}))).is_err(),
+                "receiverInfo {bad} must be rejected"
+            );
+        }
+        for ok in [
+            json!([{"key": "Authorization", "value": "Bearer t"}]),
+            json!([{"key": "X-Custom_1!", "value": ""}]),
+            json!([{"key": "Prefer", "value": "body=json"}]),
+            json!([{"key": "X", "value": "a\tb"}]),
+        ] {
+            assert!(
+                norm(&mk(json!({"uri": "http://a/x", "receiverInfo": ok}))).is_ok(),
+                "receiverInfo {ok} must be accepted"
+            );
         }
         assert!(norm(&mk(json!({"uri": "http://a/x", "accept": "text/html"}))).is_err());
         assert!(norm(&mk(
