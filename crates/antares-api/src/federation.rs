@@ -11,7 +11,7 @@ use crate::negotiate::*;
 use crate::state::AppState;
 use antares_jsonld::Context;
 use antares_model::operations::{group_members, DEFAULT_OPERATION_GROUP};
-use antares_model::TenantId;
+use antares_model::{NgsiError, TenantId};
 #[cfg(test)]
 use antares_store::Kind;
 use axum::http::{HeaderMap, StatusCode};
@@ -429,6 +429,11 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 /// Entity Types this operation names, so a broker holding a large
 /// registration set does not read all of it per distributed request.
 ///
+/// A store that cannot answer is an error, never an empty set: "no Context
+/// Source is registered" and "the registrations could not be read" lead to
+/// opposite answers, and only the first of them is one the client may be
+/// shown as complete (Table 6.3.2-1 InternalError).
+///
 /// The narrowing may only ever drop registrations [`reg_candidate`] would
 /// reject anyway; it is a prefilter, never the decision. So the type
 /// dimension is dropped whenever a member is a 4.17 Entity Type Selection
@@ -442,9 +447,9 @@ fn reg_docs(
     tenant: &TenantId,
     spec: &crate::csource::CsrSpec,
     ctx: &Context,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, NgsiError> {
     match &st.reg_mirror {
-        Some(m) => m.docs(tenant.as_str()),
+        Some(m) => Ok(m.docs(tenant.as_str())),
         None => {
             let types: Option<Vec<String>> = spec
                 .types
@@ -456,7 +461,6 @@ fn reg_docs(
                 .map(|ts| ts.iter().map(|t| ctx.expand_key(t)).collect());
             st.store
                 .matching_registrations(tenant, spec.ids.as_deref(), types.as_deref())
-                .unwrap_or_default()
         }
     }
 }
@@ -549,12 +553,12 @@ pub fn matching_regs(
     spec: &crate::csource::CsrSpec,
     ctx: &Context,
     headers: &HeaderMap,
-) -> Vec<FedReg> {
+) -> Result<Vec<FedReg>, NgsiError> {
     if via_hops(headers) > MAX_VIA_HOPS {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let seen = via_tokens(headers);
-    let regs: Vec<FedReg> = reg_docs(st, tenant, spec, ctx)
+    let regs: Vec<FedReg> = reg_docs(st, tenant, spec, ctx)?
         .iter()
         .filter_map(|doc| {
             let infos = reg_candidate(doc, spec, ctx, &seen)?;
@@ -659,7 +663,7 @@ pub fn matching_regs(
             })
         })
         .collect();
-    merge_same_source(regs)
+    Ok(merge_same_source(regs))
 }
 
 /// Registrations naming the same Context Source (same endpoint, mode,
@@ -1313,7 +1317,7 @@ pub async fn fed_retrieve_temporal(
     params: &HashMap<String, String>,
     map: Option<&Value>,
     warnings: &mut Vec<String>,
-) -> Vec<(bool, Value)> {
+) -> Result<Vec<(bool, Value)>, NgsiError> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         temporal: crate::temporal::TemporalQ::from_params(params, false)
@@ -1323,7 +1327,7 @@ pub async fn fed_retrieve_temporal(
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
         .into_iter()
         // 5.7.3.4: a live EntityMap in use is the ONLY source of matching
         // registrations; its linked map location travels with the forward.
@@ -1371,7 +1375,7 @@ pub async fn fed_retrieve_temporal(
             )),
         }
     }
-    out
+    Ok(out)
 }
 
 /// The DateTime 4.5.5.3 arbitrates on, as a comparable key: 4.6.3 admits the
@@ -1509,14 +1513,14 @@ pub async fn fed_retrieve(
     map: Option<&Value>,
     except_reg: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Vec<(bool, Value)> {
+) -> Result<Vec<(bool, Value)>, NgsiError> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
         .into_iter()
         // 5.8.6 splitEntities merge: "except for the one from which the
         // Notification has been received"
@@ -1620,7 +1624,7 @@ pub async fn fed_retrieve(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Federated query: internal docs matching a type query, per registration.
@@ -1668,16 +1672,16 @@ pub fn would_federate(
     ctx: &Context,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
-) -> bool {
+) -> Result<bool, NgsiError> {
     if !active(params) || via_hops(headers) > MAX_VIA_HOPS {
-        return false;
+        return Ok(false);
     }
     // the verdict only — no forwarding set is compiled for it
     let spec = query_spec(ctx, params);
     let seen = via_tokens(headers);
-    reg_docs(st, tenant, &spec, ctx)
+    Ok(reg_docs(st, tenant, &spec, ctx)?
         .iter()
-        .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some())
+        .any(|doc| reg_candidate(doc, &spec, ctx, &seen).is_some()))
 }
 
 /// May a fan-out response contribute the entity `id` under registration
@@ -1713,11 +1717,11 @@ pub async fn fed_query(
     ctx: &Context,
     params: &HashMap<String, String>,
     warnings: &mut Vec<String>,
-) -> Vec<(bool, Value)> {
+) -> Result<Vec<(bool, Value)>, NgsiError> {
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
         .into_iter()
         .filter(|r| r.query_op().is_some())
         .collect();
@@ -1910,7 +1914,7 @@ pub async fn fed_query(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// 5.14.4.4 / 5.14.5.4: forward EntityMap creation to matching registrations
@@ -1928,11 +1932,11 @@ pub(crate) async fn fed_entity_maps(
     split: bool,
     op: &str,
     path: &str,
-) -> Vec<(String, Value)> {
+) -> Result<Vec<(String, Value)>, NgsiError> {
     let spec = query_spec(ctx, params);
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
         .into_iter()
         .filter(|reg| reg.supports(op))
         .collect();
@@ -1989,7 +1993,7 @@ pub(crate) async fn fed_entity_maps(
             out.push((reg.reg_id.clone(), body));
         }
     }
-    out
+    Ok(out)
 }
 
 /// 5.7.4.4: forward the temporal query to matching registrations that
@@ -2002,14 +2006,14 @@ pub async fn fed_query_temporal(
     ctx: &Context,
     params: &HashMap<String, String>,
     warnings: &mut Vec<String>,
-) -> Vec<(bool, Value)> {
+) -> Result<Vec<(bool, Value)>, NgsiError> {
     let mut spec = query_spec(ctx, params);
     spec.temporal = crate::temporal::TemporalQ::from_params(params, false)
         .ok()
         .flatten();
     let ctx_url = ctx_link_url(headers, &ctx.source);
     let ctx_url = &ctx_url;
-    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)
+    let regs: Vec<FedReg> = matching_regs(st, tenant, &spec, ctx, headers)?
         .into_iter()
         .filter(|reg| reg.supports("queryTemporal"))
         .collect();
@@ -2081,7 +2085,7 @@ pub async fn fed_query_temporal(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Merge federated docs into a local candidate set (keyed by id). Local docs
@@ -2261,14 +2265,14 @@ pub fn write_regs(
     ctx: &Context,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
-) -> Vec<FedReg> {
+) -> Result<Vec<FedReg>, NgsiError> {
     if !active(params) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    matching_regs(st, tenant, spec, ctx, headers)
+    Ok(matching_regs(st, tenant, spec, ctx, headers)?
         .into_iter()
         .filter(|r| r.mode != "auxiliary")
-        .collect()
+        .collect())
 }
 
 /// Execute one forwarded write and turn it into a Part.
@@ -2711,10 +2715,10 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let all = matching_regs(&st, &tenant, &spec, &ctx, &hdrs(None));
+        let all = matching_regs(&st, &tenant, &spec, &ctx, &hdrs(None)).expect("registrations");
         assert_eq!(all.len(), 3, "no Via ⇒ every registration matches");
         let via = hdrs(Some("1.1 peer1"));
-        let left = matching_regs(&st, &tenant, &spec, &ctx, &via);
+        let left = matching_regs(&st, &tenant, &spec, &ctx, &via).expect("registrations");
         let ids: Vec<&str> = left.iter().map(|r| r.reg_id.as_str()).collect();
         assert!(
             !ids.contains(&"urn:ngsi-ld:ContextSourceRegistration:visited"),
@@ -2786,7 +2790,8 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new());
+        let regs =
+            matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new()).expect("registrations");
         let lo = |id: &str| {
             regs.iter()
                 .find(|r| r.reg_id == id)
@@ -2822,7 +2827,8 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let regs = matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new());
+        let regs =
+            matching_regs(&st, &tenant, &spec, &ctx, &HeaderMap::new()).expect("registrations");
         assert!(
             regs.iter()
                 .find(|r| r.reg_id == id)
@@ -2912,7 +2918,8 @@ mod tests {
             &ctx,
             &HashMap::new(),
             &HeaderMap::new(),
-        );
+        )
+        .expect("registrations");
         let ids: Vec<&str> = regs.iter().map(|r| r.reg_id.as_str()).collect();
         assert_eq!(ids, vec!["urn:ngsi-ld:ContextSourceRegistration:inc"]);
     }
@@ -3249,14 +3256,21 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            matching_regs(&st, &t, &spec, &ctx, &over).is_empty(),
+            matching_regs(&st, &t, &spec, &ctx, &over)
+                .expect("registrations")
+                .is_empty(),
             "no registration is matched past the hop ceiling"
         );
         // at the ceiling the chain is still processed normally
         let at = hdrs(Some(&chain(MAX_VIA_HOPS)));
         assert!(!via_loop(&at, "me"));
         assert!(handle_via_loop(&at, "me", &t, &mut vec![reg("inclusive")]).is_none());
-        assert_eq!(matching_regs(&st, &t, &spec, &ctx, &at).len(), 1);
+        assert_eq!(
+            matching_regs(&st, &t, &spec, &ctx, &at)
+                .expect("registrations")
+                .len(),
+            1
+        );
     }
 
     /// 5.7.2.4/4.23.1: `would_federate` only answers WHETHER a query leaves
@@ -3308,13 +3322,15 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                would_federate(&st, &t, &ctx, &p, &headers),
+                would_federate(&st, &t, &ctx, &p, &headers).expect("registrations"),
                 expected,
                 "would_federate verdict for {p:?}"
             );
             assert_eq!(
                 active(&p)
-                    && !matching_regs(&st, &t, &query_spec(&ctx, &p), &ctx, &headers).is_empty(),
+                    && !matching_regs(&st, &t, &query_spec(&ctx, &p), &ctx, &headers)
+                        .expect("registrations")
+                        .is_empty(),
                 expected,
                 "the compiled forward set must agree for {p:?}"
             );

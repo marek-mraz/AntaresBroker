@@ -329,7 +329,7 @@ async fn merge_and_store_map(
         let split = params.get("splitEntities").map(String::as_str) == Some("true");
         for (reg_id, remote) in
             crate::federation::fed_entity_maps(st, tenant, headers, ctx, params, split, op, path)
-                .await
+                .await?
         {
             if let Some(obj) = remote.get("entityMap").and_then(Value::as_object) {
                 for eid in obj.keys() {
@@ -474,7 +474,7 @@ pub(crate) fn build_retrieve_map(
             ids: Some(vec![id.to_owned()]),
             ..Default::default()
         };
-        for reg in crate::federation::matching_regs(st, tenant, &spec, ctx, headers) {
+        for reg in crate::federation::matching_regs(st, tenant, &spec, ctx, headers)? {
             let ok = if temporal {
                 reg.supports("retrieveTemporal")
             } else {

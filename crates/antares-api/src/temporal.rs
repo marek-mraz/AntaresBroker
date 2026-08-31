@@ -83,7 +83,7 @@ pub async fn upsert_temporal(
             ..Default::default()
         };
         let mut regs =
-            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers);
+            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers)?;
         if let Some(r) = crate::federation::handle_via_loop(
             &headers,
             &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -1690,7 +1690,7 @@ pub(crate) async fn query_temporal_inner(
     // applied to distributed operations." The subject is the EXECUTION, so a
     // query nothing would federate to orders without `local=true`.
     if let Some(spec) = params.get("orderBy") {
-        if crate::federation::would_federate(st, &tenant, &ctx, params, headers) {
+        if crate::federation::would_federate(st, &tenant, &ctx, params, headers)? {
             return Err(NgsiError::BadRequestData(
                 "orderBy requires local scope — ordering is never applied to \
                  distributed operations (5.7.4.4, 4.23.1)"
@@ -1779,7 +1779,7 @@ pub(crate) async fn query_temporal_inner(
         && params.get("datasetId").is_none()
         && params.get("pick").is_none()
         && p_limit > 0
-        && !crate::federation::would_federate(st, &tenant, &ctx, params, headers);
+        && !crate::federation::would_federate(st, &tenant, &ctx, params, headers)?;
     // 4.5.19 computed by the store: the numeric bucket matrix per attribute
     // comes back aggregated when nothing after the store call could change
     // the answer — every filter exact in SQL, the page pushed, no
@@ -1909,7 +1909,7 @@ pub(crate) async fn query_temporal_inner(
             params,
             &mut warnings,
         )
-        .await;
+        .await?;
         let mut order: Vec<String> = Vec::new();
         let mut by_id: std::collections::HashMap<String, Value> = Default::default();
         for doc in all {
@@ -2255,7 +2255,7 @@ async fn retrieve_temporal_inner(
                 map,
                 &mut warnings,
             )
-            .await;
+            .await?;
             let (mut base, skip) = match local {
                 Some(b) => (b, None),
                 None => {
@@ -2513,7 +2513,7 @@ pub async fn add_temporal_attrs(
             ..Default::default()
         };
         let mut regs =
-            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers);
+            crate::federation::write_regs(&st, &tenant, &spec, &parsed.ctx, &params, &headers)?;
         if let Some(r) = crate::federation::handle_via_loop(
             &headers,
             &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -2756,7 +2756,8 @@ fn temporal_write_regs(
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers);
+    let mut regs = crate::federation::write_regs(st, tenant, &spec, ctx, params, headers)
+        .map_err(|e| Box::new(crate::negotiate::ApiError::from(e).into_response()))?;
     match crate::federation::handle_via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, tenant),

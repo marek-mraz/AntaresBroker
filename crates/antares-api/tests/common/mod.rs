@@ -21,6 +21,7 @@ pub struct Double {
     delete_on_get: bool,
     racing_write: Option<Value>,
     raced: AtomicBool,
+    refuse_registrations: bool,
 }
 
 impl Double {
@@ -34,6 +35,7 @@ impl Double {
             delete_on_get: false,
             racing_write: None,
             raced: AtomicBool::new(false),
+            refuse_registrations: false,
         }
     }
 
@@ -48,6 +50,7 @@ impl Double {
             delete_on_get: true,
             racing_write: None,
             raced: AtomicBool::new(false),
+            refuse_registrations: false,
         }
     }
 
@@ -64,6 +67,7 @@ impl Double {
             delete_on_get: false,
             racing_write: Some(replacement),
             raced: AtomicBool::new(false),
+            refuse_registrations: false,
         }
     }
 
@@ -78,6 +82,22 @@ impl Double {
             self.inner.upsert(tenant, kind, id, doc.clone())?;
         }
         Ok(())
+    }
+
+    /// The registration read fails while everything else keeps working —
+    /// the shape of a connection lost between two statements, or a backend
+    /// that refuses this one query. Entity data still reads, so a handler
+    /// that treats the refusal as "no Context Source is registered" answers
+    /// a distributed operation with local data alone and calls it complete.
+    pub fn refusing_registrations(inner: Arc<dyn CurrentStateDriver>) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: false,
+            racing_write: None,
+            raced: AtomicBool::new(false),
+            refuse_registrations: true,
+        }
     }
 }
 
@@ -187,6 +207,9 @@ impl CurrentStateDriver for Double {
         ids: Option<&[String]>,
         types: Option<&[String]>,
     ) -> Result<Vec<Value>, NgsiError> {
+        if self.refuse_registrations {
+            return Err(NgsiError::InternalError("registrations unreadable".into()));
+        }
         self.inner.matching_registrations(tenant, ids, types)
     }
     fn query_entities(

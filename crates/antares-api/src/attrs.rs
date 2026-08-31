@@ -174,7 +174,7 @@ async fn write_attrs(
         },
     )?;
     let (mut regs, all_attr_iris) =
-        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers);
+        attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers)?;
     if let Some(r) = crate::federation::handle_via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -420,10 +420,10 @@ fn attr_fed_plan(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> (Vec<crate::federation::FedReg>, Vec<String>) {
+) -> Result<(Vec<crate::federation::FedReg>, Vec<String>), NgsiError> {
     let attr_iris = attr_iris_of(fragment);
-    let regs = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers);
-    (regs, attr_iris)
+    let regs = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers)?;
+    Ok((regs, attr_iris))
 }
 
 fn attr_fed_plan_iris(
@@ -434,7 +434,7 @@ fn attr_fed_plan_iris(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> Vec<crate::federation::FedReg> {
+) -> Result<Vec<crate::federation::FedReg>, NgsiError> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         attrs: (!attr_iris.is_empty()).then(|| attr_iris.to_vec()),
@@ -455,15 +455,16 @@ fn attr_regs_or_loop(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
-) -> (Vec<crate::federation::FedReg>, Option<Response>) {
-    let mut regs = attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers);
+) -> Result<(Vec<crate::federation::FedReg>, Option<Response>), NgsiError> {
+    let mut regs =
+        attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers)?;
     let loop_answer = crate::federation::handle_via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, tenant),
         tenant,
         &mut regs,
     );
-    (regs, loop_answer)
+    Ok((regs, loop_answer))
 }
 
 /// The local half of a distributed attribute write is skipped only when every
@@ -847,7 +848,7 @@ async fn partial_update_inner(
         .into());
     }
     let (regs, loop_answer) =
-        attr_regs_or_loop(st, &tenant, id, &attr_iri, &parsed.ctx, params, headers);
+        attr_regs_or_loop(st, &tenant, id, &attr_iri, &parsed.ctx, params, headers)?;
     if let Some(r) = loop_answer {
         return Ok(r);
     }
@@ -1008,7 +1009,7 @@ pub async fn replace_attr(
             .and_then(Value::as_str)
             .map(String::from);
         let (regs, loop_answer) =
-            attr_regs_or_loop(&st, &tenant, &id, &attr_iri, &parsed.ctx, &params, &headers);
+            attr_regs_or_loop(&st, &tenant, &id, &attr_iri, &parsed.ctx, &params, &headers)?;
         if let Some(r) = loop_answer {
             return Ok(r);
         }
@@ -1129,7 +1130,7 @@ async fn delete_attr_inner(
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
     let want_ds = params.get("datasetId").cloned();
-    let (regs, loop_answer) = attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers);
+    let (regs, loop_answer) = attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers)?;
     if let Some(r) = loop_answer {
         return Ok(r);
     }

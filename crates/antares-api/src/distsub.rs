@@ -739,7 +739,7 @@ async fn split_merge(
     sub: &Value,
     origin_reg: Option<&str>,
     data: Vec<Value>,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, NgsiError> {
     let ctx = crate::notify::sub_context(st, tenant, sub).await;
     let headers = HeaderMap::new();
     let mut out = Vec::new();
@@ -768,7 +768,7 @@ async fn split_merge(
             origin_reg,
             &mut warnings,
         )
-        .await;
+        .await?;
         for aux_pass in [false, true] {
             for (aux, doc) in &fed {
                 if *aux == aux_pass {
@@ -790,7 +790,7 @@ async fn split_merge(
             out.push(crate::entities::compact_for(&shape.repr, &shaped, &ctx));
         }
     }
-    out
+    Ok(out)
 }
 
 /// POST /ngsi-ld/ex/remote-notify — the local broker's endpoint for
@@ -906,7 +906,7 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
     // retrieve them locally and from all other Context Sources (except the
     // origin), merge, and re-filter by the local Subscription's conditions.
     if sub.get("splitEntities").and_then(Value::as_bool) == Some(true) {
-        data = split_merge(st, &tenant, &sub, origin_reg_id.as_deref(), data).await;
+        data = split_merge(st, &tenant, &sub, origin_reg_id.as_deref(), data).await?;
         if data.is_empty() {
             // "If there are Entities in the data member of the Notification
             // copy, the Notification copy shall be forwarded" — none left

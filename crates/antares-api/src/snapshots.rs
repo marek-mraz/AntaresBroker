@@ -576,7 +576,7 @@ async fn run_query(
     let headers = HeaderMap::new();
     let mut warnings = Vec::new();
     let fed = if crate::federation::active(&vp) {
-        crate::federation::fed_query(st, tenant, &headers, ctx, &vp, &mut warnings).await
+        crate::federation::fed_query(st, tenant, &headers, ctx, &vp, &mut warnings).await?
     } else {
         Vec::new()
     };

@@ -403,7 +403,7 @@ async fn batch_write(
         spec.attrs = Some(spec_attrs);
     }
     let mut fed_regs =
-        crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params, headers);
+        crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params, headers)?;
     if let Some(r) = crate::federation::handle_via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -1043,7 +1043,7 @@ pub async fn batch_delete(
             &st.loader.core(),
             &params,
             &headers,
-        );
+        )?;
         if let Some(r) = crate::federation::handle_via_loop(
             &headers,
             &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -1597,7 +1597,7 @@ async fn batch_query_inner(
         let mut warnings = Vec::new();
         let fed =
             crate::federation::fed_query(st, &tenant, headers, &parsed.ctx, &vp, &mut warnings)
-                .await;
+                .await?;
         for w in &warnings {
             tracing::debug!("distributed query warning (batch query): {w}");
         }
