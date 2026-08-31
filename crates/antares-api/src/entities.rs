@@ -1055,10 +1055,7 @@ async fn query_entities_outer(
     // (5.5.14). Memory per request is O(chunk), never O(map) — the reason
     // EntityMaps exist for the distributed case. count=true walks every
     // candidate (the total needs each id checked), still chunk-bounded.
-    let ids: Vec<String> = map["entityMap"]
-        .as_object()
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default();
+    let ids: Vec<String> = crate::entity_maps::candidate_ids(&map, &params);
     let looped = crate::federation::via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, &tenant),

@@ -54,6 +54,27 @@ pub(crate) fn map_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Valu
     Some(doc)
 }
 
+/// The Entities of a map a given request may be answered from.
+///
+/// 5.5.9.3: "the set of Entities considered for the result is fixed with the
+/// initial query creating the Entity map." The map is the CANDIDATE set; the
+/// request's own filters still apply on top of it, so a request that names
+/// `id=` is asking for the intersection and never for the map's whole set.
+/// Returned in the map's own order, which is the pagination order.
+pub(crate) fn candidate_ids(map: &Value, params: &HashMap<String, String>) -> Vec<String> {
+    let named: Option<std::collections::HashSet<&str>> =
+        params.get("id").map(|s| s.split(',').collect());
+    map["entityMap"]
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .filter(|k| named.as_ref().is_none_or(|n| n.contains(k.as_str())))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) {
     let Some(id) = doc.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return;

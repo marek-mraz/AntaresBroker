@@ -64,7 +64,9 @@ async fn create_vehicle(st: &AppState, id: &str) {
     let body = serde_json::json!({
         "id": id,
         "type": "Vehicle",
-        "speed": {"type": "Property", "value": 50},
+        // observedAt so the default ANTARES_TEMPORAL_RECORD=observed gate
+        // admits the instance and the temporal query has history to answer
+        "speed": {"type": "Property", "value": 50, "observedAt": "2026-01-01T00:00:00Z"},
     })
     .to_string();
     let req = Request::builder()
@@ -283,4 +285,64 @@ async fn map_paging_count_is_the_matching_total() {
         .get("NGSILD-Results-Count")
         .and_then(|v| v.to_str().ok());
     assert_eq!(count, Some("7"), "count walks the whole map");
+}
+
+/// Read the map document back through the API and return its candidate ids.
+async fn map_ids(st: &AppState, map_ref: &str) -> Vec<String> {
+    let (parts, body) = get(st, map_ref, None).await;
+    assert_eq!(parts.status, 200, "retrieve EntityMap: {body}");
+    serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v["entityMap"].as_object().cloned())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn ids_of(body: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| e["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// 5.5.9.3: "the set of Entities considered for the result is fixed with the
+/// initial query creating the Entity map" — the map is the CANDIDATE set and
+/// the request's own filters narrow it. A request that names `id=` therefore
+/// asks for the intersection: the answer holds only the named Entity, and the
+/// Entities it did not ask about stay in the map for the next page. Judging
+/// them against a filter they were never in scope for and deleting them
+/// ("Entities not or no longer fitting the query shall be removed") destroys
+/// the cursor for every later request that references the same map.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_request_neither_widens_the_answer_nor_empties_the_map() {
+    // wire() installs the temporal auto-record hook, so the temporal half of
+    // this test has history to answer from
+    let mut st = AppState::new("antares-map-narrow".into());
+    antares_api::notify::wire(&mut st);
+    let map_ref = seed_with_map(&st, 4).await;
+    let before = map_ids(&st, &map_ref).await;
+    assert_eq!(before.len(), 4, "{before:?}");
+    let one = "urn:ngsi-ld:Vehicle:pg-001";
+
+    for path in [
+        "/ngsi-ld/v1/entities?type=Vehicle",
+        "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=1970-01-01T00:00:00Z",
+    ] {
+        let (parts, body) = get(&st, &format!("{path}&id={one}"), Some(&map_ref)).await;
+        assert_eq!(parts.status, 200, "{path}: {body}");
+        assert_eq!(
+            ids_of(&body),
+            vec![one.to_owned()],
+            "{path} must answer the intersection of the map and the request's id="
+        );
+        let mut after = map_ids(&st, &map_ref).await;
+        after.sort();
+        assert_eq!(
+            after, before,
+            "{path} pruned Entities the request never asked about"
+        );
+    }
 }

@@ -1446,48 +1446,63 @@ async fn query_temporal_outer(
         return query_temporal_inner(st, &params, headers).await;
     };
     params.remove("entityMap");
-    // 5.5.14: the creator removes Entities that no longer match the query
-    // filters at processing time — judgeable locally only for "@none"
-    // entries. Known cost: this recheck is a second temporal query per
-    // map-using request, same shape as the entity query's filter re-run.
-    let matching: std::collections::HashSet<String> = {
+    // 5.5.9.3: the map fixes the candidate set and the request's own filters
+    // narrow it, so `id=` on this request selects from the map rather than
+    // replacing it.
+    let candidates = crate::entity_maps::candidate_ids(&map, &params);
+    // "filters shall be rechecked before returning results" and "Entities not
+    // or no longer fitting the query shall be removed from the Entity map
+    // during pagination" — so the recheck asks about the map's OWN Entities,
+    // in bounded chunks. Asking the whole Tenant instead judged, and then
+    // deleted, entries this request never asked about, and lost every
+    // candidate past the first page of the recheck. Pruning is judgeable only
+    // for "@none" (local) entries: a remote-backed id may merely have an
+    // unreachable source right now (5.5.14). Known cost: this recheck is a
+    // second temporal query per map-using request, same shape as the entity
+    // query's filter re-run.
+    let mut matching: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for chunk in candidates.chunks(st.max_limit.max(1)) {
         let mut eff = params.clone();
         for k in ["limit", "offset", "count"] {
             eff.remove(k);
         }
         eff.insert("limit".into(), st.max_limit.to_string());
+        eff.insert("id".into(), chunk.join(","));
         let resp = query_temporal_inner(st, &eff, headers).await?;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .map_err(|_| NgsiError::InternalError("entityMap recheck read".into()))?;
-        serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect()
-    };
+        matching.extend(
+            serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_owned)),
+        );
+    }
     if let Some(emap) = map.get_mut("entityMap").and_then(Value::as_object_mut) {
-        let stale: Vec<String> = emap
+        let stale: Vec<String> = candidates
             .iter()
-            .filter(|(eid, srcs)| {
-                srcs.as_array()
+            .filter(|eid| {
+                emap.get(eid.as_str())
+                    .and_then(Value::as_array)
                     .is_some_and(|a| a.len() == 1 && a[0] == "@none")
-                    && !matching.contains(*eid)
+                    && !matching.contains(eid.as_str())
             })
-            .map(|(k, _)| k.clone())
+            .cloned()
             .collect();
         for k in stale {
             emap.remove(&k);
         }
     }
     crate::entity_maps::map_put(st, &tenant, map.clone());
-    // fix the query to the Entities listed in the map (5.5.14)
-    let ids: Vec<&str> = map["entityMap"]
-        .as_object()
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+    // fix the query to the candidates that survived the recheck (5.5.14)
+    let ids: Vec<&str> = candidates
+        .iter()
+        .filter(|id| map["entityMap"].get(id.as_str()).is_some())
+        .map(String::as_str)
+        .collect();
     params.insert(
         "id".into(),
         if ids.is_empty() {
