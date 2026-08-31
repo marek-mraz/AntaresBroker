@@ -332,6 +332,133 @@ async fn clause_4_22_expired_attr_instances_reaped() {
     let _ = s.delete(&t, "urn:t:exp422");
 }
 
+/// 4.22 + 5.6.16.4: an expired `Temporal Evolution of an Entity` is not "an
+/// existing Entity whose id (URI) is equivalent held locally", so the write
+/// and delete paths have to see the absence the read paths already report.
+/// `get_range` and `query` carry the shared `NOT_EXPIRED` predicate — whose
+/// own comment says an expired temporal entity "is absent from every read" —
+/// while `delete` (5.6.16) and `mutate` (5.6.12 to 5.6.15) select the meta
+/// row without it. That is a client-visible contradiction: a GET answers 404
+/// for the id a DELETE answers 204 for.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_22_an_expired_temporal_entity_is_absent_from_writes_too() {
+    let url = require_db!();
+    let _ddl = PARTITION_DDL.lock().await;
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let t = TenantId::new("pgtempexp2").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempexp2'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("clean");
+    }
+    let s = PgTemporalStore::new(pool.clone());
+    let attr = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let id = "urn:t:exp422w";
+    let doc = json!({
+        "id": id, "type": ["T"],
+        "createdAt": "2026-08-04T09:00:00Z", "modifiedAt": "2026-08-04T09:00:00Z",
+        "expiresAt": "2020-01-01T00:00:00Z",
+        attr: [{"type": "Property", "value": 1, "observedAt": "2026-08-04T09:00:00Z",
+                "instanceId": "urn:ngsi-ld:Instance:exp422w"}]
+    });
+    assert!(s.create(&t, id, &doc).expect("create"));
+
+    // The premise: the row IS stored, and the read side already refuses it.
+    // Without this every later assertion could be about a row that was never
+    // written rather than about expiry.
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM temporal_entities WHERE tenant_id = 'pgtempexp2'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(stored, 1, "the expired entity is stored, not rejected");
+    assert!(
+        s.get(&t, id).expect("get").is_none(),
+        "4.22: an expired temporal entity is absent from a read"
+    );
+    assert!(
+        !s.list(&t).expect("list").iter().any(|d| d["id"] == id),
+        "4.22: an expired temporal entity is absent from a listing"
+    );
+
+    // 5.6.12 to 5.6.15 all reach the history through `mutate`. An entity the
+    // read side calls absent may not be modified in place.
+    let mutated = s.mutate::<(), ()>(&t, id, |_doc| Ok(())).expect("mutate");
+    assert!(
+        mutated.is_none(),
+        "4.22: an expired temporal entity cannot be modified — the read side calls it absent"
+    );
+
+    // 5.6.16.4: "no existing Entity whose id (URI) is equivalent held
+    // locally" is ResourceNotFound, which this seam reports as `false`.
+    assert!(
+        !s.delete(&t, id).expect("delete"),
+        "5.6.16.4: deleting an expired temporal entity is ResourceNotFound, not 204"
+    );
+
+    // The refused delete leaves the history intact — an expired entity keeps
+    // it until the 4.22 reap or a create replaces it. Destroying it behind a
+    // 404 would be the one outcome worse than either.
+    let kept: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM attr_instances WHERE tenant_id = 'pgtempexp2'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(
+        kept, 1,
+        "a refused delete may not wipe the history it refused"
+    );
+
+    // The other side of the same reading: absent means a create succeeds, and
+    // takes the expired entity's history with it rather than letting the new
+    // entity inherit it. `AnyStore::upsert` is `create` else `mutate`, so this
+    // is also what keeps an upsert over an expired entity from writing
+    // nothing and reporting that it replaced something.
+    let fresh = json!({
+        "id": id, "type": ["T"],
+        "createdAt": "2026-08-05T09:00:00Z", "modifiedAt": "2026-08-05T09:00:00Z",
+        attr: [{"type": "Property", "value": 9, "observedAt": "2026-08-05T09:00:00Z",
+                "instanceId": "urn:ngsi-ld:Instance:fresh"}]
+    });
+    assert!(
+        s.create(&t, id, &fresh).expect("create over expired"),
+        "4.22: an expired temporal entity is absent, so this is a creation"
+    );
+    let doc = s.get(&t, id).expect("get").expect("the fresh entity reads");
+    let insts = doc[attr].as_array().expect("instances");
+    assert_eq!(
+        insts.len(),
+        1,
+        "the replaced entity does not inherit the expired one's history: {doc}"
+    );
+    assert_eq!(insts[0]["value"], 9, "{doc}");
+
+    // And now that it is not expired, the write paths reach it again.
+    assert!(
+        s.mutate::<(), ()>(&t, id, |_doc| Ok(()))
+            .expect("mutate")
+            .is_some(),
+        "a live temporal entity is still modifiable"
+    );
+    assert!(
+        s.delete(&t, id).expect("delete"),
+        "5.6.16: a live temporal evolution is deleted, 204"
+    );
+
+    for table in ["attr_instances", "temporal_entities"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE tenant_id = 'pgtempexp2'"
+        )))
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+    }
+}
+
 /// Regression: the append fast-path's shell insert was ON CONFLICT DO
 /// NOTHING — an entity that gained a type after first touch stayed frozen
 /// with its original types and was invisible to type-filtered temporal

@@ -369,6 +369,13 @@ impl PgTemporalStore {
 
     /// `false` when the id already exists (create semantics, like the memory
     /// store's `create`).
+    ///
+    /// 4.22: an expired one does NOT exist, so it is dropped here — history
+    /// included — and the insert below is then an ordinary create. Leaving it
+    /// in place would make `create` report a conflict for an id every read
+    /// calls absent, and `AnyStore::upsert` reads that `false` as "already
+    /// there" and falls through to `mutate`, which refuses an expired entity
+    /// too: the upsert would write nothing and report success.
     pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
         let (types, scopes, created, modified) = extract(doc);
         let meta = meta_of(doc);
@@ -376,6 +383,22 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            let reaped = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM temporal_entities m \
+                 WHERE m.tenant_id = $1 AND m.id = $2 AND NOT {NOT_EXPIRED}"
+            )))
+            .bind(tenant.as_str())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if reaped == 1 {
+                sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
+                    .bind(tenant.as_str())
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             let n = sqlx::query(
                 "INSERT INTO temporal_entities
                    (tenant_id, id, types, scopes, meta, created_at, modified_at)
@@ -474,23 +497,36 @@ impl PgTemporalStore {
         self.get_range(tenant, id, &TemporalFilter::default())
     }
 
+    /// 5.6.16 Delete Temporal Evolution: `true` when it was there, `false`
+    /// for "no existing Entity whose id (URI) is equivalent held locally",
+    /// which the caller answers as ResourceNotFound. 4.22 decides what "held
+    /// locally" means, the same way `get_range` and `query` decide it.
     pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            let n = sqlx::query("DELETE FROM temporal_entities WHERE tenant_id = $1 AND id = $2")
-                .bind(tenant.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+            let n = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM temporal_entities m \
+                 WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
+            )))
+            .bind(tenant.as_str())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
             // no FK: a partitioned table cannot be the referencing side of a
-            // cascade from temporal_entities — clean the instances explicitly.
-            sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
-                .bind(tenant.as_str())
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            // cascade from temporal_entities — clean the instances explicitly,
+            // and only for the row this call actually removed. An expired
+            // entity is refused above and keeps its history until the 4.22
+            // reap or a create replaces it; wiping it here would destroy the
+            // history behind a 404.
+            if n == 1 {
+                sqlx::query("DELETE FROM attr_instances WHERE tenant_id = $1 AND entity_id = $2")
+                    .bind(tenant.as_str())
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(n == 1)
         })
@@ -798,10 +834,13 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
-            // the meta row is the serialization point (FOR UPDATE)
-            let row = sqlx::query(
-                "SELECT meta FROM temporal_entities WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
-            )
+            // the meta row is the serialization point (FOR UPDATE). 4.22
+            // qualifies it: 5.6.12 to 5.6.15 reach the history through here,
+            // and none of them may modify an entity every read calls absent.
+            let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT m.meta FROM temporal_entities m \
+                 WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED} FOR UPDATE"
+            )))
             .bind(tenant.as_str())
             .bind(id)
             .fetch_optional(&mut *tx)
