@@ -10,7 +10,6 @@ members = [
     "crates/antares-api",
     "crates/antares-matcher",
     "crates/antares-notifier",
-    "crates/antares-registry",
     "crates/antares-broker",
     "crates/antares-wasm",
     # The reference plugin: built and tested with the workspace so the
@@ -39,7 +38,6 @@ antares-api = { path = "crates/antares-api", default-features = false }
 antares-matcher = { path = "crates/antares-matcher" }
 antares-notifier = { path = "crates/antares-notifier", default-features = false }
 antares-plugin-example = { path = "examples/plugin-example" }
-antares-registry = { path = "crates/antares-registry" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

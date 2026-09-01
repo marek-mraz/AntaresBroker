@@ -203,10 +203,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "antares-registry"
-version = "0.1.0"
-
-[[package]]
 name = "antares-sql"
 version = "0.1.0"
 dependencies = [

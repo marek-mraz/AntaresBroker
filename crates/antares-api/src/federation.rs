@@ -6,6 +6,12 @@
 //! never held locally). Forwarded requests carry `Via: 1.1 <hostAlias>` and
 //! the request @context as a Link header; bodies travel as application/json
 //! without an inline @context.
+//!
+//! Three contracts hold across this module and `csource.rs`: candidate
+//! matching is SQL over `csource_index`, never a scan of a tenant's
+//! registrations; a forwarded query is narrowed to the registration's scope
+//! (4.3.6.1 — spec-mandated, not a bug to be fixed away); and fan-out is
+//! bounded, by a semaphore, a per-source timeout and an aggregate deadline.
 
 use crate::negotiate::*;
 use crate::state::AppState;
