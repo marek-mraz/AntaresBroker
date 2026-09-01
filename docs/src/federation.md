@@ -182,8 +182,23 @@ registrations at creation and each later change with a `triggerReason`:
 
 An entity subscription whose scope matches CSRs is reduced per source and
 created at the remote broker (5.8); the remote notifies back to
-`ANTARES_PUBLIC_URL`, so set it whenever the default
-`http://{host_alias}:{port}` is not routable from peers. Reduced copies
+`POST {ANTARES_PUBLIC_URL}/ex/v1/remote-notify`, so set that variable
+whenever the default `http://{host_alias}:{port}` is not routable from
+peers. That endpoint is the one non-standard route a federated deployment
+must leave reachable from its context sources: CIM 009 defines no path for
+it (5.8.1.4 says only that the copy carries "the notification endpoint of
+the local Broker", and 5.2.15 makes a notification endpoint any URI), so it
+lives outside the `/ngsi-ld` prefix ETSI owns rather than inside it, and it
+is versioned on its own (ADR-0019). Other brokers place it elsewhere:
+Orion-LD and coraine serve `POST /ngsi-ld/ex/v1/notifications/{subId}`,
+Scorpio `POST /remotenotify/{id}`.
+
+What arrives there is routed by the mapping alone. The forwarded copy
+carries a broker-generated subscription id, never the subscriber's own, so
+a context source learns nothing about the subscriber and cannot address any
+other subscription; the tenant comes from the stored mapping and not from
+the request, and the notified entities are re-filtered against the local
+subscription's own selector before delivery. Reduced copies
 follow the local subscription's lifecycle (update, delete); the
 registration's `csf` gates which sources take part. Inbound
 notifications from peers are matched against local subscriptions like

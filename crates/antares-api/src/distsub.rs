@@ -726,7 +726,7 @@ fn reduced_copy(
         }
         n.insert(
             "endpoint".into(),
-            json!({"uri": format!("{}/ngsi-ld/ex/remote-notify", st.public_url)}),
+            json!({"uri": format!("{}/ex/v1/remote-notify", st.public_url)}),
         );
     }
     Some(copy)
@@ -835,7 +835,7 @@ async fn split_merge(
     Ok(out)
 }
 
-/// POST /ngsi-ld/ex/remote-notify — the local broker's endpoint for
+/// POST /ex/v1/remote-notify — the local broker's endpoint for
 /// notifications from forwarded subscription copies. 5.8.1.4: "the mapping
 /// of the received subscriptionId with the own Subscription identifier …
 /// to enable forwarding received notifications to the original subscriber."
@@ -1105,7 +1105,7 @@ mod tests {
             );
         }
         let uri = n["endpoint"]["uri"].as_str().expect("endpoint uri");
-        assert!(uri.ends_with("/ngsi-ld/ex/remote-notify"), "{uri}");
+        assert!(uri.ends_with("/ex/v1/remote-notify"), "{uri}");
         assert_ne!(
             uri, "http://subscriber.example.org/cb",
             "the source must never learn the original subscriber's endpoint"

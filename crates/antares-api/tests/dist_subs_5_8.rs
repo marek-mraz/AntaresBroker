@@ -304,7 +304,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
     let (status, body) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound.to_string()),
     )
     .await;
@@ -325,7 +325,7 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(json!({"type": "Notification", "subscriptionId": "urn:nope", "data": []}).to_string()),
     )
     .await;
@@ -440,7 +440,7 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound("urn:ngsi-ld:Vehicle:matching")),
     )
     .await;
@@ -474,7 +474,7 @@ async fn clause_5_8_6_origin_csf_gates_inbound_notifications() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound("urn:ngsi-ld:Vehicle:gated")),
     )
     .await;
@@ -609,7 +609,7 @@ async fn clause_5_8_6_split_entities_inbound_merge() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound.to_string()),
     )
     .await;
@@ -949,7 +949,7 @@ async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
     let (status, body) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound.to_string()),
     )
     .await;
@@ -984,7 +984,7 @@ async fn clause_5_2_33_inbound_notification_refiltered_by_selector() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound.to_string()),
     )
     .await;
@@ -1340,7 +1340,7 @@ async fn clause_5_8_6_the_inbound_csf_is_read_in_the_subscriptions_own_context()
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(
             json!({
                 "type": "Notification",
@@ -1440,7 +1440,7 @@ async fn clause_5_8_6_split_merge_keeps_a_notified_deletion() {
     let (status, _) = send(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(inbound.to_string()),
     )
     .await;
@@ -1701,7 +1701,7 @@ async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone()
     let (status, body) = send_tenant(
         &st,
         "POST",
-        "/ngsi-ld/ex/remote-notify",
+        "/ex/v1/remote-notify",
         Some(
             json!({
                 "type": "Notification",

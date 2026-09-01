@@ -272,7 +272,7 @@ fn dist_sub_mapping_survives_restart() {
         let (status, _, b) = send_h(
             &st2,
             "POST",
-            "/ngsi-ld/ex/remote-notify",
+            "/ex/v1/remote-notify",
             Some(inbound.to_string()),
             &[],
         )
@@ -286,7 +286,7 @@ fn dist_sub_mapping_survives_restart() {
         let (status, _, _) = send_h(
             &st2,
             "POST",
-            "/ngsi-ld/ex/remote-notify",
+            "/ex/v1/remote-notify",
             Some(
                 json!({"type": "Notification", "subscriptionId": "urn:nope", "data": []})
                     .to_string(),

@@ -5,7 +5,10 @@
 //! lives under a reserved prefix, so an added surface can never shadow,
 //! extend or contradict a spec resource. `/q` is this broker's operational
 //! ground and belongs to the admin surface; `/x` and anything under it is
-//! free for a deployment.
+//! free for a deployment. `/ex` is neither: it is the broker's own
+//! peer-facing wire (the 5.8.1.4 notification receiver, ADR-0019), a core
+//! route no surface can claim, since a prefix outside `/q` and `/x` is
+//! refused below.
 
 use crate::AppState;
 use axum::Router;

@@ -16,7 +16,7 @@ here).
 | `ANTARES_ROLES` | `all` | Comma list of roles this process runs: `api`, `matcher`, `notifier`, `temporal`, `registry` — the role-split fleet shape. |
 | `ANTARES_BUS` | `local` | Change-event bus: `local` (in-process, single node) or `nats` (JetStream, multi-pod). Unknown value = fatal. |
 | `ANTARES_HOST_ALIAS` | `antares` | This broker's name in federation `Via` chains (CIM 009 6.3.18) — loop detection identity. Two LB'd replicas of one logical broker share one alias. |
-| `ANTARES_PUBLIC_URL` | `http://{host_alias}:{port}` | The URL peers can reach this broker at (distributed-subscription callbacks, 5.8.1.4). Set it whenever the default is not routable from peers. |
+| `ANTARES_PUBLIC_URL` | `http://{host_alias}:{port}` | The URL peers can reach this broker at: forwarded subscription copies notify `{ANTARES_PUBLIC_URL}/ex/v1/remote-notify` (5.8.1.4). Set it whenever the default is not routable from peers. |
 
 ## Store backends
 

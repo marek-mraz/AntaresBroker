@@ -361,12 +361,15 @@ pub fn router(state: AppState) -> Router {
         .route("/info/sourceIdentity", get(source_identity));
 
     // 5.8.1.4 consumer half: where forwarded subscription copies point their
-    // notifications; remapped to the original subscriber. It sits outside the
-    // API nest, so it carries the bounds wall and the body limit itself — a
-    // peer-facing write path must not be the one route where the documented
-    // caps do not apply.
+    // notifications; remapped to the original subscriber. CIM 009 defines no
+    // path for it — 5.2.15 makes a notification endpoint any URI, and 6.2
+    // standardizes only what hangs under the API root — so it lives outside
+    // the `/ngsi-ld` prefix ETSI owns, under this broker's own versioned
+    // peer-facing root (ADR-0019). Being outside the API nest, it carries the
+    // bounds wall and the body limit itself: a peer-facing write path must
+    // not be the one route where the documented caps do not apply.
     let remote_notify = Router::new()
-        .route("/ngsi-ld/ex/remote-notify", post(distsub::remote_notify))
+        .route("/ex/v1/remote-notify", post(distsub::remote_notify))
         .layer(axum::extract::DefaultBodyLimit::max(
             *bounds::MAX_BODY_BYTES,
         ))

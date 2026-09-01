@@ -15,7 +15,7 @@ published by CI: `:dev` on every green master run, `:dev-<run>` per run,
   `/q/dead-letters` with every credential blanked in the listing.
 - `GET /q/tenants` lists the tenants a broker holds, `GET /q/tenants/{tenant}`
   reads what one holds, `DELETE /q/tenants/{tenant}` purges it.
-- `POST /ngsi-ld/ex/remote-notify` receives the notifications a distributed
+- `POST /ex/v1/remote-notify` receives the notifications a distributed
   subscription's context sources send back (5.11).
 - Request bounds a deployment sizes for itself: `ANTARES_MAX_BODY_BYTES`,
   `ANTARES_MAX_CONNECTIONS`, `ANTARES_HEADER_READ_TIMEOUT_MS`,
@@ -38,6 +38,13 @@ published by CI: `:dev` on every green master run, `:dev-<run>` per run,
   database, or keep serving the old one with 0.1.0. The broker refuses such a
   database at boot and names the cause, rather than retrying the connection for
   30 s and reporting it as unreachable.
+- **Breaking, federation wire.** The distributed-subscription notification
+  receiver moved from `/ngsi-ld/ex/remote-notify` to `/ex/v1/remote-notify`,
+  out of the path prefix ETSI owns and under a root of the broker's own
+  (ADR-0019). A context source keeps the callback URL inside the
+  subscription copy it holds, so a distributed subscription created by an
+  earlier broker stops receiving notifications: delete it and create it
+  again after the upgrade.
 - Clauses 4.3.6.6 and 4.5.19.0 are reclassified `partial`, each with its gap
   named in `docs/spec/`.
 
