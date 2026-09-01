@@ -83,7 +83,18 @@ pub(crate) struct Extracted {
     location_ambiguous: bool,
 }
 
-fn extract(doc: &Value) -> Extracted {
+/// The four members every stored kind extracts the same way: `type` and
+/// `scope` as arrays whether the doc spells them as one string or many, and
+/// the two stamps. The temporal tables carry exactly these, entities carry
+/// them plus expiry and location, so this is the one implementation of the
+/// shared half — two copies is how one of them drifts.
+///
+/// 4.6.3 allows a comma seconds-fraction in requests; the stamps feed
+/// `::timestamptz` casts, which refuse it, so they are canonicalised here and
+/// every extracted column holds the instant the client meant.
+pub(super) fn types_scopes_stamps(
+    doc: &Value,
+) -> (Vec<String>, Option<Vec<String>>, String, String) {
     let as_vec = |v: &Value| -> Vec<String> {
         match v {
             Value::String(s) => vec![s.clone()],
@@ -94,23 +105,35 @@ fn extract(doc: &Value) -> Extracted {
             _ => vec![],
         }
     };
-    // 4.6.3 allows a comma seconds-fraction in requests; these three feed
-    // `::timestamptz` casts, which refuse it. Canonicalised here so every
-    // extracted column holds the instant the client meant.
     let ts = |k: &str| {
         doc.get(k)
             .and_then(Value::as_str)
             .map(|s| antares_store::filter::canonical_datetime(s).into_owned())
     };
     let now = || "1970-01-01T00:00:00Z".to_owned(); // caller always stamps; belt only
+    (
+        doc.get("type").map(&as_vec).unwrap_or_default(),
+        doc.get("scope").map(&as_vec),
+        ts("createdAt").unwrap_or_else(now),
+        ts("modifiedAt").unwrap_or_else(now),
+    )
+}
+
+fn extract(doc: &Value) -> Extracted {
+    let (types, scopes, created, modified) = types_scopes_stamps(doc);
+    let ts = |k: &str| {
+        doc.get(k)
+            .and_then(Value::as_str)
+            .map(|s| antares_store::filter::canonical_datetime(s).into_owned())
+    };
     let location = crate::compile::geo::extract_location(doc);
     let location_ambiguous =
         location.is_none() && doc.get(crate::compile::geo::LOCATION_IRI).is_some();
     Extracted {
-        types: doc.get("type").map(&as_vec).unwrap_or_default(),
-        scopes: doc.get("scope").map(&as_vec),
-        created: ts("createdAt").unwrap_or_else(now),
-        modified: ts("modifiedAt").unwrap_or_else(now),
+        types,
+        scopes,
+        created,
+        modified,
         expires: ts("expiresAt"),
         location,
         location_ambiguous,

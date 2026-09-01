@@ -40,31 +40,10 @@ pub struct PgTemporalStore {
 const NOT_EXPIRED: &str =
     "(try_timestamptz(m.meta->>'expiresAt') IS NULL OR try_timestamptz(m.meta->>'expiresAt') > now())";
 
-fn extract(doc: &Value) -> (Vec<String>, Option<Vec<String>>, String, String) {
-    let as_vec = |v: &Value| -> Vec<String> {
-        match v {
-            Value::String(s) => vec![s.clone()],
-            Value::Array(a) => a
-                .iter()
-                .filter_map(|x| x.as_str().map(str::to_owned))
-                .collect(),
-            _ => vec![],
-        }
-    };
-    // 4.6.3 comma fraction: both feed `::timestamptz` binds.
-    let ts = |k: &str| {
-        doc.get(k)
-            .and_then(Value::as_str)
-            .map(|s| antares_store::filter::canonical_datetime(s).into_owned())
-    };
-    let now = || "1970-01-01T00:00:00Z".to_owned();
-    (
-        doc.get("type").map(&as_vec).unwrap_or_default(),
-        doc.get("scope").map(&as_vec),
-        ts("createdAt").unwrap_or_else(now),
-        ts("modifiedAt").unwrap_or_else(now),
-    )
-}
+/// The temporal tables carry the same four extracted columns as `entities`,
+/// so they are read by the same function (`super::entity::types_scopes_stamps`)
+/// rather than a second copy of it.
+use super::entity::types_scopes_stamps as extract;
 
 /// Entity-doc members that are NOT temporal attributes. `scope` may itself be
 /// instance-shaped (deletion instances, 020_19/20) — it lives in `meta`
@@ -1022,6 +1001,37 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    /// The temporal tables extract their four columns with the same function
+    /// the entity table uses, so what holds there holds here: `type` and
+    /// `scope` read as arrays whichever shape the document spells them in,
+    /// and 4.6.3's comma seconds-fraction is canonicalised. A stamp that
+    /// reaches a `::timestamptz` bind with its comma intact is rejected by
+    /// Postgres, and the append fails on a document the API accepted.
+    #[test]
+    fn extract_canonicalises_the_stamps_and_takes_type_in_either_shape() {
+        let (types, scopes, created, modified) = extract(&serde_json::json!({
+            "id": "urn:x", "type": "T", "scope": ["/a", "/b"],
+            "createdAt": "2026-01-01T00:00:00,500Z",
+            "modifiedAt": "2026-01-01T00:00:01.500Z"}));
+        assert_eq!(types, ["T"]);
+        assert_eq!(scopes.expect("scopes"), ["/a", "/b"]);
+        assert_eq!(
+            created, "2026-01-01T00:00:00.500Z",
+            "the comma is the fraction"
+        );
+        assert_eq!(modified, "2026-01-01T00:00:01.500Z");
+        let (types, scopes, created, _) = extract(&serde_json::json!({"id": "urn:x"}));
+        assert!(types.is_empty(), "no type is no types, never a panic");
+        assert!(
+            scopes.is_none(),
+            "an absent scope stays absent, not an empty list"
+        );
+        assert_eq!(
+            created, "1970-01-01T00:00:00Z",
+            "the belt stamp is usable as a bind"
+        );
     }
 
     #[test]
