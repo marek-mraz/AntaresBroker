@@ -54,6 +54,12 @@ async fn send(st: &AppState, method: &str, path: &str, body: Option<Value>) -> (
 /// A registration that expires `ms` from now. The value has to be in the
 /// future: 5.9.2.4 makes a past `expiresAt` a BadRequestData at creation, so
 /// the only honest way to reach the expired state is to wait for it.
+///
+/// The window has to outlast the scheduling jitter of the machine the suite
+/// runs on, not just the two requests inside it: the instant is fixed here
+/// and then raced by creation (which rejects a past `expiresAt`) and by the
+/// read that proves the registration was live. A few hundred milliseconds is
+/// under that jitter on a shared runner, where either can arrive late.
 fn doc_expiring_in(ms: i64) -> Value {
     // The margin scales with the runner, like every wait below: creation
     // validates `expiresAt` against the clock at the moment it runs, so on a
@@ -86,13 +92,13 @@ async fn expired(st: &AppState) -> String {
         st,
         "POST",
         "/ngsi-ld/v1/csourceRegistrations",
-        Some(doc_expiring_in(400)),
+        Some(doc_expiring_in(2000)),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _) = send(st, "GET", &path, None).await;
     assert_eq!(status, StatusCode::OK, "live before the instant passes");
-    wait_past_expiry(700).await;
+    wait_past_expiry(2500).await;
     path
 }
 
