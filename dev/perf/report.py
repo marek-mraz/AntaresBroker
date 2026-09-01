@@ -91,7 +91,7 @@ def pdf(out, record, sections):
                 f = lambda k: [float(r.get(k) or 0) for r in rows]
                 fig, ax = plt.subplots(3, 1, figsize=(8.27, 11.69), sharex=True)
                 ax[0].plot(t, [v / 1024 for v in f("broker_kib")], label="broker RSS (MiB)")
-                ax[0].plot(t, [v / 1024 / 1024 * 1024 for v in f("postgres_kib")], label="postgres RSS (MiB)")
+                ax[0].plot(t, [v / 1024 for v in f("postgres_kib")], label="postgres RSS (MiB)")
                 ax[0].set_ylabel("MiB"); ax[0].legend(); ax[0].set_title("Resident set")
                 ax[1].plot(t, [v / 100 for v in f("broker_cpu_pct")], label="broker cores")
                 ax[1].plot(t, [v / 100 for v in f("postgres_cpu_pct")], label="postgres cores")

@@ -138,6 +138,8 @@ class Aggregate(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # All interfaces on purpose: the broker under load runs in a container
+    # or on another host and delivers here, so a loopback bind is unreachable.
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 9800
     workers = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     if workers == 0:
