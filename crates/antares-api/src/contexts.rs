@@ -710,6 +710,83 @@ mod tests {
         );
     }
 
+    /// 5.13.1 + 5.5.10 on the three handlers a client reaches, not only on the
+    /// lookup they share: another Tenant's Hosted @context must not appear in
+    /// the listing (with or without `details`, where the URL and the localId
+    /// would both be readable), must not be served, and must not be deletable.
+    /// A delete that answered 204 would be worse than a leak: the owning
+    /// Tenant's term mappings would be gone with no error anywhere.
+    #[tokio::test]
+    async fn clause_5_13_1_the_handlers_hide_another_tenants_context() {
+        let st = AppState::new("antares-ctx-crosstenant".into());
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let lid = "b2a1c0de-0000-4000-8000-000000000002";
+        let url = format!("http://broker.example/ngsi-ld/v1/jsonldContexts/{lid}");
+        st.store
+            .context_put(lid, hosted_row(&url, lid, &alpha))
+            .expect("store the @context");
+        let mut foreign = HeaderMap::new();
+        foreign.insert("NGSILD-Tenant", "beta".parse().expect("tenant header"));
+
+        for details in ["false", "true"] {
+            let p: HashMap<String, String> = [("details".to_owned(), details.to_owned())]
+                .into_iter()
+                .collect();
+            let resp = list_contexts(State(st.clone()), CleanParams(p), foreign.clone()).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("list body");
+            let shown = String::from_utf8_lossy(&body);
+            assert!(
+                !shown.contains(lid),
+                "details={details} listed another Tenant's @context: {shown}"
+            );
+        }
+
+        for id in [lid.to_owned(), url.clone()] {
+            let resp = serve_context(
+                State(st.clone()),
+                Path(id.clone()),
+                CleanParams(HashMap::new()),
+                foreign.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "serving {id} to another Tenant"
+            );
+            let resp = delete_context(
+                State(st.clone()),
+                Path(id.clone()),
+                CleanParams(HashMap::new()),
+                foreign.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "deleting {id} as another Tenant"
+            );
+        }
+        assert!(
+            st.store.context_get(lid).expect("store").is_some(),
+            "the owning Tenant's @context survived a foreign delete"
+        );
+        // and the owner still reaches it
+        let mut own = HeaderMap::new();
+        own.insert("NGSILD-Tenant", "alpha".parse().expect("tenant header"));
+        let resp = serve_context(
+            State(st.clone()),
+            Path(lid.to_owned()),
+            CleanParams(HashMap::new()),
+            own,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the owner is served its own");
+    }
+
     /// Table 6.29.3.2-1: List @contexts defines `details` and `kind` only —
     /// a pagination parameter this resource does not implement must be
     /// refused (6.3.20 InvalidRequest), never accepted and ignored.
