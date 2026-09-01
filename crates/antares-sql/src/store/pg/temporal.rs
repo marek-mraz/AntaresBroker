@@ -665,10 +665,16 @@ impl PgTemporalStore {
                 if let Some(cb) =
                     crate::compile::temporal::column_range_bound(r, "gi", attr_bind + 1)
                 {
-                    win_binds.push(r.time_at.to_owned());
+                    // 4.6.3 lets a request spell the seconds fraction with a
+                    // comma; the bound lands in a `::timestamptz` cast, which
+                    // takes only the point form. Every other range bind is
+                    // canonicalized for exactly this reason.
+                    win_binds
+                        .push(antares_store::filter::canonical_datetime(r.time_at).into_owned());
                     if r.timerel == "between" {
                         if let Some(e) = r.end_time_at {
-                            win_binds.push(e.to_owned());
+                            win_binds
+                                .push(antares_store::filter::canonical_datetime(e).into_owned());
                         }
                     }
                     window = format!(" AND {cb}");

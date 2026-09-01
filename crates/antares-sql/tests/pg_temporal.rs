@@ -846,3 +846,73 @@ async fn aggregation_pushdown_buckets_like_the_api() {
     assert!(out.rows[0][speed].is_array(), "{}", out.rows[0]);
     assert!(s.delete(&t, id).expect("delete"));
 }
+
+/// 4.6.3: "In requests, also a comma instead of a decimal point may be used
+/// as separator" of the seconds fraction. PostgreSQL accepts no such stamp,
+/// so every bound that reaches a `::timestamptz` cast goes through
+/// `canonical_datetime` first — the whole reason
+/// `migrations/0003_comma_seconds_fraction.sql` exists. The 5.7.4.4 S3
+/// geo prefilter built its window bound straight from the request instead,
+/// so a legal temporal geoquery raised SQLSTATE 22007 and the API answered
+/// 500 to a request the spec spells out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comma_seconds_fraction_survives_the_geo_prefilter() {
+    use antares_sql::compile::temporal::InstanceRange;
+    use antares_sql::store::filter::{GeoSpec, Rel, TemporalFilter};
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgTemporalStore::new(pool.clone());
+    let t = TenantId::new("pgcommageo").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Vehicle:commageo";
+    let _ = s.delete(&t, id);
+    let location = antares_sql::store::filter::LOCATION_IRI;
+    let doc = json!({
+        "id": id, "type": "Vehicle",
+        "createdAt": "2026-01-01T00:00:00Z", "modifiedAt": "2026-01-01T00:00:00Z",
+        location: [{
+            "type": "GeoProperty",
+            "value": {"type": "Point", "coordinates": [0.0, 0.0]},
+            "observedAt": "2026-01-01T01:00:00Z",
+            "instanceId": "urn:ngsi-ld:Instance:commageo1",
+        }],
+    });
+    assert!(s.create(&t, id, &doc).expect("create"));
+    let expand = |t: &str| t.to_owned();
+    let coordinates = json!([0.0, 0.0]);
+    let spec = GeoSpec {
+        rel: Rel::Near {
+            max: Some(1000.0),
+            min: None,
+        },
+        geometry: "Point",
+        coordinates: &coordinates,
+        geoproperty_iri: location,
+    };
+    for time_at in [
+        "2026-01-01T00:00:00.500Z", // the point form Postgres takes as it is
+        "2026-01-01T00:00:00,500Z", // the comma form 4.6.3 also allows
+    ] {
+        let f = TemporalFilter {
+            ids: Some(&[id]),
+            range: Some(InstanceRange {
+                timerel: "after",
+                time_at,
+                end_time_at: None,
+                timeproperty: "observedAt",
+            }),
+            timeproperty: "observedAt",
+            geo: Some((&spec, location)),
+            expand: &expand,
+            ..TemporalFilter::default()
+        };
+        let out = s
+            .query(&t, &f)
+            .unwrap_or_else(|e| panic!("timeAt {time_at} was refused by the store: {e}"));
+        assert_eq!(
+            out.rows.len(),
+            1,
+            "timeAt {time_at}: the instance is in the window"
+        );
+    }
+}
