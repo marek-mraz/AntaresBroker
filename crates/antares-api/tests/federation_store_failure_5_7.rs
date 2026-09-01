@@ -10,7 +10,7 @@
 //! InternalError of Table 6.3.2-1, "there has been an error during the
 //! operation execution": the broker cannot tell whether the answer it holds
 //! is the whole answer, so it must not present it as one.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

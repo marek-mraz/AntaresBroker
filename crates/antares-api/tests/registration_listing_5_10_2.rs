@@ -9,7 +9,7 @@
 //! Filter first, page second. A window applied before the filter pages rows
 //! the client never matched, which is why this listing cannot take the
 //! store-side window 5.8.4's can.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

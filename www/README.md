@@ -13,9 +13,9 @@ is the product-shaped one.
    data actually crossed it (a federated query that returned entities, a
    pipe tick whose write the broker accepted). Idle edges are static.
 2. **Every entity always shows its origin** — 🏠 local or 🌐 + the peer it
-   came from. Today's origin source is the `local=true` diff heuristic; when
-   the UI adopts `/entityMaps` (clause 5.14), `broker/api.js` is the
-   ONLY file that changes.
+   came from. The origin source is the `local=true` diff heuristic;
+   adopting `/entityMaps` (clause 5.14) instead changes `broker/api.js`
+   and no other file.
 3. **The broker is the only truth** — the UI never fabricates state; every
    count/row/edge label is derived from API responses. Structure the user
    authored (spaces, pipelines) persists in `localStorage`; data never does.
@@ -90,7 +90,7 @@ client knows nothing about React; the vanilla `www/` page could adopt it.
   exactly the interaction budget the hand-rolled SVG was starting to eat.
   The evidence rule survives: edges get `animated` + a count label only
   while a burst mark is fresh, driven by the same store logic as `www/`.
-- **JS + JSX, not TS** (for now): matches the sibling page, zero build
+- **JS + JSX, not TS**: matches the sibling page, zero build
   friction; Vite strips types without checking anyway, so TS would only pay
   once a real typecheck gate exists. Upgrade path: rename `broker/` +
   `model.js` to `.ts` first — they are the API surface.

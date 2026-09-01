@@ -9,7 +9,7 @@
 //! ones that can never be reclaimed, and the rows would stay readable to
 //! anyone sending that Tenant's header. The paged walk has no ceiling by
 //! design, which is why every other internal walker uses it.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

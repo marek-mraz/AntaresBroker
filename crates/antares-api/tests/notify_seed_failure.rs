@@ -17,7 +17,7 @@
 //! correct nor slow, so a seed that cannot complete must leave the mirror
 //! uninstalled rather than install what it managed to read.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

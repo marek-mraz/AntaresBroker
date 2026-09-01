@@ -7,7 +7,7 @@
 //! returned — reading a whole tenant to serve one page of it is the thing
 //! the clause names, and it is what made a tenant at the document ceiling
 //! unable to list its subscriptions at all.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

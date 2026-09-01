@@ -6,7 +6,7 @@
 //! its types/attrs plus the broad bucket. The ignored release bench encodes
 //! the scaling gate.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 use antares_api::notify::SubMirror;
 use serde_json::{json, Value};

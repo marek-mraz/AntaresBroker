@@ -9,7 +9,7 @@
 //! unbounded POST. The registration half has to do the same, or one
 //! subscription a client is free to create turns the whole registration set
 //! into a single in-memory body.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 use antares_api::AppState;
 use axum::body::Body;

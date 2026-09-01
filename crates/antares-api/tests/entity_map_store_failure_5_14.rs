@@ -15,7 +15,7 @@
 //! that, and answering 201 hands back the id of a map that was never stored,
 //! which 5.5.14's "An EntityMap fixes the Entities to be considered for
 //! subsequent requests" then cannot fix anything with.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 mod common;
 

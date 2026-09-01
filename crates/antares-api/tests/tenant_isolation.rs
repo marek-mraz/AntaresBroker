@@ -92,7 +92,13 @@ async fn cross_tenant_probe_is_indistinguishable_from_nonexistence() {
         b_none.replace("urn:ngsi-ld:Isolation:nowhere", "{id}"),
         "existing-elsewhere and existing-nowhere must be the same 404"
     );
-    let _ = (s_ghost, b_ghost);
+    // the tenant dimension is the one place the two 404s legitimately
+    // differ (6.3.14); it must not blur into the document dimension
+    assert_eq!(s_ghost, StatusCode::NOT_FOUND);
+    assert!(
+        b_ghost.contains("NonexistentTenant"),
+        "an unknown tenant answers NonexistentTenant, not ResourceNotFound: {b_ghost}"
+    );
 
     // same property for subscriptions and registrations
     for (path, seed_body) in [

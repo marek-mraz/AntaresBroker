@@ -5,8 +5,9 @@
 //! notify subscription X" with the broker's own semantics.
 //!
 //! Inputs are the stored (internal, expanded) forms: the subscription
-//! document as created (5.2.12, selector entity types expanded) and the entity document as the broker
-//! stores it (expanded attribute IRIs, `type` as an array). Matching is
+//! document as created (5.2.12, selector entity types expanded) and the
+//! entity document as the broker stores it (expanded attribute IRIs,
+//! `type` as an array). Matching is
 //! index-shaped in the broker (candidate lookup by (tenant, type) /
 //! (tenant, watched attribute)); every predicate here evaluates one
 //! candidate self-contained.

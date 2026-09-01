@@ -553,7 +553,7 @@ async fn suppressed_loop_forward_warns_199_on_get() {
 /// 5.6.1.4: a redirect (or exclusive) registration matching the input but
 /// NOT supporting Create Entity yields an error of type Conflict and is
 /// never contacted; an inclusive registration without Create Entity support
-/// is simply not forwarded — the local create proceeds.
+/// is not forwarded — the local create proceeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_6_1_create_unsupported_by_registration() {
     let post_entity = || {

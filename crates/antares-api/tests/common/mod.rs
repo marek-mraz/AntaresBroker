@@ -4,7 +4,7 @@
 //! One copy: a second hand-written driver would drift from the trait the
 //! moment a method is added, and the drift is invisible until a test that
 //! was meant to exercise a refusal quietly delegates instead.
-#![allow(dead_code)]
+#![allow(dead_code)] // every test binary compiles this module, none uses all of it
 
 use antares_model::{NgsiError, TenantId};
 use antares_store::{CurrentStateDriver, Kind};

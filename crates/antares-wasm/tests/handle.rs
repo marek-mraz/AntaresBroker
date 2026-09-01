@@ -4,7 +4,7 @@
 //! wasm32 build differs only below this seam (executor, fetch, timers), so a
 //! round-trip here proves the router wiring the Service Worker and the
 //! Node shim will drive.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
 use antares_wasm::Broker;
 
