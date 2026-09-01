@@ -64,7 +64,7 @@ impl NotificationSink for HttpSink {
             // Wasm: the page sink takes matching endpoints — a page cannot
             // listen on a socket, so this IS its delivery channel.
             #[cfg(target_arch = "wasm32")]
-            if crate::page_sink::try_deliver(uri, &bytes) {
+            if page_sink::try_deliver(uri, &bytes) {
                 return Ok(());
             }
             let mut req = self.client.post(uri);

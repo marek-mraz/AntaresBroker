@@ -76,6 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           # a red job still saves its target dir, so the retry is warm
@@ -120,6 +121,11 @@ jobs:
           done
           exit $rc
       - run: cargo fmt --all --check
+      # The browser build is a compile target of this workspace, not a
+      # separate product: wasm.yml runs only on dispatch, so a module that
+      # moves under everyone's feet takes the wasm32 arm down silently. A
+      # check here costs one target and keeps the arm honest per commit.
+      - run: cargo check --locked --target wasm32-unknown-unknown -p antares-wasm
       # --locked everywhere below: the image builds with it (Dockerfile), so
       # without it CI would gate on a dependency set the shipped binary never
       # used, and an out-of-date Cargo.lock would pass here and fail there.
