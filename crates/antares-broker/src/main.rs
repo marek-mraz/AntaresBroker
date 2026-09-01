@@ -690,6 +690,19 @@ async fn build_builtin(
                             Some(backend),
                         ));
                     }
+                    Err(e) if antares_sql::store::pg::is_schema_mismatch(&e) => {
+                        // Waiting cannot make this database match: its
+                        // migration history was written by a different
+                        // release. Retried, the boot ends 30 s later blaming
+                        // the network for a schema that will never fit.
+                        return Err(format!(
+                            "ANTARES_STORE={mode}: {e} — the database was migrated by a \
+                             different release of the broker, so this binary cannot serve \
+                             it. Point it at a database migrated by this release, or start \
+                             from an empty one"
+                        )
+                        .into());
+                    }
                     Err(e) => {
                         last = e.to_string();
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

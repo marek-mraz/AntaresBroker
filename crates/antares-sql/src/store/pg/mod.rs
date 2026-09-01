@@ -21,6 +21,29 @@ use sqlx::{Postgres, Transaction};
 /// default — migrates on boot exactly as before.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Is this connect failure a database whose migration history can never match
+/// this binary? A database still booting is worth waiting for; a history from
+/// another release is not, and a caller that retries it reports the timeout
+/// instead of the cause. Only the history errors are permanent: an execution
+/// failure can be a lock the next attempt gets.
+pub fn is_schema_mismatch(e: &sqlx::Error) -> bool {
+    use sqlx::migrate::MigrateError::{
+        Dirty, VersionMismatch, VersionMissing, VersionNotPresent, VersionTooNew, VersionTooOld,
+    };
+    match e {
+        sqlx::Error::Migrate(m) => matches!(
+            **m,
+            VersionMissing(_)
+                | VersionMismatch(_)
+                | VersionNotPresent(_)
+                | VersionTooOld(..)
+                | VersionTooNew(..)
+                | Dirty(_)
+        ),
+        _ => false,
+    }
+}
+
 /// The `ANTARES_MIGRATE` switch: off only for an explicit `0`/`false`.
 fn migrate_enabled(v: Option<&str>) -> bool {
     !matches!(v, Some("0" | "false"))
@@ -211,7 +234,7 @@ pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) -> Result<(), sqlx:
 
 #[cfg(test)]
 mod tests {
-    use super::{bypasses, migrate_enabled};
+    use super::{bypasses, is_schema_mismatch, migrate_enabled};
 
     /// The RLS probe answers a security gate: a probe that errors must read as
     /// "unsafe", never as "the role does not bypass RLS".
@@ -224,6 +247,41 @@ mod tests {
             "an unanswerable probe must not pass the gate"
         );
         assert!(bypasses(Err(sqlx::Error::RowNotFound)));
+    }
+
+    /// A database from another release is a permanent failure; a database
+    /// that is not up yet is not. The boot path retries the second and dies on
+    /// the first, so the classification decides which cause an operator is
+    /// shown — the squash of the pre-1.0 migration set left a 0.1.0 database
+    /// reporting "not reachable after 30 s" for a schema it would never match.
+    #[test]
+    fn a_history_from_another_release_is_permanent_and_a_booting_database_is_not() {
+        use sqlx::migrate::MigrateError;
+        for e in [
+            MigrateError::VersionMissing(5),
+            MigrateError::VersionMismatch(1),
+            MigrateError::VersionNotPresent(9),
+            MigrateError::VersionTooOld(1, 4),
+            MigrateError::VersionTooNew(9, 4),
+            MigrateError::Dirty(3),
+        ] {
+            let shown = e.to_string();
+            assert!(
+                is_schema_mismatch(&sqlx::Error::Migrate(Box::new(e))),
+                "{shown} can never be resolved by waiting"
+            );
+        }
+        assert!(
+            !is_schema_mismatch(&sqlx::Error::PoolTimedOut),
+            "a database still booting is worth another attempt"
+        );
+        assert!(!is_schema_mismatch(&sqlx::Error::RowNotFound));
+        assert!(
+            !is_schema_mismatch(&sqlx::Error::Migrate(Box::new(MigrateError::Execute(
+                sqlx::Error::PoolTimedOut
+            )))),
+            "a migration that failed to execute may be a lock the next attempt gets"
+        );
     }
 
     /// Migrations stay on unless a deployment explicitly turns them off.
