@@ -39,6 +39,16 @@ pub struct Context {
     terms: HashMap<String, TermDef>,
     /// IRI → term for compaction (built after merge; shortest term wins).
     inverse: HashMap<String, String>,
+    /// Prefix compaction index, built by [`Context::freeze`]: the IRI of
+    /// every prefix-capable term → the term to write it as, with the ties
+    /// already resolved. Probing it by candidate LENGTH keeps `compact_iri`
+    /// off a walk over the whole term map, whose cost an @context of 20 000
+    /// terms would otherwise multiply into every attribute of every entity
+    /// in a response.
+    prefixes: HashMap<String, String>,
+    /// The distinct lengths of the `prefixes` keys, longest first — the only
+    /// candidate cut points, so the longest match is the first hit.
+    prefix_lens: Vec<usize>,
     /// `@vocab`: the base unknown terms expand against.
     pub vocab: String,
     /// The @context value to hand back in responses (Link header / body):
@@ -202,6 +212,29 @@ impl Context {
             }
         }
         self.inverse = inv;
+        // The prefix index carries the same tie-break the inverse map does
+        // (shortest term, then lexicographic): `terms` is a randomly-seeded
+        // HashMap, so an unresolved tie would pick a different prefix in
+        // each process.
+        let mut pfx: HashMap<String, String> = HashMap::new();
+        for (term, def) in &self.terms {
+            if !def.prefix_ok || def.iri.is_empty() {
+                continue;
+            }
+            match pfx.get(&def.iri) {
+                Some(existing)
+                    if (existing.len(), existing.as_str()) <= (term.len(), term.as_str()) => {}
+                _ => {
+                    pfx.insert(def.iri.clone(), term.clone());
+                }
+            }
+        }
+        let mut lens: Vec<usize> = pfx.keys().map(String::len).collect();
+        lens.sort_unstable();
+        lens.dedup();
+        lens.reverse();
+        self.prefixes = pfx;
+        self.prefix_lens = lens;
     }
 
     /// The definition of `term`, if the context defines it.
@@ -252,34 +285,21 @@ impl Context {
                 break;
             }
         }
-        // Prefix compaction: longest matching prefix-capable term. `terms` is
-        // a randomly-seeded HashMap, so ties are broken on the term itself
-        // (shortest, then lexicographic — the same rule as `freeze`) or the
-        // chosen prefix would differ between processes.
-        let mut best: Option<(usize, &str)> = None;
-        for (term, def) in &self.terms {
-            if def.prefix_ok
-                && !def.iri.is_empty()
-                && iri.strip_prefix(&def.iri).is_some_and(|r| !r.is_empty())
-            {
-                let better = match best {
-                    None => true,
-                    Some((l, t)) => {
-                        (
-                            def.iri.len(),
-                            std::cmp::Reverse((term.len(), term.as_str())),
-                        ) > (l, std::cmp::Reverse((t.len(), t)))
-                    }
-                };
-                if better {
-                    best = Some((def.iri.len(), term));
-                }
+        // Prefix compaction: longest matching prefix-capable term. A prefix
+        // of this IRI can only be one of its own leading slices, so the
+        // index is probed at the lengths it actually holds — longest first,
+        // which makes the first hit the longest match — instead of walking
+        // every term. A 20 000-term vocabulary is an ordinary document, and
+        // this runs once per attribute of every entity in a response.
+        for &n in &self.prefix_lens {
+            if n >= iri.len() || !iri.is_char_boundary(n) {
+                continue;
+            }
+            if let Some(term) = self.prefixes.get(&iri[..n]) {
+                return format!("{term}:{}", &iri[n..]);
             }
         }
-        match best {
-            Some((l, term)) => format!("{term}:{}", &iri[l..]),
-            None => iri.to_owned(),
-        }
+        iri.to_owned()
     }
 }
 
@@ -741,6 +761,65 @@ mod tests {
             "\u{feff}:x",
         ] {
             assert!(!is_absolute_iri(s), "expected NOT absolute: {s:?}");
+        }
+    }
+
+    /// Prefix compaction picks the LONGEST matching prefix-capable term, and
+    /// resolves a tie on the term itself (shortest, then lexicographic) so
+    /// the answer cannot differ between processes — `terms` is a
+    /// randomly-seeded HashMap. The index `freeze` builds must give the same
+    /// answer whatever else the vocabulary holds, so the same assertions run
+    /// against a term map three orders of magnitude larger.
+    #[test]
+    fn prefix_compaction_takes_the_longest_match_whatever_the_vocabulary_size() {
+        let cases = |noise: usize| {
+            let mut m = Map::new();
+            m.insert("short".into(), Value::String("http://ex.example/".into()));
+            m.insert(
+                "long".into(),
+                Value::String("http://ex.example/deep/".into()),
+            );
+            // two terms on ONE IRI: the tie-break decides which is written
+            m.insert("bb".into(), Value::String("http://tie.example/".into()));
+            m.insert("aa".into(), Value::String("http://tie.example/".into()));
+            m.insert("aaa".into(), Value::String("http://tie.example/".into()));
+            for i in 0..noise {
+                m.insert(
+                    format!("n{i:06}"),
+                    Value::String(format!("http://noise.example/{i}/")),
+                );
+            }
+            let mut c = Context::default();
+            c.merge_object(&m).expect("merge");
+            c.freeze();
+            c
+        };
+        for noise in [0usize, 100_000] {
+            let c = cases(noise);
+            // longest match wins over the shorter one that also matches
+            assert_eq!(
+                c.compact_iri("http://ex.example/deep/x"),
+                "long:x",
+                "{noise}"
+            );
+            assert_eq!(c.compact_iri("http://ex.example/x"), "short:x", "{noise}");
+            // shortest term, then lexicographic, among terms on one IRI
+            assert_eq!(c.compact_iri("http://tie.example/x"), "aa:x", "{noise}");
+            // an IRI no term prefixes comes back whole
+            assert_eq!(
+                c.compact_iri("http://miss.example/x"),
+                "http://miss.example/x",
+                "{noise}"
+            );
+            // an exact IRI match is a term, not a prefix compaction
+            assert_eq!(c.compact_iri("http://ex.example/"), "short", "{noise}");
+            // the suffix must be non-empty for a prefix to apply, and a
+            // multi-byte boundary must not split a character
+            assert_eq!(
+                c.compact_iri("http://ex.example/deep/é"),
+                "long:é",
+                "{noise}"
+            );
         }
     }
 }
