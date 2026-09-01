@@ -36,8 +36,8 @@ Three properties, each backed by a number CI reproduces on every full run:
 1. **Footprint** — ~35 MiB average RSS (38–59 MiB peak) while running the
    complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
    where a JVM broker's heap alone would not.
-2. **Conformance** — 1813/1813 ETSI CIM 009 V1.9.1 test cases green in
-   every one of the six native store cells, and 1801/1801 in the browser
+2. **Conformance** — 1817/1817 ETSI CIM 009 V1.9.1 test cases green in
+   every one of the six native store cells, and 1805/1805 in the browser
    cell, where the twelve MQTT cases have no broker socket to run against
    — including the two cells where a 10-container role-split fleet rolls
    continuously under the suite

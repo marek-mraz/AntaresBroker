@@ -48,14 +48,14 @@ surface the official set leaves untested, either clause-numbered (`566_01`
 for 5.6.6, `5510_01` for 5.5.10, `4233_01` for 4.23.3) or slotted into the
 ETSI family they extend, and all following the same conventions and tagged
 with their clause so the ledger picks them up. Every file expands to test
-cases; one full run of a native cell is 1813 test cases:
+cases; one full run of a native cell is 1817 test cases:
 
 | suite | test cases |
 |---|---|
 | CommonBehaviours | 65 |
 | Consumption | 535 |
 | EntityMap | 22 |
-| Provision | 399 |
+| Provision | 403 |
 | Snapshot | 5 |
 | Subscription | 156 |
 | ContextSource | 143 |
@@ -72,7 +72,7 @@ than a CIM 009 requirement, with the reason the behaviour exists.
 
 ## The matrix
 
-The same 1813 cases run once per native cell; `wasm-file` runs 1801 of
+The same 1817 cases run once per native cell; `wasm-file` runs 1805 of
 them, the twelve MQTT cases having no broker socket to run against in the
 browser build. Every push gates on the quick preset; the full preset runs twice a week, on `v*` tags and on dispatch,
 and is what the report page and the badges render.
@@ -87,7 +87,7 @@ and is what the report page and the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A native cell passes at 1813/1813, `wasm-file` at 1801/1801. `dev/etsi-matrix-summary.py` folds the
+A native cell passes at 1817/1817, `wasm-file` at 1805/1805. `dev/etsi-matrix-summary.py` folds the
 per-cell results into one table and lists every failure across the
 matrix; a release requires that list to be empty.
 

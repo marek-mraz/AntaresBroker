@@ -718,12 +718,18 @@ fn expand_instance(
                 "attribute {name}: {m} is output-only and not allowed in input (4.5.2.2)"
             )));
         }
-        if name != "ngsildproof"
+        // 4.5.2.2/4.5.2.3 grant the only exception there is: "unless the
+        // PROPERTY name is ngsildproof", the member being defined as "a
+        // Property ... with the non-reified subproperties". 4.5.3.2 and
+        // 4.5.3.3 repeat the ban for a Relationship with no exception at
+        // all, so the attribute name alone is not the test.
+        let sealed_ok = attr_type == "Property" && name == "ngsildproof";
+        if !sealed_ok
             && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed"))
         {
             return Err(bad(format!(
                 "attribute {name}: entityIdSealed/entityTypeSealed are only allowed \
-                 under ngsildproof (4.5.2.2)"
+                 on the ngsildproof Property (4.5.2.2, 4.5.3.2)"
             )));
         }
         // 4.5.2.2 / C.11 / annex B: ngsildproof's NON-REIFIED sealed
@@ -731,7 +737,7 @@ fn expand_instance(
         // entityTypeSealed is "@type": "@vocab" (it seals the entity type,
         // so its value expands like a type name). They are reserved
         // members, so without this explicit copy they silently vanish.
-        if name == "ngsildproof" {
+        if sealed_ok {
             if let Some(v) = obj.get("entityIdSealed") {
                 let s = v.as_str().ok_or_else(|| {
                     bad(format!(
@@ -1455,6 +1461,53 @@ mod tests {
             expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
             "sealed members only under ngsildproof"
         );
+    }
+
+    /// 4.5.3.2 Prohibited: on a Relationship "entityIdSealed" and
+    /// "entityTypeSealed" shall never be present — flat, with no exception.
+    /// 4.5.2.2 and 4.5.2.3 write the only exception there is as "unless the
+    /// PROPERTY name is ngsildproof", and the member itself is defined as
+    /// "a Property ... with the non-reified subproperties". The attribute
+    /// name alone is therefore not the test: an attribute called
+    /// ngsildproof that is not a Property seals nothing.
+    #[test]
+    fn clause_4_5_3_2_sealed_members_are_carried_by_a_property_only() {
+        for not_a_property in [
+            json!({"type": "Relationship", "object": "urn:ngsi-ld:Store:1",
+                   "entityIdSealed": "urn:ngsi-ld:Store:1"}),
+            json!({"type": "Relationship", "object": "urn:ngsi-ld:Store:1",
+                   "entityTypeSealed": "Store"}),
+            json!({"type": "LanguageProperty", "languageMap": {"en": "x"},
+                   "entityIdSealed": "urn:ngsi-ld:Store:1"}),
+            json!({"type": "ListRelationship", "objectList": ["urn:ngsi-ld:Store:1"],
+                   "entityTypeSealed": "Store"}),
+        ] {
+            let doc = json!({"id": "urn:ngsi-ld:Store:1", "type": "Store",
+                             "ngsildproof": not_a_property});
+            let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default());
+            assert!(
+                out.is_err(),
+                "a non-Property ngsildproof carries no sealed member: {out:?}"
+            );
+        }
+        // the concise form infers the attribute type, and the inference
+        // decides the same way: `object` makes this a Relationship
+        let doc = json!({"id": "urn:ngsi-ld:Store:1", "type": "Store",
+            "ngsildproof": {"object": "urn:ngsi-ld:Store:1",
+                            "entityIdSealed": "urn:ngsi-ld:Store:1"}});
+        assert!(
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
+            "the concise Relationship form is a Relationship (4.5.3.3)"
+        );
+        // and the Property form the clause does allow still round-trips
+        let doc = json!({"id": "urn:ngsi-ld:Store:1", "type": "Store",
+            "ngsildproof": {"type": "Property", "value": {"type": "DataIntegrityProof"},
+                            "entityIdSealed": "urn:ngsi-ld:Store:1",
+                            "entityTypeSealed": "Store"}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("the ngsildproof Property is the one carrier");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/ngsildproof"][0];
+        assert_eq!(inst["entityIdSealed"], "urn:ngsi-ld:Store:1");
     }
 
     /// 4.5.3.3: "type: If missing, Relationship can be inferred by the
