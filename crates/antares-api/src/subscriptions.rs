@@ -83,8 +83,12 @@ pub fn normalize_subscription(
                                     .filter(|t| !t.is_empty())
                                     .ok_or_else(|| bad("EntitySelector type is required".into()))?;
                                 // 4.17 type-selection expressions stay raw and
-                                // are evaluated at match time (046_16)
-                                if t.contains(['|', ',', ';', '(']) {
+                                // are evaluated at match time (046_16). Table
+                                // 5.2.33-1's "*" — "a request for all
+                                // Entities" — is not a term either: expanded,
+                                // it becomes an IRI no entity carries and the
+                                // subscription notifies nothing.
+                                if t == "*" || t.contains(['|', ',', ';', '(']) {
                                     ne.insert("type".into(), ev.clone());
                                 } else {
                                     ne.insert("type".into(), Value::String(ctx.expand_key(t)));
@@ -1008,6 +1012,40 @@ mod tests {
     use super::*;
     use antares_jsonld::Loader;
     use serde_json::json;
+
+    /// Table 5.2.33-1 `type`: "To indicate a request for all Entities (with
+    /// implied local scope), \"*\" is also allowed as a value." It is neither
+    /// a term nor a 4.17 expression: expanding it yields an IRI no entity
+    /// carries, so the subscription is created and then silently notifies
+    /// nothing. The stored form has to survive normalization for the matcher
+    /// to read it.
+    #[test]
+    fn clause_5_2_33_a_star_selector_survives_normalization_and_matches() {
+        let ctx = Loader::new().core();
+        let doc = json!({
+            "id": "urn:ngsi-ld:Subscription:star",
+            "type": "Subscription",
+            "entities": [{"type": "*"}],
+            "notification": {"endpoint": {"uri": "http://localhost:1/n"}},
+        });
+        let norm = normalize_subscription(doc.as_object().expect("object"), &ctx, false)
+            .expect("Table 5.2.33-1 allows \"*\"");
+        assert_eq!(
+            norm["entities"][0]["type"],
+            json!("*"),
+            "\"*\" must stay raw: an expanded term matches no entity"
+        );
+        let stored = Value::Object(norm);
+        assert!(
+            antares_matcher::selector_match(
+                &stored,
+                &json!({"id": "urn:ngsi-ld:Vehicle:1",
+                        "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"]}),
+                &ctx,
+            ),
+            "a stored \"*\" subscription must match every Entity"
+        );
+    }
 
     /// 5.5.4: "urn:ngsi-ld:null" as a first-level member value is
     /// BadRequestData on create; in a patch fragment it is the removal form.

@@ -64,7 +64,12 @@ pub fn selector_match(sub: &Value, doc: &Value, ctx: &Context) -> bool {
     let id = doc.get("id").and_then(Value::as_str).unwrap_or("");
     sel.iter().any(|e| {
         let t_ok = e.get("type").and_then(Value::as_str).is_none_or(|t| {
-            if t.contains(['|', ',', ';', '(']) {
+            // Table 5.2.33-1: "*" indicates "a request for all Entities" —
+            // neither a term nor a 4.17 expression, but the absence of a type
+            // predicate, exactly as `type=*` is on the query side.
+            if t == "*" {
+                true
+            } else if t.contains(['|', ',', ';', '(']) {
                 type_selection_matches(t, &types, ctx)
             } else {
                 types.contains(&t)
@@ -328,5 +333,41 @@ mod tests {
         assert!(conditions_match(&s, &doc, &c, &|_| None));
         s["scopeQ"] = json!("/Paris/#");
         assert!(!conditions_match(&s, &doc, &c, &|_| None));
+    }
+
+    /// Table 5.2.33-1 `type`: "A valid type selection string as per clause
+    /// 4.17. To indicate a request for all Entities (with implied local
+    /// scope), \"*\" is also allowed as a value." 5.2.33 scopes EntitySelector
+    /// to what is "queried or subscribed to", so a Subscription carrying it
+    /// selects every Entity Type — it is not a 4.17 expression and not a term
+    /// to expand, but the absence of a type predicate.
+    #[test]
+    fn a_star_selector_type_selects_every_entity_type() {
+        let sub = json!({"entities": [{"type": "*"}]});
+        for doc in [
+            json!({"id": "urn:ngsi-ld:Vehicle:1", "type": [format!("{DC}/Vehicle")]}),
+            json!({"id": "urn:ngsi-ld:Parking:1", "type": [format!("{DC}/Parking")]}),
+            json!({"id": "urn:ngsi-ld:Odd:1", "type": ["urn:example:Odd"]}),
+        ] {
+            assert!(
+                selector_match(&sub, &doc, &ctx()),
+                "a \"*\" selector must match every type: {doc}"
+            );
+        }
+        // "*" is the type predicate only — id and idPattern still narrow.
+        let pinned = json!({"entities": [{"type": "*", "id": "urn:ngsi-ld:Vehicle:1"}]});
+        assert!(selector_match(
+            &pinned,
+            &json!({"id": "urn:ngsi-ld:Vehicle:1", "type": [format!("{DC}/Vehicle")]}),
+            &ctx()
+        ));
+        assert!(
+            !selector_match(
+                &pinned,
+                &json!({"id": "urn:ngsi-ld:Vehicle:2", "type": [format!("{DC}/Vehicle")]}),
+                &ctx()
+            ),
+            "a \"*\" type does not widen an id that was given"
+        );
     }
 }
