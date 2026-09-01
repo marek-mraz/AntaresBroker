@@ -579,3 +579,129 @@ async fn clause_6_3_14_every_response_echoes_the_request_tenant() {
         );
     }
 }
+
+/// 4.14 on the surfaces the matrix above cannot reach. Every probe there
+/// names a document by id, so it exercises only the paths that take one.
+/// Two families answer without an id: discovery folds every Entity of the
+/// Tenant into a type or attribute list (5.7.5-5.7.8), and the batch
+/// operations take a LIST of ids or documents on a resource of their own
+/// (5.6.7-5.6.10). Which types a Tenant stores and which attributes they
+/// carry is information about that Tenant's Entities, which 4.14 makes
+/// visible only to users of the same Tenant; the batch half is the one that
+/// deletes rather than leaks, and it names its targets in a body the
+/// id-addressed guards never see.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_discovery_or_batch_surface_reaches_another_tenants_entities() {
+    let st = AppState::new("test-discovery-isolation".into());
+    const A: &str = "tenant-owner";
+    const B: &str = "tenant-intruder";
+    const ENT: &str = "urn:ngsi-ld:Isolation:discoverable";
+
+    // B has to exist, or every answer is NonexistentTenant (6.3.14) and the
+    // probes prove nothing about the document dimension
+    create_entity(&st, B, "urn:ngsi-ld:Isolation:intruder-seed").await;
+    let owned = format!(
+        r#"{{"id":"{ENT}","type":"IsolationSecret",
+             "secretAttr":{{"type":"Property","value":42}}}}"#
+    );
+    let (status, body) = send(&st, "POST", "/ngsi-ld/v1/entities", Some(A), Some(&owned)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ent_path = format!("/ngsi-ld/v1/entities/{ENT}");
+    let (status, before) = send(&st, "GET", &ent_path, Some(A), None).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+
+    // The owner DOES see both through discovery. Without this the absence
+    // assertions below would hold just as well against a broker whose
+    // discovery answers nothing at all.
+    for (path, name) in [
+        ("/ngsi-ld/v1/types", "IsolationSecret"),
+        ("/ngsi-ld/v1/attributes", "secretAttr"),
+    ] {
+        let (status, mine) = send(&st, "GET", path, Some(A), None).await;
+        assert_eq!(status, StatusCode::OK, "{mine}");
+        assert!(mine.contains(name), "the owner sees its own {name}: {mine}");
+    }
+
+    // Discovery from the intruder. Each probe looks for the name the OTHER
+    // resource carries, so a body that merely echoes its own path cannot be
+    // mistaken for a leak.
+    for (path, needle) in [
+        ("/ngsi-ld/v1/types", "IsolationSecret"),
+        ("/ngsi-ld/v1/types/IsolationSecret", "secretAttr"),
+        ("/ngsi-ld/v1/attributes", "secretAttr"),
+        ("/ngsi-ld/v1/attributes/secretAttr", "IsolationSecret"),
+    ] {
+        let (status, body) = send(&st, "GET", path, Some(B), None).await;
+        assert!(
+            !body.contains(needle),
+            "{path} named {needle} to another tenant: {status} {body}"
+        );
+    }
+
+    // 5.6.14: the query resource takes its filter in the body, so the tenant
+    // never appears beside it in the path.
+    let (status, resp) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/entityOperations/query",
+        Some(B),
+        Some(r#"{"type":"Query","entities":[{"type":"IsolationSecret"}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert!(!resp.contains(ENT), "the batch query crossed over: {resp}");
+
+    // Every batch resource, naming the owner's Entity from the intruder. An
+    // upsert legitimately CREATES that id inside B, so the verdict is not the
+    // status but the owner's copy afterwards.
+    for (path, body) in [
+        (
+            "/ngsi-ld/v1/entityOperations/delete",
+            format!(r#"["{ENT}"]"#),
+        ),
+        (
+            "/ngsi-ld/v1/entityOperations/update",
+            format!(
+                r#"[{{"id":"{ENT}","type":"IsolationSecret",
+                      "secretAttr":{{"type":"Property","value":999}}}}]"#
+            ),
+        ),
+        (
+            "/ngsi-ld/v1/entityOperations/merge",
+            format!(
+                r#"[{{"id":"{ENT}","type":"IsolationSecret",
+                      "planted":{{"type":"Property","value":"x"}}}}]"#
+            ),
+        ),
+        (
+            "/ngsi-ld/v1/entityOperations/upsert",
+            format!(
+                r#"[{{"id":"{ENT}","type":"IsolationSecret",
+                      "secretAttr":{{"type":"Property","value":999}}}}]"#
+            ),
+        ),
+    ] {
+        let (status, resp) = send(&st, "POST", path, Some(B), Some(&body)).await;
+        assert!(
+            !status.is_server_error(),
+            "{path} failed inside the broker: {status} {resp}"
+        );
+    }
+
+    let (status, after) = send(&st, "GET", &ent_path, Some(A), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner's Entity is gone: {after}"
+    );
+    assert_eq!(before, after, "the owner's Entity changed");
+
+    // The upsert above is the one probe that legitimately writes: it creates
+    // that id inside B. Both copies now exist under the same id and must be
+    // each Tenant's own — the same read, answered differently per Tenant, is
+    // what "in isolation" means when the identifiers collide.
+    let (status, theirs) = send(&st, "GET", &ent_path, Some(B), None).await;
+    assert_eq!(status, StatusCode::OK, "{theirs}");
+    assert!(theirs.contains("999"), "B reads its own upsert: {theirs}");
+    assert!(after.contains("42"), "A still reads its own value: {after}");
+}
