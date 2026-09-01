@@ -165,6 +165,13 @@ fn amend_attr(v: &mut Value, ver: (u32, u32)) -> bool {
         }
     }
     // Sub-attributes (properties-of-properties) get the same treatment.
+    // Everything the Attribute itself is made of is excluded, and that
+    // includes the 5.2.14 `previous*` members a showChanges notification
+    // carries: each holds the VALUE the Attribute held, "any JSON value as
+    // defined by IETF RFC 8259" (Table 4.3.6.8-2) or a String[] object
+    // (Table 4.3.6.8-3). Walking one as an Attribute node applies Notes 2/3
+    // to a plain JSON array and hands the subscriber a single element where
+    // its own previous value had several.
     let subs: Vec<String> = obj
         .keys()
         .filter(|k| {
@@ -178,6 +185,13 @@ fn amend_attr(v: &mut Value, ver: (u32, u32)) -> bool {
                     | "vocab"
                     | "valueList"
                     | "objectList"
+                    | "previousValue"
+                    | "previousObject"
+                    | "previousLanguageMap"
+                    | "previousJson"
+                    | "previousVocab"
+                    | "previousValueList"
+                    | "previousObjectList"
                     | "datasetId"
                     | "observedAt"
                     | "unitCode"
@@ -357,6 +371,65 @@ mod tests {
         assert_eq!(preferred_version("ngsi-ld=1.6"), Some((1, 6)));
         assert_eq!(preferred_version("body=json, ngsi-ld=1.4"), Some((1, 4)));
         assert_eq!(preferred_version("body=json"), None);
+    }
+
+    /// 5.2.14: with `showChanges` an Attribute carries the value it HELD, in
+    /// a `previous*` member. That member is an NGSI-LD Value (Table
+    /// 4.3.6.8-2: "Any JSON value as defined by IETF RFC 8259") or, for a
+    /// Relationship, a `String or String[]` object — not a sub-Attribute. The
+    /// 4.3.6.8 tables say nothing about it, so the amender must carry it
+    /// through untouched. Walking into it as if it were an Attribute node
+    /// applies Notes 2/3 to a plain JSON array and hands the subscriber one
+    /// element where its own previous value had several.
+    #[test]
+    fn show_changes_previous_members_are_values_not_sub_attributes() {
+        let mk = || {
+            json!({"id": "urn:a", "type": "T",
+                "speed": {"type": "Property", "value": [1, 2, 3],
+                          "previousValue": [9, 8, 7]},
+                "where": {"type": "GeoProperty",
+                          "value": {"type": "LineString",
+                                    "coordinates": [[1.0, 2.0], [3.0, 4.0]]},
+                          "previousValue": {"type": "LineString",
+                                            "coordinates": [[5.0, 6.0], [7.0, 8.0]]}},
+                "near": {"type": "Relationship", "object": ["urn:b", "urn:c"],
+                         "previousObject": ["urn:d", "urn:e"]},
+                "label": {"type": "LanguageProperty", "languageMap": {"en": "now"},
+                          "previousLanguageMap": {"en": "then"}}})
+        };
+        // 1.2 is below every Notes 2/3 boundary — the harshest amendment.
+        let mut d = mk();
+        amend_entity(&mut d, (1, 2));
+        assert_eq!(
+            d["speed"]["previousValue"],
+            json!([9, 8, 7]),
+            "a previous Value array is a value, not a multi-instance Attribute"
+        );
+        assert_eq!(
+            d["where"]["previousValue"],
+            json!({"type": "LineString", "coordinates": [[5.0, 6.0], [7.0, 8.0]]}),
+            "a previous geometry keeps every position"
+        );
+        assert_eq!(
+            d["near"]["previousObject"],
+            json!(["urn:d", "urn:e"]),
+            "a Relationship object is String or String[] (Table 4.3.6.8-3)"
+        );
+        assert_eq!(
+            d["label"]["previousLanguageMap"],
+            json!({"en": "then"}),
+            "a previous languageMap is not walked as an Attribute either"
+        );
+        // and the members the tables DO govern still fall back
+        let mut d = json!({"id": "urn:a", "type": "T",
+            "speed": {"type": "Property", "value": 1, "observedAt": "2026-01-01T00:00:00Z",
+                      "previousValue": [9, 8, 7]}});
+        assert!(amend_entity(&mut d, (1, 2)));
+        assert!(
+            d["speed"].get("observedAt").is_none(),
+            "observedAt is a 1.3 member and still goes"
+        );
+        assert_eq!(d["speed"]["previousValue"], json!([9, 8, 7]));
     }
 
     #[test]
