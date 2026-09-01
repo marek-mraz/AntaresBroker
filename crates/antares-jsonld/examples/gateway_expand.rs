@@ -53,7 +53,7 @@ async fn screen(loader: &Loader, mut body: Value) {
     let doc = body.as_object().expect("an entity is an object");
     match expand_entity(doc, &ctx, ExpandOpts::default()) {
         Ok(expanded) => println!(
-            "forward: {} attribute(s) expanded, e.g. {}",
+            "forward: {} member(s) expanded, e.g. {}",
             expanded.as_object().map_or(0, |o| o.len()),
             expanded
                 .as_object()
