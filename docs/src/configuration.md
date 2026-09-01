@@ -75,9 +75,10 @@ here).
 | `ANTARES_TELEMETRY` | off | Any value but an off spelling enables the metrics recorder and, with the endpoint, the OTLP span and log pipelines. |
 | `ANTARES_OTLP_ENDPOINT` | unset | OTLP/HTTP collector for traces and logs, e.g. `http://collector:4318/v1/traces`; log records go to the `v1/logs` twin of that URL with the same resource attributes. Unset costs nothing. |
 
-Compile-time bounds (not configurable; spec-shaped rejections): body
-4 MiB → 413, URI 8 KiB → 414, JSON depth 64 → 400. Current values are
-reported live by `GET /q/health` under `limits`.
+Compile-time bounds (no variable sets them; spec-shaped rejections): URI
+8 KiB → 414, JSON depth 64 → 400. The body cap is `ANTARES_MAX_BODY_BYTES`
+above. Every bound in force is reported live by `GET /q/health` under
+`limits`.
 
 Node-shim (wasm tier) extras: `ANTARES_FILE` (redb path per shim) — see
 the [browser guide](wasm.md).
