@@ -85,12 +85,10 @@ fn prune_expired_instances(doc: &mut Value, now: &str) -> bool {
             continue;
         };
         let before = arr.len();
-        arr.retain(|inst| {
-            !inst
-                .get("expiresAt")
-                .and_then(Value::as_str)
-                .is_some_and(|e| e < now)
-        });
+        // 4.6.3 leaves the seconds-fraction separator open, so the two
+        // stamps have to be compared as instants and not as bytes — the rule
+        // lives in `filter::expired_at`, which the read boundary uses too.
+        arr.retain(|inst| !filter::expired_at(inst, now));
         if arr.len() != before {
             changed = true;
             if arr.is_empty() {
@@ -390,11 +388,7 @@ impl Store {
         let mut dead: Vec<(String, String)> = Vec::new();
         for (tenant, docs) in &inner.entities {
             for (id, doc) in docs {
-                if doc
-                    .get("expiresAt")
-                    .and_then(Value::as_str)
-                    .is_some_and(|e| e < now)
-                {
+                if filter::expired_at(doc, now) {
                     dead.push((tenant.clone(), id.clone()));
                 }
             }
@@ -1059,6 +1053,53 @@ mod tests {
         assert!(s.get(&t1, Kind::Entity, "urn:a").is_some());
         assert!(!s.create(&t1, Kind::Entity, "urn:a", json!({})));
         assert!(s.create(&t2, Kind::Entity, "urn:a", json!({})));
+    }
+
+    /// 4.6.3 allows a comma as the seconds-fraction separator. Byte order
+    /// puts ',' (0x2C) before both '.' and 'Z', so a comma-form instance that
+    /// has NOT expired reads as expired against the point-form `now` this
+    /// store stamps — the write path would drop a live instance, and the
+    /// postgres path (which parses through `try_timestamptz`) would keep it.
+    #[test]
+    fn a_comma_fraction_instance_is_not_pruned_before_it_expires() {
+        let now = "2026-09-01T12:00:00.000Z";
+        let mut live = json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [{"value": 1, "expiresAt": "2026-09-01T12:00:00,500Z"}]
+        });
+        assert!(
+            !prune_expired_instances(&mut live, now),
+            "live instance kept"
+        );
+        assert_eq!(live["https://a/attr"].as_array().map(Vec::len), Some(1));
+
+        // one that HAS expired still goes, comma form included, and takes the
+        // attribute with it when it was the last instance
+        let mut gone = json!({
+            "id": "urn:x", "type": ["T"],
+            "https://a/attr": [{"value": 1, "expiresAt": "2026-09-01T11:59:59,500Z"}]
+        });
+        assert!(prune_expired_instances(&mut gone, now));
+        assert!(gone.get("https://a/attr").is_none());
+
+        // the entity-level sweep reads the same stamp the same way
+        let s = Store::default();
+        let t = TenantId::new("t").expect("tenant");
+        assert!(s.create(
+            &t,
+            Kind::Entity,
+            "urn:live",
+            json!({"id": "urn:live", "type": ["T"], "expiresAt": "2026-09-01T12:00:00,500Z"})
+        ));
+        assert!(s.create(
+            &t,
+            Kind::Entity,
+            "urn:gone",
+            json!({"id": "urn:gone", "type": ["T"], "expiresAt": "2026-09-01T11:59:59,500Z"})
+        ));
+        assert_eq!(s.sweep_expired(now), 1, "only the expired one is reaped");
+        assert!(s.get(&t, Kind::Entity, "urn:live").is_some());
+        assert!(s.get(&t, Kind::Entity, "urn:gone").is_none());
     }
 
     /// The same assertion over EVERY kind and the whole read/write surface,

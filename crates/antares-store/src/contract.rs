@@ -433,6 +433,12 @@ pub fn run_current_state_contract(
         iri("subgone"): [{"value": 3, "expiresAt": "2000-01-01T00:00:00.000Z"}],
         iri("subkept"): [{"value": 4}],
     }]);
+    // 4.6.3 leaves the seconds-fraction separator open, and ',' (0x2C) sorts
+    // before both '.' and 'Z', so the two stamps have to be read as instants:
+    // a backend that compares them as bytes serves this live Attribute as
+    // expired. Every backend answers the same here or it is not the same
+    // store.
+    with_attrs[iri("commakept")] = json!([{"value": 5, "expiresAt": "2999-01-01T00:00:00,500Z"}]);
     d.upsert(a, Kind::Entity, &exp_a, with_attrs)
         .expect("upsert entity with an expired attribute");
     let served = d
@@ -457,6 +463,11 @@ pub fn run_current_state_contract(
         served[iri("kept")][0][iri("subkept")][0]["value"],
         json!(4),
         "a live sub-Attribute survives its sibling's expiry"
+    );
+    assert_eq!(
+        served[iri("commakept")][0]["value"],
+        json!(5),
+        "a comma seconds-fraction is an instant, not a byte string"
     );
     d.delete(a, Kind::Entity, &exp_a).expect("delete");
 
