@@ -344,6 +344,18 @@ mod tests {
         );
     }
 
+    /// A tenant is also the first half of the `file`-mode redb key
+    /// (`tenant \0 id`, `antares-sql store/mem/redb.rs`), whose split takes
+    /// the FIRST NUL. A separator or control byte in a tenant name would make
+    /// two different (tenant, id) pairs one key, and one tenant's document
+    /// would be written over another's.
+    #[test]
+    fn tenant_rejects_the_file_mode_key_separator() {
+        for bad in ["a\0b", "\0", "a\nb", "a\tb", "a/b", "a:b"] {
+            assert!(TenantId::new(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
     /// A tenant travels verbatim as a NATS subject token, so the wildcard
     /// and separator characters must never pass validation.
     #[test]
