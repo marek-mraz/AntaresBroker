@@ -147,6 +147,8 @@ carries the fix. The current list:
 | 6 | spec | 5.7.4.4 / Table 5.2.21-1: `lastN` versus values-filter ordering is unspecified |
 | 7 | spec | CIM 029 A.5.2.26 cites clause 5.15.4, which does not exist in CIM 009 V1.9.1 |
 | 8 | openapi | v1.8.1 temporal GET operations declare the `options` parameter twice |
+| 9 | suite | three temporal TPs assert `Content-Range` unit `date-time`; 6.3.10 mandates `DateTime` |
+| 10 | spec | 4.5.19.0's unbounded period count contradicts the aggregation fixtures |
 
 Filing is manual; each entry carries the clause quotation and the
 proposed fix so it can be pasted into the ETSI tracker as is.

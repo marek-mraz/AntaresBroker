@@ -501,6 +501,38 @@ def chapter_violations():
     return out
 
 
+def upstream_raise_violations():
+    """`docs/upstream/etsi-raises.md` is the ready-to-file list, and the
+    conformance chapter republishes it as a table an operator reads instead
+    of the file. A raise added to one and not the other is a defect the
+    chapter says is not there: it listed eight while the file held ten."""
+    raises = ROOT / "docs/upstream/etsi-raises.md"
+    book = ROOT / "docs/src/conformance.md"
+    if not raises.exists() or not book.exists():
+        return [f"{raises if not raises.exists() else book}: missing"]
+    filed = re.findall(
+        r"^## (\d+)\. \[(suite|spec|openapi)\]", raises.read_text(encoding="utf-8"), re.M
+    )
+    listed = re.findall(r"^\| (\d+) \| (suite|spec|openapi) \|", book.read_text(encoding="utf-8"), re.M)
+    out = []
+    if not filed:
+        out.append(f"{raises}: no numbered raises to check the chapter against")
+        return out
+    for n, target in filed:
+        if (n, target) not in listed:
+            out.append(
+                f"docs/src/conformance.md: the defect table has no [{target}] row {n}, "
+                f"which docs/upstream/etsi-raises.md files"
+            )
+    for n, target in listed:
+        if (n, target) not in filed:
+            out.append(
+                f"docs/src/conformance.md: the defect table lists [{target}] row {n}, "
+                f"which docs/upstream/etsi-raises.md does not file"
+            )
+    return out
+
+
 def vendored_openapi_violations():
     """The playground's API console loads its own copy of the vendored ETSI
     OpenAPI document, because `www/public` is what vite ships to the browser
@@ -886,6 +918,7 @@ def cmd_check():
     errors.extend(chapter_violations())
     errors.extend(statement_coverage_violations())
     errors.extend(vendored_openapi_violations())
+    errors.extend(upstream_raise_violations())
     errors.extend(book_fence_violations())
     errors.extend(suite_count_violations())
     errors.extend(robot_recipe_violations())
