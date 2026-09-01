@@ -887,6 +887,16 @@ pub async fn forward(
     if reg.local_only && !query.iter().any(|(k, _)| k == "local") {
         query.push(("local".into(), "true".into()));
     }
+    // 6.6 Entity Attribute / 6.7 Entity Attribute Instance: the path names one
+    // Attribute, so the payload is an Attribute Fragment (5.6.4, 5.6.14,
+    // 5.6.19) rather than an Entity.
+    let single_attr_resource = url
+        .split('?')
+        .next()
+        .unwrap_or(url.as_str())
+        .split("/attrs/")
+        .nth(1)
+        .is_some_and(|rest| !rest.is_empty());
     if let Some(reg_ctx_url) = csi_get("jsonldContext") {
         // 5.5.10: both URLs are Tenant data — the caller's own @context and one
         // the Registration names — so they resolve within the forwarding
@@ -900,36 +910,86 @@ pub async fn forward(
             .resolve_quiet_for(tenant, &Value::String(reg_ctx_url.to_owned()))
             .await;
         if let (Ok(orig), Ok(target)) = (orig, target) {
-            if let Some(b) = body.as_mut() {
-                let entity_shaped = b
-                    .as_object()
-                    .is_some_and(|o| o.get("type").and_then(Value::as_str) != Some("Query"));
-                if entity_shaped {
-                    if let Some(obj) = b.as_object() {
+            // The payload reaching here has already been validated by the
+            // operation's own handler; this expansion only re-reads it to
+            // translate its terms, so it must accept everything that handler
+            // accepted and drop nothing. A merge fragment carries NGSI-LD
+            // Nulls (5.5.12), a temporal payload repeats a datasetId across
+            // instances (4.5.6), and a 4.5.7 tombstone is a deletedAt an
+            // expansion without `sys` discards — re-validating or thinning
+            // the body here changes the write the client asked for.
+            let mut translated: Option<Value> = None;
+            let mut can_switch = true;
+            match body.as_ref() {
+                // nothing to translate
+                None => {}
+                // 6.6/6.7: a resource that names ONE Attribute takes an
+                // Attribute Fragment, not an Entity — its `type` is an
+                // Attribute type and its `value` a value, so reading it as an
+                // Entity turns the value into a sub-Attribute. Its Attribute
+                // name travels in the PATH, which the peer expands with the
+                // @context this request advertises, so switching the context
+                // without rewriting the path renames the target Attribute.
+                // ponytail: the whole request stays in the original @context,
+                // at the cost of the 4.3.6.6 payload compaction for this one
+                // resource; translate the path segment and compact the
+                // fragment through expand_attr_fragment to lift it.
+                Some(_) if single_attr_resource => can_switch = false,
+                Some(v) => match v.as_object() {
+                    // a 5.2.23 Query body carries no entity terms to recompact
+                    Some(o) if o.get("type").and_then(Value::as_str) == Some("Query") => {}
+                    Some(o) => {
                         let opts = antares_jsonld::ExpandOpts {
-                            fragment: obj.get("id").is_none(),
-                            ..Default::default()
+                            fragment: o.get("id").is_none(),
+                            allow_null: true,
+                            merge: true,
+                            temporal: true,
+                            sys: true,
                         };
-                        if let Ok(exp) = antares_jsonld::expand_entity(obj, &orig, opts) {
-                            let mut re = antares_jsonld::compact::compact_entity(&exp, &target);
-                            if let Some(o) = re.as_object_mut() {
-                                o.remove("@context");
+                        match antares_jsonld::expand_entity(o, &orig, opts) {
+                            Ok(exp) => {
+                                let mut re = antares_jsonld::compact::compact_entity(&exp, &target);
+                                if let Some(m) = re.as_object_mut() {
+                                    m.remove("@context");
+                                }
+                                translated = Some(re);
                             }
-                            *b = re;
+                            Err(_) => can_switch = false,
                         }
                     }
-                }
+                    // any other shape (a batch array) has no entity-document
+                    // translation here, so it must not claim to be in the
+                    // registered @context either
+                    None => can_switch = false,
+                },
             }
-            for (k, v) in query.iter_mut() {
-                if matches!(k.as_str(), "attrs" | "type" | "geoproperty") {
-                    *v = v
-                        .split(',')
-                        .map(|t| target.compact_iri(&orig.expand_key(t.trim())))
-                        .collect::<Vec<_>>()
-                        .join(",");
+            // 4.3.6.6 states one rule, not two: compact the payload with the
+            // registered @context "and forward with this JSON-LD context". A
+            // payload that could not be translated must therefore travel in
+            // the @context its terms ARE in — advertising the registered one
+            // over untranslated terms makes the Context Source expand them to
+            // different Fully Qualified Names (5.5.7) and write Attributes
+            // the client never named.
+            if can_switch {
+                if let Some(re) = translated {
+                    body = Some(re);
                 }
+                for (k, v) in query.iter_mut() {
+                    if matches!(k.as_str(), "attrs" | "type" | "geoproperty") {
+                        *v = v
+                            .split(',')
+                            .map(|t| target.compact_iri(&orig.expand_key(t.trim())))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                    }
+                }
+                link_ctx = reg_ctx_url.to_owned();
+            } else {
+                tracing::warn!(
+                    "payload could not be expressed in the registered jsonldContext \
+                     {reg_ctx_url}; forwarding with the original context"
+                );
             }
-            link_ctx = reg_ctx_url.to_owned();
         } else {
             tracing::warn!(
                 "registered jsonldContext {reg_ctx_url} (or the request context) \

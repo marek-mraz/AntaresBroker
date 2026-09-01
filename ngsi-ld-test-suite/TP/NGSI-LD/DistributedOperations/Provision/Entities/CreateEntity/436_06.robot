@@ -28,6 +28,7 @@ Test Teardown       Delete Registration And Stop Context Source Mock Server
 ${entity_speed_filename}                vehicle-speed-attribute.jsonld
 ${stub_entity_filename}                 vehicle-speed-attribute.json
 ${registration_payload_file_path}       csourceRegistrations/context-source-registration-vehicle-speed-with-redirection-ops.jsonld
+${attribute_fragment_filename}          vehicle-speed-no-datasetid-fragment.jsonld
 
 
 *** Test Cases ***
@@ -87,6 +88,30 @@ ${registration_payload_file_path}       csourceRegistrations/context-source-regi
     ${accept}=    Evaluate    str($headers.get('Accept'))
     Should Contain    ${accept}    application/ld+json
 
+
+436_06_04 Registered jsonldContext Leaves An Attribute Fragment A Fragment
+    [Documentation]    4.3.6.6 jsonldContext: the compaction applies "over both
+    ...    payload and query parameters". A 5.6.4 Attribute Fragment is not an
+    ...    Entity — its "type" is an Attribute type (4.5.2) and its "value" is the
+    ...    Property value — so the Context Source shall receive the fragment the
+    ...    client sent. Read as an Entity, "value" becomes a sub-Attribute name and
+    ...    the value the Context Source stores is not the one that was written.
+    [Tags]    dist-ops    4_3_6_6    5_6_4    since_v1.9.1
+    ${csi}=    Evaluate    [{"key": "jsonldContext", "value": $ngsild_test_suite_context}]
+    Setup Registration With ContextSourceInfo And Start Mock    ${csi}
+    Set Stub Reply    PATCH    /ngsi-ld/v1/entities/${entity_id}/attrs/speed    204
+    ${response}=    Partial Update Entity Attributes
+    ...    ${entity_id}
+    ...    speed
+    ...    ${attribute_fragment_filename}
+    ...    ${CONTENT_TYPE_LD_JSON}
+    Check Response Status Code    204    ${response.status_code}
+    Wait For Request
+    ${body}=    Get Request Body
+    ${parsed}=    Evaluate    json.loads($body)    json
+    Should Be Equal As Integers    ${parsed}[value]    56
+    ${sub}=    Set Variable    ${parsed}[source]
+    Should Be Equal As Strings    ${sub}[value]    Speedometer
 
 *** Keywords ***
 Setup Registration With ContextSourceInfo And Start Mock
