@@ -210,11 +210,15 @@ const server = createServer(async (req, res) => {
     res.writeHead(resp.status, headers);
     res.end(noBody ? undefined : Buffer.from(await resp.arrayBuffer()));
   } catch (e) {
+    // The console gets the exception; the response does not. An egress
+    // failure's text carries the URL it dialled, userinfo and all.
     console.error("shim error:", e);
     res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ title: "shim error", detail: String(e) }));
+    res.end(JSON.stringify({ title: "shim error" }));
   }
 });
+// All interfaces on purpose: the Robot suite drives this shim from another
+// container, and a loopback bind would not be reachable from it.
 server.listen(port, "0.0.0.0", () =>
   console.log(`antares-wasm (Node tier) listening on :${port}`),
 );
