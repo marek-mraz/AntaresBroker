@@ -5,9 +5,9 @@ import * as apiMod from "../broker/api.js";
 import { uuid } from "../uuid.js";
 import { DEMO, SEED_SPACES, TENANT_RE, TYPES, arrangeBoard, buildTemplate, normalizeTemplate } from "../model.js";
 import { transport } from "../broker/transport.js";
+import { load, save } from "../persist.js";
 
-export const load = (k, d) => JSON.parse(localStorage.getItem(k) ?? "null") ?? d;
-export const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+export { load, save } from "../persist.js";
 
 const listeners = new Set();
 let version = 0;

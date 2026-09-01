@@ -2,12 +2,14 @@
 // Also owns the request log: EVERY broker call is recorded (tenant, method,
 // path, status) — the 🛰 feature. React components subscribe via `transport`.
 
+import { load, save } from "../persist.js";
+
 const listeners = new Set();
 export const transport = {
   mode: "booting", // booting | opfs-worker | in-page | failed
   persistent: false,
   requests: [], // newest first, capped
-  reqlogOn: JSON.parse(localStorage.getItem("antares.reqlog") ?? "true"),
+  reqlogOn: load("antares.reqlog", true),
   bootError: null,
   subscribe(fn) {
     listeners.add(fn);
@@ -23,7 +25,7 @@ export function emit() {
 
 export function setReqlog(on) {
   transport.reqlogOn = on;
-  localStorage.setItem("antares.reqlog", JSON.stringify(on));
+  save("antares.reqlog", on);
   emit();
 }
 

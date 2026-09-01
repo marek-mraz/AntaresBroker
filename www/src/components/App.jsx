@@ -3,6 +3,7 @@ import { bootTransport, brokerFetch, onNotification, transport } from "../broker
 import { installVirtualHost } from "../broker/virtualhost.js";
 import * as apiMod from "../broker/api.js";
 import { board, createDemo, refreshAll, startPolling, toast } from "../state/board.js";
+import { load, save } from "../persist.js";
 import { startAllPipes, startPipe } from "../state/pipes.js";
 import { useBoard, useTransport } from "../hooks.js";
 import TopBar from "./TopBar.jsx";
@@ -21,9 +22,7 @@ export default function App() {
   const [selectedSpace, setSelectedSpace] = useState("smart-city");
   const [picked, setPicked] = useState(null); // {space,id,attr,emoji,type}
   const [apiOpen, setApiOpen] = useState(false);
-  const [drawerW, setDrawerW] = useState(
-    () => Number(localStorage.getItem("antares.drawerw")) || 420,
-  );
+  const [drawerW, setDrawerW] = useState(() => Number(load("antares.drawerw")) || 420);
 
   useEffect(() => {
     let alive = true;
@@ -34,14 +33,14 @@ export default function App() {
       if (!alive) return;
       setHealth(h);
       // First visit: the board demos itself — once, pristine boards only.
-      if (!localStorage.getItem("antares.demoed")) {
+      if (!load("antares.demoed")) {
         await refreshAll();
         const pristine =
           !board.pipes.length &&
           ![...board.links.values()].some((ls) => ls.length) &&
           ![...board.ents.values()].some((c) => c.local.length);
         if (pristine) await createDemo({ startPipe });
-        localStorage.setItem("antares.demoed", "1");
+        save("antares.demoed", true);
       }
       await refreshAll();
       startAllPipes();
@@ -85,7 +84,7 @@ export default function App() {
             const move = (ev) => {
               const w = Math.min(900, Math.max(300, startW + startX - ev.clientX));
               setDrawerW(w);
-              localStorage.setItem("antares.drawerw", String(w));
+              save("antares.drawerw", w);
             };
             const up = () => {
               window.removeEventListener("pointermove", move);
