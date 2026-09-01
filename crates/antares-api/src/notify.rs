@@ -1448,6 +1448,19 @@ fn selector_ids(sub: &Value) -> Option<Vec<String>> {
     (!ids.is_empty()).then_some(ids)
 }
 
+/// A store read on a delivery path has no caller to fail: the sweep is a
+/// timer, the fan-out is spawned, and both answer `()`. Silence is what makes
+/// a failure dangerous here — a subscription that stops firing because the
+/// store could not be read looks exactly like one with nothing to send — so
+/// the failure is named and the path continues on the empty set it would
+/// have continued on anyway.
+fn read_or_warn<T>(res: Result<Vec<T>, antares_model::NgsiError>, what: &str) -> Vec<T> {
+    res.unwrap_or_else(|e| {
+        tracing::warn!("notification path: reading {what} failed: {e}");
+        Vec::new()
+    })
+}
+
 /// timeInterval subscriptions: fire when due, with all matching entities.
 /// Multi-instance: claim one interval firing under the subscription row
 /// lock — N matcher pods race, exactly one wins (single-winner by
@@ -1549,7 +1562,10 @@ pub async fn interval_tick(st: &AppState) {
     // Earliest next-due instant seen by this sweep, per half.
     let mut next_sub = i64::MAX;
     let mut next_csub = i64::MAX;
-    for tenant_str in st.store.subscription_tenants().unwrap_or_default() {
+    for tenant_str in read_or_warn(
+        st.store.subscription_tenants(),
+        "the tenants with subscriptions",
+    ) {
         let Ok(tenant) = TenantId::new(&tenant_str) else {
             continue;
         };
@@ -1558,10 +1574,10 @@ pub async fn interval_tick(st: &AppState) {
         let subs = match (&st.sub_mirror, sweep_subs) {
             (_, false) => Vec::new(),
             (Some(m), _) => m.periodic_docs(tenant.as_str()),
-            (None, _) => st
-                .store
-                .list(&tenant, Kind::Subscription)
-                .unwrap_or_default(),
+            (None, _) => read_or_warn(
+                st.store.list(&tenant, Kind::Subscription),
+                "the periodic Subscriptions",
+            ),
         };
         for sub in subs {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
@@ -1635,10 +1651,10 @@ pub async fn interval_tick(st: &AppState) {
                     expand: &expand,
                     ..Default::default()
                 };
-                st.store
-                    .query_entities(&tenant, &filter)
-                    .map(|o| o.rows)
-                    .unwrap_or_default()
+                read_or_warn(
+                    st.store.query_entities(&tenant, &filter).map(|o| o.rows),
+                    "the Entities a periodic Subscription notifies about",
+                )
             };
             let matching: Vec<Value> = rows
                 .into_iter()
@@ -1668,11 +1684,10 @@ pub async fn interval_tick(st: &AppState) {
         }
         // csource timeInterval subs: periodic CSourceNotification with all
         // matching registrations, independent of changes (5.11.7)
-        for sub in st
-            .store
-            .list(&tenant, Kind::CSourceSubscription)
-            .unwrap_or_default()
-        {
+        for sub in read_or_warn(
+            st.store.list(&tenant, Kind::CSourceSubscription),
+            "the periodic Context Source Registration Subscriptions",
+        ) {
             let Some(interval) = sub.get("timeInterval").and_then(Value::as_f64) else {
                 continue;
             };
@@ -1694,22 +1709,19 @@ pub async fn interval_tick(st: &AppState) {
             }
             let ctx = sub_context(st, &tenant, &sub).await;
             let spec = crate::csource::spec_for_subscription(&sub);
-            let data: Vec<Value> = st
-                .store
-                .list(&tenant, Kind::Registration)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
-                .map(|r| {
-                    let mut p = crate::csource::present_registration(
-                        &filter_csr(&spec, &r, &ctx),
-                        &ctx,
-                        false,
-                    );
-                    arrayify_entity_types(&mut p);
-                    p
-                })
-                .collect();
+            let data: Vec<Value> = read_or_warn(
+                st.store.list(&tenant, Kind::Registration),
+                "the registrations a periodic Context Source Notification carries",
+            )
+            .into_iter()
+            .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
+            .map(|r| {
+                let mut p =
+                    crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+                arrayify_entity_types(&mut p);
+                p
+            })
+            .collect();
             deliver_csource(st, &tenant, &sub, data, &ctx, "newlyMatching").await;
         }
     }
@@ -1839,11 +1851,10 @@ pub async fn prepare_csource_jobs(
     after: Option<Value>,
 ) -> Vec<CsourceJob> {
     let mut jobs = Vec::new();
-    for sub in st
-        .store
-        .list(tenant, Kind::CSourceSubscription)
-        .unwrap_or_default()
-    {
+    for sub in read_or_warn(
+        st.store.list(tenant, Kind::CSourceSubscription),
+        "the Context Source Registration Subscriptions of a changed registration",
+    ) {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
         }
@@ -1988,19 +1999,18 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     }
     let ctx = sub_context(st, tenant, &sub).await;
     let spec = crate::csource::spec_for_subscription(&sub);
-    let data: Vec<Value> = st
-        .store
-        .list(tenant, Kind::Registration)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
-        .map(|r| {
-            let mut p =
-                crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
-            arrayify_entity_types(&mut p);
-            p
-        })
-        .collect();
+    let data: Vec<Value> = read_or_warn(
+        st.store.list(tenant, Kind::Registration),
+        "the registrations an initial Context Source Notification carries",
+    )
+    .into_iter()
+    .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
+    .map(|r| {
+        let mut p = crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+        arrayify_entity_types(&mut p);
+        p
+    })
+    .collect();
     if data.is_empty() {
         return; // nothing currently matching ⇒ no initial notification
     }
