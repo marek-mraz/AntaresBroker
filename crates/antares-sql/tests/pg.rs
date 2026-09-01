@@ -87,7 +87,6 @@ async fn migrations_apply_and_indexes_exist() {
         "csource_registrations",
         "csource_index",
         "jsonld_contexts",
-        "entity_maps",
         "outbox",
     ] {
         let ok: bool = sqlx::query("SELECT to_regclass($1) IS NOT NULL")
@@ -261,23 +260,13 @@ async fn purge_tenant_empties_every_tenant_table() {
                     "observedAt": "2026-08-04T09:01:00Z", "instanceId": "urn:i:1"}]}),
             )
             .expect("append");
-        sqlx::query(
-            "INSERT INTO entity_maps (tenant_id, map_id, pos, query_checksum, entity_id,
-             registration_id, last_access, expires_at)
-             VALUES ($1, 'm', 0, 'c', 'urn:x:1', 'r', now(), now() + interval '1 hour')",
-        )
-        .bind(t.as_str())
-        .execute(&pool)
-        .await
-        .expect("entity map row");
     }
-    const TABLES: [&str; 13] = [
+    const TABLES: [&str; 12] = [
         "entities",
         "subscriptions",
         "csource_subscriptions",
         "csource_registrations",
         "csource_index",
-        "entity_maps",
         "outbox",
         "snapshots",
         "entity_map_docs",

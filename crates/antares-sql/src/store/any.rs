@@ -1009,7 +1009,6 @@ impl AnyStore {
                     "csource_subscriptions",
                     "csource_registrations",
                     "csource_index",
-                    "entity_maps",
                     "outbox",
                     "snapshots",
                     "entity_map_docs",

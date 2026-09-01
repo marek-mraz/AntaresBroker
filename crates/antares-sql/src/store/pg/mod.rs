@@ -4,7 +4,6 @@
 
 pub mod doc;
 pub mod entity;
-pub mod entity_map;
 pub mod maintenance;
 pub mod outbox;
 pub mod temporal;

@@ -135,7 +135,8 @@ interval firings are claimed through the store so one pod fires.
 
 `ANTARES_STORE=memory|file|postgres|timescale` (ADR-0004), one trait
 pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
-`0002_dead_letters.sql`, `0003_comma_seconds_fraction.sql`).
+`0002_dead_letters.sql`, `0003_comma_seconds_fraction.sql`,
+`0004_drop_entity_maps.sql`).
 
 - Tenancy: one shared schema, `tenant_id` on every row, Row-Level
   Security with `FORCE` on every tenant table (ADR-0001). RLS is a belt
