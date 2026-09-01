@@ -1202,17 +1202,19 @@ pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<V
 /// datasetIds must be distinct per attribute (explicit "@none" is normalized
 /// to absent before this check, so absent + "@none" counts as two defaults).
 fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError> {
-    let mut seen: Vec<&str> = Vec::new();
+    // A set, not a scanned list: the instance count is bounded only by the
+    // request body, so a linear scan per instance makes the check quadratic
+    // in what a client sends.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut default_count = 0usize;
     for inst in instances {
         match inst.get("datasetId").and_then(Value::as_str) {
             Some(d) => {
-                if seen.contains(&d) {
+                if !seen.insert(d) {
                     return Err(NgsiError::BadRequestData(format!(
                         "attribute {name}: duplicate datasetId {d}"
                     )));
                 }
-                seen.push(d);
             }
             None => default_count += 1,
         }
@@ -1395,6 +1397,43 @@ mod tests {
             "speed": [{"type": "Property", "value": 1},
                       {"type": "Property", "value": 2, "datasetId": "@none"}]});
         assert!(expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err());
+    }
+
+    /// 4.5.5.1: "there cannot be several Attribute instances with the same
+    /// datasetId" — two instances naming one datasetId are BadRequestData
+    /// wherever the repeat sits, and the instance count of one Attribute is
+    /// bounded by the request body alone, so the check may not scan the
+    /// instances it has already seen for each new one.
+    #[test]
+    fn clause_4_5_5_1_a_repeated_dataset_id_is_refused_at_any_position() {
+        let inst = |i: usize| {
+            json!({"type": "Property", "value": i,
+                   "datasetId": format!("urn:ngsi-ld:Dataset:{i:05}")})
+        };
+        const N: usize = 4000;
+        let distinct: Vec<Value> = (0..N).map(inst).collect();
+        let doc = json!({"id": "urn:ngsi-ld:X:1", "type": "T", "speed": distinct.clone()});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("distinct datasetIds are legal however many there are");
+        assert_eq!(
+            out["https://uri.etsi.org/ngsi-ld/default-context/speed"]
+                .as_array()
+                .expect("array")
+                .len(),
+            N
+        );
+        // the repeat at the front, in the middle and at the end: a check that
+        // stops early, or one that only compares neighbours, misses two of them
+        for at in [1usize, N / 2, N - 1] {
+            let mut insts = distinct.clone();
+            insts[at] = inst(0);
+            let doc = json!({"id": "urn:ngsi-ld:X:1", "type": "T", "speed": insts});
+            let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default());
+            let Err(NgsiError::BadRequestData(msg)) = out else {
+                panic!("a repeat at {at} must be BadRequestData: {out:?}");
+            };
+            assert!(msg.contains("duplicate datasetId"), "{msg}");
+        }
     }
 
     /// 4.5.2.2 / C.11: "ngsildproof": a Property with the non-reified
