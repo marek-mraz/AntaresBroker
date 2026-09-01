@@ -3872,6 +3872,17 @@ mod candidate_index {
                  so the index must not classify it as a plain type"
             );
         }
+        // Table 5.2.33-1's "*" is the other member of that relation: it is
+        // stored raw and `selector_match` reads it as every type, so an index
+        // that classified it as the literal type "*" would look up a key no
+        // change carries and the subscription would never be a candidate.
+        assert!(
+            matches!(
+                index_keys(&json!({"entities": [{"type": "*"}]})),
+                Keys::Broad
+            ),
+            "a \"*\" selector matches every type, so the index must go broad"
+        );
         assert!(matches!(
             index_keys(&json!({"entities": [{"type": format!("{DC}/Vehicle")}]})),
             Keys::Types(_)
