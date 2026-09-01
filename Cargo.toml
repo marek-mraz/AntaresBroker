@@ -58,6 +58,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redb = "4.1"
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
+# The crypto provider for mqtts. rumqttc is built provider-less
+# (use-rustls-no-provider) so the workspace stays on ONE rustls stack with
+# ring only — aws-lc-sys (C + cmake) never enters the build.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Geoquery evaluator (4.10): DE-9IM relate + GeoJSON conversion
 # no rayon: the geo operations here run per request on the runtime, and
 # rayon's pool (crossbeam-epoch) is what Miri rejects
