@@ -113,6 +113,12 @@ jobs:
           curl -sL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
             | tar xz --strip-components=1
           sudo mv k6 /usr/local/bin/ 2>/dev/null || mv k6 /usr/local/bin/
+      # The subscription index carries a capacity target (100 000
+      # subscriptions per broker), and its shape gate is a release-mode
+      # timing assertion: it belongs on dedicated hardware, where the numbers
+      # measure the index rather than the neighbours on a shared runner.
+      - name: Subscription index shape
+        run: cargo test --release -q -p antares-api --test sub_index -- --ignored --nocapture
       - name: Benchmark passes
         run: REPEATS=${{ inputs.repeats || 10 }} DURATION=1m ./dev/perf/run-bench.sh
       # The published shapes (memory store, this box): startup, throughput
