@@ -501,6 +501,36 @@ def chapter_violations():
     return out
 
 
+def vendored_openapi_violations():
+    """The playground's API console loads its own copy of the vendored ETSI
+    OpenAPI document, because `www/public` is what vite ships to the browser
+    and `docs/openapi` is what ReDoc renders for the book. Two copies of a
+    6 500-line vendored file drift the moment the pin moves and only one of
+    them is updated, and a reader of either has no way to tell. The copies
+    are allowed to differ in exactly one line — the OAS version the console's
+    renderer is pinned to — and trailing whitespace."""
+    docs = ROOT / "docs/openapi/ngsi-ld-api.yaml"
+    web = ROOT / "www/public/openapi/ngsi-ld-api.yaml"
+    if not docs.exists() or not web.exists():
+        return [f"{docs if not docs.exists() else web}: missing"]
+    a = [ln.rstrip() for ln in docs.read_text(encoding="utf-8").splitlines()]
+    b = [ln.rstrip() for ln in web.read_text(encoding="utf-8").splitlines()]
+    if len(a) != len(b):
+        return [
+            f"www/public/openapi/ngsi-ld-api.yaml has {len(b)} lines, "
+            f"docs/openapi/ngsi-ld-api.yaml has {len(a)} — re-copy it from the pin"
+        ]
+    out = []
+    for n, (x, y) in enumerate(zip(a, b), 1):
+        if x == y or (x.startswith("openapi:") and y.startswith("openapi:")):
+            continue
+        out.append(
+            f"www/public/openapi/ngsi-ld-api.yaml:{n} differs from the vendored "
+            f"document beyond its OAS version line: {y[:60]!r}"
+        )
+    return out[:5]
+
+
 def statement_coverage_violations():
     """The conformance chapter closes on a spec-statement snapshot: how many
     leaf clauses carry SHALL sentences no Robot TP exercises, and the fifteen
@@ -855,6 +885,7 @@ def cmd_check():
 
     errors.extend(chapter_violations())
     errors.extend(statement_coverage_violations())
+    errors.extend(vendored_openapi_violations())
     errors.extend(book_fence_violations())
     errors.extend(suite_count_violations())
     errors.extend(robot_recipe_violations())

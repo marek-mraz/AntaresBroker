@@ -19,6 +19,14 @@ would let the implementation define a contract the spec already fixes.
   this file therefore use lenient tooling (oasdiff), not strict
   validation.
 
+The playground ships its own copy at `www/public/openapi/ngsi-ld-api.yaml`
+— `www/public` is what vite serves to the browser, and the API console
+loads the document over HTTP. That copy is this one with a single line
+changed: it declares OAS `3.0.3`, the version Swagger UI is exercised
+against in the browser tier, where ReDoc renders `3.1.0` here.
+`python3 dev/spec.py check` refuses any other difference between the two,
+so moving the pin has to move both.
+
 CI: a PR that touches this file runs `oasdiff breaking` against the
 version on the base branch. Rendering: ReDoc (the CIM 047 Annex B
 recommendation) builds `api.html` beside the book in the Pages deploy.
