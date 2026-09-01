@@ -52,6 +52,20 @@ fn redact_url(url: &str) -> String {
     }
 }
 
+/// An exporter that refuses its endpoint prints the endpoint back verbatim
+/// (`invalid URI {0}`), so a rejected URL carrying `user:password@` userinfo
+/// (RFC 3986 clause 3.2.1) reaches the startup error the way it would reach a
+/// log line. The endpoint is known at the call site, so the failure carries
+/// its redacted form instead.
+fn no_userinfo(message: String, endpoint: &str) -> String {
+    let safe = redact_url(endpoint);
+    if safe == endpoint {
+        message
+    } else {
+        message.replace(endpoint, &safe)
+    }
+}
+
 /// The OTLP/HTTP logs endpoint paired with a traces endpoint: the standard
 /// `v1/traces` suffix becomes `v1/logs`; any other URL is used as given.
 fn logs_endpoint(traces: &str) -> String {
@@ -89,7 +103,8 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_endpoint(endpoint.clone())
-                .build()?;
+                .build()
+                .map_err(|e| no_userinfo(e.to_string(), &endpoint))?;
             let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                 .with_batch_exporter(exporter)
                 .with_resource(resource.clone())
@@ -99,10 +114,12 @@ pub fn init() -> Result<Option<MetricsRender>, Box<dyn std::error::Error>> {
             // queue, so a dead collector drops records instead of stalling
             // a request. The exporter's own HTTP stack is filtered out of
             // the bridge, else every export would log another export.
+            let logs_endpoint = logs_endpoint(&endpoint);
             let log_exporter = opentelemetry_otlp::LogExporter::builder()
                 .with_http()
-                .with_endpoint(logs_endpoint(&endpoint))
-                .build()?;
+                .with_endpoint(logs_endpoint.clone())
+                .build()
+                .map_err(|e| no_userinfo(e.to_string(), &logs_endpoint))?;
             let logger_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
                 .with_batch_exporter(log_exporter)
                 .with_resource(resource)
@@ -351,6 +368,46 @@ mod tests {
             "",
         ] {
             assert_eq!(redact_url(plain), plain, "rewrote a credential-free URL");
+        }
+    }
+
+    /// An exporter that refuses its endpoint prints the endpoint back
+    /// verbatim, so the credential survives the build failure and lands in
+    /// the startup error `main` prints — the leak `redact_url` closes on the
+    /// two paths that succeed. Both exporters are built from the same
+    /// operator-supplied URL, so both have to lose it.
+    #[test]
+    fn a_rejected_collector_endpoint_loses_its_password() {
+        use opentelemetry_otlp::WithExportConfig as _;
+        // A space is not a legal URI character, so the build fails with no
+        // collector to reach — and the rejected endpoint rides the error.
+        let endpoint = "http://otel:s3cr3t@collector .internal:4318/v1/traces";
+        let Err(spans) = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()
+        else {
+            panic!("a URI carrying a space is rejected")
+        };
+        let logs_endpoint = logs_endpoint(endpoint);
+        let Err(logs) = opentelemetry_otlp::LogExporter::builder()
+            .with_http()
+            .with_endpoint(logs_endpoint.clone())
+            .build()
+        else {
+            panic!("a URI carrying a space is rejected")
+        };
+        for (raw, needle) in [
+            (spans.to_string(), endpoint),
+            (logs.to_string(), logs_endpoint.as_str()),
+        ] {
+            let safe = no_userinfo(raw, needle);
+            assert!(!safe.contains("s3cr3t"), "the password reached it: {safe}");
+            assert!(!safe.contains("otel:"), "the userinfo reached it: {safe}");
+            assert!(
+                safe.contains("collector"),
+                "the destination stays readable: {safe}"
+            );
         }
     }
 
