@@ -943,7 +943,13 @@ fn expand_instance(
             };
             out.insert("objectList".into(), normalized);
         }
-        _ => unreachable!(),
+        // 4.5.2 closes the set of Attribute types, and `attr_type` is
+        // either a member of ATTR_TYPES or one of the inferred literals
+        // above — so every reachable value has an arm. A member added to
+        // that list without an arm here would arrive as a client-supplied
+        // `"type"`: pinned by
+        // `every_declarable_attribute_type_is_dispatched_not_unreachable`.
+        _ => unreachable!("attribute type {attr_type} has no expansion arm"),
     }
 
     // optional standard members
@@ -3641,5 +3647,45 @@ mod reserved_member_guards {
 
     fn core() -> std::sync::Arc<Context> {
         Loader::new().core()
+    }
+
+    /// `expand_instance` dispatches on `attr_type` and closes the match with
+    /// `unreachable!()`. That arm is reachable exactly when `ATTR_TYPES` — a
+    /// `pub` list, and the gate a CLIENT-supplied `"type"` passes through —
+    /// carries a member the match does not: 4.5.2 gives Attribute types a
+    /// closed set, but a later edition adding one to the list without an arm
+    /// turns `{"type": "<new>"}` into a panic on the request path instead of
+    /// a Table 6.3.2-1 error.
+    ///
+    /// So every member of the list is walked here. A type may legitimately
+    /// refuse an instance that carries the wrong members (BadRequestData is a
+    /// fine answer); it may not panic, and it may not answer with an error
+    /// that is not an NGSI-LD one.
+    #[test]
+    fn every_declarable_attribute_type_is_dispatched_not_unreachable() {
+        for t in ATTR_TYPES {
+            let doc = serde_json::json!({
+                "id": "urn:ngsi-ld:Vehicle:dispatch",
+                "type": "Vehicle",
+                // Bare on purpose: 4.5.2.2 lets a value-defining member
+                // appear only on its own type, so an instance carrying them
+                // all is refused BEFORE the dispatch and would prove nothing.
+                "attr": {"type": t},
+            });
+            // Whatever the answer is, reaching one is the assertion: an
+            // unhandled type would have panicked before returning.
+            let got = expand_entity(
+                doc.as_object().expect("object"),
+                &core(),
+                ExpandOpts::default(),
+            );
+            if let Err(e) = got {
+                assert_eq!(
+                    e.status(),
+                    400,
+                    "{t}: an instance carrying the wrong members is BadRequestData, not {e}"
+                );
+            }
+        }
     }
 }
