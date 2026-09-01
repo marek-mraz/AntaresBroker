@@ -47,7 +47,7 @@ services:
       ANTARES_BUS: ${HA_BUS:-nats}
       ANTARES_NATS_URL: nats://localhost:4222
     depends_on: [nats]
-    # stop_grace_period must exceed drain delay (0.5 s) +
+    # stop_grace_period must exceed drain delay (2 s) +
     # drain deadline (20 s), or `docker stop` turns the drain into a kill.
     stop_grace_period: 30s
 

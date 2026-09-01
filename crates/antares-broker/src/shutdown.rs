@@ -328,6 +328,30 @@ mod tests {
             drain_deadline().expect("absent").as_secs().to_string(),
             "the book's in-flight ceiling is not the compiled one"
         );
+
+        // The shipped compose files justify their stop_grace_period against
+        // the same two defaults, in a comment an operator copies the number
+        // out of. Both said 0.5 s long after the delay became 2 s.
+        let secs = drain_delay().expect("absent").as_secs_f64();
+        let want = format!(
+            "drain delay ({} s)",
+            if secs.fract() == 0.0 {
+                format!("{secs:.0}")
+            } else {
+                format!("{secs}")
+            }
+        );
+        for name in ["docker-compose-ha.yml", "docker-compose-roles.yml"] {
+            let path = format!(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../compose-files/{}"),
+                name
+            );
+            let text = std::fs::read_to_string(&path).expect("the compose file");
+            assert!(
+                text.contains(&want),
+                "{name} does not justify stop_grace_period against \"{want}\""
+            );
+        }
     }
 
     /// Both drain knobs in ONE test: the environment is process-global, so

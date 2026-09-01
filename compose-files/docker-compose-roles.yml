@@ -33,7 +33,7 @@ x-worker: &worker
   image: antares-local:latest
   network_mode: host
   restart: unless-stopped
-  # stop_grace_period must exceed drain delay (0.5 s) +
+  # stop_grace_period must exceed drain delay (2 s) +
   # drain deadline (20 s), or `docker stop` turns the drain into a kill.
   stop_grace_period: 30s
   depends_on: [nats]
