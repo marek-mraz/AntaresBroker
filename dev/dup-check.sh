@@ -28,7 +28,7 @@ npm_config_ignore_scripts=true npx -y jscpd@4.3.0 crates --min-tokens 60 --min-l
 # jscpd cannot see #[cfg(test)] modules; drop clone pairs where both sides
 # start inside the file's `#[cfg(test)] mod` block.
 python3 - "$OUT" <<'EOF'
-import json, sys, os, re
+import json, sys
 out = sys.argv[1]
 rep = json.load(open(f"{out}/jscpd/jscpd-report.json"))
 first_test = {}
@@ -52,7 +52,8 @@ rep["statistics"]["prod_clone_lines"] = sum(d["lines"] for d in keep)
 json.dump(rep, open(f"{out}/jscpd/jscpd-report.json", "w"), indent=1)
 pairs = {}
 for d in keep:
-    k = tuple(sorted((a := d["firstFile"]["name"].split("crates/")[-1], d["secondFile"]["name"].split("crates/")[-1])))
+    k = tuple(sorted((d["firstFile"]["name"].split("crates/")[-1],
+                       d["secondFile"]["name"].split("crates/")[-1])))
     pairs[k] = pairs.get(k, 0) + d["lines"]
 with open(f"{out}/clones.txt", "w") as f:
     f.write(f"production clones: {len(keep)}, lines: {rep['statistics']['prod_clone_lines']}\n\n")

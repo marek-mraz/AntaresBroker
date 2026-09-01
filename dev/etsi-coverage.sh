@@ -202,6 +202,6 @@ if [ "${UNIT_TESTS:-0}" = 1 ]; then
     "etsi-$STORE=$RESULTS_DIR/robot/coverage.json" \
     "combined=$RESULTS_DIR/coverage.json"
 fi
-echo "=== functions no test ran ($STORE): $(grep -c . "$RESULTS_DIR/uncovered-functions.txt" || true) ==="
+echo "=== functions no test ran ($STORE): $(wc -l < "$RESULTS_DIR/uncovered-functions.txt") ==="
 head -30 "$RESULTS_DIR/uncovered-functions.txt"
 echo "full list: $RESULTS_DIR/uncovered-functions.txt — line level: $RESULTS_DIR/html/index.html"
