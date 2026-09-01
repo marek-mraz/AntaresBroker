@@ -3625,6 +3625,119 @@ mod clause_5_8_6_deletion_payload {
         }
     }
 
+    /// 5.8.6: "If an Attribute has been deleted, only the name of the
+    /// attribute as key and the URI `urn:ngsi-ld:null` as value shall be
+    /// provided, unless more information is required. The latter is the case,
+    /// if: a datasetId needs to be provided; the notification.sysAttrs is set
+    /// to true …; notification.showChanges is set to true …. In all such
+    /// cases, a JSON object with all the required information is provided,
+    /// where the value or the object is set to the URI `urn:ngsi-ld:null`
+    /// respectively or, in case of a LanguageProperty, the languageMap is set
+    /// to `{"@none": "urn:ngsi-ld:null"}`."
+    ///
+    /// The bare-key form is the one an interoperability campaign reads, and
+    /// it is reached only through the concise collapse — the tombstone itself
+    /// is always built as an object, so nothing below this level can tell the
+    /// two apart. 5.5.4 confines the bare form to concise: normalized keeps
+    /// the object, and a first-level `urn:ngsi-ld:null` is BadRequestData
+    /// everywhere else.
+    #[test]
+    fn a_deleted_attribute_is_bare_unless_it_has_more_to_say() {
+        let speed = format!("{DC}/speed");
+        let label = format!("{DC}/label");
+        let before = json!({
+            "id": "urn:ngsi-ld:Vehicle:c",
+            "type": [format!("{DC}/Vehicle")],
+            speed.clone(): [{"type": "Property", "value": 1}],
+            label.clone(): [{"type": "LanguageProperty", "languageMap": {"en": "hi"}}],
+        });
+        let after = json!({
+            "id": "urn:ngsi-ld:Vehicle:c",
+            "type": [format!("{DC}/Vehicle")],
+        });
+        let deleted = [speed.clone(), label.clone()];
+        let entry = |n: Value| {
+            build(
+                &json!({"notification": n}),
+                &before,
+                Some(&after),
+                &deleted,
+                false,
+            )
+        };
+
+        // Nothing more is required: the attribute IS the URI.
+        for fmt in ["concise", "simplified"] {
+            let e = entry(json!({"format": fmt}));
+            assert_eq!(
+                e["speed"],
+                json!("urn:ngsi-ld:null"),
+                "{fmt}: a plain deletion is the bare URI, not an object"
+            );
+            assert_eq!(
+                e["label"],
+                json!({"languageMap": {"@none": "urn:ngsi-ld:null"}}),
+                "{fmt}: a LanguageProperty deletion is the @none map"
+            );
+        }
+
+        // Normalized is not the bare form (5.5.4 confines that to concise).
+        let e = entry(json!({"format": "normalized"}));
+        assert_eq!(
+            e["speed"],
+            json!({"type": "Property", "value": "urn:ngsi-ld:null"}),
+            "normalized keeps the typed object"
+        );
+
+        // sysAttrs: the system-generated sub-attributes have to be provided,
+        // so the deletion becomes an object carrying them.
+        let e = entry(json!({"format": "concise", "sysAttrs": true}));
+        assert_eq!(e["speed"]["value"], json!("urn:ngsi-ld:null"));
+        assert_eq!(e["speed"]["deletedAt"], json!("2026-01-01T00:00:00Z"));
+
+        // showChanges: a previous value has to be provided.
+        let e = entry(json!({"format": "concise", "showChanges": true}));
+        assert_eq!(e["speed"]["value"], json!("urn:ngsi-ld:null"));
+        assert_eq!(e["speed"]["previousValue"], json!(1));
+        assert_eq!(
+            e["label"]["previousLanguageMap"],
+            json!({"en": "hi"}),
+            "a LanguageProperty reports previousLanguageMap"
+        );
+
+        // A datasetId needs to be provided: one instance of two goes, so the
+        // tombstone must name which — and stays an object to do it.
+        let before_ds = json!({
+            "id": "urn:ngsi-ld:Vehicle:c",
+            "type": [format!("{DC}/Vehicle")],
+            speed.clone(): [{"type": "Property", "value": 1, "datasetId": "urn:ds:a"},
+                    {"type": "Property", "value": 2, "datasetId": "urn:ds:b"}],
+        });
+        let after_ds = json!({
+            "id": "urn:ngsi-ld:Vehicle:c",
+            "type": [format!("{DC}/Vehicle")],
+            speed.clone(): [{"type": "Property", "value": 2, "datasetId": "urn:ds:b"}],
+        });
+        let e = build(
+            &json!({"notification": {"format": "concise"}}),
+            &before_ds,
+            Some(&after_ds),
+            &[speed],
+            false,
+        );
+        let gone = e["speed"]
+            .as_array()
+            .and_then(|a| a.iter().find(|i| i["value"] == json!("urn:ngsi-ld:null")))
+            .expect("the lost instance is tombstoned");
+        assert_eq!(gone["datasetId"], json!("urn:ds:a"));
+        assert!(
+            e["speed"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|i| i["value"] == json!(2))),
+            "the surviving instance is still reported: {e}"
+        );
+    }
+
     /// 5.8.6 with sysAttrs and showChanges: the tombstone carries deletedAt
     /// and the previous value of its own typed member.
     #[test]
