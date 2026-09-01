@@ -22,9 +22,16 @@ const VERBATIM: &[&str] = &[
     "modifiedAt",
     "deletedAt",
     "instanceId",
+    // 4.22: a transient attribute instance carries its own expiry, and 4.8
+    // makes it the fifth Temporal Property beside the four already here.
+    "expiresAt",
+    // 5.8.6 showChanges: one previous-member per attribute type.
+    // `previousJson` holds an arbitrary JSON value (4.5.20), which a
+    // sub-attribute walk would rewrite key by key.
     "previousValue",
     "previousObject",
     "previousLanguageMap",
+    "previousJson",
 ];
 
 /// Compact an internal expanded entity for output.
@@ -168,6 +175,16 @@ pub fn compact_entity_shallow(internal: &Value, ctx: &Context) -> Value {
 /// as on the normalized path; multi-instance attributes are the {"dataset":
 /// `{<datasetId>|"@none": <simplified>}}` map (Example 2), compacted per
 /// instance. All other simplified values are plain JSON and stay verbatim.
+///
+/// Ceiling, and it belongs to the representation rather than to this
+/// function: a Property whose VALUE is itself the single-key object
+/// `{"vocab": …}` or `{"dataset": …}` is indistinguishable here from the
+/// wrapper 4.5.4 gives those two forms, because the simplified document no
+/// longer carries the attribute type that would tell them apart. The
+/// normalized representation is lossless and is what a consumer that needs
+/// the distinction asks for. A JsonProperty is NOT affected: 4.5.4 wraps its
+/// payload as `{"json": …}`, so an arbitrary JSON value never reaches this
+/// test unwrapped.
 fn compact_simplified_value(v: &Value, ctx: &Context) -> Value {
     let Some(o) = v.as_object() else {
         return v.clone();
@@ -362,6 +379,47 @@ mod tests {
         assert_eq!(out["expiresAt"], "2026-01-04T00:00:00Z");
         let out = compact_entity(&json!({"scope": ["/a", "/b"]}), &ctx);
         assert_eq!(out["scope"], json!(["/a", "/b"]));
+    }
+
+    /// 4.8 names five Temporal Properties — observedAt, createdAt,
+    /// modifiedAt, deletedAt and expiresAt — and 4.22 puts `expiresAt` on an
+    /// attribute instance, not only on the Entity. All five are reserved
+    /// members whose value is a DateTime string, so none of them is a
+    /// sub-attribute to be renamed under the request @context.
+    ///
+    /// 5.8.6 adds the showChanges previous-members, one per attribute type;
+    /// `previousJson` carries an arbitrary JSON object (4.5.20), which a
+    /// sub-attribute walk rewrites key by key.
+    #[test]
+    fn reserved_instance_members_are_not_compacted_as_sub_attributes() {
+        // a request @context that renames both, which is what a member
+        // treated as a sub-attribute name would obey
+        let ctx = ctx_of(json!({
+            "exp": "expiresAt",
+            "pj": "previousJson",
+            "inner": "https://example.org/inner"
+        }));
+        // a JSON value whose own keys happen to be IRIs the @context knows:
+        // a sub-attribute walk rewrites them, which is data corruption, not
+        // compaction — 4.5.20 keeps a JsonProperty value uninterpreted.
+        let payload = json!({
+            "https://example.org/inner": 1,
+            "nested": {"https://example.org/inner": 2}
+        });
+        let inst = json!({
+            "type": "JsonProperty",
+            "json": payload,
+            "previousJson": payload,
+            "expiresAt": "2026-01-04T00:00:00Z"
+        });
+        let out = compact_instance(&inst, &ctx);
+        assert_eq!(
+            out["expiresAt"], "2026-01-04T00:00:00Z",
+            "expiresAt renamed or rewritten: {out}"
+        );
+        assert_eq!(out["previousJson"], payload, "previousJson mangled: {out}");
+        // and the JsonProperty's own value was already safe
+        assert_eq!(out["json"], payload);
     }
 
     // ---- compact_types ------------------------------------------------
