@@ -706,6 +706,54 @@ def shared_crate_violations():
     return out
 
 
+# ADR-0018 names the four references that select a channel or a tool rather
+# than a version; pinning them would freeze the resolution, not the action.
+UNVERSIONED_USES = {
+    "dtolnay/rust-toolchain@stable",
+    "dtolnay/rust-toolchain@nightly",
+    "dtolnay/rust-toolchain@master",
+    "taiki-e/install-action@nextest",
+}
+
+
+def workflow_pin_violations():
+    """ADR-0018 states what every workflow may run: a `uses:` naming a path in
+    this repository or carrying a version tag, a `run:` step that never asks a
+    release API which version is newest, and a `permissions:` block on every
+    job. Its confirmation was a grep somebody had to remember to run — which is
+    how `advisories.yml` came to resolve `releases/latest` in a job holding
+    `issues: write`. The decision is checkable, so it is checked."""
+    out = []
+    for path in sorted((ROOT / ".github").rglob("*.yml")):
+        rel = path.relative_to(ROOT)
+        text = path.read_text(encoding="utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            hit = re.search(r"uses:\s*(\S+)", line)
+            if hit:
+                ref = hit.group(1)
+                if ref.startswith("./"):
+                    pass
+                elif ref in UNVERSIONED_USES:
+                    pass
+                elif not re.search(r"@(v[\d.]+|[0-9a-f]{40})$", ref):
+                    out.append(f"{rel}:{n}: `uses: {ref}` names neither a version nor a commit")
+            if "releases/latest" in line:
+                out.append(f"{rel}:{n}: asks a release API which version is newest")
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            out.append(f"{rel}: does not parse: {e}")
+            continue
+        if not isinstance(doc, dict) or "jobs" not in doc:
+            continue
+        for name, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict) or "uses" in job:
+                continue  # a called workflow declares its own
+            if "permissions" not in job and "permissions" not in doc:
+                out.append(f"{rel}: job {name} runs without a permissions block")
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -741,6 +789,7 @@ def cmd_check():
     errors.extend(robot_recipe_violations())
     errors.extend(architecture_size_violations())
     errors.extend(shared_crate_violations())
+    errors.extend(workflow_pin_violations())
     errors.extend(book_error_title_violations())
 
     for e in errors:
