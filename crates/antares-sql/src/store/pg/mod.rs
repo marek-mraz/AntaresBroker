@@ -175,8 +175,33 @@ pub async fn set_service(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx:
         .map(|_| ())
 }
 
-/// Tenant auto-create is one idempotent upsert — two concurrent
-/// first-writes both succeed (vs Scorpio's CREATE DATABASE + Flyway deadlock).
+/// The write's own claim on its tenant (ADR-0001: "every implicit tenant
+/// creation inserts its row in the same transaction as the document"). Two
+/// things ride on it being IN the document's transaction rather than before
+/// it: the tenant row and the rows it accounts for commit together, and the
+/// `DO UPDATE` takes the row lock, so the purge's `SELECT … FOR UPDATE`
+/// waits for an in-flight first write instead of stepping over it. Committed
+/// separately, a write racing a purge leaves rows behind for a tenant the
+/// inventory no longer names — readable to whoever sends that tenant header,
+/// listed by nothing, and reclaimable by no further purge.
+///
+/// Idempotent, so two concurrent first writes both succeed (vs Scorpio's
+/// CREATE DATABASE + Flyway deadlock).
+pub async fn claim_tenant(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &TenantId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO tenants (tenant_id) VALUES ($1)          ON CONFLICT (tenant_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id",
+    )
+    .bind(tenant.as_str())
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+}
+
+/// The same claim outside a document transaction, for the callers that have
+/// no document to pair it with (test seeds, the maintenance paths).
 pub async fn ensure_tenant(pool: &PgPool, tenant: &TenantId) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING")
         .bind(tenant.as_str())

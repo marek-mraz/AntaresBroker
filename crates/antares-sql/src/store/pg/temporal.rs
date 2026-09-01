@@ -405,6 +405,7 @@ impl PgTemporalStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let reaped = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM temporal_entities m \
                  WHERE m.tenant_id = $1 AND m.id = $2 AND NOT {NOT_EXPIRED}"

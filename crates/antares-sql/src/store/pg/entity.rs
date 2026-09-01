@@ -309,6 +309,7 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
@@ -888,6 +889,7 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "INSERT INTO entities
                    (tenant_id, id, entity, types, scopes, created_at, modified_at, expires_at,
@@ -1039,6 +1041,7 @@ impl PgEntityStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             // lock + before-images in one statement (ordered: stable lock order)
             let prev_rows = sqlx::query(
                 "SELECT id, entity,

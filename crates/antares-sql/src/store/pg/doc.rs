@@ -364,6 +364,7 @@ impl PgDocStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
                 .await?
                 .is_some();
@@ -404,6 +405,7 @@ impl PgDocStore {
         wait(async {
             let mut tx = self.pool.begin().await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
+            crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             // INSERT … ON CONFLICT DO UPDATE … RETURNING always answers with
             // the row; no row means the statement stopped being an upsert.
             let existed = insert_doc(&mut tx, tenant, kind, id, doc, &conflict)

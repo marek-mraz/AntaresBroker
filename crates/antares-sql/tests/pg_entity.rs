@@ -809,3 +809,50 @@ async fn clause_5_5_6_a_page_is_served_where_the_whole_list_is_refused() {
         .expect("clean");
     tx.commit().await.expect("commit");
 }
+
+/// ADR-0001: "every implicit tenant creation inserts its row in the same
+/// transaction as the document". The claim is not bookkeeping — it is what
+/// makes the purge and a first write agree on an order. The purge takes the
+/// tenant row with `SELECT … FOR UPDATE` before it deletes anything, so a
+/// write that claims its tenant inside its own transaction WAITS there; one
+/// that claimed it beforehand, in a transaction of its own, walks past the
+/// lock and commits rows into a tenant the purge has just removed from the
+/// inventory — rows that stay readable to whoever sends that tenant header,
+/// are listed by nothing, and no later purge can reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_write_waits_for_the_tenant_row_lock() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = std::sync::Arc::new(PgEntityStore::new(pool.clone()));
+    let t = TenantId::new("pgclaim").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Vehicle:claim1";
+    let _ = s.delete(&t, id);
+
+    // the purge's own first statement, held open
+    let mut holder = pool.begin().await.expect("begin");
+    sqlx::query("SELECT 1 FROM tenants WHERE tenant_id = $1 FOR UPDATE")
+        .bind(t.as_str())
+        .fetch_optional(&mut *holder)
+        .await
+        .expect("lock the tenant row");
+
+    let (s2, t2) = (s.clone(), t.clone());
+    let doc = json!({"id": id, "type": "Vehicle",
+                     "createdAt": "2026-01-01T00:00:00Z",
+                     "modifiedAt": "2026-01-01T00:00:00Z"});
+    let writing = tokio::task::spawn_blocking(move || s2.create(&t2, id, &doc));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !writing.is_finished(),
+        "the write committed while the tenant row was locked — its claim is not in its own \
+         transaction"
+    );
+    holder.rollback().await.expect("release");
+    let created = writing
+        .await
+        .expect("join")
+        .expect("the write finishes once the lock is released");
+    assert!(created, "the entity was created");
+    let _ = s.delete(&t, id);
+}

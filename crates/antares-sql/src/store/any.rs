@@ -255,14 +255,6 @@ impl AnyStore {
 
     /// 6.3.14 implicit tenant creation on Pg write paths.
     #[cfg(feature = "postgres")]
-    fn ensure_tenant(p: &PgBackend, tenant: &TenantId) -> Result<(), NgsiError> {
-        super::pg::entity::wait(async {
-            crate::store::pg::ensure_tenant(p.docs.pool(), tenant)
-                .await
-                .map_err(db)
-        })
-    }
-
     pub fn create(
         &self,
         tenant: &TenantId,
@@ -274,7 +266,6 @@ impl AnyStore {
             AnyStore::Mem(s) => Ok(s.create(tenant, kind, id, doc)),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
-                Self::ensure_tenant(p, tenant)?;
                 let created = match kind {
                     Kind::Entity => p.entities.create(tenant, id, &doc).map_err(db)?,
                     Kind::Temporal => p.temporal.create(tenant, id, &doc).map_err(db)?,
@@ -305,7 +296,6 @@ impl AnyStore {
                 .collect()),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
-                Self::ensure_tenant(p, tenant)?;
                 let flags = p.entities.batch_create(tenant, &items).map_err(db)?;
                 for ((_, doc), created) in items.into_iter().zip(&flags) {
                     if *created {
@@ -356,9 +346,6 @@ impl AnyStore {
             AnyStore::Mem(s) => Ok(s.upsert(tenant, kind, id, doc)),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => match kind {
-                _ if Self::ensure_tenant(p, tenant).is_err() => Err(NgsiError::InternalError(
-                    "tenant provisioning failed".into(),
-                )),
                 Kind::Entity => {
                     // replace-or-create without a pre-read: try the replace
                     // first (captures the true before-image under the row
@@ -836,8 +823,6 @@ impl AnyStore {
                 .collect()),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
-                Self::ensure_tenant(p, tenant)
-                    .map_err(|_| NgsiError::InternalError("tenant provisioning failed".into()))?;
                 let out = p
                     .entities
                     .batch_upsert_replace(tenant, &items)
