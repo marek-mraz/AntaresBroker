@@ -71,8 +71,9 @@ peer's under the non-spec member name `hostAlias` and never read it back.
 
 Set `ANTARES_HOST_ALIAS` to the deployment's **razidlo** — the reverse-DNS
 stamp already used in entity URNs (`sk_banskabystrica`). Then one identity
-runs through all three layers: `urn:ngsi-ld:WasteContainer:sk_banskabystrica:…`
-for the data, `did:web:banskabystrica.sk` for the credential, and
+runs through all three layers:
+`urn:ngsi-ld:WasteContainer:sk_banskabystrica:…` for the data,
+`did:web:banskabystrica.sk` for the credential, and
 `Via: 1.1 sk_banskabystrica~odpady` for the hop. DNS delegation supplies the
 federation-wide uniqueness the pseudonym needs with no central registry, which
 is the same argument ADR 001 makes for the URN prefix, and the admission rule
@@ -102,4 +103,8 @@ learns the tenant from the registration's `tenant` member and the
 
 ## Confirmation
 
-`crates/antares-api/src/federation.rs alias_identifies_the_tenant_not_just_the_broker`, `registered_alias_in_the_via_chain_is_not_a_matching_registration`, `via_loop_compares_tokens_not_suffixes`; `crates/antares-api/tests/federation_loop.rs`.
+In `crates/antares-api/src/federation.rs`:
+`alias_identifies_the_tenant_not_just_the_broker`,
+`registered_alias_in_the_via_chain_is_not_a_matching_registration`,
+`via_loop_compares_tokens_not_suffixes`; end to end in
+`crates/antares-api/tests/federation_loop.rs`.

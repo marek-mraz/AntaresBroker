@@ -147,4 +147,7 @@ response flush is a one-line change to make on a measured latency need.
 
 ## Confirmation
 
-`crates/antares-store/src/lib.rs no_temporal_degrades_without_panicking`, `crates/antares-api/tests/temporal_driver_6_3_2.rs`; the `shared-crates` job in `.github/workflows/workspace.yml` fails on any dependency path from a shared crate into api/broker/sql.
+`crates/antares-store/src/lib.rs no_temporal_degrades_without_panicking`
+and `crates/antares-api/tests/temporal_driver_6_3_2.rs`; the
+`shared-crates` job in `.github/workflows/workspace.yml` fails on any
+dependency path from a shared crate into api/broker/sql.
