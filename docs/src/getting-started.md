@@ -82,8 +82,9 @@ The listener receives:
  "subscriptionId": "urn:ngsi-ld:Subscription:demo", "notifiedAt": "2026-08-26T16:16:00.851Z",
  "data": [{"id": "urn:ngsi-ld:TemperatureSensor:001", "type": "TemperatureSensor",
            "temperature": {"type": "Property", "unitCode": "CEL", "value": 42.0}}]}
-``` MQTT delivery works the same way with an
-`mqtt[s]://` endpoint URI.
+```
+
+MQTT delivery works the same way with an `mqtt[s]://` endpoint URI.
 
 ## First federation pair
 

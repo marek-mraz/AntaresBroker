@@ -313,6 +313,41 @@ def chapter_violations():
     return out
 
 
+def book_fence_violations():
+    """CommonMark 4.5: a closing code fence may be followed only by spaces.
+    A ``` with prose glued to its right is therefore NOT a close — the block
+    stays open and eats the rest of the chapter as code. One such line in the
+    getting-started chapter swallowed a paragraph, a heading and two runnable
+    snippets, and neither `mdbook build` nor `mdbook test` says a word about
+    it: both render the result exactly as written."""
+    out = []
+    for path in sorted((ROOT / "docs/src").rglob("*.md")):
+        opened = None
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            m = re.match(r"^ {0,3}(`{3,})(.*)$", line)
+            if not m:
+                continue
+            ticks, rest = len(m.group(1)), m.group(2)
+            if opened is None:
+                # An info string cannot contain a backtick, so a line that
+                # does is prose, not a fence.
+                if "`" not in rest:
+                    opened = (ticks, n)
+            elif ticks >= opened[0]:
+                if rest.strip():
+                    out.append(
+                        f"{path.relative_to(ROOT)}:{n}: fence carries trailing text "
+                        f"{rest.strip()[:40]!r}, so the block opened on line {opened[1]} "
+                        f"never closes"
+                    )
+                    opened = None
+                    break
+                opened = None
+        if opened is not None:
+            out.append(f"{path.relative_to(ROOT)}:{opened[1]}: code fence is never closed")
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -343,6 +378,7 @@ def cmd_check():
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
 
     errors.extend(chapter_violations())
+    errors.extend(book_fence_violations())
 
     for e in errors:
         print(f"CHECK {e}")
