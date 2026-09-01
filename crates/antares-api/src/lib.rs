@@ -185,6 +185,23 @@ pub fn ops_router(state: AppState) -> Router {
 /// every `/q` route — the broker adds no authentication of its own.
 pub struct Admin;
 
+impl Admin {
+    /// Every path this surface mounts, and the only source of the route
+    /// count `/q/health` reports. The destructuring in `router` binds one
+    /// name per entry, so a route added to one and not the other does not
+    /// compile.
+    const PATHS: [&'static str; 8] = [
+        "/health",
+        "/ready",
+        "/metrics",
+        "/tenants",
+        "/tenants/{tenant}",
+        "/dead-letters",
+        "/dead-letters/{id}",
+        "/dead-letters/{id}/replay",
+    ];
+}
+
 impl ApiSurface for Admin {
     fn name(&self) -> &str {
         "admin"
@@ -195,21 +212,23 @@ impl ApiSurface for Admin {
     }
 
     fn router(&self, _st: AppState) -> Router<AppState> {
+        let [health_p, ready_p, metrics_p, tenants_p, tenant_p, dl_p, dl_id_p, replay_p] =
+            Self::PATHS;
         Router::new()
-            .route("/health", get(health))
-            .route("/ready", get(ready))
+            .route(health_p, get(health))
+            .route(ready_p, get(ready))
             // Prometheus text format. 404 until the broker installs the
             // renderer — the api crate never depends on an exporter.
-            .route("/metrics", get(metrics_endpoint))
-            .route("/tenants", get(tenants_list))
-            .route("/tenants/{tenant}", get(tenant_get).delete(tenant_purge))
-            .route("/dead-letters", get(dead_letters_list))
-            .route("/dead-letters/{id}", delete(dead_letter_delete))
-            .route("/dead-letters/{id}/replay", post(dead_letter_replay))
+            .route(metrics_p, get(metrics_endpoint))
+            .route(tenants_p, get(tenants_list))
+            .route(tenant_p, get(tenant_get).delete(tenant_purge))
+            .route(dl_p, get(dead_letters_list))
+            .route(dl_id_p, delete(dead_letter_delete))
+            .route(replay_p, post(dead_letter_replay))
     }
 
     fn version_info(&self) -> serde_json::Value {
-        serde_json::json!({"routes": 8})
+        serde_json::json!({"routes": Self::PATHS.len()})
     }
 }
 
