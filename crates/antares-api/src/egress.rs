@@ -157,7 +157,7 @@ impl Egress {
     /// is not resolved here — the addresses a name stands for are judged by
     /// the transport that dials them, and a binding that opens its own
     /// socket owes that filter (`EgressPolicy::ip_is_metadata` and
-    /// `ip_is_private` over the resolved answer, as `connect_addr` does for
+    /// `ip_is_private` over the resolved answer, as `checked_addr` does for
     /// MQTT and `PolicyResolver` for every reqwest client).
     pub async fn check_destination(&self, url: &str) -> Result<(), String> {
         let parsed =

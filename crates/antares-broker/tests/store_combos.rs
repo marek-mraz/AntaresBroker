@@ -431,7 +431,6 @@ macro_rules! require_db {
 
 /// Rows with a database half: the pg tables hold exactly the half that
 /// backend serves; the local half is proven by `kill -9` as in `local_row`.
-/// `expect_db` = (entity row present, instance rows present).
 fn pg_row(url: &str, store: &str, temporal: &str) {
     let row = format!("{store}-{temporal}");
     let dir = tempdir(&row);

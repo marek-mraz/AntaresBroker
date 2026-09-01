@@ -255,7 +255,7 @@ impl EgressPolicy {
         // when private egress is denied; with it allowed the name passes and
         // the verdict on what it resolves to belongs to the transport, which
         // judges the addresses it is about to dial: `PolicyResolver` for
-        // every reqwest client, `connect_addr` for MQTT. Both drop a
+        // every reqwest client, `checked_addr` for MQTT. Both drop a
         // metadata address whatever the switch says. A binding that dials
         // without such a filter is not covered by this check alone.
         if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
@@ -1392,9 +1392,8 @@ impl Loader {
         }
     }
 
-    /// Cache occupancy (entries per cache). Feeds /q/health today and the
-    /// `antares_context_cache_entries` metric later; also what the
-    /// security regression tests assert the cache size caps against.
+    /// Cache occupancy (entries per cache). Feeds /q/health, and is what
+    /// the security regression tests assert the cache size caps against.
     pub fn cache_stats(&self) -> serde_json::Value {
         self.fetched.run_pending_tasks();
         self.merged.run_pending_tasks();
@@ -1416,7 +1415,8 @@ impl Loader {
 /// The `@context` of a compiled-in document, or `None` for a URL that is not
 /// pinned. The bodies are `include_str!`-ed at build time, so a body that
 /// does not parse or carries no `@context` is a build defect rather than
-/// anything a request can cause — `every_pinned_context_parses` fails on it.
+/// anything a request can cause —
+/// `every_pinned_context_parses_and_carries_an_at_context` fails on it.
 fn pinned(url: &str) -> Option<Value> {
     let (_, body) = PINNED.iter().find(|(u, _)| *u == url)?;
     let doc: Value = serde_json::from_str(body).ok()?;
