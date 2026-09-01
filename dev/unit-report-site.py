@@ -197,12 +197,14 @@ page = f"""<!doctype html>
   table {{ border-collapse: collapse; margin: .5rem 0 1.5rem; width: 100%; }}
   th, td {{ text-align: left; padding: .3rem .7rem; border-bottom: 1px solid #e5e5e5; vertical-align: top; }}
   tr.bad td {{ background: #fdf0f0; }}
+  tr.warn td {{ background: #fff8e1; }}
   pre {{ margin: 0; white-space: pre-wrap; font-size: .8rem; }}
   footer {{ color: #666; font-size: .85rem; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background: #111; color: #ddd; }}
     th, td {{ border-color: #333; }}
     tr.bad td {{ background: #3a1d1d; }}
+    tr.warn td {{ background: #3a331d; }}
     a {{ color: #7ab8ff; }}
   }}
 </style>
