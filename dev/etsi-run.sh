@@ -71,7 +71,7 @@ status=0
 for s in $SUITES; do
   name="${s//\//_}"
   echo "=== $s ==="
-  # Tell the 1 Hz sampler which suite owns the samples from here on (E9g) —
+  # Tell the 1 Hz sampler which suite owns the samples from here on —
   # written before the reset so the reset's own churn is attributed too.
   [ -n "${PHASE_FILE:-}" ] && echo "$name" > "$PHASE_FILE"
   bash dev/reset-broker.sh "$BROKER_URL"   # state reset between suites

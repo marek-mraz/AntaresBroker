@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-check for the ETSI resource-sampling pair (E9g).
+"""Self-check for the ETSI resource-sampling pair.
 
 The two pieces with real logic in them: the sampler's /proc parsing, and the
 report's sample↔TP interval join. Both fail silently if they break — an empty
