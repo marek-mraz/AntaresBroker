@@ -125,6 +125,53 @@ async fn inventory_lists_the_tenant_names_and_nothing_else() {
     );
 }
 
+/// The inventory and the per-tenant routes answer two different questions,
+/// and the split is deliberate. The broker mints tenants for its own
+/// bookkeeping — `snap-<uuid>` per snapshot, `snap-index` for the
+/// synthetic-tenant reverse index, `distsub-index` for the distributed
+/// subscription inbound index. The INVENTORY shows them, because it is the
+/// operator's only way to see a synthetic tenant a deleted snapshot left
+/// behind; the per-tenant routes REFUSE them, because addressing one means
+/// reading or purging broker state out from under the resource that owns it.
+/// Neither half may drift into the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn broker_tenants_are_visible_in_the_inventory_and_not_addressable() {
+    let st = state();
+    seed(&st, "invreal", "urn:ngsi-ld:Room:9").await;
+    let internal = ["snap-index", "snap-0000", "distsub-index"];
+    for name in internal {
+        let t = TenantId::new(name).expect("a legal tenant name");
+        st.store
+            .create(
+                &t,
+                Kind::Entity,
+                "urn:ngsi-ld:Room:x",
+                entity("urn:ngsi-ld:Room:x"),
+            )
+            .expect("seed the broker's own tenant");
+    }
+    let (s, list) = send(&st, "GET", "/q/tenants", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    assert!(listed(&list, "invreal"), "{list}");
+    for name in internal {
+        assert!(
+            listed(&list, name),
+            "a leaked {name} has to stay visible to an operator: {list}"
+        );
+        for method in ["GET", "DELETE"] {
+            let (s, _) = send(&st, method, &format!("/q/tenants/{name}"), None, None).await;
+            assert_eq!(
+                s,
+                StatusCode::BAD_REQUEST,
+                "{method} /q/tenants/{name} must not address broker state"
+            );
+        }
+    }
+    // and the tenant that owns real data is addressable as before
+    let (s, one) = send(&st, "GET", "/q/tenants/invreal", None, None).await;
+    assert_eq!(s, StatusCode::OK, "{one}");
+}
+
 /// One tenant is addressable directly, and that is where its counts live.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_tenant_is_addressable_and_matches_its_inventory_row() {
