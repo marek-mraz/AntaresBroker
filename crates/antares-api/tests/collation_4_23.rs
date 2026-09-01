@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2
+//! 4.23 Entity ordering through query parameters.
+//!
 //! 4.23.1 / 4.23.3 EXAMPLES 6/7: the collation parameter — orderBy string
 //! comparison under an ICU collation (RFC 6067 tag) instead of codepoint
 //! order; 5.2.43 maps the OrderingParams `collation` member onto it.
+//!
+//! 4.23.3 EXAMPLES 8/9/10: distance ordering, whose reference geometry is
+//! `orderFrom` (+ `orderGeometry`, default Point). The clause writes those
+//! examples as QUERY PARAMETERS, and Table 6.4.3.2-1 makes `orderFrom`
+//! mandatory when orderBy asks for distance, so the GET form is the one the
+//! spec specifies and the one asserted here.
 
 use antares_api::AppState;
 use axum::body::Body;
@@ -232,4 +240,132 @@ async fn clause_5_7_4_4_temporal_ordering_requires_local_scope() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Seed a Vehicle whose `location` GeoProperty is a Point, for the distance
+/// ordering below.
+async fn seed_at(st: &AppState, suffix: &str, lon: f64, lat: f64) {
+    let body = json!({
+        "id": format!("urn:ngsi-ld:Vehicle:dist{suffix}"),
+        "type": "Vehicle",
+        "location": {
+            "type": "GeoProperty",
+            "value": {"type": "Point", "coordinates": [lon, lat]},
+        },
+    })
+    .to_string();
+    let (status, b) = send(
+        st,
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+}
+
+fn ids(body: &Value) -> Vec<String> {
+    body.as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|d| d["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// 4.23.3 EXAMPLE 8/9, written by the clause as query parameters:
+/// `?orderBy=location;dist-asc&orderFrom=[8,40]` ranks Entities in ascending
+/// distance from the reference Point, and `dist-desc` in descending distance.
+/// Both directions are asserted against the SAME seed, so a broker that
+/// allow-listed `orderFrom` without reading it cannot pass: it would return
+/// one order for both.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_23_3_dist_ordering_reads_order_from_on_a_get() {
+    let st = AppState::new("dist".into());
+    seed_at(&st, "near", 8.01, 40.01).await;
+    seed_at(&st, "far", 10.0, 45.0).await;
+
+    let (status, body) = get(
+        &st,
+        "/ngsi-ld/v1/entities?type=Vehicle&orderBy=location;dist-asc&orderFrom=%5B8,40%5D",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        [
+            "urn:ngsi-ld:Vehicle:distnear",
+            "urn:ngsi-ld:Vehicle:distfar"
+        ],
+        "dist-asc ranks the nearer Entity first: {body}"
+    );
+
+    let (status, body) = get(
+        &st,
+        "/ngsi-ld/v1/entities?type=Vehicle&orderBy=location;dist-desc&orderFrom=%5B8,40%5D",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        [
+            "urn:ngsi-ld:Vehicle:distfar",
+            "urn:ngsi-ld:Vehicle:distnear"
+        ],
+        "dist-desc ranks the farther Entity first: {body}"
+    );
+}
+
+/// Table 6.4.3.2-1 `orderFrom`: "It shall be one if orderBy uses order by
+/// distance". Without it there is no reference geometry, so the request is
+/// refused rather than answered in some arbitrary order.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_23_3_dist_ordering_without_order_from_is_refused() {
+    let st = AppState::new("distnoref".into());
+    seed_at(&st, "solo", 8.0, 40.0).await;
+    let (status, body) = get(
+        &st,
+        "/ngsi-ld/v1/entities?type=Vehicle&orderBy=location;dist-asc",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "distance ordering has no reference geometry without orderFrom: {body}"
+    );
+}
+
+/// 4.23.3 EXAMPLE 10: the reference geometry is not always a Point —
+/// `orderFrom=[[8,40],[9,42],[9,45],[8,40]]&orderGeometry=LineString` ranks
+/// by distance from a LineString. Read as the default Point, that coordinate
+/// list is not a Point at all, so a broker ignoring `orderGeometry` cannot
+/// answer this the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_23_3_order_geometry_selects_the_reference_geometry() {
+    let st = AppState::new("distline".into());
+    // on the segment from [8,40] to [9,42]
+    seed_at(&st, "online", 8.5, 41.0).await;
+    seed_at(&st, "offline", 20.0, 60.0).await;
+
+    let (status, body) = get(
+        &st,
+        concat!(
+            "/ngsi-ld/v1/entities?type=Vehicle&orderBy=location;dist-asc",
+            "&orderFrom=%5B%5B8,40%5D,%5B9,42%5D,%5B9,45%5D,%5B8,40%5D%5D",
+            "&orderGeometry=LineString"
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        ids(&body),
+        [
+            "urn:ngsi-ld:Vehicle:distonline",
+            "urn:ngsi-ld:Vehicle:distoffline"
+        ],
+        "a LineString reference ranks the Entity on the line first: {body}"
+    );
 }
