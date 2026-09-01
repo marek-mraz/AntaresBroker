@@ -876,6 +876,10 @@ impl AnyStore {
     pub fn sweep_expired(&self) -> usize {
         match self {
             AnyStore::Mem(s) => s.sweep_expired(&now_utc()),
+            // 4.22 reaping on the Pg arm is `pg::maintenance`'s job
+            // (`reap_expired_entities` / `reap_expired_instances`), which
+            // deletes in one indexed statement instead of walking the store;
+            // reads refuse an expired document either way.
             #[cfg(feature = "postgres")]
             AnyStore::Pg(_) => 0,
         }

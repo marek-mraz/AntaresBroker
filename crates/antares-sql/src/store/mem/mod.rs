@@ -1061,6 +1061,58 @@ mod tests {
         assert!(s.create(&t2, Kind::Entity, "urn:a", json!({})));
     }
 
+    /// The same assertion over EVERY kind and the whole read/write surface,
+    /// with the SAME id on both sides — the shape a tenant-blind map gets
+    /// wrong, because it answers the neighbour's document instead of `None`.
+    #[test]
+    fn no_kind_leaks_across_tenants() {
+        let s = Store::default();
+        let a = TenantId::new("t-a").expect("tenant");
+        let b = TenantId::new("t-b").expect("tenant");
+        let id = "urn:ngsi-ld:shared:1";
+        for kind in ALL_KINDS {
+            assert!(s.create(&a, kind, id, json!({"id": id, "owner": "a"})));
+
+            assert!(s.get(&b, kind, id).is_none(), "{kind:?}: get");
+            assert!(s.list(&b, kind).is_empty(), "{kind:?}: list");
+            assert!(
+                s.list_page(&b, kind, None, 100).is_empty(),
+                "{kind:?}: list_page"
+            );
+            assert_eq!(
+                s.list_slice(&b, kind, 0, 100),
+                (Vec::new(), 0),
+                "{kind:?}: list_slice"
+            );
+
+            // no write reaches the neighbour's document either
+            assert!(!s.delete(&b, kind, id), "{kind:?}: delete");
+            assert!(
+                s.mutate::<(), ()>(&b, kind, id, |d| {
+                    d["owner"] = json!("b");
+                    Ok(())
+                })
+                .is_none(),
+                "{kind:?}: mutate"
+            );
+
+            // the same id under another tenant is a create, not a conflict
+            assert!(s.create(&b, kind, id, json!({"id": id, "owner": "b"})));
+            assert_eq!(s.get(&a, kind, id).expect("a keeps its own")["owner"], "a");
+            assert_eq!(s.get(&b, kind, id).expect("b has its own")["owner"], "b");
+
+            // and b deleting its own leaves a's untouched
+            assert!(s.delete(&b, kind, id), "{kind:?}: delete own");
+            assert!(s.get(&b, kind, id).is_none(), "{kind:?}: deleted");
+            assert_eq!(
+                s.get(&a, kind, id)
+                    .expect("survives the neighbour's delete")["owner"],
+                "a"
+            );
+            assert!(s.delete(&a, kind, id), "{kind:?}: cleanup");
+        }
+    }
+
     fn tempdir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("antares-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
