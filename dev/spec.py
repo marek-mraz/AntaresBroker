@@ -268,6 +268,22 @@ def cmd_statements():
           f"{sum(1 for r in rows if r[4] == 0)} cite no code/test anchor.")
 
 
+def robot_cases(subtree):
+    """Robot test cases under a named subtree — a case is a line at column 0
+    inside a `*** Test Cases ***` section."""
+    n = 0
+    for f in (ROOT / "ngsi-ld-test-suite").rglob("*.robot"):
+        if subtree.lower() not in str(f).lower():
+            continue
+        insec = False
+        for line in f.read_text(errors="replace").splitlines():
+            if line.strip().startswith("***"):
+                insec = line.strip().lower().startswith("*** test case")
+            elif insec and line.strip() and not line[0].isspace() and not line.startswith("#"):
+                n += 1
+    return n
+
+
 def chapter_violations():
     """The conformance chapter republishes numbers this tool computes: the
     status counts and the size of the suite. A generated number copied into
@@ -310,6 +326,31 @@ def chapter_violations():
         out.append(f"{book}: no suite file count to check")
     elif int(stated.group(1)) != files:
         out.append(f"{book}: says {stated.group(1)} suite files, TP/ holds {files}")
+
+    # The federation chapter republishes the size of the two suites that
+    # cover its surface. Same failure as the counts block: prose that was
+    # true when it was written and drifts every time a case is added.
+    fed = ROOT / "docs/src/federation.md"
+    if not fed.exists():
+        out.append("docs/src/federation.md: the federation chapter is missing")
+        return out
+    ftext = fed.read_text(encoding="utf-8")
+    dist, iop = robot_cases("DistributedOperations"), robot_cases("IOP")
+    pair = re.search(r"\((\d+) \+ (\d+) tests\)", ftext)
+    if not pair:
+        out.append("docs/src/federation.md: no suite size to check")
+    elif (int(pair.group(1)), int(pair.group(2))) != (dist, iop):
+        out.append(
+            f"docs/src/federation.md: says {pair.group(1)} + {pair.group(2)} tests, "
+            f"the suites hold "
+            f"{dist} + {iop}"
+        )
+    lone = re.search(r"(\d+)-test IOP tree", ftext)
+    if lone and int(lone.group(1)) != iop:
+        out.append(
+            f"docs/src/federation.md: says a {lone.group(1)}-test IOP tree, "
+            f"it holds {iop}"
+        )
     return out
 
 
