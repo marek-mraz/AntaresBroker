@@ -637,8 +637,12 @@ fn expand_instance(
     let attr_type: &str = match declared {
         Some(t) if ATTR_TYPES.contains(&t) => t,
         Some(t) if GEO_TYPES.contains(&t) && obj.contains_key("coordinates") => {
-            // concise GeoProperty: bare GeoJSON object as the value
+            // concise GeoProperty: bare GeoJSON object as the value. 4.7.3
+            // mandates `coordinates` "as defined by the relevant GeoJSON
+            // Geometry", so the concise form is held to the same RFC 7946
+            // restrictions as the verbose one.
             check_value_nulls(name, v, opts)?;
+            validate_geojson(name, v)?;
             return Ok(json!({"type": "GeoProperty", "value": v.clone()}));
         }
         Some(t) => {
@@ -1195,25 +1199,101 @@ fn validate_dataset_ids(name: &str, instances: &[Value]) -> Result<(), NgsiError
     Ok(())
 }
 
+/// RFC 7946 3.1.1: "A position is an array of numbers. There MUST be two or
+/// more elements. The first two elements are longitude and latitude \[…\]
+/// using decimal numbers", read in the coordinate reference system the
+/// format fixes: "a geographic coordinate reference system, using the World
+/// Geodetic System 1984 \[…\] datum, with longitude and latitude units of
+/// decimal degrees" (RFC 7946 4). 4.7.2 adds that the coordinates are "values
+/// of a JSON-LD floating point number data type".
+///
+/// The range is not decoration: a latitude of 999 reaches PostGIS as a
+/// `::geography` cast that errors, so a single accepted write would break
+/// every later `near` query in that tenant.
+fn check_position(p: &Value) -> Result<(), String> {
+    let a = p.as_array().ok_or("position is not an array")?;
+    if a.len() < 2 {
+        return Err(format!("position has {} elements (minimum 2)", a.len()));
+    }
+    let mut n = a.iter().map(|c| c.as_f64().filter(|f| f.is_finite()));
+    let (Some(Some(lon)), Some(Some(lat))) = (n.next(), n.next()) else {
+        return Err("position holds a value that is not a number".into());
+    };
+    if n.any(|c| c.is_none()) {
+        return Err("position holds a value that is not a number".into());
+    }
+    if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
+        return Err(format!(
+            "position [{lon}, {lat}] is outside the WGS84 range [-180 -90, 180 90]"
+        ));
+    }
+    Ok(())
+}
+
+/// RFC 7946 3.1.4: a LineString is "two or more positions".
+fn check_line(v: &Value) -> Result<(), String> {
+    let a = v.as_array().ok_or("LineString is not an array")?;
+    if a.len() < 2 {
+        return Err(format!("LineString has {} positions (minimum 2)", a.len()));
+    }
+    a.iter().try_for_each(check_position)
+}
+
+/// RFC 7946 3.1.6: a linear ring is "closed \[…\] with four or more positions",
+/// "the first and last positions \[…\] equivalent".
+fn check_ring(v: &Value) -> Result<(), String> {
+    let a = v.as_array().ok_or("linear ring is not an array")?;
+    if a.len() < 4 {
+        return Err(format!("linear ring has {} positions (minimum 4)", a.len()));
+    }
+    if a.first() != a.last() {
+        return Err("linear ring is not closed (first != last position)".into());
+    }
+    a.iter().try_for_each(check_position)
+}
+
+fn each(v: &Value, what: &str, f: impl FnMut(&Value) -> Result<(), String>) -> Result<(), String> {
+    v.as_array()
+        .ok_or_else(|| format!("{what} is not an array"))?
+        .iter()
+        .try_for_each(f)
+}
+
+/// The nesting RFC 7946 3.1 gives each geometry type its `coordinates`.
+/// Empty multi-geometries are geometries: only the shapes the RFC names a
+/// minimum for carry one.
+pub fn check_geometry(gtype: &str, coords: &Value) -> Result<(), String> {
+    match gtype {
+        "Point" => check_position(coords),
+        "MultiPoint" => each(coords, "MultiPoint coordinates", check_position),
+        "LineString" => check_line(coords),
+        "MultiLineString" => each(coords, "MultiLineString coordinates", check_line),
+        "Polygon" => each(coords, "Polygon coordinates", check_ring),
+        "MultiPolygon" => each(coords, "MultiPolygon coordinates", |p| {
+            each(p, "MultiPolygon polygon", check_ring)
+        }),
+        _ => Err(format!("{gtype} is not a supported GeoJSON geometry type")),
+    }
+}
+
 /// 4.6.3: supported Value geometries are "All the GeoJSON Geometries \[8\]
 /// with the exception of GeometryCollection" — GEO_TYPES holds exactly that
-/// set, and every one of them carries a `coordinates` ARRAY (RFC 7946 3.1): a
-/// scalar or object one is not a geometry and must not reach the 4.5.16
-/// GeoJSON rendering path.
+/// set. 4.7.2 accepts a geometry "if and only if \[…\] meeting the syntax and
+/// restrictions mandated by IETF RFC 7946 \[8\] when representing a valid
+/// Geometry of the type specified", so the shape of `coordinates` is checked
+/// against the declared type, not merely for being an array: a geometry that
+/// is not one must not reach storage, the 4.5.16 GeoJSON rendering path or a
+/// PostGIS cast.
 pub fn validate_geojson(name: &str, v: &Value) -> Result<(), NgsiError> {
-    let ok = v.as_object().is_some_and(|o| {
-        o.get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|t| GEO_TYPES.contains(&t))
-            && o.get("coordinates").is_some_and(Value::is_array)
+    let bad = |m: &str| NgsiError::BadRequestData(format!("attribute {name}: {m}"));
+    let shape = v.as_object().and_then(|o| {
+        let t = o.get("type").and_then(Value::as_str)?;
+        GEO_TYPES.contains(&t).then_some((t, o.get("coordinates")?))
     });
-    if ok {
-        Ok(())
-    } else {
-        Err(NgsiError::BadRequestData(format!(
-            "attribute {name}: value is not a valid GeoJSON geometry"
-        )))
-    }
+    let Some((gtype, coords)) = shape else {
+        return Err(bad("value is not a valid GeoJSON geometry"));
+    };
+    check_geometry(gtype, coords).map_err(|e| bad(&e))
 }
 
 /// ISO 8601 DateTime check — 4.6.3, `YYYY-MM-DDThh:mm:ss[.ffffff]Z`.
@@ -1826,6 +1906,148 @@ mod tests {
             out["https://uri.etsi.org/ngsi-ld/default-context/g"][0]["type"],
             "Property"
         );
+    }
+
+    /// 4.7.2: a geometry is accepted "if and only if" it meets "the syntax
+    /// and restrictions mandated by IETF RFC 7946 \[8\] when representing a
+    /// valid Geometry of the type specified", and its coordinates are "values
+    /// of a JSON-LD floating point number data type". The verbose, concise
+    /// and string-encoded forms are one Value and all three are held to it.
+    #[test]
+    fn geojson_geometries_meet_the_rfc_7946_restrictions() {
+        let ent = |attr: Value| {
+            let doc = json!({"id": "urn:x", "type": "T", "location": attr});
+            expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+        };
+        let bad_geoms = vec![
+            // RFC 7946 3.1.1: "A position is an array of numbers. There MUST
+            // be two or more elements."
+            (
+                "point is not an array",
+                json!({"type": "Point", "coordinates": 1}),
+            ),
+            (
+                "point is an object",
+                json!({"type": "Point", "coordinates": {"lon": 1}}),
+            ),
+            (
+                "one element",
+                json!({"type": "Point", "coordinates": [1.0]}),
+            ),
+            (
+                "empty position",
+                json!({"type": "Point", "coordinates": []}),
+            ),
+            // 4.7.2: coordinates are floating point numbers.
+            (
+                "strings, not numbers",
+                json!({"type": "Point", "coordinates": ["1", "2"]}),
+            ),
+            (
+                "null coordinate",
+                json!({"type": "Point", "coordinates": [1.0, null]}),
+            ),
+            (
+                "nested where a position belongs",
+                json!({"type": "Point", "coordinates": [[1.0, 2.0]]}),
+            ),
+            // RFC 7946 4: the CRS is WGS84 "with longitude and latitude units
+            // of decimal degrees" — 999 is not a latitude. Left through, it
+            // reaches PostGIS as a `::geography` cast that errors, so one
+            // write breaks every later `near` query in the tenant.
+            (
+                "latitude past the pole",
+                json!({"type": "Point", "coordinates": [0.0, 999.0]}),
+            ),
+            (
+                "longitude past the antimeridian",
+                json!({"type": "Point", "coordinates": [181.0, 0.0]}),
+            ),
+            (
+                "latitude below the pole",
+                json!({"type": "Point", "coordinates": [0.0, -90.5]}),
+            ),
+            // RFC 7946 3.1.4: a LineString needs "two or more positions".
+            (
+                "one-position LineString",
+                json!({"type": "LineString", "coordinates": [[1.0, 2.0]]}),
+            ),
+            (
+                "LineString of numbers",
+                json!({"type": "LineString", "coordinates": [1.0, 2.0]}),
+            ),
+            // RFC 7946 3.1.6: rings are closed and have four or more positions.
+            (
+                "open ring",
+                json!({"type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]}),
+            ),
+            (
+                "short ring",
+                json!({"type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]]}),
+            ),
+            (
+                "ring out of range",
+                json!({"type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 91.0], [0.0, 0.0]]]}),
+            ),
+            (
+                "polygon of positions",
+                json!({"type": "Polygon", "coordinates": [[0.0, 0.0]]}),
+            ),
+            (
+                "MultiPolygon nested one level short",
+                json!({"type": "MultiPolygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]}),
+            ),
+        ];
+        for (why, geom) in &bad_geoms {
+            // verbose form
+            let err = ent(json!({"type": "GeoProperty", "value": geom})).expect_err(why);
+            assert!(
+                matches!(err, NgsiError::BadRequestData(_)),
+                "{why}: {err:?}"
+            );
+            // 4.7.3 concise form — the same Value, the same restrictions
+            let err = ent(geom.clone()).expect_err(&format!("{why} (concise)"));
+            assert!(
+                matches!(err, NgsiError::BadRequestData(_)),
+                "{why} (concise)"
+            );
+            // 4.7.2 string-encoded form
+            let encoded = serde_json::to_string(geom).expect("encode");
+            let err = ent(json!({"type": "GeoProperty", "value": encoded}))
+                .expect_err(&format!("{why} (encoded)"));
+            assert!(
+                matches!(err, NgsiError::BadRequestData(_)),
+                "{why} (encoded)"
+            );
+        }
+        // the shapes RFC 7946 does allow stay accepted, in all three forms
+        let good = vec![
+            json!({"type": "Point", "coordinates": [17.1, 48.7]}),
+            json!({"type": "Point", "coordinates": [-180.0, -90.0]}),
+            json!({"type": "Point", "coordinates": [180.0, 90.0]}),
+            // "Altitude or elevation MAY be included as an optional third element"
+            json!({"type": "Point", "coordinates": [1.0, 2.0, 300.0]}),
+            json!({"type": "MultiPoint", "coordinates": [[1.0, 2.0], [3.0, 4.0]]}),
+            json!({"type": "LineString", "coordinates": [[1.0, 2.0], [3.0, 4.0]]}),
+            json!({"type": "MultiLineString", "coordinates": [[[1.0, 2.0], [3.0, 4.0]]]}),
+            json!({"type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]}),
+            json!({"type": "Polygon", "coordinates": [
+                [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 0.0]],
+                [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 1.0]]]}),
+            json!({"type": "MultiPolygon",
+                "coordinates": [[[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]]}),
+            // RFC 7946 3.1: an empty multi-geometry is still a geometry
+            json!({"type": "MultiPoint", "coordinates": []}),
+            json!({"type": "Polygon", "coordinates": []}),
+        ];
+        for geom in &good {
+            ent(json!({"type": "GeoProperty", "value": geom}))
+                .unwrap_or_else(|e| panic!("{geom} rejected: {e:?}"));
+            ent(geom.clone()).unwrap_or_else(|e| panic!("{geom} concise rejected: {e:?}"));
+        }
     }
 
     /// 5.5.4 General NGSI-LD validation: "urn:ngsi-ld:null" as a first-level

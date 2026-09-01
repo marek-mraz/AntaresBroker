@@ -66,3 +66,39 @@ Resource            ${EXECDIR}/resources/JsonUtils.resource
     Check Response Body Containing ProblemDetails Element Containing Type Element set to
     ...    ${response.json()}
     ...    ${ERROR_TYPE_BAD_REQUEST_DATA}
+
+471_01_04 A Geometry That Is Not Valid For Its Type Is Rejected
+    [Documentation]    4.7.2: a geometry is accepted "if and only if ... meeting
+    ...    the syntax and restrictions mandated by IETF RFC 7946 [8] when
+    ...    representing a valid Geometry of the type specified". A Polygon whose
+    ...    ring is not closed and carries three positions is not a valid Polygon
+    ...    (IETF RFC 7946 3.1.6: "a closed LineString with four or more
+    ...    positions") → 400 BadRequestData, entity NOT created.
+    [Tags]    e-create    4_7_2    since_v1.9.1
+    ${entity_id}=    Generate Random Vehicle Entity Id
+    ${payload}=    Evaluate
+    ...    {"id": $entity_id, "type": "Vehicle", "@context": [$ngsild_test_suite_context], "location": {"type": "GeoProperty", "value": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1]]]}}}
+    ${response}=    Create Entity From JSON-LD Content    ${payload}
+    Check Response Status Code    400    ${response.status_code}
+    Check Response Body Containing ProblemDetails Element Containing Type Element set to
+    ...    ${response.json()}
+    ...    ${ERROR_TYPE_BAD_REQUEST_DATA}
+    ${response}=    Retrieve Entity    ${entity_id}    context=${ngsild_test_suite_context}
+    Check Response Status Code    404    ${response.status_code}
+
+471_01_05 A Concise Geometry Is Held To The Same Restrictions
+    [Documentation]    4.7.3: in the concise form "coordinates" "shall be
+    ...    present, as defined by the relevant GeoJSON Geometry [8]" — the same
+    ...    RFC 7946 restrictions 4.7.2 states, so a Point whose coordinates are
+    ...    not a position → 400 BadRequestData, entity NOT created.
+    [Tags]    e-create    4_7_3    since_v1.9.1
+    ${entity_id}=    Generate Random Vehicle Entity Id
+    ${payload}=    Evaluate
+    ...    {"id": $entity_id, "type": "Vehicle", "@context": [$ngsild_test_suite_context], "location": {"type": "Point", "coordinates": [17.1]}}
+    ${response}=    Create Entity From JSON-LD Content    ${payload}
+    Check Response Status Code    400    ${response.status_code}
+    Check Response Body Containing ProblemDetails Element Containing Type Element set to
+    ...    ${response.json()}
+    ...    ${ERROR_TYPE_BAD_REQUEST_DATA}
+    ${response}=    Retrieve Entity    ${entity_id}    context=${ngsild_test_suite_context}
+    Check Response Status Code    404    ${response.status_code}

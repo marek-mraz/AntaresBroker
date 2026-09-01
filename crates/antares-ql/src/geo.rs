@@ -83,37 +83,6 @@ pub struct GeoQuery {
     query_geom: geo_types::Geometry<f64>,
 }
 
-/// 4.7.1: Polygon/MultiPolygon rings need ≥4 positions and closure — the
-/// malformed shapes the suite probes with are 400s.
-fn validate_rings(gtype: &str, coords: &Value) -> Result<(), String> {
-    let check_ring = |ring: &Value| -> Result<(), String> {
-        let pts = ring.as_array().ok_or("ring must be an array")?;
-        if pts.len() < 4 {
-            return Err(format!("ring has {} positions (minimum 4)", pts.len()));
-        }
-        if pts.first() != pts.last() {
-            return Err("ring is not closed (first != last position)".into());
-        }
-        Ok(())
-    };
-    match gtype {
-        "Polygon" => {
-            for ring in coords.as_array().into_iter().flatten() {
-                check_ring(ring)?;
-            }
-        }
-        "MultiPolygon" => {
-            for poly in coords.as_array().into_iter().flatten() {
-                for ring in poly.as_array().into_iter().flatten() {
-                    check_ring(ring)?;
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Coordinate positions in a GeoJSON `coordinates` value — the leaves of its
 /// nested arrays, at whatever depth the geometry type nests them.
 fn count_positions(v: &Value) -> usize {
@@ -175,19 +144,29 @@ fn min_distance_m(a: &geo_types::Geometry<f64>, b: &geo_types::Geometry<f64>) ->
     use geo::algorithm::{BoundingRect, MapCoords};
     let mid_lat =
         |g: &geo_types::Geometry<f64>| g.bounding_rect().map(|r| (r.min().y + r.max().y) / 2.0);
-    let lat0 = match (mid_lat(a), mid_lat(b)) {
-        (Some(x), Some(y)) => (x + y) / 2.0,
-        _ => 0.0,
+    let (Some(la), Some(lb)) = (mid_lat(a), mid_lat(b)) else {
+        // A geometry with no position has no bounding box. RFC 7946 3.1:
+        // "GeoJSON processors MAY interpret Geometry objects with empty
+        // `coordinates` arrays as null objects" — nothing is near a null
+        // object, and reading the absent box as the origin made an empty
+        // stored geometry match every `near` query in the tenant.
+        return f64::INFINITY;
     };
+    let lat0 = (la + lb) / 2.0;
     let k = lat0.to_radians().cos().max(1e-9);
     let proj =
         |g: &geo_types::Geometry<f64>| g.map_coords(|c| geo_types::Coord { x: c.x * k, y: c.y });
     Euclidean.distance(&proj(a), &proj(b)) * DEG_M
 }
 
-/// GeoJSON `{type, coordinates}` → geo_types, with ring validation.
+/// GeoJSON `{type, coordinates}` → geo_types. 4.7.2 admits a geometry only
+/// when it meets "the syntax and restrictions mandated by IETF RFC 7946 \[8\]
+/// when representing a valid Geometry of the type specified", so the shape
+/// and the WGS84 coordinate range are checked by the one validator the write
+/// path uses: a reference geometry the broker would not have stored is a 400,
+/// and a target that is not a geometry is a non-match.
 fn parse_geometry(gtype: &str, coords: &Value) -> Result<geo_types::Geometry<f64>, String> {
-    validate_rings(gtype, coords)?;
+    antares_jsonld::expand::check_geometry(gtype, coords)?;
     let gj = serde_json::json!({"type": gtype, "coordinates": coords});
     let geom: geojson::Geometry =
         serde_json::from_value(gj).map_err(|e| format!("invalid GeoJSON geometry: {e}"))?;
@@ -597,8 +576,10 @@ mod tests {
     #[test]
     fn nested_multipolygon_cannot_smuggle_vertices_past_the_cap() {
         let cap = MAX_GEO_VERTICES;
+        // the squares march along a meridian band, so 205 of them still sit
+        // inside the WGS84 longitude range a reference geometry must respect
         let square = |i: usize| {
-            let x = i as f64;
+            let x = i as f64 * 0.7 - 100.0;
             json!([[[x, 0.0], [x + 0.5, 0.0], [x + 0.5, 0.5], [x, 0.5], [x, 0.0]]])
         };
         let members = cap / 5 + 1; // 5 positions per member => one over the cap
@@ -750,6 +731,60 @@ mod tests {
             "expanded, got {iri}"
         );
     }
+
+    /// A stored TARGET that is not a valid geometry is a non-match, not a
+    /// panic and not a match: reads over data written before the check must
+    /// still answer.
+    #[test]
+    fn a_malformed_target_geometry_is_a_nonmatch() {
+        let g = q("intersects", "Polygon", "[[[0,0],[2,0],[2,2],[0,2],[0,0]]]");
+        for target in [
+            geoval("Point", json!([1, 999])),
+            geoval("Point", json!([1])),
+            geoval("Polygon", json!([[[0, 0], [1, 0], [1, 1]]])),
+            geoval("GeometryCollection", json!([])),
+        ] {
+            assert!(!g.matches_geometry(&target), "{target}");
+        }
+    }
+
+    /// RFC 7946 3.1 puts no minimum on a multi-geometry, so an empty one is a
+    /// geometry and reaches both sides of every relation. Neither the DE-9IM
+    /// relate nor the metric distance may panic on it: an empty geometry
+    /// touches nothing, so every relation but `disjoint` is a non-match.
+    #[test]
+    fn an_empty_geometry_relates_without_panicking() {
+        let empties = [
+            geoval("MultiPoint", json!([])),
+            geoval("MultiLineString", json!([])),
+            geoval("Polygon", json!([])),
+            geoval("MultiPolygon", json!([])),
+        ];
+        for rel in [
+            "intersects",
+            "within",
+            "contains",
+            "overlaps",
+            "equals",
+            "near;maxDistance==1000000",
+        ] {
+            let g = q(rel, "Polygon", "[[[0,0],[2,0],[2,2],[0,2],[0,0]]]");
+            for target in &empties {
+                assert!(!g.matches_geometry(target), "{rel} vs {target}");
+            }
+            // and with the empty geometry as the REFERENCE side
+            let g = q(rel, "MultiPoint", "[]");
+            assert!(
+                !g.matches_geometry(&geoval("Point", json!([1.0, 1.0]))),
+                "{rel} with an empty reference"
+            );
+        }
+        // disjoint is the complement: nothing intersects an empty geometry
+        let g = q("disjoint", "Polygon", "[[[0,0],[2,0],[2,2],[0,2],[0,0]]]");
+        for target in &empties {
+            assert!(g.matches_geometry(target), "disjoint vs {target}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -808,5 +843,61 @@ mod clause_4_10_grammar {
             ]
         });
         assert!(!g.matches(&doc, &ctx), "no location => non-matching");
+    }
+
+    /// 4.7.1 through 4.10: `coordinates` expresses "the reference geometry",
+    /// and a reference geometry is a GeoJSON Geometry — "meeting the syntax
+    /// and restrictions mandated by IETF RFC 7946 \[8\] when representing a
+    /// valid Geometry of the type specified" (4.7.2). A geometry outside the
+    /// WGS84 range the format fixes is not one, and reaching PostGIS it is a
+    /// `::geography` cast that errors rather than a 400.
+    #[test]
+    fn a_reference_geometry_is_a_valid_rfc_7946_geometry() {
+        let ask = |gtype: &str, coords: &str| {
+            let mut p = HashMap::new();
+            p.insert("georel".to_owned(), "near;maxDistance==100".to_owned());
+            p.insert("geometry".to_owned(), gtype.to_owned());
+            p.insert("coordinates".to_owned(), coords.to_owned());
+            GeoQuery::from_params(&p)
+        };
+        for (why, gtype, coords) in [
+            ("latitude past the pole", "Point", "[0, 999]"),
+            ("longitude past the antimeridian", "Point", "[181, 0]"),
+            ("latitude just past the pole", "Point", "[0, -90.5]"),
+            ("one-element position", "Point", "[1]"),
+            ("position of strings", "Point", r#"["1", "2"]"#),
+            ("nested where a position belongs", "Point", "[[1, 2]]"),
+            ("one-position LineString", "LineString", "[[1, 2]]"),
+            ("open ring", "Polygon", "[[[0,0],[1,0],[1,1]]]"),
+            ("short ring", "Polygon", "[[[0,0],[1,0],[0,0]]]"),
+            (
+                "ring out of range",
+                "Polygon",
+                "[[[0,0],[1,0],[1,91],[0,0]]]",
+            ),
+            (
+                "MultiPolygon nested one level short",
+                "MultiPolygon",
+                "[[[0,0],[1,0],[1,1],[0,0]]]",
+            ),
+        ] {
+            let err = ask(gtype, coords).expect_err(why);
+            assert!(
+                matches!(err, NgsiError::BadRequestData(_)),
+                "{why}: {err:?}"
+            );
+        }
+        // the shapes RFC 7946 allows stay valid, edges of the range included
+        for (gtype, coords) in [
+            ("Point", "[17.1, 48.7]"),
+            ("Point", "[-180, -90]"),
+            ("Point", "[180, 90]"),
+            ("Point", "[1, 2, 300]"),
+            ("LineString", "[[1,2],[3,4]]"),
+            ("Polygon", "[[[0,0],[1,0],[1,1],[0,0]]]"),
+            ("MultiPolygon", "[[[[0,0],[1,0],[1,1],[0,0]]]]"),
+        ] {
+            assert!(ask(gtype, coords).is_ok(), "{gtype} {coords}");
+        }
     }
 }

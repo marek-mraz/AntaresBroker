@@ -29,7 +29,7 @@ Current counts (`python3 dev/spec.py status`):
   implemented       477
   informative       468
   partial             2
-  robot-tagged       191
+  robot-tagged       192
 ```
 
 A `partial` names its gap in `notes:` and is the honest status for a clause
@@ -48,14 +48,14 @@ surface the official set leaves untested, either clause-numbered (`566_01`
 for 5.6.6, `5510_01` for 5.5.10, `4233_01` for 4.23.3) or slotted into the
 ETSI family they extend, and all following the same conventions and tagged
 with their clause so the ledger picks them up. Every file expands to test
-cases; one full run of a native cell is 1810 test cases:
+cases; one full run of a native cell is 1812 test cases:
 
 | suite | test cases |
 |---|---|
 | CommonBehaviours | 65 |
 | Consumption | 535 |
 | EntityMap | 22 |
-| Provision | 397 |
+| Provision | 399 |
 | Snapshot | 5 |
 | Subscription | 155 |
 | ContextSource | 143 |
@@ -72,7 +72,7 @@ than a CIM 009 requirement, with the reason the behaviour exists.
 
 ## The matrix
 
-The same 1810 cases run once per native cell; `wasm-file` runs 1798 of
+The same 1812 cases run once per native cell; `wasm-file` runs 1800 of
 them, the twelve MQTT cases having no broker socket to run against in the
 browser build. Every push gates on the quick preset; the full preset runs twice a week, on `v*` tags and on dispatch,
 and is what the report page and the badges render.
@@ -87,7 +87,7 @@ and is what the report page and the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A native cell passes at 1810/1810, `wasm-file` at 1798/1798. `dev/etsi-matrix-summary.py` folds the
+A native cell passes at 1812/1812, `wasm-file` at 1800/1800. `dev/etsi-matrix-summary.py` folds the
 per-cell results into one table and lists every failure across the
 matrix; a release requires that list to be empty.
 
