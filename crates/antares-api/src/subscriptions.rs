@@ -1156,6 +1156,53 @@ mod tests {
         )
     }
 
+    /// 6.3.8 / 6.3.9: "each of the KeyValuePairs shall be included as a
+    /// custom HTTP header … 'Key' and 'value' members shall adhere to IETF
+    /// RFC 7230 clause 3.2 definitions concerning HTTP headers". A pair that
+    /// cannot be written as a header is refused at create, not at delivery:
+    /// a subscriber that could smuggle CR or LF into a receiverInfo value
+    /// would write its own headers — or its own request line — into every
+    /// notification the broker sends to that endpoint.
+    #[test]
+    fn clause_6_3_8_receiver_info_that_cannot_be_a_header_is_refused() {
+        let with = |k: &str, v: &str| {
+            sub(json!({"notification": {"endpoint": {
+                "uri": "http://localhost:1111/notify",
+                "receiverInfo": [{"key": k, "value": v}],
+            }}}))
+        };
+        for (k, v, why) in [
+            ("X-Ok", "a\r\nInjected: 1", "a CRLF splits the header block"),
+            (
+                "X-Ok",
+                "a\nInjected: 1",
+                "a bare LF is enough for most parsers",
+            ),
+            ("X-Ok", "a\rInjected: 1", "so is a bare CR"),
+            ("X-Ok", "a\0b", "NUL is not field-content"),
+            ("X-Ok", " leading", "OWS may not be part of the value"),
+            ("X-Ok", "trailing\t", "nor may it trail it"),
+            ("Bad Key", "v", "SP is not a tchar"),
+            ("X:Ok", "v", "neither is the field separator"),
+            ("", "v", "a field-name is one or more tchar"),
+            ("X-Ok\r\nInjected", "v", "the key is a header name too"),
+            ("X-Ünicode", "v", "field-name is ASCII"),
+        ] {
+            assert!(
+                norm(&with(k, v)).is_err(),
+                "receiverInfo {k:?}: {v:?} must be refused — {why}"
+            );
+        }
+        // and the negative: an empty value and the full tchar repertoire are
+        // legal headers, so they stay legal Subscriptions
+        for (k, v) in [
+            ("X-Empty", ""),
+            ("!#$%&x*+-.^_`|~0Aa", "value with spaces inside"),
+        ] {
+            assert!(norm(&with(k, v)).is_ok(), "receiverInfo {k:?}: {v:?}");
+        }
+    }
+
     // ---------- 5.2.12 read-only and internal members ----------
 
     /// 5.8.6: the @context governing a Subscription's notifications is the
