@@ -221,3 +221,27 @@ async fn a_registered_surface_is_behind_the_bounds_wall() {
         .expect("resp");
     assert_eq!(resp.status(), StatusCode::LENGTH_REQUIRED);
 }
+
+/// Every way the notification pipeline can silently lose work is visible on
+/// `/q/health`, which is the surface that is always there. The Prometheus
+/// recorder is not: `ANTARES_TELEMETRY` is off by default, so a counter that
+/// lives only in `/q/metrics` is invisible in a default deployment.
+///
+/// The three losses are the bounded matcher queue refusing a change
+/// (`changesDropped`), the delivery policy giving up (`deadLetters`), and a
+/// panic absorbed at the task boundary — which logs "this change is lost"
+/// and drops one subscription's notification (`taskPanics`). A counter that
+/// reports one of them and not the others makes a partial outage look clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_reports_every_notification_loss_counter() {
+    let st = AppState::new("surfaces".into());
+    let (code, body) = get_path(&st, "/q/health").await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
+    for member in ["changesDropped", "deadLetters", "taskPanics"] {
+        assert!(
+            doc[member].is_u64(),
+            "/q/health must report {member}: {body}"
+        );
+    }
+}

@@ -31,7 +31,10 @@ progress). A memory-store broker answers:
   "commit": "3432674",
   "notificationSchemes": ["http", "https", "mqtt", "mqtts"],
   "deadLetters": 0,
+  "changesDropped": 0,
+  "taskPanics": 0,
   "temporalDrainErrors": 0,
+  "surfaces": { "admin": { "prefix": "/q", "routes": 8 } },
   "limits": {
     "maxBatchItems": 1000,
     "maxBodyBytes": 4194304,
@@ -66,7 +69,10 @@ progress). A memory-store broker answers:
 | `version`, `commit` | Workspace version and the git hash the binary was built from. |
 | `notificationSchemes` | The `notification.endpoint.uri` schemes this build can deliver to — the registered bindings (6.3.8, clause 7, and any a deployment added). A subscription naming a scheme absent here is refused at creation with `BadRequestData`. |
 | `deadLetters` | Dead letters this process wrote since start ([notification delivery](operations.md#notification-delivery)). |
+| `changesDropped` | Changes the bounded matcher queue refused since start, each one a notification never matched: delivery is slower than the write rate. |
+| `taskPanics` | Panics absorbed at the notification-task boundary since start, each one a lost notification. Reported here because the Prometheus recorder is off unless `ANTARES_TELEMETRY` is set. |
 | `temporalDrainErrors` | Post-response history writes that failed since start; the client's 2xx stands, the counter and a warning record the loss. |
+| `surfaces` | The mounted admin surfaces by name, each with its prefix and route count. |
 | `limits` | The bounds wall: every `max*` cap in force and the `rejected*` counters of requests refused by it. |
 | `memory` | jemalloc live (`allocatedBytes`) and resident (`residentBytes`) bytes. |
 | `commitQueueDepth`, `commitQueuePeak` | Present only for a store with a single committer to queue behind (`file`, and the browser build over OPFS): writers queued now and at peak. |

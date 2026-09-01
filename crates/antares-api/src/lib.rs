@@ -763,6 +763,12 @@ async fn health(
     body["deadLetters"] = notify::dead_letters_written().into();
     // Changes the bounded matcher queue dropped (this process, since start).
     body["changesDropped"] = notify::changes_dropped().into();
+    // Panics absorbed at the notification-task boundary, each one a change
+    // whose notification was lost. Reported here and not only through the
+    // metrics facade: the recorder is installed by ANTARES_TELEMETRY, which
+    // is off by default, so this endpoint is where a default deployment can
+    // see it at all.
+    body["taskPanics"] = notify::task_panics().into();
     // Jemalloc heap stats (RSS ≈ live×1.2 is the target).
     if let Some(mem) = &state.mem_stats {
         body["memory"] = mem();
