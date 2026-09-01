@@ -26,10 +26,19 @@ enforces **data-plane integrity** — strict input validation at every API
 boundary, tenant isolation (one shared schema + `tenant_id` on every row,
 Postgres Row-Level Security, `ANTARES_REQUIRE_RLS` production gate), an
 egress wall for every outbound call the broker makes on user-supplied URLs
-(scheme allowlist, private-range deny by default, per-destination breakers,
-size/time bounds), bounded resource use (`/q/health` `limits` — body size,
-batch items, fan-out, response bytes), and `unsafe_code = "forbid"` with
+(scheme allowlist, DNS pinning, a redirect cap, per-destination breakers,
+size/time bounds, and the cloud instance-metadata endpoints refused in every
+IPv6 spelling whatever the configuration says), bounded resource use
+(`/q/health` `limits` — body size, batch items, fan-out, response bytes), and `unsafe_code = "forbid"` with
 `cargo deny` license/advisory gates.
+
+Private, loopback and link-local destinations are **allowed** by default, so
+a single-node or edge deployment federates and notifies over the local
+network without configuration. An internet-facing deployment turns that off
+with `ANTARES_EGRESS_ALLOW_PRIVATE=false`: it belongs in the same
+pre-production checklist as `ANTARES_REQUIRE_RLS=1`, because a subscription
+or registration endpoint is client-supplied and the default lets one name an
+address inside your network.
 
 **Out of core by standing decision:** authentication, authorization, rate
 limiting, DID/VC/ODRL — the PEP/gateway in front of the broker owns them.

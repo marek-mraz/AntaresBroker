@@ -2303,6 +2303,45 @@ mod tests {
         );
     }
 
+    /// The published posture is part of the switch. SECURITY.md told a reader
+    /// private ranges were denied by default while this function allows them,
+    /// which reads as an SSRF guard that is on when it is off — and an
+    /// operator auditing the broker from that page would never set the
+    /// variable. The default lives in one place, here, so the two documents
+    /// that state it are checked against it here too.
+    #[test]
+    fn the_documented_egress_default_is_the_compiled_one() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let book = std::fs::read_to_string(format!("{root}/docs/src/configuration.md"))
+            .expect("the configuration chapter");
+        let row = book
+            .lines()
+            .find(|l| l.starts_with("| `ANTARES_EGRESS_ALLOW_PRIVATE` |"))
+            .expect("the variable has no row in the configuration table");
+        let stated = row
+            .split('|')
+            .nth(2)
+            .expect("the default column")
+            .trim()
+            .trim_matches('`');
+        assert_eq!(
+            stated.parse::<bool>().ok(),
+            Some(EgressPolicy::allow_private_from(None)),
+            "the chapter states {stated:?} as the default"
+        );
+
+        let policy =
+            std::fs::read_to_string(format!("{root}/SECURITY.md")).expect("the security policy");
+        assert!(
+            !policy.contains("private-range deny by default"),
+            "SECURITY.md claims a deny-by-default this switch does not implement"
+        );
+        assert!(
+            policy.contains("ANTARES_EGRESS_ALLOW_PRIVATE=false"),
+            "SECURITY.md must name the switch that turns the deny on"
+        );
+    }
+
     /// A locally hosted @context is stored "for the Tenant" that added it
     /// (5.13.1, 5.13.2.4) and 5.5.10 makes the Tenant the boundary an
     /// operation applies within: another Tenant naming the same URL must not
