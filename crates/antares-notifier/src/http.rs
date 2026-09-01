@@ -35,9 +35,12 @@ impl NotificationSink for HttpSink {
     /// an absolute http(s) URL with an authority.
     fn parse_endpoint(&self, uri: &str, _notifier_info: &[(&str, &str)]) -> Result<(), NgsiError> {
         let safe = crate::redact_userinfo(uri);
+        // IETF RFC 3986 3.1: scheme names are case-insensitive, and
+        // `SinkRegistry::scheme_of` already lowercases to pick this sink.
         let rest = uri
-            .strip_prefix("http://")
-            .or_else(|| uri.strip_prefix("https://"))
+            .split_once("://")
+            .filter(|(s, _)| s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https"))
+            .map(|(_, rest)| rest)
             .ok_or_else(|| {
                 NgsiError::BadRequestData(format!("not an http(s) endpoint URI: {safe:?}"))
             })?;
@@ -217,6 +220,46 @@ mod tests {
         ] {
             let err = s.parse_endpoint(bad, &[]).expect_err(bad);
             assert_eq!(err.status(), 400, "{bad}");
+        }
+    }
+
+    /// IETF RFC 3986 3.1: "schemes are case-insensitive ... an implementation
+    /// should accept uppercase letters as equivalent to lowercase in scheme
+    /// names". `SinkRegistry::scheme_of` lowercases before it picks a sink, so
+    /// `HTTP://…` is routed HERE — and this is the layer that decides, so a
+    /// case-sensitive check turns a legal endpoint URI into a 400 the
+    /// registry's own contract says it should not be.
+    #[test]
+    fn the_scheme_is_matched_case_insensitively() {
+        let s = sink();
+        for uri in [
+            "HTTP://example.org/notify",
+            "HTTPS://example.org/n",
+            "HttP://example.org/n",
+        ] {
+            assert!(s.parse_endpoint(uri, &[]).is_ok(), "{uri}");
+        }
+    }
+
+    /// The HTTP binding hands a DRIVER ERROR to `redact_userinfo`, not a bare
+    /// URI: reqwest prints the failing URL and `url::Url`'s Display serializes
+    /// the password with it. Every message shape the driver produces has to
+    /// lose the credential.
+    #[test]
+    fn a_driver_error_carrying_the_url_loses_the_password() {
+        for msg in [
+            "error sending request for url (https://alice:s3cret@host/notify)",
+            "error sending request for url (https://alice:s3cret@host)",
+            "error sending request for url (https://alice:s3cret@host): error trying to connect",
+            "error sending request for url (https://alice:s3cret@host/n): dns error: no such host",
+        ] {
+            let red = crate::redact_userinfo(msg);
+            assert!(!red.contains("s3cret"), "{msg} -> {red}");
+            assert!(!red.contains("alice"), "{msg} -> {red}");
+            assert!(
+                red.contains("host"),
+                "the destination stays readable: {red}"
+            );
         }
     }
 

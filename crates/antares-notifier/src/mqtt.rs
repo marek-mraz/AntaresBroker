@@ -38,12 +38,12 @@ impl MqttEndpoint {
     /// credentials 7.2 permits in the userinfo never reach the response body.
     pub fn parse(uri: &str) -> Result<Self, NgsiError> {
         let safe = redacted(uri);
-        let (secure, rest) = if let Some(r) = uri.strip_prefix("mqtts://") {
-            (true, r)
-        } else if let Some(r) = uri.strip_prefix("mqtt://") {
-            (false, r)
-        } else {
-            return Err(bad(format!("not an mqtt(s) endpoint URI: {safe:?}")));
+        // IETF RFC 3986 3.1: scheme names are case-insensitive, and
+        // `SinkRegistry::scheme_of` already lowercases to pick this sink.
+        let (secure, rest) = match uri.split_once("://") {
+            Some((s, r)) if s.eq_ignore_ascii_case("mqtts") => (true, r),
+            Some((s, r)) if s.eq_ignore_ascii_case("mqtt") => (false, r),
+            _ => return Err(bad(format!("not an mqtt(s) endpoint URI: {safe:?}"))),
         };
         let (authority, topic) = rest
             .split_once('/')
@@ -567,6 +567,24 @@ mod tests {
         assert_eq!(e.port, 8883, "mqtts default port");
     }
 
+    /// IETF RFC 3986 3.1: scheme names are case-insensitive.
+    /// `SinkRegistry::scheme_of` lowercases before it picks this sink, so an
+    /// uppercase-scheme endpoint is routed here and this parser decides —
+    /// rejecting it would 400 an endpoint URI the registry says it serves.
+    #[test]
+    fn the_scheme_is_matched_case_insensitively() {
+        assert!(
+            MqttEndpoint::parse("MQTT://host/topic")
+                .expect("upper")
+                .port
+                == 1883
+        );
+        let e = MqttEndpoint::parse("MQTTS://host/t").expect("upper tls");
+        assert!(e.secure);
+        assert_eq!(e.port, 8883);
+        assert!(MqttEndpoint::parse("MqTt://host/t").is_ok());
+    }
+
     #[test]
     fn rejects_bad_endpoints() {
         for uri in [
@@ -704,7 +722,15 @@ mod tests {
     async fn checked_addr_applies_the_egress_rules_to_resolved_addresses() {
         let d = Duration::from_secs(2);
         // metadata: denied with private egress ALLOWED (the default)
-        for host in ["169.254.169.254", "::ffff:169.254.169.254", "fd00:ec2::254"] {
+        // the 6to4 spelling too (IETF RFC 3056: the two segments after the
+        // 2002:: prefix ARE the IPv4 destination), which proves this binding
+        // goes through the shared classifier rather than its own check
+        for host in [
+            "169.254.169.254",
+            "::ffff:169.254.169.254",
+            "fd00:ec2::254",
+            "2002:a9fe:a9fe::",
+        ] {
             let e = checked_addr(host, 1883, true, d)
                 .await
                 .expect_err("metadata range must be refused whatever the switch says");
