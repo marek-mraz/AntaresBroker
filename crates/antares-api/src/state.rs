@@ -294,8 +294,18 @@ impl AppState {
             loader.set_local_lookup(Box::new(move |url| {
                 let id = hosted_row_id(&*store, url)?;
                 let row = store.context_get(&id).ok().flatten()?;
-                let owner = row["owner"]
-                    .as_str()
+                // Ownership is `contexts.rs` `row_visible`'s rule, and only
+                // that one: a Cached row is a copy of a public document and
+                // belongs to no Tenant, everything else belongs to its
+                // `owner` — with the DEFAULT Tenant for a row written before
+                // that member existed, which is the Tenant that lists,
+                // serves and deletes it.
+                let owner = (row["kind"].as_str() != Some("Cached"))
+                    .then(|| {
+                        row["owner"]
+                            .as_str()
+                            .unwrap_or(antares_model::TenantId::DEFAULT)
+                    })
                     .and_then(|o| antares_model::TenantId::new(o).ok());
                 Some((owner, row["body"]["@context"].clone()))
             }));
@@ -673,6 +683,48 @@ mod jsonld_context_locality_5_13 {
             .resolve_for(&beta, &user)
             .await
             .expect_err("another Tenant may not resolve it (5.5.10)");
+        assert!(
+            matches!(err, antares_model::NgsiError::LdContextNotAvailable(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// 5.13.1 + 5.5.10: a stored @context with no `owner` member is not
+    /// ownerless. `contexts.rs` `row_visible` reads a row written before that
+    /// member existed as the DEFAULT Tenant's — it is listed, served and
+    /// deleted through that Tenant alone — so resolving one must answer the
+    /// same way. Read as "belongs to no Tenant" it would expand every other
+    /// Tenant's payloads with the default Tenant's private term mappings.
+    #[tokio::test]
+    async fn a_stored_context_without_an_owner_belongs_to_the_default_tenant() {
+        let st = AppState::new("me".into());
+        let default = antares_model::TenantId::new("default").expect("tenant");
+        let other = antares_model::TenantId::new("beta").expect("tenant");
+        let url = "http://127.0.0.1:9/ngsi-ld/v1/jsonldContexts/legacy-1";
+        st.store
+            .context_put(
+                "legacy-1",
+                serde_json::json!({
+                    "url": url,
+                    "localId": "legacy-1",
+                    "kind": "Hosted",
+                    "createdAt": now_iso(),
+                    "body": {"@context": {"legacy": "https://legacy.example/term"}},
+                }),
+            )
+            .expect("seed a row from before the owner member");
+        let user = serde_json::json!(url);
+        let ctx = st
+            .loader
+            .resolve_for(&default, &user)
+            .await
+            .expect("the Tenant the row belongs to resolves it");
+        assert_eq!(ctx.expand_key("legacy"), "https://legacy.example/term");
+        let err = st
+            .loader
+            .resolve_for(&other, &user)
+            .await
+            .expect_err("no other Tenant may resolve it (5.5.10)");
         assert!(
             matches!(err, antares_model::NgsiError::LdContextNotAvailable(_)),
             "got {err:?}"
