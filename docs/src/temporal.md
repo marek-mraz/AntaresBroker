@@ -35,8 +35,10 @@ history.
 
 `timerel` is `before`, `after` or `between` around `timeAt` (and
 `endTimeAt` for `between`), applied to `timeproperty` (`observedAt` by
-default; `createdAt`, `modifiedAt`, `deletedAt`). `after` and `before`
-include the `timeAt` instant itself. `attrs` restricts the attributes.
+default; `createdAt`, `modifiedAt`, `deletedAt`). Clause 4.11 fixes the
+bounds: `after` includes the `timeAt` instant, `before` excludes it, and
+`between` includes `timeAt` and excludes `endTimeAt`. `attrs` restricts the
+attributes.
 
 ```bash
 curl -si "$U/temporal/entities/urn:ngsi-ld:TemperatureSensor:qs:1?timerel=after&timeAt=2026-08-26T08:30:00Z&attrs=temperature"
