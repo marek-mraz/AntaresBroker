@@ -2000,18 +2000,6 @@ pub async fn csource_fanout(
     });
 }
 
-/// Compatibility wrapper: prepare + send in one call (spawned contexts that
-/// don't need the phase split).
-pub async fn csource_changed(
-    st: &AppState,
-    tenant: &TenantId,
-    before: Option<Value>,
-    after: Option<Value>,
-) {
-    let jobs = prepare_csource_jobs(st, tenant, before, after).await;
-    send_csource_jobs(st, tenant, jobs).await;
-}
-
 /// POST a CSourceNotification (5.3.2) under the same body bound as every
 /// other one: 5.11.2.4 sends "all matching Context Source Registrations",
 /// and a broker holding 100 000 of them must not turn that into one
