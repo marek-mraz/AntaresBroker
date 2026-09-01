@@ -112,7 +112,9 @@ jobs:
       # line AND function floors, so one of them rising can no longer hide
       # the other falling. Floors only ratchet UP — after a green run raise
       # them to just under the measured figure; never lower one to make a red
-      # run pass. The numbers below sit a couple of points under a run
+      # run pass, and move docs/src/coverage.md in the same commit — the
+      # chapter publishes these four numbers to readers who never open this
+      # file. The numbers below sit a couple of points under a run
       # measured with a live Postgres but no MQTT or NATS, which this job
       # has, so they are a floor and not a target.
       # The summary is captured from the gated run itself. A bare

@@ -5,7 +5,7 @@ rather than gate, except for the unit floor.
 
 | job | what runs under instrumentation | where the numbers land |
 |---|---|---|
-| `strict` → Coverage floor (daily) | the workspace unit and integration tests, with live PostGIS, MQTT and NATS so the integration tests count instead of skipping | `cargo llvm-cov --fail-under-lines 60`; the floor only ratchets up after a green run |
+| `strict` → Coverage floor (daily) | the workspace unit and integration tests, with live PostGIS, MQTT and NATS so the integration tests count instead of skipping | Two floors, never one blended number: the unit surface (`--lib --bins`) at 75 % lines / 73 % functions and the API surface (the integration binaries of `antares-api`, `antares-broker`, `antares-bus`, `antares-sql`) at 63 % lines / 64 % functions. Gating each test source separately is what stops one rising while the other falls. Floors only ratchet up after a green run — never lowered to make a red one pass. |
 | `etsi-coverage` (weekly, per store) | the workspace tests **and** the whole Robot suite against an instrumented broker, once per store mode (memory, file, postgres, timescale), then merged | [`/reports/coverage/`](https://antares-ngsi-ld-demo.marek-mraz.com/reports/coverage/) with the per-store and merged HTML, the badge on the README, and the step summary's `lcov --list` table |
 
 A zero-count line in the merged view means no Rust test and no ETSI test
