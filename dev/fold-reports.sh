@@ -4,7 +4,7 @@
 # site/reports/coverage + coverage-badge.json). Shared by wasm.yml and
 # pages.yml so the two Pages paths cannot drift. Needs: GH_TOKEN, REPO.
 # A missing bundle renders a placeholder instead of failing the deploy.
-set -e
+set -euo pipefail
 # Only bundles produced on this repository's master are folded: a pull
 # request from a fork also uploads artifacts here, and its branch may be
 # named master too, so the producing run's head repository decides.

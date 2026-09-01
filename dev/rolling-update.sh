@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Rolling update across the HA pair — one instance at a time,
-# using whatever antares-local:latest currently is (i.e. the image the
-# pipeline just built). Same script locally and in CI (the one-pipeline
-# rule).
+# using the antares-local:latest image the pipeline just built. Same script
+# locally and in CI (the one-pipeline rule).
 #
 # Precondition: the HA stack is up —
 #   docker compose -f compose-files/docker-compose-etsi.yml \

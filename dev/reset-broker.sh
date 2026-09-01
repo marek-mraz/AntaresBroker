@@ -2,7 +2,8 @@
 # API-level broker state reset (broker-agnostic; rows are the only truth in
 # Antares, so this is a complete reset — the phantom-state trap from the
 # Scorpio campaign does not apply, but the harness stays API-level anyway).
-set -u
+# -e stays off: a resource with nothing to delete answers non-zero.
+set -uo pipefail
 BASE="${1:-http://localhost:9090/ngsi-ld/v1}"
 
 ids() { python3 -c 'import sys,json

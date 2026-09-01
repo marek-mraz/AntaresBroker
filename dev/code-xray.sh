@@ -7,6 +7,7 @@
 #   COVERAGE=path/to/coverage.json   optional llvm-cov export (etsi-coverage.sh
 #                                    artifact) — without it the radar ranks on
 #                                    complexity x churn only
+# -e stays off: the lint sweep reports findings through its exit code.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"

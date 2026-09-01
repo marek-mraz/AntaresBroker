@@ -7,7 +7,8 @@
 # overwrite each other — this copies it out before the next run clobbers it.
 # The copy happens even when the run is red (that is the interesting case),
 # and the cargo exit code is preserved so the CI step still fails.
-set -u
+# -e stays off: the JUnit copy below is the point of the script on a red run.
+set -uo pipefail
 OUT=${UNIT_JUNIT_DIR:-unit-junit}
 name=$1
 shift

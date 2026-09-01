@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# -e stays off: every probe below is optional and defaults when it fails.
+set -uo pipefail
 # One metrics sample line: epoch, entity count, broker RSS/CPU, pg RSS, DB size.
 BASE="${1:-http://localhost:42010/ngsi-ld/v1}"
 count=$(curl -s -o /dev/null -D- "$BASE/entities?type=Vehicle&count=true&limit=1" \

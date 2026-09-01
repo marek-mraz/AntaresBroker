@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Every Rust source file opens with the SPDX licence line; list the ones that
 # do not and fail. `dev/spdx-check.sh fix` prepends the line instead.
+# POSIX sh has no pipefail; the one pipeline below is guarded by hand.
 set -eu
 cd "$(dirname "$0")/.."
 LINE='// SPDX-License-Identifier: EUPL-1.2'

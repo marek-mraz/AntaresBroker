@@ -79,6 +79,7 @@
 #                                    SUITES=CommonBehaviours,Provision,Consumption,jsonldContext
 #                                    (Subscription/ContextSource/DO/IOP stay
 #                                    Node-tier-only).
+# -e stays off: a failing suite is a result to report, not an abort.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -101,9 +102,8 @@ case "$STORE" in
   *) echo "unknown STORE=$STORE (memory|file|postgres|timescale)"; exit 2 ;;
 esac
 
-# Honesty banner: which modes actually have a store backend TODAY. Update this
-# list as new store backends land — a green column for a
-# mode whose backend does not exist yet validates infrastructure, not storage.
+# Honesty banner: which modes have a store backend. A green column for a
+# mode whose backend does not exist validates infrastructure, not storage.
 BACKED="memory file postgres timescale"
 case "$STORE" in file) SECTION="B" ;; postgres) SECTION="C" ;; timescale) SECTION="D" ;; *) SECTION="?" ;; esac
 case " $BACKED " in *" $STORE "*) BACKED_NOTE="" ;;
@@ -333,10 +333,10 @@ fi
 # never rely on that sed surviving.
 if [ "$RUN_IOP" = 1 ]; then
 echo "IOP" > "$PHASE_FILE"
-# The venv bootstrap lives in etsi-run.sh — which an IOP-only invocation
-# (CI cell SUITES=IOP) never executes, so ../.venv/bin/robot simply did not
-# exist there: robot died instantly, || true swallowed it, and the cell
-# reported an empty "0 passed — gate FAIL" (run #18's 1 KB artifacts).
+# The venv bootstrap lives in etsi-run.sh, which an IOP-only invocation
+# (CI cell SUITES=IOP) never executes. Without this, ../.venv/bin/robot is
+# absent, robot dies instantly, || true swallows it and the cell reports an
+# empty "0 passed — gate FAIL".
 # Same recipe as etsi-run.sh: pip runs FROM the suite dir (relative paths).
 if [ ! -x .venv/bin/robot ]; then
   python3 -m venv .venv

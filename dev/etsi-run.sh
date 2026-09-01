@@ -9,6 +9,7 @@
 #   SUITES         robot suite dirs, default: the Scorpio serial order
 #   STOP_ON_ERROR  default 1 (local loop: stop at the FIRST failing TP);
 #                  CI sets 0 to run the whole suite and report everything
+# -e stays off: a failing TP is a result to report, not an abort.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

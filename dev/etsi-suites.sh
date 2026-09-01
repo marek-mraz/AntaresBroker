@@ -1,5 +1,5 @@
-# Sourced by dev/etsi-pipeline.sh and dev/etsi-run.sh — the ONE definition of
-# which serial suites exist (was duplicated in both scripts).
+# Sourced by dev/etsi-pipeline.sh and dev/etsi-run.sh — the one definition of
+# which serial suites exist. No `set` line: it would leak into the caller.
 SERIAL_ALL="CommonBehaviours ContextInformation/Consumption ContextInformation/EntityMap ContextInformation/Provision ContextInformation/Snapshot ContextInformation/Subscription ContextSource jsonldContext DistributedOperations"
 
 # Completeness guard: a suite dir the runner doesn't know is a hard error, so

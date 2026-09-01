@@ -2,10 +2,10 @@
 # Launch 5 Antares brokers (ports 9090..9094) — the Scorpio IOP-stack
 # equivalent for DistributedOperations and IOP suites, no Docker needed
 # (in-memory store, bus=local per instance).
-set -e
+set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --release -p antares-broker 2>&1 | grep -E "^error" -A8 && exit 1 || true
+cargo build --release -p antares-broker
 
 for p in $(ls /proc | grep -E '^[0-9]+$'); do
   case "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)" in
