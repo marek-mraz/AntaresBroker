@@ -1023,7 +1023,16 @@ fn expand_instance(
         }
     }
     if let Some(l) = obj.get("lang") {
-        out.insert("lang".into(), l.clone());
+        // 4.15: the language filter augments the converted Property with "an
+        // additional non-reified subproperty lang indicating the actual
+        // language returned" — a langtag. The member is broker-produced and
+        // the clause says nothing about a client supplying one, so it is
+        // kept; a non-string would leave the instance in a shape no reader
+        // of 4.15 can interpret.
+        let s = l
+            .as_str()
+            .ok_or_else(|| bad(format!("attribute {name}: lang must be a language tag")))?;
+        out.insert("lang".into(), Value::String(s.to_owned()));
     }
     if let Some(ot) = obj.get("objectType") {
         out.insert(
@@ -1465,6 +1474,37 @@ mod tests {
         assert!(
             expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default()).is_err(),
             "sealed members only under ngsildproof"
+        );
+    }
+
+    /// 4.15: the language filter augments the converted Property with "a
+    /// non-reified subproperty lang indicating the actual language
+    /// returned" — a langtag string (RFC 5646). The member is broker-
+    /// produced, and the clause is silent on a client supplying one, so it
+    /// is stored; it is not stored in a shape no consumer can read. Every
+    /// other non-reified member of an instance (unitCode, valueType,
+    /// datasetId, observedAt) is checked here, and lang was copied through
+    /// whatever its JSON type.
+    #[test]
+    fn clause_4_15_a_supplied_lang_member_is_a_string() {
+        for bad_lang in [json!({"en": "x"}), json!(["fr"]), json!(7), json!(true)] {
+            let doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle",
+                "street": {"type": "Property", "value": "Grand Place", "lang": bad_lang}});
+            let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default());
+            assert!(out.is_err(), "lang must be a langtag string: {out:?}");
+        }
+        let doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle",
+            "street": {"type": "Property", "value": "Grand Place", "lang": "fr"}});
+        let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
+            .expect("a langtag string is kept");
+        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/street"][0];
+        assert_eq!(inst["lang"], "fr");
+        // and it stays a member of the instance, never a reified
+        // sub-attribute of its own
+        assert!(
+            out.get("https://uri.etsi.org/ngsi-ld/default-context/lang")
+                .is_none(),
+            "lang is non-reified: {out}"
         );
     }
 
