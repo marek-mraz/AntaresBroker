@@ -9,6 +9,7 @@
 //      TENANT.
 
 import http from "k6/http";
+import exec from "k6/execution";
 import { Trend, Rate } from "k6/metrics";
 
 const BASE = `${__ENV.BROKER_URL || "http://localhost:9090"}/ngsi-ld/v1`;
@@ -38,7 +39,6 @@ export const options = {
 
 const latency = new Trend("stage_latency", true);
 const errors = new Rate("stage_errors");
-const t0 = Date.now();
 const stageMs = parseInt(STAGE) * (STAGE.endsWith("m") ? 60000 : 1000);
 
 export function setup() {
@@ -55,7 +55,13 @@ export function setup() {
 }
 
 export default function () {
-  const stage = Math.min(STAGES, 1 + Math.floor((Date.now() - t0) / stageMs));
+  // The scenario's start, not the module's: a VU allocated mid-sweep
+  // initialises late and would tag its requests with an early stage,
+  // folding late samples into a rate that never produced them.
+  const stage = Math.min(
+    STAGES,
+    1 + Math.floor((Date.now() - exec.scenario.startTime) / stageMs),
+  );
   const tags = { stage: String(stage), rate: String(stage * STEP) };
   let r;
   if (SHAPE === "write") {
