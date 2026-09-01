@@ -152,7 +152,16 @@ pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) -> Resul
     Ok(())
 }
 
+/// 5.14.3.4: "If the NGSI-LD endpoint does not know about a matching EntityMap
+/// for the EntityMap ID, then an error of type ResourceNotFound shall be
+/// raised." What the endpoint knows about is what [`map_get`] serves, so the
+/// delete reads through it: an expired map is beyond access (5.5.14) for the
+/// retrieve and for the delete alike, and `map_get` prunes the row on the way
+/// past, which leaves nothing for a later sweep to collect.
 pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
+    if map_get(st, tenant, id)?.is_none() {
+        return Ok(false);
+    }
     st.store.delete(tenant, Kind::EntityMap, id)
 }
 

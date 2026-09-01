@@ -318,6 +318,58 @@ async fn clause_5_14_3_delete() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// 5.14.3.4: "If the NGSI-LD endpoint does not know about a matching
+/// EntityMap for the EntityMap ID, then an error of type ResourceNotFound
+/// shall be raised." An expired map is one the endpoint does not know about —
+/// 5.5.14 puts it beyond access and the retrieve answers 404 for it — so the
+/// delete of the same id at the same instant answers 404 too. A 204 there
+/// tells the client it deleted a map the broker had already stopped serving.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_14_3_delete_of_an_expired_map_is_not_found() {
+    let st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:d2", 10).await;
+    let (loc, _) = create_map(&st).await;
+
+    // 5.14.2.4 sets the expiry; nothing requires it to be in the future, and
+    // a past instant is the shortest way to an expired map over the wire.
+    let frag = json!({"expiresAt": "1970-01-01T00:00:00Z"}).to_string();
+    let (status, _, _) = send(
+        &st,
+        Request::builder()
+            .method("PATCH")
+            .uri(&loc)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", frag.len().to_string())
+            .body(Body::from(frag))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // the delete comes FIRST: a retrieve prunes the row on touch, so asking
+    // for it beforehand would hide the answer this test is about.
+    let (status, _, _) = send(
+        &st,
+        Request::builder()
+            .method("DELETE")
+            .uri(&loc)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the delete agrees with the retrieve about what the broker knows"
+    );
+    let (status, _, _) = get(&st, &loc).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an expired map is not served"
+    );
+}
+
 /// 6.4.3.2: entityMap=true on the entity query → 201 + NGSILD-EntityMap
 /// header, and the entity payload is still the query result.
 #[tokio::test(flavor = "multi_thread")]
