@@ -253,6 +253,26 @@ pub fn normalize_registration(
                                 .into(),
                         ));
                     };
+                    // 6.3.19: "Key and value members shall adhere to IETF
+                    // RFC 7230 definitions concerning HTTP headers". The pair
+                    // becomes a header on every forward, so the transport's
+                    // own RFC 7230 parsers are the judge — a name or a value
+                    // they refuse can only fail later, at a forward whose
+                    // error names no registration.
+                    if axum::http::HeaderName::from_bytes(key.as_bytes()).is_err() {
+                        return Err(bad(format!(
+                            "contextSourceInfo key {key:?} is not an RFC 7230 header name (6.3.19)"
+                        )));
+                    }
+                    if value
+                        .as_str()
+                        .is_none_or(|s| axum::http::HeaderValue::from_str(s).is_err())
+                    {
+                        return Err(bad(format!(
+                            "contextSourceInfo value for {key:?} is not an RFC 7230 header value \
+                             (6.3.19)"
+                        )));
+                    }
                     // 4.3.6.6: the four processed keys have constrained
                     // value spaces — reject bad ones at registration, not at
                     // first forward
@@ -2315,6 +2335,50 @@ mod csi_tests {
         assert!(!ok("ngsildConformance", "latest"));
         // ordinary custom keys stay free-form
         assert!(ok("Authorization", "Bearer abc"));
+    }
+
+    /// 6.3.19: "Key and value members shall adhere to IETF RFC 7230 …
+    /// definitions concerning HTTP headers". A pair that is not a header is
+    /// refused where 5.9.2.4 refuses registration content, not carried until
+    /// the first forward — where the request cannot be built at all, and the
+    /// registration that caused it is nowhere in the failure.
+    #[test]
+    fn clause_6_3_19_a_pair_that_is_not_a_header_is_refused() {
+        let ctx = Loader::new().core();
+        let mk = |key: &str, value: &str| {
+            json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:csi2",
+                "type": "ContextSourceRegistration",
+                "endpoint": "http://peer:9090",
+                "information": [{"entities": [{"type": "Building"}]}],
+                "contextSourceInfo": [{"key": key, "value": value}]
+            })
+        };
+        let ok = |key: &str, value: &str| {
+            normalize_registration(mk(key, value).as_object().expect("object"), &ctx, false).is_ok()
+        };
+        // RFC 7230 field-name is a token: no separators, no space, no CTL
+        for key in [
+            "X-Injected\r\nX-Second",
+            "X Injected",
+            "X:Injected",
+            "",
+            "X-Inj\u{0000}ected",
+            "Über-Header",
+        ] {
+            assert!(!ok(key, "value"), "{key:?} is not an RFC 7230 field-name");
+        }
+        // RFC 7230 field-value carries no CR, LF or NUL
+        for value in ["a\r\nX-Injected: 1", "a\nb", "a\rb", "a\u{0000}b"] {
+            assert!(
+                !ok("X-Custom", value),
+                "{value:?} is not an RFC 7230 field-value"
+            );
+        }
+        // and the shapes a real registration uses stay accepted
+        assert!(ok("X-Custom", "urn:ngsi-ld:request"));
+        assert!(ok("X-Api-Key", "a b c"));
+        assert!(ok("Authorization", "Bearer abc.def-ghi_jkl"));
     }
 }
 
