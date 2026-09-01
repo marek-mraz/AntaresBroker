@@ -74,8 +74,9 @@ than a CIM 009 requirement, with the reason the behaviour exists.
 
 The same 1817 cases run once per native cell; `wasm-file` runs 1805 of
 them, the twelve MQTT cases having no broker socket to run against in the
-browser build. Every push gates on the quick preset; the full preset runs twice a week, on `v*` tags and on dispatch,
-and is what the report page and the badges render.
+browser build. Every push gates on the quick preset; the full preset runs
+twice a week, on `v*` tags and on dispatch, and is what the report page and
+the badges render.
 
 | cell | store | preset | what it adds |
 |---|---|---|---|
@@ -87,9 +88,10 @@ and is what the report page and the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A native cell passes at 1817/1817, `wasm-file` at 1805/1805. `dev/etsi-matrix-summary.py` folds the
-per-cell results into one table and lists every failure across the
-matrix; a release requires that list to be empty.
+A native cell passes at 1817/1817, `wasm-file` at 1805/1805.
+`dev/etsi-matrix-summary.py` folds the per-cell results into one table and
+lists every failure across the matrix; a release requires that list to be
+empty.
 
 ## Running a suite locally
 
@@ -158,7 +160,8 @@ the TPs tagged with its number (or its operation's number) and the
 code/test anchors its evidence cites. It adds no tests; it names where the
 next ones belong.
 
-310 leaf clauses carry 1661 SHALL statements; 119 of them have no Robot TP (350 SHALLs), 64 cite no code/test anchor.
+310 leaf clauses carry 1661 SHALL statements; 118 of them have no Robot
+TP (347 SHALLs), 63 cite no code/test anchor.
 
 The fifteen untested clauses with the most SHALL statements:
 
@@ -176,7 +179,7 @@ The fifteen untested clauses with the most SHALL statements:
 | 5.2.36 | ListProperty | 7 | 0 | 0 |
 | 5.2.5 | Property | 7 | 0 | 0 |
 | 5.2.7 | GeoProperty | 7 | 0 | 0 |
-| 6.3.8 | Notification behaviour | 7 | 0 | 3 |
+| 6.3.8 | Notification behaviour | 7 | 0 | 4 |
 | 5.2.37 | ListRelationship | 6 | 0 | 0 |
 | 5.2.6 | Relationship | 6 | 0 | 0 |
 

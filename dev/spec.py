@@ -223,10 +223,11 @@ def ledger():
     return out
 
 
-def cmd_statements():
-    """Per leaf clause: SHALL sentences in the spec text against the Robot
-    TPs and code/test anchors the ledger cites. Reveals clauses whose
-    normative statements no test asserts; adds no tests itself."""
+def statement_rows():
+    """Per leaf clause: (clause, title, SHALLs, robot TPs, anchors, status).
+    SHALL sentences in the spec text against the Robot TPs and code/test
+    anchors the ledger cites. Reveals clauses whose normative statements no
+    test asserts; adds no tests itself."""
     rows = []
     metas = [m for m in (read_frontmatter(p) for p in all_sections()) if m]
     leaf = {m["clause"] for m in leaves(metas)}
@@ -257,10 +258,15 @@ def cmd_statements():
         evidence = str(meta.get("evidence") or "")
         anchors = len(re.findall(r"[\w/]+\.(?:rs|robot|py|sql)\b", evidence))
         rows.append((meta["clause"], full_title(meta["clause"]), shalls, len(robot_tps(meta["clause"])), anchors, meta.get("status")))
+    return sorted(rows, key=lambda r: (-r[2], r[0]))
+
+
+def cmd_statements():
+    rows = statement_rows()
     untested = [r for r in rows if r[3] == 0]
     print("| clause | title | SHALL | robot TPs | code/test anchors | status |")
     print("|---|---|---:|---:|---:|---|")
-    for c, t, sh, tp, an, st in sorted(rows, key=lambda r: (-r[2], r[0])):
+    for c, t, sh, tp, an, st in rows:
         print(f"| {c} | {t} | {sh} | {tp} | {an} | {st} |")
     print()
     print(f"{len(rows)} leaf clauses carry {sum(r[2] for r in rows)} SHALL statements; "
@@ -492,6 +498,50 @@ def chapter_violations():
             f"docs/src/federation.md: says a {lone.group(1)}-test IOP tree, "
             f"it holds {iop}"
         )
+    return out
+
+
+def statement_coverage_violations():
+    """The conformance chapter closes on a spec-statement snapshot: how many
+    leaf clauses carry SHALL sentences no Robot TP exercises, and the fifteen
+    worst of them. It is computed by `dev/spec.py statements`, so a TP added
+    or a clause re-statused moves it — and prose that states a computed
+    number and is not checked against it drifts the same way the counts block
+    once did."""
+    book = ROOT / "docs/src/conformance.md"
+    if not book.exists():
+        return [f"{book}: the conformance chapter is missing"]
+    text = book.read_text(encoding="utf-8")
+    rows = statement_rows()
+    untested = [r for r in rows if r[3] == 0]
+    want = (len(rows), sum(r[2] for r in rows), len(untested),
+            sum(r[2] for r in untested), sum(1 for r in rows if r[4] == 0))
+    out = []
+    # the sentence wraps in the chapter, so match across the newline
+    hit = re.search(
+        r"(\d+) leaf clauses carry\s+(\d+) SHALL statements;\s+(\d+) of them\s+have"
+        r"\s+no\s+Robot\s+TP\s+\((\d+) SHALLs\),\s+(\d+) cite no code/test anchor",
+        text,
+    )
+    if not hit:
+        out.append(f"{book}: no spec-statement summary to check")
+    else:
+        said = tuple(int(g) for g in hit.groups())
+        if said != want:
+            out.append(
+                f"{book}: the spec-statement summary says {said}, "
+                f"`dev/spec.py statements` computes {want}"
+            )
+    listed = re.findall(r"^\| ([\dA-Z.]+) \| .+ \| (\d+) \| 0 \| (\d+) \|$", text, re.M)
+    if not listed:
+        out.append(f"{book}: no untested-clause table to check")
+        return out
+    for (clause, shalls, anchors), row in zip(listed, untested):
+        if (clause, int(shalls), int(anchors)) != (row[0], row[2], row[4]):
+            out.append(
+                f"{book}: the untested-clause table has {clause} at {shalls} SHALLs "
+                f"and {anchors} anchors, the ledger has {row[0]} at {row[2]} and {row[4]}"
+            )
     return out
 
 
@@ -804,6 +854,7 @@ def cmd_check():
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
 
     errors.extend(chapter_violations())
+    errors.extend(statement_coverage_violations())
     errors.extend(book_fence_violations())
     errors.extend(suite_count_violations())
     errors.extend(robot_recipe_violations())
