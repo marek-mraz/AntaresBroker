@@ -320,6 +320,8 @@ mod tests {
             "http://[fd00:ec2::254]/latest",
             "http://[::ffff:169.254.169.254]/latest",
             "http://[64:ff9b::a9fe:a9fe]/latest",
+            // 6to4 (RFC 3056): 2002:169.254.169.254::
+            "http://[2002:a9fe:a9fe::]/latest",
         ] {
             assert!(
                 allow.check_url(u).await.is_err(),
@@ -339,6 +341,8 @@ mod tests {
             "fd00:ec2::254",
             "::ffff:169.254.169.254",
             "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::",
+            "2002:a9fe:a9fe:1:2:3:4:5",
         ] {
             assert!(
                 antares_jsonld::EgressPolicy::ip_is_metadata(ip.parse().expect("address")),

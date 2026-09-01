@@ -142,19 +142,23 @@ impl EgressPolicy {
         })
     }
 
-    /// The IPv4 destination an IPv6 address stands for. Three spellings
+    /// The IPv4 destination an IPv6 address stands for. Four spellings
     /// reach one and the same host: `::ffff:a.b.c.d` (IPv4-mapped),
-    /// `::a.b.c.d` (IPv4-compatible, RFC 4291) and `64:ff9b::a.b.c.d` (the
+    /// `::a.b.c.d` (IPv4-compatible, RFC 4291), `64:ff9b::a.b.c.d` (the
     /// well-known NAT64 prefix, RFC 6052, which an IPv6-only deployment
-    /// translates straight back to IPv4). Both classifiers below unwrap
-    /// through this one function, so a range denied in one spelling is
-    /// denied in every spelling.
+    /// translates straight back to IPv4) and `2002:a.b.c.d::/48` (6to4,
+    /// RFC 3056, where the two segments after the prefix ARE the IPv4
+    /// address a 6to4 tunnel forwards to, whatever the rest of the address
+    /// holds). Both classifiers below unwrap through this one function, so a
+    /// range denied in one spelling is denied in every spelling.
     fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
         let s = v6.segments();
+        let v4 = |hi: u16, lo: u16| std::net::Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
         if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
-            return Some(std::net::Ipv4Addr::from(
-                (u32::from(s[6]) << 16) | u32::from(s[7]),
-            ));
+            return Some(v4(s[6], s[7]));
+        }
+        if s[0] == 0x2002 {
+            return Some(v4(s[1], s[2]));
         }
         v6.to_ipv4_mapped().or_else(|| v6.to_ipv4())
     }
@@ -226,8 +230,12 @@ impl EgressPolicy {
         }
     }
 
-    /// Deny-by-default for private destinations. Resolves the host
-    /// once; any private address in the answer denies the fetch.
+    /// Judge one destination against the policy. The instance-metadata
+    /// ranges are refused whatever the switch says; the private ranges are
+    /// refused only under `allow_private: false`, which ADR-0010 makes the
+    /// internet-facing posture rather than the default. A host given as a
+    /// name is resolved once, and any private address in the answer denies
+    /// the fetch.
     pub async fn check_host(&self, host: &str, port: u16) -> Result<(), String> {
         self.check_host_within(host, port, DNS_TIMEOUT * slow_factor() as u32)
             .await
@@ -2191,6 +2199,53 @@ mod tests {
                 .expect_err("the metadata endpoint must be denied");
             assert!(err.contains("metadata"), "{host}: {err}");
         }
+    }
+
+    /// 6to4 (IETF RFC 3056) is the fourth spelling that carries an IPv4
+    /// destination inside an IPv6 address: `2002:V4ADDR::/48`, where the two
+    /// segments after the prefix ARE the target IPv4 address. A host with a
+    /// 6to4 tunnel routes `[2002:a9fe:a9fe::]` to 169.254.169.254, so the
+    /// unconditional metadata deny has to unwrap it like the other three.
+    #[tokio::test]
+    async fn metadata_and_private_denies_cover_the_6to4_spelling() {
+        let allow = EgressPolicy {
+            allow_private: true,
+        };
+        for host in [
+            // 2002:169.254.169.254::
+            "[2002:a9fe:a9fe::]",
+            "[2002:a9fe:a9fe:1:2:3:4:5]",
+            // 2002:100.100.100.200::
+            "[2002:6464:64c8::]",
+        ] {
+            let err = allow
+                .check_host(host, 80)
+                .await
+                .expect_err("the metadata endpoint must be denied");
+            assert!(err.contains("metadata"), "{host}: {err}");
+        }
+        let deny = EgressPolicy {
+            allow_private: false,
+        };
+        for host in [
+            // 2002:127.0.0.1::
+            "[2002:7f00:1::]",
+            // 2002:10.1.1.1::
+            "[2002:a01:101::]",
+            // 2002:192.168.0.1::
+            "[2002:c0a8:1::]",
+        ] {
+            let err = deny
+                .check_host(host, 80)
+                .await
+                .expect_err("a 6to4 address standing for a private IPv4 must be denied");
+            assert!(err.contains("denied"), "{host}: {err}");
+        }
+        // the prefix alone denies nothing: 2002:5db8:d822:: stands for the
+        // public 93.184.216.34 and stays reachable
+        deny.check_host("[2002:5db8:d822::]", 80)
+            .await
+            .expect("a 6to4 address for a public IPv4 is public");
     }
 
     /// ADR-0010 makes `allow_private: false` the internet-facing posture, so
