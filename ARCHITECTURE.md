@@ -28,23 +28,27 @@ JetStream stream fed from a transactional outbox. The browser build
 
 ## 2. Crates and their contracts
 
-Dependency direction is acyclic and enforced in CI
-(`.github/workflows/workspace.yml`): `broker → api → {bus, sql, store,
-jsonld, ql, matcher, notifier, model}`. A leaf crate never names a crate
-above it.
+Dependency direction runs one way — `broker → api → {bus, sql, store,
+jsonld, ql, matcher, notifier, model}` — and cargo refuses a cycle in it.
+What CI adds (`.github/workflows/workspace.yml`, "Shared crates
+standalone") is the stronger rule for the five crates a gateway can take on
+its own, `model`, `ql`, `jsonld`, `matcher` and `store`: each is built,
+tested and documented alone, and its dependency tree may name neither the
+broker nor a storage backend (`antares-api`, `antares-broker`,
+`antares-sql`, `sqlx`, `axum`, `redb`).
 
 | Crate | Lines | Owns | Must not |
 |---|---|---|---|
-| `antares-model` | 600 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
+| `antares-model` | 880 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
 | `antares-ql` | 4 000 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
 | `antares-jsonld` | 7 200 | `@context` loader with caches and pinned core contexts, expansion/compaction, structural validation, the one outbound `client_builder` | do business logic |
 | `antares-matcher` | 330 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
-| `antares-store` | 1 400 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
-| `antares-sql` | 2 900 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
+| `antares-store` | 2 600 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
+| `antares-sql` | 9 400 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
 | `antares-bus` | 760 | `ChangeEvent`, the JetStream bus, subjects | decide who consumes |
 | `antares-notifier` | 1 700 | `NotificationSink` (schemes, `parse_endpoint`, `deliver`, `network`) chosen from `SinkRegistry` by endpoint scheme: http (`http.rs`), mqtt behind the feature, delivery policy, `Outbound` | match or store |
 | `antares-api` | 40 000 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
-| `antares-broker` | 2 700 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
+| `antares-broker` | 3 500 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
 | `antares-wasm` | 500 | the router under a Service Worker, OPFS-backed file store | diverge from the native router |
 | `antares-registry` | 16 | `RegMode` and the federation contracts stated as doc | grow without a reason (registration logic lives in `antares-api/src/csource.rs` and `federation.rs`) |
 
@@ -56,27 +60,27 @@ module's header comment.
 | Module | Lines | Surface |
 |---|---|---|
 | `lib.rs` | 5 500 | the router (`/ngsi-ld/v1` nest, `/q/*` admin, `/info`), tenant purge, shared helpers |
-| `negotiate.rs` | 1 500 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
+| `negotiate.rs` | 1 800 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
 | `entities.rs` | 4 700 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, paging, distributed write fan-out |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
-| `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
+| `batch.rs` | 2 400 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
 | `temporal.rs` | 3 800 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
 | `subscriptions.rs` | 1 600 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
-| `notify.rs` | 4 300 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
+| `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
 | `distsub.rs` | 1 500 | 5.8.1.4 distributed subscriptions, consumer half |
-| `csource.rs` | 2 200 | 5.9, 5.10 registrations, `csource_index` maintenance |
+| `csource.rs` | 2 500 | 5.9, 5.10 registrations, `csource_index` maintenance |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
-| `entity_maps.rs` | 1 000 | 5.14 EntityMaps |
+| `entity_maps.rs` | 1 100 | 5.14 EntityMaps |
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
-| `contexts.rs` | 660 | 5.13 `/jsonldContexts` |
+| `contexts.rs` | 760 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 760 | 6.3.21 version negotiation |
 | `repr.rs` | 960 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs |
 | `history.rs` | 150 | the producer side of temporal recording (change buffer per request) |
-| `bounds.rs` | 340 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
-| `egress.rs` | 280 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
+| `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
+| `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 90 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
-| `state.rs` | 590 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
+| `state.rs` | 770 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
 own nothing: each is a handful of lines re-exporting `antares_ql::geo`,

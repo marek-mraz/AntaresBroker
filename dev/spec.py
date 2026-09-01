@@ -640,6 +640,72 @@ def robot_recipe_violations():
     return out
 
 
+def architecture_size_violations():
+    """ARCHITECTURE.md sizes every crate and every `antares-api` module so a
+    reader can tell where the weight sits before opening anything. Typed by
+    hand they drift with the code and stop meaning anything: the sql crate was
+    published at 2 900 lines while it held 9 415, and the store crate at half
+    its size, which sends a reader to the wrong file for the biggest change in
+    the workspace. Rounding is the author's business — the check only refuses a
+    number that is no longer the right size."""
+    doc = ROOT / "ARCHITECTURE.md"
+    if not doc.exists():
+        return [f"{doc}: the code map is missing"]
+    out, tolerance = [], 0.10
+
+    def lines_of(paths):
+        n = 0
+        for f in paths:
+            n += len(f.read_bytes().split(b"\n")) - 1
+        return n
+
+    sizes = {}
+    for d in sorted((ROOT / "crates").iterdir()):
+        if (d / "src").is_dir():
+            sizes[d.name] = lines_of(sorted((d / "src").rglob("*.rs")))
+    for f in sorted((ROOT / "crates/antares-api/src").glob("*.rs")):
+        sizes[f.name] = lines_of([f])
+
+    for line in doc.read_text(encoding="utf-8").splitlines():
+        row = re.match(r"\| `([a-z_0-9.-]+)` \| ([\d ]+) \|", line)
+        if not row or row.group(1) not in sizes:
+            continue
+        name, stated = row.group(1), int(row.group(2).replace(" ", ""))
+        actual = sizes[name]
+        if abs(stated - actual) > max(tolerance * actual, 2):
+            out.append(
+                f"ARCHITECTURE.md: sizes {name} at {stated} lines, it holds {actual}"
+            )
+    for name in sorted(sizes):
+        if name.endswith(".rs") and name not in ("geo.rs", "qeval.rs", "regexcache.rs"):
+            if not re.search(rf"^\| `{re.escape(name)}` \|", doc.read_text(encoding="utf-8"), re.M):
+                out.append(f"ARCHITECTURE.md: the module table has no row for {name}")
+    return out
+
+
+def shared_crate_violations():
+    """The shared-crates chapter names the crates a gateway can take on its own,
+    and the workspace workflow is what proves each one still builds, tests and
+    documents alone without naming the broker or a storage backend. The two
+    lists are one claim: a crate published in the chapter and missing from the
+    matrix is a promise nothing checks."""
+    book = ROOT / "docs/src/shared-crates.md"
+    wf = ROOT / ".github/workflows/workspace.yml"
+    if not book.exists() or not wf.exists():
+        return [f"{book if not book.exists() else wf}: missing"]
+    published = set(re.findall(r"^\| `(antares-[a-z]+)` \|", book.read_text(encoding="utf-8"), re.M))
+    gated = re.search(r"crate: \[([^\]]*)\]", wf.read_text(encoding="utf-8"))
+    if not gated:
+        return [f"{wf}: no shared-crate matrix to compare the chapter against"]
+    gated = {c.strip() for c in gated.group(1).split(",") if c.strip()}
+    out = []
+    for name in sorted(published - gated):
+        out.append(f"docs/src/shared-crates.md publishes {name}, which the standalone matrix omits")
+    for name in sorted(gated - published):
+        out.append(f"workspace.yml gates {name} standalone, which the shared-crates chapter omits")
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -673,6 +739,8 @@ def cmd_check():
     errors.extend(book_fence_violations())
     errors.extend(suite_count_violations())
     errors.extend(robot_recipe_violations())
+    errors.extend(architecture_size_violations())
+    errors.extend(shared_crate_violations())
     errors.extend(book_error_title_violations())
 
     for e in errors:
