@@ -534,6 +534,75 @@ mod tests {
         })
     }
 
+    /// 5.13.1 + 5.5.10: purging a Tenant takes the @contexts authored through
+    /// ITS requests and nothing else. `jsonld_contexts` is keyed by local id
+    /// alone, so the store's tenant-keyed purge cannot reach these rows and
+    /// this walk is the only thing standing between one Tenant's deletion and
+    /// another Tenant's term mappings. A Cached row is a copy of a public
+    /// document and belongs to no Tenant, so it survives every purge.
+    #[tokio::test]
+    async fn clause_5_13_1_a_tenant_purge_takes_only_its_own_contexts() {
+        let st = AppState::new("antares-ctx-purge".into());
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        let base = "http://broker.example/ngsi-ld/v1/jsonldContexts";
+        for (lid, owner) in [("hosted-alpha", &alpha), ("hosted-beta", &beta)] {
+            st.store
+                .context_put(lid, hosted_row(&format!("{base}/{lid}"), lid, owner))
+                .expect("store the Hosted @context");
+        }
+        // an ImplicitlyCreated wrapper is owned the same way a Hosted one is
+        let mut implicit = hosted_row(&format!("{base}/implicit-alpha"), "implicit-alpha", &alpha);
+        implicit["kind"] = json!("ImplicitlyCreated");
+        st.store
+            .context_put("implicit-alpha", implicit)
+            .expect("store the ImplicitlyCreated @context");
+        // and a Cached copy, which carries no owner at all
+        st.store
+            .context_put(
+                "cached-shared",
+                json!({"url": "https://example.org/ctx.jsonld", "localId": "cached-shared",
+                       "kind": "Cached", "createdAt": now_iso()}),
+            )
+            .expect("store the Cached @context");
+        // a legacy row with no owner member belongs to the default Tenant
+        let mut legacy = hosted_row(&format!("{base}/legacy"), "legacy", &alpha);
+        legacy.as_object_mut().expect("row object").remove("owner");
+        st.store
+            .context_put("legacy", legacy)
+            .expect("store legacy");
+
+        purge_tenant(&st, &alpha).await.expect("purge alpha");
+
+        let present = |lid: &str| st.store.context_get(lid).expect("store read").is_some();
+        assert!(
+            !present("hosted-alpha"),
+            "the purged Tenant's Hosted row goes"
+        );
+        assert!(
+            !present("implicit-alpha"),
+            "and so does its ImplicitlyCreated wrapper"
+        );
+        assert!(
+            present("hosted-beta"),
+            "another Tenant's Hosted @context must survive a purge it has no part in"
+        );
+        assert!(
+            present("cached-shared"),
+            "a Cached copy belongs to no Tenant and is not purged with one"
+        );
+        assert!(
+            present("legacy"),
+            "an owner-less row belongs to the default Tenant, not to alpha"
+        );
+        // the same purge run against the default Tenant reaches the legacy row
+        purge_tenant(&st, &TenantId::default())
+            .await
+            .expect("purge default");
+        assert!(!present("legacy"));
+        assert!(present("hosted-beta"), "still beta's");
+    }
+
     /// 5.13.4.4: a stored @context resolves by its locally unique URI —
     /// the localId and the full published URL name the SAME entry (5.13.2.4),
     /// while a URL that only ends in a known localId names no entry at all,
