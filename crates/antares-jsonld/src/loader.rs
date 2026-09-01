@@ -576,6 +576,40 @@ const MAX_FETCHED_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 /// tiny documents cannot turn a byte budget into an unbounded map.
 const MAX_FETCHED_ENTRIES: u64 = 256;
 
+/// Terms the merged-context cache may hold across all its entries. A merged
+/// Context costs memory in proportion to its term map (the map itself, its
+/// compaction inverse and its prefix index), and an @context document may
+/// spend its 5 MiB budget on hundreds of thousands of short mappings — so an
+/// entry ceiling alone bounds nothing. 256 entries of an ordinary vocabulary
+/// (the core context defines 184 terms; a large domain one runs to tens of
+/// thousands) fit inside this comfortably.
+const MAX_MERGED_CACHE_TERMS: u64 = 2_000_000;
+
+/// Entry ceiling of the merged-context cache, charged through the term
+/// budget exactly as the fetched cache charges its byte budget.
+const MAX_MERGED_ENTRIES: u64 = 256;
+
+/// The merged-context cache, bounded by TERMS held rather than by entries.
+#[cfg(not(target_arch = "wasm32"))]
+fn merged_cache() -> BoundedCache<String, Arc<Context>> {
+    let floor = (MAX_MERGED_CACHE_TERMS / MAX_MERGED_ENTRIES) as u32;
+    BoundedCache::builder()
+        .max_capacity(MAX_MERGED_CACHE_TERMS)
+        .weigher(move |_key: &String, ctx: &Arc<Context>| {
+            u32::try_from(ctx.term_count())
+                .unwrap_or(u32::MAX)
+                .max(floor)
+        })
+        .build()
+}
+
+/// wasm32: the FIFO minicache carries no weigher, and a browser tab's
+/// @context set is tiny — the entry bound is the bound there.
+#[cfg(target_arch = "wasm32")]
+fn merged_cache() -> BoundedCache<String, Arc<Context>> {
+    BoundedCache::new(MAX_MERGED_ENTRIES)
+}
+
 /// The fetched-document cache, bounded by BYTES: the weight of an entry is
 /// the size of the document it holds (floored, see above).
 #[cfg(not(target_arch = "wasm32"))]
@@ -739,10 +773,10 @@ impl Loader {
             http: wrap_client(client),
             policy,
             fetched: fetched_cache(),
-            merged: BoundedCache::new(256),
+            merged: merged_cache(),
             core_only: Arc::new(core),
             usage: RwLock::new(HashMap::new()),
-            merged_urls: BoundedCache::new(256),
+            merged_urls: BoundedCache::new(MAX_MERGED_ENTRIES),
             resolve_permits: tokio::sync::Semaphore::new(32),
             cache_writer: std::sync::RwLock::new(None),
             usage_bump: std::sync::RwLock::new(None),
@@ -2199,6 +2233,60 @@ mod tests {
                 .expect_err("the metadata endpoint must be denied");
             assert!(err.contains("metadata"), "{host}: {err}");
         }
+    }
+
+    /// The merged-context cache is charged by the TERMS an entry holds, not
+    /// by counting entries: an @context document may spend its whole byte
+    /// budget on short mappings, and a merged Context costs memory in
+    /// proportion to its term map, its compaction inverse and its prefix
+    /// index. An entry ceiling alone would let 256 such documents pin
+    /// hundreds of megabytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_merged_cache_is_bounded_by_terms_not_by_entries() {
+        let big = |n: usize| {
+            let mut m = serde_json::Map::new();
+            for i in 0..n {
+                m.insert(
+                    format!("t{i:06}"),
+                    Value::String(format!("http://a.example/{i}")),
+                );
+            }
+            let mut c = Context::default();
+            c.merge_object(&m).expect("merge");
+            c.freeze();
+            Arc::new(c)
+        };
+        let cache = merged_cache();
+        // one entry far under the floor still costs the floor, so a flood of
+        // tiny contexts cannot turn the term budget into an unbounded map
+        cache.insert("small".into(), big(1));
+        cache.run_pending_tasks();
+        let floor = MAX_MERGED_CACHE_TERMS / MAX_MERGED_ENTRIES;
+        assert_eq!(
+            cache.weighted_size(),
+            floor,
+            "a small entry costs the floor"
+        );
+        // and a large one costs what it holds
+        let n = (floor as usize) * 4;
+        cache.insert("large".into(), big(n));
+        cache.run_pending_tasks();
+        assert_eq!(
+            cache.weighted_size(),
+            floor + n as u64,
+            "a large entry is charged its term count"
+        );
+        // past the budget the cache evicts rather than growing
+        for i in 0..8 {
+            cache.insert(format!("f{i}"), big(n));
+        }
+        cache.run_pending_tasks();
+        assert!(
+            cache.weighted_size() <= MAX_MERGED_CACHE_TERMS,
+            "weighted size {} passed the budget",
+            cache.weighted_size()
+        );
     }
 
     /// 6to4 (IETF RFC 3056) is the fourth spelling that carries an IPv4

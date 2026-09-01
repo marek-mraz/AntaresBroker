@@ -242,6 +242,15 @@ impl Context {
         self.terms.get(term)
     }
 
+    /// How many terms this context defines. The merged-context cache charges
+    /// an entry by this rather than counting entries: an @context document
+    /// may spend its whole byte budget on short mappings, and a term map of
+    /// hundreds of thousands of terms is what the cache would then hold,
+    /// times its entry ceiling.
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
     /// Expand a key/term in vocab position (attribute names, type values).
     pub fn expand_key(&self, key: &str) -> String {
         if let Some(def) = self.terms.get(key) {
