@@ -1169,7 +1169,7 @@ pub async fn query_registrations(
             }
             csr_matches(&spec, doc, &ctx)
         };
-        let matches = collect_matching(&st, &tenant, keep)?;
+        let matches = collect_matching(&st, &tenant, keep, *crate::bounds::MAX_FOLD_DOCS)?;
         let (page, count_hdr, links) = crate::entities::paginate_accept(
             &st,
             &params,
@@ -1237,14 +1237,28 @@ pub(crate) fn walk_docs(
 }
 
 /// Every registration of one tenant that `keep` accepts.
+/// Every registration of one tenant that `keep` accepts, up to `ceiling`.
+///
+/// 5.10.2.4 filters before it pages, so the page cannot be pushed into the
+/// store and the whole match set is held at once. A broker is built for
+/// 100 000+ registrations per tenant, so "the whole match set" is a number a
+/// client picks with one `type=` — and 5.5.6 gives the answer for "a query
+/// operation … producing so many results that can potentially exhaust client
+/// or server resources": TooManyResults, rather than the memory.
 fn collect_matching(
     st: &AppState,
     tenant: &antares_model::TenantId,
     keep: impl Fn(&Value) -> bool,
+    ceiling: usize,
 ) -> Result<Vec<Value>, NgsiError> {
     let mut matches = Vec::new();
     walk_docs(st, tenant, Kind::Registration, |doc| {
         if keep(&doc) {
+            if matches.len() == ceiling {
+                return Err(NgsiError::TooManyResults(format!(
+                    "the query matches more than {ceiling} registrations — narrow it (5.5.6)"
+                )));
+            }
             matches.push(doc);
         }
         Ok(())
@@ -2332,6 +2346,52 @@ mod csi_tests {
         assert!(!ok("ngsildConformance", "latest"));
         // ordinary custom keys stay free-form
         assert!(ok("Authorization", "Bearer abc"));
+    }
+
+    /// 5.5.6 + 5.10.2.4: the registration query filters before it pages, so
+    /// every match is held at once. A tenant at the 100 000-registration
+    /// target answers one `type=` selector with every one of them, which is
+    /// the "so many results that can potentially exhaust … server resources"
+    /// 5.5.6 names — the query is refused at the ceiling instead of building
+    /// the answer.
+    #[test]
+    fn clause_5_5_6_a_registration_query_stops_at_the_fold_ceiling() {
+        let st = AppState::new("antares-csr-ceiling".into());
+        let tenant = TenantId::default();
+        for i in 0..5 {
+            let id = format!("urn:ngsi-ld:ContextSourceRegistration:ceil{i}");
+            st.store
+                .create(
+                    &tenant,
+                    Kind::Registration,
+                    &id,
+                    json!({
+                        "id": id,
+                        "type": "ContextSourceRegistration",
+                        "endpoint": "http://peer:9090",
+                        "information": [{"entities": [{"type": "Building"}]}],
+                    }),
+                )
+                .expect("store the registration");
+        }
+        let all = collect_matching(&st, &tenant, |_| true, 100).expect("under the ceiling");
+        assert_eq!(all.len(), 5, "every registration matches");
+        let err = collect_matching(&st, &tenant, |_| true, 2)
+            .expect_err("a match set over the ceiling is refused");
+        assert!(
+            matches!(err, NgsiError::TooManyResults(_)),
+            "5.5.6 names TooManyResults, got {err:?}"
+        );
+        // the ceiling counts MATCHES, not documents walked: a narrow query
+        // over the same tenant still answers
+        let narrow = collect_matching(
+            &st,
+            &tenant,
+            |d| d["id"] == json!("urn:ngsi-ld:ContextSourceRegistration:ceil3"),
+            2,
+        )
+        .expect("one match is under any ceiling");
+        assert_eq!(narrow.len(), 1);
     }
 
     /// 6.3.19: "Key and value members shall adhere to IETF RFC 7230 …

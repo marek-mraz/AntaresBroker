@@ -96,6 +96,22 @@ pub use antares_ql::regex::{MAX_REGEX_CACHE, MAX_REGEX_CACHE_BYTES, MAX_REGEX_PR
 /// enforces it (`antares_ql::parse_q`).
 pub use antares_ql::MAX_Q_NODES;
 
+/// → 403 TooManyResults (5.5.6). Deployment knob
+/// (ANTARES_DISCOVERY_SCAN_MAX): documents ONE unpaginated whole-tenant fold
+/// may read or hold. The folds that carry it are the ones the spec gives no
+/// window to push into the store: `/types` and `/attributes` (5.7.5-5.7.10
+/// define no pagination) and the registration query (5.10.2.4 filters first
+/// and pages second, so the page cannot be pushed down). Without it one
+/// request over a tenant at the 100 000-registration target holds every match
+/// at once. Read once at first use.
+pub static MAX_FOLD_DOCS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    std::env::var("ANTARES_DISCOVERY_SCAN_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(100_000)
+});
+
 /// Rejection counters, exported by /q/health.
 #[derive(Default)]
 pub struct LimitStats {
@@ -112,6 +128,7 @@ impl LimitStats {
             "maxJsonDepth": MAX_JSON_DEPTH,
             "maxGeoVertices": MAX_GEO_VERTICES,
             "maxBatchItems": *MAX_BATCH_ITEMS,
+            "maxFoldDocs": *MAX_FOLD_DOCS,
             "maxFedResponseBytes": *MAX_FED_RESPONSE_BYTES,
             "maxFedFanout": *MAX_FED_FANOUT,
             "maxFedInflight": *MAX_FED_INFLIGHT,
@@ -358,6 +375,7 @@ mod tests {
                 "maxFedFanout",
                 "maxFedInflight",
                 "maxFedResponseBytes",
+                "maxFoldDocs",
                 "maxGeoVertices",
                 "maxJoinLevel",
                 "maxJsonDepth",

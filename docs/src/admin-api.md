@@ -39,6 +39,7 @@ progress). A memory-store broker answers:
     "maxFedFanout": 8,
     "maxFedInflight": 256,
     "maxFedResponseBytes": 16777216,
+    "maxFoldDocs": 100000,
     "maxGeoVertices": 1024,
     "maxJoinLevel": 10,
     "maxJsonDepth": 64,

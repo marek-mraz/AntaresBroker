@@ -13,18 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::negotiate::CleanParams;
 
-/// Deployment knob (ANTARES_DISCOVERY_SCAN_MAX): entities one discovery fold
-/// may read. 5.7.5-5.7.10 give /types and /attributes no pagination, so the
-/// list folds are over the whole tenant — this caps the work a single request
-/// can buy. Read once at first use.
-static SCAN_MAX: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
-    std::env::var("ANTARES_DISCOVERY_SCAN_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(100_000)
-});
-
 /// Which of the tenant's entities a fold needs. 5.7.5/5.7.8 describe the
 /// types and attributes "for which entity instances exist within the NGSI-LD
 /// system", so those two fold the whole tenant; 5.7.7 asks about ONE entity
@@ -234,7 +222,8 @@ pub async fn entity_types(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX, Narrow::Tenant)?;
+        let (stats, partial) =
+            type_stats(&st, &tenant, *crate::bounds::MAX_FOLD_DOCS, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
         let payload = if details {
             Value::Array(
@@ -287,7 +276,12 @@ pub async fn entity_type_info(
         // attributeDetails (5.2.26), so the fold asks the datastore for those
         // and the ceiling applies to them — a tenant of 100M entities with 50
         // Buildings answers exactly, instead of from the tenant's first page.
-        let (stats, partial) = type_stats(&st, &tenant, *SCAN_MAX, Narrow::Type(&iri))?;
+        let (stats, partial) = type_stats(
+            &st,
+            &tenant,
+            *crate::bounds::MAX_FOLD_DOCS,
+            Narrow::Type(&iri),
+        )?;
         let Some((count, attrs)) = stats.get(&iri) else {
             let mut resp = ApiError::from(NgsiError::ResourceNotFound(format!(
                 "no entities of type {type_name}"
@@ -338,7 +332,8 @@ pub async fn attributes(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX, Narrow::Tenant)?;
+        let (stats, partial) =
+            attr_stats(&st, &tenant, *crate::bounds::MAX_FOLD_DOCS, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
         let payload = if details {
             Value::Array(
@@ -394,7 +389,12 @@ pub async fn attribute_info(
         // attributeCount, attributeTypes and typeNames (5.2.28) are all
         // properties of the entities that CARRY this attribute; the rest of
         // the tenant is not read.
-        let (stats, partial) = attr_stats(&st, &tenant, *SCAN_MAX, Narrow::Attr(&iri))?;
+        let (stats, partial) = attr_stats(
+            &st,
+            &tenant,
+            *crate::bounds::MAX_FOLD_DOCS,
+            Narrow::Attr(&iri),
+        )?;
         let Some((count, attr_types, etypes)) = stats.get(&iri) else {
             let mut resp = ApiError::from(NgsiError::ResourceNotFound(format!(
                 "attribute {attr} not found"
