@@ -529,7 +529,7 @@ fn scope_match_intervals(doc: &Value, sq: &str) -> Vec<(String, Option<String>)>
                     scope_set_time(i).map(|t| (t, i.get("value").unwrap_or(&Value::Null)))
                 })
                 .collect();
-            states.sort_by_key(|(t, _)| *t);
+            states.sort_by_key(|(t, _)| dt_key(t));
             (0..states.len())
                 .filter(|&n| scope_value_matches(sq, states[n].1))
                 .map(|n| {
@@ -616,8 +616,8 @@ fn window(
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|i| scope_set_time(i).is_some_and(|t| t < start))
-                    .max_by(|a, b| scope_set_time(a).cmp(&scope_set_time(b)))
+                    .filter(|i| scope_set_time(i).is_some_and(|t| dt_key(t) < dt_key(start)))
+                    .max_by_key(|i| scope_set_time(i).map(dt_key))
                     .cloned();
                 if let Some(c) = carry {
                     if !instances.contains(&c) {
@@ -647,10 +647,10 @@ fn window(
         w.max_per_attr = w.max_per_attr.max(instances.len());
         for inst in &instances {
             if let Some(t) = inst.get(timeprop).and_then(Value::as_str) {
-                if w.ts_min.as_deref().is_none_or(|m| t < m) {
+                if w.ts_min.as_deref().is_none_or(|m| dt_key(t) < dt_key(m)) {
                     w.ts_min = Some(t.to_owned());
                 }
-                if w.ts_max.as_deref().is_none_or(|m| t > m) {
+                if w.ts_max.as_deref().is_none_or(|m| dt_key(t) > dt_key(m)) {
                     w.ts_max = Some(t.to_owned());
                 }
             }
@@ -2083,12 +2083,12 @@ pub(crate) async fn query_temporal_inner(
         }
         g_trunc |= w.truncated;
         if let Some(m) = &w.ts_min {
-            if g_min.as_deref().is_none_or(|c| m.as_str() < c) {
+            if g_min.as_deref().is_none_or(|c| dt_key(m) < dt_key(c)) {
                 g_min = Some(m.clone());
             }
         }
         if let Some(m) = &w.ts_max {
-            if g_maxts.as_deref().is_none_or(|c| m.as_str() > c) {
+            if g_maxts.as_deref().is_none_or(|c| dt_key(m) > dt_key(c)) {
                 g_maxts = Some(m.clone());
             }
         }
@@ -2390,11 +2390,11 @@ fn merge_temporal_docs(base: &mut Value, add: &Value, aux: bool, timeprop: &str)
             Some(cur) => {
                 for ni in incoming {
                     if aux {
-                        let ts = ni.get(timeprop).and_then(Value::as_str);
+                        let ts = ni.get(timeprop).and_then(Value::as_str).map(dt_key);
                         if ts.is_some()
-                            && cur
-                                .iter()
-                                .any(|ci| ci.get(timeprop).and_then(Value::as_str) == ts)
+                            && cur.iter().any(|ci| {
+                                ci.get(timeprop).and_then(Value::as_str).map(dt_key) == ts
+                            })
                         {
                             continue;
                         }
@@ -2407,19 +2407,22 @@ fn merge_temporal_docs(base: &mut Value, add: &Value, aux: bool, timeprop: &str)
                     // timeproperty value. Without the is_some() guard a pair of
                     // instances that both lack it would compare None == None,
                     // letting a remote instance replace unrelated local history.
-                    let ni_ts = ni.get(timeprop).and_then(Value::as_str);
+                    // 4.6.3 leaves the seconds fraction optional, so two
+                    // Context Sources may spell one instant differently: the
+                    // slot and its winner are decided on the canonical key,
+                    // or the same instance comes back twice.
+                    let ni_ts = ni.get(timeprop).and_then(Value::as_str).map(dt_key);
                     let slot = ni_ts.and_then(|ts| {
                         cur.iter_mut().find(|ci| {
-                            ci.get(timeprop).and_then(Value::as_str) == Some(ts)
+                            ci.get(timeprop).and_then(Value::as_str).map(dt_key) == Some(ts.clone())
                                 && ci.get("datasetId") == ni.get("datasetId")
                         })
                     });
                     if let Some(existing) = slot {
-                        let newer = ni.get("modifiedAt").and_then(Value::as_str).unwrap_or("")
-                            > existing
-                                .get("modifiedAt")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
+                        let stamp = |i: &Value| {
+                            dt_key(i.get("modifiedAt").and_then(Value::as_str).unwrap_or(""))
+                        };
+                        let newer = stamp(&ni) > stamp(existing);
                         if newer {
                             *existing = ni;
                         }
@@ -3124,6 +3127,64 @@ mod clause_4_11 {
         assert_eq!(speed[1]["value"], 20);
     }
 
+    /// 4.6.3 leaves the seconds fraction optional, so two Context Sources
+    /// holding one instance may spell its timeproperty differently. The slot
+    /// of 4.5.5.3 is the INSTANT, not the spelling: a byte comparison treats
+    /// the two as separate slots and serves the same instance twice — the
+    /// IOP_EXT_TMP_02_05 duplicate, reached through a different door.
+    #[test]
+    fn one_instant_spelled_two_ways_is_still_one_slot() {
+        let mut base = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-05-01T00:00:00Z"},
+        ]});
+        let add = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 11, "observedAt": "2026-05-01T00:00:00.000Z",
+             "modifiedAt": "2026-06-01T00:00:00Z"},
+        ]});
+        merge_temporal_docs(&mut base, &add, false, "observedAt");
+        let speed = base["speed"].as_array().expect("array");
+        assert_eq!(speed.len(), 1, "one instant is one slot: {speed:?}");
+        assert_eq!(speed[0]["value"], 11, "newer modifiedAt wins");
+    }
+
+    /// The winner of a conflicting slot is "the most recent modifiedAt", and
+    /// which of two `modifiedAt` values is more recent is a comparison of
+    /// instants for the same reason. A remote instance stamped
+    /// `…:00.500Z` is LATER than a local one stamped `…:00Z`, though its
+    /// bytes sort earlier.
+    #[test]
+    fn the_more_recent_modified_at_wins_across_fraction_spellings() {
+        let mut base = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-05-01T09:00:00Z"},
+        ]});
+        let add = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 11, "observedAt": "2026-05-01T00:00:00Z",
+             "modifiedAt": "2026-05-01T09:00:00.500Z"},
+        ]});
+        merge_temporal_docs(&mut base, &add, false, "observedAt");
+        let speed = base["speed"].as_array().expect("array");
+        assert_eq!(speed.len(), 1, "{speed:?}");
+        assert_eq!(speed[0]["value"], 11, "the later instant wins: {speed:?}");
+    }
+
+    /// 4.3.6.2 auxiliary supplementation is decided on the same slot, so an
+    /// auxiliary instance that respells an occupied instant is still refused.
+    #[test]
+    fn an_auxiliary_respelling_of_an_occupied_slot_is_refused() {
+        let mut base = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 10, "observedAt": "2026-05-01T00:00:00Z"},
+        ]});
+        let add = json!({"id": "urn:e", "type": "T", "speed": [
+            {"type": "Property", "value": 99, "observedAt": "2026-05-01T00:00:00.000Z"},
+        ]});
+        merge_temporal_docs(&mut base, &add, true, "observedAt");
+        let speed = base["speed"].as_array().expect("array");
+        assert_eq!(speed.len(), 1, "{speed:?}");
+        assert_eq!(speed[0]["value"], 10);
+    }
+
     fn tq(timerel: &str, time_at: &str, end: Option<&str>) -> TemporalQ {
         let mut p = HashMap::new();
         p.insert("timerel".to_owned(), timerel.to_owned());
@@ -3449,6 +3510,35 @@ mod clause_6_3_10 {
             ),
             None
         );
+    }
+
+    /// 4.6.3 allows a DateTime to carry a seconds fraction or leave it out,
+    /// and both spellings of one instant are the same instant. The window's
+    /// own bounds are compared as raw strings nowhere: `.` sorts before `Z`,
+    /// so `…:00.500Z` reads as EARLIER than `…:00Z` on a byte compare, and a
+    /// Content-Range built from those bounds would name a range the body
+    /// contradicts. The instances are sorted on the canonical key already
+    /// (`dt_key`); the bounds are on the same key or they disagree with the
+    /// order they summarize.
+    #[test]
+    fn the_window_bounds_are_the_true_extremes_across_fraction_spellings() {
+        let doc = json!({
+            "id": "urn:ngsi-ld:Vehicle:1",
+            "type": "Vehicle",
+            "speed": [
+                {"type": "Property", "value": 1, "observedAt": "2020-01-01T00:09:00Z"},
+                {"type": "Property", "value": 2, "observedAt": "2020-01-01T00:09:00.500Z"},
+            ],
+        });
+        let w = windowed(&doc, None, None);
+        assert_eq!(w.attrs["speed"].len(), 2);
+        assert_eq!(
+            observed(&w),
+            vec!["2020-01-01T00:09:00Z", "2020-01-01T00:09:00.500Z"],
+            "the instances themselves sort on the canonical key"
+        );
+        assert_eq!(w.ts_min.as_deref(), Some("2020-01-01T00:09:00Z"));
+        assert_eq!(w.ts_max.as_deref(), Some("2020-01-01T00:09:00.500Z"));
     }
 }
 
