@@ -392,11 +392,16 @@ pub fn normalize_subscription(
                     .ok_or_else(|| bad("timeInterval must be a positive number".into()))?;
                 out.insert("timeInterval".into(), v.clone());
             }
-            "isActive" => {
+            // Table 5.2.12-1: all three are Booleans. `localOnly` and
+            // `splitEntities` decide how far the Subscription reaches — a
+            // string read through `as_bool()` is falsy, so accepting one
+            // would turn a subscriber's request for local scope (5.5.13)
+            // into a distributed subscription without telling it.
+            "isActive" | "localOnly" | "splitEntities" => {
                 if !v.is_boolean() {
-                    return Err(bad("isActive must be a boolean".into()));
+                    return Err(bad(format!("{k} must be a boolean (5.2.12)")));
                 }
-                out.insert("isActive".into(), v.clone());
+                out.insert(k.clone(), v.clone());
             }
             "temporalQ" => {
                 // 5.2.21 TemporalQuery: timerel and timeAt are cardinality 1
@@ -1200,6 +1205,29 @@ mod tests {
             ("!#$%&x*+-.^_`|~0Aa", "value with spaces inside"),
         ] {
             assert!(norm(&with(k, v)).is_ok(), "receiverInfo {k:?}: {v:?}");
+        }
+    }
+
+    /// Table 5.2.12-1: `localOnly` and `splitEntities` are Booleans. Both
+    /// decide how far a Subscription reaches — `localOnly=true` confines it
+    /// to "the Entities stored locally" (5.5.13), and `splitEntities` decides
+    /// whether filters may be applied locally at all. A string `"true"` read
+    /// through `as_bool()` is falsy, so accepting one turns a subscriber's
+    /// request for local scope into a distributed subscription that forwards
+    /// to every matching Context Source, and the subscriber is never told.
+    #[test]
+    fn clause_5_2_12_local_only_and_split_entities_are_booleans() {
+        for member in ["localOnly", "splitEntities"] {
+            for v in [json!("true"), json!(1), json!("false"), json!([true])] {
+                assert!(
+                    norm(&sub(json!({member: v.clone()}))).is_err(),
+                    "{member}: {v} is not a Boolean (5.2.12)"
+                );
+            }
+            for v in [json!(true), json!(false)] {
+                let out = norm(&sub(json!({member: v.clone()}))).expect("a Boolean is accepted");
+                assert_eq!(out[member], v, "{member} is stored as given");
+            }
         }
     }
 
