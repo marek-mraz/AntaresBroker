@@ -516,3 +516,66 @@ async fn no_operation_of_one_tenant_touches_another_tenants_document() {
         "a refused cross-tenant write must not create a local copy: {listing}"
     );
 }
+
+/// 6.3.14: "If the HTTP header `NGSILD-Tenant` is present in the HTTP
+/// request, it shall also be present in HTTP response." The sentence has no
+/// exception for failures, and the failures are where it matters most: a
+/// client (or a proxy in front of one) that routes on the echoed header
+/// cannot tell which tenant a 400 or a 404 belongs to when the header is
+/// missing, and a multi-tenant client reading a batch of responses has
+/// nothing to attribute them by.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_6_3_14_every_response_echoes_the_request_tenant() {
+    const T: &str = "echoer";
+    let st = AppState::new("antares-echo".into());
+    create_entity(&st, T, "urn:ngsi-ld:Room:7").await;
+
+    let cases: [(&str, &str, Option<&str>); 8] = [
+        // the shapes that answer from a handler's own error path
+        ("GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:Room:missing", None),
+        (
+            "DELETE",
+            "/ngsi-ld/v1/entities/urn:ngsi-ld:Room:missing",
+            None,
+        ),
+        ("GET", "/ngsi-ld/v1/subscriptions/not%20a%20uri", None),
+        // 6.3.20 unknown parameter, and 5.7.2.4 too-wide query
+        ("GET", "/ngsi-ld/v1/entities?type=Room&bogus=1", None),
+        ("GET", "/ngsi-ld/v1/entities", None),
+        // a body that never reaches expansion
+        ("POST", "/ngsi-ld/v1/entities", Some("{\"nope\": 1}")),
+        // and the two that already answered correctly, so a fix cannot
+        // regress them
+        ("GET", "/ngsi-ld/v1/nosuchresource", None),
+        ("GET", "/ngsi-ld/v1/entities?type=Room", None),
+    ];
+    for (method, path, body) in cases {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("NGSILD-Tenant", T);
+        if let Some(b) = body {
+            req = req
+                .header("Content-Type", "application/json")
+                .header("Content-Length", b.len());
+        }
+        let req = req
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+            .expect("request");
+        let resp = antares_api::router(st.clone())
+            .oneshot(req)
+            .await
+            .expect("response");
+        let echoed = resp
+            .headers()
+            .get("NGSILD-Tenant")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        assert_eq!(
+            echoed.as_deref(),
+            Some(T),
+            "{method} {path} answered {} without echoing the tenant",
+            resp.status()
+        );
+    }
+}

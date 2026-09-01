@@ -447,7 +447,12 @@ pub fn router(state: AppState) -> Router {
                 // number governs both walls.
                 .layer(axum::extract::DefaultBodyLimit::max(
                     *bounds::MAX_BODY_BYTES,
-                )),
+                ))
+                // 6.3.14, last so it sees every exit: outside the snapshot
+                // layer, which rewrites the request header to the snapshot's
+                // internal tenant, and outside the bounds wall, whose bare
+                // 411/414 leave through no handler at all.
+                .layer(axum::middleware::from_fn(echo_tenant_layer)),
         )
         .fallback(not_found)
         // outermost on purpose: axum attaches the 405 Allow header in the
@@ -575,6 +580,32 @@ async fn tenant_exists_layer(
         }
     }
     next.run(req).await
+}
+
+/// 6.3.14: "If the HTTP header `NGSILD-Tenant` is present in the HTTP
+/// request, it shall also be present in HTTP response." The sentence admits
+/// no exception, and the responses that most need it are the ones no handler
+/// shapes: a rejection from the bounds wall, a 405, a body that never parsed.
+/// An echo the handlers own is an echo some handler forgets, so it is read
+/// once here, from the request the CALLER sent — the snapshot layer below
+/// rewrites that header to the snapshot's internal tenant, which must never
+/// reach the caller.
+async fn echo_tenant_layer(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let tenant = req
+        .headers()
+        .get("NGSILD-Tenant")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| TenantId::new(s).ok());
+    let mut resp = next.run(req).await;
+    if let Some(t) = tenant {
+        if !resp.headers().contains_key("NGSILD-Tenant") {
+            crate::negotiate::echo_tenant(&t, &mut resp);
+        }
+    }
+    resp
 }
 
 /// /q/metrics — Prometheus exposition, rendered by the closure the

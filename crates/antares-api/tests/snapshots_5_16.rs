@@ -897,6 +897,34 @@ async fn clause_5_5_15_snapshot_is_tenant_scoped() {
         StatusCode::NOT_FOUND,
         "status invisible cross-tenant"
     );
+
+    // and not from a second NAMED tenant either: the default Tenant is the
+    // one case the response path treats specially (it drops the echo rather
+    // than setting it), so a guard that only held there would pass above.
+    let other = &[("NGSILD-Tenant", "rival"), ("NGSILD-Snapshot", &sid[..])];
+    let seed = json!({"id": "urn:ngsi-ld:Vehicle:ten2", "type": "Vehicle"}).to_string();
+    let (status, _, b) = send_h(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(seed),
+        &[("NGSILD-Tenant", "rival")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+    let (status, h, _) = send_h(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None, other).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a named tenant sees no more");
+    // 6.3.22 keeps the snapshot header on the refusal, and the tenant echoed
+    // is the caller's own — never the snapshot's internal one
+    assert_eq!(
+        h.get("NGSILD-Tenant").and_then(|v| v.to_str().ok()),
+        Some("rival"),
+        "the synthetic tenant must not reach the caller"
+    );
+    assert_eq!(
+        h.get("NGSILD-Snapshot").and_then(|v| v.to_str().ok()),
+        Some(&sid[..])
+    );
 }
 
 /// 6.3.22: an unknown NGSILD-Snapshot reference is ResourceNotFound.
