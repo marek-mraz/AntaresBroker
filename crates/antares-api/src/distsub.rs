@@ -28,6 +28,24 @@ use serde_json::{json, Value};
 /// = {"csr_sub": id, "remotes": {reg_id: [endpoint, remote sub id]}}, plus
 /// inbound index docs under the internal "distsub-index" tenant
 /// (id = remote subscriptionId, doc = {"tenant", "own"}).
+/// 5.8.1.4: the Registration Subscription the distributed half owns is
+/// broker plumbing, not a resource a Context Source Subscriber created —
+/// 5.11.5.4 lists the subscriptions clients made through 5.11.2, and this
+/// one carries the internal `urn:antares:distsub:` endpoint naming the
+/// tenant and the owning Subscription. It is stored under `Kind::DistSub`,
+/// so the 5.11 endpoints cannot read, patch or delete it, and its id
+/// namespace is what tells the two apart on the notification path.
+pub(crate) const INTERNAL_CSR_PREFIX: &str = "urn:ngsi-ld:CSourceSubscription:distsub:";
+
+/// The kind one Registration Subscription id is stored under.
+pub(crate) fn csr_kind(id: &str) -> Kind {
+    if id.starts_with(INTERNAL_CSR_PREFIX) {
+        Kind::DistSub
+    } else {
+        Kind::CSourceSubscription
+    }
+}
+
 fn ds_index_tenant() -> Option<TenantId> {
     TenantId::new("distsub-index").ok()
 }
@@ -217,10 +235,7 @@ pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Va
     let Some(own_id) = sub.get("id").and_then(Value::as_str) else {
         return;
     };
-    let csr_id = format!(
-        "urn:ngsi-ld:CSourceSubscription:distsub:{}",
-        uuid::Uuid::new_v4()
-    );
+    let csr_id = format!("{INTERNAL_CSR_PREFIX}{}", uuid::Uuid::new_v4());
     let ts = now_iso();
     let mut doc = json!({
         "id": csr_id,
@@ -249,7 +264,7 @@ pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Va
     }
     let created = st
         .store
-        .create(tenant, Kind::CSourceSubscription, &csr_id, doc)
+        .create(tenant, Kind::DistSub, &csr_id, doc)
         .unwrap_or_else(|e| {
             tracing::warn!("subscription {own_id}: Registration Subscription not created: {e}");
             false
@@ -296,28 +311,26 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
             on_subscription_created(st, tenant, &sub);
         }
         Some(csr_id) => {
-            let _ = st
-                .store
-                .mutate(tenant, Kind::CSourceSubscription, &csr_id, |doc| {
-                    for k in CSR_MATCH_MEMBERS {
-                        match sub.get(k) {
-                            Some(v) => doc[k] = v.clone(),
-                            None => {
-                                doc.as_object_mut().map(|o| o.remove(k));
-                            }
-                        }
-                    }
-                    match sub.get("notification").and_then(|n| n.get("attributes")) {
-                        Some(a) => doc["notification"]["attributes"] = a.clone(),
+            let _ = st.store.mutate(tenant, Kind::DistSub, &csr_id, |doc| {
+                for k in CSR_MATCH_MEMBERS {
+                    match sub.get(k) {
+                        Some(v) => doc[k] = v.clone(),
                         None => {
-                            doc["notification"]
-                                .as_object_mut()
-                                .map(|n| n.remove("attributes"));
+                            doc.as_object_mut().map(|o| o.remove(k));
                         }
                     }
-                    doc["modifiedAt"] = Value::String(now_iso());
-                    Ok::<(), NgsiError>(())
-                });
+                }
+                match sub.get("notification").and_then(|n| n.get("attributes")) {
+                    Some(a) => doc["notification"]["attributes"] = a.clone(),
+                    None => {
+                        doc["notification"]
+                            .as_object_mut()
+                            .map(|n| n.remove("attributes"));
+                    }
+                }
+                doc["modifiedAt"] = Value::String(now_iso());
+                Ok::<(), NgsiError>(())
+            });
         }
     }
     let remotes: Vec<(String, (String, String))> = ds_remotes(&ds_get(st, tenant, own_id));
@@ -371,7 +384,7 @@ pub(crate) fn on_subscription_deleted(st: &AppState, tenant: &TenantId, own_id: 
     }
     let _ = st.store.delete(tenant, Kind::DistSub, own_id);
     if let Some(csr_id) = csr_id {
-        let _ = st.store.delete(tenant, Kind::CSourceSubscription, &csr_id);
+        let _ = st.store.delete(tenant, Kind::DistSub, &csr_id);
     }
     for (reg_id, (endpoint, remote_id)) in remotes {
         let stored = st
@@ -1210,7 +1223,7 @@ mod tests {
             .to_owned();
         let csr = st
             .store
-            .get(&t, Kind::CSourceSubscription, &csr_id)
+            .get(&t, Kind::DistSub, &csr_id)
             .ok()
             .flatten()
             .expect("csr subscription");
@@ -1297,7 +1310,7 @@ mod tests {
             .create(&t, Kind::Subscription, &own, sub.clone())
             .expect("create");
         st.store
-            .create(&t, Kind::CSourceSubscription, csr_id, json!({"id": csr_id}))
+            .create(&t, Kind::DistSub, csr_id, json!({"id": csr_id}))
             .expect("create");
         ds_put(&st, &t, &own, json!({"csr_sub": csr_id}));
         // a Context Source Notification arriving after the flip creates
@@ -1310,7 +1323,7 @@ mod tests {
         on_subscription_updated(&st, &t, &own);
         assert!(
             st.store
-                .get(&t, Kind::CSourceSubscription, csr_id)
+                .get(&t, Kind::DistSub, csr_id)
                 .ok()
                 .flatten()
                 .is_none(),

@@ -29,9 +29,11 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
 5814_01_01 Subscription Forwarded To Matching Context Source And Deleted
     [Documentation]    5.8.1.4: a reduced copy of the Subscription reaches
     ...    the registered Context Source with the local broker as its
-    ...    notification endpoint (never the original subscriber's); an
-    ...    internal Context Source Registration Subscription exists; the
-    ...    delete is forwarded (5.8.5.4).
+    ...    notification endpoint (never the original subscriber's); the
+    ...    delete is forwarded (5.8.5.4). The Context Source Registration
+    ...    Subscription 5.8.1.4 creates is the broker's own, addressed to
+    ...    the broker itself, so nothing here asserts it is served on the
+    ...    5.11 endpoints.
     [Tags]    dist-ops    5_8_1_4    5_8_5_4    since_v1.9.1
 
     &{headers}=    Create Dictionary    Content-Type=application/json
@@ -48,14 +50,14 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Should Be Equal    ${method}    POST
     Should Contain    ${path}    /ngsi-ld/v1/subscriptions
     ${body}=    Evaluate    $body.decode('utf-8') if isinstance($body, bytes) else $body
-    Should Contain    ${body}    remote-notify
-    Should Not Contain    ${body}    original.subscriber.example
+    # 5.8.1.4: "the notification endpoint is set to that of the local
+    # Broker" — the copy notifies the broker, which remaps and forwards to
+    # the subscriber. The URL that endpoint carries is not standardized, so
+    # what is asserted is that it exists and is NOT the subscriber's own.
+    ${copy_uri}=    Evaluate    __import__('json').loads($body)["notification"]["endpoint"]["uri"]
+    Should Not Be Empty    ${copy_uri}
+    Should Not Contain    ${copy_uri}    original.subscriber.example
     Reply By    201
-
-    # 5.8.1.4: the internal CSR subscription is visible (5.11.2)
-    ${response}=    GET    url=${url}/csourceSubscriptions    expected_status=any
-    Check Response Status Code    200    ${response.status_code}
-    Should Not Be Empty    ${response.json()}
 
     # 5.8.5.4: the delete is forwarded with the mapped subscriptionId
     ${response}=    DELETE    url=${url}/subscriptions/${sub_id}    expected_status=any
@@ -67,10 +69,6 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Should Contain    ${path}    /ngsi-ld/v1/subscriptions/
     Reply By    204
 
-    # and the internal CSR subscription is gone
-    ${response}=    GET    url=${url}/csourceSubscriptions    expected_status=any
-    Should Be Empty    ${response.json()}
-
 5814_01_02 Split Entities Inbound Notification Is Merged And Refiltered
     [Documentation]    5.8.6 splitEntities=true: the reduced remote copy
     ...    carries no q; the Entities of an inbound Notification are
@@ -80,7 +78,6 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     [Tags]    dist-ops    5_8_6    since_v1.9.1
 
     &{headers}=    Create Dictionary    Content-Type=application/json
-    ${broker_base}=    Evaluate    "${url}".replace("/ngsi-ld/v1", "")
     ${sub}=    Set Variable
     ...    {"id": "${sub_id}", "type": "Subscription", "entities": [{"type": "Vehicle"}], "q": "speed>50;brandName==%22Tesla%22", "splitEntities": true, "notification": {"endpoint": {"uri": "http://${context_source_host}:${context_source_port}/notify"}}}
     ${response}=    POST    url=${url}/subscriptions    data=${sub}    headers=${headers}    expected_status=any
@@ -93,6 +90,7 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Should Not Contain    ${body}    "q"
     Should Contain    ${body}    "splitEntities":true
     ${remote_id}=    Evaluate    __import__('json').loads($body)["id"]
+    ${notify_url}=    Evaluate    __import__('json').loads($body)["notification"]["endpoint"]["uri"]
     Reply By    201
 
     # the LOCAL part of the entity carries the brandName the q needs
@@ -102,7 +100,7 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Check Response Status Code    201    ${response.status_code}
 
     # inbound fragment (speed only) → merged with the local brandName → q passes
-    ${response}=    POST    url=${broker_base}/ngsi-ld/ex/remote-notify
+    ${response}=    POST    url=${notify_url}
     ...    data={"type": "Notification", "subscriptionId": "${remote_id}", "data": [{"id": "urn:ngsi-ld:Vehicle:split5814", "type": "Vehicle", "speed": {"type": "Property", "value": 99}}]}
     ...    headers=${headers}    expected_status=any
     Check Response Status Code    200    ${response.status_code}
@@ -118,7 +116,7 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Reply By    200
 
     # a fragment failing q after the merge (speed 10) is dropped entirely
-    ${response}=    POST    url=${broker_base}/ngsi-ld/ex/remote-notify
+    ${response}=    POST    url=${notify_url}
     ...    data={"type": "Notification", "subscriptionId": "${remote_id}", "data": [{"id": "urn:ngsi-ld:Vehicle:split5814", "type": "Vehicle", "speed": {"type": "Property", "value": 10}}]}
     ...    headers=${headers}    expected_status=any
     Check Response Status Code    200    ${response.status_code}
@@ -140,7 +138,6 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     [Tags]    dist-ops    5_8_6    5_5_4    4_5_7    since_v1.9.1
 
     &{headers}=    Create Dictionary    Content-Type=application/json
-    ${broker_base}=    Evaluate    "${url}".replace("/ngsi-ld/v1", "")
     ${sub}=    Set Variable
     ...    {"id": "${sub_id}", "type": "Subscription", "entities": [{"type": "Vehicle"}], "splitEntities": true, "notification": {"endpoint": {"uri": "http://${context_source_host}:${context_source_port}/notify"}}}
     ${response}=    POST    url=${url}/subscriptions    data=${sub}    headers=${headers}    expected_status=any
@@ -150,13 +147,14 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     ${body}=    Get Request Body
     ${body}=    Evaluate    $body.decode('utf-8') if isinstance($body, bytes) else $body
     ${remote_id}=    Evaluate    __import__('json').loads($body)["id"]
+    ${notify_url}=    Evaluate    __import__('json').loads($body)["notification"]["endpoint"]["uri"]
     Reply By    201
 
     # the Context Source reports speed, isParked and label deleted, and a
     # live brandName on the same Entity
     ${notified}=    Set Variable
     ...    {"type": "Notification", "subscriptionId": "${remote_id}", "data": [{"id": "urn:ngsi-ld:Vehicle:splitnull5814", "type": "Vehicle", "speed": "urn:ngsi-ld:null", "isParked": {"object": "urn:ngsi-ld:null"}, "label": {"languageMap": {"@none": "urn:ngsi-ld:null"}}, "brandName": "Tesla"}]}
-    ${response}=    POST    url=${broker_base}/ngsi-ld/ex/remote-notify
+    ${response}=    POST    url=${notify_url}
     ...    data=${notified}    headers=${headers}    expected_status=any
     Check Response Status Code    200    ${response.status_code}
 

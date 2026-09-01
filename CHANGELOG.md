@@ -42,6 +42,15 @@ published by CI: `:dev` on every green master run, `:dev-<run>` per run,
   named in `docs/spec/`.
 
 ### Fixed
+- The Registration Subscription the consumer half of a distributed
+  subscription owns (5.8.1.4) is no longer served on `/csourceSubscriptions`:
+  a subscriber could read it, patch `isActive` to false or delete it —
+  disabling the distributed half of a Subscription that still reports status
+  `active` — and read every other subscriber's Subscription id out of the
+  listing. It is held as internal state (ADR-0012) instead, so 5.11.5 lists
+  exactly the subscriptions a client created. A broker upgraded onto a
+  persistent store leaves the records it wrote before as inert documents on
+  that endpoint; delete them once.
 - 89 conformance fixes, each committed under the clause it holds: the temporal
   representation and its aggregations (4.5.9, 4.5.19, 6.3.11), `@context`
   ownership and hosting (5.13, 5.13.1), forwarding and its bounds (4.3.6, 5.7,

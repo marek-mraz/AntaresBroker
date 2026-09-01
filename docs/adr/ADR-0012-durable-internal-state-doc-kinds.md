@@ -41,6 +41,13 @@ vanish, and EntityMap references stop resolving.
   later means a data migration, which is why this is an ADR.
 - 5.5.15 resource-pressure eviction (`evict_over_cap`) remains the
   sanctioned way to shed snapshots; durability does not repeal it.
+- The Registration Subscription the consumer half of a distributed
+  subscription owns (5.8.1.4) is internal state of the same class, so it is
+  stored under `Kind::DistSub` in the subscriber's own tenant rather than
+  under the client-visible `Kind::CSourceSubscription`. The 5.11 endpoints
+  then cannot read, patch or delete broker plumbing, and 5.11.5 lists exactly
+  the subscriptions a client created; `GET /q/tenants/{tenant}` counts it
+  under `distSubs`.
 - `tenant_exists` counts the new kinds, so a tenant that only owns an
   EntityMap or snapshot still passes the 5.5.10 gate after a restart.
 

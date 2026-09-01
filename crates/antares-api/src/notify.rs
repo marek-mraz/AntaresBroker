@@ -1898,10 +1898,26 @@ pub async fn prepare_csource_jobs(
     after: Option<Value>,
 ) -> Vec<CsourceJob> {
     let mut jobs = Vec::new();
-    for sub in read_or_warn(
+    // 5.8.1.4: the Registration Subscriptions the distributed half owns are
+    // not client resources, so they live under Kind::DistSub beside the
+    // mapping documents — which carry no `type`. A document under the
+    // client kind in the internal id namespace is a leftover of a release
+    // that stored the internal ones there, and drives nothing.
+    let client = read_or_warn(
         st.store.list(tenant, Kind::CSourceSubscription),
         "the Context Source Registration Subscriptions of a changed registration",
-    ) {
+    )
+    .into_iter()
+    .filter(|d| {
+        sub_str(d, "id").is_some_and(|id| crate::distsub::csr_kind(id) == Kind::CSourceSubscription)
+    });
+    let internal = read_or_warn(
+        st.store.list(tenant, Kind::DistSub),
+        "the internal Registration Subscriptions of a changed registration",
+    )
+    .into_iter()
+    .filter(|d| d.get("type").and_then(Value::as_str) == Some("Subscription"));
+    for sub in client.chain(internal) {
         if !is_active(&sub) || sub.get("timeInterval").is_some() {
             continue;
         }
@@ -1940,16 +1956,14 @@ pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<Csour
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !matches!(
-            st.store.get(tenant, Kind::CSourceSubscription, sub_id),
-            Ok(Some(_))
-        ) {
+        let kind = crate::distsub::csr_kind(sub_id);
+        if !matches!(st.store.get(tenant, kind, sub_id), Ok(Some(_))) {
             continue;
         }
         deliver_as(
             st,
             tenant,
-            Kind::CSourceSubscription,
+            kind,
             &job.sub,
             "ContextSourceNotification",
             vec![job.presented],
@@ -2015,11 +2029,12 @@ async fn deliver_csource(
     ctx: &Context,
     reason: &str,
 ) {
+    let kind = crate::distsub::csr_kind(sub_str(sub, "id").unwrap_or_default());
     for chunk in chunk_by_bytes(data, *crate::bounds::MAX_BODY_BYTES) {
         deliver_as(
             st,
             tenant,
-            Kind::CSourceSubscription,
+            kind,
             sub,
             "ContextSourceNotification",
             chunk,
@@ -2035,7 +2050,7 @@ async fn deliver_csource(
 pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     let Some(sub) = st
         .store
-        .get(tenant, Kind::CSourceSubscription, sub_id)
+        .get(tenant, crate::distsub::csr_kind(sub_id), sub_id)
         .ok()
         .flatten()
     else {

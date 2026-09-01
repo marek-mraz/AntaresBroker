@@ -694,6 +694,16 @@ pub async fn create(
             id
         }
     };
+    // The Registration Subscriptions the distributed half owns (5.8.1.4)
+    // are stored outside the client kinds, under this id namespace: a
+    // client document claiming it would be looked up in that store on the
+    // notification path and would silently never notify.
+    if id.starts_with(crate::distsub::INTERNAL_CSR_PREFIX) {
+        return Err(NgsiError::BadRequestData(format!(
+            "subscription id {id} is reserved by the broker"
+        ))
+        .into());
+    }
     let ts = now_iso();
     norm.insert("createdAt".into(), Value::String(ts.clone()));
     norm.insert("modifiedAt".into(), Value::String(ts.clone()));

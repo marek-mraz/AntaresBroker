@@ -223,12 +223,20 @@ async fn clause_5_8_1_4_consumer_half_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    // 5.8.1.4: an internal CSR subscription exists (5.11.2)
-    let (status, body) = send(&st, "GET", "/ngsi-ld/v1/csourceSubscriptions", None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // 5.8.1.4: an internal CSR subscription exists (5.11.2). It is broker
+    // plumbing, so it is read where it lives and not off the 5.11 endpoint.
+    let mapping = st
+        .store
+        .get(
+            &antares_model::TenantId::default(),
+            antares_store::Kind::DistSub,
+            "urn:ngsi-ld:Subscription:ds-own",
+        )
+        .expect("mapping read")
+        .expect("the distributed half stores a mapping");
     assert!(
-        body.as_array().is_some_and(|a| !a.is_empty()),
-        "a Context Source Registration Subscription shall be created: {body}"
+        mapping["csr_sub"].is_string(),
+        "a Context Source Registration Subscription shall be created: {mapping}"
     );
 
     // newlyMatching → reduced copy forwarded to the remote broker
@@ -1491,5 +1499,237 @@ async fn clause_5_8_6_split_merge_keeps_a_notified_deletion() {
         keys,
         ["brandName", "id", "isParked", "label", "speed", "type"],
         "the merged Entity carries exactly what was notified: {notif}"
+    );
+}
+
+/// 5.11.5.4 lists "all the existing Context Source Registration
+/// Subscriptions" — the ones a Context Source Subscriber created through
+/// 5.11.2. The Registration Subscription 5.8.1.4 creates for a distributed
+/// entity Subscription is not one of those: no client asked for it, and it
+/// carries the internal `urn:antares:distsub:` endpoint naming the tenant
+/// and the owning Subscription. On the 5.11 endpoints it is a client
+/// resource like any other, so a subscriber can read it, patch isActive to
+/// false, or DELETE it — silently disabling the distributed half of a
+/// Subscription that keeps reporting status "active", and reading the
+/// Subscription ids of every other subscriber in the tenant out of the
+/// listing.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_11_5_the_internal_registration_subscription_is_not_a_client_resource() {
+    allow_private();
+    let st = AppState::new("antares-internal-csr".into());
+    antares_api::notify::wire(&mut st.clone());
+    let own = "urn:ngsi-ld:Subscription:internal-csr-owner";
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(
+            json!({
+                "id": own,
+                "type": "Subscription",
+                "entities": [{"type": "Building"}],
+                "notification": {"endpoint": {"uri": "http://127.0.0.1:9/notify"}},
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let t = antares_model::TenantId::default();
+    let csr = st
+        .store
+        .get(&t, antares_store::Kind::DistSub, own)
+        .expect("mapping read")
+        .expect("the distributed half stores a mapping")
+        .get("csr_sub")
+        .and_then(Value::as_str)
+        .expect("the mapping names the internal Registration Subscription")
+        .to_owned();
+
+    let (status, body) = send(&st, "GET", "/ngsi-ld/v1/csourceSubscriptions", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!([]),
+        "the client created no Context Source Registration Subscription: {body}"
+    );
+    let text = body.to_string();
+    assert!(
+        !text.contains("urn:antares:") && !text.contains(own),
+        "the internal endpoint and the owning Subscription id must not leak: {text}"
+    );
+
+    let path = format!("/ngsi-ld/v1/csourceSubscriptions/{csr}");
+    for (method, payload) in [
+        ("GET", None),
+        ("PATCH", Some(json!({"isActive": false}).to_string())),
+        ("DELETE", None),
+    ] {
+        let (status, _) = send(&st, method, &path, payload).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{method} on the internal Registration Subscription must be 404"
+        );
+    }
+
+    assert!(
+        st.store
+            .get(&t, antares_store::Kind::DistSub, &csr)
+            .expect("read")
+            .is_some(),
+        "the distributed half survives every client request aimed at it"
+    );
+}
+
+/// Same as [`send`], under one tenant (4.14).
+async fn send_tenant(
+    st: &AppState,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    tenant: &str,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("NGSILD-Tenant", tenant);
+    if body.is_some() {
+        b = b.header("Content-Type", "application/json");
+    }
+    let req = match body {
+        Some(body) => b
+            .header("Content-Length", body.len())
+            .body(Body::from(body)),
+        None => b.body(Body::empty()),
+    }
+    .expect("request");
+    let res = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("response");
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, body)
+}
+
+/// 5.8.1.4 stores "the mapping of the received subscriptionId with the own
+/// Subscription identifier … to enable forwarding received notifications to
+/// the original subscriber", and 4.14 keeps every tenant's data apart. The
+/// endpoint the forwarded copies notify is one URL for every tenant, so the
+/// stored mapping is the ONLY thing that may decide which subscriber a
+/// notification reaches: a peer that sends the tenant header of a different
+/// tenant — or none — must not move one tenant's notification into another
+/// tenant's subscription.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone() {
+    allow_private();
+    let mut st = AppState::new("antares-ds-tenants".into());
+    antares_api::notify::wire(&mut st);
+    let (remote_port, remote_seen) = recording_mock();
+    let (alpha_port, alpha_seen) = recording_mock();
+    let (beta_port, beta_seen) = recording_mock();
+
+    for (tenant, etype, cb) in [
+        ("alpha", "Vehicle", alpha_port),
+        ("beta", "Building", beta_port),
+    ] {
+        let (status, body) = send_tenant(
+            &st,
+            "POST",
+            "/ngsi-ld/v1/csourceRegistrations",
+            Some(
+                json!({
+                    "id": format!("urn:ngsi-ld:ContextSourceRegistration:{tenant}"),
+                    "type": "ContextSourceRegistration",
+                    "information": [{"entities": [{"type": etype}]}],
+                    "operations": ["federationOps"],
+                    "endpoint": format!("http://127.0.0.1:{remote_port}"),
+                })
+                .to_string(),
+            ),
+            tenant,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, body) = send_tenant(
+            &st,
+            "POST",
+            "/ngsi-ld/v1/subscriptions",
+            Some(
+                json!({
+                    "id": format!("urn:ngsi-ld:Subscription:{tenant}"),
+                    "type": "Subscription",
+                    "entities": [{"type": etype}],
+                    "notification": {"endpoint": {"uri": format!("http://127.0.0.1:{cb}/cb")}},
+                })
+                .to_string(),
+            ),
+            tenant,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    wait_for("both forwarded copies", || {
+        remote_seen.lock().expect("seen").len() >= 2
+    })
+    .await;
+    // each copy carries the entity type of the registration it was reduced
+    // to, which is what tells the two tenants' remote ids apart
+    let alpha_remote = {
+        let seen = remote_seen.lock().expect("seen");
+        let raw = seen
+            .iter()
+            .find(|r| r.contains("Vehicle"))
+            .expect("the copy forwarded for alpha")
+            .clone();
+        let body: Value = serde_json::from_str(raw.split_once("\n\n").expect("body").1)
+            .expect("the forwarded copy is JSON");
+        body["id"].as_str().expect("remote id").to_owned()
+    };
+
+    // the peer answers with alpha's subscriptionId while claiming to be beta
+    let (status, body) = send_tenant(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(
+            json!({
+                "type": "Notification",
+                "subscriptionId": alpha_remote,
+                "data": [{"id": "urn:ngsi-ld:Vehicle:slip", "type": "Vehicle"}],
+            })
+            .to_string(),
+        ),
+        "beta",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    wait_for("the notification alpha subscribed to", || {
+        !alpha_seen.lock().expect("seen").is_empty()
+    })
+    .await;
+    assert!(
+        alpha_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:slip")),
+        "the mapping names alpha, so alpha is the subscriber notified"
+    );
+    let beta = beta_seen.lock().expect("seen").clone();
+    assert!(
+        beta.is_empty(),
+        "a forged tenant header must not move a notification between tenants: {beta:?}"
     );
 }
