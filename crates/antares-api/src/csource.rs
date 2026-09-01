@@ -259,14 +259,14 @@ pub fn normalize_registration(
                     // own RFC 7230 parsers are the judge — a name or a value
                     // they refuse can only fail later, at a forward whose
                     // error names no registration.
-                    if axum::http::HeaderName::from_bytes(key.as_bytes()).is_err() {
+                    if !crate::subscriptions::is_field_name(key) {
                         return Err(bad(format!(
                             "contextSourceInfo key {key:?} is not an RFC 7230 header name (6.3.19)"
                         )));
                     }
-                    if value
+                    if !value
                         .as_str()
-                        .is_none_or(|s| axum::http::HeaderValue::from_str(s).is_err())
+                        .is_some_and(crate::subscriptions::is_field_value)
                     {
                         return Err(bad(format!(
                             "contextSourceInfo value for {key:?} is not an RFC 7230 header value \
@@ -338,16 +338,13 @@ pub fn normalize_registration(
             "contextSourceAlias" => {
                 let a = v
                     .as_str()
-                    .filter(|a| {
-                        !a.is_empty()
-                            && a.bytes().all(|b| {
-                                b.is_ascii_alphanumeric()
-                                    || b"!#$%&'*+-.^_`|~".contains(&b)
-                            })
-                    })
+                    .filter(|a| crate::subscriptions::is_field_name(a))
                     .ok_or_else(|| {
-                        bad("contextSourceAlias must be a non-empty RFC 7230 pseudonym                              token (5.2.9)"
-                            .into())
+                        bad(
+                            "contextSourceAlias must be a non-empty RFC 7230 pseudonym token \
+                             (5.2.9)"
+                                .into(),
+                        )
                     })?;
                 out.insert("contextSourceAlias".into(), Value::String(a.to_owned()));
             }

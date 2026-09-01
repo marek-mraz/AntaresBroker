@@ -754,6 +754,25 @@ def workflow_pin_violations():
     return out
 
 
+def wrapped_literal_violations():
+    """A Rust string literal wrapped across source lines WITHOUT a trailing `\\`
+    keeps every space of the next line''s indentation. The message still
+    compiles, still reads correctly in the source, and ships the indentation to
+    whoever receives it: two ProblemDetails bodies told a client its
+    contextSourceInfo pair "is not a valid HTTP header<30 spaces>(RFC 7230)".
+    Nothing in a message a client reads needs three spaces in a row."""
+    out = []
+    for path in sorted((ROOT / "crates").glob("*/src/**/*.rs")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in re.finditer(r'"([^"\\]|\\.)*"', line):
+                if re.search(r"\S {3,}\S", m.group(0)):
+                    out.append(
+                        f"{path.relative_to(ROOT)}:{n}: a string literal carries a run of spaces "
+                        f"— a line wrapped without its `\\`"
+                    )
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -790,6 +809,7 @@ def cmd_check():
     errors.extend(architecture_size_violations())
     errors.extend(shared_crate_violations())
     errors.extend(workflow_pin_violations())
+    errors.extend(wrapped_literal_violations())
     errors.extend(book_error_title_violations())
 
     for e in errors:

@@ -336,7 +336,8 @@ pub fn normalize_subscription(
                         let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
                         if !k.is_some_and(is_field_name) || !v.is_some_and(is_field_value) {
                             return Err(bad(format!(
-                                "endpoint.receiverInfo entry {kv} is not a valid HTTP header                                  (RFC 7230, 6.3.8)"
+                                "endpoint.receiverInfo entry {kv} is not a valid HTTP header \
+                                 (RFC 7230, 6.3.8)"
                             )));
                         }
                     }

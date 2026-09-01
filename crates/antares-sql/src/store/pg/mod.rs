@@ -214,7 +214,8 @@ pub async fn claim_tenant(
     tenant: &TenantId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO tenants (tenant_id) VALUES ($1)          ON CONFLICT (tenant_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id",
+        "INSERT INTO tenants (tenant_id) VALUES ($1) \
+         ON CONFLICT (tenant_id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id",
     )
     .bind(tenant.as_str())
     .execute(&mut **tx)
