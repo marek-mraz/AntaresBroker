@@ -655,11 +655,13 @@ fn file_timescale_without_the_extension_is_fatal() {
         );
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The exit IS the proof that nothing of this broker is listening: a
+    // process that has been reaped holds no socket. Probing the port for a
+    // refused connection asserted something else — that no OTHER process
+    // took the port in the meantime — and `free_port` reserves nothing, so
+    // a sibling test binding it turned this into a failure about a broker
+    // that had already done the right thing.
     assert!(!status.success(), "exit status: {status}");
-    assert!(
-        TcpStream::connect(("127.0.0.1", port)).is_err(),
-        "nothing may be listening after the refusal"
-    );
 }
 
 // ---- ANTARES_TEMPORAL_RECORD read from the backend ---------------------------
