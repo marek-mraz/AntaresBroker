@@ -24,4 +24,4 @@ echo "CSR registered on A -> B"
 echo "federated query via A:"
 out=$(curl -sf "$A/ngsi-ld/v1/entities?type=ParkingSpot")
 echo "$out"
-echo "$out" | /usr/bin/grep -q "urn:ngsi-ld:ParkingSpot:fed:042" && echo "OK: B's entity served by A"
+echo "$out" | grep -q "urn:ngsi-ld:ParkingSpot:fed:042" && echo "OK: B's entity served by A"

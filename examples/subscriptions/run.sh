@@ -20,6 +20,6 @@ curl -sf -o /dev/null -X PATCH "$URL/entities/urn:ngsi-ld:Door:sub:1/attrs/state
   -H 'Content-Type: application/ld+json' \
   -d '{"type":"Property","value":"open","@context":"'"$CTX"'"}'
 
-for _ in $(seq 30); do /usr/bin/grep -q "state=open" notifications.log 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 30); do grep -q "state=open" notifications.log 2>/dev/null && break; sleep 0.2; done
 cat notifications.log
-/usr/bin/grep -q "state=open" notifications.log && echo "OK: notification received"
+grep -q "state=open" notifications.log && echo "OK: notification received"

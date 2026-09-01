@@ -14,4 +14,6 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers()
     def log_message(self, *a): pass
 
+# All interfaces, not loopback: a broker running in the quickstart
+# container reaches this sink from outside the host network namespace.
 HTTPServer(("0.0.0.0", int(sys.argv[1]) if len(sys.argv) > 1 else 9491), H).serve_forever()

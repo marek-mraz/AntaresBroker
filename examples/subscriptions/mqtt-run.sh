@@ -16,4 +16,4 @@ curl -sf -o /dev/null -X PATCH "$URL/entities/urn:ngsi-ld:Door:mqtt:1/attrs/stat
   -H 'Content-Type: application/ld+json' \
   -d '{"type":"Property","value":"open","@context":"'"$CTX"'"}'
 wait $sub
-/usr/bin/grep -q '"state"' mqtt-notification.json && echo "OK: MQTT notification received"
+grep -q '"state"' mqtt-notification.json && echo "OK: MQTT notification received"
