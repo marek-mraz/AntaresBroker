@@ -441,7 +441,9 @@ fn compare(target: &Value, op: CmpOp, want: &QValue, re: Option<&regex::Regex>) 
                 CmpOp::NotPattern => re.is_some_and(|re| !re.is_match(t)),
             }
         }
-        QValue::List(_) | QValue::Range(..) => unreachable!("handled above"),
+        // both are answered by the unfold guards at the top of this
+        // function; false is the same posture the arms there take
+        QValue::List(_) | QValue::Range(..) => false,
     }
 }
 

@@ -953,9 +953,14 @@ fn expand_instance(
         // either a member of ATTR_TYPES or one of the inferred literals
         // above — so every reachable value has an arm. A member added to
         // that list without an arm here would arrive as a client-supplied
-        // `"type"`: pinned by
+        // `"type"`, which is a request to answer, not a reason to panic:
+        // pinned by
         // `every_declarable_attribute_type_is_dispatched_not_unreachable`.
-        _ => unreachable!("attribute type {attr_type} has no expansion arm"),
+        _ => {
+            return Err(NgsiError::InternalError(format!(
+                "attribute type {attr_type} has no expansion arm"
+            )))
+        }
     }
 
     // optional standard members

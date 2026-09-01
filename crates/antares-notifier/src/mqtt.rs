@@ -357,7 +357,9 @@ impl MqttSink {
                 }
             }
         }
-        unreachable!("loop returns on second attempt");
+        Err(NgsiError::InternalError(
+            "mqtt publish exhausted its retry without a verdict".into(),
+        ))
     }
 
     async fn publish(client: &Client, topic: &str, qos: u8, payload: &[u8]) -> Result<(), String> {

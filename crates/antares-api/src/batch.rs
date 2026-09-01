@@ -515,7 +515,18 @@ async fn batch_write(
     for round in rounds {
         let ts = now_iso();
         match mode {
-            BatchMode::Create => unreachable!("creates take the batch path above"),
+            // Creates are collected into pending_creates above and never
+            // reach a round; a request handler answers, it does not panic.
+            BatchMode::Create => {
+                for (id, _) in round {
+                    out.errors.push(err_entry(
+                        Some(&id),
+                        &NgsiError::InternalError(
+                            "batch create is handled before the rounds".into(),
+                        ),
+                    ));
+                }
+            }
             BatchMode::Upsert => {
                 // options=update: merge into existing rows first; ids that
                 // turn out absent (or vanish mid-flight) fall through to the
