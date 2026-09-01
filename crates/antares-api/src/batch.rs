@@ -1445,7 +1445,7 @@ pub(crate) fn query_doc_params(
             match ap.get("aggrMethods") {
                 None => {}
                 Some(Value::String(s)) => {
-                    vp.insert("aggrMethods".into(), s.clone());
+                    vp.insert("aggrMethods".into(), capped("aggrMethods", s.clone())?);
                 }
                 Some(Value::Array(a)) => {
                     let mut parts = Vec::with_capacity(a.len());
@@ -1454,7 +1454,10 @@ pub(crate) fn query_doc_params(
                             bad("aggrParams aggrMethods entries must be strings (5.2.44)".into())
                         })?);
                     }
-                    vp.insert("aggrMethods".into(), parts.join(","));
+                    vp.insert(
+                        "aggrMethods".into(),
+                        capped("aggrMethods", parts.join(","))?,
+                    );
                 }
                 Some(_) => {
                     return Err(bad(
@@ -1466,7 +1469,10 @@ pub(crate) fn query_doc_params(
             match ap.get("aggrPeriodDuration") {
                 None => {}
                 Some(Value::String(s)) => {
-                    vp.insert("aggrPeriodDuration".into(), s.clone());
+                    vp.insert(
+                        "aggrPeriodDuration".into(),
+                        capped("aggrPeriodDuration", s.clone())?,
+                    );
                 }
                 Some(_) => {
                     return Err(bad(
@@ -1493,6 +1499,11 @@ pub(crate) fn query_doc_params(
             // Table 5.2.43-1 (OrderingParams): orderBy String[] -> the 4.23
             // keys; coordinates (JSON array) + geometry (default "Point")
             // -> the dist-ordering reference (orderFrom/orderGeometry).
+            // Every member lifted here takes the same MAX_URI_BYTES cap as
+            // the rest of the body, for the same reason: it becomes the
+            // parameter the GET twin carries in its URI. `coordinates` is
+            // again the exception — its ceiling is MAX_GEO_VERTICES, the one
+            // that governs a reference geometry.
             if let Some(ob) = o.get("orderBy") {
                 let a = ob.as_array().ok_or_else(|| {
                     bad("ordering orderBy must be an array of strings (5.2.43)".into())
@@ -1503,7 +1514,7 @@ pub(crate) fn query_doc_params(
                         bad("ordering orderBy entries must be strings (5.2.43)".into())
                     })?);
                 }
-                vp.insert("orderBy".into(), parts.join(","));
+                vp.insert("orderBy".into(), capped("orderBy", parts.join(","))?);
             }
             match o.get("coordinates") {
                 None => {}
@@ -1519,14 +1530,14 @@ pub(crate) fn query_doc_params(
             match o.get("geometry") {
                 None => {}
                 Some(Value::String(g)) => {
-                    vp.insert("orderGeometry".into(), g.clone());
+                    vp.insert("orderGeometry".into(), capped("orderGeometry", g.clone())?);
                 }
                 Some(_) => return Err(bad("ordering geometry must be a string (5.2.43)".into())),
             }
             match o.get("collation") {
                 None => {}
                 Some(Value::String(c)) => {
-                    vp.insert("collation".into(), c.clone());
+                    vp.insert("collation".into(), capped("collation", c.clone())?);
                 }
                 Some(_) => return Err(bad("ordering collation must be a string (5.2.43)".into())),
             }
@@ -1839,6 +1850,67 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The same cap again, for the members `ordering` and `aggrParams` are
+    /// lifted into. 5.2.43 makes `orderBy` a String[] and 5.2.44 makes
+    /// `aggrMethods` one, and both are joined into the flat parameter the GET
+    /// twin carries in its URI — where 6.3.4's bare 414 caps them. They went
+    /// into the map uncapped, so the POST form handed the 4.23 ordering and
+    /// the 4.5.19 aggregation parsers a string the GET form cannot express:
+    /// one body inside `MAX_BODY_BYTES` holds ~150 000 order keys, each
+    /// expanded once per Entity comparison.
+    #[tokio::test]
+    async fn ordering_and_aggregation_members_are_capped_like_the_uri() {
+        let app = app();
+        let many: Vec<Value> = (0..600)
+            .map(|i| Value::String(format!("attributeWithALongOrderKeyName{i:04}")))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                   "ordering": {"orderBy": many}}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an over-cap orderBy is refused"
+        );
+
+        // the temporal twin carries aggrParams; its aggrMethods is joined the
+        // same way and takes the same cap
+        let methods: Vec<Value> = (0..600)
+            .map(|i| Value::String(format!("totallyUnknownAggregationMethod{i:04}")))
+            .collect();
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/temporal/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                   "temporalQ": {"timerel": "before", "timeAt": "2026-01-01T00:00:00Z"},
+                   "aggrParams": {"aggrMethods": methods}}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an over-cap aggrMethods is refused"
+        );
+
+        // an ordinary ordering is untouched
+        let resp = post(
+            &app,
+            "/ngsi-ld/v1/entityOperations/query",
+            json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+                   "ordering": {"orderBy": ["name", "!speed"], "collation": "sk"}}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a normal ordering still works"
+        );
     }
 
     /// The same cap, for the three parameters the `entities` selectors are
