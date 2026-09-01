@@ -422,6 +422,14 @@ async fn batch_write(
         fed_regs.iter().filter(|r| r.is_proxy()).collect();
     // Creates are collected and written as ONE multi-row statement;
     // upsert/update/merge run batched per round below.
+    // 5.5.11.0: "All Entities and Attributes in the batch will get the same
+    // modifiedAt timestamp" — the clock is read once for the whole array, not
+    // per document. Stamping per document spreads a large create over several
+    // milliseconds, and a Context Consumer filtering or paging on modifiedAt
+    // then sees one batch as two. The per-round stamp below is the separate
+    // case: repeated instances of one id are sequential operations (5.5.11.2,
+    // 5.5.11.5) and do carry their own instants.
+    let create_ts = now_iso();
     let mut pending_creates: Vec<(String, Value)> = Vec::new();
     let mut prepped: Vec<(String, Value)> = Vec::new();
     for (item, ctx) in items {
@@ -452,7 +460,7 @@ async fn batch_write(
                     .ok_or_else(|| NgsiError::BadRequestData("entity must be an object".into()))?;
                 let mut expanded = expand_entity(obj, &ctx, ExpandOpts::default())?;
                 let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
-                stamp_new(&mut expanded, &now_iso());
+                stamp_new(&mut expanded, &create_ts);
                 Ok((id, expanded))
             };
             match prep() {

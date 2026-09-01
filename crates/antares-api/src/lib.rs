@@ -1900,6 +1900,93 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// 5.5.11.0: "All Entities and Attributes in the batch will get the same
+    /// modifiedAt timestamp, so it makes sense to distinguish them via the
+    /// observedAt temporal property." One batch is one instant. Reading the
+    /// clock per entity spreads a large create over several milliseconds, and
+    /// a Context Consumer that filters or pages on modifiedAt then sees the
+    /// batch split in two — half of it before its own cursor, half after.
+    #[tokio::test]
+    async fn clause_5_5_11_0_one_batch_create_carries_one_timestamp() {
+        let app = app();
+        // Enough documents that per-entity stamping cannot stay inside one
+        // millisecond: the spread is what the clause forbids, not the count.
+        let batch: Vec<serde_json::Value> = (0..500)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("urn:ngsi-ld:Building:ts-{i}"),
+                    "type": "Building",
+                    "speed": {"type": "Property", "value": i},
+                    "name": {"type": "Property", "value": "x".repeat(64)},
+                    "near": {"type": "Relationship",
+                             "object": "urn:ngsi-ld:Building:other"},
+                })
+            })
+            .collect();
+        let body = serde_json::Value::Array(batch).to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/ngsi-ld/v1/entityOperations/create")
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .oneshot(
+                Request::get("/ngsi-ld/v1/entities?type=Building&options=sysAttrs&limit=1000")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = body_json(resp).await;
+        let ents = list.as_array().expect("entity array");
+        assert_eq!(ents.len(), 500, "every entity was created");
+        // Entity level and Attribute level: stamp_new writes the same instant
+        // into both, so one batch may produce exactly one value overall.
+        let mut stamps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in ents {
+            let o = e.as_object().expect("entity object");
+            for key in ["createdAt", "modifiedAt"] {
+                stamps.insert(
+                    o.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_else(|| panic!("entity {key} is served under sysAttrs"))
+                        .to_owned(),
+                );
+            }
+            for (k, v) in o {
+                if matches!(
+                    k.as_str(),
+                    "id" | "type" | "@context" | "createdAt" | "modifiedAt"
+                ) {
+                    continue;
+                }
+                for key in ["createdAt", "modifiedAt"] {
+                    stamps.insert(
+                        v.get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_else(|| panic!("attribute {k} carries {key}"))
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            stamps.len(),
+            1,
+            "one batch, one timestamp; got {} distinct: {:?}",
+            stamps.len(),
+            stamps
+        );
+    }
+
     /// 4.6.6: duplicate instances of one Entity in a batch array "shall come
     /// in chronological order" — the broker applies them sequentially, so
     /// the LAST occurrence's state wins, never the first.
