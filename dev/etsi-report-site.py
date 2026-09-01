@@ -15,7 +15,7 @@ Writes <out-dir>/:
                   store's Robot report/log for that suite — the stats are
                   ON the page, nothing to download
   badge.json      shields.io endpoint schema ("ETSI 6×1652 green" / red)
-  badge-<cell>.json  one endpoint badge PER CELL ("1652/1652", 08-15b item 6)
+  badge-<cell>.json  one endpoint badge PER CELL ("1652/1652")
   <store>/<suite>/report.html|log.html   copied from the bundle
 """
 import glob
@@ -97,8 +97,8 @@ json.dump(
     open(os.path.join(out, os.pardir, "badge.json"), "w"),
 )
 
-# 08-15b item 6: one shields endpoint badge PER CELL next to the combined
-# one — the README's live "file 1652/1652" row reads these.
+# One shields endpoint badge PER CELL next to the combined one — the
+# README's live "file 1652/1652" row reads these.
 for st, gate, suites in stores:
     ok = sum(o for _, o, _, _, _ in suites)
     tot = sum(o + f + sk for _, o, f, sk, _ in suites)
@@ -168,5 +168,6 @@ links Robot's own drill-down for that run. Produced by the
 bundle.</footer>
 """
 open(os.path.join(out, "index.html"), "w").write(page)
+# Rendering never gates: a red cell is reported here and gated by
+# dev/etsi-matrix-summary.py, which exits nonzero on it.
 print(f"site: {out}/index.html  badge: {message}")
-sys.exit(0 if all_green else 0)
