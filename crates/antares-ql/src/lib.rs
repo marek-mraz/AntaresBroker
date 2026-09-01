@@ -451,7 +451,13 @@ impl<'a> Parser<'a> {
     /// RegExp`. Lists and ranges with an ordering or pattern operator are a
     /// grammar violation, not an empty result.
     fn value(&mut self, op: CmpOp) -> Result<QValue, NgsiError> {
-        let first = self.scalar()?;
+        // 4.9: `patternOp`/`notPatternOp` take a `RegExp` (IEEE 1003.2), not
+        // a `quotedStr`, so the operand is the pattern text as written — a
+        // backslash in it belongs to the regular expression and is not an
+        // RFC 8259 escape. Every other operand is a `quotedStr`, a Number, a
+        // 4.6.3 dateTime/date/time or a URI.
+        let regexp = matches!(op, CmpOp::Pattern | CmpOp::NotPattern);
+        let first = self.scalar(regexp)?;
         let equality = matches!(op, CmpOp::Eq | CmpOp::Ne);
         self.rest = self.rest.trim_start();
         if let Some(rest) = self.rest.strip_prefix("..") {
@@ -462,7 +468,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.rest = rest.trim_start();
-            let hi = self.scalar()?;
+            let hi = self.scalar(false)?;
             // Range = ComparableValue..ComparableValue: booleans excluded, and
             // an order relation needs both endpoints in one value space
             if std::mem::discriminant(&first) != std::mem::discriminant(&hi)
@@ -485,7 +491,7 @@ impl<'a> Parser<'a> {
             let mut items = vec![first];
             while self.eat(',') {
                 self.rest = self.rest.trim_start();
-                items.push(self.scalar()?);
+                items.push(self.scalar(false)?);
                 self.rest = self.rest.trim_start();
             }
             return Ok(QValue::List(items));
@@ -504,14 +510,37 @@ impl<'a> Parser<'a> {
     /// One scalar literal. Unquoted tokens stop at a delimiter or at `..`
     /// (the Range separator) — a decimal like `10.5` has no `..`, so
     /// `10.5..20.5` still splits at the right place.
-    fn scalar(&mut self) -> Result<QValue, NgsiError> {
-        if let Some(rest) = self.rest.strip_prefix('"') {
-            let end = rest
-                .find('"')
-                .ok_or_else(|| bad(rest, "unterminated string"))?;
-            let (s, rest) = rest.split_at(end);
-            self.rest = &rest[1..];
-            return Ok(QValue::Str(s.to_owned()));
+    ///
+    /// `regexp` selects the grammar the quoted form follows: a `RegExp`
+    /// operand is taken as written, everything else is a `quotedStr`, i.e.
+    /// "a text string as mandated by the JSON Specification, following the
+    /// ABNF Grammar, production rule named String, section 7 of IETF
+    /// RFC 8259" — escapes included, decoded to the text the term compares
+    /// against, which is how the entity member reached the store too.
+    fn scalar(&mut self, regexp: bool) -> Result<QValue, NgsiError> {
+        // The clause writes its own examples with a space before the value
+        // (`color!= "black", "red"`, p.90). Deciding quoted-vs-unquoted on an
+        // untrimmed head read that as an unquoted token and kept the quotes
+        // INSIDE the value, so the term matched a value literally spelled
+        // with them.
+        self.rest = self.rest.trim_start();
+        if self.rest.starts_with('"') {
+            if regexp {
+                let rest = &self.rest[1..];
+                let end = rest
+                    .find('"')
+                    .ok_or_else(|| bad(rest, "unterminated string"))?;
+                let (s, rest) = rest.split_at(end);
+                self.rest = &rest[1..];
+                return Ok(QValue::Str(s.to_owned()));
+            }
+            let end = Self::json_string_end(self.rest)
+                .ok_or_else(|| bad(self.rest, "unterminated string"))?;
+            let (lit, rest) = self.rest.split_at(end);
+            let s: String = serde_json::from_str(lit)
+                .map_err(|_| bad(lit, "value is not an RFC 8259 String (4.9 quotedStr)"))?;
+            self.rest = rest;
+            return Ok(QValue::Str(s));
         }
         let stop = self
             .rest
@@ -523,6 +552,12 @@ impl<'a> Parser<'a> {
         };
         let (raw, rest) = self.rest.split_at(end);
         let raw = raw.trim();
+        // The unquoted alternatives are `dateTime`/`date`/`time` (4.6.3), a
+        // Number and a `URI` (RFC 3986). None of them admits a `\"`, so one
+        // here is an unterminated `quotedStr`, not a value.
+        if !regexp && raw.contains('"') {
+            return Err(bad(raw, "unquoted value must not contain a quote (4.9)"));
+        }
         self.rest = rest;
         match raw {
             "true" => Ok(QValue::Bool(true)),
@@ -539,6 +574,24 @@ impl<'a> Parser<'a> {
                     }
                 }),
         }
+    }
+
+    /// Byte index one past the closing quote of the RFC 8259 string at the head
+    /// of `s`, or `None` when it never closes. A quote is the closing one only
+    /// when it is not itself escaped, so the scan skips the byte after every
+    /// backslash — both are ASCII, so a skip can never land mid-character in a
+    /// way that reads as either.
+    fn json_string_end(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        let mut i = 1;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        None
     }
 
     fn eat(&mut self, c: char) -> bool {
@@ -630,16 +683,26 @@ mod tests {
                 value: QValue::List(vec![QValue::Str("black".into()), QValue::Str("red".into())])
             }
         );
-        // spec's own spacing (`color!= "black", "red"`) must parse too
-        let q = parse_q(r#"color!= "black", "red""#).expect("parse");
-        assert!(matches!(
-            q,
+        // spec's own spacing (`color!= "black", "red"`, p.90) must parse to
+        // the same values — the space may not end up inside them, and neither
+        // may the quotes that delimit them
+        assert_eq!(
+            parse_q(r#"color!= "black", "red""#).expect("parse"),
             QNode::Cmp {
+                path: QPath::dotted(vec!["color".into()]),
                 op: CmpOp::Ne,
-                value: QValue::List(_),
-                ..
+                value: QValue::List(vec![QValue::Str("black".into()), QValue::Str("red".into())])
             }
-        ));
+        );
+        assert_eq!(
+            parse_q(r#"color==  "black""#).expect("parse"),
+            QNode::Cmp {
+                path: QPath::dotted(vec!["color".into()]),
+                op: CmpOp::Eq,
+                value: QValue::Str("black".into())
+            },
+            "a single spaced value keeps neither the space nor the quotes"
+        );
         // mixed scalar kinds are legal (ValueList is over Value)
         assert!(parse_q("a==1,2,3").is_ok());
         // ordering + list is a grammar violation → 400, not empty result
@@ -696,6 +759,73 @@ mod tests {
                 value: QValue::Str("^Merc".into())
             }
         );
+    }
+
+    /// 4.9: `quotedStr = String`, and `String` "shall be a text string as
+    /// mandated by the JSON Specification, following the ABNF Grammar,
+    /// production rule named String, section 7 of IETF RFC 8259" — whose
+    /// `char` production is `unescaped / escape (…)`. So a Query Term value
+    /// may carry an escaped quote, an escaped backslash, the two-character
+    /// control escapes and `\uXXXX`, and the value the term compares against
+    /// is the DECODED text: the entity member it is matched to was decoded by
+    /// the JSON parser on the way in.
+    #[test]
+    fn a_quoted_string_is_an_rfc_8259_string() {
+        for (q, want) in [
+            (r#"a=="say \"hi\"""#, "say \"hi\""),
+            (r#"a=="back\\slash""#, "back\\slash"),
+            (r#"a=="line\nbreak""#, "line\nbreak"),
+            (r#"a=="tab\there""#, "tab\there"),
+            (r#"a=="caf\u00e9""#, "café"),
+            (r#"a=="sl\/ash""#, "sl/ash"),
+            (r#"a=="""#, ""),
+        ] {
+            let node = parse_q(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
+            let QNode::Cmp { value, .. } = node else {
+                panic!("{q}: expected a comparison")
+            };
+            assert_eq!(value, QValue::Str(want.to_owned()), "{q}");
+        }
+    }
+
+    /// The escape only ends the string when it is not itself escaped: a
+    /// trailing `\"` continues the literal, and `\\` before the closing
+    /// quote does not.
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string() {
+        assert!(
+            parse_q(r#"a=="unterminated\""#).is_err(),
+            "an escaped quote leaves the string open"
+        );
+        let node = parse_q(r#"a=="ends with a backslash\\";b"#).expect("parses");
+        let QNode::And(items) = node else {
+            panic!("expected an And")
+        };
+        let QNode::Cmp { value, .. } = &items[0] else {
+            panic!("expected a comparison")
+        };
+        assert_eq!(value, &QValue::Str("ends with a backslash\\".to_owned()));
+    }
+
+    /// An escape RFC 8259 does not define is not a String, so the term is
+    /// not a Query Term — refused rather than silently read as two
+    /// characters.
+    #[test]
+    fn an_undefined_escape_is_not_a_string() {
+        for q in [r#"a=="bad\x""#, r#"a=="short\u12""#, r#"a=="\u12zz""#] {
+            assert!(parse_q(q).is_err(), "{q} must not parse");
+        }
+    }
+
+    /// The unquoted alternatives of the grammar are `dateTime`/`date`/`time`
+    /// (4.6.3) and `URI` (RFC 3986), and a raw `"` belongs to none of them.
+    /// Accepting one produced a value that could not be written back as a
+    /// Query Term at all.
+    #[test]
+    fn an_unquoted_value_may_not_carry_a_bare_quote() {
+        for q in [r#"a==x"y"#, r#"a==urn:x:"y"#, r#"a>2020-01-01T00:00:"0Z"#] {
+            assert!(parse_q(q).is_err(), "{q} must not parse");
+        }
     }
 
     #[test]

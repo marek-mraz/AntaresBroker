@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Render an AST back to 4.9 `q=` syntax, so a rewritten query can travel
-//! on as a query string. `parse_q(&node.to_string())` yields `node` again.
+//! on as a query string. `parse_q(&node.to_string())` yields `node` again,
+//! with one limit the grammar itself imposes: the operand of `patternOp` /
+//! `notPatternOp` is a `RegExp`, not a `quotedStr`, so it is written back
+//! verbatim between quotes and a pattern whose own text carries a `\"`
+//! cannot be spelled as a Query Term at all.
 
 use crate::{CmpOp, Link, QNode, QPath, QValue};
 use std::fmt;
@@ -12,7 +16,14 @@ impl fmt::Display for QNode {
             // parentheses back, nothing else does.
             QNode::And(items) => join(f, items, ";", |n| matches!(n, QNode::Or(_))),
             QNode::Or(items) => join(f, items, "|", |n| matches!(n, QNode::Or(_))),
-            QNode::Cmp { path, op, value } => write!(f, "{path}{op}{value}"),
+            // 4.9: a `RegExp` operand is not a `quotedStr`, so it is not
+            // escaped as one — the backslashes in it are the pattern's.
+            QNode::Cmp { path, op, value } => match (op, value) {
+                (CmpOp::Pattern | CmpOp::NotPattern, QValue::Str(s)) => {
+                    write!(f, "{path}{op}\"{s}\"")
+                }
+                _ => write!(f, "{path}{op}{value}"),
+            },
             QNode::Exists { path, negated } => {
                 if *negated {
                     f.write_str("!")?;
@@ -79,9 +90,10 @@ impl fmt::Display for CmpOp {
 impl fmt::Display for QValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // always quoted: the parser reads an unquoted date into Str too,
-            // and the quoted form parses back to the same value
-            QValue::Str(s) => write!(f, "\"{s}\""),
+            // 4.9 `quotedStr = String`: the RFC 8259 escaping the parser
+            // decodes, put back. Always quoted — the parser reads an unquoted
+            // date into Str too, and the quoted form parses back the same.
+            QValue::Str(s) => write!(f, "{}", serde_json::Value::String(s.clone())),
             QValue::Num(n) => write!(f, "{n}"),
             QValue::Bool(b) => write!(f, "{b}"),
             QValue::List(items) => {
@@ -153,6 +165,49 @@ mod tests {
         ]);
         assert_eq!(node.to_string(), r#"(a|b);owner=="t1""#);
         assert_eq!(parse_q(&node.to_string()).expect("parses"), node);
+    }
+
+    /// 4.9 `quotedStr = String`: a value carrying the RFC 8259 escapes is
+    /// written back escaped, so the rendered Query Term parses to the value
+    /// it was rendered from rather than to a truncated one.
+    #[test]
+    fn an_escaped_string_survives_the_round_trip() {
+        for q in [
+            r#"a=="say \"hi\"""#,
+            r#"a=="back\\slash""#,
+            r#"a=="line\nbreak""#,
+            r#"a=="semi;colon""#,
+            r#"a=="pipe|bar""#,
+            r#"a=="comma,list""#,
+            r#"a=="paren)close""#,
+            r#"a=="dots..range""#,
+        ] {
+            let node = parse_q(q).expect(q);
+            let rendered = node.to_string();
+            let again = parse_q(&rendered).unwrap_or_else(|e| panic!("{q} → {rendered}: {e}"));
+            assert_eq!(again, node, "{q} → {rendered}");
+        }
+    }
+
+    /// The operand of `patternOp`/`notPatternOp` is a `RegExp`, not a
+    /// `quotedStr`: its backslashes belong to the pattern and are neither
+    /// decoded on the way in nor escaped on the way out.
+    #[test]
+    fn a_regexp_operand_keeps_its_own_backslashes() {
+        for q in [r#"a~="^\d+$""#, r#"a!~="^[a-z]\.[0-9]{2}$""#] {
+            let node = parse_q(q).expect(q);
+            let QNode::Cmp { value, .. } = &node else {
+                panic!("{q}: expected a comparison")
+            };
+            let QValue::Str(pattern) = value else {
+                panic!("{q}: expected a string operand")
+            };
+            assert!(
+                pattern.contains('\\'),
+                "{q}: the regex kept its backslash: {pattern:?}"
+            );
+            assert_eq!(parse_q(&node.to_string()).expect("re-parses"), node, "{q}");
+        }
     }
 
     #[test]
