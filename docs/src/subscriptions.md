@@ -207,7 +207,7 @@ created — the endpoint is input data that does not meet the requirements of
 the operation (5.8.1.4, Table 5.5.2-1), so the error is BadRequestData:
 
 ```json
-{"detail":"no notification binding registered for endpoint scheme \"ftp\" (6.3.8)","status":400,"title":"Bad Request Data",...}
+{"detail":"no notification binding registered for endpoint scheme \"ftp\" (6.3.8)","status":400,"title":"BadRequestData",...}
 ```
 
 ## MQTT endpoints

@@ -348,6 +348,36 @@ def book_fence_violations():
     return out
 
 
+def book_error_title_violations():
+    """An error body in the book names a `title`, and 6.3.6 makes that member
+    the error type — a reader matches on it. The set the broker can actually
+    emit is closed: `NgsiError::kind()` plus the few statuses built by hand
+    (508 has no variant). A prettified title is a body no client will ever
+    see: the book printed "Bad Request Data" where the broker sends
+    "BadRequestData"."""
+    src = ROOT / "crates"
+    err = (src / "antares-model/src/error.rs").read_text(encoding="utf-8")
+    body = re.search(r"fn kind\(&self\).*?\n    \}", err, re.S)
+    if not body:
+        return ["crates/antares-model/src/error.rs: kind() no longer parses"]
+    known = set(re.findall(r'=>\s*"([^"]+)"', body.group(0)))
+    for path in src.rglob("*.rs"):
+        known.update(re.findall(r'"title"\s*:\s*"([^"]+)"', path.read_text(encoding="utf-8")))
+    out = []
+    # The book only: docs/spec/ transcribes the standard, whose own examples
+    # carry the spec's titles rather than this broker's.
+    for path in sorted((ROOT / "docs/src").rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            for title in re.findall(r'"title"\s*:\s*"([^"]+)"', line):
+                if title not in known:
+                    out.append(
+                        f"{path.relative_to(ROOT)}:{n}: error title {title!r} is one "
+                        f"no broker response carries"
+                    )
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -379,6 +409,7 @@ def cmd_check():
 
     errors.extend(chapter_violations())
     errors.extend(book_fence_violations())
+    errors.extend(book_error_title_violations())
 
     for e in errors:
         print(f"CHECK {e}")
