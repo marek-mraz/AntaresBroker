@@ -9,7 +9,7 @@ name: etsi-matrix
 #           artifact: five dockerized node shims over the redb file store —
 #           the same .wasm a page loads, MQTT structurally excluded there).
 #           Runs twice a week + on v* tags + on manual dispatch (full.yml).
-# Each cell runs ALL 8 suites through the one pipeline, folded into the
+# Each cell runs ALL 10 suites through the one pipeline, folded into the
 # per-cell summary tables + one bundle (quick bundles are named
 # ETSI-quick-results so the Pages fold only ever renders full runs).
 
@@ -71,7 +71,7 @@ jobs:
           retention-days: 3
 
   etsi-cell:
-    # Parallel cells, each running ALL 8 suites serially through the SAME
+    # Parallel cells, each running ALL 10 suites serially through the SAME
     # pipeline (with the between-suite state-reset pairing). The
     # single-broker cells run bus=local as always; the two -nats cells run
     # the role-split fleet (ROLES_SPLIT=1) with the containers rolling in

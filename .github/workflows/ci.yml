@@ -80,7 +80,7 @@ jobs:
     # The wasm broker image publishes from full.yml, after its cell.
     name: Publish the dev image to GHCR
     # Pushes to master publish :dev; PRs never do. All signals — workspace
-    # tests, the cell matrix (quick preset, all 8 suites incl. IOP per
+    # tests, the cell matrix (quick preset, all 10 suites incl. IOP per
     # cell) and the arm build — must be green.
     if: github.ref == 'refs/heads/master' && success()
     needs: [workspace, matrix, build-arm]

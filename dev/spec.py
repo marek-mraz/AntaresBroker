@@ -560,6 +560,42 @@ def book_error_title_violations():
     return out
 
 
+def suite_count_violations():
+    """`dev/etsi-suites.sh` is the runner's own list of suites, and every cell
+    runs all of them plus the IOP step. Prose that states that number instead
+    of deriving it goes stale the moment a suite is added: two were added to
+    SERIAL_ALL while five comments and table rows still promised eight, so the
+    workflow that runs ten advertised eight to everyone reading it. The same
+    list is what SUITE_DIRS counts cases from, and a suite in one and not the
+    other drops out of the headline totals without a word."""
+    runner = ROOT / "dev/etsi-suites.sh"
+    if not runner.exists():
+        return [f"{runner}: the suite list is missing"]
+    hit = re.search(r'^SERIAL_ALL="([^"]*)"', runner.read_text(encoding="utf-8"), re.M)
+    if not hit:
+        return [f"{runner}: no SERIAL_ALL to read the suite list from"]
+    serial, out = hit.group(1).split(), []
+    listed = {d.removeprefix("TP/NGSI-LD/") for _, d in SUITE_DIRS if d != "IOP_TP"}
+    for name in sorted(set(serial) - listed):
+        out.append(f"dev/spec.py: SUITE_DIRS has no entry for the suite {name}")
+    for name in sorted(listed - set(serial)):
+        out.append(f"dev/spec.py: SUITE_DIRS counts {name}, which no cell runs")
+    total = len(serial) + 1  # the serial suites, then IOP against all five brokers
+    scan = [ROOT / "README.md", ROOT / "ARCHITECTURE.md", ROOT / "CONTRIBUTING.md"]
+    scan += sorted((ROOT / "docs/src").rglob("*.md"))
+    scan += sorted((ROOT / ".github/workflows").glob("*.yml"))
+    for path in scan:
+        if not path.exists():
+            continue
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for stated in re.findall(r"\b(\d+) suites\b", line):
+                if int(stated) != total:
+                    out.append(
+                        f"{path.relative_to(ROOT)}:{n}: says {stated} suites, a cell runs {total}"
+                    )
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -591,6 +627,7 @@ def cmd_check():
 
     errors.extend(chapter_violations())
     errors.extend(book_fence_violations())
+    errors.extend(suite_count_violations())
     errors.extend(book_error_title_violations())
 
     for e in errors:
