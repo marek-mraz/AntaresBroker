@@ -289,6 +289,47 @@ mod tests {
         );
     }
 
+    /// The book states these two defaults, and their SUM is an operator
+    /// contract: the container stop grace period has to exceed it or the
+    /// orchestrator turns a drain into a kill. Nothing tied the stated
+    /// numbers to the ones the binary uses, and the delay drifted to a value
+    /// 1.5 s shorter than the truth in three chapters at once — a grace
+    /// period sized from the book would then have been under the real drain.
+    /// `dev/check-env-docs.sh` proves each variable is documented; this
+    /// proves the documented numbers are the ones that run.
+    #[test]
+    fn the_documented_drain_defaults_are_the_ones_the_binary_uses() {
+        let book = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/configuration.md"
+        ))
+        .expect("the configuration chapter");
+        let stated = |var: &str| -> String {
+            let row = book
+                .lines()
+                .find(|l| l.starts_with(&format!("| `{var}` |")))
+                .unwrap_or_else(|| panic!("{var} has no row in the configuration table"));
+            row.split('|')
+                .nth(2)
+                .expect("the default column")
+                .trim()
+                .trim_matches('`')
+                .to_owned()
+        };
+        std::env::remove_var("ANTARES_DRAIN_DELAY_MS");
+        std::env::remove_var("ANTARES_DRAIN_DEADLINE_SECS");
+        assert_eq!(
+            stated("ANTARES_DRAIN_DELAY_MS"),
+            drain_delay().expect("absent").as_millis().to_string(),
+            "the book's notice window is not the compiled one"
+        );
+        assert_eq!(
+            stated("ANTARES_DRAIN_DEADLINE_SECS"),
+            drain_deadline().expect("absent").as_secs().to_string(),
+            "the book's in-flight ceiling is not the compiled one"
+        );
+    }
+
     /// Both drain knobs in ONE test: the environment is process-global, so
     /// parsing them from parallel test threads would race.
     ///

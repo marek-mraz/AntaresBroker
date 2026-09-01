@@ -82,7 +82,8 @@ rolling-update shape. The contract that makes rolls invisible:
 
 1. `stop_grace_period` (30 s in the compose file) MUST exceed
    `ANTARES_DRAIN_DELAY_MS` + `ANTARES_DRAIN_DEADLINE_SECS` (default
-   0.5 s + 20 s), or `docker stop` turns the drain into a kill.
+   2 s + 20 s), or `docker stop` turns the drain into a kill. Docker's own
+   10 s default does not.
 2. Replicas of one logical broker share `ANTARES_HOST_ALIAS` — behind the
    LB they are one hop for federation loop detection.
 3. `/q/health` answers 503 DRAINING during the drain window; the LB pulls

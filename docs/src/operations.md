@@ -185,7 +185,7 @@ delivery is booked on the subscription as a failure (`lastFailure`,
 ## Drain
 
 On SIGTERM the broker flips `/q/health` to 503, keeps serving for
-`ANTARES_DRAIN_DELAY_MS` (default 500) so the load balancer notices, then
+`ANTARES_DRAIN_DELAY_MS` (default 2000) so the load balancer notices, then
 waits up to `ANTARES_DRAIN_DEADLINE_SECS` (default 20) for in-flight
 requests before exiting. Set the container's stop grace period above the
 sum. The rolling-update section below relies on exactly this sequence.
