@@ -358,6 +358,18 @@ def chapter_violations():
         for name in sorted(listed - on_disk):
             out.append(f"docs/src/storage.md: names migration {name}, which does not exist")
 
+    # Same shape one directory over: the runbook enumerates the reference
+    # manifests, and a manifest missing from that list is one an operator
+    # copying it never applies — networkpolicy.yaml, the deny-by-default
+    # ingress, was exactly that.
+    k8s = ROOT / "deploy/k8s"
+    ops = ROOT / "docs/src/operations.md"
+    if k8s.is_dir() and ops.exists():
+        otext = ops.read_text(encoding="utf-8")
+        for f in sorted(k8s.glob("*.yaml")):
+            if f"`{f.name}`" not in otext:
+                out.append(f"docs/src/operations.md: manifest {f.name} is not named")
+
     lone = re.search(r"(\d+)-test IOP tree", ftext)
     if lone and int(lone.group(1)) != iop:
         out.append(

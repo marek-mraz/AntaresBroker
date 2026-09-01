@@ -21,8 +21,12 @@ these stacks are what CI's ETSI cells run).
 production uses a CNPG cluster, `postgres-cnpg.yaml` is lint-only),
 `broker-postgres.yaml` (an `antares-api` Deployment with `ANTARES_ROLES=api`
 and an `antares-worker` Deployment with matcher/notifier/temporal/registry),
-`broker-file.yaml` (single-replica file mode, `Recreate` strategy). All pod
-specs set `enableServiceLinks: false` (kubelet's injected `ANTARES_*`
+`broker-file.yaml` (single-replica file mode, `Recreate` strategy),
+`networkpolicy.yaml` (deny-by-default ingress in the namespace, one allow
+per flow the other manifests use; egress stays open because notification
+endpoints, Context Sources and `@context` URLs are client data, gated by
+`ANTARES_EGRESS_ALLOW_PRIVATE` and the scheme allowlist rather than by a
+CIDR list). All pod specs set `enableServiceLinks: false` (kubelet's injected `ANTARES_*`
 service-link vars would otherwise trip the unknown-config check; the broker
 also exempts those exact shapes). Proven by k8s-smoke.yml's `k8s-manifests`
 kind smoke (dispatch): apply + every `rollout status` green.
