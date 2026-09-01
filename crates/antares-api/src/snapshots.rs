@@ -589,9 +589,15 @@ async fn run_query(
     if n > budget {
         return Err(too_many(n, budget));
     }
+    // A write the store refuses fails the query. What this returns is what
+    // the caller adds to `copied`, and `copied` decides both the budget left
+    // for the next query and whether the synthetic tenant is materialized —
+    // an empty snapshot has to read as empty rather than as a tenant that
+    // never existed. Counting a copy that never happened costs the snapshot
+    // both, and 5.2.41 would publish the query as a success besides.
     for doc in docs {
         if let Some(id) = doc.get("id").and_then(Value::as_str) {
-            let _ = st.store.create(synth, Kind::Entity, id, doc.clone());
+            st.store.create(synth, Kind::Entity, id, doc.clone())?;
         }
     }
     Ok(n)
@@ -653,12 +659,23 @@ async fn run_temporal_query(
             let Some(eid) = d.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if let Ok(Some(doc)) = st.temporal.get_temporal(
+            // `None` is an Entity with no Temporal Evolution to copy; an Err
+            // is the store refusing the read, which is not the same thing and
+            // is not this snapshot's to swallow.
+            //
+            // The copy REPLACES: a snapshot carrying both kinds of query runs
+            // its Entity queries first, and copying an Entity into the
+            // synthetic tenant fires the 5.6.11 auto-record hook, which leaves
+            // a Temporal Evolution holding only the instant of the copy. An
+            // insert-if-absent would find that stub and keep it, so the
+            // snapshot would answer temporal reads with one instance of a
+            // history the source has many of — and report the query a success.
+            if let Some(doc) = st.temporal.get_temporal(
                 tenant,
                 eid,
                 &antares_store::filter::TemporalFilter::default(),
-            ) {
-                let _ = st.temporal.create(synth, eid, doc);
+            )? {
+                st.temporal.upsert(synth, eid, doc)?;
                 n += 1;
             }
         }

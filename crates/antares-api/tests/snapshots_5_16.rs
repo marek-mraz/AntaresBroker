@@ -6,6 +6,8 @@
 //! 5.3.4 SnapshotNotification.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use antares_api::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -1124,4 +1126,131 @@ async fn clause_5_16_3_snapshot_id_must_be_a_uri() {
             }
         }
     }
+}
+
+/// 5.16.1.4: the fill copies query results "into an isolated copy", and
+/// 5.2.41's `snapshotStatus` / ExecutionResultDetails are what a client has
+/// to decide whether that copy holds anything. A write the store refuses is
+/// therefore not a detail the fill may keep to itself: a snapshot that
+/// reports `success` while holding nothing sends every later read to a
+/// frozen copy that is empty for a reason nobody recorded.
+///
+/// The one entity the query matches is refused by the store. Both halves are
+/// asserted, because the count the fill keeps drives them separately: the
+/// per-query detail must say `failure`, and the synthetic tenant must still
+/// be materialized — 6.3.22 scoped reads answer an empty snapshot with an
+/// empty list, and NonexistentTenant only when a tenant genuinely never
+/// existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_1_a_refused_copy_is_not_reported_as_a_filled_snapshot() {
+    use antares_store::Kind;
+    use std::sync::Arc;
+
+    let mut st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:refused", 80).await;
+    // wrapped AFTER the seed: the entity has to exist for the query to match
+    // it, and it is the copy INTO the snapshot that is refused
+    st.store = Arc::new(common::Double::refusing_create(
+        st.store.clone(),
+        Kind::Entity,
+        "urn:ngsi-ld:Vehicle:refused",
+    ));
+
+    let snap = json!({"type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})
+    .to_string();
+    let (status, headers, body) =
+        send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let loc = headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header")
+        .to_owned();
+    let ready = wait_ready(&st, &loc).await;
+
+    assert_eq!(
+        ready["snapshotQueriesDetails"][0]["resultStatus"], "failure",
+        "a copy the store refused is not a successful query: {ready}"
+    );
+    assert_ne!(
+        ready["snapshotStatus"], "success",
+        "the snapshot holds nothing it was asked to hold: {ready}"
+    );
+
+    let sid = ready["id"].as_str().expect("id");
+    let (status, _, list) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Vehicle",
+        None,
+        &[("NGSILD-Snapshot", sid)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an empty snapshot reads as empty, not as a missing tenant: {list}"
+    );
+    assert_eq!(list.as_array().map(Vec::len), Some(0), "{list}");
+}
+
+/// 5.16.1.4 runs a Snapshot's Entity queries and its temporal queries into
+/// the same isolated copy, and copying an Entity there fires the 5.6.11
+/// auto-record hook — which writes a Temporal Evolution holding one instance,
+/// the instant of the copy. The temporal query's own copy is the source's
+/// whole history (5.7.3), so it is the one the snapshot has to keep: a
+/// snapshot that answers a temporal read with the instant it was taken is
+/// not a snapshot of an evolution, and it reports the query a success.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_16_1_the_temporal_copy_outlives_the_auto_recorded_stub() {
+    let st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:hist", 80).await;
+    // a second instance, so the source history is longer than any stub the
+    // Entity copy can leave behind
+    let patch = json!({"speed": {"type": "Property", "value": 30}}).to_string();
+    let (status, b) = send(
+        &st,
+        "PATCH",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:hist/attrs",
+        Some(patch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{b}");
+
+    let tq = json!({"type": "Query", "entities": [{"type": "Vehicle"}],
+        "temporalQ": {"timerel": "after", "timeAt": "2000-01-01T00:00:00Z",
+                      "timeproperty": "createdAt"}});
+    // both kinds, Entity queries first — the order `fill` runs them in
+    let snap = json!({"type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}],
+        "snapshotTemporalQueries": [tq]})
+    .to_string();
+    let (status, headers, body) =
+        send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let loc = headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header")
+        .to_owned();
+    let ready = wait_ready(&st, &loc).await;
+    assert_eq!(ready["snapshotStatus"], "success", "{ready}");
+    let sid = ready["id"].as_str().expect("id");
+
+    let (status, _, evo) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:Vehicle:hist\
+         ?timerel=after&timeAt=2000-01-01T00:00:00Z&timeproperty=createdAt",
+        None,
+        &[("NGSILD-Snapshot", sid)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{evo}");
+    let instances = evo["speed"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(
+        instances, 2,
+        "the snapshot holds the copied history, not the instant of the copy: {evo}"
+    );
 }

@@ -23,6 +23,7 @@ pub struct Double {
     raced: AtomicBool,
     refuse_registrations: bool,
     refuse_doc: Option<(Kind, String)>,
+    refuse_create: Option<(Kind, String)>,
 }
 
 impl Double {
@@ -38,6 +39,7 @@ impl Double {
             raced: AtomicBool::new(false),
             refuse_registrations: false,
             refuse_doc: None,
+            refuse_create: None,
         }
     }
 
@@ -54,6 +56,7 @@ impl Double {
             raced: AtomicBool::new(false),
             refuse_registrations: false,
             refuse_doc: None,
+            refuse_create: None,
         }
     }
 
@@ -72,6 +75,7 @@ impl Double {
             raced: AtomicBool::new(false),
             refuse_registrations: false,
             refuse_doc: None,
+            refuse_create: None,
         }
     }
 
@@ -102,6 +106,7 @@ impl Double {
             raced: AtomicBool::new(false),
             refuse_registrations: true,
             refuse_doc: None,
+            refuse_create: None,
         }
     }
 
@@ -118,7 +123,36 @@ impl Double {
             raced: AtomicBool::new(false),
             refuse_registrations: false,
             refuse_doc: Some((kind, id.to_owned())),
+            refuse_create: None,
         }
+    }
+
+    /// The INSERT of one document fails while the rest of the store keeps
+    /// working — a backend that refuses one write, or loses the connection
+    /// between two of them. A caller that discards the result writes nothing
+    /// and reports the document as stored.
+    pub fn refusing_create(inner: Arc<dyn CurrentStateDriver>, kind: Kind, id: &str) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: false,
+            racing_write: None,
+            raced: AtomicBool::new(false),
+            refuse_registrations: false,
+            refuse_doc: None,
+            refuse_create: Some((kind, id.to_owned())),
+        }
+    }
+
+    fn refused_create(&self, kind: Kind, id: &str) -> Result<(), NgsiError> {
+        if self
+            .refuse_create
+            .as_ref()
+            .is_some_and(|(k, i)| *k == kind && i == id)
+        {
+            return Err(NgsiError::InternalError(format!("{id} not writable")));
+        }
+        Ok(())
     }
 
     fn refused(&self, kind: Kind, id: &str) -> Result<(), NgsiError> {
@@ -185,6 +219,7 @@ impl CurrentStateDriver for Double {
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError> {
+        self.refused_create(kind, id)?;
         self.inner.create(tenant, kind, id, doc)
     }
     fn batch_create(
