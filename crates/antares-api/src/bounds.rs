@@ -299,6 +299,45 @@ mod tests {
         ));
     }
 
+    /// Every cap belongs in `/q/health` AND in the operator's chapter: the
+    /// admin-API chapter prints the whole `limits` object as the answer a
+    /// memory-store broker gives, and an operator reads a bound from there.
+    /// The test above pins the key set in code; nothing pinned the chapter,
+    /// and `maxFedInflight` was published for a release without ever being
+    /// written down. A cap added here now fails until the chapter has it.
+    #[test]
+    fn the_documented_health_limits_are_the_published_ones() {
+        let book = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/admin-api.md"
+        ))
+        .expect("the admin API chapter");
+        let block = book
+            .split_once("\"limits\": {")
+            .expect("the limits object in the sample response")
+            .1;
+        let block = block.split_once('}').expect("the end of the object").0;
+        let mut documented: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('"'))
+            .filter_map(|l| l.split_once('"'))
+            .map(|(k, _)| k)
+            .collect();
+        documented.sort_unstable();
+        let snap = LimitStats::default().snapshot();
+        let mut published: Vec<&str> = snap
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        published.sort_unstable();
+        assert_eq!(
+            documented, published,
+            "the admin API chapter's limits object is not the one /q/health answers"
+        );
+    }
+
     /// /q/health publishes the caps and the rejection counters — and nothing
     /// else: no configuration paths, no environment variable values, no
     /// internal error text.

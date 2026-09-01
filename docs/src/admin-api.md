@@ -37,6 +37,7 @@ progress). A memory-store broker answers:
     "maxBodyBytes": 4194304,
     "maxContextFetches": 32,
     "maxFedFanout": 8,
+    "maxFedInflight": 256,
     "maxFedResponseBytes": 16777216,
     "maxGeoVertices": 1024,
     "maxJoinLevel": 10,
