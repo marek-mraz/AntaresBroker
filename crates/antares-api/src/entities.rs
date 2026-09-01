@@ -4926,4 +4926,103 @@ mod clause_4_8_system_attributes {
             "no level of the document may carry the stamp the client sent: {served}"
         );
     }
+
+    /// 4.8 again, on every route that writes an Attribute. Create is the
+    /// obvious way in; a client that is refused there and accepted on Append,
+    /// Merge, Partial Update or Replace has the same forged provenance one
+    /// request later. Each of the four carries the stamps at Entity,
+    /// Attribute and sub-Attribute level.
+    #[tokio::test]
+    async fn no_write_route_lets_the_client_stamp_its_own_attributes() {
+        let st = AppState::new("antares-sysattrs-writes".into());
+        let forged = "1970-01-01T00:00:00Z";
+        let id = "urn:ngsi-ld:Vehicle:writes";
+        let stamped = |v: Value| {
+            let mut o = v;
+            if let Some(m) = o.as_object_mut() {
+                m.insert("createdAt".into(), json!(forged));
+                m.insert("modifiedAt".into(), json!(forged));
+            }
+            o
+        };
+        let send = |req: Request<Body>| {
+            let st = st.clone();
+            async move { crate::router(st).oneshot(req).await.expect("resp") }
+        };
+
+        let seed = json!({"id": id, "type": "Vehicle"}).to_string();
+        let resp = send(
+            Request::post("/ngsi-ld/v1/entities")
+                .header("Content-Type", "application/json")
+                .header("Content-Length", seed.len().to_string())
+                .body(Body::from(seed))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let attr = || {
+            stamped(json!({
+                "type": "Property",
+                "value": 10,
+                "accuracy": stamped(json!({"type": "Property", "value": 1})),
+            }))
+        };
+        // Append (5.6.3), Partial Update (5.6.4), Merge (5.6.17), Replace
+        // (5.6.16) — the whole write surface that reaches expand_entity.
+        let calls: Vec<(&str, String, Value)> = vec![
+            (
+                "POST",
+                format!("/ngsi-ld/v1/entities/{id}/attrs"),
+                stamped(json!({"speed": attr()})),
+            ),
+            (
+                "PATCH",
+                format!("/ngsi-ld/v1/entities/{id}/attrs/speed"),
+                attr(),
+            ),
+            (
+                "PATCH",
+                format!("/ngsi-ld/v1/entities/{id}"),
+                stamped(json!({"speed": attr()})),
+            ),
+            (
+                "PUT",
+                format!("/ngsi-ld/v1/entities/{id}"),
+                stamped(json!({"id": id, "type": "Vehicle", "speed": attr()})),
+            ),
+        ];
+        for (method, path, payload) in calls {
+            let body = payload.to_string();
+            let resp = send(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("Content-Type", "application/json")
+                    .header("Content-Length", body.len().to_string())
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await;
+            assert!(
+                resp.status().is_success(),
+                "{method} {path} answered {}",
+                resp.status()
+            );
+            let resp = send(
+                Request::get(format!("/ngsi-ld/v1/entities/{id}?options=sysAttrs"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await;
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let served = String::from_utf8_lossy(&bytes);
+            assert!(
+                !served.contains(forged),
+                "{method} {path} let the client stamp the document: {served}"
+            );
+        }
+    }
 }
