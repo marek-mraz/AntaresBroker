@@ -8,8 +8,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod compile;
-#[cfg(feature = "postgres")]
-#[cfg(feature = "postgres")]
 /// Re-export for integration tests that need raw SQL against the pool.
 #[cfg(feature = "postgres")]
 pub use sqlx;
