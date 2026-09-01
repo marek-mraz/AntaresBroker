@@ -493,7 +493,10 @@ fn valid_iso8601_duration(s: &str) -> bool {
         for u in units {
             if let Some(i) = p.find(*u) {
                 let num = &p[..i];
-                if num.is_empty()
+                // A component is a number: at least one digit, and nothing
+                // but digits and a decimal separator. Without the digit test
+                // the separators alone pass, and `P,D` reads as a duration.
+                if !num.bytes().any(|b| b.is_ascii_digit())
                     || !num
                         .bytes()
                         .all(|b| b.is_ascii_digit() || b == b'.' || b == b',')
@@ -2346,6 +2349,41 @@ mod csi_tests {
         assert!(!ok("ngsildConformance", "latest"));
         // ordinary custom keys stay free-form
         assert!(ok("Authorization", "Bearer abc"));
+    }
+
+    /// Table 5.2.9-1 refreshRate and Table 5.2.34-1 cacheDuration are ISO 8601
+    /// durations. The grammar is `P[nY][nM][nW][nD][T[nH][nM][nS]]`: every
+    /// component is a number, the components keep their order, and the time
+    /// units live after the `T` — a value that is none of those is not a
+    /// duration, whatever it looks like.
+    #[test]
+    fn table_5_2_9_1_refresh_rate_takes_an_iso_8601_duration() {
+        for good in [
+            "P1Y",
+            "P1M",
+            "P1W",
+            "P1D",
+            "PT1H",
+            "PT1M",
+            "PT30S",
+            "P1Y2M3DT4H5M6S",
+            "PT0.5S",
+            "PT0,5S",
+            "P1Y2M",
+            "P1DT12H",
+        ] {
+            assert!(valid_iso8601_duration(good), "{good} is a duration");
+        }
+        for bad in [
+            "", "P", "PT", "1Y", "P1", "P1X", "p1d",   // the designators are upper case
+            "P1H",   // an hour is a time component and belongs after the T
+            "PT1D",  // a day is a date component and belongs before it
+            "P1D2M", // out of order: months precede days
+            "P,D", "P.D", "P..D", // separators are not a number
+            "P-1D", "P+1D", "P 1D", "PT1S1S", "P1DT", "1PD",
+        ] {
+            assert!(!valid_iso8601_duration(bad), "{bad:?} is not a duration");
+        }
     }
 
     /// 5.5.6 + 5.10.2.4: the registration query filters before it pages, so
