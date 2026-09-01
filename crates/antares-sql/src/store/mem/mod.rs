@@ -214,12 +214,19 @@ impl Store {
             None => {
                 let rt = db.begin_read().map_err(|e| e.to_string())?;
                 for kind in ALL_KINDS {
-                    if let Ok(t) = rt.open_table(table_for(kind)) {
-                        if t.len().map_err(|e| e.to_string())? > 0 {
-                            return Err(format!(
-                                "data file {label} holds data but no format marker — refusing to start"
-                            ));
-                        }
+                    // Absent = nothing stored under that kind. Any other
+                    // error is a table this binary cannot read, and reading
+                    // it as empty would let the guard stamp its marker onto
+                    // a file it is about to refuse.
+                    let t = match rt.open_table(table_for(kind)) {
+                        Ok(t) => t,
+                        Err(::redb::TableError::TableDoesNotExist(_)) => continue,
+                        Err(e) => return Err(e.to_string()),
+                    };
+                    if t.len().map_err(|e| e.to_string())? > 0 {
+                        return Err(format!(
+                            "data file {label} holds data but no format marker — refusing to start"
+                        ));
                     }
                 }
                 drop(rt);
@@ -264,7 +271,16 @@ impl Store {
                 map.entry(tenant).or_default().insert(id, doc);
             }
         }
-        if let Ok(t) = rt.open_table(T_JSONLD_CONTEXTS) {
+        // Same rule as the kind loop above: absent is empty, unreadable is a
+        // refusal. Hosted and ImplicitlyCreated @contexts (5.13.1) are a
+        // Tenant's own documents, so starting without this table is serving
+        // partial data, which `open_file` promises never to do.
+        let contexts = match rt.open_table(T_JSONLD_CONTEXTS) {
+            Ok(t) => Some(t),
+            Err(::redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        if let Some(t) = contexts {
             for row in ::redb::ReadableTable::iter(&t).map_err(|e| e.to_string())? {
                 let (k, v) = row.map_err(|e| e.to_string())?;
                 let id = String::from_utf8(k.value().to_vec())
@@ -1159,6 +1175,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tempdir");
         dir
+    }
+
+    /// `open_file` promises "Any open/format/decode error refuses to start —
+    /// never silently serve partial data", and the boot rebuild's kind loop
+    /// keeps it: an absent table has nothing to load, any other error refuses.
+    /// The @context table is read as `if let Ok(...)` instead, so a table that
+    /// exists and cannot be opened counts as an empty one — and that is the
+    /// table whose absence costs a Tenant its own documents, since Hosted and
+    /// ImplicitlyCreated @contexts (5.13.1) hold term mappings authored
+    /// through its requests. The broker would come up and serve without them.
+    ///
+    /// A table of the same name under different key/value types is redb's
+    /// `TableTypeMismatch`: the shape a file written by another binary, or by
+    /// an older schema, actually has.
+    #[test]
+    fn an_unreadable_table_refuses_the_boot_instead_of_reading_as_empty() {
+        let dir = tempdir("unreadable-context-table");
+        let path = dir.join("antares.redb");
+        {
+            let db = Database::create(&path).expect("db");
+            let mut tx = db.begin_write().expect("tx");
+            tx.set_durability(Durability::Immediate).expect("dur");
+            {
+                let mut m = tx.open_table(T_META).expect("meta");
+                m.insert("format", FORMAT_VERSION).expect("insert");
+            }
+            {
+                let def = ::redb::TableDefinition::<&str, &str>::new("jsonld_contexts");
+                let mut t = tx.open_table(def).expect("mismatched contexts table");
+                t.insert("urn:ngsi-ld:ctx", "{}").expect("insert");
+            }
+            tx.commit().expect("commit");
+        }
+        let db = Database::create(&path).expect("reopen");
+        let Err(err) = Store::from_database(db, &path.display().to_string()) else {
+            panic!("a table that cannot be opened must refuse the boot, not start without it");
+        };
+        assert!(!err.is_empty(), "the refusal says what failed");
+    }
+
+    /// The same read, in the guard that exists to refuse a file this binary
+    /// cannot vouch for: data present with no format marker. Skipping a table
+    /// it cannot open makes the guard conclude the file is empty and stamp
+    /// this binary's marker onto it — a write into a file it is about to
+    /// declare unreadable, and one that costs the operator the guard's own
+    /// diagnosis on every later start.
+    #[test]
+    fn the_marker_guard_does_not_stamp_a_file_it_could_not_read() {
+        let dir = tempdir("unstamped-unreadable");
+        let path = dir.join("antares.redb");
+        {
+            let db = Database::create(&path).expect("db");
+            let mut tx = db.begin_write().expect("tx");
+            tx.set_durability(Durability::Immediate).expect("dur");
+            let def = ::redb::TableDefinition::<&str, &str>::new("entities");
+            let mut t = tx.open_table(def).expect("mismatched entities table");
+            t.insert("k", "v").expect("insert");
+            drop(t);
+            tx.commit().expect("commit");
+        }
+        let db = Database::create(&path).expect("reopen");
+        let Err(_) = Store::from_database(db, &path.display().to_string()) else {
+            panic!("an unreadable table with no marker must refuse the boot");
+        };
+        let db = Database::create(&path).expect("reopen after the refusal");
+        let rt = db.begin_read().expect("read tx");
+        let stamped = match rt.open_table(T_META) {
+            Ok(m) => m.get("format").expect("get").is_some(),
+            Err(::redb::TableError::TableDoesNotExist(_)) => false,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(
+            !stamped,
+            "a file the guard could not read must not carry this binary's format marker"
+        );
     }
 
     /// Every kind + contexts round-trip through a close/reopen.
