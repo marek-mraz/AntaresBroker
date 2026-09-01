@@ -1576,6 +1576,15 @@ pub async fn interval_tick(st: &AppState) {
     // Earliest next-due instant seen by this sweep, per half.
     let mut next_sub = i64::MAX;
     let mut next_csub = i64::MAX;
+    // One sweep visits every tenant, and a delivery costs up to the
+    // endpoint's whole timeout (Table 5.2.15-1, 30 s at the ceiling). Awaited
+    // in turn, one unresponsive endpoint becomes the deadline of every other
+    // subscriber's periodic notification. The deliveries of a tick therefore
+    // run together, under the same width the change path uses, and the tick
+    // still does not return until they have settled: ticks never overlap, so
+    // a subscription cannot be fired twice for one period.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut sending = tokio::task::JoinSet::new();
     for tenant_str in read_or_warn(
         st.store.subscription_tenants(),
         "the tenants with subscriptions",
@@ -1691,6 +1700,15 @@ pub async fn interval_tick(st: &AppState) {
                 next_sub = next_sub.min(due_at);
                 continue;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (st, tenant, ctx) = (st.clone(), tenant.clone(), Arc::clone(&ctx));
+                sending.spawn(async move {
+                    let _permit = DELIVERY_SLOTS.acquire().await;
+                    deliver(&st, &tenant, &sub, matching, &ctx).await;
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
             deliver(st, &tenant, &sub, matching, &ctx).await;
         }
         if !sweep_csubs {
@@ -1736,7 +1754,22 @@ pub async fn interval_tick(st: &AppState) {
                 p
             })
             .collect();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (st, tenant, ctx) = (st.clone(), tenant.clone(), Arc::clone(&ctx));
+                sending.spawn(async move {
+                    let _permit = DELIVERY_SLOTS.acquire().await;
+                    deliver_csource(&st, &tenant, &sub, data, &ctx, "newlyMatching").await;
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
             deliver_csource(st, &tenant, &sub, data, &ctx, "newlyMatching").await;
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    while let Some(joined) = sending.join_next().await {
+        if joined.is_err() {
+            note_panic();
         }
     }
     if let (Some(m), Some((sub_clock, csub_clock))) = (&st.sub_mirror, clocks) {
@@ -4702,6 +4735,86 @@ mod change_grouping {
             sizes,
             vec![CHANGES; SUBS],
             "each notification carries every entity of the drain"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod interval_sweep_concurrency {
+    use super::*;
+
+    /// 5.8.6 sends a periodic Notification "when the time interval … is
+    /// reached". One sweep visits every tenant and every due Subscription, so
+    /// whatever it does per Subscription it does 10 000 tenants' worth of —
+    /// and a notification endpoint may take its whole `endpoint.timeout` to
+    /// answer (Table 5.2.15-1). Awaiting each delivery in turn makes one
+    /// unresponsive endpoint the deadline of every other subscriber's
+    /// periodic notification, on a broker whose targets are 10 000 tenants
+    /// and 100 000 subscriptions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_unresponsive_endpoint_does_not_hold_up_the_other_subscriptions() {
+        crate::allow_private();
+        // a listener that accepts and never answers: every delivery to it
+        // costs exactly its endpoint timeout
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s);
+            }
+        });
+        // no mirror: the sweep reads the subscriptions from the store, which
+        // is where this test seeds them
+        let st = AppState::new("antares-sweep-test".into());
+        let tenant = TenantId::new("default").expect("tenant");
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Vehicle:sweep",
+                json!({
+                    "id": "urn:ngsi-ld:Vehicle:sweep",
+                    "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
+                }),
+            )
+            .expect("seed entity");
+        const SUBS: u32 = 4;
+        const TIMEOUT_MS: u64 = 300;
+        for i in 0..SUBS {
+            let id = format!("urn:ngsi-ld:Subscription:sweep-{i}");
+            st.store
+                .create(
+                    &tenant,
+                    Kind::Subscription,
+                    &id,
+                    json!({
+                        "id": id,
+                        "type": "Subscription",
+                        "status": "active",
+                        "timeInterval": 1,
+                        "createdAt": "2020-01-01T00:00:00Z",
+                        "entities": [{
+                            "type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"
+                        }],
+                        "notification": {"endpoint": {
+                            "uri": format!("http://{addr}/notify"),
+                            "timeout": TIMEOUT_MS,
+                        }},
+                    }),
+                )
+                .expect("seed subscription");
+        }
+        let started = std::time::Instant::now();
+        interval_tick(&st).await;
+        let elapsed = started.elapsed().as_millis() as u64;
+        let serial = TIMEOUT_MS * u64::from(SUBS);
+        assert!(
+            elapsed < serial * crate::state::slow_factor(),
+            "the sweep took {elapsed} ms — {SUBS} deliveries of {TIMEOUT_MS} ms ran one after \
+             the other instead of together"
         );
     }
 }
