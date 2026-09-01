@@ -7,6 +7,48 @@ published by CI: `:dev` on every green master run, `:dev-<run>` per run,
 
 ## [Unreleased]
 
+### Added
+- Notification delivery survives an endpoint that is down:
+  `ANTARES_NOTIFY_ATTEMPTS` retries on the backoff of
+  `ANTARES_NOTIFY_BACKOFF_MS` until `ANTARES_NOTIFY_MAX_AGE_SECS`, and what
+  still fails becomes a dead letter — listed, dropped and replayed under
+  `/q/dead-letters` with every credential blanked in the listing.
+- `GET /q/tenants` lists the tenants a broker holds, `GET /q/tenants/{tenant}`
+  reads what one holds, `DELETE /q/tenants/{tenant}` purges it.
+- `POST /ngsi-ld/ex/remote-notify` receives the notifications a distributed
+  subscription's context sources send back (5.11).
+- Request bounds a deployment sizes for itself: `ANTARES_MAX_BODY_BYTES`,
+  `ANTARES_MAX_CONNECTIONS`, `ANTARES_HEADER_READ_TIMEOUT_MS`,
+  `ANTARES_DISCOVERY_SCAN_MAX`, `ANTARES_FED_INFLIGHT`.
+- The temporal half is configured on its own: `ANTARES_TEMPORAL` picks its
+  backend or switches history off, `ANTARES_TEMPORAL_RECORD` decides what the
+  entity endpoints record.
+- Postgres knobs: `ANTARES_PG_POOL`, `ANTARES_PG_STATEMENT_TIMEOUT_MS`, and
+  `ANTARES_MIGRATE=0` so serving replicas never race the DDL.
+- `ANTARES_CORS_ORIGINS` serves a browser without a proxy in front,
+  `ANTARES_API_SURFACES` chooses which surfaces mount beside the API root, and
+  `ANTARES_ALLOW_SHARED_LOCAL` permits `ANTARES_BUS=local` on a shared database
+  for a strictly single-process deployment.
+
+### Changed
+- **Breaking, store format.** The Postgres and Timescale migrations are
+  squashed into one `0001_init.sql`, and `0004` drops the `entity_maps` table
+  `0001` created. A database migrated by 0.1.0 carries that release's
+  nine-migration history, which this build cannot match: start from an empty
+  database, or keep serving the old one with 0.1.0. The broker refuses such a
+  database at boot and names the cause, rather than retrying the connection for
+  30 s and reporting it as unreachable.
+- Clauses 4.3.6.6 and 4.5.19.0 are reclassified `partial`, each with its gap
+  named in `docs/spec/`.
+
+### Fixed
+- 89 conformance fixes, each committed under the clause it holds: the temporal
+  representation and its aggregations (4.5.9, 4.5.19, 6.3.11), `@context`
+  ownership and hosting (5.13, 5.13.1), forwarding and its bounds (4.3.6, 5.7,
+  5.10.2), delivery bookkeeping (5.2.14.2, 5.8.6), what a batch answers about an
+  expired Entity (5.6.7, 5.6.8, 5.6.9.4, 5.6.10), and the HTTP request wall
+  (6.3.4, 6.3.5, 6.3.10).
+
 ## [0.1.0] - 2026-08-16
 
 First tagged release: the ETSI-conformant broker with the full store
