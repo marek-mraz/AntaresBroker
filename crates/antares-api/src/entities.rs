@@ -1068,7 +1068,7 @@ async fn query_entities_outer(
         .into());
     }
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_maps::map_get(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_maps::map_if_accessible(st, &tenant, &map_id) else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
         params.insert("entityMap".into(), "true".into());
         return query_entities_inner(st, &params, headers).await;
@@ -1154,7 +1154,7 @@ async fn query_entities_outer(
     if count {
         more = total > offset + limit;
     }
-    crate::entity_maps::map_put(st, &tenant, map.clone());
+    crate::entity_maps::map_put(st, &tenant, map.clone())?;
     // fix the final fetch to exactly the page's survivors (5.5.14: an empty
     // set is fixed to nothing); one extra page-sized fetch keeps the whole
     // repr pipeline shared instead of forked

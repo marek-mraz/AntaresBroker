@@ -22,6 +22,7 @@ pub struct Double {
     racing_write: Option<Value>,
     raced: AtomicBool,
     refuse_registrations: bool,
+    refuse_doc: Option<(Kind, String)>,
 }
 
 impl Double {
@@ -36,6 +37,7 @@ impl Double {
             racing_write: None,
             raced: AtomicBool::new(false),
             refuse_registrations: false,
+            refuse_doc: None,
         }
     }
 
@@ -51,6 +53,7 @@ impl Double {
             racing_write: None,
             raced: AtomicBool::new(false),
             refuse_registrations: false,
+            refuse_doc: None,
         }
     }
 
@@ -68,6 +71,7 @@ impl Double {
             racing_write: Some(replacement),
             raced: AtomicBool::new(false),
             refuse_registrations: false,
+            refuse_doc: None,
         }
     }
 
@@ -97,7 +101,35 @@ impl Double {
             racing_write: None,
             raced: AtomicBool::new(false),
             refuse_registrations: true,
+            refuse_doc: None,
         }
+    }
+
+    /// Reads of ONE document fail while the rest of the store keeps working —
+    /// the row a backend refuses, or a document whose stored bytes no longer
+    /// parse. A handler that reads the refusal as "there is no such document"
+    /// answers a fault as absence.
+    pub fn refusing_doc(inner: Arc<dyn CurrentStateDriver>, kind: Kind, id: &str) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: false,
+            racing_write: None,
+            raced: AtomicBool::new(false),
+            refuse_registrations: false,
+            refuse_doc: Some((kind, id.to_owned())),
+        }
+    }
+
+    fn refused(&self, kind: Kind, id: &str) -> Result<(), NgsiError> {
+        if self
+            .refuse_doc
+            .as_ref()
+            .is_some_and(|(k, i)| *k == kind && i == id)
+        {
+            return Err(NgsiError::InternalError(format!("{id} unreadable")));
+        }
+        Ok(())
     }
 }
 
@@ -182,6 +214,7 @@ impl CurrentStateDriver for Double {
         self.inner.upsert(tenant, kind, id, doc)
     }
     fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+        self.refused(kind, id)?;
         let doc = self.inner.get(tenant, kind, id)?;
         if self.delete_on_get && doc.is_some() {
             self.inner.delete(tenant, kind, id)?;
@@ -190,6 +223,7 @@ impl CurrentStateDriver for Double {
         Ok(doc)
     }
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+        self.refused(kind, id)?;
         self.inner.delete(tenant, kind, id)
     }
     fn delete_entity_if(

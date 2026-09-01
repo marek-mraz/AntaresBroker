@@ -1508,7 +1508,7 @@ async fn query_temporal_outer(
     };
     let tenant = tenant_from(headers)?;
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_maps::map_get(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_maps::map_if_accessible(st, &tenant, &map_id) else {
         params.insert("entityMap".into(), "true".into());
         return query_temporal_inner(st, &params, headers).await;
     };
@@ -1563,7 +1563,7 @@ async fn query_temporal_outer(
             emap.remove(&k);
         }
     }
-    crate::entity_maps::map_put(st, &tenant, map.clone());
+    crate::entity_maps::map_put(st, &tenant, map.clone())?;
     // fix the query to the candidates that survived the recheck (5.5.14)
     let ids: Vec<&str> = candidates
         .iter()

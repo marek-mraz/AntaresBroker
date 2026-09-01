@@ -37,8 +37,14 @@ fn dt(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Fetch a live EntityMap; an expired one "cannot be accessed" (5.5.14) and
 /// is pruned on touch. Maps live in the store (Kind::EntityMap) so
 /// persistent modes survive restarts.
-pub(crate) fn map_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
-    let doc = st.store.get(tenant, Kind::EntityMap, id).ok().flatten()?;
+pub(crate) fn map_get(
+    st: &AppState,
+    tenant: &TenantId,
+    id: &str,
+) -> Result<Option<Value>, NgsiError> {
+    let Some(doc) = st.store.get(tenant, Kind::EntityMap, id)? else {
+        return Ok(None);
+    };
     // 5.5.14 is a positive condition: a map is served only while a READABLE
     // expiry is still in the future. Judging "expired" instead lets a map
     // whose expiresAt is missing or unparseable outlive every ceiling.
@@ -48,10 +54,23 @@ pub(crate) fn map_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Valu
         .and_then(dt)
         .is_some_and(|e| e > chrono::Utc::now());
     if !live {
+        // Pruning is opportunistic: the map is unusable either way, and the
+        // expiry sweep collects what a refused delete leaves behind.
         let _ = st.store.delete(tenant, Kind::EntityMap, id);
-        return None;
+        return Ok(None);
     }
-    Some(doc)
+    Ok(Some(doc))
+}
+
+/// The map a consumption request named, or nothing.
+///
+/// 5.5.14: "If an EntityMap has expired, or cannot be accessed, no inference
+/// can be made as to which entities are held within the Context Sources and a
+/// new one shall be created." A store that refuses the read is one way a map
+/// cannot be accessed, so these paths recover the way they recover from an
+/// expiry — with a new map — instead of failing the request.
+pub(crate) fn map_if_accessible(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
+    map_get(st, tenant, id).ok().flatten()
 }
 
 /// The Entities of a map a given request may be answered from.
@@ -75,9 +94,13 @@ pub(crate) fn candidate_ids(map: &Value, params: &HashMap<String, String>) -> Ve
         .unwrap_or_default()
 }
 
-pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) {
+///
+/// Every store failure here is the caller's: a map the broker could not count
+/// against its ceiling, or could not write, is not a map the client can be
+/// handed the id of (Table 6.3.2-1 InternalError).
+pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) -> Result<(), NgsiError> {
     let Some(id) = doc.get("id").and_then(Value::as_str).map(str::to_owned) else {
-        return;
+        return Ok(());
     };
     // 6.4.3.2-1: "the actual expiresAt time of the EntityMap shall be set by
     // the Context Broker or Context Source, possibly overriding the requested
@@ -93,20 +116,27 @@ pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) {
     {
         doc["expiresAt"] = json!(ceiling.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     }
-    let existing = st.store.list(tenant, Kind::EntityMap).unwrap_or_default();
-    if existing.len() >= MAX_MAPS_PER_TENANT && !existing.iter().any(|d| d["id"] == id.as_str()) {
-        // eviction order is a heuristic — earliest expiresAt string wins
-        if let Some(victim) = existing
-            .iter()
-            .min_by(|a, b| {
-                a["expiresAt"]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b["expiresAt"].as_str().unwrap_or(""))
-            })
-            .and_then(|d| d.get("id").and_then(Value::as_str))
-        {
-            let _ = st.store.delete(tenant, Kind::EntityMap, victim);
+    // The ceiling decides whether a NEW map fits; rewriting a map that is
+    // already stored replaces a row that is already counted, so the paging
+    // path neither lists the tenant's maps nor evicts one per page. A count
+    // the store refuses leaves the ceiling unenforceable, and an unbounded
+    // buffer is not the safer half of that choice: the write is refused.
+    if st.store.get(tenant, Kind::EntityMap, &id)?.is_none() {
+        let existing = st.store.list(tenant, Kind::EntityMap)?;
+        if existing.len() >= MAX_MAPS_PER_TENANT {
+            // eviction order is a heuristic — earliest expiresAt string wins
+            if let Some(victim) = existing
+                .iter()
+                .min_by(|a, b| {
+                    a["expiresAt"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["expiresAt"].as_str().unwrap_or(""))
+                })
+                .and_then(|d| d.get("id").and_then(Value::as_str))
+            {
+                st.store.delete(tenant, Kind::EntityMap, victim)?;
+            }
         }
     }
     let updated = st
@@ -114,19 +144,16 @@ pub(crate) fn map_put(st: &AppState, tenant: &TenantId, mut doc: Value) {
         .mutate(tenant, Kind::EntityMap, &id, |d| {
             *d = doc.clone();
             Ok::<_, std::convert::Infallible>(())
-        })
-        .ok()
-        .flatten()
+        })?
         .is_some();
     if !updated {
-        let _ = st.store.create(tenant, Kind::EntityMap, &id, doc);
+        st.store.create(tenant, Kind::EntityMap, &id, doc)?;
     }
+    Ok(())
 }
 
-pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> bool {
-    st.store
-        .delete(tenant, Kind::EntityMap, id)
-        .unwrap_or(false)
+pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> Result<bool, NgsiError> {
+    st.store.delete(tenant, Kind::EntityMap, id)
 }
 
 /// Parse an ISO 8601 duration (entityMapLifetime, Table 6.4.3.2-1) to whole
@@ -242,7 +269,7 @@ pub async fn retrieve_entity_map(
         let tenant = open_map(&params, &headers, &id)?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let doc = map_get(&st, &tenant, &id)
+        let doc = map_get(&st, &tenant, &id)?
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")))?;
         Ok::<_, ApiError>(respond(StatusCode::OK, doc, &ctx, accept, &tenant))
     };
@@ -266,7 +293,7 @@ pub async fn update_entity_map(
         let obj = frag.as_object().ok_or_else(|| {
             NgsiError::BadRequestData("EntityMap fragment must be a JSON object".into())
         })?;
-        let mut doc = map_get(&st, &tenant, &id)
+        let mut doc = map_get(&st, &tenant, &id)?
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")))?;
         if let Some(e) = obj.get("expiresAt") {
             let s = e.as_str().filter(|s| dt(s).is_some()).ok_or_else(|| {
@@ -274,7 +301,7 @@ pub async fn update_entity_map(
             })?;
             doc["expiresAt"] = json!(s);
         }
-        map_put(&st, &tenant, doc);
+        map_put(&st, &tenant, doc)?;
         Ok::<_, ApiError>(no_content(&tenant))
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -290,7 +317,7 @@ pub async fn delete_entity_map(
 ) -> Response {
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
-        if !map_delete(&st, &tenant, &id) {
+        if !map_delete(&st, &tenant, &id)? {
             return Err(NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into());
         }
         Ok::<_, ApiError>(no_content(&tenant))
@@ -354,7 +381,7 @@ async fn merge_and_store_map(
         "entityMap": Value::Object(emap),
         "linkedMaps": Value::Object(linked),
     });
-    map_put(st, tenant, doc.clone());
+    map_put(st, tenant, doc.clone())?;
     Ok(doc)
 }
 
@@ -496,7 +523,7 @@ pub(crate) fn build_retrieve_map(
         "entityMap": Value::Object(emap),
         "linkedMaps": {},
     });
-    map_put(st, tenant, doc.clone());
+    map_put(st, tenant, doc.clone())?;
     Ok(doc)
 }
 
@@ -534,7 +561,10 @@ where
         .get("NGSILD-EntityMap")
         .and_then(|v| v.to_str().ok())
         .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
-    if let Some(map) = map_ref.as_deref().and_then(|mid| map_get(st, &tenant, mid)) {
+    if let Some(map) = map_ref
+        .as_deref()
+        .and_then(|mid| map_if_accessible(st, &tenant, mid))
+    {
         let mut resp = inner(Some(map)).await?;
         set_map_header(&mut resp, &map_ref.unwrap_or_default());
         return Ok(resp);
@@ -756,6 +786,12 @@ pub async fn create_temporal_entity_map_post(
 mod tests {
     use super::*;
 
+    /// `map_get` with its store failure unwrapped: these tests drive a
+    /// working store, where a refusal would be the test's own bug.
+    fn map_read(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
+        map_get(st, tenant, id).expect("the store answers")
+    }
+
     /// Table 6.4.3.2-1: entityMapLifetime is an ISO 8601 duration.
     #[test]
     fn clause_5_14_4_lifetime_parse() {
@@ -852,22 +888,22 @@ mod tests {
         let a = TenantId::new("alpha").expect("tenant");
         let b = TenantId::new("beta").expect("tenant");
         let id = "urn:ngsi-ld:entitymap:t1";
-        map_put(&st, &a, live_map(id));
-        assert!(map_get(&st, &a, id).is_some());
+        map_put(&st, &a, live_map(id)).expect("stored");
+        assert!(map_read(&st, &a, id).is_some());
         assert!(
-            map_get(&st, &b, id).is_none(),
+            map_read(&st, &b, id).is_none(),
             "another tenant must not read the map"
         );
         assert!(
-            !map_delete(&st, &b, id),
+            !map_delete(&st, &b, id).expect("delete"),
             "another tenant must not delete the map"
         );
         assert!(
-            map_get(&st, &a, id).is_some(),
+            map_read(&st, &a, id).is_some(),
             "the owner still has its map"
         );
-        assert!(map_delete(&st, &a, id));
-        assert!(map_get(&st, &a, id).is_none());
+        assert!(map_delete(&st, &a, id).expect("delete"));
+        assert!(map_read(&st, &a, id).is_none());
     }
 
     fn live_map(id: &str) -> Value {
@@ -890,8 +926,8 @@ mod tests {
         let t = TenantId::default();
         let mut past = live_map("urn:ngsi-ld:entitymap:past");
         past["expiresAt"] = json!("2020-01-01T00:00:00.000Z");
-        map_put(&st, &t, past);
-        assert!(map_get(&st, &t, "urn:ngsi-ld:entitymap:past").is_none());
+        map_put(&st, &t, past).expect("stored");
+        assert!(map_read(&st, &t, "urn:ngsi-ld:entitymap:past").is_none());
         assert!(
             st.store
                 .get(&t, Kind::EntityMap, "urn:ngsi-ld:entitymap:past")
@@ -911,9 +947,9 @@ mod tests {
                     doc.as_object_mut().expect("object").remove("expiresAt");
                 }
             }
-            map_put(&st, &t, doc);
+            map_put(&st, &t, doc).expect("stored");
             assert!(
-                map_get(&st, &t, id).is_none(),
+                map_read(&st, &t, id).is_none(),
                 "{id} has no readable expiry and must not be served"
             );
         }
@@ -929,7 +965,7 @@ mod tests {
             let mut doc = live_map(&format!("urn:ngsi-ld:entitymap:{i:04}"));
             // earliest expiry first, so the eviction victim is deterministic
             doc["expiresAt"] = json!(format!("2099-01-01T00:00:{:02}.000Z", i % 60));
-            map_put(&st, &t, doc);
+            map_put(&st, &t, doc).expect("stored");
             assert!(
                 st.store.list(&t, Kind::EntityMap).expect("list").len() <= MAX_MAPS_PER_TENANT,
                 "the registry exceeded its ceiling at {i}"
@@ -941,7 +977,7 @@ mod tests {
             .as_str()
             .expect("id")
             .to_owned();
-        map_put(&st, &t, live_map(&known));
+        map_put(&st, &t, live_map(&known)).expect("stored");
         assert_eq!(
             st.store.list(&t, Kind::EntityMap).expect("list").len(),
             before
@@ -1014,8 +1050,8 @@ mod tests {
         let far = "urn:ngsi-ld:entitymap:far";
         let mut doc = live_map(far);
         doc["expiresAt"] = json!("2099-01-01T00:00:00.000Z");
-        map_put(&st, &t, doc);
-        let stored = map_get(&st, &t, far).expect("a clamped map is still live");
+        map_put(&st, &t, doc).expect("stored");
+        let stored = map_read(&st, &t, far).expect("a clamped map is still live");
         let at = dt(stored["expiresAt"].as_str().expect("expiresAt")).expect("RFC 3339 expiry");
         assert!(
             at <= ceiling + chrono::Duration::seconds(5),
@@ -1026,8 +1062,8 @@ mod tests {
         let near = "urn:ngsi-ld:entitymap:near";
         let doc = live_map(near);
         let want = doc["expiresAt"].clone();
-        map_put(&st, &t, doc);
-        assert_eq!(map_get(&st, &t, near).expect("live")["expiresAt"], want);
+        map_put(&st, &t, doc).expect("stored");
+        assert_eq!(map_read(&st, &t, near).expect("live")["expiresAt"], want);
     }
 
     /// 6.3.20: an unknown query parameter is InvalidRequest. The temporal
