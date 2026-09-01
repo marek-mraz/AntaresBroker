@@ -234,3 +234,95 @@ async fn deleted_subscription_stops_notifying() {
         "a deleted subscription kept notifying — orphaned state"
     );
 }
+
+/// HTTP Parameter Pollution across the gateway seam. Implementations
+/// disagree on which occurrence of a repeated query parameter wins — first,
+/// last, or the values joined — so a policy layer in front of the broker can
+/// authorize one value while the broker acts on another. CIM 009 delegates
+/// authorization to that layer (no clause gives the broker an authz model),
+/// which makes the disagreement the whole exposure. The broker refuses the
+/// ambiguity instead of picking a side, the way 6.3.14 already refuses a
+/// repeated `NGSILD-Tenant`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_query_parameter_is_refused_not_silently_resolved() {
+    let st = AppState::new("test".into());
+    for uri in [
+        // the selector a gateway would police
+        "/ngsi-ld/v1/entities?type=Vehicle&type=Secret",
+        // and the filter behind it
+        "/ngsi-ld/v1/entities?type=Vehicle&q=speed%3E1&q=speed%3C1",
+        // an empty first occurrence must not hide the repeat
+        "/ngsi-ld/v1/entities?type=&type=Secret",
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(
+            send(&st, req).await,
+            StatusCode::BAD_REQUEST,
+            "a repeated query parameter must not resolve silently: {uri}"
+        );
+    }
+}
+
+/// The repeated-parameter guard must refuse the ambiguity WITHOUT refusing
+/// the spec's own way of naming several types. 4.17 Entity Type Selection
+/// Language passes a disjunction inside ONE parameter (`,` and `|` are OR,
+/// `(a;b)` is AND), so a conformant client never repeats a parameter and
+/// nothing it sends is affected.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_repeated_parameter_guard_leaves_conformant_queries_alone() {
+    let st = AppState::new("test".into());
+    for uri in [
+        // 4.17: two types are one parameter, not two
+        "/ngsi-ld/v1/entities?type=Vehicle,Building",
+        "/ngsi-ld/v1/entities?type=Vehicle%7CBuilding",
+        // distinct parameters are not a repeat
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=speed",
+        // 6.3.20 allows a parameter to appear once with an empty value
+        "/ngsi-ld/v1/entities?type=Vehicle&attrs=",
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(
+            send(&st, req).await,
+            StatusCode::OK,
+            "the guard must not touch a conformant query: {uri}"
+        );
+    }
+}
+
+/// The repeat is counted on the DECODED key, so percent-encoding cannot hide
+/// it. `%74ype` is `type`: a guard comparing raw strings would let the second
+/// occurrence through and hand the policy layer in front exactly the
+/// disagreement the guard exists to remove.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_percent_encoded_key_cannot_smuggle_a_repeat_past_the_guard() {
+    let st = AppState::new("test".into());
+    for uri in [
+        // %74 is 't'
+        "/ngsi-ld/v1/entities?type=Vehicle&%74ype=Secret",
+        // the same the other way round: the encoded one first
+        "/ngsi-ld/v1/entities?%74ype=Vehicle&type=Secret",
+        // a valueless first occurrence is still an occurrence
+        "/ngsi-ld/v1/entities?type&type=Secret",
+        // `+` decodes to a space, so both of these name the key `a b`
+        "/ngsi-ld/v1/entities?a+b=1&a%20b=2",
+    ] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(
+            send(&st, req).await,
+            StatusCode::BAD_REQUEST,
+            "an encoded repeat must be refused like a plain one: {uri}"
+        );
+    }
+}

@@ -27,7 +27,7 @@ pub const JSONLD_CONTEXT_REL: &str = "http://www.w3.org/ns/json-ld#context";
 pub struct CleanParams(pub std::collections::HashMap<String, String>);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
-    type Rejection = std::convert::Infallible;
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
@@ -35,6 +35,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
     ) -> Result<Self, Self::Rejection> {
         let raw = parts.uri.query().unwrap_or("");
         let mut map = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
         for pair in raw.split('&') {
             if pair.is_empty() {
                 continue;
@@ -42,6 +43,19 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CleanParams {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
             let dec = |s: &str| percent_decode(s.replace('+', " ").as_bytes());
             let (k, v) = (dec(k), dec(v));
+            // No clause names which occurrence of a repeated parameter wins,
+            // and implementations disagree (first, last, or the values
+            // joined). CIM 009 gives the broker no authorization model, so a
+            // policy layer sits in front of it; resolving the ambiguity here
+            // would let that layer read one value while the operation acts on
+            // another. 6.3.14 already refuses a repeated NGSILD-Tenant on the
+            // same reasoning, and the value-emptiness filter below must not
+            // hide the repeat, so this counts occurrences of the KEY.
+            if !seen.insert(k.clone()) {
+                return Err(
+                    NgsiError::InvalidRequest(format!("repeated query parameter {k:?}")).into(),
+                );
+            }
             if !v.is_empty() {
                 map.insert(k, v);
             }
