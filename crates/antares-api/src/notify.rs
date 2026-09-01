@@ -1235,15 +1235,29 @@ pub async fn process_change(
 /// data entries (and timesSent moves by one), never N POSTs.
 pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
     let mut groups: Vec<Matched> = Vec::new();
+    // (tenant, subscription id) → its group. A scan for the group would be
+    // linear in the subscriptions already matched, and a drain of
+    // CHANGE_BATCH changes over S matching subscriptions walks it S times per
+    // change: quadratic in the one dimension this broker is built to grow
+    // (100 000 subscriptions), on the notification hot path.
+    let mut index: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     for (tenant_str, before, after) in changes {
         for m in matches_for(st, &tenant_str, before, after).await {
-            let sub_id = m.sub.get("id").and_then(Value::as_str);
-            match groups
-                .iter_mut()
-                .find(|g| g.tenant == m.tenant && g.sub.get("id").and_then(Value::as_str) == sub_id)
-            {
-                Some(g) => g.data.extend(m.data),
-                None => groups.push(m),
+            let key = (
+                m.tenant.as_str().to_owned(),
+                m.sub
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+            match index.get(&key) {
+                Some(&i) => groups[i].data.extend(m.data),
+                None => {
+                    index.insert(key, groups.len());
+                    groups.push(m);
+                }
             }
         }
     }
@@ -4589,5 +4603,105 @@ mod interval_claim {
                 "nats={nats}: nothing matched, so nothing was sent"
             );
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod change_grouping {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    /// 5.8.6: "the Notification … data … shall contain the Entities that
+    /// match" — every change of one drain that matches the same Subscription
+    /// travels in ONE notification. Grouping is what makes a batch of N
+    /// writes one POST with N data entries instead of N POSTs, and it has to
+    /// hold when many Subscriptions match the same change: each of them gets
+    /// exactly one notification carrying every entity, and no entity lands on
+    /// the wrong Subscription.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_change_of_a_drain_reaches_each_matching_subscription_once() {
+        crate::allow_private();
+        let mut st = AppState::new("antares-grouping-test".into());
+        wire(&mut st);
+        let tenant = TenantId::new("default").expect("tenant");
+        let posts: StdArc<AtomicUsize> = StdArc::default();
+        let entities: StdArc<std::sync::Mutex<Vec<usize>>> = StdArc::default();
+        let (p, e) = (posts.clone(), entities.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move |body: String| {
+                let (p, e) = (p.clone(), e.clone());
+                async move {
+                    p.fetch_add(1, Ordering::SeqCst);
+                    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    e.lock()
+                        .expect("seen")
+                        .push(v["data"].as_array().map(Vec::len).unwrap_or(0));
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        const SUBS: usize = 8;
+        const CHANGES: usize = 5;
+        for i in 0..SUBS {
+            let sub = json!({
+                "id": format!("urn:ngsi-ld:Subscription:group-{i}"),
+                "type": "Subscription",
+                "status": "active",
+                "entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}],
+                "notification": {"endpoint": {"uri": format!("http://{addr}/notify")}},
+            });
+            st.store
+                .create(
+                    &tenant,
+                    Kind::Subscription,
+                    &format!("urn:ngsi-ld:Subscription:group-{i}"),
+                    sub.clone(),
+                )
+                .expect("seed subscription");
+            if let Some(m) = &st.sub_mirror {
+                m.apply(
+                    tenant.as_str(),
+                    &format!("urn:ngsi-ld:Subscription:group-{i}"),
+                    Some(sub),
+                );
+            }
+        }
+        let changes: Vec<Change> = (0..CHANGES)
+            .map(|i| {
+                (
+                    tenant.as_str().to_owned(),
+                    None,
+                    Some(json!({
+                        "id": format!("urn:ngsi-ld:Vehicle:{i}"),
+                        "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
+                        "https://uri.etsi.org/ngsi-ld/default-context/speed": [
+                            {"type": "Property", "value": i}
+                        ],
+                    })),
+                )
+            })
+            .collect();
+        process_changes(&st, changes).await;
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            SUBS,
+            "one notification per matching subscription, never one per change"
+        );
+        let sizes = entities.lock().expect("seen").clone();
+        assert_eq!(
+            sizes,
+            vec![CHANGES; SUBS],
+            "each notification carries every entity of the drain"
+        );
     }
 }
