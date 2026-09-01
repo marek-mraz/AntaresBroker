@@ -1349,3 +1349,147 @@ async fn clause_5_8_6_the_inbound_csf_is_read_in_the_subscriptions_own_context()
     })
     .await;
 }
+
+/// 5.5.4: `"urn:ngsi-ld:null"` as a first level member value is BadRequestData
+/// "with the exception of NGSI-LD Fragments … or to represent deleted
+/// Properties in concise representation as part of notifications". A Context
+/// Source therefore notifies a deletion as a concise NGSI-LD Null, and the
+/// 5.8.6 splitEntities merge must carry that Entity through to the original
+/// subscriber instead of refusing it as an invalid payload.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_8_6_split_merge_keeps_a_notified_deletion() {
+    allow_private();
+    std::env::set_var("ANTARES_PUBLIC_URL", "http://127.0.0.1:9999");
+    let mut st = AppState::new("antares-split-null".into());
+    antares_api::notify::wire(&mut st);
+
+    let (remote_port, remote_seen) = recording_mock();
+    let reg = json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:split-null-origin",
+        "type": "ContextSourceRegistration",
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "operations": ["federationOps"],
+        "endpoint": format!("http://127.0.0.1:{remote_port}"),
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(reg.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (orig_port, orig_seen) = recording_mock();
+    let sub = json!({
+        "id": "urn:ngsi-ld:Subscription:ds-split-null",
+        "type": "Subscription",
+        "entities": [{"type": "Vehicle"}],
+        "splitEntities": true,
+        "notification": {"endpoint": {"uri": format!("http://127.0.0.1:{orig_port}/notify")}},
+    });
+    let (status, body) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(sub.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    wait_for("the forwarded remote subscription", || {
+        remote_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+    })
+    .await;
+    let remote_id = {
+        let seen = remote_seen.lock().expect("seen");
+        let r = seen
+            .iter()
+            .find(|r| r.starts_with("POST /ngsi-ld/v1/subscriptions"))
+            .expect("post")
+            .clone();
+        let v: Value = serde_json::from_str(r.split("\n\n").nth(1).expect("body")).expect("json");
+        v["id"].as_str().expect("remote id").to_owned()
+    };
+
+    // 4.5.7: the Context Source reports the deletion of `speed` and a live
+    // value for `brandName` on the same Entity, both concise.
+    let inbound = json!({
+        "type": "Notification",
+        "subscriptionId": remote_id,
+        "data": [{
+            "id": "urn:ngsi-ld:Vehicle:split-null",
+            "type": "Vehicle",
+            "speed": "urn:ngsi-ld:null",
+            "isParked": {"object": "urn:ngsi-ld:null"},
+            "label": {"languageMap": {"@none": "urn:ngsi-ld:null"}},
+            "brandName": "Tesla",
+        }],
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/ex/remote-notify",
+        Some(inbound.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    wait_for("the notification at the original subscriber", || {
+        orig_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:split-null"))
+    })
+    .await;
+    let delivered = orig_seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .find(|r| r.contains("urn:ngsi-ld:Vehicle:split-null"))
+        .expect("notification")
+        .clone();
+    let notif: Value =
+        serde_json::from_str(delivered.split("\n\n").nth(1).expect("body")).expect("json");
+    let ent = &notif["data"][0];
+    // 4.5.7 / 5.5.4: all three deleted forms reach the subscriber, each in
+    // the encoding its Attribute type mandates.
+    assert_eq!(
+        ent["speed"],
+        json!({"type": "Property", "value": "urn:ngsi-ld:null"}),
+        "the deleted Property must reach the subscriber: {notif}"
+    );
+    assert_eq!(
+        ent["isParked"],
+        json!({"type": "Relationship", "object": "urn:ngsi-ld:null"}),
+        "the deleted Relationship must reach the subscriber: {notif}"
+    );
+    assert_eq!(
+        ent["label"],
+        json!({"type": "LanguageProperty", "languageMap": {"@none": "urn:ngsi-ld:null"}}),
+        "a deleted Language Property is the map form, never a bare string: {notif}"
+    );
+    assert_eq!(
+        ent["brandName"]["value"],
+        json!("Tesla"),
+        "the live attribute on the same Entity must survive: {notif}"
+    );
+    // nothing else rode along: no internal member, no attribute the Context
+    // Source never notified.
+    let mut keys: Vec<&str> = ent
+        .as_object()
+        .expect("entity")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["brandName", "id", "isParked", "label", "speed", "type"],
+        "the merged Entity carries exactly what was notified: {notif}"
+    );
+}

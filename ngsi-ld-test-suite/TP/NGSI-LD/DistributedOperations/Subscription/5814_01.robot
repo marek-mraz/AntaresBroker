@@ -128,6 +128,49 @@ ${sub_id}=      urn:ngsi-ld:Subscription:distsub5814
     Check Response Status Code    204    ${response.status_code}
 
 
+5814_01_03 Split Entities Inbound Notification Carries A Notified Deletion
+    [Documentation]    5.5.4 bans "urn:ngsi-ld:null" as a first level member
+    ...    value "with the exception of NGSI-LD Fragments ... or to represent
+    ...    deleted Properties in concise representation as part of
+    ...    notifications". A Context Source therefore reports a deletion
+    ...    (4.5.7) as a concise NGSI-LD Null, and the 5.8.6 splitEntities
+    ...    merge shall carry that Entity through to the original subscriber
+    ...    rather than refuse it as an invalid payload. Deleted Relationships
+    ...    and Language Properties travel in their own encodings.
+    [Tags]    dist-ops    5_8_6    5_5_4    4_5_7    since_v1.9.1
+
+    &{headers}=    Create Dictionary    Content-Type=application/json
+    ${broker_base}=    Evaluate    "${url}".replace("/ngsi-ld/v1", "")
+    ${sub}=    Set Variable
+    ...    {"id": "${sub_id}", "type": "Subscription", "entities": [{"type": "Vehicle"}], "splitEntities": true, "notification": {"endpoint": {"uri": "http://${context_source_host}:${context_source_port}/notify"}}}
+    ${response}=    POST    url=${url}/subscriptions    data=${sub}    headers=${headers}    expected_status=any
+    Check Response Status Code    201    ${response.status_code}
+
+    Wait For Request    ${15}
+    ${body}=    Get Request Body
+    ${body}=    Evaluate    $body.decode('utf-8') if isinstance($body, bytes) else $body
+    ${remote_id}=    Evaluate    __import__('json').loads($body)["id"]
+    Reply By    201
+
+    # the Context Source reports speed, isParked and label deleted, and a
+    # live brandName on the same Entity
+    ${notified}=    Set Variable
+    ...    {"type": "Notification", "subscriptionId": "${remote_id}", "data": [{"id": "urn:ngsi-ld:Vehicle:splitnull5814", "type": "Vehicle", "speed": "urn:ngsi-ld:null", "isParked": {"object": "urn:ngsi-ld:null"}, "label": {"languageMap": {"@none": "urn:ngsi-ld:null"}}, "brandName": "Tesla"}]}
+    ${response}=    POST    url=${broker_base}/ngsi-ld/ex/remote-notify
+    ...    data=${notified}    headers=${headers}    expected_status=any
+    Check Response Status Code    200    ${response.status_code}
+
+    Wait For Request    ${15}
+    ${nbody}=    Get Request Body
+    ${nbody}=    Evaluate    $nbody.decode('utf-8') if isinstance($nbody, bytes) else $nbody
+    ${ent}=    Evaluate    __import__('json').loads($nbody)["data"][0]
+    Should Be Equal    ${ent}[speed][value]    urn:ngsi-ld:null
+    Should Be Equal    ${ent}[isParked][object]    urn:ngsi-ld:null
+    Should Be Equal    ${ent}[label][languageMap][@none]    urn:ngsi-ld:null
+    Should Be Equal    ${ent}[brandName][value]    Tesla
+    Reply By    200
+
+
 *** Keywords ***
 Setup Registration And Start Mock
     ${registration_id}=    Generate Random CSR Id

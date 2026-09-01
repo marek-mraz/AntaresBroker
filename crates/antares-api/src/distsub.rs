@@ -760,10 +760,24 @@ async fn split_merge(
     let mut out = Vec::new();
     for ent in data {
         let Some(obj) = ent.as_object() else { continue };
-        // inbound notification presentation → the expanded storage form
-        let Ok(mut merged) =
-            antares_jsonld::expand_entity(obj, &ctx, antares_jsonld::ExpandOpts::default())
-        else {
+        // inbound notification presentation → the expanded storage form.
+        // 5.5.4 bans "urn:ngsi-ld:null" as a first level member value "with
+        // the exception of NGSI-LD Fragments … or to represent deleted
+        // Properties in concise representation as part of notifications", so
+        // a notified deletion (4.5.7) is a valid payload here and a
+        // validating expansion would drop the whole Entity. `sys` keeps the
+        // timestamps a sysAttrs subscriber asked for; this is a translation
+        // of a document the Context Source already produced, not an
+        // admission check on client input.
+        let Ok(mut merged) = antares_jsonld::expand_entity(
+            obj,
+            &ctx,
+            antares_jsonld::ExpandOpts {
+                allow_null: true,
+                sys: true,
+                ..Default::default()
+            },
+        ) else {
             continue;
         };
         let Some(id) = merged.get("id").and_then(Value::as_str).map(str::to_owned) else {
