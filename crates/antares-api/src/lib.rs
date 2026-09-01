@@ -1004,7 +1004,27 @@ async fn tenant_purge(
         Ok(out)
     };
     let run = || -> Result<(), NgsiError> {
-        if !ids(Kind::DistSub)?.is_empty() {
+        // 5.8.1.4 stores one mapping document per distributed Subscription;
+        // its `remotes` names the subscription copies that live AT context
+        // sources. Those are deleted at their source by deleting the
+        // Subscription (5.8.5.4), which a purge does not do, so a tenant
+        // still holding them is refused rather than orphaning them. The
+        // mapping shell of a Subscription no source has matched yet, and
+        // the internal Registration Subscription beside it, hold nothing
+        // remote and block nothing — the id-shaped read this used to do
+        // saw neither, since a mapping document carries no `id` member.
+        let mut remote_copies = false;
+        crate::csource::walk_docs(&st, &tenant, Kind::DistSub, |doc| {
+            if doc
+                .get("remotes")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|m| !m.is_empty())
+            {
+                remote_copies = true;
+            }
+            Ok(())
+        })?;
+        if remote_copies {
             return Err(NgsiError::Conflict(
                 "tenant holds active distributed subscriptions".into(),
             ));

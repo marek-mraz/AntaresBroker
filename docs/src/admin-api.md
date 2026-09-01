@@ -130,7 +130,7 @@ exists (5.5.10) and is always readable, even when empty.
 
 `DELETE /q/tenants/{tenant}` purges the tenant: `204` when done, `404` for
 an unknown tenant (`{"title":"ResourceNotFound","detail":"tenant nope"}`),
-`409` while it still holds distributed subscriptions, `400` for a name
+`409` while a distributed subscription of it still holds a copy at a Context Source, `400` for a name
 outside the tenant grammar. The default tenant is emptied and keeps
 existing. The path names the tenant; an `NGSILD-Tenant` header is ignored.
 Background in [operations](operations.md#tenants).

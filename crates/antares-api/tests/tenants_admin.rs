@@ -399,13 +399,18 @@ async fn purge_is_refused_while_distributed_subscriptions_are_active() {
     let st = state();
     seed(&st, "purgedist", "urn:ngsi-ld:Room:1").await;
     let t = TenantId::new("purgedist").expect("tenant");
+    // the 5.8.1.4 mapping of one Subscription that reached a Context
+    // Source: `remotes` names the copy living at that source, which only
+    // deleting the Subscription removes there (5.8.5.4)
     assert!(st
         .store
         .create(
             &t,
             Kind::DistSub,
-            "urn:ngsi-ld:DistSub:1",
-            json!({"id": "urn:ngsi-ld:DistSub:1", "status": "active"}),
+            "urn:ngsi-ld:Subscription:own",
+            json!({"csr_sub": "urn:ngsi-ld:CSourceSubscription:distsub:1",
+                   "remotes": {"urn:ngsi-ld:ContextSourceRegistration:r1":
+                       ["http://source.example.org", "urn:ngsi-ld:Subscription:remote1"]}}),
         )
         .expect("dist sub"));
     let (s, body) = send(&st, "DELETE", "/q/tenants/purgedist", None, None).await;
@@ -607,5 +612,52 @@ async fn purging_a_tenant_takes_its_hosted_contexts_with_it() {
         hosted("ctxother").await,
         1,
         "and no other tenant's @context was taken with it"
+    );
+}
+
+/// A purge that ran while the tenant still holds subscription copies at
+/// context sources would orphan them: 5.8.5.4 removes a copy at its source
+/// when the Subscription is deleted, and a purge deletes documents without
+/// forwarding anything. The refusal is therefore about the copies that
+/// exist remotely, held in the `remotes` member of the 5.8.1.4 mapping —
+/// not about the mapping documents themselves, which every ordinary
+/// Subscription owns from the moment it is created and which would make
+/// every tenant that ever held a Subscription unpurgeable.
+#[tokio::test]
+async fn purge_goes_ahead_when_no_copy_lives_at_a_context_source() {
+    let st = state();
+    let t = TenantId::new("distsubpurge").expect("tenant");
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(json!({
+            "id": "urn:ngsi-ld:Subscription:purge-me",
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {"uri": "http://127.0.0.1:9/cb"}},
+        })),
+        Some("distsubpurge"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // the Subscription owns a mapping document and an internal Registration
+    // Subscription; no Context Source has matched it, so nothing lives
+    // remotely and the purge goes ahead
+    assert!(
+        st.store
+            .get(&t, Kind::DistSub, "urn:ngsi-ld:Subscription:purge-me")
+            .expect("mapping read")
+            .is_some(),
+        "the distributed half stores a mapping for an ordinary Subscription"
+    );
+    let (status, body) = send(&st, "DELETE", "/q/tenants/distsubpurge", None, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        st.store
+            .get(&t, Kind::Subscription, "urn:ngsi-ld:Subscription:purge-me")
+            .expect("read")
+            .is_none(),
+        "the purge took the Subscription with it"
     );
 }
