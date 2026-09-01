@@ -551,3 +551,78 @@ async fn registration_maintains_csource_index() {
     .expect("geo query");
     assert!(inside, "the registration geometry must be queryable in SQL");
 }
+
+/// 5.2.14.2 delivery bookkeeping: `record_delivery` hands back the
+/// `lastSuccess` it overwrote, and a failed attempt puts that value back.
+/// Under fan-out two attempts on ONE subscription run at once, so "the value
+/// it overwrote" has to be the one that was there when the UPDATE landed —
+/// not the one that was there when the statement began. A pre-image read from
+/// the statement's own snapshot is the older of the two whenever another
+/// attempt commits in between, and the rollback then rewinds `lastSuccess`
+/// past a delivery that did succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn record_delivery_returns_the_pre_image_it_actually_overwrote() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let s = std::sync::Arc::new(PgDocStore::new(pool.clone()));
+    let t = TenantId::new("pgpreimage").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Subscription:preimage";
+    let (t0, t1, t2) = (
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:01.000Z",
+        "2026-01-01T00:00:02.000Z",
+    );
+    s.upsert(
+        &t,
+        DocKind::Subscription,
+        id,
+        &json!({"id": id, "type": "Subscription",
+                "notification": {"endpoint": {"uri": "http://127.0.0.1:9"},
+                                 "lastSuccess": t0}}),
+    )
+    .expect("seed");
+
+    // The other attempt's UPDATE, landed but not yet committed: it holds the
+    // row lock, so the delivery below blocks with its snapshot already taken.
+    let mut holder = pool.begin().await.expect("begin");
+    sqlx::query(
+        "UPDATE subscriptions
+            SET subscription = jsonb_set(subscription, '{notification,lastSuccess}',
+                                         to_jsonb($3::text))
+          WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(t.as_str())
+    .bind(id)
+    .bind(t1)
+    .execute(&mut *holder)
+    .await
+    .expect("the competing attempt writes");
+
+    let (s2, t2s) = (s.clone(), t.clone());
+    let recording = tokio::task::spawn_blocking(move || {
+        s2.record_delivery(&t2s, DocKind::Subscription, id, t2)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !recording.is_finished(),
+        "the delivery stamp did not wait for the row lock"
+    );
+    holder.commit().await.expect("commit the competing attempt");
+
+    let (doc, prev) = recording
+        .await
+        .expect("join")
+        .expect("record_delivery")
+        .expect("the subscription is still there");
+    assert_eq!(
+        prev.as_ref().and_then(serde_json::Value::as_str),
+        Some(t1),
+        "the pre-image is the value this attempt overwrote, not the one its \
+         statement started with — a rollback to {t0:?} would erase a delivery \
+         that succeeded"
+    );
+    assert_eq!(doc["notification"]["lastSuccess"], json!(t2));
+    assert_eq!(doc["notification"]["timesSent"], json!(1));
+    let _ = s.delete(&t, DocKind::Subscription, id);
+}

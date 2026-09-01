@@ -457,9 +457,15 @@ impl PgDocStore {
     /// delivery on one subscription contends for the same row, so the lock
     /// hold time is what serializes delivery, not the statement count.
     ///
-    /// The CTE reads the pre-image in the statement's own snapshot, which is
-    /// how the overwritten `lastSuccess` comes back for the rollback a failed
-    /// attempt performs.
+    /// The pre-image comes back through a locking sub-select, not a plain
+    /// CTE. Both are read once per statement, but a CTE is answered from the
+    /// snapshot the statement started with: when another attempt on the same
+    /// subscription commits while this one waits for the row, the CTE hands
+    /// back the value from BEFORE that commit, and the rollback a failed
+    /// attempt performs then rewinds `lastSuccess` past a delivery that
+    /// succeeded. `FOR UPDATE` waits for the same row lock the UPDATE needs
+    /// and re-reads the row it actually gets, so the pre-image is the value
+    /// this statement overwrote.
     ///
     /// `notification` is a mandatory member (5.2.12) and `jsonb_set` on a
     /// path with no parent is a no-op, so a document that somehow lacks it is
@@ -475,23 +481,24 @@ impl PgDocStore {
         let col = kind.doc_column();
         // literals from DocKind; every value is bound
         let sql = format!(
-            "WITH prev AS (
-               SELECT {col} #> '{{notification,lastSuccess}}' AS ls
-                 FROM {table} WHERE tenant_id = $1 AND id = $2
-             )
-             UPDATE {table} SET
+            "UPDATE {table} AS d SET
                {col} = jsonb_set(jsonb_set(jsonb_set(jsonb_set(
-                   {col} - 'status',
+                   d.{col} - 'status',
                    '{{notification,timesSent}}',
-                   to_jsonb(COALESCE(({col} #>> '{{notification,timesSent}}')::bigint, 0) + 1)),
+                   to_jsonb(COALESCE((d.{col} #>> '{{notification,timesSent}}')::bigint, 0) + 1)),
                    '{{notification,lastNotification}}', to_jsonb($3::text)),
                    '{{notification,lastSuccess}}', to_jsonb($3::text)),
                    '{{notification,status}}', '\"ok\"'::jsonb),
-               times_sent = COALESCE(times_sent, 0) + 1,
+               times_sent = COALESCE(d.times_sent, 0) + 1,
                last_notification = $3::timestamptz,
                last_success = $3::timestamptz
-             WHERE tenant_id = $1 AND id = $2
-             RETURNING {col}, (SELECT ls FROM prev)"
+             FROM (SELECT id AS locked_id,
+                          {col} #> '{{notification,lastSuccess}}' AS ls
+                     FROM {table}
+                    WHERE tenant_id = $1 AND id = $2
+                      FOR UPDATE) AS prev
+             WHERE d.tenant_id = $1 AND d.id = prev.locked_id
+             RETURNING d.{col}, prev.ls"
         );
         wait(async move {
             let mut tx = self.pool.begin().await?;
