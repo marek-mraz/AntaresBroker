@@ -594,7 +594,9 @@ last `/`-segment of the URL.
 
 **Hit:** `resources/variables.py` sets
 `core_context = 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.6.jsonld'`.
-The broker's actual core (compile-time) is v1.9 / v1.9.1. Per spec
+The broker's actual core (the URL it advertises, `CORE_CONTEXT`) is
+the v1.8 document; v1.9 is pinned as well but served only on request.
+Per spec
 (TS 104-175 § 13.5.4), only the implementation's *actual* core
 context is undeletable / un-reloadable — older or unrelated core URLs
 are user contexts to the API and may be deleted normally.
@@ -608,8 +610,9 @@ the core.
 "undeletable core" classification to alternate-version core URLs.
 
 **Fix wanted:** `variables.py` should be set per-implementation, e.g.
-`core_context = 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld'`,
-or the fixture should derive it from a broker-served endpoint.
+`core_context = 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld'`
+for this broker, or the fixture should derive it from a broker-served
+endpoint, which is the only version-proof shape.
 
 
 ## 21. DistOps — `application/ld+json` + `Link` header in body-bearing POSTs

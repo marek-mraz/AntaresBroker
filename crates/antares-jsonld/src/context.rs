@@ -61,7 +61,34 @@ pub struct Context {
 impl Context {
     /// Merge one raw `@context` object (its term definitions) into this
     /// context. Later calls override earlier definitions.
+    ///
+    /// The object is a user @context, so 5.5.7's Scoped Context
+    /// prohibition applies to it; [`Context::merge_core_object`] is the
+    /// entry point for the normative Core documents.
     pub fn merge_object(&mut self, obj: &Map<String, Value>) -> Result<(), NgsiError> {
+        self.merge_definitions(obj, true)
+    }
+
+    /// Merge one raw `@context` object of a Core @context document.
+    ///
+    /// 5.5.7 bars Scoped Contexts from the *user* @context, and says why:
+    /// they "could be used to modify terms defined in the Core @context or
+    /// to reshape NGSI-LD Elements during the expansion of terms". The Core
+    /// @context is the thing being protected, not a thing to protect
+    /// against, and Annex B (V1.9.1) defines one Scoped Context of its own,
+    /// on `ngsildproof`. Merging that document as a user @context would
+    /// reject the normative core.
+    pub fn merge_core_object(&mut self, obj: &Map<String, Value>) -> Result<(), NgsiError> {
+        self.merge_definitions(obj, false)
+    }
+
+    /// Merge term definitions, rejecting Scoped Contexts (5.5.7) only when
+    /// `user_context` says the object came from a client.
+    fn merge_definitions(
+        &mut self,
+        obj: &Map<String, Value>,
+        user_context: bool,
+    ) -> Result<(), NgsiError> {
         if let Some(v) = obj.get("@vocab").and_then(Value::as_str) {
             self.vocab = v.to_owned();
         }
@@ -106,8 +133,12 @@ impl Context {
                     // 5.5.7: user @contexts shall not contain JSON-LD Scoped
                     // Contexts — a per-term @context could override core
                     // terms or reshape elements during expansion →
-                    // BadRequestData.
-                    if o.contains_key("@context") {
+                    // BadRequestData. A Core document carries its own
+                    // (Annex B defines one) and is merged without this.
+                    // ponytail: a Core Scoped Context is dropped rather than
+                    // applied, so its inner terms expand through @vocab;
+                    // honouring it needs a per-term active context.
+                    if user_context && o.contains_key("@context") {
                         return Err(NgsiError::BadRequestData(format!(
                             "term {term:?}: JSON-LD Scoped Contexts are not \
                              allowed in a user @context (5.5.7)"

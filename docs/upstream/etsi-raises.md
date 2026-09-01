@@ -262,3 +262,36 @@ periods holding at least one Attribute instance", or defining both the
 padding value for an empty period and the error an implementation raises
 when the requested period count is beyond what it will serve, and updating
 the CTI fixtures to match.
+
+## 11. [spec] Annex B maps `attributeCount` and `attributeDetails` to bare terms
+
+**Title:** CIM 009 V1.9.1 Annex B: `attributeCount` and `attributeDetails`
+expand into the default @context, not into the NGSI-LD namespace
+
+**Body:**
+
+The Core NGSI-LD @context of Annex B (p. 365) defines every member it
+carries against the `ngsi-ld` prefix, with two exceptions:
+
+```
+"attributeCount": "attributeCount",
+"attributeDetails": "attributeDetails",
+```
+
+A bare string that is not an absolute IRI and carries no prefix is not a
+term definition JSON-LD can resolve against the NGSI-LD namespace, so both
+fall through to the annex's own
+`"@vocab": "https://uri.etsi.org/ngsi-ld/default-context/"`. Their expanded
+IRIs become `https://uri.etsi.org/ngsi-ld/default-context/attributeCount`
+and `.../attributeDetails`, while every neighbouring member of the same
+data types expands to `https://uri.etsi.org/ngsi-ld/...`.
+
+Both are normative members: `attributeCount` in Table 5.2.28-1 (Attribute,
+p. 127) and `attributeDetails` in Table 5.2.26-1 (EntityTypeInfo, p. 125).
+The default @context is the namespace reserved for terms the Core @context
+does not define, so two members the Core @context does define land there,
+and an expansion round-trip of an EntityTypeInfo or Attribute payload does
+not recover the NGSI-LD names.
+
+Suggest defining both as `"ngsi-ld:attributeCount"` and
+`"ngsi-ld:attributeDetails"`, the form the rest of the annex uses.

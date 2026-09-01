@@ -1165,7 +1165,14 @@ impl Loader {
                     )
                     .await
                 }
-                Value::Object(obj) => ctx.merge_object(obj),
+                // 5.5.7's Scoped Context prohibition binds the user
+                // @context. A document fetched from a pinned core URL is
+                // a Core @context, not client input, so it merges under
+                // the Core rule; everything else is the user's.
+                Value::Object(obj) => match base.as_deref() {
+                    Some(b) if Self::is_pinned_core(b) => ctx.merge_core_object(obj),
+                    _ => ctx.merge_object(obj),
+                },
                 Value::Null => Ok(()),
                 _ => Err(NgsiError::BadRequestData("invalid @context entry".into())),
             }
@@ -1423,10 +1430,11 @@ fn pinned(url: &str) -> Option<Value> {
     doc.get("@context").cloned()
 }
 
+/// Merge a pre-parsed Core @context value (4.4: merged last, so it wins).
 fn merge_context_value(ctx: &mut Context, v: &Value) {
     match v {
         Value::Object(o) => {
-            let _ = ctx.merge_object(o);
+            let _ = ctx.merge_core_object(o);
         }
         Value::Array(items) => {
             for i in items {
@@ -2676,5 +2684,68 @@ mod tests {
                 "https://uri.etsi.org/ngsi-ld/observedAt"
             );
         }
+    }
+
+    /// Annex B (normative), V1.9.1: the core @context served for the v1.9
+    /// URL is that version's document. The terms V1.9 added are the test —
+    /// a v1.8 document under the v1.9 name expands every one of them
+    /// through the @vocab fallback into the default context instead, and
+    /// the broker then does not see a core member at all.
+    #[tokio::test]
+    async fn the_v1_9_core_context_carries_the_terms_v1_9_added() {
+        let l = Loader::new();
+        let ctx = l
+            .resolve(&Value::String(
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld".into(),
+            ))
+            .await
+            .expect("resolve");
+        for term in [
+            "Snapshot",
+            "SnapshotNotification",
+            "ExecutionResultDetails",
+            "aggrMethods",
+            "aggrParams",
+            "aggrPeriodDuration",
+            "collation",
+            "lastUsedAt",
+            "ngsildproof",
+            "orderBy",
+            "ordering",
+            "problemDetails",
+            "resultStatus",
+            "snapshotId",
+            "snapshotLifetime",
+            "snapshotPriority",
+            "snapshotStatus",
+        ] {
+            assert_eq!(
+                ctx.expand_key(term),
+                format!("https://uri.etsi.org/ngsi-ld/{term}"),
+                "{term} must expand to its Annex B IRI, not through @vocab"
+            );
+        }
+        // renamed by the V1.9 annex; the v1.8 spelling stays reachable
+        // because 4.4 merges the served Core @context (v1.8) last, so a
+        // resolve sees the union — the documents themselves are the test.
+        assert_eq!(
+            ctx.expand_key("objectLists"),
+            "https://uri.etsi.org/ngsi-ld/hasObjectLists"
+        );
+        let terms = |url: &str| {
+            pinned(url)
+                .and_then(|c| c.as_object().cloned())
+                .expect("pinned document")
+        };
+        let v19 = terms("https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld");
+        let v18 = terms("https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld");
+        for gone in ["objectsLists", "geometryProperty"] {
+            assert!(v18.contains_key(gone), "{gone} belongs to the v1.8 annex");
+            assert!(
+                !v19.contains_key(gone),
+                "{gone} is not in the V1.9 annex; the v1.9 document is a copy of v1.8"
+            );
+        }
+        assert!(!v18.contains_key("Snapshot"), "v1.8 predates Snapshot");
     }
 }
