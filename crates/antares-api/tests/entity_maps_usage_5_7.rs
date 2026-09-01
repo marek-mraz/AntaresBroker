@@ -159,8 +159,12 @@ async fn clause_5_7_1_4_live_map_gates_registrations() {
         "remoteAttr": {"type": "Property", "value": 7},
     })
     .to_string();
+    // One request per connection, so the reply says so (RFC 9112 clause 9.3):
+    // a persistent connection this handler immediately drops would be pooled
+    // by the client and reused for the next page.
     let reply = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{remote}",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{remote}",
         remote.len()
     );
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");

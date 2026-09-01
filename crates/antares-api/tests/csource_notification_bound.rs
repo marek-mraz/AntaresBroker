@@ -63,7 +63,14 @@ fn recording_mock() -> (u16, Arc<Mutex<Vec<String>>>) {
                 sink.lock()
                     .expect("seen")
                     .push(String::from_utf8_lossy(&buf[end..]).to_string());
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                // This handler serves ONE request and drops the socket, so the
+                // reply has to say so: an HTTP/1.1 response without it leaves
+                // the connection persistent by default (RFC 9112 clause 9.3),
+                // the client returns it to its pool, and the next
+                // notification is written into a socket already being closed.
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                );
             });
         }
     });

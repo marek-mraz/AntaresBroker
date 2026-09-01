@@ -76,6 +76,11 @@ fn allow_private() {
 fn mock(reply: String) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
+    // One request per connection, so the reply has to say so: without it an
+    // HTTP/1.1 response leaves the connection persistent (RFC 9112 clause
+    // 9.3), the client pools it, and the next forward is written into a
+    // socket already being closed.
+    let reply = reply.replacen("\r\n", "\r\nConnection: close\r\n", 1);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };

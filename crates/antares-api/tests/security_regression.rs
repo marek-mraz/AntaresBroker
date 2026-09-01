@@ -149,7 +149,12 @@ async fn deleted_subscription_stops_notifying() {
             sink.fetch_add(1, Ordering::SeqCst);
             let mut buf = [0u8; 4096];
             let _ = s.read(&mut buf);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            // One request per connection (RFC 9112 clause 9.3): a reply that
+            // leaves the connection persistent gets pooled and reused for a
+            // socket this handler has already dropped, so a delivery that DID
+            // happen could be lost — and this test passes when none arrives.
+            let _ =
+                s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         }
     });
 
