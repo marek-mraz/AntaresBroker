@@ -128,23 +128,31 @@ async fn the_initial_csource_notification_is_cut_into_bounded_bodies() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    // the initial notification is dispatched off the request path
-    for _ in 0..100 {
-        if !seen.lock().expect("seen").is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            break;
+    // The initial notification is dispatched off the request path, and the
+    // set is too large for one bounded body, so more than one POST is on the
+    // way. Waiting for the FIRST body and then a fixed grace drops whatever
+    // has not arrived within it: wait for the registrations themselves, on a
+    // deadline that scales with the runner.
+    let deadline = std::time::Duration::from_secs(10 * antares_api::state::slow_factor());
+    let started = std::time::Instant::now();
+    let count = |bodies: &[String]| -> usize {
+        bodies
+            .iter()
+            .map(|b| {
+                let v: Value = serde_json::from_str(b).expect("json");
+                v["data"].as_array().map(Vec::len).unwrap_or(0)
+            })
+            .sum()
+    };
+    let (bodies, delivered) = loop {
+        let bodies = seen.lock().expect("seen").clone();
+        let delivered = count(&bodies);
+        if delivered >= 6 || started.elapsed() >= deadline {
+            break (bodies, delivered);
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let bodies = seen.lock().expect("seen").clone();
+    };
     assert!(!bodies.is_empty(), "no CSourceNotification arrived");
-    let delivered: usize = bodies
-        .iter()
-        .map(|b| {
-            let v: Value = serde_json::from_str(b).expect("json");
-            v["data"].as_array().map(Vec::len).unwrap_or(0)
-        })
-        .sum();
     assert_eq!(delivered, 6, "every registration is notified: {bodies:?}");
     for b in &bodies {
         assert!(
