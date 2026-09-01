@@ -1455,16 +1455,21 @@ fn selector_ids(sub: &Value) -> Option<Vec<String>> {
 /// winner stamps `lastNotification` as its claim, losers see not-due and
 /// roll back. Only engaged in bus=nats mode — single-process behaviour (and
 /// its 046_12 bookkeeping ordering) is untouched.
+///
+/// `None` = the firing is not this pod's. `Some(prev)` = claimed, carrying
+/// the `lastNotification` the claim overwrote: a firing that turns out to
+/// have nothing to send gives it back through [`release_interval`], because
+/// Table 5.2.14.2-1 stamps the instant a notification was SENT and 5.8.6
+/// sends none when nothing matches.
 fn claim_interval(
     st: &AppState,
     tenant: &TenantId,
     kind: Kind,
     sub: &Value,
     interval: f64,
-) -> bool {
-    let Some(id) = sub.get("id").and_then(Value::as_str) else {
-        return false;
-    };
+) -> Option<Option<Value>> {
+    let id = sub.get("id").and_then(Value::as_str)?;
+    let mut prev: Option<Value> = None;
     let res = st.store.mutate(tenant, kind, id, |doc| {
         if chrono::Utc::now().timestamp_millis() < due_at_ms(doc, interval) {
             return Err(());
@@ -1480,11 +1485,34 @@ fn claim_interval(
             .or_insert_with(|| json!({}))
             .as_object_mut()
         {
-            n.insert("lastNotification".into(), Value::String(now_iso()));
+            prev = n.insert("lastNotification".into(), Value::String(now_iso()));
         }
         Ok(())
     });
-    matches!(res, Ok(Some(Ok(()))))
+    matches!(res, Ok(Some(Ok(())))).then_some(prev)
+}
+
+/// Give a claimed firing back (5.8.6: nothing matched, so nothing was sent).
+/// The stamp returns to what [`claim_interval`] found, which both keeps
+/// `lastNotification` truthful and leaves the subscription due, exactly as
+/// the single-process path does.
+fn release_interval(st: &AppState, tenant: &TenantId, kind: Kind, id: &str, prev: Option<Value>) {
+    let res = st.store.mutate::<(), ()>(tenant, kind, id, |doc| {
+        if let Some(n) = doc
+            .as_object_mut()
+            .and_then(|o| o.get_mut("notification"))
+            .and_then(Value::as_object_mut)
+        {
+            match &prev {
+                Some(v) => n.insert("lastNotification".into(), v.clone()),
+                None => n.remove("lastNotification"),
+            };
+        }
+        Ok(())
+    });
+    if let Err(e) = res {
+        tracing::warn!("releasing the interval claim for {id} failed: {e}");
+    }
 }
 
 /// One sweep of the interval subscriptions (5.8.6, 5.11.7): "If a
@@ -1552,9 +1580,14 @@ pub async fn interval_tick(st: &AppState) {
             // this subscription right now) keeps sweeping on the interval
             // instead of parking on an anchor only the winner advanced.
             next_sub = next_sub.min(now_ms.saturating_add(interval_offset_ms(interval)));
-            if st.nats && !claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
-                continue;
-            }
+            let claim = if st.nats {
+                match claim_interval(st, &tenant, Kind::Subscription, &sub, interval) {
+                    Some(prev) => Some(prev),
+                    None => continue,
+                }
+            } else {
+                None
+            };
             let ctx = sub_context(st, &tenant, &sub).await;
             let now = now_iso();
             // 5.8.6: the periodic Notification "shall include all the
@@ -1619,7 +1652,12 @@ pub async fn interval_tick(st: &AppState) {
                 // 5.8.6: "If there are no matching Entities, no Notification
                 // is sent" — lastNotification stays untouched, so this
                 // subscription is still due and every following tick
-                // re-checks it.
+                // re-checks it. A claim taken to win the firing is given back
+                // here, or the multi-pod path would stamp an instant nothing
+                // was sent at and park the subscription for a whole interval.
+                if let (Some(prev), Some(id)) = (claim, sub.get("id").and_then(Value::as_str)) {
+                    release_interval(st, &tenant, Kind::Subscription, id, prev);
+                }
                 next_sub = next_sub.min(due_at);
                 continue;
             }
@@ -1647,7 +1685,11 @@ pub async fn interval_tick(st: &AppState) {
                 continue;
             }
             next_csub = next_csub.min(now_ms.saturating_add(interval_offset_ms(interval)));
-            if st.nats && !claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval) {
+            // 5.11.7 sends the periodic CSourceNotification whatever the
+            // matching set is, so this claim is never given back.
+            if st.nats
+                && claim_interval(st, &tenant, Kind::CSourceSubscription, &sub, interval).is_none()
+            {
                 continue;
             }
             let ctx = sub_context(st, &tenant, &sub).await;
@@ -4470,5 +4512,63 @@ mod notification_body_bound {
         let runs = chunk_by_bytes(vec![item(0), item(1)], one / 2);
         assert_eq!(runs.len(), 2, "an over-cap item is its own run, never lost");
         assert!(chunk_by_bytes(Vec::new(), 1).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod interval_claim {
+    use super::*;
+    use serde_json::json;
+
+    fn seed(st: &AppState, tenant: &TenantId) {
+        st.store
+            .create(
+                tenant,
+                Kind::Subscription,
+                "urn:ngsi-ld:Subscription:tick",
+                json!({
+                    "id": "urn:ngsi-ld:Subscription:tick",
+                    "type": "Subscription",
+                    "entities": [{"type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"}],
+                    "timeInterval": 1,
+                    "status": "active",
+                    "createdAt": "2020-01-01T00:00:00Z",
+                    "notification": {"endpoint": {"uri": "http://127.0.0.1:9/notify"}},
+                }),
+            )
+            .expect("seed");
+    }
+
+    fn stamp(st: &AppState, tenant: &TenantId) -> Option<String> {
+        st.store
+            .get(tenant, Kind::Subscription, "urn:ngsi-ld:Subscription:tick")
+            .expect("store")
+            .expect("row")["notification"]["lastNotification"]
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// 5.8.6: "If there are no matching Entities, no Notification is sent",
+    /// and Table 5.2.14.2-1 makes `lastNotification` "the timestamp
+    /// corresponding to the instant when the last notification was sent".
+    /// The multi-pod claim stamps that member to win the firing, so a due
+    /// subscription that then matches nothing must have the stamp put back:
+    /// otherwise a client reads a notification instant for a notification
+    /// that never happened, and the subscription — still owing its firing —
+    /// waits out a whole interval that the single-process path does not.
+    #[tokio::test]
+    async fn a_claimed_firing_that_matches_nothing_leaves_no_notification_instant() {
+        let tenant = TenantId::new("default").expect("tenant");
+        for nats in [false, true] {
+            let mut st = AppState::new("me".into());
+            st.nats = nats;
+            seed(&st, &tenant);
+            interval_tick(&st).await;
+            assert_eq!(
+                stamp(&st, &tenant),
+                None,
+                "nats={nats}: nothing matched, so nothing was sent"
+            );
+        }
     }
 }
