@@ -69,6 +69,8 @@ def main():
     ap.add_argument("--run-id", default=str(int(time.time())))
     args = ap.parse_args()
 
+    # All interfaces on purpose: the broker under drill runs in a container
+    # and delivers to the host, so a loopback bind would never be reached.
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", args.listen_port), Receiver)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
