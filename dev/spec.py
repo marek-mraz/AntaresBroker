@@ -268,20 +268,54 @@ def cmd_statements():
           f"{sum(1 for r in rows if r[4] == 0)} cite no code/test anchor.")
 
 
+# The suites one ETSI cell runs, in the order the chapter tables them.
+SUITE_DIRS = [
+    ("CommonBehaviours", "TP/NGSI-LD/CommonBehaviours"),
+    ("Consumption", "TP/NGSI-LD/ContextInformation/Consumption"),
+    ("EntityMap", "TP/NGSI-LD/ContextInformation/EntityMap"),
+    ("Provision", "TP/NGSI-LD/ContextInformation/Provision"),
+    ("Snapshot", "TP/NGSI-LD/ContextInformation/Snapshot"),
+    ("Subscription", "TP/NGSI-LD/ContextInformation/Subscription"),
+    ("ContextSource", "TP/NGSI-LD/ContextSource"),
+    ("DistributedOperations", "TP/NGSI-LD/DistributedOperations"),
+    ("IOP", "IOP_TP"),
+    ("jsonldContext", "TP/NGSI-LD/jsonldContext"),
+]
+
+
 def robot_cases(subtree):
-    """Robot test cases under a named subtree — a case is a line at column 0
-    inside a `*** Test Cases ***` section."""
-    n = 0
-    for f in (ROOT / "ngsi-ld-test-suite").rglob("*.robot"):
-        if subtree.lower() not in str(f).lower():
-            continue
+    """(cases, of which MQTT) under a suite directory, counted the way a cell
+    counts them: a test case is a line at column 0 inside a `*** Test Cases ***`
+    section, and `dev/etsi-run.sh` passes `--exclude config_no_temporal`, so a
+    case carrying that tag is not one a cell runs. `MQTT=0` adds
+    `--exclude *mqtt*`, which is the browser cell — hence the second number."""
+    root = ROOT / "ngsi-ld-test-suite" / subtree
+    total = mqtt = 0
+    for f in sorted(root.rglob("*.robot")):
         insec = False
+        pending = None  # None = not in a case; 0/1 = in one, is it MQTT
+
+        def close(pending, total, mqtt):
+            return (total + 1, mqtt + pending) if pending is not None else (total, mqtt)
+
         for line in f.read_text(errors="replace").splitlines():
-            if line.strip().startswith("***"):
-                insec = line.strip().lower().startswith("*** test case")
-            elif insec and line.strip() and not line[0].isspace() and not line.startswith("#"):
-                n += 1
-    return n
+            st = line.strip()
+            if st.startswith("***"):
+                total, mqtt = close(pending, total, mqtt)
+                pending = None
+                insec = st.lower().startswith("*** test case")
+            elif not insec:
+                continue
+            elif st and not line[0].isspace() and not st.startswith("#"):
+                total, mqtt = close(pending, total, mqtt)
+                pending = 0
+            elif pending is not None and st.lower().startswith("[tags]"):
+                if "config_no_temporal" in st:
+                    pending = None
+                elif "mqtt" in st.lower():
+                    pending = 1
+        total, mqtt = close(pending, total, mqtt)
+    return total, mqtt
 
 
 def chapter_violations():
@@ -320,6 +354,46 @@ def chapter_violations():
         if label != "?" and f" {label} " not in block.group(1).replace("\n", " ") + " ":
             out.append(f"{book}: counts block omits {label} ({actual})")
 
+    # The per-suite table and the two totals the chapter (and the README)
+    # publish are the project's headline number. Counted here from the tree
+    # with the cell's own exclusions, they matched the green run
+    # 33486804581 suite for suite: 1803 native, 1791 in the browser cell.
+    per_suite = {name: robot_cases(d) for name, d in SUITE_DIRS}
+    native = sum(c for c, _ in per_suite.values())
+    wasm = native - sum(m for _, m in per_suite.values())
+    for name, (cases, _) in per_suite.items():
+        row = re.search(rf"^\| {re.escape(name)} \| (\d+) \|", text, re.M)
+        if not row:
+            out.append(f"{book}: the suite table has no {name} row")
+        elif int(row.group(1)) != cases:
+            out.append(f"{book}: says {name} runs {row.group(1)} cases, it runs {cases}")
+    for stated, actual, what in (
+        (set(re.findall(r"is (\d+) test cases", text)), native, "a native cell"),
+        (set(re.findall(r"passes at (\d+)/", text)), native, "a native cell"),
+        (set(re.findall(r"same (\d+) cases run", text)), native, "a native cell"),
+        (set(re.findall(r"runs (\d+) of\b", text)), wasm, "the browser cell"),
+        (set(re.findall(r"`wasm-file` at (\d+)/", text)), wasm, "the browser cell"),
+    ):
+        for n in stated:
+            if int(n) != actual:
+                out.append(f"{book}: says {n} for {what}, the suites hold {actual}")
+
+    # The README leads with the same two numbers.
+    readme = ROOT / "README.md"
+    if readme.exists():
+        rtext = readme.read_text(encoding="utf-8")
+        for pat, actual, what in (
+            (r"(\d+)/\d+ ETSI CIM 009", native, "a native cell"),
+            (r"and (\d+)/\d+ in the browser", wasm, "the browser cell"),
+        ):
+            hit = re.search(pat, rtext)
+            if not hit:
+                out.append(f"README.md: no count for {what} to check")
+            elif int(hit.group(1)) != actual:
+                out.append(
+                    f"README.md: says {hit.group(1)} for {what}, the suites hold {actual}"
+                )
+
     files = len(list(SUITE.rglob("*.robot")))
     stated = re.search(r"holds (\d+) `\.robot` files", text)
     if not stated:
@@ -335,7 +409,8 @@ def chapter_violations():
         out.append("docs/src/federation.md: the federation chapter is missing")
         return out
     ftext = fed.read_text(encoding="utf-8")
-    dist, iop = robot_cases("DistributedOperations"), robot_cases("IOP")
+    dist = robot_cases("TP/NGSI-LD/DistributedOperations")[0]
+    iop = robot_cases("IOP_TP")[0]
     pair = re.search(r"\((\d+) \+ (\d+) tests\)", ftext)
     if not pair:
         out.append("docs/src/federation.md: no suite size to check")

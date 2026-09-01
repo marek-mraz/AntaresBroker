@@ -33,11 +33,11 @@ Stellio) and reimplements the broker in Rust with hard resource targets.
 
 Three properties, each backed by a number CI reproduces on every full run:
 
-1. **Footprint** — ~35 MiB average RSS (45–64 MiB peak) while running the
+1. **Footprint** — ~35 MiB average RSS (38–59 MiB peak) while running the
    complete ETSI conformance suite, ~9 MiB idle. The full store ladder fits
    where a JVM broker's heap alone would not.
-2. **Conformance** — 1786/1786 ETSI CIM 009 V1.9.1 test cases green in
-   every one of the six native store cells, and 1774/1774 in the browser
+2. **Conformance** — 1803/1803 ETSI CIM 009 V1.9.1 test cases green in
+   every one of the six native store cells, and 1791/1791 in the browser
    cell, where the twelve MQTT cases have no broker socket to run against
    — including the two cells where a 10-container role-split fleet rolls
    continuously under the suite
@@ -356,7 +356,7 @@ reporting.
 | Primary storage | memory / redb file / PostgreSQL+PostGIS / TimescaleDB | PostgreSQL+PostGIS ([README](https://github.com/ScorpioBroker/ScorpioBroker/blob/development/README.md)) | MongoDB, with PostgreSQL+PostGIS+TimescaleDB as the temporal sink ([troe.md](https://github.com/FIWARE/context.Orion-LD/blob/develop/doc/manuals-ld/troe.md)) | PostgreSQL + PostGIS + TimescaleDB ([docker-compose.yml](https://github.com/stellio-hub/stellio-context-broker/blob/develop/docker-compose.yml)) | plugin: MongoDB (libmongoc) or in-memory, TimescaleDB plugin for temporal ([plugin-architecture.md](https://github.com/seamware/coraine/blob/main/doc/plugin-architecture.md)) |
 | Message bus | none (`local`) or NATS JetStream | Kafka ([README](https://github.com/ScorpioBroker/ScorpioBroker/blob/development/README.md)) | none | Kafka ([docker-compose.yml](https://github.com/stellio-hub/stellio-context-broker/blob/develop/docker-compose.yml)) | none |
 | Minimum footprint | one binary, zero infrastructure (`memory`/`file`) | JVM + PostgreSQL | broker + MongoDB | JVM + PostgreSQL + Kafka | broker + in-memory plugin (no persistence) |
-| Measured RSS under the full ETSI suite | ~35 MiB avg / 64 MiB peak (CI, every full run) | JVM heap-sized | — | JVM heap-sized | — |
+| Measured RSS under the full ETSI suite | ~35 MiB avg / 59 MiB peak (CI, every matrix run) | JVM heap-sized | — | JVM heap-sized | — |
 | Browser/wasm build | yes — 4.05 MB artifact, full API in a Service Worker | no | no | no | no |
 | Conformance evidence | [public per-store matrix, Robot drill-down](https://antares-ngsi-ld-demo.marek-mraz.com/reports/latest/) | see project | see project | see project | see project |
 

@@ -10,7 +10,7 @@ the same constraints. Resource numbers are measured by the matrix run
 
 | Shape | RSS avg | RSS peak | Notes |
 |---|---|---|---|
-| Native broker, any store | ~35 MiB | 41–64 MiB | peak is the Subscription suite |
+| Native broker, any store | ~35 MiB | 38–59 MiB | peak is the Subscription suite |
 | Idle | ~9 MiB | — | memory store, no traffic |
 | wasm Node shim | 74–111 MiB | up to 185 MiB | Node runtime overhead, not the broker |
 
