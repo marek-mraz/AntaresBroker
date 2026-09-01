@@ -7,6 +7,8 @@ services:
     image: timescale/timescaledb-ha:pg17
     environment:
       POSTGRES_USER: antares
+      # Demo credential, and it stays one: this service publishes no port,
+      # so the database is reachable only from the compose network.
       POSTGRES_PASSWORD: antares
       POSTGRES_DB: antares
       TS_TUNE_MEMORY: 4GB
