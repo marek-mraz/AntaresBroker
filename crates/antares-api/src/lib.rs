@@ -985,13 +985,20 @@ async fn tenant_purge(
         }
         Err(e) => return ApiError::from(e).into_response(),
     }
+    // The paged walk, not `list`: the all-at-once read carries a ceiling
+    // (the Postgres arm refuses past MAX_UNDECIDED_ROWS), and a purge behind
+    // that ceiling means the Tenants most worth reclaiming are the ones that
+    // can never be reclaimed — while their rows stay readable to anyone
+    // sending the Tenant header.
     let ids = |kind: Kind| -> Result<Vec<String>, NgsiError> {
-        Ok(st
-            .store
-            .list(&tenant, kind)?
-            .into_iter()
-            .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(str::to_string))
-            .collect())
+        let mut out = Vec::new();
+        crate::csource::walk_docs(&st, &tenant, kind, |doc| {
+            if let Some(id) = doc.get("id").and_then(|v| v.as_str()) {
+                out.push(id.to_owned());
+            }
+            Ok(())
+        })?;
+        Ok(out)
     };
     let run = || -> Result<(), NgsiError> {
         if !ids(Kind::DistSub)?.is_empty() {
@@ -1008,11 +1015,12 @@ async fn tenant_purge(
         // two purges below would delete that pointer and leave the copy
         // behind, reachable by nothing and freeable by nothing. Each snapshot
         // goes through the same removal a DELETE of it does, first.
-        for meta in st.store.list(&tenant, Kind::Snapshot)? {
+        crate::csource::walk_docs(&st, &tenant, Kind::Snapshot, |meta| {
             if let Some(id) = meta.get("id").and_then(|v| v.as_str()) {
                 crate::snapshots::snap_remove(&st, &tenant, id, &meta);
             }
-        }
+            Ok(())
+        })?;
         st.temporal.purge_tenant(&tenant)?;
         st.store.purge_tenant(&tenant)?;
         if let Some(sync) = &st.sub_sync {

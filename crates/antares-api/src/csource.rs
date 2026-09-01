@@ -1190,7 +1190,7 @@ const SCAN_PAGE: usize = 1_000;
 /// conflicts existed. A page bounds the allocation by construction and
 /// carries no ceiling, so a large tenant costs time here rather than a
 /// permanent 403.
-fn walk_docs(
+pub(crate) fn walk_docs(
     st: &AppState,
     tenant: &antares_model::TenantId,
     kind: Kind,

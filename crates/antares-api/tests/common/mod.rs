@@ -263,4 +263,39 @@ impl CurrentStateDriver for Double {
     fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
         self.inner.context_list_meta()
     }
+    // The trait's PROVIDED methods delegate too. Left out, each one answers
+    // the trait's own default — `OperationNotSupported`, an empty inventory,
+    // a no-op sweep — under a double whose contract is that everything it
+    // does not intercept behaves like the real store. The failure is silent
+    // and reads as the broker refusing the operation.
+    fn commit_queue(&self) -> Option<(usize, usize)> {
+        self.inner.commit_queue()
+    }
+    fn set_outbox(&self, on: bool) {
+        self.inner.set_outbox(on);
+    }
+    fn outbox_peek(&self, limit: i64) -> Result<Vec<(i64, String, Value)>, NgsiError> {
+        self.inner.outbox_peek(limit)
+    }
+    fn outbox_ack(&self, seqs: &[i64]) -> Result<u64, NgsiError> {
+        self.inner.outbox_ack(seqs)
+    }
+    fn version_info(&self) -> Value {
+        self.inner.version_info()
+    }
+    fn sweep_expired(&self) -> usize {
+        self.inner.sweep_expired()
+    }
+    fn tenant_ids(&self) -> Result<Vec<String>, NgsiError> {
+        self.inner.tenant_ids()
+    }
+    fn tenant_stats_one(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Option<antares_store::TenantStats>, NgsiError> {
+        self.inner.tenant_stats_one(tenant)
+    }
+    fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
+        self.inner.purge_tenant(tenant)
+    }
 }
