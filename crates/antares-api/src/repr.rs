@@ -78,7 +78,7 @@ pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Rep
         let mut list = Vec::new();
         for t in a.split(',') {
             let t = t.trim();
-            if t.is_empty() || ENTITY_META.contains(&t) || t == "@context" {
+            if t.is_empty() || ENTITY_META.contains(&t) {
                 return Err(NgsiError::BadRequestData(format!(
                     "invalid attribute name {t:?} in attrs"
                 )));
@@ -113,6 +113,13 @@ pub fn proj_depth(nodes: &[ProjNode]) -> usize {
         .unwrap_or(0)
 }
 
+/// The entity-level members of 4.5.1: everything an Entity carries that is
+/// NOT an Attribute. Every layer that has to tell the two apart reads this
+/// one list — `attrs`/`pick`/`omit` validation and projection here, the
+/// notification diff and tombstone in `notify`, the 4.3.6.8 amendment in
+/// `conformance`, the registration-scope narrowing in `federation`. A layer
+/// with its own copy is a layer that will disagree with the others about
+/// what an attribute is.
 pub(crate) const ENTITY_META: &[&str] = &[
     "id",
     "type",
@@ -121,6 +128,7 @@ pub(crate) const ENTITY_META: &[&str] = &[
     "modifiedAt",
     "deletedAt",
     "expiresAt",
+    "@context",
 ];
 
 /// One node of a 4.21 attribute-projection expression; `children` carries a

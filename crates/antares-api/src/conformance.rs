@@ -16,17 +16,6 @@ use axum::response::Response;
 use serde_json::Value;
 
 /// Members of an entity that are NOT attributes.
-const ENTITY_META: &[&str] = &[
-    "id",
-    "type",
-    "scope",
-    "@context",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-];
-
 /// `"major.minor"` (4.3.6.8; a patch part as in `1.9.1` is tolerated).
 pub fn parse_version(s: &str) -> Option<(u32, u32)> {
     let mut it = s.trim().split('.');
@@ -65,7 +54,7 @@ pub fn amend_entity(doc: &mut Value, ver: (u32, u32)) -> bool {
     }
     let attr_names: Vec<String> = obj
         .keys()
-        .filter(|k| !ENTITY_META.contains(&k.as_str()))
+        .filter(|k| !crate::repr::ENTITY_META.contains(&k.as_str()))
         .cloned()
         .collect();
     for name in attr_names {

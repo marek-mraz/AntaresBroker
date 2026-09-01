@@ -60,17 +60,6 @@ pub fn task_panics() -> u64 {
 /// watchedAttributes to "Properties or Relationships", so the entity's own
 /// system members (including 4.22 `expiresAt` and `deletedAt`) must never be
 /// diffed as attribute-level changes.
-const ENTITY_META: &[&str] = &[
-    "id",
-    "type",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-    "@context",
-];
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ChangeClass {
     Created,
@@ -630,7 +619,7 @@ fn attr_keys(doc: &Value) -> Vec<String> {
     doc.as_object()
         .map(|o| {
             o.keys()
-                .filter(|k| !ENTITY_META.contains(&k.as_str()))
+                .filter(|k| !crate::repr::ENTITY_META.contains(&k.as_str()))
                 .cloned()
                 .collect()
         })
@@ -1048,7 +1037,7 @@ fn build_data(
                 // nothing to decorate and travels on unchanged.
                 if let (Some(b), Some(obj)) = (before, doc.as_object_mut()) {
                     for (k, v) in obj.iter_mut() {
-                        if ENTITY_META.contains(&k.as_str()) {
+                        if crate::repr::ENTITY_META.contains(&k.as_str()) {
                             continue;
                         }
                         let Some(arr) = v.as_array_mut() else {
