@@ -1710,17 +1710,7 @@ pub async fn interval_tick(st: &AppState) {
                     p
                 })
                 .collect();
-            deliver_as(
-                st,
-                &tenant,
-                Kind::CSourceSubscription,
-                &sub,
-                "ContextSourceNotification",
-                data,
-                &ctx,
-                Some("newlyMatching"),
-            )
-            .await;
+            deliver_csource(st, &tenant, &sub, data, &ctx, "newlyMatching").await;
         }
     }
     if let (Some(m), Some((sub_clock, csub_clock))) = (&st.sub_mirror, clocks) {
@@ -1953,6 +1943,35 @@ pub async fn csource_changed(
     send_csource_jobs(st, tenant, jobs).await;
 }
 
+/// POST a CSourceNotification (5.3.2) under the same body bound as every
+/// other one: 5.11.2.4 sends "all matching Context Source Registrations",
+/// and a broker holding 100 000 of them must not turn that into one
+/// unbounded request. Over the cap the set leaves as several notifications,
+/// each carrying whole registrations — the trade [`deliver`] already makes
+/// for entity Notifications.
+async fn deliver_csource(
+    st: &AppState,
+    tenant: &TenantId,
+    sub: &Value,
+    data: Vec<Value>,
+    ctx: &Context,
+    reason: &str,
+) {
+    for chunk in chunk_by_bytes(data, *crate::bounds::MAX_BODY_BYTES) {
+        deliver_as(
+            st,
+            tenant,
+            Kind::CSourceSubscription,
+            sub,
+            "ContextSourceNotification",
+            chunk,
+            ctx,
+            Some(reason),
+        )
+        .await;
+    }
+}
+
 /// Initial / post-update CSourceNotification with all currently matching
 /// registrations (5.11.2.4 / 5.11.3.4).
 pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
@@ -1985,17 +2004,7 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     if data.is_empty() {
         return; // nothing currently matching ⇒ no initial notification
     }
-    deliver_as(
-        st,
-        tenant,
-        Kind::CSourceSubscription,
-        &sub,
-        "ContextSourceNotification",
-        data,
-        &ctx,
-        Some("newlyMatching"),
-    )
-    .await;
+    deliver_csource(st, tenant, &sub, data, &ctx, "newlyMatching").await;
 }
 
 /// Registration copy reduced to the matching RegistrationInfo elements
