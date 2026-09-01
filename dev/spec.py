@@ -268,6 +268,51 @@ def cmd_statements():
           f"{sum(1 for r in rows if r[4] == 0)} cite no code/test anchor.")
 
 
+def chapter_violations():
+    """The conformance chapter republishes numbers this tool computes: the
+    status counts and the size of the suite. A generated number copied into
+    prose drifts in silence — it read 479 implemented with zero partial while
+    the ledger held 477 and two, and 666 suite files while the directory held
+    667. An operator reads those numbers instead of running the tool."""
+    book = ROOT / "docs/src/conformance.md"
+    if not book.exists():
+        return [f"{book}: the conformance chapter is missing"]
+    text = book.read_text(encoding="utf-8")
+    out = []
+
+    metas = [m for m in (read_frontmatter(p) for p in all_sections()) if m]
+    counts = {"sections": len(metas), "robot-tagged": sum(1 for m in metas if m.get("robot"))}
+    for m in metas:
+        key = m.get("status", "?")
+        counts[key] = counts.get(key, 0) + 1
+    block = re.search(r"Current counts.*?```text\n(.*?)```", text, re.S)
+    if not block:
+        return [f"{book}: no `Current counts` block to check"]
+    for line in block.group(1).splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        stated, label = (parts[0], parts[1]) if parts[1] == "sections" else (parts[1], parts[0])
+        if not stated.isdigit():
+            continue
+        actual = counts.get(label)
+        if actual is None:
+            out.append(f"{book}: counts block names {label!r}, which the ledger has none of")
+        elif int(stated) != actual:
+            out.append(f"{book}: counts block says {label} {stated}, ledger has {actual}")
+    for label, actual in sorted(counts.items()):
+        if label != "?" and f" {label} " not in block.group(1).replace("\n", " ") + " ":
+            out.append(f"{book}: counts block omits {label} ({actual})")
+
+    files = len(list(SUITE.rglob("*.robot")))
+    stated = re.search(r"holds (\d+) `\.robot` files", text)
+    if not stated:
+        out.append(f"{book}: no suite file count to check")
+    elif int(stated.group(1)) != files:
+        out.append(f"{book}: says {stated.group(1)} suite files, TP/ holds {files}")
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -296,6 +341,8 @@ def cmd_check():
             errors.append(f"{path}: implemented without evidence")
         if meta.get("robot") != tps.get(meta.get("clause"), []):
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
+
+    errors.extend(chapter_violations())
 
     for e in errors:
         print(f"CHECK {e}")

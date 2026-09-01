@@ -26,25 +26,29 @@ Current counts (`python3 dev/spec.py status`):
 
 ```text
 947 sections
-  implemented       479
+  implemented       477
   informative       468
-  robot-tagged      190
+  partial             2
+  robot-tagged       190
 ```
 
-Zero `partial`, zero `not-implemented`. `python3 dev/spec.py check`
-fails on a malformed file or a stale `robot:` list; `dev/spec.py gaps`
-lists leaf clauses without a TP.
+A `partial` names its gap in `notes:` and is the honest status for a clause
+whose normative surface is not fully closed; `not-implemented` is empty.
+`python3 dev/spec.py check` fails on a malformed file, a stale `robot:` list
+or a count in this chapter that no longer matches the ledger; `dev/spec.py
+gaps` lists leaf clauses without a TP.
 
 ## The suite
 
-The suite directory holds 666 `.robot` files under
+The suite directory holds 667 `.robot` files under
 `TP/NGSI-LD/{CommonBehaviours, ContextInformation, ContextSource,
-DistributedOperations, jsonldContext}`. 555 carry ETSI's numbering
-(`002_01`, `D018_01`); 111 are clause-numbered additions written here for
-normative surface the official set leaves untested (`566_01` for 5.6.6,
-`5510_01` for 5.5.10, `586_01` for 5.8.6), following the same conventions
-and tagged with their clause so the ledger picks them up. Every file
-expands to test cases; one full run of a native cell is 1786 test cases:
+DistributedOperations, jsonldContext}`. Most carry ETSI's own numbering
+(`002_01`, `D018_01`); the rest are additions written here for normative
+surface the official set leaves untested, either clause-numbered (`566_01`
+for 5.6.6, `5510_01` for 5.5.10, `4233_01` for 4.23.3) or slotted into the
+ETSI family they extend, and all following the same conventions and tagged
+with their clause so the ledger picks them up. Every file expands to test
+cases; one full run of a native cell is 1786 test cases:
 
 | suite | test cases |
 |---|---|
@@ -58,6 +62,13 @@ expands to test cases; one full run of a native cell is 1786 test cases:
 | DistributedOperations | 132 |
 | IOP | 278 |
 | jsonldContext | 68 |
+
+Behaviour Antares defines for itself, where CIM 009 is silent, does not go
+in `TP/` — that directory is run against other brokers in interoperability
+campaigns, so every file in it has to assert a SHALL the spec text carries.
+Those tests live in `ngsi-ld-test-suite/AntaresSpecificTests/` instead, and
+each says in its own documentation that it is an Antares decision rather
+than a CIM 009 requirement, with the reason the behaviour exists.
 
 ## The matrix
 
