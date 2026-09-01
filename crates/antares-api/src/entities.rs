@@ -4769,3 +4769,91 @@ mod clause_5_6_17_and_6_4_3_2 {
         assert!(ids.contains(&root), "the Linking Entity is there: {ids:?}");
     }
 }
+
+#[cfg(test)]
+mod clause_5_5_9_paging_bounds {
+    use super::*;
+    use antares_model::NgsiError;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// 5.5.9 pagination is driven by `limit` and `offset`, and 5.5.6 answers
+    /// a request for "so many results that can potentially exhaust client or
+    /// server resources" with TooManyResults rather than clamping. 6.3.10
+    /// takes `limit=0` only together with `count=true`. Every one of these is
+    /// a client-supplied number, so the boundaries are what a client reaches
+    /// for: the largest offset the store can bind, the first one it cannot,
+    /// a number no integer type holds, and the negative form of both.
+    #[test]
+    fn the_paging_numbers_are_refused_at_their_boundaries_not_wrapped() {
+        let st = AppState::new("http://localhost:9090".into());
+
+        let (offset, _, _) = page_params(&st, &params(&[("offset", &i64::MAX.to_string())]))
+            .expect("the largest offset the store can bind is servable");
+        assert_eq!(offset, i64::MAX as usize);
+
+        // one past it wraps negative when bound as `$n::bigint`, and a
+        // negative OFFSET is a Postgres error, so it is a bad request here
+        let over = (i64::MAX as u128 + 1).to_string();
+        assert!(
+            matches!(
+                page_params(&st, &params(&[("offset", &over)])),
+                Err(e) if matches!(e, crate::negotiate::ApiError::Ngsi(NgsiError::BadRequestData(_)))
+            ),
+            "an offset above i64::MAX must not reach the store"
+        );
+
+        for bad in ["-1", "1.5", "", " 1", "0x10", "99999999999999999999999999"] {
+            assert!(
+                matches!(
+                    page_params(&st, &params(&[("offset", bad)])),
+                    Err(e) if matches!(e, crate::negotiate::ApiError::Ngsi(NgsiError::BadRequestData(_)))
+                ),
+                "offset {bad:?} is not a number this API takes"
+            );
+            assert!(
+                matches!(
+                    page_params(&st, &params(&[("limit", bad)])),
+                    Err(e) if matches!(e, crate::negotiate::ApiError::Ngsi(NgsiError::BadRequestData(_)))
+                ),
+                "limit {bad:?} is not a number this API takes"
+            );
+        }
+
+        // 5.5.6: over the server maximum is 403, never a silent clamp
+        let over_max = (st.max_limit + 1).to_string();
+        assert!(
+            matches!(
+                page_params(&st, &params(&[("limit", &over_max)])),
+                Err(e) if matches!(e, crate::negotiate::ApiError::Ngsi(NgsiError::TooManyResults(_)))
+            ),
+            "a limit above the maximum is TooManyResults"
+        );
+        let (_, limit, _) = page_params(&st, &params(&[("limit", &st.max_limit.to_string())]))
+            .expect("the maximum itself is servable");
+        assert_eq!(limit, st.max_limit, "the boundary value is not clamped");
+
+        // 6.3.10: limit=0 is the count-only request and nothing else
+        assert!(
+            matches!(
+                page_params(&st, &params(&[("limit", "0")])),
+                Err(e) if matches!(e, crate::negotiate::ApiError::Ngsi(NgsiError::BadRequestData(_)))
+            ),
+            "limit=0 without count asks for a page of nothing"
+        );
+        let (_, limit, count) = page_params(&st, &params(&[("limit", "0"), ("count", "true")]))
+            .expect("limit=0 with count=true is the count-only request");
+        assert_eq!((limit, count), (0, true));
+
+        // `count` is the literal "true" and nothing else is a count request
+        for not_true in ["TRUE", "1", "yes", ""] {
+            let (_, _, count) = page_params(&st, &params(&[("count", not_true)])).expect("params");
+            assert!(!count, "count={not_true:?} is not count=true");
+        }
+    }
+}
