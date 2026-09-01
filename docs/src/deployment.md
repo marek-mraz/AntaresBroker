@@ -53,8 +53,10 @@ docker run --rm -p 9090:9090 \
 ```
 
 `file` mode constraints (measured, documented in the README store table):
-queries run on in-memory maps (~19 KB RSS per typical entity — comfortable
-to ~10k entities), one writer at ~3.1k fsynced writes/s, backup is
+queries run on in-memory maps (~19 KB RSS for a small entity of a few
+hundred bytes — comfortable to ~10k of those; the 1.5 KB entity
+[Storage drivers](storage.md#measured-storage-cost) measures costs 37.6 KB,
+so size from your own payload), one writer at ~3.1k fsynced writes/s, backup is
 stop-copy only (redb holds an exclusive lock). Beyond that, move to
 `postgres`.
 

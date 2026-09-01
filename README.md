@@ -167,10 +167,13 @@ subscription endpoint, `mqtt[s]://` URI). Operations detail:
 
 `file` mode notes: queries and subscription matching still run on the
 in-memory maps — redb is durability only, so working-set RAM grows with the
-dataset (measured: ~19 KB RSS per typical entity — expanded doc +
-temporal mirror as `serde_json::Value` — rule of thumb: ~10k entities
-(~200 MB, comfortably inside the 350 MiB gate); beyond that, move up a rung to
-`postgres`). The on-disk file carries a format
+dataset (measured: ~19 KB RSS for a SMALL entity of a few hundred bytes of
+compact JSON — expanded doc + temporal mirror as `serde_json::Value` — rule
+of thumb: ~10k of those, ~200 MB, comfortably inside the 350 MiB gate). The
+cost scales with the document: the 1.5 KB entity the
+[storage chapter](docs/src/storage.md#measured-storage-cost) measures costs
+37.6 KB, so size from your own payload rather than from that rule of thumb;
+beyond it, move up a rung to `postgres`. The on-disk file carries a format
 version and the broker refuses to start on a mismatch or corruption rather
 than serve partial data. Measured cost on a dev box: ~3.1k fsynced writes/s,
 commit p50 0.21 ms (the cost is the fsync, not redb); batch operations commit
