@@ -64,6 +64,7 @@ client-facing temporal read answers `OperationNotSupported` with status 422
 {
   "type": "https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported",
   "title": "OperationNotSupported",
+  "status": 422,
   "detail": "no temporal store is configured"
 }
 ```
@@ -122,3 +123,5 @@ unless `ANTARES_MIGRATE=0` hands the job to an init container.
 |---|---|
 | `0001_init` | The PostGIS and `btree_gin` extensions; `tenants`; `entities` with the GiST location index, the `jsonb_path_ops` GIN serving `q=`, the tenant-scoped type index and the expiry index; `subscriptions`, `csource_subscriptions`, `csource_registrations` with the `csource_index` match table; `jsonld_contexts`; `entity_maps` and `entity_map_docs` (5.5.9.3 distributed pagination); `outbox`; `snapshots`; `dist_subs`; `temporal_entities`; `maintenance_jobs`; `attr_instances` as a hypertable when TimescaleDB is present, otherwise range-partitioned with a default partition, plus the lookup index and the idempotent-upsert key `(tenant_id, entity_id, attr_id, instance_id, observed_at)`. Row-Level Security with a `tenant_isolation` policy on every tenant-scoped table. |
 | `0002_dead_letters` | `dead_letters` (`tenant_id`, `id`, `doc`), same RLS belt, read through the [admin API](admin-api.md#dead-letters). |
+| `0003_comma_seconds_fraction` | Rewrites `try_timestamptz` to accept the comma decimal separator 4.6.3 permits in requests. The stamps live in `jsonb` as the client wrote them, and a NULL from this function means "no expiry" to `NOT_EXPIRED` and to the 4.22 instance reap — so a comma-stamped `expiresAt` made the document immortal instead of raising. |
+| `0004_drop_entity_maps` | Drops the `entity_maps` row store `0001_init` created. EntityMaps (5.14) are documents in `entity_map_docs`, which is what every read and write path uses; nothing ever wrote a row to the table. |

@@ -345,6 +345,19 @@ def chapter_violations():
             f"the suites hold "
             f"{dist} + {iop}"
         )
+    # The storage chapter's migration table is a list of files. A migration
+    # added without its row leaves an operator reading a schema that is two
+    # migrations behind — 0004 dropped a table 0001's row still advertises.
+    mig = ROOT / "crates/antares-sql/migrations"
+    book2 = ROOT / "docs/src/storage.md"
+    if mig.is_dir() and book2.exists():
+        on_disk = {f.stem for f in mig.glob("*.sql")}
+        listed = set(re.findall(r"^\| `(\d{4}_[a-z0-9_]+)`", book2.read_text(encoding="utf-8"), re.M))
+        for name in sorted(on_disk - listed):
+            out.append(f"docs/src/storage.md: migration {name} has no row")
+        for name in sorted(listed - on_disk):
+            out.append(f"docs/src/storage.md: names migration {name}, which does not exist")
+
     lone = re.search(r"(\d+)-test IOP tree", ftext)
     if lone and int(lone.group(1)) != iop:
         out.append(
