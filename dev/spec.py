@@ -355,9 +355,9 @@ def chapter_violations():
             out.append(f"{book}: counts block omits {label} ({actual})")
 
     # The per-suite table and the two totals the chapter (and the README)
-    # publish are the project's headline number. Counted here from the tree
-    # with the cell's own exclusions, they matched the green run
-    # 33486804581 suite for suite: 1803 native, 1791 in the browser cell.
+    # publish are the project's headline number, counted here from the tree
+    # with the cell's own exclusions. Stating them here as well would put a
+    # second copy of the number in the file whose job is to have only one.
     per_suite = {name: robot_cases(d) for name, d in SUITE_DIRS}
     native = sum(c for c, _ in per_suite.values())
     wasm = native - sum(m for _, m in per_suite.values())
@@ -676,9 +676,10 @@ def architecture_size_violations():
             out.append(
                 f"ARCHITECTURE.md: sizes {name} at {stated} lines, it holds {actual}"
             )
+    text = doc.read_text(encoding="utf-8")
     for name in sorted(sizes):
         if name.endswith(".rs") and name not in ("geo.rs", "qeval.rs", "regexcache.rs"):
-            if not re.search(rf"^\| `{re.escape(name)}` \|", doc.read_text(encoding="utf-8"), re.M):
+            if not re.search(rf"^\| `{re.escape(name)}` \|", text, re.M):
                 out.append(f"ARCHITECTURE.md: the module table has no row for {name}")
     return out
 
@@ -756,7 +757,7 @@ def workflow_pin_violations():
 
 def wrapped_literal_violations():
     """A Rust string literal wrapped across source lines WITHOUT a trailing `\\`
-    keeps every space of the next line''s indentation. The message still
+    keeps every space of the next line's indentation. The message still
     compiles, still reads correctly in the source, and ships the indentation to
     whoever receives it: two ProblemDetails bodies told a client its
     contextSourceInfo pair "is not a valid HTTP header<30 spaces>(RFC 7230)".
