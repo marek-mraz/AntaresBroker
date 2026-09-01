@@ -77,6 +77,11 @@ mod tests {
             "x",
             "q",
             "//x",
+            // the peer-facing wire of 5.8.1.4 is a core route, so a surface
+            // cannot claim it or anything under it
+            "/ex",
+            "/ex/v1",
+            "/ex/v1/remote-notify",
         ] {
             let err = check_prefix(bad).expect_err(bad);
             assert!(err.contains(bad), "the message names the prefix: {err}");
