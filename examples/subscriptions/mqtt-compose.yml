@@ -5,6 +5,8 @@ services:
   broker:
     image: ghcr.io/marek-mraz/antares-broker:dev
     ports: ["9090:9090"]
+    # demo network: the broker notifies mosquitto by service name, which
+    # is a private address. Never set this facing the internet (SSRF guard).
     environment: {ANTARES_EGRESS_ALLOW_PRIVATE: "true"}
   mosquitto:
     image: eclipse-mosquitto:2

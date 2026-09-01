@@ -6,6 +6,8 @@ Serves map/index.html on 0.0.0.0:42080 (host-published range) and proxies
 published 42080-42099 range and the broker sends no CORS headers).
 """
 import http.server
+import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -32,8 +34,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-            except Exception as e:
-                self.send_error(502, str(e))
+            except Exception as e:  # the reason goes to the console, not the client
+                print(f"proxy to {url} failed: {e}", file=sys.stderr)
+                self.send_error(502, "upstream request failed")
             return
         body = (ROOT / "index.html").read_bytes()
         self.send_response(200)

@@ -12,6 +12,7 @@ stack on 42010. This one drives the two-tenant demo: `helsinki` holds the live
 vehicles and arrival events, `helsinki-kpi` holds the computed KPIs.
 """
 import http.server
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -44,7 +45,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # pass it through so the UI can show "waiting" rather than break.
                 body, status, ctype = e.read(), e.code, "application/json"
             except Exception as e:  # noqa: BLE001 - surface proxy failures as 502
-                self.send_error(502, str(e))
+                # the reason goes to the console, not into the response body
+                print(f"proxy failed: {e}", file=sys.stderr)
+                self.send_error(502, "upstream request failed")
                 return
             self.send_response(status)
             self.send_header("Content-Type", ctype)
