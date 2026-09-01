@@ -1733,3 +1733,47 @@ async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone()
         "a forged tenant header must not move a notification between tenants: {beta:?}"
     );
 }
+
+/// 5.8.1.4 gives the internal Context Source Registration Subscription a
+/// notification endpoint this broker resolves in-process
+/// (`urn:antares:distsub:{tenant}\n{own sub id}`), and `notify::deliver_as`
+/// short-circuits it BEFORE the binding registry, the endpoint cooldown, the
+/// circuit breaker and the egress policy — none of those judge a destination
+/// that never becomes a socket.
+///
+/// So the only thing standing between a client and that internal control
+/// plane is 5.8.1.4's own endpoint check: "the notification endpoint has to
+/// be one this deployment can deliver to", and no sink serves the `urn`
+/// scheme. Table 5.5.2-1 makes that BadRequestData. If a deployment ever
+/// registered a `urn` sink, or `scheme_of` stopped yielding `urn` here, a
+/// client-supplied `endpoint.uri` would reach `on_csource_notification`
+/// directly — so the refusal is asserted rather than assumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_internal_distsub_endpoint_cannot_be_named_by_a_client() {
+    let st = AppState::new("antares-distsub-internal-endpoint".into());
+    let id = "urn:ngsi-ld:Subscription:internal-endpoint";
+    for uri in [
+        "urn:antares:distsub:default\nurn:ngsi-ld:Subscription:victim",
+        "URN:antares:distsub:default\nurn:ngsi-ld:Subscription:victim",
+        "urn:antares:distsub:other\nurn:ngsi-ld:Subscription:victim",
+        "urn:ngsi-ld:Subscription:victim",
+    ] {
+        let body = json!({
+            "id": id,
+            "type": "Subscription",
+            "entities": [{"type": "Vehicle"}],
+            "notification": {"endpoint": {"uri": uri}},
+        })
+        .to_string();
+        let (status, doc) = send(&st, "POST", "/ngsi-ld/v1/subscriptions", Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "endpoint {uri:?} must not be accepted: {doc}"
+        );
+        assert_eq!(doc["title"], "BadRequestData", "{uri:?}: {doc}");
+    }
+    // and nothing was stored under that id
+    let (status, _) = send(&st, "GET", &format!("/ngsi-ld/v1/subscriptions/{id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no subscription was created");
+}
