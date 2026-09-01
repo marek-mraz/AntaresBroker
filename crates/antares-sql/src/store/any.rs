@@ -253,8 +253,7 @@ impl AnyStore {
         }
     }
 
-    /// 6.3.14 implicit tenant creation on Pg write paths.
-    #[cfg(feature = "postgres")]
+    /// Create one document of `kind`; `false` when that id is already taken.
     pub fn create(
         &self,
         tenant: &TenantId,
