@@ -560,6 +560,14 @@ def book_error_title_violations():
     return out
 
 
+WORD_NUMBERS = {
+    w: str(i)
+    for i, w in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve".split()
+    )
+}
+
+
 def suite_count_violations():
     """`dev/etsi-suites.sh` is the runner's own list of suites, and every cell
     runs all of them plus the IOP step. Prose that states that number instead
@@ -587,12 +595,17 @@ def suite_count_violations():
     for path in scan:
         if not path.exists():
             continue
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            for stated in re.findall(r"\b(\d+) suites\b", line):
-                if int(stated) != total:
-                    out.append(
-                        f"{path.relative_to(ROOT)}:{n}: says {stated} suites, a cell runs {total}"
-                    )
+        # Whole text, not line by line: prose wraps, and the count that drifted
+        # in CONTRIBUTING sat on the line above the word `suites`.
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"\b([a-z]+|\d+)\s+suites\b", text):
+            said = WORD_NUMBERS.get(m.group(1), m.group(1))
+            if said.isdigit() and int(said) != total:
+                line = text.count("\n", 0, m.start()) + 1
+                out.append(
+                    f"{path.relative_to(ROOT)}:{line}: says {m.group(1)} suites, "
+                    f"a cell runs {total}"
+                )
     return out
 
 
