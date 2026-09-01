@@ -30,7 +30,10 @@ const MAX_SCOPE_Q_BYTES: usize = 4096;
 /// Compile `scope_q` into a predicate over `col` (a `text[]`).
 /// `None` = outside the exact subset; the caller filters in memory.
 pub fn compile_scope_q(scope_q: &str, col: &str, first_bind: usize) -> Option<CompiledSql> {
-    if scope_q.len() > MAX_SCOPE_Q_BYTES {
+    // A NUL has no representation in a `text` value, so binding one raises in
+    // the database — a 500 in `postgres` mode for a query `memory` mode
+    // answers (`antares_ql::sql::literal` refuses one for the same reason).
+    if scope_q.len() > MAX_SCOPE_Q_BYTES || scope_q.contains('\0') {
         return None;
     }
     let mut binds = Vec::new();
@@ -223,6 +226,26 @@ mod tests {
                 .len(),
             100
         );
+    }
+
+    /// A NUL has no representation in a `text` value, so a bind carrying one
+    /// raises in the database — a 500 in `postgres` mode for a query `memory`
+    /// mode answers from the matcher. `antares_ql::sql::literal` refuses one
+    /// for the same reason; refusing here leaves the verdict to the matcher,
+    /// which compares the byte like any other. Refusing ONE group has to
+    /// refuse the whole query: dropping a branch of an OR would narrow.
+    #[test]
+    fn a_nul_never_reaches_a_bind() {
+        for q in ["\0", "/A\0B", "/A/B,/A\0", "(/A;/\0)"] {
+            assert!(
+                compile_scope_q(q, "scopes", 1).is_none(),
+                "{q:?} must not reach a bind"
+            );
+        }
+        // and the matcher does answer it — a NUL is a byte in a segment
+        let doc = serde_json::json!({"scope": ["/A\u{0}B"]});
+        assert!(antares_ql::scope::scope_matches("/A\0B", &doc));
+        assert!(!antares_ql::scope::scope_matches("/AB", &doc));
     }
 
     /// Doubled slashes: the matcher drops empty segments, so `/A//B` IS a

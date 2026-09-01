@@ -274,8 +274,18 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
         }
     }
 
-    // scopeQ, same contract
-    for sq in ["/A/B", "/A/#", "/A/+/C", "/X/Y,/A/B", "/A/B;/A/B", "/#"] {
+    // scopeQ, same contract. The last case carries a NUL: `text` cannot hold
+    // one, so a bind carrying it raises here and nowhere else — the compiler
+    // must decline the whole query rather than turn it into a 500.
+    for sq in [
+        "/A/B",
+        "/A/#",
+        "/A/+/C",
+        "/X/Y,/A/B",
+        "/A/B;/A/B",
+        "/#",
+        "/A/B,/A\0",
+    ] {
         let mut expected: Vec<String> = docs
             .iter()
             .filter(|(_, d)| antares_api::scope_matches(sq, d))
