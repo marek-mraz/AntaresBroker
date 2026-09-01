@@ -394,6 +394,47 @@ def chapter_violations():
                     f"README.md: says {hit.group(1)} for {what}, the suites hold {actual}"
                 )
 
+    # The maintainer note classifies every chapter into one of the four
+    # documentation modes, and is the checklist for whether a new feature
+    # needs a how-to. A chapter added to SUMMARY and not to the note is a
+    # chapter the gap check silently stops covering.
+    summ = ROOT / "docs/src/SUMMARY.md"
+    note = ROOT / "docs/book-structure.md"
+    if summ.exists() and note.exists():
+        stext, part, listed = summ.read_text(encoding="utf-8"), None, {}
+        for line in stext.splitlines():
+            if line.startswith("# ") and line[2:].strip() != "Summary":
+                part = line[2:].strip().lower()
+            hit = re.search(r"\]\(([a-z0-9-]+\.md)\)", line)
+            if hit:
+                # mdBook's prefix chapter precedes every part heading
+                listed.setdefault(hit.group(1), part)
+        ntext = note.read_text(encoding="utf-8")
+        mapped = {}
+        for line in ntext.splitlines():
+            row = re.match(r"\| (tutorial|how-to|reference|explanation) \| (.+) \|$", line)
+            if not row:
+                continue
+            for cell in row.group(2).split(","):
+                chapter = cell.strip().split()[0]
+                if chapter in mapped:
+                    out.append(
+                        f"docs/book-structure.md: {chapter} is classified twice, under "
+                        f"{mapped[chapter]} and {row.group(1)}"
+                    )
+                    continue  # the first row keeps the chapter
+                mapped[chapter] = row.group(1)
+        for chapter, part in sorted(listed.items()):
+            if chapter not in mapped:
+                out.append(f"docs/book-structure.md: {chapter} is in SUMMARY but not classified")
+            elif part is not None and mapped[chapter] != part:
+                out.append(
+                    f"docs/book-structure.md: files {chapter} under {mapped[chapter]}, "
+                    f"SUMMARY has it under {part}"
+                )
+        for chapter in sorted(set(mapped) - set(listed)):
+            out.append(f"docs/book-structure.md: classifies {chapter}, which SUMMARY does not list")
+
     files = len(list(SUITE.rglob("*.robot")))
     stated = re.search(r"holds (\d+) `\.robot` files", text)
     if not stated:

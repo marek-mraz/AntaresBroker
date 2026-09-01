@@ -5,14 +5,15 @@ are a CHECKLIST for gaps, not a mandate for scaffolding: a chapter exists
 because it has content, never to fill a quadrant.
 
 Current mapping of `docs/src` (`SUMMARY.md` groups the chapters under the
-same four part titles):
+same four part titles; `introduction.md` sits before them as mdBook's
+prefix chapter, which is why it carries no part heading there):
 
 | part | chapter |
 |---|---|
 | tutorial | getting-started.md |
 | how-to | deployment.md, subscriptions.md, temporal.md, federation.md, operations.md, wasm.md |
 | reference | configuration.md, admin-api.md, storage.md, conformance.md, performance.md, coverage.md, shared-crates.md, api.md (links to the ReDoc render and rustdoc) |
-| explanation | introduction.md, extending.md, ecosystem.md, decisions.md (the ADR index) |
+| explanation | introduction.md (the prefix chapter), extending.md, ecosystem.md, decisions.md (the ADR index) |
 
 Gap check, last run against this mapping: every feature an operator can
 run (subscriptions, temporal, federation, bulk load, backup, tenants,
