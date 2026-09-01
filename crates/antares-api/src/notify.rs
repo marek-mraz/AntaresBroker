@@ -17,7 +17,7 @@
 use crate::negotiate::{inject_context, link_header_value};
 use crate::state::{now_iso, AppState};
 use antares_jsonld::Context;
-use antares_model::TenantId;
+use antares_model::{dt_key, TenantId};
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
 use antares_store::{TemporalEvent, TemporalOp};
@@ -774,6 +774,14 @@ pub fn record_temporal_change(
 /// the same instant lands on the same row — the temporal store's upsert key —
 /// and corrects it instead of appending a duplicate. Without observedAt there
 /// is no instant to key on: a fresh random id, append-only.
+///
+/// The instant is keyed through `dt_key`, not through the stamp as written.
+/// 4.6.3 leaves the seconds fraction optional and accepts a comma separator
+/// in requests, and the broker stores a DateTime exactly as the client wrote
+/// it, so one instant arrives under several spellings; keying the raw text
+/// gave each spelling its own instance and left the correction's target in
+/// place beside it — the failure 4.5.7 calls severe "in the case of
+/// modification or deletion requests for legal reasons".
 fn instance_id(entity: &str, attr: &str, inst: &serde_json::Map<String, Value>) -> String {
     let u = match inst.get("observedAt").and_then(Value::as_str) {
         Some(at) => {
@@ -783,7 +791,7 @@ fn instance_id(entity: &str, attr: &str, inst: &serde_json::Map<String, Value>) 
                 .unwrap_or("@none");
             uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_URL,
-                format!("{entity}\n{attr}\n{ds}\n{at}").as_bytes(),
+                format!("{entity}\n{attr}\n{ds}\n{}", dt_key(at)).as_bytes(),
             )
         }
         None => uuid::Uuid::new_v4(),
@@ -3363,6 +3371,84 @@ mod clause_5_2_12_triggers {
             diff(Some(&before), Some(&with_attr)),
             vec![("speed".to_owned(), ChangeClass::Created)]
         );
+    }
+}
+
+#[cfg(test)]
+mod clause_4_5_7_instance_identity {
+    use super::*;
+    use serde_json::json;
+
+    fn id_of(observed: Option<&str>, dataset: Option<&str>) -> String {
+        let mut inst = Map::new();
+        if let Some(o) = observed {
+            inst.insert("observedAt".into(), json!(o));
+        }
+        if let Some(d) = dataset {
+            inst.insert("datasetId".into(), json!(d));
+        }
+        instance_id("urn:ngsi-ld:Vehicle:1", "https://a/speed", &inst)
+    }
+
+    /// 4.5.7: an instance is the Property "at a particular point in time,
+    /// which is recorded as a Temporal Property of the instance (typically
+    /// observedAt)" — so the instant, not the way a client spelled it,
+    /// decides which instance a record belongs to. 4.6.3 leaves the seconds
+    /// fraction optional and accepts a comma separator in requests, and the
+    /// broker stores the stamp as written, so one instant reaches this
+    /// function under several spellings.
+    ///
+    /// The consequence is the one the clause names: "Without such an
+    /// instanceId, it is not possible to selectively modify or delete
+    /// temporal information via the NGSI-LD API. The consequences of this
+    /// may be severe in the case of modification or deletion requests for
+    /// legal reasons". A correction re-sent with a different spelling landed
+    /// on a second row and left the value it was correcting in place.
+    #[test]
+    fn one_instant_is_one_instance_however_it_is_spelled() {
+        let spellings = [
+            "2020-01-01T00:00:00Z",
+            "2020-01-01T00:00:00.0Z",
+            "2020-01-01T00:00:00.000Z",
+            "2020-01-01T00:00:00.000000Z",
+            "2020-01-01T00:00:00,000Z",
+        ];
+        let first = id_of(Some(spellings[0]), None);
+        for s in &spellings[1..] {
+            assert_eq!(id_of(Some(s), None), first, "{s} is the same instant");
+        }
+        // and with a datasetId, which is part of the same identity
+        let first = id_of(Some(spellings[0]), Some("urn:ds:1"));
+        for s in &spellings[1..] {
+            assert_eq!(
+                id_of(Some(s), Some("urn:ds:1")),
+                first,
+                "{s} is the same instant"
+            );
+        }
+    }
+
+    /// The identity still separates what the clause separates: a different
+    /// instant, a different dataset and a different fractional value are
+    /// different instances.
+    #[test]
+    fn different_instants_and_datasets_stay_different_instances() {
+        let base = id_of(Some("2020-01-01T00:00:00Z"), None);
+        for other in [
+            id_of(Some("2020-01-01T00:00:00.500Z"), None),
+            id_of(Some("2020-01-01T00:00:01Z"), None),
+            id_of(Some("2020-01-02T00:00:00Z"), None),
+            id_of(Some("2020-01-01T00:00:00Z"), Some("urn:ds:1")),
+        ] {
+            assert_ne!(other, base);
+        }
+        assert_ne!(
+            id_of(Some("2020-01-01T00:00:00.500Z"), Some("urn:ds:1")),
+            id_of(Some("2020-01-01T00:00:00.500Z"), Some("urn:ds:2"))
+        );
+        // "Without observedAt there is no instant to key on": a fresh id
+        // every time, so two unobserved records never collide.
+        assert_ne!(id_of(None, None), id_of(None, None));
     }
 }
 

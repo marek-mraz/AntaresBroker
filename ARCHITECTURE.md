@@ -40,7 +40,7 @@ broker nor a storage backend (`antares-api`, `antares-broker`,
 | Crate | Lines | Owns | Must not |
 |---|---|---|---|
 | `antares-model` | 880 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
-| `antares-ql` | 4 000 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
+| `antares-ql` | 4 500 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
 | `antares-jsonld` | 7 200 | `@context` loader with caches and pinned core contexts, expansion/compaction, structural validation, the one outbound `client_builder` | do business logic |
 | `antares-matcher` | 330 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
 | `antares-store` | 2 600 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
