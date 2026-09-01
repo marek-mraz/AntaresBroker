@@ -408,6 +408,26 @@ fn compare(target: &Value, op: CmpOp, want: &QValue, re: Option<&regex::Regex>) 
             let Some(t) = target.as_str() else {
                 return false;
             };
+            // 4.9 p.92: "When comparing dates or times, the order relation
+            // considered shall be a temporal one" (EXAMPLE 8 of the clause is
+            // exactly this: `?q=temperature.observedAt>=2017-12-24T12:00:00Z`).
+            // Equality stays a string comparison: `==` also lowers to a
+            // jsonpath string compare in `antares_ql::sql`, and widening it
+            // here alone would make the memory and Postgres arms disagree.
+            if matches!(op, CmpOp::Gt | CmpOp::Ge | CmpOp::Lt | CmpOp::Le) {
+                if let (Some(tk), Some(sk)) = (temporal_key(t), temporal_key(s)) {
+                    // equal length is equal base shape — a Time and a
+                    // DateTime are not two points on one axis
+                    if tk.len() == sk.len() {
+                        return match op {
+                            CmpOp::Gt => tk > sk,
+                            CmpOp::Ge => tk >= sk,
+                            CmpOp::Lt => tk < sk,
+                            _ => tk <= sk,
+                        };
+                    }
+                }
+            }
             match op {
                 CmpOp::Eq => t == s,
                 CmpOp::Ne => t != s,
@@ -425,14 +445,45 @@ fn compare(target: &Value, op: CmpOp, want: &QValue, re: Option<&regex::Regex>) 
     }
 }
 
+/// Canonical ordering key for a 4.6.3 DateTime or Time: the trailing `Z`
+/// dropped and the optional seconds fraction (`.`, or the request-side `,`)
+/// zero-padded to six digits, so string order equals temporal order across
+/// spellings of one instant. Without it `.` (0x2E) sorts before `Z` (0x5A)
+/// and `…:00.500Z` reads as EARLIER than `…:00Z`. A Date carries no fraction
+/// and already orders lexicographically, so it needs no key. `None` for
+/// anything that is neither shape, which leaves an ordinary string ordered
+/// as a string. `antares_model::dt_key` is the same rule for the DateTime
+/// shape alone, and returns its input unchanged rather than `None`, which is
+/// why the two are not one function.
+fn temporal_key(s: &str) -> Option<String> {
+    let body = s.strip_suffix('Z')?;
+    let (base, frac) = match body.find(['.', ',']) {
+        Some(i) => (&body[..i], &body[i + 1..]),
+        None => (body, ""),
+    };
+    // hh:mm:ss (Time) or YYYY-MM-DDThh:mm:ss (DateTime)
+    let shaped = matches!(base.len(), 8 | 19) && frac.len() <= 6;
+    (shaped && frac.bytes().all(|c| c.is_ascii_digit())).then(|| format!("{base}.{frac:0<6}"))
+}
+
 /// `t ∈ [lo, hi]`, both included (4.9 p.90). The parser guarantees both
 /// endpoints share one variant and are never booleans.
 fn in_range(target: &Value, lo: &QValue, hi: &QValue) -> bool {
     match (lo, hi) {
         (QValue::Num(a), QValue::Num(b)) => target.as_f64().is_some_and(|t| t >= *a && t <= *b),
-        (QValue::Str(a), QValue::Str(b)) => target
-            .as_str()
-            .is_some_and(|t| t >= a.as_str() && t <= b.as_str()),
+        // 4.9 p.92 again: a Range over dates or times is an interval on the
+        // temporal axis, so its two inclusive bounds are compared the same
+        // way the ordering operators are. A string range stays a string
+        // range. (A Range only reaches SQL when both endpoints are Numbers,
+        // so this arm has no Postgres twin to diverge from.)
+        (QValue::Str(a), QValue::Str(b)) => target.as_str().is_some_and(|t| {
+            match (temporal_key(t), temporal_key(a), temporal_key(b)) {
+                (Some(tk), Some(ak), Some(bk)) if tk.len() == ak.len() && ak.len() == bk.len() => {
+                    tk >= ak && tk <= bk
+                }
+                _ => t >= a.as_str() && t <= b.as_str(),
+            }
+        }),
         _ => false,
     }
 }
@@ -904,6 +955,105 @@ mod tests {
         ] {
             let ast = parse_q(q).expect(q);
             assert_eq!(eval_q(&ast, &e, &ctx, &|_| None), want, "q={q}");
+        }
+    }
+
+    /// 4.9 p.92: "When comparing dates or times, the order relation
+    /// considered shall be a temporal one." 4.6.3 leaves the seconds
+    /// fraction optional, so one instant has several spellings — and on a
+    /// byte comparison `.` (0x2E) sorts before `Z` (0x5A), which puts
+    /// `…:00.500Z` BEFORE `…:00Z` and drops an entity the query selects.
+    /// EXAMPLE 8 of the clause is exactly this shape
+    /// (`?q=temperature.observedAt>=2017-12-24T12:00:00Z`).
+    #[test]
+    fn dates_and_times_order_temporally_across_fraction_spellings() {
+        let ctx = antares_jsonld::core_context();
+        let at = |v: &str| {
+            json!({
+                "id": "urn:ngsi-ld:Vehicle:3",
+                "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
+                "https://uri.etsi.org/ngsi-ld/default-context/seen": [
+                    {"type": "Property", "value": v}
+                ]
+            })
+        };
+        for (value, q, want) in [
+            // half a second after the bound: greater, however it is spelled
+            (
+                "2020-01-01T00:00:00.500Z",
+                "seen>2020-01-01T00:00:00Z",
+                true,
+            ),
+            (
+                "2020-01-01T00:00:00.500Z",
+                "seen<2020-01-01T00:00:00Z",
+                false,
+            ),
+            (
+                "2020-01-01T00:00:00Z",
+                "seen<2020-01-01T00:00:00.500Z",
+                true,
+            ),
+            (
+                "2020-01-01T00:00:00Z",
+                "seen>2020-01-01T00:00:00.500Z",
+                false,
+            ),
+            // the same instant, two spellings: neither strictly ordered,
+            // both inclusive bounds hold
+            (
+                "2020-01-01T00:00:00.000Z",
+                "seen>2020-01-01T00:00:00Z",
+                false,
+            ),
+            (
+                "2020-01-01T00:00:00.000Z",
+                "seen>=2020-01-01T00:00:00Z",
+                true,
+            ),
+            (
+                "2020-01-01T00:00:00.000Z",
+                "seen<=2020-01-01T00:00:00Z",
+                true,
+            ),
+            // 4.6.3 also admits a comma as the fraction separator
+            (
+                "2020-01-01T00:00:00,500Z",
+                "seen>2020-01-01T00:00:00Z",
+                true,
+            ),
+            // Time carries the same optional fraction
+            ("00:00:00.500Z", "seen>00:00:00Z", true),
+            ("00:00:00Z", "seen>00:00:00.500Z", false),
+            // a Date has no fraction and already orders lexicographically
+            ("2020-01-02", "seen>2020-01-01", true),
+            ("2020-01-01", "seen>2020-01-02", false),
+            // an ordinary string is still ordered as a string
+            (r#"banana"#, r#"seen>"apple""#, true),
+            (r#"apple"#, r#"seen>"banana""#, false),
+            // a Range over instants is an interval on the same axis
+            (
+                "2020-01-01T00:00:00.500Z",
+                "seen==2020-01-01T00:00:00Z..2020-01-01T00:00:01Z",
+                true,
+            ),
+            (
+                "2020-01-01T00:00:01.500Z",
+                "seen==2020-01-01T00:00:00Z..2020-01-01T00:00:01Z",
+                false,
+            ),
+            (
+                "2020-01-01T00:00:00.500Z",
+                "seen!=2020-01-01T00:00:00Z..2020-01-01T00:00:01Z",
+                false,
+            ),
+        ] {
+            let ast = parse_q(q).expect(q);
+            assert_eq!(
+                eval_q(&ast, &at(value), &ctx, &|_| None),
+                want,
+                "value {value:?} against q={q}"
+            );
         }
     }
 
