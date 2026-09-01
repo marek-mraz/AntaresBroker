@@ -415,8 +415,6 @@ mod tests {
         assert!(e.is_open("tenant-b", url));
     }
 
-    /// Both maps are keyed by client-supplied strings (notification endpoints,
-    /// registration ids), so neither may grow without a ceiling: a client that
     /// The ceiling is shared; the isolation must not be. A tenant churning
     /// destinations past it evicts its OWN oldest entry — another tenant's
     /// tripped breaker survives, or every later notification to that
@@ -438,6 +436,8 @@ mod tests {
         );
     }
 
+    /// Both maps are keyed by client-supplied strings (notification endpoints,
+    /// registration ids), so neither may grow without a ceiling: a client that
     /// points subscriptions at thousands of dead hosts must not be able to
     /// spend the broker's memory one entry at a time.
     #[test]
