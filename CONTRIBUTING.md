@@ -24,12 +24,19 @@ Integration tests that need services are env-gated and skip loudly:
 - **One clause = one commit**, message prefixed with the clause number
   (`5.6.6: …`), committed on a green targeted run (`cargo test -p
   <touched-crate> <filter> -j 2`) plus the clause's Robot TPs green against
-  one local memory-store broker:
+  one local memory-store broker (`resources/variables.py` ships upstream's
+  compose addresses, so a bare `robot` run overrides them the way
+  `dev/etsi-run.sh` does):
 
   ```bash
   cargo build -q -p antares-broker -j 2
   ANTARES_HTTP_PORT=9377 ./target/debug/antares &
-  cd ngsi-ld-test-suite && robot --variable url:http://localhost:9377/ngsi-ld/v1 TP/path/to/<tp>.robot
+  cd ngsi-ld-test-suite && robot --variable url:http://localhost:9377/ngsi-ld/v1 \
+    --variable temporal_api_url:http://localhost:9377/ngsi-ld/v1 \
+    --variable notification_server_host:127.0.0.1 \
+    --variable context_source_host:127.0.0.1 \
+    --variable context_server_host:127.0.0.1 \
+    TP/path/to/<tp>.robot
   ```
 
 - **ETSI validation.** `STORE=<mode> dev/etsi-local.sh` runs the suite for

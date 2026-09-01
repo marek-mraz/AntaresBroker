@@ -609,6 +609,37 @@ def suite_count_violations():
     return out
 
 
+def robot_recipe_violations():
+    """The suite ships upstream's compose addresses in `resources/variables.py`:
+    the broker is `scorpio1`, the notification mock and the two context-source
+    mocks are `172.28.0.18`. Both runners rewrite all five before every run, a
+    bare `robot` invocation rewrites none, so a published recipe that omits one
+    points its TPs at a host the box cannot resolve — and `Start Local Server`
+    on an address the box does not own never comes up at all. A documented
+    recipe is runnable only if it overrides everything the runner does."""
+    run = ROOT / "dev/etsi-run.sh"
+    if not run.exists():
+        return [f"{run}: the suite runner is missing"]
+    names = re.findall(r'sed -i "s\|\^(\w+) = ', run.read_text(encoding="utf-8"))
+    if not names:
+        return [f"{run}: no variables.py overrides to compare a recipe against"]
+    out = []
+    for path in [ROOT / "CONTRIBUTING.md", *sorted((ROOT / "docs/src").rglob("*.md"))]:
+        if not path.exists():
+            continue
+        blocks = path.read_text(encoding="utf-8").split("```")
+        for block in blocks[1::2]:
+            if "robot --variable" not in block:
+                continue
+            for name in names:
+                if f"--variable {name}:" not in block:
+                    out.append(
+                        f"{path.relative_to(ROOT)}: a robot recipe leaves {name} at the "
+                        f"suite's compose default, which the runner overrides"
+                    )
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -641,6 +672,7 @@ def cmd_check():
     errors.extend(chapter_violations())
     errors.extend(book_fence_violations())
     errors.extend(suite_count_violations())
+    errors.extend(robot_recipe_violations())
     errors.extend(book_error_title_violations())
 
     for e in errors:

@@ -112,12 +112,19 @@ STORE=file` (reproduce the wasm cell). Results land in `results/$STORE`
 with Robot's own `log.html` per suite.
 
 For a single clause during development, one broker without Docker is
-enough:
+enough. `resources/variables.py` carries the suite's own compose addresses
+(`scorpio1` for the broker, `172.28.0.18` for the notification and
+context-source mocks), which the runners rewrite and a bare `robot` does
+not, so the recipe overrides them itself:
 
 ```bash
 cargo build -q -p antares-broker -j 2
 ANTARES_HTTP_PORT=9377 ./target/debug/antares &
 cd ngsi-ld-test-suite && robot --variable url:http://localhost:9377/ngsi-ld/v1 \
+  --variable temporal_api_url:http://localhost:9377/ngsi-ld/v1 \
+  --variable notification_server_host:127.0.0.1 \
+  --variable context_source_host:127.0.0.1 \
+  --variable context_server_host:127.0.0.1 \
   --outputdir /tmp/robot-566 TP/NGSI-LD/ContextInformation/Provision/Entities/DeleteEntity/566_01.robot
 ```
 
