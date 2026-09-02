@@ -16,7 +16,7 @@
 // elsewhere than the HTTP sink.
 //
 // Env: BROKER_URL, RATE (1000), DURATION (60s), TENANTS, SUBS, ENTITIES,
-//      DELETE_PCT (10), MQTT (0|1).
+//      DELETE_PCT (10), READ_PCT (20), MQTT (0|1).
 
 import http from "k6/http";
 import exec from "k6/execution";
@@ -126,8 +126,10 @@ export default function () {
   const slot = Math.floor(i / TENANTS);
   // decided per slot, not per i: with i the deletes all land on tenant 0
   // whenever 100/DELETE_PCT divides TENANTS
+  // DELETE_PCT=0 means an update-only run: 100/0 is Infinity and slot %
+  // Infinity is slot, which would still delete on the first slot of every VU.
   const period = Math.round(100 / DELETE_PCT);
-  const del = (slot % period) === 0;
+  const del = DELETE_PCT > 0 && (slot % period) === 0;
   if (del && UPDATE_IDS < PER_TENANT) {
     // gen.py numbers entities globally: tenant t owns t, t+TENANTS, t+2·TENANTS, …
     // pool index walks slot/period so consecutive deletes hit fresh ids
