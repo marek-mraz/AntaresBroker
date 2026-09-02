@@ -7,6 +7,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -127,6 +128,25 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// A collector that accepts and then says nothing, holding every connection
+/// open. A closed port answers RST at once, so it never exercises an
+/// exporter waiting on a response — this does. The counter is how the test
+/// knows the exporter really is stuck on it.
+fn black_hole() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            h.fetch_add(1, Ordering::Relaxed);
+            held.push(conn);
+        }
+    });
+    (port, hits)
+}
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -164,8 +184,9 @@ fn log_records_reach_the_collector_next_to_the_spans() {
         std::thread::sleep(Duration::from_millis(250));
     };
     assert!(
-        logs.iter().any(|b| contains(b, b"antares")),
-        "resource service.name travels with the logs"
+        logs.iter()
+            .any(|b| contains(b, b"service.name") && contains(b, b"antares")),
+        "the resource travels with the logs, service.name and all"
     );
     assert!(
         !logs
@@ -179,10 +200,20 @@ fn log_records_reach_the_collector_next_to_the_spans() {
 /// queue is bounded and drained off-path, so /q/health stays fast.
 #[test]
 fn a_dead_collector_never_slows_a_request() {
-    let dead = free_port();
+    let (dead, hits) = black_hole();
     let port = free_port();
     let _b = start(port, &format!("http://127.0.0.1:{dead}/v1/traces"));
     wait_healthy(port);
+    // Measure the request path while the exporter is actually blocked on
+    // the collector, not before it has tried.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while hits.load(Ordering::Relaxed) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the exporter never dialled the collector"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     for _ in 0..5 {
         let t = Instant::now();
         let out = http(port, "/q/health");
