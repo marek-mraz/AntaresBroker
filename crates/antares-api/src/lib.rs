@@ -31,6 +31,7 @@ pub mod snapshots;
 pub mod state;
 pub mod subscriptions;
 pub mod temporal;
+pub mod temporalq;
 pub mod types_attrs;
 
 pub use antares_notifier::DeliveryPolicy;

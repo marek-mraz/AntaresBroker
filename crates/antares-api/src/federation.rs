@@ -1346,7 +1346,7 @@ pub async fn fed_retrieve_temporal(
 ) -> Result<Vec<(bool, Value)>, NgsiError> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
-        temporal: crate::temporal::TemporalQ::from_params(params, false)
+        temporal: crate::temporalq::TemporalQ::from_params(params, false)
             .ok()
             .flatten(),
         ..Default::default()
@@ -2034,7 +2034,7 @@ pub async fn fed_query_temporal(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<(bool, Value)>, NgsiError> {
     let mut spec = query_spec(ctx, params);
-    spec.temporal = crate::temporal::TemporalQ::from_params(params, false)
+    spec.temporal = crate::temporalq::TemporalQ::from_params(params, false)
         .ok()
         .flatten();
     let ctx_url = ctx_link_url(headers, &ctx.source);

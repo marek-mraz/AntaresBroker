@@ -1124,8 +1124,8 @@ pub async fn query_registrations(
             .transpose()?;
         let scope_q = params.get("scopeQ").cloned();
         // temporal query: validate + interval presence rules (5.10.2.4)
-        let temporal =
-            crate::temporal::TemporalQ::from_params(&params, false)?.filter(|t| t.timerel != "any");
+        let temporal = crate::temporalq::TemporalQ::from_params(&params, false)?
+            .filter(|t| t.timerel != "any");
         // 5.10.2.4 fixes the order: run the query returning the
         // registrations that "meet all the applicable conditions", THEN
         // "Pagination logic shall be in place as mandated by clause 5.5.9".
@@ -1282,7 +1282,7 @@ fn q_attr_roots(node: &antares_ql::QNode, out: &mut Vec<String>) {
 }
 
 /// 5.10.2.4 temporal matching against observationInterval/managementInterval.
-pub(crate) fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::TemporalQ) -> bool {
+pub(crate) fn temporal_interval_matches(doc: &Value, tq: &crate::temporalq::TemporalQ) -> bool {
     let key = if tq.timeproperty == "observedAt" {
         "observationInterval"
     } else {
@@ -1335,7 +1335,7 @@ pub struct CsrSpec {
     /// distributed to registrations whose declared interval overlaps the
     /// temporal query; a registration declaring NO interval stays
     /// unconstrained (both members are optional).
-    pub temporal: Option<crate::temporal::TemporalQ>,
+    pub temporal: Option<crate::temporalq::TemporalQ>,
 }
 
 /// 5.2.8: EntityInfo type is a String or String[] — yield every named type.
@@ -1507,7 +1507,7 @@ pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool
                     params.insert(k.into(), s.into());
                 }
             }
-            if let Ok(Some(t)) = crate::temporal::TemporalQ::from_params(&params, false) {
+            if let Ok(Some(t)) = crate::temporalq::TemporalQ::from_params(&params, false) {
                 if t.timerel != "any" && !temporal_interval_matches(reg, &t) {
                     return false;
                 }

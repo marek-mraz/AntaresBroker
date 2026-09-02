@@ -431,7 +431,7 @@ pub fn normalize_subscription(
                 })?;
                 let mut p = std::collections::HashMap::new();
                 crate::paging::temporal_q_params(tq, &mut p)?;
-                crate::temporal::TemporalQ::from_params(&p, true)?;
+                crate::temporalq::TemporalQ::from_params(&p, true)?;
                 out.insert(k.clone(), v.clone());
             }
             // Table 5.2.12-1: "Valid notification triggers are entityCreated,
