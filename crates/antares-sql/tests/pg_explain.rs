@@ -57,6 +57,48 @@ async fn q_predicate_uses_the_gin_jsonb_path_ops_index() {
     );
 }
 
+/// The other two entity indexes. 4.17 type selection is the predicate almost
+/// every request carries, and 4.22 reaping is the one statement that runs on
+/// a timer against the whole table rather than against one tenant: both go
+/// dead the same silent way the `q=` and geo arms once did, and a dead index
+/// there is a full read of `entities` per request and per sweep.
+#[tokio::test]
+async fn type_selection_and_the_expiry_sweep_stay_index_shaped() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+
+    // `types @> ARRAY[…]` is the containment form the compiler emits per
+    // AND-group. The tenant predicate is left out for the same reason the
+    // `q=` plan above leaves it out: it hands the planner the primary key
+    // and hides whether the GIN can serve the containment at all.
+    let plan = plan_of(
+        &pool,
+        r#"SELECT id FROM entities
+           WHERE types @> ARRAY['https://uri.etsi.org/ngsi-ld/default-context/Vehicle']"#,
+    )
+    .await;
+    assert!(
+        plan.contains("i_entities_types"),
+        "type selection no longer routes through the GIN index — plan:\n{plan}"
+    );
+
+    // The reap reads the partial index, not the table: `expires_at` is NULL
+    // for almost every row, which is exactly what the index excludes.
+    let plan = plan_of(
+        &pool,
+        "SELECT id FROM entities WHERE expires_at IS NOT NULL AND expires_at <= now()",
+    )
+    .await;
+    assert!(
+        plan.contains("i_entities_expires"),
+        "the 4.22 sweep no longer routes through its partial index — plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on entities"),
+        "the 4.22 sweep degenerated into a full read of entities — plan:\n{plan}"
+    );
+}
+
 /// 5.12 registration matching must be index-shaped: the whole point of
 /// narrowing candidates through `csource_index` is to stop reading every
 /// registration of the tenant per federated request. The type dimension has to
