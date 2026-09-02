@@ -103,8 +103,11 @@ TCP accept (broker main.rs, TCP_NODELAY)
 
 Handlers are synchronous with respect to the store: `antares-sql`'s
 Postgres driver bridges sqlx through `tokio::task::block_in_place`
-(`store/pg/entity.rs::wait`). Every Postgres round trip therefore parks a
-runtime worker; see §8.
+(`store/pg/entity.rs::wait`, 37 call sites under `store/pg/`). Every
+Postgres round trip therefore parks a runtime worker, the composition root
+sizes the blocking-thread ceiling at `ANTARES_MAX_CONNECTIONS + 1024`
+(`broker/src/main.rs` `runtime`), and the pool (`ANTARES_PG_POOL`, 20)
+answers InternalError after its 5 s acquire timeout; see §8.
 
 ## 5. A change, end to end
 
@@ -192,13 +195,41 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   Postgres call goes through `block_in_place`; the blocking-thread
   ceiling is sized from the connection cap (`antares-broker` `runtime`)
   so a parked caller always wakes; parallelism above the store is
-  bounded by that ceiling. This is the single largest
-  architectural lever left; reversing it touches every driver and
-  ~60 call sites in `antares-api`.
-- `state.rs` closes a module cycle: `AppState` carries closures typed
-  with `notify::Change`, so `state → notify → federation → csource →
-  temporal → bounds → state`. Moving `Change` and the hook types to a
-  leaf module breaks it.
+  bounded by that ceiling, and a current-thread runtime cannot host the
+  Postgres driver at all (`Handle::block_on` inside it panics), which is
+  why the crate's own `#[tokio::test]` suites reach only the memory and
+  redb stores. A dedicated Postgres runtime removes the ceiling but
+  makes every round trip a cross-thread wakeup (measured p99 at 500
+  updates/s: 49 ms to 2 s), so it is not the exit. This is the single
+  largest architectural lever left; reversing it touches every driver
+  and ~60 call sites in `antares-api`, and the object-safe shape for it
+  already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
+  boxed `Send` future returned from a trait method.
+- `antares-api` has one strongly connected component of 14 of its 24
+  modules, counted from every `crate::<module>` reference per file:
+  `attrs, batch, contexts, csource, distsub, entities, entity_maps,
+  federation, history, notify, snapshots, state, subscriptions, temporal`.
+  The other ten (`negotiate`, `bounds`, `repr`, `egress`, `surface`,
+  `conformance`, `geo`, `qeval`, `regexcache`, `types_attrs`) are leaves.
+  `state.rs` closes the component through three names from `notify.rs`:
+  `Change` (a tuple alias), `SubMirror` and `DocMirror`; moving the three
+  to a leaf module takes `state` out of it. `cargo modules` does not show
+  this cycle because it records call edges and not field types, so the
+  source-level count is the one to measure.
+- `antares-api` names `antares-sql` in live code at two places:
+  `state.rs` composes the built-in `AnyStore` for `AppState::new`, and
+  `temporal.rs` calls `compile::temporal::InstanceRange` and
+  `compile::qprefilter::prefilter_exact`, AST-level helpers that live in
+  the SQL crate. Until both move, the crate cannot be built without a
+  backend the way the five shared crates are.
+- ADR-0014 names five hook phases; two of them, `on_request` and
+  `pre_notify`, have no seam in code. The seams that exist are the
+  `ChangeHook`, the temporal drain, the `NotificationSink` boundary and the
+  tower layer stack.
+- `csource.rs` serialises registration writes on one process-wide
+  `tokio::sync::Mutex` (`REGISTRATION_WRITE`) shared by every tenant, and
+  the 5.9.2.4 overlap check of an idPattern-only registration walks up to
+  `MAX_UNDECIDED_ROWS` under it.
 - The distributed-write prologue (`CsrSpec` → `write_regs` →
   `handle_via_loop` → `strip_covered_expanded`) is repeated in
   `entities.rs`, `attrs.rs`, `batch.rs`, `temporal.rs`. One helper.
@@ -279,6 +310,8 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | federation behaviour | `federation.rs` (`forward` is the one outbound chokepoint) | 4.3.6 narrowing is spec-mandated; keep it |
 | the bus or roles | `broker/src/wiring.rs` | ADR-0002 |
 | a role's HTTP surface | `lib.rs` router construction by `roles` | a worker must 404 the API |
+| another standard's API beside NGSI-LD (SensorThings, OGC API, WFS) | an `ApiSurface` under `/x/…` in its own crate that drives the NGSI-LD router in process — `crates/antares-wasm/src/lib.rs` `handle` is the worked `tower::Service::call` | never under `/ngsi-ld/`; every façade request is an NGSI-LD request, so negotiation, bounds and tenancy are not repeated |
+| an authorization decision | nothing in the broker: the gateway in front of it, with the shared crates (`docs/src/shared-crates.md`, "The PEP boundary") | `surface.rs` refuses a surface under the API root for the same reason |
 
 ## 10. Verification ladder
 
