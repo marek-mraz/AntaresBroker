@@ -65,7 +65,7 @@ progress). A memory-store broker answers:
 | `status` | `UP`, or `DRAINING` with status 503 once shutdown began. |
 | `store` | The current-state backend: `memory`, `file`, `postgres`, `timescale`. |
 | `temporal` | The history backend: one of the four, or `none` when history is off (`ANTARES_TEMPORAL`). |
-| `storeInfo`, `temporalInfo` | What each driver actually runs on: `{engine}` for the built-in stores (`memory` or `redb`), and on Postgres `{engine, server, postgis, timescaledb?}` read once at startup. Absent when a driver has nothing to add to its name (`none` history). Two deployments answering `postgres` are told apart here. |
+| `storeInfo`, `temporalInfo` | What each driver actually runs on: `{engine}` for the built-in stores (`memory` or `redb`), and on Postgres `{engine, poolSize, poolAcquireTimeoutSeconds, server, postgis?, timescaledb?}` — the pool's own shape always, the server probe read once at startup and omitted if it failed. Absent when a driver has nothing to add to its name (`none` history). Two deployments answering `postgres` are told apart here. |
 | `version`, `commit` | Workspace version and the git hash the binary was built from. |
 | `notificationSchemes` | The `notification.endpoint.uri` schemes this build can deliver to — the registered bindings (6.3.8, clause 7, and any a deployment added). A subscription naming a scheme absent here is refused at creation with `BadRequestData`. |
 | `deadLetters` | Dead letters this process wrote since start ([notification delivery](operations.md#notification-delivery)). |
@@ -104,8 +104,10 @@ Prometheus text with the `antares_` prefix:
 | `antares_notification_changes_dropped_total` | Change events the notifier dropped under back-pressure. |
 | `antares_notification_task_panics_total` | Delivery tasks that panicked (a bug, never expected). |
 | `antares_change_lag_seconds` | Age of the change a notifier is handling. |
+| `antares_pg_transaction_begin_seconds` | `postgres`/`timescale`: time to obtain a pooled connection and open a transaction — the pool wait plus one BEGIN round trip. |
+| `antares_pg_pool_timeouts_total` | `postgres`/`timescale`: acquire timeouts, each one a request answered 503 with `Retry-After`. |
 
-Both `_seconds` metrics are true histograms, bucketed at 5 ms, 10 ms, 25 ms,
+Every `_seconds` metric is a true histogram, bucketed at 5 ms, 10 ms, 25 ms,
 50 ms, 100 ms, 250 ms, 500 ms, 1 s, 2.5 s, 5 s, 10 s, 30 s and 60 s. The
 bounds are what `histogram_quantile()` can resolve, and the top ones exist
 because service time reaches tens of seconds once the accept path saturates.

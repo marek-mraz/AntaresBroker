@@ -51,6 +51,15 @@ pub enum NgsiError {
     TooManyResults(String),
 }
 
+/// The `InternalError` detail a storage driver sets when its connection
+/// pool ran out of time handing over a connection. It is not a Table
+/// 6.3.2-1 error type: the HTTP binding answers it 503 with `Retry-After`
+/// (6.3.2 "implementations shall support the standard specific errors of
+/// HTTP bindings, such as the following", an open list). Both the driver
+/// that raises it and the binding that recognises it name this constant,
+/// so the two ends cannot drift.
+pub const DB_OVERLOADED: &str = "database overloaded";
+
 impl NgsiError {
     /// HTTP status per Table 6.3.2-1.
     pub fn status(&self) -> u16 {

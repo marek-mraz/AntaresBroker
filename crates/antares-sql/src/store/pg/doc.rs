@@ -362,7 +362,7 @@ impl PgDocStore {
     ) -> Result<bool, sqlx::Error> {
         let conflict = " ON CONFLICT (tenant_id, id) DO NOTHING RETURNING true AS created";
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let created = insert_doc(&mut tx, tenant, kind, id, doc, conflict)
@@ -403,7 +403,7 @@ impl PgDocStore {
             )
         };
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             // INSERT … ON CONFLICT DO UPDATE … RETURNING always answers with
@@ -431,7 +431,7 @@ impl PgDocStore {
             kind.table()
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
@@ -501,7 +501,7 @@ impl PgDocStore {
              RETURNING d.{col}, prev.ls"
         );
         wait(async move {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(tenant.as_str())
@@ -542,7 +542,7 @@ impl PgDocStore {
             format!("UPDATE {table} SET {col} = $3 WHERE tenant_id = $1 AND id = $2")
         };
         wait(async move {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(select.clone()))
                 .bind(tenant.as_str())
@@ -597,7 +597,7 @@ impl PgDocStore {
             kind.table()
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
@@ -637,7 +637,7 @@ impl PgDocStore {
             kind.table()
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
@@ -673,7 +673,7 @@ impl PgDocStore {
         );
         let count_sql = format!("SELECT count(*) FROM {} WHERE tenant_id = $1", kind.table());
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
                 .bind(tenant.as_str())
@@ -707,7 +707,7 @@ impl PgDocStore {
             kind.table()
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
@@ -782,7 +782,7 @@ impl PgDocStore {
             n + 1
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(tenant.as_str());
             if let Some(types) = types {
@@ -810,7 +810,7 @@ impl PgDocStore {
             kind.table()
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())

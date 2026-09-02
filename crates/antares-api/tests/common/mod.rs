@@ -24,6 +24,7 @@ pub struct Double {
     refuse_registrations: bool,
     refuse_doc: Option<(Kind, String)>,
     refuse_create: Option<(Kind, String)>,
+    overloaded: bool,
 }
 
 impl Double {
@@ -40,6 +41,25 @@ impl Double {
             refuse_registrations: false,
             refuse_doc: None,
             refuse_create: None,
+            overloaded: false,
+        }
+    }
+
+    /// Every read answers the way a storage driver answers when its
+    /// connection pool ran out of time: the operation was never attempted,
+    /// and the detail is the constant the HTTP binding turns into 503 with
+    /// `Retry-After`.
+    pub fn overloaded(inner: Arc<dyn CurrentStateDriver>) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicUsize::new(0),
+            delete_on_get: false,
+            racing_write: None,
+            raced: AtomicBool::new(false),
+            refuse_registrations: false,
+            refuse_doc: None,
+            refuse_create: None,
+            overloaded: true,
         }
     }
 
@@ -57,6 +77,7 @@ impl Double {
             refuse_registrations: false,
             refuse_doc: None,
             refuse_create: None,
+            overloaded: false,
         }
     }
 
@@ -76,6 +97,7 @@ impl Double {
             refuse_registrations: false,
             refuse_doc: None,
             refuse_create: None,
+            overloaded: false,
         }
     }
 
@@ -107,6 +129,7 @@ impl Double {
             refuse_registrations: true,
             refuse_doc: None,
             refuse_create: None,
+            overloaded: false,
         }
     }
 
@@ -124,6 +147,7 @@ impl Double {
             refuse_registrations: false,
             refuse_doc: Some((kind, id.to_owned())),
             refuse_create: None,
+            overloaded: false,
         }
     }
 
@@ -141,6 +165,7 @@ impl Double {
             refuse_registrations: false,
             refuse_doc: None,
             refuse_create: Some((kind, id.to_owned())),
+            overloaded: false,
         }
     }
 
@@ -151,6 +176,16 @@ impl Double {
             .is_some_and(|(k, i)| *k == kind && i == id)
         {
             return Err(NgsiError::InternalError(format!("{id} not writable")));
+        }
+        Ok(())
+    }
+
+    /// The connection pool gave up before this call could start.
+    fn pool_wall(&self) -> Result<(), NgsiError> {
+        if self.overloaded {
+            return Err(NgsiError::InternalError(
+                antares_model::error::DB_OVERLOADED.into(),
+            ));
         }
         Ok(())
     }
@@ -169,6 +204,7 @@ impl Double {
 
 impl CurrentStateDriver for Double {
     fn list(&self, tenant: &TenantId, kind: Kind) -> Result<Vec<Value>, NgsiError> {
+        self.pool_wall()?;
         if self
             .fail_next
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -188,6 +224,7 @@ impl CurrentStateDriver for Double {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Value>, NgsiError> {
+        self.pool_wall()?;
         self.inner.list_page(tenant, kind, after, limit)
     }
 
@@ -200,6 +237,7 @@ impl CurrentStateDriver for Double {
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<Value>, usize), NgsiError> {
+        self.pool_wall()?;
         self.inner.list_slice(tenant, kind, offset, limit)
     }
 
@@ -219,6 +257,7 @@ impl CurrentStateDriver for Double {
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError> {
+        self.pool_wall()?;
         self.refused_create(kind, id)?;
         self.inner.create(tenant, kind, id, doc)
     }
@@ -246,9 +285,11 @@ impl CurrentStateDriver for Double {
         id: &str,
         doc: Value,
     ) -> Result<bool, NgsiError> {
+        self.pool_wall()?;
         self.inner.upsert(tenant, kind, id, doc)
     }
     fn get(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Option<Value>, NgsiError> {
+        self.pool_wall()?;
         self.refused(kind, id)?;
         let doc = self.inner.get(tenant, kind, id)?;
         if self.delete_on_get && doc.is_some() {
@@ -258,6 +299,7 @@ impl CurrentStateDriver for Double {
         Ok(doc)
     }
     fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<bool, NgsiError> {
+        self.pool_wall()?;
         self.refused(kind, id)?;
         self.inner.delete(tenant, kind, id)
     }
@@ -276,6 +318,7 @@ impl CurrentStateDriver for Double {
         ids: Option<&[String]>,
         types: Option<&[String]>,
     ) -> Result<Vec<Value>, NgsiError> {
+        self.pool_wall()?;
         if self.refuse_registrations {
             return Err(NgsiError::InternalError("registrations unreadable".into()));
         }
@@ -286,6 +329,7 @@ impl CurrentStateDriver for Double {
         tenant: &TenantId,
         f: &antares_store::filter::EntityFilter<'_>,
     ) -> Result<antares_store::filter::QueryOutcome, NgsiError> {
+        self.pool_wall()?;
         self.inner.query_entities(tenant, f)
     }
     fn mutate_boxed<'a>(

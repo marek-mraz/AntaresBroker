@@ -330,7 +330,7 @@ impl PgEntityStore {
     pub fn create(&self, tenant: &TenantId, id: &str, doc: &Value) -> Result<bool, sqlx::Error> {
         let e = extract(doc);
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let done = sqlx::query(
@@ -385,7 +385,7 @@ impl PgEntityStore {
 
     pub fn get(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: expired rows are invalid context until the sweep reaps them
             let row = sqlx::query(
@@ -405,7 +405,7 @@ impl PgEntityStore {
     /// transaction as the DELETE — never re-read outside it), `None` = absent.
     pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: an already-expired row is invalid, so deleting it is a
             // 404 exactly as retrieving it is — never a 204 for an entity the
@@ -461,7 +461,7 @@ impl PgEntityStore {
         keep: &dyn Fn(&Value) -> bool,
     ) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = $2
@@ -643,7 +643,7 @@ impl PgEntityStore {
         let ceiling = MAX_UNDECIDED_ROWS;
         let (sql, paged) = query_sql(&select, &wheres, f.page.as_ref(), decided, &mut binds);
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // sqlx 0.9 makes dynamic SQL opt-in. The assertion holds by
             // construction: `sql` is built from this function's own literals
@@ -741,7 +741,7 @@ impl PgEntityStore {
     /// prefix.
     pub fn list(&self, tenant: &TenantId) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut docs: Vec<Value> = Vec::new();
             {
@@ -787,7 +787,7 @@ impl PgEntityStore {
         limit: i64,
     ) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "SELECT entity FROM entities WHERE tenant_id = $1 AND id > $2
@@ -814,7 +814,7 @@ impl PgEntityStore {
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // 4.22: an expired row is invalid, so a patch of it is a 404 —
             // the same answer the retrieve it would follow already gives.
@@ -912,7 +912,7 @@ impl PgEntityStore {
             }
         }
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
@@ -990,7 +990,7 @@ impl PgEntityStore {
         ids: &[String],
     ) -> Result<Vec<(String, Value)>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 "DELETE FROM entities WHERE tenant_id = $1 AND id = ANY($2)
@@ -1064,7 +1064,7 @@ impl PgEntityStore {
             }
         }
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             // lock + before-images in one statement (ordered: stable lock order)
@@ -1175,7 +1175,7 @@ impl PgEntityStore {
         mut f: impl FnMut(&str, &mut Value) -> Result<(), E>,
     ) -> Result<Vec<Option<Result<(), E>>>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let rows = sqlx::query(
                 // 4.22: an expired entity is invalid, so it is not a row this
@@ -1302,7 +1302,7 @@ impl PgEntityStore {
     /// Current row version (test hook for the version-monotonicity assertions).
     pub fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let row = sqlx::query("SELECT version FROM entities WHERE tenant_id = $1 AND id = $2")
                 .bind(tenant.as_str())

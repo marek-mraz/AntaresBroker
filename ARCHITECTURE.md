@@ -112,8 +112,12 @@ Postgres driver bridges sqlx through `tokio::task::block_in_place`
 (`store/pg/entity.rs::wait`, 37 call sites under `store/pg/`). Every
 Postgres round trip therefore parks a runtime worker, the composition root
 sizes the blocking-thread ceiling at `ANTARES_MAX_CONNECTIONS + 1024`
-(`broker/src/main.rs` `runtime`), and the pool (`ANTARES_PG_POOL`, 20)
-answers InternalError after its 5 s acquire timeout; see §8.
+(`broker/src/main.rs` `runtime`). The pool (`ANTARES_PG_POOL`, 20) answers
+503 with `Retry-After` after its 5 s acquire timeout — the driver marks a
+`PoolTimedOut` with `antares_model::error::DB_OVERLOADED` and
+`negotiate::ApiError::Overloaded` renders it — and every transaction opens
+through `store/pg/mod.rs::begin`, which times the wait into
+`antares_pg_transaction_begin_seconds`; see §8.
 
 ## 5. A change, end to end
 

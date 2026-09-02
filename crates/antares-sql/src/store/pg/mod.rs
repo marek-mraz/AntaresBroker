@@ -150,6 +150,20 @@ pub async fn role_bypasses_rls(pool: &PgPool) -> bool {
 /// broker serves fine without knowing its own server version — so the caller
 /// gets an empty object and health simply says nothing.
 pub async fn version_info(pool: &PgPool) -> Value {
+    // The pool's own shape is what an operator sizes against, and it is
+    // known without asking the server: how many connections this process may
+    // hold, and how long a request waits for one before the broker answers
+    // 503. Both are reported even when the version probe fails.
+    let mut m = serde_json::Map::new();
+    m.insert("engine".into(), "postgres".into());
+    m.insert(
+        "poolSize".into(),
+        pool.options().get_max_connections().into(),
+    );
+    m.insert(
+        "poolAcquireTimeoutSeconds".into(),
+        pool.options().get_acquire_timeout().as_secs().into(),
+    );
     let row: Result<(String, Option<String>, Option<String>), sqlx::Error> = sqlx::query_as(
         "SELECT current_setting('server_version'), \
          (SELECT extversion FROM pg_extension WHERE extname = 'postgis'), \
@@ -159,8 +173,6 @@ pub async fn version_info(pool: &PgPool) -> Value {
     .await;
     match row {
         Ok((server, postgis, timescale)) => {
-            let mut m = serde_json::Map::new();
-            m.insert("engine".into(), "postgres".into());
             m.insert("server".into(), server.into());
             if let Some(v) = postgis {
                 m.insert("postgis".into(), v.into());
@@ -168,13 +180,27 @@ pub async fn version_info(pool: &PgPool) -> Value {
             if let Some(v) = timescale {
                 m.insert("timescaledb".into(), v.into());
             }
-            Value::Object(m)
         }
         Err(e) => {
             tracing::warn!("server version probe failed ({e}); /q/health will not report it");
-            Value::Object(serde_json::Map::new())
         }
     }
+    Value::Object(m)
+}
+
+/// Open a transaction, timing what it cost to get one. `Pool::begin` is the
+/// only way to a `Transaction<'static>` (sqlx owns the pooled connection
+/// inside it), so the measurement covers the pool wait plus one BEGIN round
+/// trip; the round trip is sub-millisecond and the wait is what grows, up to
+/// the acquire timeout. Every transactional store call goes through here, so
+/// `antares_pg_transaction_begin_seconds` is where pool pressure shows.
+pub(crate) async fn begin(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, sqlx::Error> {
+    let t0 = std::time::Instant::now();
+    let tx = pool.begin().await;
+    metrics::histogram!("antares_pg_transaction_begin_seconds").record(t0.elapsed().as_secs_f64());
+    tx
 }
 
 fn bypasses(probe: Result<bool, sqlx::Error>) -> bool {

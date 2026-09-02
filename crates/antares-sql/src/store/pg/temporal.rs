@@ -382,7 +382,7 @@ impl PgTemporalStore {
         let meta = meta_of(doc);
         let rows = decompose(doc);
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             crate::store::pg::claim_tenant(&mut tx, tenant).await?;
             let reaped = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -447,7 +447,7 @@ impl PgTemporalStore {
         let meta = meta_of(shell);
         let rows = decompose(additions);
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             if !self.temporal_only {
                 let live = sqlx::query(
@@ -505,7 +505,7 @@ impl PgTemporalStore {
     /// locally" means, the same way `get_range` and `query` decide it.
     pub fn delete(&self, tenant: &TenantId, id: &str) -> Result<bool, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let n = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM temporal_entities m \
@@ -730,7 +730,7 @@ impl PgTemporalStore {
              WHERE {where_sql}{tail}"
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // `sql` is compiler literals + $n placeholders only.
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()));
@@ -818,7 +818,7 @@ impl PgTemporalStore {
              WHERE m.tenant_id = $1 AND m.id = $2 AND {NOT_EXPIRED}"
         );
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             let mut qy = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(tenant.as_str())
@@ -848,7 +848,7 @@ impl PgTemporalStore {
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, sqlx::Error> {
         wait(async {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = super::begin(&self.pool).await?;
             crate::store::pg::set_tenant(&mut tx, tenant).await?;
             // the meta row is the serialization point (FOR UPDATE). 4.22
             // qualifies it: 5.6.12 to 5.6.15 reach the history through here,

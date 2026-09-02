@@ -15,6 +15,9 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 redb = { workspace = true }
 sqlx = { workspace = true, optional = true }
+# the Postgres arm's pool-pressure histogram; a facade with no recorder
+# installed (telemetry off, or a test) compiles to a no-op
+metrics = { workspace = true, optional = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 
@@ -36,7 +39,7 @@ antares-store = { workspace = true, features = ["test-kit"] }
 # it off and gets the memory store through the same seam. A feature gate
 # only — every gated item keeps its behaviour verbatim.
 default = ["postgres"]
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "dep:metrics"]
 
 [lints]
 workspace = true

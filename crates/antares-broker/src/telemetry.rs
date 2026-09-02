@@ -250,6 +250,18 @@ fn describe() {
         Unit::Count,
         "file mode: writers queued behind the single redb committer"
     );
+    describe_histogram!(
+        "antares_pg_transaction_begin_seconds",
+        Unit::Seconds,
+        "postgres: time to obtain a pooled connection and open a transaction \
+         — the pool wait plus one BEGIN round trip, so this is where pool \
+         pressure shows"
+    );
+    describe_counter!(
+        "antares_pg_pool_timeouts_total",
+        Unit::Count,
+        "postgres: acquire timeouts — the request was answered 503 with Retry-After"
+    );
     describe_gauge!(
         "antares_limit_rejections_total",
         Unit::Count,

@@ -39,6 +39,20 @@ pub(crate) fn db(e: sqlx::Error) -> NgsiError {
             }
         };
     }
+    // The pool handed out no connection inside its acquire timeout: the
+    // broker is holding every connection it may hold and the caller waited
+    // the whole wall. That is overload, not a fault — the binding answers it
+    // 503 with Retry-After (`negotiate::ApiError::Overloaded`), so the detail
+    // is the constant both ends name.
+    if matches!(e, sqlx::Error::PoolTimedOut) {
+        metrics::counter!("antares_pg_pool_timeouts_total").increment(1);
+        tracing::warn!(
+            "connection pool exhausted: no connection within the acquire timeout \
+             (raise ANTARES_PG_POOL, or the request rate is above what this \
+             database can serve)"
+        );
+        return NgsiError::InternalError(antares_model::error::DB_OVERLOADED.into());
+    }
     // 5.5.2: "database timeouts" are InternalError. SQLSTATE 57014 is the
     // session's statement_timeout firing — named in the detail so a wall hit
     // reads differently from a broken query in the operator's log.
@@ -1108,7 +1122,26 @@ impl AnyStore {
 
 #[cfg(all(test, feature = "postgres"))]
 mod db_error_tests {
+    #[allow(unused_imports)]
     use antares_model::NgsiError;
+
+    /// An acquire timeout is overload, not a fault, and the HTTP binding
+    /// recognises it by this exact detail. If the two ends ever spell it
+    /// differently the broker answers 500 to a condition a client could
+    /// have retried, so the constant is asserted rather than the words.
+    #[test]
+    fn a_pool_timeout_is_marked_as_overload() {
+        let pd = super::db(sqlx::Error::PoolTimedOut).to_problem_details();
+        assert_eq!(pd.detail, antares_model::error::DB_OVERLOADED);
+        assert_eq!(pd.title, "InternalError");
+        // and no other sqlx error borrows the mark
+        assert_ne!(
+            super::db(sqlx::Error::RowNotFound)
+                .to_problem_details()
+                .detail,
+            antares_model::error::DB_OVERLOADED
+        );
+    }
 
     /// 5.5.6 InternalError: the RFC 7807 `detail` a client sees must be
     /// generic — driver internals (SQL text, row counts, connection

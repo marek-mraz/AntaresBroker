@@ -25,7 +25,7 @@ here).
 | `ANTARES_DATA_DIR` | — (required for `file`) | Directory for the redb file. Must be a mounted volume — data never lives inside the image. |
 | `ANTARES_DATABASE_URL` | — (required for `postgres`/`timescale`) | PostgreSQL connection string; PostGIS required, TimescaleDB for `timescale`. Bounded startup retry while the DB boots. |
 | `ANTARES_REQUIRE_RLS` | unset | `1`/`true`: refuse to start when the DB role bypasses Row-Level Security (defense-in-depth for shared-schema multi-tenancy). |
-| `ANTARES_PG_POOL` | `20` | Connection-pool size for `postgres`/`timescale`. Unparsable value = fatal. Sessions carry `lock_timeout` 5 s. |
+| `ANTARES_PG_POOL` | `20` | Connection-pool size for `postgres`/`timescale`. Unparsable value = fatal. Sessions carry `lock_timeout` 5 s. A request that waits the pool's 5 s acquire timeout without getting a connection is answered `503` with `Retry-After` — see the sizing formula in the [operations runbook](operations.md#sizing-the-connection-pool). |
 | `ANTARES_PG_STATEMENT_TIMEOUT_MS` | `30000` | Per-session `statement_timeout` on every pooled connection: a query past it is cancelled and answered `InternalError` (500, "database statement timeout"; CIM 009 5.5.2 names database timeouts as InternalError). Migrations are exempt. Not a positive integer = fatal. |
 | `ANTARES_MIGRATE` | on | `0`/`false` skips running migrations from this process, so serving replicas do not race the DDL — run them once from a job or init container instead. |
 | `ANTARES_ALLOW_SHARED_LOCAL` | unset | `1` permits `bus=local` with a `postgres`/`timescale` store — safe ONLY for a strictly single-process deployment; two such processes double-fire notifications. |

@@ -212,6 +212,7 @@ dependencies = [
  "antares-store",
  "chrono",
  "futures-util",
+ "metrics",
  "redb",
  "serde_json",
  "sqlx",

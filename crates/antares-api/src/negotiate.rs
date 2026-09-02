@@ -74,10 +74,27 @@ pub enum ApiError {
     Bare(StatusCode),
     /// 6.3.4: 406 whose body lists the available representations.
     NotAcceptable(&'static [&'static str]),
+    /// The store has no connection to give inside its acquire timeout.
+    /// 503 with `Retry-After`, carrying the seconds to wait.
+    Overloaded(u64),
 }
+
+/// How long a client is told to wait after a 503. The store waited its whole
+/// acquire timeout before answering, so a retry sooner than that walks into
+/// the same wall; one second past it is the first moment the queue can have
+/// moved.
+const RETRY_AFTER_SECONDS: u64 = 6;
 
 impl From<NgsiError> for ApiError {
     fn from(e: NgsiError) -> Self {
+        // A pool that timed out is overload, not a fault: the operation was
+        // never attempted and the same request will succeed once the queue
+        // drains. The driver marks it with the detail both ends name.
+        if let NgsiError::InternalError(d) = &e {
+            if d == antares_model::error::DB_OVERLOADED {
+                return Self::Overloaded(RETRY_AFTER_SECONDS);
+            }
+        }
         Self::Ngsi(e)
     }
 }
@@ -102,6 +119,18 @@ impl IntoResponse for ApiError {
                     .into_response()
             }
             Self::Bare(code) => code.into_response(),
+            // 6.3.2 requires the HTTP binding's own status codes beside
+            // Table 6.3.2-1 ("such as the following", an open list), and
+            // 6.3.4 answers the binding's own conditions with the bare
+            // status. Overload is one of those: 503 with Retry-After
+            // (RFC 7231 clause 6.6.4, clause 7.1.3), no ProblemDetails body,
+            // and no ETSI error type claimed for a condition the spec does
+            // not name.
+            Self::Overloaded(secs) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, secs.to_string())],
+            )
+                .into_response(),
             // 6.3.4: "the body of the message shall contain the list of the
             // available representations of the resources"
             Self::NotAcceptable(available) => (

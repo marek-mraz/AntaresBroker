@@ -52,6 +52,46 @@ during an outage the API keeps serving (writes land in the transactional
 outbox), `/q/ready` goes 503, and on reconnect the outbox drains — the
 outage-time notifications arrive, none lost.
 
+## Sizing the connection pool
+
+`ANTARES_PG_POOL` (default 20) is how many PostgreSQL connections one broker
+process may hold. It is a ceiling on concurrent database work, not a
+throughput dial, and the measured runs say the dial does very little: on a
+16-physical-core box pool 100 is 8 % faster than pool 20 at eight allotted
+cores and 10 % slower at 1 024 concurrent query clients, and both pools hold
+the same 1 000 rps write knee and fail at the same 1 500
+([performance](performance.md#the-measured-ceiling)). Raise it to buy
+concurrency the database can actually serve, never to buy speed.
+
+Size it from the database, not from the broker:
+
+```
+ANTARES_PG_POOL  <=  (max_connections - superuser_reserved_connections - other clients)
+                     / number of broker replicas
+```
+
+A pool larger than the server's share does not fail at startup — it fails
+later, at the first burst, as `FATAL: sorry, too many clients already` from
+whichever client asks last. Leave headroom for the migration job, the
+replicas rolling during an update, and anything else on the same database.
+
+Three signals say the pool is the constraint:
+
+| Signal | Where | Reading |
+|---|---|---|
+| `antares_pg_transaction_begin_seconds` | `/q/metrics` | time to get a pooled connection and open a transaction. Sub-millisecond when the pool is idle; it grows toward the 5 s acquire timeout as the pool empties. |
+| `antares_pg_pool_timeouts_total` | `/q/metrics` | requests that waited the whole acquire timeout and got nothing. Any non-zero rate means clients are being turned away. |
+| `storeInfo.poolSize`, `storeInfo.poolAcquireTimeoutSeconds` | `/q/health` | what this process was configured with, so a dashboard does not have to trust the deployment manifest. |
+
+When the pool has nothing to give inside its acquire timeout, the request is
+answered **503** with a `Retry-After` header and no body. The operation was
+never attempted, so the client may retry the same request unchanged; a batch
+that had already written part of its array reports the failure per item
+instead, and never as a 503 the client would retry into duplicates. This is
+an Antares decision, not a CIM 009 requirement: Table 6.3.2-1 has no error
+type for an overloaded server, and clause 6.3.2 requires the HTTP binding's
+own status codes beside it.
+
 ## Observability
 
 Three signals, one switch (`ANTARES_TELEMETRY`):

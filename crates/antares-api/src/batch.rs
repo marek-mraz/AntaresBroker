@@ -293,6 +293,13 @@ fn ngsi_of(e: ApiError) -> NgsiError {
         ApiError::Ngsi(n) => n,
         ApiError::Bare(code) => NgsiError::BadRequestData(format!("HTTP {code}")),
         ApiError::NotAcceptable(_) => NgsiError::BadRequestData("HTTP 406".into()),
+        // One item of a batch cannot answer 503: the array's other entries
+        // may have succeeded, and 5.6.7.4 gives each failure its own
+        // ProblemDetails. The item carries the same detail the whole-request
+        // answer would, so the cause is not lost in the collapse.
+        ApiError::Overloaded(_) => {
+            NgsiError::InternalError(antares_model::error::DB_OVERLOADED.into())
+        }
     }
 }
 
