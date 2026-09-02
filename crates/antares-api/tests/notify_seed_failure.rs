@@ -35,8 +35,7 @@ use tower::ServiceExt;
 /// set_var once: a sibling test reading the env while another rewrites it
 /// saw the policy missing and refused the loopback forward.
 fn allow_private() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+    antares_jsonld::allow_private_egress(true);
 }
 
 async fn send(st: &AppState, path: &str, doc: Value) -> (StatusCode, String) {

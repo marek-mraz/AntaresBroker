@@ -72,7 +72,7 @@ async fn register(st: &AppState, port: u16, mode: &str) {
 /// (>= 1500 ms) with margin on both sides.
 #[tokio::test(flavor = "multi_thread")]
 async fn fanout_is_concurrent_and_complete() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let st = AppState::new("antares1".into());
     let delay = std::time::Duration::from_millis(500);
     let ids = [

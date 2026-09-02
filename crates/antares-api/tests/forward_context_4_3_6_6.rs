@@ -105,7 +105,7 @@ fn read_request(s: &mut std::net::TcpStream) -> String {
 }
 
 fn state() -> AppState {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     AppState::new("antares-ctxfwd".into())
 }
 

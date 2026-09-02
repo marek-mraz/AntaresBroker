@@ -57,7 +57,7 @@ fn reply_without_length(body: &str) -> String {
 }
 
 fn state() -> AppState {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     std::env::set_var("ANTARES_MAX_FED_RESPONSE_BYTES", "2048");
     AppState::new("antares1".into())
 }

@@ -18,11 +18,12 @@ use axum::http::Request;
 use std::io::{Read, Write};
 use tower::ServiceExt;
 
-/// set_var once: a sibling test reading the env while another rewrites it
-/// saw the policy missing and refused the loopback forward (TSan flake).
+/// The programmatic egress override, not `ANTARES_EGRESS_ALLOW_PRIVATE`: a
+/// sibling test reading the environment while another rewrote it saw the
+/// policy missing and refused the loopback forward. An atomic store carries
+/// the same switch with no write for a reader to land in the middle of.
 fn allow_private() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+    antares_jsonld::allow_private_egress(true);
 }
 
 const ENTITY: &str = "urn:ngsi-ld:Vehicle:split572";

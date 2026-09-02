@@ -68,8 +68,7 @@ async fn post(st: &AppState, uri: &str, body: String) -> (StatusCode, Value) {
 /// set_var once: a sibling test reading the env while this one rewrites it
 /// saw the policy missing and refused the loopback forward (TSan flake).
 fn allow_private() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+    antares_jsonld::allow_private_egress(true);
 }
 
 /// Canned Context Source answering every request with `reply` (raw HTTP).

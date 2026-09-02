@@ -188,7 +188,7 @@ fn snapshot_and_entity_map_survive_restart() {
 /// (before the promotion this was a guaranteed 404).
 #[test]
 fn dist_sub_mapping_survives_restart() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let dir = scratch_dir("distsub");
 
     let first = rt();

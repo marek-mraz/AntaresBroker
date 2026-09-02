@@ -166,8 +166,7 @@ fn state() -> AppState {
     // The mock source is loopback, denied by the egress policy by default.
     // Set once: a sibling test reading the variable while another rewrites
     // it saw the policy missing and refused the forward.
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+    antares_jsonld::allow_private_egress(true);
     AppState::new(ALIAS.into())
 }
 

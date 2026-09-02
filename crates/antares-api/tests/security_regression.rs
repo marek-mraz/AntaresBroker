@@ -160,7 +160,7 @@ async fn deleted_subscription_stops_notifying() {
 
     // egress: the receiver is loopback, which is denied by default —
     // allow it for this process the way the ETSI stacks do
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test".into());
     antares_api::notify::wire(&mut st);
     let st = st;

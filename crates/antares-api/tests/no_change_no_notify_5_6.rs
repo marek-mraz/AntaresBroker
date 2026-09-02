@@ -15,8 +15,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 fn allow_private() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
+    antares_jsonld::allow_private_egress(true);
 }
 
 async fn call(st: &AppState, method: &str, path: &str, body: &str) -> (StatusCode, String) {

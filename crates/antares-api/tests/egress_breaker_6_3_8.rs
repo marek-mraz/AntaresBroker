@@ -260,7 +260,7 @@ async fn wait_hits(hits: &AtomicUsize, want: usize, ms: u64) -> usize {
 }
 
 fn state() -> AppState {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("antares1".into());
     antares_api::notify::wire(&mut st);
     st

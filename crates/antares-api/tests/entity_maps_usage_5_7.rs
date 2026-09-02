@@ -148,7 +148,7 @@ async fn clause_5_7_1_4_unknown_map_reference_recreates() {
 /// matching registration OUT of the retrieve.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_1_4_live_map_gates_registrations() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let st = state();
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:r3", 30).await;
 

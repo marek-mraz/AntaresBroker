@@ -115,7 +115,7 @@ fn entity_count(body: &str) -> usize {
 /// list stays within one chunk (limit.max(20)), so memory is O(page).
 #[tokio::test(flavor = "multi_thread")]
 async fn map_paging_fetches_only_the_pages_chunk() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let st = AppState::new("antares1".into());
     let m = mock_source();
     let body = serde_json::json!({

@@ -98,7 +98,7 @@ async fn send(st: &AppState, path: &str, body: Value) -> StatusCode {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_initial_csource_notification_is_cut_into_bounded_bodies() {
     std::env::set_var("ANTARES_MAX_BODY_BYTES", "4096");
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let cap = 4096usize;
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);

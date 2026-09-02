@@ -520,7 +520,7 @@ async fn clause_5_14_5_temporal_map() {
 /// linkedMaps records the remote map id.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_14_4_federated_map_merge() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let st = state();
     create_vehicle(&st, "urn:ngsi-ld:Vehicle:localf", 10).await;
 

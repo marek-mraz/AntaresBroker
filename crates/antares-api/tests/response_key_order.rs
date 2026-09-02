@@ -167,7 +167,7 @@ async fn capture_raw() -> (String, tokio::sync::mpsc::Receiver<String>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn notification_data_entities_lead_with_id_then_type() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     let (uri, mut rx) = capture_raw().await;

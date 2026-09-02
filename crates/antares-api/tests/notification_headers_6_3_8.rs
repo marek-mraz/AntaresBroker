@@ -63,7 +63,7 @@ async fn capture_headers() -> (String, tokio::sync::mpsc::Receiver<HeaderMap>) {
 
 #[tokio::test]
 async fn a_receiver_info_pair_never_doubles_a_header_the_binding_owns() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     let (uri, mut rx) = capture_headers().await;

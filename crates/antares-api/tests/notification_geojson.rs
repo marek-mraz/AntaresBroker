@@ -55,7 +55,7 @@ async fn capture_server() -> (String, tokio::sync::mpsc::Receiver<Value>) {
 }
 
 async fn notified_body(receiver_info: Option<Value>) -> Value {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
     let (uri, mut rx) = capture_server().await;

@@ -41,7 +41,7 @@ async fn send(st: &AppState, method: &str, path: &str) -> (StatusCode, Value) {
 }
 
 fn state() -> AppState {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     AppState::new("antares-dead-letters".into())
 }
 

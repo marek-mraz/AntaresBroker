@@ -53,7 +53,7 @@ async fn counting_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicU
 
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_2_12_throttling_suppresses_consecutive_notifications() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("antares-throttle".into());
     antares_api::notify::wire(&mut st);
     let (uri, count) = counting_server().await;

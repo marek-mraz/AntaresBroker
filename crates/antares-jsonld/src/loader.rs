@@ -112,7 +112,10 @@ static ALLOW_PRIVATE_OVERRIDE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Grant egress to private/loopback ranges for policies created AFTER this
-/// call (the wasm constructor path; native deployments use the env var).
+/// call. The wasm constructor path — wasm32 has no process environment — and
+/// the way a test grants itself loopback: an atomic store is the same switch
+/// as the environment variable with no write a concurrent reader can land in
+/// the middle of. Native deployments use `ANTARES_EGRESS_ALLOW_PRIVATE`.
 pub fn allow_private_egress(v: bool) {
     ALLOW_PRIVATE_OVERRIDE.store(v, std::sync::atomic::Ordering::Relaxed);
 }

@@ -57,7 +57,7 @@ async fn capture_server() -> (String, tokio::sync::mpsc::Receiver<Value>) {
 /// healthy Device must NOT.
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_4_9_linked_q_resolves_through_the_store_in_notifications() {
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
     antares_api::notify::wire(&mut st);
 
