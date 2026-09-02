@@ -847,6 +847,184 @@ async fn aggregation_pushdown_buckets_like_the_api() {
     assert!(s.delete(&t, id).expect("delete"));
 }
 
+/// 4.14 through the temporal reads that build SQL of their own. `get`,
+/// `list` and `delete` are keyed lookups whose isolation is easy to see;
+/// `query` is not. It compiles a window predicate, an optional geo
+/// prefilter and an optional aggregate into statements over
+/// `attr_instances`, and a tenant predicate dropped from any one of them
+/// answers with another tenant's history — as instances under the asking
+/// tenant's entity id, or, worse, folded into an average that names no
+/// source at all. Two tenants hold the SAME entity id here, because an id
+/// that differs would let a filter narrow the leak away by accident.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_temporal_query_never_reads_another_tenants_history() {
+    use antares_sql::compile::temporal::InstanceRange;
+    use antares_sql::store::filter::{Aggregate, GeoSpec, Rel, TemporalFilter};
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgTemporalStore::new(pool.clone());
+    let a = TenantId::new("pgtempiso_a").expect("tenant");
+    let b = TenantId::new("pgtempiso_b").expect("tenant");
+    for t in [&a, &b] {
+        pg::ensure_tenant(&pool, t).await.expect("tenant row");
+    }
+    // Two ids, both held by BOTH tenants. The numeric one is kept clear of
+    // the GeoProperty because one non-numeric windowed value is enough to
+    // make the store decline the aggregate, and this test is about what the
+    // aggregate reads, not about when it runs.
+    let id = "urn:ngsi-ld:Vehicle:shared";
+    let geo_id = "urn:ngsi-ld:Vehicle:sharedgeo";
+    let speed = "https://uri.etsi.org/ngsi-ld/default-context/speed";
+    let location = antares_sql::store::filter::LOCATION_IRI;
+    let doc = |tag: &str, v1: i64, v2: i64| {
+        json!({
+            "id": id, "type": "Vehicle",
+            "createdAt": "2026-01-01T00:00:00Z", "modifiedAt": "2026-01-01T00:00:00Z",
+            speed: [
+                {"type": "Property", "value": v1, "observedAt": "2026-01-01T00:10:00Z",
+                 "instanceId": format!("urn:ngsi-ld:Instance:{tag}1")},
+                {"type": "Property", "value": v2, "observedAt": "2026-01-01T00:20:00Z",
+                 "instanceId": format!("urn:ngsi-ld:Instance:{tag}2")}
+            ],
+        })
+    };
+    let geo_doc = |tag: &str| {
+        json!({
+            "id": geo_id, "type": "Vehicle",
+            "createdAt": "2026-01-01T00:00:00Z", "modifiedAt": "2026-01-01T00:00:00Z",
+            location: [{
+                "type": "GeoProperty",
+                "value": {"type": "Point", "coordinates": [0.0, 0.0]},
+                "observedAt": "2026-01-01T00:30:00Z",
+                "instanceId": format!("urn:ngsi-ld:Instance:{tag}geo"),
+            }],
+        })
+    };
+    for (t, tag, v1, v2) in [(&a, "isoa", 10, 20), (&b, "isob", 1000, 2000)] {
+        let _ = s.delete(t, id);
+        let _ = s.delete(t, geo_id);
+        assert!(s.create(t, id, &doc(tag, v1, v2)).expect("create"), "{tag}");
+        assert!(
+            s.create(t, geo_id, &geo_doc(tag)).expect("create geo"),
+            "{tag}"
+        );
+    }
+
+    let expand = |t: &str| t.to_owned();
+    let window = || InstanceRange {
+        timerel: "after",
+        time_at: "2026-01-01T00:00:00Z",
+        end_time_at: None,
+        timeproperty: "observedAt",
+    };
+    let instance_ids = |rows: &[serde_json::Value], attr: &str| -> Vec<String> {
+        let mut v: Vec<String> = rows
+            .iter()
+            .flat_map(|r| r[attr].as_array().cloned().unwrap_or_default())
+            .filter_map(|i| i["instanceId"].as_str().map(str::to_owned))
+            .collect();
+        v.sort();
+        v
+    };
+
+    // The windowed instance read: only this tenant's instances of the id.
+    let plain = TemporalFilter {
+        ids: Some(&[id]),
+        range: Some(window()),
+        expand: &expand,
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&a, &plain).expect("query a");
+    assert_eq!(
+        instance_ids(&out.rows, speed),
+        [
+            "urn:ngsi-ld:Instance:isoa1".to_owned(),
+            "urn:ngsi-ld:Instance:isoa2".to_owned()
+        ],
+        "the window read another tenant's instances: {:?}",
+        out.rows
+    );
+
+    // The aggregate, where a leak carries no id to give it away: the average
+    // of this tenant's two values and nothing else.
+    let methods = ["avg".to_owned(), "totalCount".to_owned()];
+    let aggregated = TemporalFilter {
+        ids: Some(&[id]),
+        range: Some(window()),
+        expand: &expand,
+        aggregate: Some(Aggregate {
+            methods: &methods,
+            period_secs: Some(3600),
+            anchor: Some("2026-01-01T00:00:00Z"),
+        }),
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&a, &aggregated).expect("aggregate a");
+    assert!(out.aggregated, "the store aggregated");
+    let agg = &out.rows[0][speed];
+    assert_eq!(
+        agg["totalCount"][0][0].as_f64(),
+        Some(2.0),
+        "the bucket counted another tenant's instances: {agg}"
+    );
+    assert_eq!(
+        agg["avg"][0][0].as_f64(),
+        Some(15.0),
+        "the average was taken over another tenant's values: {agg}"
+    );
+
+    // The geo prefilter, which selects instances through a second statement.
+    let coordinates = json!([0.0, 0.0]);
+    let spec = GeoSpec {
+        rel: Rel::Near {
+            max: Some(1000.0),
+            min: None,
+        },
+        geometry: "Point",
+        coordinates: &coordinates,
+        geoproperty_iri: location,
+    };
+    let geo = TemporalFilter {
+        ids: Some(&[geo_id]),
+        range: Some(window()),
+        timeproperty: "observedAt",
+        geo: Some((&spec, location)),
+        expand: &expand,
+        ..TemporalFilter::default()
+    };
+    let out = s.query(&a, &geo).expect("geo a");
+    assert_eq!(
+        instance_ids(&out.rows, location),
+        ["urn:ngsi-ld:Instance:isoageo".to_owned()],
+        "the geo prefilter reached another tenant: {:?}",
+        out.rows
+    );
+
+    // And the mirror image: b sees b's, so the reads are narrowed by tenant
+    // rather than by whatever happened to be written first.
+    let out = s.query(&b, &plain).expect("query b");
+    assert_eq!(
+        instance_ids(&out.rows, speed),
+        [
+            "urn:ngsi-ld:Instance:isob1".to_owned(),
+            "urn:ngsi-ld:Instance:isob2".to_owned()
+        ]
+    );
+
+    // A tenant that holds no history at all answers with none of it.
+    let empty = TenantId::new("pgtempiso_c").expect("tenant");
+    pg::ensure_tenant(&pool, &empty).await.expect("tenant row");
+    assert!(
+        s.query(&empty, &plain).expect("query c").rows.is_empty(),
+        "a tenant with no temporal entity of that id reads nothing"
+    );
+
+    for t in [&a, &b] {
+        assert!(s.delete(t, id).expect("delete"));
+        assert!(s.delete(t, geo_id).expect("delete geo"));
+    }
+}
+
 /// 4.6.3: "In requests, also a comma instead of a decimal point may be used
 /// as separator" of the seconds fraction. PostgreSQL accepts no such stamp,
 /// so every bound that reaches a `::timestamptz` cast goes through
