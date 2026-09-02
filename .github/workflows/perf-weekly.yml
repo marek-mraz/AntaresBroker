@@ -136,6 +136,14 @@ jobs:
         run: ./dev/perf/shapes.sh
       - name: Core scaling
         run: ./dev/perf/core-scale.sh
+      # The write shape as well: the in-process store holds one writer lock,
+      # so the query ladder above cannot say whether that lock is what the
+      # eighth core is spent on. Both stores, because the file store's
+      # committer is a second candidate for the same symptom.
+      - name: Core scaling, write shape
+        run: |
+          SHAPE=update ./dev/perf/core-scale.sh
+          STORE=file OUT=results/perf/file SHAPE=update ./dev/perf/core-scale.sh
       - name: Saturation sweep
         run: STAGES=10 STAGE=15s ./dev/perf/saturate.sh
       # The same tables with the store out of process: PostgreSQL on this
@@ -175,6 +183,10 @@ jobs:
             [ -f results/perf/noise-profile.txt ] && cat results/perf/noise-profile.txt
             echo '```'
             python3 dev/perf/report.py results/perf --readme
+            for f in results/perf/core-scale-update.md results/perf/file/core-scale-update.md; do
+              [ -f "$f" ] || continue
+              echo; echo "## Core scaling, write shape (${f%/core-scale-update.md})"; echo; cat "$f"
+            done
             for d in results/perf/pg-pool*; do
               [ -d "$d" ] || continue
               echo "## PostgreSQL, ${d##*/pg-}"

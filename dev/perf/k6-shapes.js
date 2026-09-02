@@ -2,6 +2,9 @@
 //   query   GET /entities?type=Vehicle&limit=20&local=true   over 100 five-attribute entities
 //           (local=true: the store answers alone, no registration fan-out)
 //   retrieve GET /entities/{id}
+//   update  PATCH /entities/{id}/attrs  (5.6.3, one Property per request),
+//           spread over the same 100 entities — the write shape, which is
+//           what takes the store's writer lock
 // Closed model (constant VUs) on purpose here: this measures what the
 // broker sustains at a fixed concurrency (c50, c200), which is what the
 // published tables of other brokers report. k6-baseline.js keeps the open
@@ -9,7 +12,7 @@
 //
 //   k6 run -e SHAPE=query -e VUS=50 -e DURATION=5s dev/perf/k6-shapes.js
 //
-// Env: BROKER_URL, SHAPE (query|retrieve), VUS (50), DURATION (5s),
+// Env: BROKER_URL, SHAPE (query|retrieve|update), VUS (50), DURATION (5s),
 //      TENANT (unset = default tenant), SEED (entities are urn:ngsi-ld:Vehicle:shape:<n>).
 
 import http from "k6/http";
@@ -52,6 +55,16 @@ export default function () {
   let r;
   if (SHAPE === "retrieve") {
     r = http.get(`${BASE}/entities/urn:ngsi-ld:Vehicle:shape:${__ITER % N}`, { headers });
+  } else if (SHAPE === "update") {
+    // 5.6.3 Update Attributes: 204 on success. One Property, so the request
+    // costs the store a write and almost nothing else — what is being
+    // measured is the writer lock, not the payload.
+    const body = JSON.stringify({ speed: { type: "Property", value: __ITER % 130 } });
+    r = http.patch(`${BASE}/entities/urn:ngsi-ld:Vehicle:shape:${__ITER % N}/attrs`, body, {
+      headers: { "Content-Type": "application/json", ...headers },
+    });
+    check(r, { "204": (res) => res.status === 204 });
+    return;
   } else {
     r = http.get(`${BASE}/entities?type=Vehicle&limit=20&local=true`, { headers });
   }
