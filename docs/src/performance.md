@@ -39,61 +39,94 @@ python3 dev/perf/report.py results/perf     # index.html + perf.json
 
 ## The measured ceiling
 
-One `perf-weekly` dispatch on ccx33 (8 logical, 4 physical cores; three
-passes; `store=postgres`) at commit `b55d554`. The load generator shares
-the machine, so every row is broker plus generator on 4 physical cores.
+Two `perf-weekly` dispatches. The first, on ccx33 (8 logical, 4 physical
+cores, three passes) at commit `b55d554`, could isolate only the 1- and
+2-core steps: pinning the broker to 4 cores needs 8 physical, and to 8
+needs 16. The second, on ccx53 (32 logical, 16 physical cores, two passes)
+at commit `41610be`, runs the whole ladder, and the tables below are that
+run. `store=postgres` in both; the load generator shares the machine, so
+every row is broker plus generator.
 
-Core scaling, one row per store and pool. `cores used` is the broker's
-CPU time over the window against the cores it was allotted; the 4- and
-8-core steps refuse to run on this instance type because isolating them
-needs 8 and 16 physical cores.
+Core scaling, one row per store and pool: the broker pinned to N physical
+cores (SMT siblings excluded), the generator on the rest, query shape at
+50 concurrent clients. `cores used` is the broker's CPU time over the
+window against the cores it was allotted.
 
-| store | 1 core | 2 cores | efficiency at 2 | cores used at 2 | peak threads |
-|---|---|---|---|---|---|
-| memory | 2 481 req/s | 4 964 req/s | 100 % | 1.87 | 10 |
-| postgres, pool 20 | 1 378 req/s | 2 809 req/s | 102 % | 1.82 | 88 |
-| postgres, pool 100 | 1 471 req/s | 2 746 req/s | 93 % | 1.81 | 140 |
+| store | 1 core | 2 cores | 4 cores | 8 cores | efficiency at 2 / 4 / 8 | cores used at 8 | peak threads at 8 |
+|---|---|---|---|---|---|---|---|
+| memory | 3 076 req/s | 6 050 req/s | 11 342 req/s | 12 554 req/s | 98 % / 92 % / 51 % | 7.64 | 16 |
+| postgres, pool 20 | 2 097 req/s | 3 809 req/s | 7 093 req/s | 7 238 req/s | 91 % / 85 % / 43 % | 6.47 | 73 |
+| postgres, pool 100 | 2 026 req/s | 3 665 req/s | 7 157 req/s | 7 837 req/s | 90 % / 88 % / 48 % | 7.03 | 85 |
+
+The same rows as CPU spent per request (`cores used` over req/s), which is
+what the efficiency column is measuring underneath:
+
+| store | 1 core | 2 cores | 4 cores | 8 cores |
+|---|---|---|---|---|
+| memory | 0.31 ms | 0.32 ms | 0.34 ms | 0.61 ms |
+| postgres, pool 20 | 0.47 ms | 0.49 ms | 0.50 ms | 0.89 ms |
+| postgres, pool 100 | 0.48 ms | 0.50 ms | 0.51 ms | 0.90 ms |
 
 The saturation knee, whole box, open model:
 
 | store | shape | knee | p99 at the knee | first failing stage | cores used | peak threads |
 |---|---|---|---|---|---|---|
-| memory | query | 5 000 rps | 4.2 ms | none reached | 1.83 | 17 |
-| memory | write | 5 000 rps | 1.2 ms | none reached | 0.84 | 72 |
-| postgres, pool 20 | query | 3 000 rps | 12.1 ms | 3 500 rps | 2.70 | 4 028 |
-| postgres, pool 20 | write | 1 000 rps | 5.8 ms | 1 500 rps | 1.84 | 4 016 |
-| postgres, pool 100 | query | 2 500 rps | 7.7 ms | 3 000 rps | 2.80 | 4 073 |
-| postgres, pool 100 | write | — | — | 500 rps | 1.52 | 4 015 |
+| memory | query | 5 000 rps | 1.2 ms | none reached | 0.96 | 39 |
+| memory | write | 5 000 rps | 0.6 ms | none reached | 0.47 | 62 |
+| postgres, pool 20 | query | 5 000 rps | 3.0 ms | none reached | 2.17 | 77 |
+| postgres, pool 20 | write | 1 000 rps | 2.9 ms | 1 500 rps | 1.79 | 4 038 |
+| postgres, pool 100 | query | 5 000 rps | 2.6 ms | none reached | 2.18 | 64 |
+| postgres, pool 100 | write | 1 000 rps | 2.8 ms | 1 500 rps | 1.80 | 4 038 |
 
-Throughput per shape at 64, 256 and 1 024 concurrent clients:
+Throughput per shape at 64, 256 and 1 024 concurrent clients, whole box:
 
 | store | shape | c64 | c256 | c1024 |
 |---|---|---|---|---|
-| memory | query | 7 274 req/s, p99 24.5 ms | 7 451 req/s, p99 73.2 ms | 7 359 req/s, p99 367.1 ms |
-| memory | retrieve | 29 008 req/s, p99 7.8 ms | 30 114 req/s, p99 35.9 ms | 29 136 req/s, p99 93.4 ms |
-| postgres, pool 20 | query | 3 207 req/s, p99 22.3 ms | 3 384 req/s, p99 73.8 ms | 3 909 req/s, p99 252.5 ms |
-| postgres, pool 20 | retrieve | 4 548 req/s, p99 15.6 ms | 4 405 req/s, p99 56.9 ms | 4 458 req/s, p99 216.8 ms |
-| postgres, pool 100 | query | 3 456 req/s, p99 26.3 ms | 3 244 req/s, p99 86.9 ms | 2 917 req/s, p99 337.7 ms |
-| postgres, pool 100 | retrieve | 4 640 req/s, p99 18.4 ms | 4 247 req/s, p99 63.8 ms | 4 317 req/s, p99 231.5 ms |
+| memory | query | 19 272 req/s, p99 7.7 ms | 21 254 req/s, p99 36.6 ms | 21 566 req/s, p99 123.4 ms |
+| memory | retrieve | 39 766 req/s, p99 3.8 ms | 43 805 req/s, p99 19.7 ms | 45 425 req/s, p99 68.1 ms |
+| postgres, pool 20 | query | 12 418 req/s, p99 7.3 ms | 11 948 req/s, p99 23.2 ms | 11 448 req/s, p99 93.2 ms |
+| postgres, pool 20 | retrieve | 12 432 req/s, p99 5.9 ms | 12 233 req/s, p99 22.3 ms | 11 766 req/s, p99 90.0 ms |
+| postgres, pool 100 | query | 12 426 req/s, p99 7.8 ms | 11 823 req/s, p99 28.5 ms | 10 292 req/s, p99 104.0 ms |
+| postgres, pool 100 | retrieve | 13 974 req/s, p99 6.0 ms | 14 144 req/s, p99 20.4 ms | 13 696 req/s, p99 75.7 ms |
 
 What the run says, in the order it matters:
 
-- The blocking pool carries the whole PostgreSQL path: about 4 000 live
-  OS threads at saturation against a ceiling of 11 024 (the connection
-  limit plus 1 024). The ceiling is never reached, so nothing deadlocks,
-  but every store call is one parked thread.
-- Past the knee p99 does not degrade, it steps: 12.1 ms at 3 000 rps to
-  843.6 ms at 3 500 rps on pool 20, with the error rate still zero. The
-  queue absorbs the overload and the client waits.
-- A larger pool is worse, not better. Pool 100 holds 2 500 rps where
-  pool 20 holds 3 000, and its write path fails one stage earlier, at
-  500 rps.
-- The in-memory write path holds 5 000 rps on 0.84 cores. It is not CPU
-  bound; something ahead of the CPU serialises it.
-- Scaling from 1 to 2 cores is linear (100 %, 102 %, 93 %). This
-  instance type cannot measure the 4- and 8-core steps, which is where a
-  blocking-thread design is expected to bend; `perf-weekly` takes a
-  `server` input for the run that can.
+- Scaling is close to linear to four cores (98 %, 92 % on memory; 91 %,
+  85 % and 90 %, 88 % on the two pools) and loses half of that at eight.
+- The eighth core is used, not idle: 7.64 of 8 on memory, 7.03 and 6.47
+  on the two pools. What changes is the price of a request, which is flat
+  from one core to four and then rises by about 80 % on all three stores.
+  A cost that appears identically in the in-process store, which never
+  parks a thread on a socket, is not the storage driver: it is contention
+  above the store, in the path the three shapes share.
+- The blocking pool is nowhere near its ceiling. The Postgres write shape
+  parks 4 038 live OS threads at its knee against a ceiling of 11 024
+  (`ANTARES_MAX_CONNECTIONS` plus 1 024, `main.rs`), and the query shapes
+  park 64 to 77. Nothing deadlocks and no shape reaches the cap.
+- Pool size barely moves anything on this box. Pool 100 is 8 % faster at
+  eight cores and 10 % slower at 1 024 concurrent query clients; both
+  pools hold the same 1 000 rps write knee and fail at the same 1 500.
+  The ccx33 run's "a larger pool is worse" reads as an artefact of four
+  physical cores, not a property of the pool.
+- The write path is what bends first. Both Postgres pools hold 1 000 rps
+  and fail at 1 500 while every query shape holds the harness ceiling of
+  5 000 rps; the in-memory write path holds 5 000 rps on 0.47 cores.
+
+### The exit criterion
+
+`perf-weekly` run `33683839528` sets what the runtime work has to hold. A
+change to the request runtime, the drivers or the store keeps all of it:
+
+- Efficiency at eight allotted physical cores, query at c50: at least
+  51 % on memory and 43 % on either Postgres pool.
+- CPU per request at eight cores: no more than twice its one-core value
+  on any store. The run itself sits at 1.97 (memory), 1.89 (pool 20) and
+  1.87 (pool 100).
+- Saturation, whole box: the knee at 5 000 rps or better for every query
+  shape and 1 000 rps or better for the Postgres write shape, p99 at the
+  knee within 3.0 ms.
+- Live OS threads at the write knee: 4 038 or fewer, against the 11 024
+  ceiling.
 
 ## The design targets (`scale-weekly`)
 
