@@ -895,8 +895,8 @@ def ledger_prose_violations():
     a stamp or a mention of how the line was produced only dates the record."""
     banned = re.compile(
         r"(?i)\b(audit(ed|s|ing)?|this session|session (log|note)|backlog|"
-        r"work-item|user (rule|request)|scratchpad|subagent|claude|mempalace|"
-        r"phase [A-Z])\b|20\d\d-\d\d-\d\d(?!T)"
+        r"work-item|(deferred|tasks?) item \d|user (rule|request)|scratchpad|"
+        r"subagent|claude|mempalace|phase [A-Z])\b|20\d\d-\d\d-\d\d(?!T)"
     )
     out = []
     for path in sorted(SPEC.rglob("*.md")):
@@ -913,6 +913,67 @@ def ledger_prose_violations():
                 out.append(
                     f"{path.relative_to(ROOT)}: {field} carries {m.group(0)!r} "
                     f"— the ledger records the clause, not the work"
+                )
+    return out
+
+
+def ledger_body_violations():
+    """A clause body is the ETSI text verbatim and is not ours to edit, so
+    nothing else looks at it: `dev/prod-grep.sh` skips the ledger and the rest
+    of this gate reads only the frontmatter. `write_section` joins the two with
+    exactly one blank line, and a caller that hands the body back with the
+    separator still attached grows the file by a line on every round trip —
+    silent, cumulative, and inside text a conformance claim rests on. The
+    separator is the invariant that catches it."""
+    out = []
+    for path in sorted(SPEC.rglob("*.md")):
+        text = path.read_text()
+        if not text.startswith("---\n"):
+            continue  # README.md and anything else without frontmatter
+        parts = text.split("---\n", 2)
+        if len(parts) < 3:
+            continue  # the malformed file is reported by cmd_check itself
+        if parts[2].startswith("\n\n"):
+            out.append(
+                f"{path.relative_to(ROOT)}: the body opens with a blank line "
+                f"the separator already provides — a round trip added it"
+            )
+    return out
+
+
+def ledger_citation_violations():
+    """Evidence is only evidence if a reader can reach it. A file named in
+    `evidence` or `notes` that is nowhere in the tree points at nothing — the
+    clause then rests on a claim no one can check, and the commonest way it
+    happens is a citation of an internal planning document, which is never the
+    requirement in the first place (the requirement is the CIM 009 clause, and
+    the proof is code and tests). Matching is by basename: the ledger cites
+    `entities.rs` and `filter_pushdown_5_7_2.rs`, not repository paths."""
+    cited = re.compile(r"\b[A-Za-z0-9_.\-/]+\.(?:rs|py|sh|toml|robot|yml|yaml|md)\b")
+    skip = {".git", "book", "node_modules", "pkg", "results", "target", ".venv"}
+    have = set()
+    for f in ROOT.rglob("*"):
+        if f.is_dir():
+            continue
+        if skip & set(f.relative_to(ROOT).parts):
+            continue
+        have.add(f.name)
+    out = []
+    for path in sorted(SPEC.rglob("*.md")):
+        try:
+            meta = read_frontmatter(path)
+        except yaml.YAMLError:
+            continue  # the parse failure is reported by cmd_check itself
+        for field in ("evidence", "notes"):
+            value = (meta or {}).get(field)
+            if not isinstance(value, str):
+                continue
+            for name in sorted(set(cited.findall(value))):
+                if Path(name).name in have:
+                    continue
+                out.append(
+                    f"{path.relative_to(ROOT)}: {field} cites {name!r}, "
+                    f"which is not in the tree — evidence has to be reachable"
                 )
     return out
 
@@ -947,6 +1008,8 @@ def cmd_check():
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
 
     errors.extend(ledger_prose_violations())
+    errors.extend(ledger_citation_violations())
+    errors.extend(ledger_body_violations())
     errors.extend(chapter_violations())
     errors.extend(statement_coverage_violations())
     errors.extend(vendored_openapi_violations())
