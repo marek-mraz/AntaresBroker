@@ -66,8 +66,11 @@ const OUTPUT_ONLY: &[&str] = &[
     "previousObjectList",
 ];
 
-/// Instance members that are NOT sub-attributes.
-const RESERVED_MEMBERS: &[&str] = &[
+/// Instance members that are NOT sub-attributes: everything 4.5 gives an
+/// Attribute instance beside its sub-Attributes. The one list — a walk over
+/// an instance decides what is a sub-Attribute by asking it, so a second
+/// copy is a copy free to drift as the clause grows.
+pub const RESERVED_MEMBERS: &[&str] = &[
     "type",
     "value",
     "object",

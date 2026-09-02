@@ -63,7 +63,7 @@ pub(crate) fn stamp_instances(v: &mut Value, ts: &str) {
                 o.insert("createdAt".into(), Value::String(ts.to_owned()));
                 o.insert("modifiedAt".into(), Value::String(ts.to_owned()));
                 for (k, sub) in o.iter_mut() {
-                    if sub.is_array() && !crate::repr_reserved(k) {
+                    if sub.is_array() && !antares_jsonld::RESERVED_MEMBERS.contains(&k.as_str()) {
                         stamp_instances(sub, ts);
                     }
                 }
@@ -4861,6 +4861,35 @@ mod clause_4_8_system_attributes {
     use axum::http::Request;
     use serde_json::json;
     use tower::ServiceExt;
+
+    /// 4.8 stamps a sub-Attribute because "a sub-Property is a Property".
+    /// The members an Attribute instance carries under 4.5 are NOT
+    /// sub-Attributes, so none of them may be descended into and stamped —
+    /// several of them (`previousJson` and `previousVocab` hold uninterpreted
+    /// JSON per 4.5.20/4.5.21, `entityList` holds Linked Entities) can be an
+    /// array of objects, which is exactly the shape the walk mistakes for an
+    /// instance array. The list the expander keeps verbatim is the one list;
+    /// a second copy is what drifts.
+    #[test]
+    fn no_reserved_instance_member_is_walked_as_a_sub_attribute() {
+        let carrier = json!([{"probe": "untouched"}]);
+        for member in antares_jsonld::RESERVED_MEMBERS {
+            // the two the stamp itself writes; every other member is the
+            // instance's own and is left exactly as it was found
+            if matches!(*member, "createdAt" | "modifiedAt") {
+                continue;
+            }
+            let mut inst = json!({"type": "Property", "value": 1});
+            inst[*member] = carrier.clone();
+            let mut attr = json!([inst]);
+            stamp_instances(&mut attr, "2020-01-01T00:00:00Z");
+            let held = attr[0].get(*member).expect("the member survives");
+            assert_eq!(
+                held, &carrier,
+                "{member} was walked as a sub-Attribute and stamped"
+            );
+        }
+    }
 
     /// 4.8: createdAt is "the temporal Property at which the Entity,
     /// Property or Relationship was entered into an NGSI-LD system" and

@@ -129,33 +129,6 @@ pub(crate) fn apply_doc_fragment(
     );
 }
 
-/// Instance members that are NOT sub-attributes (shared list).
-pub(crate) fn repr_reserved(k: &str) -> bool {
-    matches!(
-        k,
-        "type"
-            | "value"
-            | "object"
-            | "objectType"
-            | "datasetId"
-            | "observedAt"
-            | "unitCode"
-            | "lang"
-            | "languageMap"
-            | "vocab"
-            | "json"
-            | "valueList"
-            | "objectList"
-            | "createdAt"
-            | "modifiedAt"
-            | "deletedAt"
-            | "instanceId"
-            | "previousValue"
-            | "previousObject"
-            | "previousLanguageMap"
-    )
-}
-
 pub mod surface;
 pub use surface::ApiSurface;
 
