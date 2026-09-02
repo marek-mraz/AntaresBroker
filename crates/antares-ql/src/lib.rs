@@ -274,6 +274,37 @@ pub fn parse_q(input: &str) -> Result<QNode, NgsiError> {
     Ok(node)
 }
 
+/// 4.9 p.85: "`Number` shall be a number as mandated by the JSON
+/// Specification, following the ABNF Grammar, production rule named `number`,
+/// section 6 of IETF RFC 8259" — `[minus] int [frac] [exp]`, the int without
+/// a leading zero, the fraction and the exponent with at least one digit each.
+/// A float parse is much wider: `+5`, `01`, `.5`, `5.`, `NaN` and `inf` all
+/// come back as numbers from it and none of them is a Number here, so each
+/// would compare against a number where the term named text.
+fn is_json_number(s: &str) -> bool {
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let digits = |t: &str| t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let int = digits(s);
+    if int == 0 || (int > 1 && s.starts_with('0')) {
+        return false;
+    }
+    let rest = &s[int..];
+    let rest = match rest.strip_prefix('.') {
+        None => rest,
+        Some(frac) => match digits(frac) {
+            0 => return false,
+            n => &frac[n..],
+        },
+    };
+    match rest.strip_prefix(['e', 'E']) {
+        None => rest.is_empty(),
+        Some(exp) => {
+            let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+            !exp.is_empty() && digits(exp) == exp.len()
+        }
+    }
+}
+
 fn q_nodes(n: &QNode) -> usize {
     match n {
         QNode::And(xs) | QNode::Or(xs) => 1 + xs.iter().map(q_nodes).sum::<usize>(),
@@ -562,17 +593,14 @@ impl<'a> Parser<'a> {
         match raw {
             "true" => Ok(QValue::Bool(true)),
             "false" => Ok(QValue::Bool(false)),
-            _ => raw
-                .parse::<f64>()
-                .map(QValue::Num)
-                // unquoted non-numeric literal (spec allows e.g. dates)
-                .or_else(|_| {
-                    if raw.is_empty() {
-                        Err(bad(raw, "expected value"))
-                    } else {
-                        Ok(QValue::Str(raw.to_owned()))
-                    }
-                }),
+            _ if is_json_number(raw) => match raw.parse::<f64>() {
+                Ok(n) => Ok(QValue::Num(n)),
+                Err(_) => Ok(QValue::Str(raw.to_owned())),
+            },
+            // the other unquoted alternatives: a URI, a dateTime, a date or a
+            // time, all of them compared as text
+            "" => Err(bad(raw, "expected value")),
+            _ => Ok(QValue::Str(raw.to_owned())),
         }
     }
 
@@ -607,6 +635,46 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 4.9 p.85: "`Number` shall be a number as mandated by the JSON
+    /// Specification, following the ABNF Grammar, production rule named
+    /// `number`, section 6 of IETF RFC 8259" — an optional minus, an int with
+    /// no leading zero, a fraction of at least one digit, an exponent of at
+    /// least one digit. A plain float parse is far wider than that: it takes
+    /// `+5`, `01`, `.5`, `5.`, `NaN` and `inf`, none of which is a Number.
+    /// The other unquoted alternatives of `ComparableValue` and
+    /// `CompEqualityValue` are `dateTime`/`date`/`time` and `URI`, all of
+    /// which compare as text, so a token that is not a Number is a String.
+    #[test]
+    fn an_unquoted_token_is_a_number_only_when_rfc_8259_says_so() {
+        for (q, want) in [
+            ("x==5", QValue::Num(5.0)),
+            ("x==-5", QValue::Num(-5.0)),
+            ("x==0", QValue::Num(0.0)),
+            ("x==0.5", QValue::Num(0.5)),
+            ("x==1e3", QValue::Num(1000.0)),
+            ("x==1E+3", QValue::Num(1000.0)),
+            ("x==-2.5e-2", QValue::Num(-0.025)),
+            // every one of these a plain float parse accepts and RFC 8259
+            // does not
+            ("x==+5", QValue::Str("+5".into())),
+            ("x==01", QValue::Str("01".into())),
+            ("x==.5", QValue::Str(".5".into())),
+            ("x==5.", QValue::Str("5.".into())),
+            ("x==NaN", QValue::Str("NaN".into())),
+            ("x==nan", QValue::Str("nan".into())),
+            ("x==inf", QValue::Str("inf".into())),
+            ("x==-inf", QValue::Str("-inf".into())),
+            ("x==infinity", QValue::Str("infinity".into())),
+            ("x==1e", QValue::Str("1e".into())),
+            ("x==-", QValue::Str("-".into())),
+        ] {
+            let QNode::Cmp { value, .. } = parse_q(q).expect(q) else {
+                panic!("{q} is a comparison");
+            };
+            assert_eq!(value, want, "{q}");
+        }
+    }
 
     #[test]
     fn simple_comparison() {
