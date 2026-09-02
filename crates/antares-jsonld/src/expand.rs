@@ -599,6 +599,204 @@ fn looks_like_instance(v: &Value) -> bool {
     })
 }
 
+/// 4.5.2.2 Prohibited (mirrored by 4.5.3.2 and the 4.5.18-4.5.24
+/// subclasses): an instance "shall never include" the value-defining
+/// member of a DIFFERENT attribute type, nor the output-only members
+/// inline Linked Entity retrieval and showChanges notifications produce.
+/// `entityIdSealed`/`entityTypeSealed` are the one exception the clause
+/// grants, on the `ngsildproof` Property alone, and because they are
+/// reserved members this is also where they are copied out.
+fn check_prohibited_members(
+    name: &str,
+    obj: &Map<String, Value>,
+    attr_type: &str,
+    ctx: &Context,
+    opts: ExpandOpts,
+    out: &mut Map<String, Value>,
+) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    const VALUE_OWNERS: &[(&str, &[&str])] = &[
+        ("value", &["Property", "GeoProperty"]),
+        ("object", &["Relationship"]),
+        ("languageMap", &["LanguageProperty"]),
+        ("json", &["JsonProperty"]),
+        ("vocab", &["VocabProperty"]),
+        ("valueList", &["ListProperty"]),
+        ("objectList", &["ListRelationship"]),
+    ];
+    for (m, owners) in VALUE_OWNERS {
+        if obj.contains_key(*m) && !owners.contains(&attr_type) {
+            return Err(bad(format!(
+                "attribute {name}: {m} is not allowed on a {attr_type} (4.5.2.2)"
+            )));
+        }
+    }
+    if let Some(m) = OUTPUT_ONLY.iter().find(|m| obj.contains_key(**m)) {
+        return Err(bad(format!(
+            "attribute {name}: {m} is output-only and not allowed in input (4.5.2.2)"
+        )));
+    }
+    // 4.5.2.2/4.5.2.3 grant the only exception there is: "unless the
+    // PROPERTY name is ngsildproof", the member being defined as "a
+    // Property ... with the non-reified subproperties". 4.5.3.2 and
+    // 4.5.3.3 repeat the ban for a Relationship with no exception at
+    // all, so the attribute name alone is not the test.
+    let sealed_ok = attr_type == "Property" && name == "ngsildproof";
+    if !sealed_ok
+        && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed"))
+    {
+        return Err(bad(format!(
+            "attribute {name}: entityIdSealed/entityTypeSealed are only allowed \
+             on the ngsildproof Property (4.5.2.2, 4.5.3.2)"
+        )));
+    }
+    // 4.5.2.2 / C.11 / annex B: ngsildproof's NON-REIFIED sealed
+    // subproperties — entityIdSealed is a plain string term,
+    // entityTypeSealed is "@type": "@vocab" (it seals the entity type,
+    // so its value expands like a type name). They are reserved
+    // members, so without this explicit copy they silently vanish.
+    if sealed_ok {
+        if let Some(v) = obj.get("entityIdSealed") {
+            let s = v.as_str().ok_or_else(|| {
+                bad(format!(
+                    "attribute {name}: entityIdSealed must be a string (4.5.2.2)"
+                ))
+            })?;
+            out.insert("entityIdSealed".into(), Value::String(s.to_owned()));
+        }
+        if let Some(v) = obj.get("entityTypeSealed") {
+            let s = v.as_str().ok_or_else(|| {
+                bad(format!(
+                    "attribute {name}: entityTypeSealed must be a string (4.5.2.2)"
+                ))
+            })?;
+            out.insert("entityTypeSealed".into(), Value::String(ctx.expand_key(s)));
+        }
+        // "The value of its \"value\" element shall be an object
+        // containing the W3C Data integrity \"proof\" structure"
+        if let Some(v) = obj.get("value") {
+            if !v.is_object() && !(opts.allow_null && is_ngsi_null(v)) {
+                return Err(bad(format!(
+                    "attribute {name}: ngsildproof value shall be an object \
+                     containing the W3C proof structure (4.5.2.2)"
+                )));
+            }
+        }
+    }
+    // 4.5.3.2: "unitCode shall never be present, as Relationships are
+    // unitless." 4.5.18.2/3 and 4.5.20.2/3 extend the prohibition to
+    // LanguageProperty and VocabProperty ("always strings and hence
+    // unitless").
+    // (4.5.24.2/3 add JsonProperty — "raw JSON objects are unitless".)
+    if obj.contains_key("unitCode")
+        && matches!(
+            attr_type,
+            "Relationship"
+                | "ListRelationship"
+                | "LanguageProperty"
+                | "VocabProperty"
+                | "JsonProperty"
+        )
+    {
+        return Err(bad(format!(
+            "attribute {name}: unitCode is not allowed on a {attr_type}"
+        )));
+    }
+    Ok(())
+}
+
+/// The members Table 5.2.5-1 allows on any Attribute instance beside its
+/// value: the 4.5.5 `datasetId`, the 4.8 temporal members, the system
+/// attributes, and `unitCode`, `valueType`, `lang` and `objectType`,
+/// each expanded the way its own subclause defines.
+fn expand_common_members(
+    name: &str,
+    obj: &Map<String, Value>,
+    attr_type: &str,
+    ctx: &Context,
+    opts: ExpandOpts,
+    out: &mut Map<String, Value>,
+) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    if let Some(d) = obj.get("datasetId") {
+        if let Some(d) = dataset_id_member(d).map_err(|e| bad(format!("attribute {name}: {e}")))? {
+            out.insert("datasetId".into(), d);
+        }
+    }
+    if let Some(o) = obj.get("observedAt") {
+        let s = o
+            .as_str()
+            .filter(|s| parse_datetime(s))
+            .ok_or_else(|| bad(format!("attribute {name}: invalid observedAt")))?;
+        out.insert("observedAt".into(), Value::String(s.to_owned()));
+    }
+    if let Some(e) = obj.get("expiresAt") {
+        // 4.22 transient attribute instances carry their own expiresAt.
+        let s = e
+            .as_str()
+            .filter(|s| parse_datetime(s))
+            .ok_or_else(|| bad(format!("attribute {name}: invalid expiresAt")))?;
+        out.insert("expiresAt".into(), Value::String(s.to_owned()));
+    }
+    if opts.sys {
+        // 4.8/4.5.7: deletedAt marks a deletion instance in a Temporal
+        // Evolution — dropping it here would strip remote tombstones of the
+        // timestamp their deletedAt-window matching needs (5.7.3.4 merge).
+        for k in ["createdAt", "modifiedAt", "deletedAt"] {
+            if let Some(Value::String(s)) = obj.get(k) {
+                if parse_datetime(s) {
+                    out.insert(k.into(), Value::String(s.clone()));
+                }
+            }
+        }
+    }
+    if let Some(u) = obj.get("unitCode") {
+        if !u.is_string() {
+            return Err(bad(format!("attribute {name}: unitCode must be a string")));
+        }
+        out.insert("unitCode".into(), u.clone());
+    }
+    if let Some(vt) = obj.get("valueType") {
+        // 4.5.2.2: "valueType": a string value which shall be type coerced
+        // into a datatype URI — the non-reified alternative to a native
+        // JSON-LD @type on the Property value.
+        let s = vt
+            .as_str()
+            .ok_or_else(|| bad(format!("attribute {name}: valueType must be a string")))?;
+        // Table 5.2.32-1: on a LanguageProperty valueType "shall be equal
+        // to langString" (the rdf:langString datatype) — kept literal.
+        if attr_type == "LanguageProperty" {
+            if s != "langString" {
+                return Err(bad(format!(
+                    "attribute {name}: valueType shall be \"langString\" on a LanguageProperty"
+                )));
+            }
+            out.insert("valueType".into(), vt.clone());
+        } else {
+            out.insert("valueType".into(), Value::String(ctx.expand_key(s)));
+        }
+    }
+    if let Some(l) = obj.get("lang") {
+        // 4.15: the language filter augments the converted Property with "an
+        // additional non-reified subproperty lang indicating the actual
+        // language returned" — a langtag. The member is broker-produced and
+        // the clause says nothing about a client supplying one, so it is
+        // kept; a non-string would leave the instance in a shape no reader
+        // of 4.15 can interpret.
+        let s = l
+            .as_str()
+            .ok_or_else(|| bad(format!("attribute {name}: lang must be a language tag")))?;
+        out.insert("lang".into(), Value::String(s.to_owned()));
+    }
+    if let Some(ot) = obj.get("objectType") {
+        out.insert(
+            "objectType".into(),
+            expand_terms(name, "objectType", ot, ctx)?,
+        );
+    }
+    Ok(())
+}
+
 /// Expand a single instance (normalized or concise) to normalized form.
 ///
 /// This is where the 4.2.2 Meta Model's own SHALLs are enforced: "An NGSI-LD
@@ -694,100 +892,7 @@ fn expand_instance(
     let mut out = Map::new();
     out.insert("type".into(), Value::String(attr_type.to_owned()));
 
-    // 4.5.2.2 Prohibited (mirrored by 4.5.3.2 and the 4.5.18–4.5.24
-    // subclasses): an instance "shall never include" the value-defining
-    // member of a DIFFERENT attribute type, nor the output-only members
-    // produced by inline Linked Entity retrieval and showChanges
-    // notifications; entityIdSealed/entityTypeSealed only under ngsildproof.
-    {
-        const VALUE_OWNERS: &[(&str, &[&str])] = &[
-            ("value", &["Property", "GeoProperty"]),
-            ("object", &["Relationship"]),
-            ("languageMap", &["LanguageProperty"]),
-            ("json", &["JsonProperty"]),
-            ("vocab", &["VocabProperty"]),
-            ("valueList", &["ListProperty"]),
-            ("objectList", &["ListRelationship"]),
-        ];
-        for (m, owners) in VALUE_OWNERS {
-            if obj.contains_key(*m) && !owners.contains(&attr_type) {
-                return Err(bad(format!(
-                    "attribute {name}: {m} is not allowed on a {attr_type} (4.5.2.2)"
-                )));
-            }
-        }
-        if let Some(m) = OUTPUT_ONLY.iter().find(|m| obj.contains_key(**m)) {
-            return Err(bad(format!(
-                "attribute {name}: {m} is output-only and not allowed in input (4.5.2.2)"
-            )));
-        }
-        // 4.5.2.2/4.5.2.3 grant the only exception there is: "unless the
-        // PROPERTY name is ngsildproof", the member being defined as "a
-        // Property ... with the non-reified subproperties". 4.5.3.2 and
-        // 4.5.3.3 repeat the ban for a Relationship with no exception at
-        // all, so the attribute name alone is not the test.
-        let sealed_ok = attr_type == "Property" && name == "ngsildproof";
-        if !sealed_ok
-            && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed"))
-        {
-            return Err(bad(format!(
-                "attribute {name}: entityIdSealed/entityTypeSealed are only allowed \
-                 on the ngsildproof Property (4.5.2.2, 4.5.3.2)"
-            )));
-        }
-        // 4.5.2.2 / C.11 / annex B: ngsildproof's NON-REIFIED sealed
-        // subproperties — entityIdSealed is a plain string term,
-        // entityTypeSealed is "@type": "@vocab" (it seals the entity type,
-        // so its value expands like a type name). They are reserved
-        // members, so without this explicit copy they silently vanish.
-        if sealed_ok {
-            if let Some(v) = obj.get("entityIdSealed") {
-                let s = v.as_str().ok_or_else(|| {
-                    bad(format!(
-                        "attribute {name}: entityIdSealed must be a string (4.5.2.2)"
-                    ))
-                })?;
-                out.insert("entityIdSealed".into(), Value::String(s.to_owned()));
-            }
-            if let Some(v) = obj.get("entityTypeSealed") {
-                let s = v.as_str().ok_or_else(|| {
-                    bad(format!(
-                        "attribute {name}: entityTypeSealed must be a string (4.5.2.2)"
-                    ))
-                })?;
-                out.insert("entityTypeSealed".into(), Value::String(ctx.expand_key(s)));
-            }
-            // "The value of its \"value\" element shall be an object
-            // containing the W3C Data integrity \"proof\" structure"
-            if let Some(v) = obj.get("value") {
-                if !v.is_object() && !(opts.allow_null && is_ngsi_null(v)) {
-                    return Err(bad(format!(
-                        "attribute {name}: ngsildproof value shall be an object \
-                         containing the W3C proof structure (4.5.2.2)"
-                    )));
-                }
-            }
-        }
-        // 4.5.3.2: "unitCode shall never be present, as Relationships are
-        // unitless." 4.5.18.2/3 and 4.5.20.2/3 extend the prohibition to
-        // LanguageProperty and VocabProperty ("always strings and hence
-        // unitless").
-        // (4.5.24.2/3 add JsonProperty — "raw JSON objects are unitless".)
-        if obj.contains_key("unitCode")
-            && matches!(
-                attr_type,
-                "Relationship"
-                    | "ListRelationship"
-                    | "LanguageProperty"
-                    | "VocabProperty"
-                    | "JsonProperty"
-            )
-        {
-            return Err(bad(format!(
-                "attribute {name}: unitCode is not allowed on a {attr_type}"
-            )));
-        }
-    }
+    check_prohibited_members(name, obj, attr_type, ctx, opts, &mut out)?;
 
     // required member per type
     match attr_type {
@@ -967,82 +1072,7 @@ fn expand_instance(
     }
 
     // optional standard members
-    if let Some(d) = obj.get("datasetId") {
-        if let Some(d) = dataset_id_member(d).map_err(|e| bad(format!("attribute {name}: {e}")))? {
-            out.insert("datasetId".into(), d);
-        }
-    }
-    if let Some(o) = obj.get("observedAt") {
-        let s = o
-            .as_str()
-            .filter(|s| parse_datetime(s))
-            .ok_or_else(|| bad(format!("attribute {name}: invalid observedAt")))?;
-        out.insert("observedAt".into(), Value::String(s.to_owned()));
-    }
-    if let Some(e) = obj.get("expiresAt") {
-        // 4.22 transient attribute instances carry their own expiresAt.
-        let s = e
-            .as_str()
-            .filter(|s| parse_datetime(s))
-            .ok_or_else(|| bad(format!("attribute {name}: invalid expiresAt")))?;
-        out.insert("expiresAt".into(), Value::String(s.to_owned()));
-    }
-    if opts.sys {
-        // 4.8/4.5.7: deletedAt marks a deletion instance in a Temporal
-        // Evolution — dropping it here would strip remote tombstones of the
-        // timestamp their deletedAt-window matching needs (5.7.3.4 merge).
-        for k in ["createdAt", "modifiedAt", "deletedAt"] {
-            if let Some(Value::String(s)) = obj.get(k) {
-                if parse_datetime(s) {
-                    out.insert(k.into(), Value::String(s.clone()));
-                }
-            }
-        }
-    }
-    if let Some(u) = obj.get("unitCode") {
-        if !u.is_string() {
-            return Err(bad(format!("attribute {name}: unitCode must be a string")));
-        }
-        out.insert("unitCode".into(), u.clone());
-    }
-    if let Some(vt) = obj.get("valueType") {
-        // 4.5.2.2: "valueType": a string value which shall be type coerced
-        // into a datatype URI — the non-reified alternative to a native
-        // JSON-LD @type on the Property value.
-        let s = vt
-            .as_str()
-            .ok_or_else(|| bad(format!("attribute {name}: valueType must be a string")))?;
-        // Table 5.2.32-1: on a LanguageProperty valueType "shall be equal
-        // to langString" (the rdf:langString datatype) — kept literal.
-        if attr_type == "LanguageProperty" {
-            if s != "langString" {
-                return Err(bad(format!(
-                    "attribute {name}: valueType shall be \"langString\" on a LanguageProperty"
-                )));
-            }
-            out.insert("valueType".into(), vt.clone());
-        } else {
-            out.insert("valueType".into(), Value::String(ctx.expand_key(s)));
-        }
-    }
-    if let Some(l) = obj.get("lang") {
-        // 4.15: the language filter augments the converted Property with "an
-        // additional non-reified subproperty lang indicating the actual
-        // language returned" — a langtag. The member is broker-produced and
-        // the clause says nothing about a client supplying one, so it is
-        // kept; a non-string would leave the instance in a shape no reader
-        // of 4.15 can interpret.
-        let s = l
-            .as_str()
-            .ok_or_else(|| bad(format!("attribute {name}: lang must be a language tag")))?;
-        out.insert("lang".into(), Value::String(s.to_owned()));
-    }
-    if let Some(ot) = obj.get("objectType") {
-        out.insert(
-            "objectType".into(),
-            expand_terms(name, "objectType", ot, ctx)?,
-        );
-    }
+    expand_common_members(name, obj, attr_type, ctx, opts, &mut out)?;
 
     // sub-attributes
     for (k, sub) in obj {
