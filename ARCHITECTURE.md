@@ -60,7 +60,7 @@ module's header comment.
 |---|---|---|
 | `lib.rs` | 5 500 | the router (`/ngsi-ld/v1` nest, `/q/*` admin, `/info`), tenant purge, shared helpers |
 | `negotiate.rs` | 1 800 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
-| `entities.rs` | 4 000 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, distributed write fan-out |
+| `entities.rs` | 3 500 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, distributed write fan-out |
 | `paging.rs` | 1 400 | 4.12, 6.3.10 limit/offset/count and the next/prev links, 4.23 ordering and ICU collation, 6.3.17 `NGSILD-Warning`, the query body of 5.2.23 lifted into parameters; every list operation pages through it |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
 | `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
@@ -77,7 +77,7 @@ module's header comment.
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
 | `contexts.rs` | 760 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 760 | 6.3.21 version negotiation |
-| `repr.rs` | 960 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs |
+| `repr.rs` | 1 500 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs; 4.5.23 Linked Entity Retrieval (inline and flat, the lookup budget) and the 4.5.16 GeoJSON Feature/FeatureCollection shapes — what every module needs to render a document |
 | `history.rs` | 260 | the producer side of temporal recording: the per-request change buffer and the 4.5.7/4.5.8 delete mirrors that record a deleted Entity or Attribute in history |
 | `stamp.rs` | 50 | 4.8, 5.2.4 system attributes of a write: `createdAt`/`modifiedAt` on the entity and on every attribute instance |
 | `mirror.rs` | 350 | the change event and the two document mirrors (`Change`, `DocMirror`, `SubMirror`, `TenantIndex`) that state, notify and history share; names no other module |

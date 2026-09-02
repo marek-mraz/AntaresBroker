@@ -830,21 +830,21 @@ fn build_data(
         }
     };
     let shaped = crate::repr::apply(&internal, &shape.repr);
-    let mut main = crate::entities::compact_for(&shape.repr, &shaped, ctx);
+    let mut main = crate::repr::compact_for(&shape.repr, &shaped, ctx);
     let mut data = Vec::new();
     match &shape.join {
         Some((mode, level)) if mode == "inline" => {
-            crate::entities::inline_join(st, tenant, ctx, &shape.repr, &mut main, *level);
+            crate::repr::inline_join(st, tenant, ctx, &shape.repr, &mut main, *level);
             data.push(main);
         }
         Some((mode, level)) if mode == "flat" => {
             let main_id = internal.get("id").and_then(Value::as_str).unwrap_or("");
             let mut linked = std::collections::BTreeMap::new();
-            crate::entities::collect_flat(st, tenant, &shape.repr, &internal, *level, &mut linked);
+            crate::repr::collect_flat(st, tenant, &shape.repr, &internal, *level, &mut linked);
             data.push(main);
             for (id, (ldoc, lrepr)) in linked {
                 if id != main_id {
-                    data.push(crate::entities::compact_for(
+                    data.push(crate::repr::compact_for(
                         &lrepr,
                         &crate::repr::apply(&ldoc, &lrepr),
                         ctx,
@@ -1930,7 +1930,7 @@ async fn deliver_as(
                 })
             });
         let entities = body["data"].as_array().cloned().unwrap_or_default();
-        let mut fc = crate::entities::to_geojson_collection(entities, None);
+        let mut fc = crate::repr::to_geojson_collection(entities, None);
         if !prefer_body_json {
             fc["@context"] = crate::negotiate::served_context(ctx);
         }

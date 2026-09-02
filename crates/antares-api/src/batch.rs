@@ -1333,7 +1333,7 @@ async fn batch_query_inner(
             if repr.pick.is_some() && shaped.as_object().is_some_and(|o| o.is_empty()) {
                 return None;
             }
-            Some(crate::entities::compact_for(&repr, &shaped, &parsed.ctx))
+            Some(crate::repr::compact_for(&repr, &shaped, &parsed.ctx))
         })
         .collect();
     if let Some((mode, level)) = &join {
@@ -1343,11 +1343,11 @@ async fn batch_query_inner(
         // the ceiling by the page size, which is the request the ceiling
         // exists to bound: a page of densely linked Entities.
         let held = crate::entities::contained_by(&page_params);
-        let mut budget = crate::entities::MAX_JOIN_LOOKUPS;
+        let mut budget = crate::repr::MAX_JOIN_LOOKUPS;
         match mode.as_str() {
             "inline" => {
                 for p in &mut payload {
-                    crate::entities::inline_join_beyond(
+                    crate::repr::inline_join_beyond(
                         st,
                         &tenant,
                         &parsed.ctx,
@@ -1362,7 +1362,7 @@ async fn batch_query_inner(
             "flat" => {
                 let mut linked = std::collections::BTreeMap::new();
                 for doc in &page {
-                    crate::entities::collect_flat_beyond(
+                    crate::repr::collect_flat_beyond(
                         st,
                         &tenant,
                         &repr,
@@ -1376,7 +1376,7 @@ async fn batch_query_inner(
                 let page_ids: Vec<&str> = page.iter().filter_map(|d| d["id"].as_str()).collect();
                 for (id, (ldoc, lrepr)) in linked {
                     if !page_ids.contains(&id.as_str()) {
-                        payload.push(crate::entities::compact_for(
+                        payload.push(crate::repr::compact_for(
                             &lrepr,
                             &apply(&ldoc, &lrepr),
                             &parsed.ctx,
@@ -1388,7 +1388,7 @@ async fn batch_query_inner(
         }
     }
     let out = if accept == Accept::GeoJson {
-        crate::entities::to_geojson_collection(payload, None)
+        crate::repr::to_geojson_collection(payload, None)
     } else {
         Value::Array(payload)
     };

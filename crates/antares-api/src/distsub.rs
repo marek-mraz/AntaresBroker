@@ -822,7 +822,7 @@ async fn split_merge(
             // form exactly like the local notify path.
             let shape = crate::notify::notif_shape(sub, &ctx);
             let shaped = crate::repr::apply(&merged, &shape.repr);
-            out.push(crate::entities::compact_for(&shape.repr, &shaped, &ctx));
+            out.push(crate::repr::compact_for(&shape.repr, &shaped, &ctx));
         }
     }
     Ok(out)

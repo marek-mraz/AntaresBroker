@@ -3,8 +3,11 @@
 //! projection, lang filter) — applied on the INTERNAL expanded form before
 //! compaction.
 
-use antares_jsonld::Context;
+use crate::state::AppState;
+use antares_jsonld::{compact_entity, compact_entity_shallow, Context};
 use antares_model::NgsiError;
+use antares_model::{is_meta, TenantId};
+use antares_store::Kind;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -507,6 +510,431 @@ fn simplified_value(obj: &Map<String, Value>) -> Value {
         }
     }
     Value::Object(obj.clone())
+}
+
+/// Compaction for a shaped doc under a representation: keyValues docs get
+/// shallow key renaming only (values are already plain JSON).
+pub fn compact_for(
+    repr: &crate::repr::Repr,
+    shaped: &Value,
+    ctx: &antares_jsonld::Context,
+) -> Value {
+    if repr.key_values {
+        compact_entity_shallow(shaped, ctx)
+    } else {
+        compact_entity(shaped, ctx)
+    }
+}
+
+/// The child representation for a linked entity under `key` (4.21 nested
+/// projections apply to the joined entity, not the relationship itself).
+fn joined_repr(parent: &crate::repr::Repr, key_compact: &str, key_iri: &str) -> crate::repr::Repr {
+    let mut r = crate::repr::Repr {
+        sys_attrs: parent.sys_attrs,
+        key_values: parent.key_values,
+        concise: parent.concise,
+        lang: parent.lang.clone(),
+        ..Default::default()
+    };
+    if let Some(pick) = &parent.pick {
+        if let Some(n) = pick
+            .iter()
+            .find(|n| n.raw == key_compact || n.iri == key_iri)
+        {
+            r.pick = n.children.clone();
+        }
+    }
+    if let Some(omit) = &parent.omit {
+        if let Some(n) = omit
+            .iter()
+            .find(|n| (n.raw == key_compact || n.iri == key_iri) && n.children.is_some())
+        {
+            r.omit = n.children.clone();
+        }
+    }
+    r
+}
+
+/// 4.5.23.1: "When retrieving Linked Entities, it is necessary to limit
+/// retrieval to avoid cascades of an excessive length, duplicates or loops."
+/// joinLevel bounds the DEPTH of the walk; this bounds its WIDTH — the total
+/// number of Linked Entity reads a single request may buy, so that a densely
+/// linked graph cannot turn one retrieval into an unbounded store scan.
+pub(crate) const MAX_JOIN_LOOKUPS: usize = 1_000;
+
+/// State of one Linked Entity Retrieval walk (4.5.23.1): the entity ids
+/// already resolved — a loop or a duplicate is never walked a second time —
+/// and the remaining lookup budget. `complete` goes false as soon as the walk
+/// left something out, which the caller reports as an NGSILD-Warning.
+struct JoinWalk {
+    seen: std::collections::BTreeSet<String>,
+    budget: usize,
+    complete: bool,
+}
+
+impl JoinWalk {
+    /// The Linking Entity is already part of the response, so it counts as
+    /// resolved before the walk starts — and so does every id the client
+    /// passed in `containedBy`. `budget` is what is LEFT of the request's
+    /// allowance: a page walks one entity at a time and each walk hands the
+    /// remainder to the next, so the ceiling bounds the request rather than
+    /// each of its entities.
+    fn rooted(root: Option<&str>, contained_by: &[String], budget: usize) -> Self {
+        let mut seen: std::collections::BTreeSet<String> = contained_by.iter().cloned().collect();
+        if let Some(id) = root {
+            seen.insert(id.to_owned());
+        }
+        JoinWalk {
+            seen,
+            budget,
+            complete: true,
+        }
+    }
+}
+
+/// Linked Entity Retrieval, inline form (4.5.23.2): embed each relationship
+/// target under an "entity" member (normalized) or replace the object URI by
+/// the linked entity representation (simplified). Operates on COMPACTED docs.
+/// Returns false when 4.5.23.1 truncated the walk (loop, duplicate, budget).
+pub fn inline_join(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    compacted: &mut Value,
+    level: usize,
+) -> bool {
+    inline_join_beyond(st, tenant, ctx, repr, compacted, level, &[], &mut {
+        MAX_JOIN_LOOKUPS
+    })
+}
+
+/// Same, continuing an Entity Graph the client is already holding: the
+/// `containedBy` ids count as encountered (Table 6.4.3.2-1).
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
+pub fn inline_join_beyond(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    compacted: &mut Value,
+    level: usize,
+    contained_by: &[String],
+    budget: &mut usize,
+) -> bool {
+    let mut walk = JoinWalk::rooted(
+        compacted.get("id").and_then(Value::as_str),
+        contained_by,
+        *budget,
+    );
+    inline_join_walk(st, tenant, ctx, repr, compacted, level, &mut walk);
+    *budget = walk.budget;
+    walk.complete
+}
+
+fn inline_join_walk(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    compacted: &mut Value,
+    level: usize,
+    walk: &mut JoinWalk,
+) {
+    let Some(obj) = compacted.as_object_mut() else {
+        return;
+    };
+    let metas = ["id", "type", "scope", "createdAt", "modifiedAt", "@context"];
+    for (k, v) in obj.iter_mut() {
+        if metas.contains(&k.as_str()) {
+            continue;
+        }
+        let child = joined_repr(repr, k, &ctx.expand_key(k));
+        inline_join_value(st, tenant, ctx, repr, &child, v, level, walk);
+    }
+}
+
+fn lookup_joined(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    child: &crate::repr::Repr,
+    id: &str,
+    level: usize,
+    walk: &mut JoinWalk,
+) -> Option<Value> {
+    if walk.budget == 0 {
+        walk.complete = false;
+        return None;
+    }
+    walk.budget -= 1;
+    let target = st.store.get(tenant, Kind::Entity, id).ok().flatten()?;
+    let shaped = apply(&target, child);
+    let mut c = compact_for(child, &shaped, ctx);
+    if level > 1 {
+        if walk.seen.insert(id.to_owned()) {
+            inline_join_walk(st, tenant, ctx, child, &mut c, level - 1, walk);
+        } else {
+            // 4.5.23.1: an already-resolved target is a loop or a duplicate —
+            // it is still embedded, but its own links are not walked again.
+            walk.complete = false;
+        }
+    }
+    Some(c)
+}
+
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
+fn inline_join_value(
+    st: &AppState,
+    tenant: &TenantId,
+    ctx: &antares_jsonld::Context,
+    repr: &crate::repr::Repr,
+    child: &crate::repr::Repr,
+    v: &mut Value,
+    level: usize,
+    walk: &mut JoinWalk,
+) {
+    match v {
+        Value::Array(items) => {
+            for i in items {
+                inline_join_value(st, tenant, ctx, repr, child, i, level, walk);
+            }
+        }
+        Value::Object(inst) => {
+            if repr.key_values {
+                return;
+            }
+            // 4.5.22.2: a ListRelationship's targets join under the
+            // output-only "entityList" member (always an array). The
+            // compacted objectList carries {"object": URI} entries.
+            if let Some(Value::Array(ol)) = inst.get("objectList") {
+                let targets: Vec<String> = ol
+                    .iter()
+                    .filter_map(|e| match e {
+                        Value::String(id) => Some(id.clone()),
+                        Value::Object(o) => {
+                            o.get("object").and_then(Value::as_str).map(str::to_owned)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut joined: Vec<Value> = Vec::new();
+                for id in &targets {
+                    if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                        joined.push(j);
+                    }
+                }
+                if !joined.is_empty() {
+                    inst.insert("entityList".into(), Value::Array(joined));
+                }
+                return;
+            }
+            let targets: Vec<String> = match inst.get("object") {
+                Some(Value::String(id)) => vec![id.clone()],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => return,
+            };
+            let mut joined: Vec<Value> = Vec::new();
+            for id in &targets {
+                if let Some(j) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                    joined.push(j);
+                }
+            }
+            if joined.is_empty() {
+                return;
+            }
+            let e = if joined.len() == 1 {
+                joined.remove(0)
+            } else {
+                Value::Array(joined)
+            };
+            inst.insert("entity".into(), e);
+        }
+        // simplified: relationship value is the object URI string
+        Value::String(id) if repr.key_values => {
+            if let Some(joined) = lookup_joined(st, tenant, ctx, child, id, level, walk) {
+                *v = joined;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Linked Entity Retrieval, flattened form (4.5.23.3): collect targets with
+/// the child representation that applies to each. The Linking Entity is
+/// already in the flattened array, so 4.5.23.1 ("avoid ... duplicates or
+/// loops") keeps it out of `out` even when a Relationship points back at it.
+/// Returns false when the walk was truncated by the lookup budget.
+pub fn collect_flat(
+    st: &AppState,
+    tenant: &TenantId,
+    repr: &crate::repr::Repr,
+    internal_doc: &Value,
+    level: usize,
+    out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+) -> bool {
+    collect_flat_beyond(st, tenant, repr, internal_doc, level, out, &[], &mut {
+        MAX_JOIN_LOOKUPS
+    })
+}
+
+/// Same, continuing an Entity Graph the client is already holding: the
+/// `containedBy` ids count as encountered (Table 6.4.3.2-1).
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
+pub fn collect_flat_beyond(
+    st: &AppState,
+    tenant: &TenantId,
+    repr: &crate::repr::Repr,
+    internal_doc: &Value,
+    level: usize,
+    out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+    contained_by: &[String],
+    budget: &mut usize,
+) -> bool {
+    let mut walk = JoinWalk::rooted(
+        internal_doc.get("id").and_then(Value::as_str),
+        contained_by,
+        *budget,
+    );
+    walk.seen.extend(out.keys().cloned());
+    collect_flat_walk(st, tenant, repr, internal_doc, level, out, &mut walk);
+    *budget = walk.budget;
+    walk.complete
+}
+
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
+fn collect_flat_walk(
+    st: &AppState,
+    tenant: &TenantId,
+    repr: &crate::repr::Repr,
+    internal_doc: &Value,
+    level: usize,
+    out: &mut std::collections::BTreeMap<String, (Value, crate::repr::Repr)>,
+    walk: &mut JoinWalk,
+) {
+    let Some(obj) = internal_doc.as_object() else {
+        return;
+    };
+    for (k, v) in obj {
+        if is_meta(k) {
+            continue;
+        }
+        // only traverse relationships that survive THIS doc's projection
+        if let Some(pick) = &repr.pick {
+            if !pick.iter().any(|n| n.iri == *k || n.raw == *k) {
+                continue;
+            }
+        }
+        if let Some(omit) = &repr.omit {
+            if omit
+                .iter()
+                .any(|n| (n.iri == *k || n.raw == *k) && n.children.is_none())
+            {
+                continue;
+            }
+        }
+        let Some(instances) = v.as_array() else {
+            continue;
+        };
+        let child = joined_repr(repr, k, k);
+        for inst in instances {
+            // Relationship objects plus ListRelationship objectList targets
+            // (internal form stores bare URIs) — 4.5.23.3 appends both kinds
+            // of Linked Entities to the flattened array.
+            let targets: Vec<&str> = match (inst.get("object"), inst.get("objectList")) {
+                (Some(Value::String(id)), _) => vec![id.as_str()],
+                (Some(Value::Array(a)), _) => a.iter().filter_map(Value::as_str).collect(),
+                (None, Some(Value::Array(a))) => a.iter().filter_map(Value::as_str).collect(),
+                _ => continue,
+            };
+            for id in targets {
+                if walk.seen.contains(id) {
+                    continue;
+                }
+                if walk.budget == 0 {
+                    walk.complete = false;
+                    return;
+                }
+                walk.budget -= 1;
+                if let Some(target) = st.store.get(tenant, Kind::Entity, id).ok().flatten() {
+                    walk.seen.insert(id.to_owned());
+                    out.insert(id.to_owned(), (target.clone(), child.clone()));
+                    if level > 1 {
+                        collect_flat_walk(st, tenant, &child, &target, level - 1, out, walk);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 4.5.16.2 GeoJSON Feature, members per Table 5.2.29-1 (5.2.29 Feature):
+/// id = entity id (URI), fixed type "Feature", geometry = the selected
+/// GeoProperty's value or null (4.5.16.1: geometryProperty parameter,
+/// default "location"), properties = the 5.2.31 FeatureProperties (entity
+/// type + attributes). The @context member is added by respond() (6.3.6).
+pub fn to_geojson_feature(entity: Value, geometry_property: Option<&String>) -> Value {
+    let geom_term = geometry_property
+        .cloned()
+        .unwrap_or_else(|| "location".into());
+    let geometry = entity
+        .get(&geom_term)
+        .map(geo_value_of)
+        .unwrap_or(Value::Null);
+    let id = entity.get("id").cloned().unwrap_or(Value::Null);
+    let mut props = entity.as_object().cloned().unwrap_or_default();
+    props.remove("id");
+    let mut feature = Map::new();
+    feature.insert("id".into(), id);
+    feature.insert("type".into(), Value::String("Feature".into()));
+    feature.insert("geometry".into(), geometry);
+    feature.insert("properties".into(), Value::Object(props));
+    Value::Object(feature)
+}
+
+/// 4.5.16.3 GeoJSON FeatureCollection, members per Table 5.2.30-1 (5.2.30
+/// FeatureCollection): fixed type "FeatureCollection" + features array of
+/// 4.5.16.2 Feature objects — empty array when no matches, no per-Feature
+/// @context; the top-level @context is added by respond() (6.3.6).
+pub fn to_geojson_collection(entities: Vec<Value>, geometry_property: Option<&String>) -> Value {
+    let features: Vec<Value> = entities
+        .into_iter()
+        .map(|e| to_geojson_feature(e, geometry_property))
+        .collect();
+    serde_json::json!({"type": "FeatureCollection", "features": features})
+}
+
+/// 4.5.16.1: with multiple instances the default one (no datasetId) is
+/// selected unless a datasetId filter already narrowed the set to one; a
+/// missing GeoProperty or a value that "does not hold a valid GeoJSON
+/// geometry object" yields null — "which is syntactically valid GeoJSON".
+fn geo_value_of(attr: &Value) -> Value {
+    let inst = match attr {
+        Value::Array(a) => match a.iter().find(|i| i.get("datasetId").is_none()) {
+            Some(default) => default.clone(),
+            None if a.len() == 1 => a[0].clone(),
+            None => return Value::Null,
+        },
+        other => other.clone(),
+    };
+    let v = inst.get("value").cloned().unwrap_or(inst);
+    // 4.5.17.1: in the simplified representation a multi-instance GeoProperty
+    // is the {"dataset": {…}} map — the default ("@none") instance is the
+    // 4.5.16.1 selection.
+    let v = match v.as_object() {
+        Some(o) if o.len() == 1 && o.contains_key("dataset") => {
+            o["dataset"].get("@none").cloned().unwrap_or(Value::Null)
+        }
+        _ => v,
+    };
+    match antares_jsonld::expand::validate_geojson("geometry", &v) {
+        Ok(()) => v,
+        Err(_) => Value::Null,
+    }
 }
 
 #[cfg(test)]
@@ -1017,5 +1445,74 @@ mod clause_6_3_7 {
             },
         );
         assert_eq!(omitted["type"], "T", "omit leaves the rest of the entity");
+    }
+
+    /// 4.5.16.1/4.5.16.2/4.5.16.3: geometry selection (default instance,
+    /// datasetId-narrowed single, invalid value -> null) and the
+    /// Feature/FeatureCollection shapes.
+    #[test]
+    fn geojson_feature_selection_and_shape() {
+        use super::{to_geojson_collection, to_geojson_feature};
+        use serde_json::Value;
+        let entity = json!({
+            "id": "urn:ngsi-ld:V:1", "type": "Vehicle",
+            "location": [
+                {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [9.0, 9.0]},
+                 "datasetId": "urn:ngsi-ld:Dataset:gps"},
+                {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [1.0, 2.0]}}
+            ],
+            "speed": {"type": "Property", "value": 5}
+        });
+        let f = to_geojson_feature(entity.clone(), None);
+        assert_eq!(f["type"], "Feature");
+        assert_eq!(f["id"], "urn:ngsi-ld:V:1");
+        // default instance (no datasetId) wins over the first array element
+        assert_eq!(
+            f["geometry"],
+            json!({"type": "Point", "coordinates": [1.0, 2.0]})
+        );
+        assert_eq!(f["properties"]["type"], "Vehicle");
+        assert!(
+            f["properties"].get("id").is_none(),
+            "id only at Feature level"
+        );
+        assert!(f["properties"].get("speed").is_some());
+
+        // geometryProperty naming a non-geometry Property -> null geometry
+        let f2 = to_geojson_feature(entity.clone(), Some(&"speed".to_string()));
+        assert_eq!(f2["geometry"], Value::Null);
+        // absent GeoProperty -> null geometry
+        let f3 = to_geojson_feature(entity.clone(), Some(&"missing".to_string()));
+        assert_eq!(f3["geometry"], Value::Null);
+
+        // 4.5.17.1: simplified multi-instance GeoProperty = dataset map;
+        // the "@none" (default) entry is the geometry
+        let simplified = json!({
+            "id": "urn:ngsi-ld:V:2", "type": "Vehicle",
+            "location": {"dataset": {
+                "urn:ngsi-ld:Dataset:gps": {"type": "Point", "coordinates": [9.0, 9.0]},
+                "@none": {"type": "Point", "coordinates": [3.0, 4.0]}
+            }},
+            "speed": 5
+        });
+        let fs = to_geojson_feature(simplified, None);
+        assert_eq!(
+            fs["geometry"],
+            json!({"type": "Point", "coordinates": [3.0, 4.0]})
+        );
+        assert_eq!(fs["properties"]["speed"], 5);
+
+        let fc = to_geojson_collection(vec![entity], None);
+        assert_eq!(fc["type"], "FeatureCollection");
+        assert_eq!(fc["features"].as_array().map(Vec::len), Some(1));
+        assert!(
+            fc["features"][0].get("@context").is_none(),
+            "no per-Feature @context"
+        );
+        // Table 5.2.30-1: "In the case that no matches are found, features
+        // will be an empty array"
+        let empty = to_geojson_collection(vec![], None);
+        assert_eq!(empty["type"], "FeatureCollection");
+        assert_eq!(empty["features"], json!([]));
     }
 }
