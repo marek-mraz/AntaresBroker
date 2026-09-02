@@ -502,6 +502,235 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
     assert!(!outcome.decided && !outcome.paged && outcome.total.is_none());
 }
 
+/// 4.9 on the CURRENT-STATE path, under the contract the whole file rests
+/// on: SQL may only narrow. The temporal side of `q=` has a battery of
+/// deliberately awkward shapes against `qeval::eval_q`; the current-state
+/// side had one hand-written filter over ten uniform rooms, which is the
+/// half of the compiler most likely to drop a row — the value classes it
+/// meets are whatever a client stored, not a fixture of matching type.
+/// A drop here is `memory` and `postgres` answering the same query
+/// differently, which is the divergence this suite exists to catch.
+#[tokio::test(flavor = "multi_thread")]
+async fn current_state_q_prefilter_narrows_but_never_drops() {
+    let url = require_db!();
+    let pool = antares_sql::store::pg::connect(&url, 5)
+        .await
+        .expect("connect");
+    let t = TenantId::new("cqprefilter").expect("tenant");
+    antares_sql::store::pg::ensure_tenant(&pool, &t)
+        .await
+        .expect("tenant row");
+    let store = AnyStore::Pg(PgBackend::new(pool));
+    let ctx = Loader::new().core();
+
+    let a = |name: &str| format!("{NS}{name}");
+    let prop = |v: Value| json!([{"type": "Property", "value": v}]);
+    let base = |id: &str| {
+        json!({
+            "id": id, "type": [format!("{NS}Thing")],
+            "createdAt": "2026-08-05T09:00:00Z", "modifiedAt": "2026-08-05T09:00:00Z"
+        })
+    };
+    let with = |id: &str, members: Vec<(String, Value)>| {
+        let mut d = base(id);
+        for (k, v) in members {
+            d[k] = v;
+        }
+        d
+    };
+    let docs: Vec<(&str, Value)> = vec![
+        (
+            "urn:cq:num",
+            with(
+                "urn:cq:num",
+                vec![
+                    (a("speed"), prop(json!(30))),
+                    (a("name"), prop(json!("north"))),
+                ],
+            ),
+        ),
+        (
+            "urn:cq:zero",
+            with("urn:cq:zero", vec![(a("speed"), prop(json!(0)))]),
+        ),
+        // exactly on the lower edge of the range case below, and its only
+        // value: a boundary compiled as strict drops this row and nothing else
+        (
+            "urn:cq:edge",
+            with("urn:cq:edge", vec![(a("speed"), prop(json!(10)))]),
+        ),
+        // the same term holding a string where its siblings hold numbers
+        (
+            "urn:cq:str",
+            with("urn:cq:str", vec![(a("speed"), prop(json!("fast")))]),
+        ),
+        (
+            "urn:cq:null",
+            with("urn:cq:null", vec![(a("speed"), prop(Value::Null))]),
+        ),
+        (
+            "urn:cq:bool",
+            with("urn:cq:bool", vec![(a("flag"), prop(json!(true)))]),
+        ),
+        (
+            "urn:cq:arr",
+            with("urn:cq:arr", vec![(a("tags"), prop(json!(["a", "b"])))]),
+        ),
+        (
+            "urn:cq:obj",
+            with(
+                "urn:cq:obj",
+                vec![(a("address"), prop(json!({"city": "Bonn"})))],
+            ),
+        ),
+        // two instances of one attribute, only one of which matches
+        (
+            "urn:cq:multi",
+            with(
+                "urn:cq:multi",
+                vec![(
+                    a("speed"),
+                    json!([
+                        {"type": "Property", "value": 10, "datasetId": "urn:d:1"},
+                        {"type": "Property", "value": 90, "datasetId": "urn:d:2"}
+                    ]),
+                )],
+            ),
+        ),
+        (
+            "urn:cq:rel",
+            with(
+                "urn:cq:rel",
+                vec![(
+                    a("parked"),
+                    json!([{"type": "Relationship", "object": "urn:x:1"}]),
+                )],
+            ),
+        ),
+        (
+            "urn:cq:lang",
+            with(
+                "urn:cq:lang",
+                vec![(
+                    a("label"),
+                    json!([{"type": "LanguageProperty",
+                            "languageMap": {"en": "north", "de": "nord"}}]),
+                )],
+            ),
+        ),
+        ("urn:cq:none", base("urn:cq:none")),
+    ];
+    for (id, doc) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+        assert!(
+            store
+                .create(&t, antares_sql::store::Kind::Entity, id, doc.clone())
+                .expect("seed"),
+            "seed {id}"
+        );
+    }
+    let all: Vec<String> = {
+        let mut v: Vec<String> = docs.iter().map(|(id, _)| (*id).to_owned()).collect();
+        v.sort();
+        v
+    };
+    let expand = |term: &str| format!("{NS}{term}");
+
+    // The grammar, not one shape of it: comparison against every value
+    // class present, existence both ways, ranges, lists, conjunction,
+    // disjunction, a Relationship object, and the dotted path the compiler
+    // is documented to decline.
+    for q in [
+        "speed>25",
+        "speed>=0",
+        "speed==30",
+        "speed!=30",
+        "speed<1",
+        "speed",
+        "!speed",
+        "name==\"north\"",
+        "name!=\"north\"",
+        "flag==true",
+        "tags==\"a\"",
+        "speed==10..90",
+        "speed==0,30",
+        "parked==\"urn:x:1\"",
+        "speed>25;name==\"north\"",
+        "speed>25|flag==true",
+        "(speed>25;name==\"north\")|flag==true",
+        "address.city==\"Bonn\"",
+        "name~=\"^nor\"",
+    ] {
+        let ast = antares_ql::parse_q(q).unwrap_or_else(|e| panic!("q={q} does not parse: {e:?}"));
+        let expected: Vec<&str> = docs
+            .iter()
+            .filter(|(_, d)| antares_api::qeval::eval_q(&ast, d, &ctx, &|_| None))
+            .map(|(id, _)| *id)
+            .collect();
+        let got = ids(&store
+            .query_entities(
+                &t,
+                &EntityFilter {
+                    q: Some(&ast),
+                    expand: &expand,
+                    ..Default::default()
+                },
+            )
+            .expect("sql query")
+            .rows);
+        for want in &expected {
+            assert!(
+                got.contains(&(*want).to_string()),
+                "SQL dropped {want}, which the evaluator matches, for q={q}\n  sql set: {got:?}"
+            );
+        }
+    }
+
+    // …and the prefilter really runs: a filter whose every leaf compiles
+    // excludes the rows it can decide about, and one the compiler declines
+    // widens to the whole tenant rather than guessing a translation.
+    let ast = antares_ql::parse_q("speed>25").expect("parse");
+    let got = ids(&store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                q: Some(&ast),
+                expand: &expand,
+                ..Default::default()
+            },
+        )
+        .expect("sql query")
+        .rows);
+    for out in ["urn:cq:zero", "urn:cq:none"] {
+        assert!(
+            !got.contains(&out.to_string()),
+            "the prefilter never reached the database: {got:?}"
+        );
+        let d = &docs.iter().find(|(id, _)| *id == out).expect("fixture").1;
+        assert!(
+            !antares_api::qeval::eval_q(&ast, d, &ctx, &|_| None),
+            "case bug: {out} matches speed>25"
+        );
+    }
+    let ast = antares_ql::parse_q("address.city==\"Bonn\"").expect("parse");
+    let got = ids(&store
+        .query_entities(
+            &t,
+            &EntityFilter {
+                q: Some(&ast),
+                expand: &expand,
+                ..Default::default()
+            },
+        )
+        .expect("sql query")
+        .rows);
+    assert_eq!(got, all, "a declined leaf must widen, never narrow");
+
+    for (id, _) in &docs {
+        let _ = store.delete(&t, antares_sql::store::Kind::Entity, id);
+    }
+}
+
 /// 5.7.4.4 S2 — the temporal q= prefilter obeys the same contract as every
 /// pushdown in this file: **SQL may only narrow.** ONE fixture set with
 /// deliberately awkward shapes (relationships, languageMaps, array values,
