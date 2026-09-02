@@ -29,6 +29,7 @@ pub mod regexcache;
 pub mod registry;
 pub mod repr;
 pub mod snapshots;
+pub mod stamp;
 pub mod state;
 pub mod subscriptions;
 pub mod temporal;

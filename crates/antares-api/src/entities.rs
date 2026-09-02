@@ -2,10 +2,12 @@
 //! /entities resource (CIM 009 6.4–6.7; operations 5.6.1–5.6.6, 5.6.17,
 //! 5.6.18, 5.6.19, 5.6.21, 5.7.1, 5.7.2).
 
+use crate::history::mirror_delete_entity;
 use crate::negotiate::*;
 use crate::paging::{attach_warnings, order_entities, page_params, paginate, paginate_pre};
 use crate::qeval::eval_q;
 use crate::repr::{apply, parse_repr};
+use crate::stamp::stamp_new;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{
     compact_entity, compact_entity_shallow, expand_entity, is_ngsi_null, ExpandOpts,
@@ -14,7 +16,6 @@ use antares_model::{NgsiError, TenantId};
 use antares_ql::parse_q;
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
-use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -27,46 +28,6 @@ use crate::negotiate::CleanParams;
 use antares_model::is_meta;
 
 pub(crate) use antares_ql::type_selection_matches;
-
-/// Inject server-managed timestamps into a freshly expanded doc.
-pub fn stamp_new(doc: &mut Value, ts: &str) {
-    if let Some(obj) = doc.as_object_mut() {
-        obj.insert("createdAt".into(), Value::String(ts.to_owned()));
-        obj.insert("modifiedAt".into(), Value::String(ts.to_owned()));
-        for (k, v) in obj.iter_mut() {
-            if !is_meta(k) {
-                stamp_instances(v, ts);
-            }
-        }
-    }
-}
-
-/// Stamp one Attribute's instances, and their sub-Attributes, with the
-/// 4.8 timestamps: createdAt and modifiedAt are "the temporal Property at
-/// which the Entity, Property or Relationship was entered into"/"last
-/// modified in an NGSI-LD system", a sub-Property is a Property, and the
-/// value is server-generated — whatever the client sent is overwritten.
-/// Every write path that brings a new Attribute in uses this one: 5.6.1
-/// through `stamp_new`, 5.6.2 and 5.6.3 through `attrs.rs`, so the served
-/// representation does not depend on which operation wrote the Attribute.
-/// The temporal write path stamps differently (`temporal::stamp_instances`):
-/// there an instance is the unit of history and carries an instanceId, and
-/// sub-Attributes are part of the instance, not stamped separately.
-pub(crate) fn stamp_instances(v: &mut Value, ts: &str) {
-    if let Some(arr) = v.as_array_mut() {
-        for inst in arr {
-            if let Some(o) = inst.as_object_mut() {
-                o.insert("createdAt".into(), Value::String(ts.to_owned()));
-                o.insert("modifiedAt".into(), Value::String(ts.to_owned()));
-                for (k, sub) in o.iter_mut() {
-                    if sub.is_array() && !antares_jsonld::RESERVED_MEMBERS.contains(&k.as_str()) {
-                        stamp_instances(sub, ts);
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Compaction for a shaped doc under a representation: keyValues docs get
 /// shallow key renaming only (values are already plain JSON).
@@ -89,116 +50,6 @@ pub fn compact_for(
 // `notify::record_temporal_change`. Only the DELETION mirrors below stay as
 // explicit handler calls (their typed-null deletion shape is not derivable
 // from a plain before/after append).
-
-/// delete_temporal_on_core_delete: entity deletion removes its temporal
-/// representation too (suite configuration parity). Skipped on bus=nats
-/// api pods — the recorder applies the entityDeleted fence instead.
-pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
-    if !st.record_locally() {
-        return;
-    }
-    if let Err(e) = st.temporal.delete(tenant, id) {
-        tracing::warn!("temporal mirror delete failed: {e}");
-    }
-}
-
-/// 4.5.7/4.5.8: "In case the Property is deleted, an instance of the
-/// Property is recorded with its value set to the URI "urn:ngsi-ld:null"
-/// and the deletedAt Temporal Property set" (object for a Relationship;
-/// typed null shapes for the LanguageProperty/JsonProperty/Vocab/List
-/// subtypes). Each recorded instance carries an instanceId — the clause
-/// SHOULD that makes 5.6.14/5.6.15 selective modification possible.
-pub fn mirror_delete_attr(
-    st: &AppState,
-    tenant: &TenantId,
-    id: &str,
-    attr_iri: &str,
-    dataset_id: Option<&str>,
-    ts: &str,
-) -> bool {
-    let mut had = false;
-    let r = st.temporal.mutate(tenant, id, |doc| {
-        // The mirror writes nothing into a document the temporal driver
-        // handed back in a shape the contract forbids; `had` stays false and
-        // the caller reports that nothing was mirrored.
-        let Some(target) = doc.as_object_mut() else {
-            return Ok::<(), std::convert::Infallible>(());
-        };
-        if attr_iri == "scope" {
-            // scope deletion: temporal scope becomes an instance array with
-            // value [] (the 020_19/020_20 shape)
-            had = true;
-            let inst = serde_json::json!({
-                "type": "Property",
-                "value": [],
-                "instanceId": format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4()),
-                "deletedAt": ts,
-            });
-            match target.get_mut("scope").and_then(Value::as_array_mut) {
-                Some(arr) if arr.first().is_some_and(|i| i.is_object()) => arr.push(inst),
-                _ => {
-                    target.insert("scope".into(), Value::Array(vec![inst]));
-                }
-            }
-            return Ok::<(), std::convert::Infallible>(());
-        }
-        if let Some(arr) = target.get_mut(attr_iri).and_then(Value::as_array_mut) {
-            if arr.is_empty() {
-                return Ok(());
-            }
-            had = true;
-            let atype = arr
-                .first()
-                .and_then(|i| i.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("Property")
-                .to_owned();
-            let mut inst = Map::new();
-            inst.insert("type".into(), Value::String(atype.clone()));
-            let null = Value::String("urn:ngsi-ld:null".into());
-            match atype.as_str() {
-                "Relationship" => {
-                    inst.insert("object".into(), null);
-                }
-                "LanguageProperty" => {
-                    inst.insert(
-                        "languageMap".into(),
-                        serde_json::json!({"@none": "urn:ngsi-ld:null"}),
-                    );
-                }
-                "JsonProperty" => {
-                    inst.insert("json".into(), null);
-                }
-                "VocabProperty" => {
-                    inst.insert("vocab".into(), null);
-                }
-                "ListProperty" => {
-                    inst.insert("valueList".into(), null);
-                }
-                "ListRelationship" => {
-                    inst.insert("objectList".into(), null);
-                }
-                _ => {
-                    inst.insert("value".into(), null);
-                }
-            }
-            if let Some(ds) = dataset_id {
-                inst.insert("datasetId".into(), Value::String(ds.to_owned()));
-            }
-            inst.insert(
-                "instanceId".into(),
-                Value::String(format!("urn:ngsi-ld:Instance:{}", uuid::Uuid::new_v4())),
-            );
-            inst.insert("deletedAt".into(), Value::String(ts.to_owned()));
-            arr.push(Value::Object(inst));
-        }
-        Ok(())
-    });
-    if let Err(e) = r {
-        tracing::warn!("temporal attr mirror failed: {e}");
-    }
-    had
-}
 
 // ---------- POST /entities/ (5.6.1) ----------
 
@@ -3969,6 +3820,7 @@ mod clause_5_6_17_and_6_4_3_2 {
 #[cfg(test)]
 mod clause_4_8_system_attributes {
     use super::*;
+    use crate::stamp::stamp_instances;
     use axum::body::Body;
     use axum::http::Request;
     use serde_json::json;

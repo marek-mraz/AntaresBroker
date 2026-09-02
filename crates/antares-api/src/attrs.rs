@@ -315,7 +315,7 @@ async fn append_attrs_inner(
                     continue;
                 }
                 let mut incoming = v.clone();
-                crate::entities::stamp_instances(&mut incoming, ts);
+                crate::stamp::stamp_instances(&mut incoming, ts);
                 match target.get_mut(k) {
                     None => {
                         target.insert(k.clone(), incoming);
@@ -370,7 +370,7 @@ async fn update_attrs_inner(
                     continue;
                 }
                 let mut incoming = v.clone();
-                crate::entities::stamp_instances(&mut incoming, ts);
+                crate::stamp::stamp_instances(&mut incoming, ts);
                 match target.get_mut(k) {
                     // 5.6.2 + 011_01_03: unknown attributes are appended silently
                     None => {
@@ -1177,7 +1177,7 @@ async fn delete_attr_inner(
         // 5.6.5.4 type selector did not match) deleted nothing and must leave
         // the attribute history untouched.
         let temporal_had = !matches!(res, Some(Err(_)))
-            && crate::entities::mirror_delete_attr(
+            && crate::history::mirror_delete_attr(
                 st,
                 &tenant,
                 id,
@@ -1677,7 +1677,7 @@ mod clause_4_8 {
             }]
         }]);
         let mut appended = attr.clone();
-        crate::entities::stamp_instances(&mut appended, TS);
+        crate::stamp::stamp_instances(&mut appended, TS);
 
         // what 5.6.1 Create Entity produces for the same attribute
         let mut created = json!({
@@ -1685,7 +1685,7 @@ mod clause_4_8 {
             "type": "Room",
             "https://example.org/temperature": attr
         });
-        crate::entities::stamp_new(&mut created, TS);
+        crate::stamp::stamp_new(&mut created, TS);
         assert_eq!(
             appended, created["https://example.org/temperature"],
             "an appended attribute must carry the timestamps a created one carries"
