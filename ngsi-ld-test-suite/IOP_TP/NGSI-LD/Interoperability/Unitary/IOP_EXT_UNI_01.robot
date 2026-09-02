@@ -221,10 +221,14 @@ IOP_EXT_UNI_01_08 Retrieve Merge: Newest observedAt Wins Per datasetId
 
     ${response}=    Get Entity Via Broker    ${b1_url}    ${entity_id}
     Check Response Status Code    200    ${response.status_code}
-    Should Contain    ${response.text}    909
-    Should Contain    ${response.text}    202
-    Should Not Contain    ${response.text}    101
-    Should Not Contain    ${response.text}    808
+    # Read out of the parsed Attribute, not looked for in the serialized
+    # body: the entity id carries a random suffix and every observedAt
+    # carries a year, so three digits can be present in the text of a
+    # response that holds no such value at all.
+    ${speed}=    Evaluate    {i["datasetId"]: i["value"] for i in $response.json()["speed"]}
+    Length Should Be    ${speed}    2
+    Should Be Equal As Integers    ${speed}[urn:ngsi-ld:ds:a]    909
+    Should Be Equal As Integers    ${speed}[urn:ngsi-ld:ds:b]    202
 
 
 *** Keywords ***

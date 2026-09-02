@@ -177,9 +177,11 @@ IOP_EXT_REG_01_07 Inclusive Beats Auxiliary For The Same Attribute
 
     ${response}=    Get Entity Via Broker    ${b1_url}    ${entity_id}
     Check Response Status Code    200    ${response.status_code}
-    ${speed}=    Evaluate    $response.json()["speed"]["value"]
-    Should Be Equal As Integers    ${speed}    222
-    Should Not Contain    ${response.text}    333
+    # The auxiliary instance is absent from the parsed Attribute, not from
+    # the response text: the entity id carries a random suffix whose digits
+    # can spell the value a substring check looks for.
+    ${values}=    Evaluate    [i["value"] for i in ($response.json()["speed"] if isinstance($response.json()["speed"], list) else [$response.json()["speed"]])]
+    Should Be Equal As Strings    ${values}    [222]
 
 IOP_EXT_REG_01_08 PropertyNames Scope Gates The Forward
     [Documentation]    4.3.6.1: "if a registration states that only Entities

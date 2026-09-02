@@ -64,8 +64,10 @@ IOP_EXT_SUB_01_01 Subscription Update Re-Narrows The Chain
     Wait For Request    ${30}
     ${body}=    Get Request Body
     Reply By    200
-    Should Contain    ${body.decode('utf-8')}    150
-    Should Not Contain    ${body.decode('utf-8')}    "value":60
+    # The notified value comes out of the parsed payload: the Notification
+    # carries the entity id, whose random suffix can spell any three digits.
+    ${notified}=    Evaluate    [e["speed"]["value"] for e in json.loads($body.decode('utf-8'))["data"]]    json
+    Should Be Equal As Strings    ${notified}    [150]
 
 IOP_EXT_SUB_01_02 isActive=false Pauses The Chain, Reactivation Resumes
     [Documentation]    5.8.2.4: isActive=false updates status to "paused";
