@@ -512,12 +512,14 @@ impl AnyStore {
                     rows.retain_mut(|d| !crate::store::filter::strip_expired(d, &now));
                     Ok(rows)
                 }
+                // ponytail: temporal is sliced from the whole list, so a
+                // tenant large enough still refuses this read for volume; the
+                // upgrade is a keyset reader over the instance rows.
                 // Temporal has no keyset reader of its own: its documents are
                 // reconstructed from the instance rows, where the volume that
-                // needs bounding is instances and not entities. Sliced from
-                // the whole list, and so still refusable for volume — the one
-                // kind that does not yet honour `list_page`'s contract, and
-                // the reason nothing internal walks temporal state.
+                // needs bounding is instances and not entities — the one kind
+                // that does not yet honour `list_page`'s contract, and the
+                // reason nothing internal walks temporal state.
                 Kind::Temporal => {
                     let mut rows = AnyStore::list(self, tenant, kind)?;
                     rows.sort_by(|a, b| row_id(a).cmp(row_id(b)));
