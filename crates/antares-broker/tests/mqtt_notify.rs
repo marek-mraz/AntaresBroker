@@ -9,9 +9,27 @@
 #![cfg(all(unix, feature = "mqtt"))]
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::process::Command;
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+
+/// Kills the child on the way out, including out of a failed assertion: a
+/// broker left behind holds its port and the next run talks to it instead.
+struct Broker(Child);
+impl Drop for Broker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
 
 fn http(port: u16, request: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
@@ -68,7 +86,7 @@ fn mqtt_notification_carries_metadata_and_body() {
     let mqtt_port: u16 = port_s.parse().expect("port");
 
     let topic = format!("antares-e2e-{}", std::process::id());
-    let http_port = 19195_u16;
+    let http_port = free_port();
 
     // Subscriber FIRST (QoS 1 so the publish is buffered for us).
     let mut opts = rumqttc::MqttOptions::new(
@@ -93,13 +111,15 @@ fn mqtt_notification_carries_metadata_and_body() {
         }
     }
 
-    let mut broker = Command::new(env!("CARGO_BIN_EXE_antares"))
-        .env_remove("ANTARES_TEST_DATABASE_URL")
-        .env_remove("ANTARES_TEST_MQTT_URL")
-        .env("ANTARES_HTTP_PORT", http_port.to_string())
-        .env("ANTARES_EGRESS_ALLOW_PRIVATE", "true")
-        .spawn()
-        .expect("spawn antares");
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_antares"))
+            .env_remove("ANTARES_TEST_DATABASE_URL")
+            .env_remove("ANTARES_TEST_MQTT_URL")
+            .env("ANTARES_HTTP_PORT", http_port.to_string())
+            .env("ANTARES_EGRESS_ALLOW_PRIVATE", "true")
+            .spawn()
+            .expect("spawn antares"),
+    );
     wait_healthy(http_port);
 
     // Subscription with an MQTT endpoint + receiverInfo (Table 7.2-2).
@@ -138,9 +158,6 @@ fn mqtt_notification_carries_metadata_and_body() {
             break;
         }
     }
-    let _ = broker.kill();
-    let _ = broker.wait();
-
     let payload = payload.expect("no MQTT notification arrived within 15 s");
     let msg: serde_json::Value = serde_json::from_slice(&payload).expect("payload is JSON");
     // 7.2: two elements, metadata + body.
