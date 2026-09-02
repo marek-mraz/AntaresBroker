@@ -33,11 +33,12 @@ measured costs.
 
 ## What the broker does not do
 
-Authentication, authorization, rate limiting and quotas belong to the
-policy enforcement point in front of the broker (an API gateway). The
-broker validates, stores, serves, notifies and federates; it trusts the
-`NGSILD-Tenant` header it receives and enforces tenant isolation in the
-store. The [Shared crates](shared-crates.md) chapter shows how a gateway
+Authentication, rate limiting and quotas belong to the policy enforcement
+point in front of the broker (an API gateway), and so does every
+authorization *decision*: the broker ships no policy engine, only the seam
+one attaches to (ADR-0020). The broker validates, stores, serves, notifies
+and federates; it trusts the `NGSILD-Tenant` header it receives and
+enforces tenant isolation in the store. The [Shared crates](shared-crates.md) chapter shows how a gateway
 uses the broker's own parser, query engine and matcher to make its
 decisions with identical semantics.
 

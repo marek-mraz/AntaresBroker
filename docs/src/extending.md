@@ -231,11 +231,14 @@ a cargo feature. Nothing in the typed NGSI-LD path dispatches through a
 generic plugin chain, so conformance stays a property of the binary, not
 of a deployment's configuration.
 
-HTTP-level concerns that belong to a gateway (authentication,
-authorization, rate limiting, request transforms) stay in the gateway in
-front of the broker. The shared crates give a gateway the broker's own
-parsing, expansion and matching for that job; see
-[Shared crates](shared-crates.md).
+HTTP-level concerns that belong to a gateway (authentication, rate
+limiting, request transforms) stay in the gateway in front of the broker.
+The shared crates give a gateway the broker's own parsing, expansion and
+matching for that job; see [Shared crates](shared-crates.md). Authorization
+is the one concern that is split: the broker ships no policy engine, but it
+carries the seam an engine attaches to, because a query has to be narrowed
+before the store answers it and a notification has to be filtered on its
+way out — neither is visible from in front of the broker (ADR-0020).
 
 ## Layer 3: dynamic loading
 

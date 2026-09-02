@@ -1,6 +1,10 @@
 # ADR-0014: extension hooks — fixed phases, batch granularity
 
-Date: 2026-08-24 · Status: accepted; the notification-sink paragraph superseded by ADR-0016
+Date: 2026-08-24 · Status: accepted; the notification-sink paragraph
+superseded by ADR-0016. ADR-0020 gives `on_request` and `pre_notify`
+their first named user, the policy seam, and states an exception to
+rule 1: `pre_notify` fires once per matched subscription, because the
+subscriber is the subject of the decision.
 
 ## Context
 

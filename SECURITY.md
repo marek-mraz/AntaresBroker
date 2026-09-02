@@ -40,8 +40,16 @@ pre-production checklist as `ANTARES_REQUIRE_RLS=1`, because a subscription
 or registration endpoint is client-supplied and the default lets one name an
 address inside your network.
 
-**Out of core by standing decision:** authentication, authorization, rate
-limiting, DID/VC/ODRL — the PEP/gateway in front of the broker owns them.
+**Out of core by standing decision:** authentication, rate limiting,
+quotas, DID/VC/ODRL — the PEP/gateway in front of the broker owns them.
+The broker takes no authorization decision of its own either: it exposes a
+policy *seam* (ADR-0020) — one trait, one built-in allow-all engine, fail
+closed — so a deployment can attach an engine as an addon crate the way it
+attaches a store. Every engine lives outside `crates/` behind an
+off-by-default feature; the shipped image and every CI gate run the
+built-in engine, and conformance is asserted against it. The subject
+headers an engine reads never travel: they are stripped from forwarded
+requests and never enter a notification, a log line or a dead letter.
 Deployments MUST NOT expose an Antares port to untrusted callers directly.
 The NATS change stream carries every tenant's data: require auth on
 JetStream and network-isolate it (the broker logs a loud warning when it

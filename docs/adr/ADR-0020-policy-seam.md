@@ -1,0 +1,139 @@
+# ADR-0020 — The policy seam: one trait, one built-in engine, every engine an addon
+
+Date: 2026-09-02. Status: accepted. Reverses the "no policy code in the
+broker" reading of the standing PEP decision (SECURITY.md,
+`docs/roadmap-1.0.md`, `docs/policies.md`), which otherwise stands.
+
+## Context
+
+The standing decision puts authentication, authorization, rate limiting
+and quotas in the gateway in front of the broker, and `docs/policies.md`
+is the design that follows it: APISIX as the PEP, OPA as the PDP,
+Keycloak and a VC verifier for identity. That division holds for
+everything a gateway can decide from the request line and the response
+bytes.
+
+It stops holding where the decision is about data the gateway never sees
+as data:
+
+- **A query the broker runs.** "This consumer sees only entities in scope
+  `/BB/Traffic`" has to narrow `GET /entities` before the store answers.
+  A gateway can only rewrite `q=` on the way in — string surgery on a
+  grammar with `;`, `|` and parentheses, where a wrong parenthesisation
+  widens the result instead of narrowing it — or filter the response
+  after the fact, which has already paid for the rows, and which leaves
+  `NGSILD-Results-Count` and the paging links describing a result set the
+  caller is not allowed to see.
+- **One subscription's notification.** 5.8.6 delivery is broker-initiated:
+  the notification goes from the broker to the subscriber's endpoint. A
+  gateway in front of the broker is not on that path at all.
+- **A federated merge.** 4.3.6 merges the local answer with what the
+  Context Sources returned. Only the broker holds the merged result
+  before it is rendered.
+
+The deployment that forces the question is the three-organization
+federation: a registration forwarded to a peer must carry the narrowing,
+or the peer answers more than the consumer may see, and 4.3.6.1's own
+narrowing rules then travel with a predicate the gateway never wrote.
+
+## Decision
+
+The broker gains a policy **seam**, and no policy engine.
+
+**Module `antares-api::policy`** — the trait, the types and one built-in
+`AllowAll` engine. Core code: always compiled, always tested, always
+shipped, no feature flag.
+
+```
+PolicyEngine: Send + Sync {
+    fn name(&self) -> &str;
+    fn decide(&self, subject: &Subject, op: &Operation) -> DecisionFuture;
+    fn pre_notify(&self, subject: &Subject, sub: &Value,
+                  notification: &mut Value) -> NotifyDecision;
+}
+```
+
+`Subject { tenant, headers }` carries the identity headers named by
+`ANTARES_POLICY_SUBJECT_HEADERS`, opaque to the broker — it parses no
+credential and validates no token. `Operation` is the expanded request:
+clause, ids, types, attrs, `q`, `scopeQ`, geo, body. `Decision` is
+`Allow`, `Deny(String)` or `Filter(Filter)`; `Filter` carries a `q`, a
+`scopeQ`, `omit`, `pick` and `restricted`.
+
+**Two phases**, both already in ADR-0014's table:
+
+| phase | when | granularity |
+|---|---|---|
+| `on_request` | after negotiation and expansion, before the operation and before any fan-out | once per request |
+| `pre_notify` | notification built, before the egress check and the send | once per notification document per subscription |
+
+**The answers:**
+
+| decision | the broker does |
+|---|---|
+| `Allow` | nothing |
+| `Deny` | 403 with ProblemDetails whose `type` is an Antares URI — Table 6.3.2-1 has no access-denied type, so this is an Antares decision with its own `AntaresSpecificTests` and a 6.3.2 ledger note |
+| `Filter` | narrows: the `q` is conjoined into the query the store runs and travels on forwards, `omit`/`pick` go through the 5.2.14.1 projection the notification path already has, and a merged federated result is filtered after the merge |
+| `Filter { restricted: true }` | the same, plus `NGSILD-Results-Restricted: true` |
+| `Filter` on purge (5.6.21), snapshot fill (5.16) or tenant purge | answered as `Deny` — there is no narrowed form of "delete everything" |
+
+The conjunction is made on the `antares-ql` AST, never on the query
+string, so the precedence trap a gateway rewrite has to distribute around
+cannot occur. Narrowing is silent: a caller cannot tell a hidden entity
+from an absent one, and a retrieve of a hidden entity is 404.
+
+**Fail closed.** An engine error, panic or timeout
+(`ANTARES_POLICY_TIMEOUT_MS`) is `Deny`. `AllowAll` has no error path.
+
+**The subject never travels.** The subject headers are stripped from
+every forwarded request in `federation::forward`, and never enter a
+notification, a log line, a dead letter or a peer registration. `/q` is
+outside the seam: the admin surface is the gateway's to protect.
+
+**Every engine is an addon**, in the sense `plugin-example` is: a crate
+outside `crates/`, behind an off-by-default `antares-broker` feature,
+built and run by `examples.yml` alone. The shipped image, `ci`, `full`,
+`strict` and every ETSI cell run `AllowAll`. No core crate names an
+engine crate.
+
+A policy engine's rule language, identity model and data source are
+deployment choices. A broker that shipped one would make conformance a
+function of its configuration — the argument `surface.rs` already makes
+for the `/x/` prefixes. Conformance is therefore asserted against the
+built-in engine, and a deployment running another engine makes no
+conformance claim.
+
+## Consequences
+
+- ADR-0014's phase table gains no row: the seam is a named user of two
+  phases that already exist, with fail-closed policy per rule 2.
+- It does take a stated exception to ADR-0014's rule 1. `pre_notify`
+  fires once per matched subscription, not once per drained batch,
+  because the decision is *about* the subscription: the subscriber is the
+  subject, and one verdict for a batch of subscriptions with different
+  subscribers has no meaning. The marshalling cost that rule 1 protects
+  against is bounded by the delivery it precedes — the seam is crossed
+  once per notification the broker was going to serialise and send over
+  the network anyway.
+- The gateway keeps everything it had. Authentication, token validation,
+  rate limiting and quotas do not move; the broker still takes no
+  authorization decision of its own, it asks the engine and obeys.
+  `docs/policies.md` stays the reference for what an engine outside the
+  tree looks like.
+- Deployments that run `AllowAll` — the default, the image, every gate —
+  pay one virtual call per request and one per notification.
+
+## Confirmation
+
+- `run_policy_contract` (behind `test-kit`, the contract an addon
+  engine's own tests call): a `Filter` never widens — the engine's answer
+  is run through the projection and asserted a subset of the unfiltered
+  one; the whole-tenant operations answer `Deny`; the timeout path
+  answers `Deny`.
+- A counting engine, reachable from no socket, walks every route of
+  `router()` and asserts each operation hits the gate exactly once. A
+  handler that skips the gate is a red test, not a review finding.
+- `cargo tree -p antares-broker` with default features names no engine
+  crate, and the release gate proves no addon is in the shipped image.
+- A test that fails when a subject header survives `federation::forward`.
+- `/q/health` names the active engine and its timeout.

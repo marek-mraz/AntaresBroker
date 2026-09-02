@@ -47,9 +47,14 @@ ten repeated runs comes before any regression gate.
 
 ## Out of scope for the broker
 
-Authentication, authorization, rate limiting and per-tenant quotas belong
-to the gateway in front of the broker; the shared crates give that
-gateway the broker's own parser, query engine and matcher. A WebSocket
+Authentication, rate limiting and per-tenant quotas belong to the gateway
+in front of the broker; the shared crates give that gateway the broker's
+own parser, query engine and matcher. Authorization is out of scope in the
+same sense: the broker ships no policy engine and takes no authorization
+decision of its own. What it does ship is the seam an engine attaches to
+(ADR-0020), because three decisions cannot be made in front of the broker
+at all — narrowing the query the store runs, filtering one subscription's
+notification, and filtering a federated result before it is rendered. A WebSocket
 notification binding waits for the ETSI text. A non-HTTP ingest path is
 not planned: an ingester that speaks MQTT or NATS posts to the batch
 endpoints, and the in-process router already serves the browser build

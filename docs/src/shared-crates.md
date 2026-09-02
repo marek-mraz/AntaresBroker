@@ -78,9 +78,13 @@ are ordinary commits.
 
 ## The PEP boundary
 
-Authentication, authorization, rate limiting and request transforms stay in
-the gateway in front of the broker: the broker grows no authorization code
-(SECURITY.md states the same boundary). These crates are how a gateway does that job with
+Authentication, rate limiting and request transforms stay in the gateway in
+front of the broker, and the broker ships no policy engine (SECURITY.md
+states the same boundary). It does carry a policy seam — one trait, one
+built-in allow-all engine, every other engine an addon crate outside the
+workspace (ADR-0020) — for the three decisions a gateway cannot make from
+outside: narrowing the query the store runs, filtering one subscription's
+notification, and filtering a federated result before it is rendered. These crates are how a gateway does that job with
 broker-identical semantics — rewrite the incoming `q=` with an authorization
 predicate (`gateway_filter`), refuse a payload the broker would refuse
 before it costs a hop (`gateway_expand`), or answer "would this change
