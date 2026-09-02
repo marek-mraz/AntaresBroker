@@ -171,13 +171,14 @@ fn recording_mock_opts(delay_ms: u64, record_head: bool) -> (u16, Arc<Mutex<Vec<
 }
 
 async fn wait_for<F: Fn() -> bool>(what: &str, f: F) {
-    for _ in 0..100 {
+    let rounds = 100 * antares_api::state::slow_factor();
+    for _ in 0..rounds {
         if f() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("timed out waiting for {what}");
+    panic!("timed out waiting for {what} after {}ms", rounds * 100);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1731,6 +1732,129 @@ async fn clause_5_8_1_4_an_inbound_notification_is_routed_by_the_mapping_alone()
     assert!(
         beta.is_empty(),
         "a forged tenant header must not move a notification between tenants: {beta:?}"
+    );
+}
+
+/// 5.8.1.4 keeps "the mapping of the received subscriptionId with the own
+/// Subscription identifier" in a store namespace of the broker's own, and
+/// that namespace is addressed as a Tenant. A Tenant is whatever a client
+/// puts in `NGSILD-Tenant` (6.3.14), so without a guard the broker's
+/// control plane is one header away from any client: a Subscription created
+/// under the index Tenant is written with the client's own id as its key,
+/// which is the key an inbound mapping already occupies. Overwriting one
+/// takes a DIFFERENT Tenant's distributed subscription off the air — every
+/// notification its Context Source sends is answered 404 from then on, with
+/// nothing wrong on the subscriber's side to see.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_cannot_address_the_brokers_own_index_tenant() {
+    allow_private();
+    let mut st = AppState::new("antares-ds-index-tenant".into());
+    antares_api::notify::wire(&mut st);
+    let (remote_port, remote_seen) = recording_mock();
+    let (cb_port, cb_seen) = recording_mock();
+
+    let (status, body) = send_tenant(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(
+            json!({
+                "id": "urn:ngsi-ld:ContextSourceRegistration:victim",
+                "type": "ContextSourceRegistration",
+                "information": [{"entities": [{"type": "Vehicle"}]}],
+                "operations": ["federationOps"],
+                "endpoint": format!("http://127.0.0.1:{remote_port}"),
+            })
+            .to_string(),
+        ),
+        "victim",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = send_tenant(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(
+            json!({
+                "id": "urn:ngsi-ld:Subscription:victim",
+                "type": "Subscription",
+                "entities": [{"type": "Vehicle"}],
+                "notification": {"endpoint": {"uri": format!("http://127.0.0.1:{cb_port}/cb")}},
+            })
+            .to_string(),
+        ),
+        "victim",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    wait_for("the forwarded copy", || {
+        !remote_seen.lock().expect("seen").is_empty()
+    })
+    .await;
+    // The Context Source learns the remote id: it is the id of the copy it
+    // was sent. Nothing else has to be guessed.
+    let remote_id = {
+        let seen = remote_seen.lock().expect("seen");
+        let raw = seen.first().expect("the copy").clone();
+        let body: Value = serde_json::from_str(raw.split_once("\n\n").expect("body").1)
+            .expect("the forwarded copy is JSON");
+        body["id"].as_str().expect("remote id").to_owned()
+    };
+
+    // The attempt: a Subscription of the attacker's own, in the index
+    // Tenant, named after the mapping it wants gone.
+    let (status, body) = send_tenant(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/subscriptions",
+        Some(
+            json!({
+                "id": remote_id,
+                "type": "Subscription",
+                "entities": [{"type": "Vehicle"}],
+                "notification": {"endpoint": {"uri": "http://127.0.0.1:9/attacker"}},
+            })
+            .to_string(),
+        ),
+        "distsub-index",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the index Tenant is the broker's, not a client's: {body}"
+    );
+
+    // and the victim's subscription still receives what its source sends
+    let (status, body) = send_tenant(
+        &st,
+        "POST",
+        "/ex/v1/remote-notify",
+        Some(
+            json!({
+                "type": "Notification",
+                "subscriptionId": remote_id,
+                "data": [{"id": "urn:ngsi-ld:Vehicle:still-here", "type": "Vehicle"}],
+            })
+            .to_string(),
+        ),
+        "victim",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the mapping still resolves: {body}");
+    wait_for("the victim's notification", || {
+        !cb_seen.lock().expect("seen").is_empty()
+    })
+    .await;
+    assert!(
+        cb_seen
+            .lock()
+            .expect("seen")
+            .iter()
+            .any(|r| r.contains("urn:ngsi-ld:Vehicle:still-here")),
+        "the mapping was taken from under the subscription"
     );
 }
 
