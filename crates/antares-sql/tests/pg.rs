@@ -217,7 +217,9 @@ async fn purge_tenant_empties_every_tenant_table() {
         .expect("clock")
         .as_millis();
     let a = TenantId::new(&format!("pgpa{run}")).expect("tenant");
-    let b = TenantId::new(&format!("pgpb{run}")).expect("tenant");
+    // `b` extends `a`: a purge that ever matched its tenant by prefix
+    // instead of by equality would take this one with it.
+    let b = TenantId::new(&format!("pgpa{run}x")).expect("tenant");
     let doc = |id: &str| {
         serde_json::json!({
             "id": id, "type": "Test",
@@ -289,6 +291,29 @@ async fn purge_tenant_empties_every_tenant_table() {
             n
         }
     };
+    // The list above is hand-written, and so is the one `purge_tenant`
+    // deletes from. A new tenant-bearing table added to the schema without a
+    // purge branch would keep that tenant's rows after its deletion, and no
+    // assertion below would notice. Ask the catalogue instead: every table
+    // with a `tenant_id` column is either purged here or `tenants` itself,
+    // whose row purge_tenant removes and `tenant_exists` reports on.
+    let bearing: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname::text FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+           JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id'
+          WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+          ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("catalogue");
+    let mut want: Vec<String> = TABLES.iter().map(|t| (*t).to_owned()).collect();
+    want.push("tenants".to_owned());
+    want.sort();
+    assert_eq!(
+        bearing, want,
+        "a tenant-bearing table is missing from the purge"
+    );
     for table in TABLES {
         assert!(count(table, &a).await > 0, "seed missing in {table}");
     }
