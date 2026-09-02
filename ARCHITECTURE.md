@@ -47,7 +47,7 @@ broker nor a storage backend (`antares-api`, `antares-broker`,
 | `antares-sql` | 9 400 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
 | `antares-bus` | 760 | `ChangeEvent`, the JetStream bus, subjects | decide who consumes |
 | `antares-notifier` | 1 700 | `NotificationSink` (schemes, `parse_endpoint`, `deliver`, `network`) chosen from `SinkRegistry` by endpoint scheme: http (`http.rs`), mqtt behind the feature, delivery policy, `Outbound` | match or store |
-| `antares-api` | 40 000 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
+| `antares-api` | 44 500 | the HTTP binding: routers, handlers, negotiation, federation, notification pipeline, snapshots, bounds | own a backend or a transport |
 | `antares-broker` | 3 500 | composition root: env → config, roles, bus wiring (`wiring.rs`), telemetry, shutdown | contain clause logic |
 | `antares-wasm` | 500 | the router under a Service Worker, OPFS-backed file store | diverge from the native router |
 
@@ -67,7 +67,7 @@ module's header comment.
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
 | `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
 | `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
-| `distsub.rs` | 1 500 | 5.8.1.4 distributed subscriptions, consumer half |
+| `distsub.rs` | 1 750 | 5.8.1.4 distributed subscriptions, consumer half |
 | `csource.rs` | 2 500 | 5.9, 5.10 registrations, `csource_index` maintenance |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
 | `entity_maps.rs` | 1 100 | 5.14 EntityMaps |
