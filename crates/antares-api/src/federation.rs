@@ -14,6 +14,7 @@
 //! bounded, by a semaphore, a per-source timeout and an aggregate deadline.
 
 use crate::negotiate::*;
+use crate::paging::pct_encode;
 use crate::state::AppState;
 use antares_jsonld::Context;
 use antares_model::operations::{group_members, DEFAULT_OPERATION_GROUP};
@@ -360,49 +361,6 @@ pub(crate) fn path_segment(s: &str) -> String {
                 | b'@'
         )
     })
-}
-
-/// Percent-encode one client-controlled value for use as a query-string
-/// value (RFC 3986 clause 3.4: a query is made of `pchar`, `/` and `?`).
-/// Parameters reach a handler already percent-decoded, so a value spliced
-/// back into a URI raw would change the query it belongs to (`&` and `=`
-/// start another parameter, `%` re-decodes, `+` reads back as a space) and,
-/// in a Link header, `>` would end the link-value (RFC 8288 clause 3).
-pub(crate) fn query_value(s: &str) -> String {
-    pct_encode(s, |b| {
-        matches!(
-            b,
-            b'-' | b'.'
-                | b'_'
-                | b'~'
-                | b'!'
-                | b'$'
-                | b'\''
-                | b'('
-                | b')'
-                | b'*'
-                | b','
-                | b';'
-                | b':'
-                | b'@'
-                | b'/'
-                | b'?'
-        )
-    })
-}
-
-/// RFC 3986 clause 2.1: every byte the caller does not keep becomes its
-/// percent-encoded triplet; ASCII letters and digits are always kept.
-fn pct_encode(s: &str, keep: impl Fn(u8) -> bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || keep(b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// The @context URL to advertise on forwarded requests.
@@ -1450,7 +1408,7 @@ pub async fn fed_retrieve_temporal(
 /// same instant with or without a fraction, so a raw string compare would
 /// rank `…:01.500Z` below `…:01Z`.
 fn recency(inst: &Value) -> String {
-    crate::temporal::dt_key(
+    antares_model::dt_key(
         inst.get("observedAt")
             .or_else(|| inst.get("modifiedAt"))
             .and_then(Value::as_str)
@@ -1480,7 +1438,7 @@ fn push_down_expires(doc: &mut Value) {
         };
         for inst in instances.iter_mut().filter_map(Value::as_object_mut) {
             match inst.get("expiresAt").and_then(Value::as_str) {
-                Some(ae) if crate::temporal::dt_key(ae) <= crate::temporal::dt_key(&exp) => {}
+                Some(ae) if antares_model::dt_key(ae) <= antares_model::dt_key(&exp) => {}
                 _ => {
                     inst.insert("expiresAt".into(), Value::String(exp.clone()));
                 }
@@ -1495,7 +1453,7 @@ fn push_down_expires(doc: &mut Value) {
 fn expired(inst: &Value, now: &str) -> bool {
     inst.get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(now))
+        .is_some_and(|e| antares_model::dt_key(e) < antares_model::dt_key(now))
 }
 
 /// 4.3.6.2: "An auxiliary Context Source Registration never overrides data
@@ -1523,7 +1481,7 @@ pub fn merge_docs(base: &mut Value, add: &Value, aux: bool) {
             ao.get("expiresAt").and_then(Value::as_str),
         ) {
             (Some(b), Some(a)) => {
-                if crate::temporal::dt_key(a) > crate::temporal::dt_key(b) {
+                if antares_model::dt_key(a) > antares_model::dt_key(b) {
                     bo.insert("expiresAt".into(), Value::String(a.to_owned()));
                 }
             }
@@ -2631,27 +2589,6 @@ mod tests {
         assert_eq!(path_segment(".."), "..");
         // non-ASCII is percent-encoded per its UTF-8 bytes
         assert_eq!(path_segment("é"), "%C3%A9");
-    }
-
-    /// RFC 3986 clause 3.4 + RFC 8288 clause 3: a value spliced back into a
-    /// query string must not be able to start another parameter, decode a
-    /// second time, or end the link-value it is carried in. The characters an
-    /// NGSI-LD filter legitimately uses (`urn:`, `.`, `*`, `-`) survive, or
-    /// every pagination link would run a different query than the one that
-    /// produced it.
-    #[test]
-    fn query_value_encodes_what_would_change_the_query() {
-        assert_eq!(
-            query_value("urn:ngsi-ld:Building:01931.*"),
-            "urn:ngsi-ld:Building:01931.*"
-        );
-        assert_eq!(query_value("cat>1"), "cat%3E1");
-        assert_eq!(query_value(r#"cat=="a&b""#), "cat%3D%3D%22a%26b%22");
-        // a value already carrying a percent must not decode twice
-        assert_eq!(query_value("a%26b"), "a%2526b");
-        // `+` reads back as a space in a query string
-        assert_eq!(query_value("a+b"), "a%2Bb");
-        assert_eq!(query_value("é"), "%C3%A9");
     }
 
     /// RFC 7230 received-by is a TOKEN compared for equality:

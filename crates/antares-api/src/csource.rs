@@ -221,7 +221,7 @@ pub fn normalize_registration(
                     .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
                 // the instant decides, not the spelling: now_iso always
                 // carries 3 fraction digits, a client's expiresAt 0 to 6
-                if crate::temporal::dt_key(s) < crate::temporal::dt_key(&now_iso()) {
+                if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
                     return Err(bad("expiresAt is in the past".into()));
                 }
                 out.insert("expiresAt".into(), v.clone());
@@ -682,9 +682,7 @@ fn check_entity_conflict(
 pub fn reg_expired(doc: &Value) -> bool {
     doc.get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| {
-            crate::temporal::dt_key(e) < crate::temporal::dt_key(&crate::state::now_iso())
-        })
+        .is_some_and(|e| antares_model::dt_key(e) < antares_model::dt_key(&crate::state::now_iso()))
 }
 
 /// The stored registration for `id`, with 5.9.2.4's deletion applied: "If
@@ -1173,7 +1171,7 @@ pub async fn query_registrations(
             csr_matches(&spec, doc, &ctx)
         };
         let matches = collect_matching(&st, &tenant, keep, *crate::bounds::MAX_FOLD_DOCS)?;
-        let (page, count_hdr, links) = crate::entities::paginate_accept(
+        let (page, count_hdr, links) = crate::paging::paginate_accept(
             &st,
             &params,
             matches,
@@ -1295,7 +1293,7 @@ pub(crate) fn temporal_interval_matches(doc: &Value, tq: &crate::temporal::Tempo
     };
     // 4.11 comparison on the canonical key — equal instants in different
     // 4.6.3 fraction spellings must hit the bounds exactly.
-    let dt = crate::temporal::dt_key;
+    let dt = antares_model::dt_key;
     let start = dt(iv.get("startAt").and_then(Value::as_str).unwrap_or(""));
     let end = iv.get("endAt").and_then(Value::as_str).map(dt); // open-ended when absent
     match tq.timerel.as_str() {

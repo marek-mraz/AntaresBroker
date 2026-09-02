@@ -394,7 +394,7 @@ pub fn normalize_subscription(
                     .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
                 // 4.6.3 admits several spellings of one instant, so whether a
                 // DateTime has passed cannot be read off the raw strings.
-                if crate::temporal::dt_key(s) < crate::temporal::dt_key(&now_iso()) {
+                if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
                     return Err(bad("expiresAt is in the past (5.8.1)".into()));
                 }
                 out.insert("expiresAt".into(), v.clone());
@@ -430,7 +430,7 @@ pub fn normalize_subscription(
                     bad("temporalQ must be a TemporalQuery object (5.2.21)".into())
                 })?;
                 let mut p = std::collections::HashMap::new();
-                crate::temporal::temporal_q_params(tq, &mut p)?;
+                crate::paging::temporal_q_params(tq, &mut p)?;
                 crate::temporal::TemporalQ::from_params(&p, true)?;
                 out.insert(k.clone(), v.clone());
             }
@@ -594,7 +594,7 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
     let expired = obj
         .get("expiresAt")
         .and_then(Value::as_str)
-        .is_some_and(|e| crate::temporal::dt_key(e) < crate::temporal::dt_key(&now_iso()));
+        .is_some_and(|e| antares_model::dt_key(e) < antares_model::dt_key(&now_iso()));
     let paused = obj.get("isActive") == Some(&Value::Bool(false));
     let status = if expired {
         "expired"
@@ -835,9 +835,9 @@ pub async fn list(
     // window is the store's to apply. Reading the tenant and slicing it
     // here made a tenant at the document ceiling unable to list at all,
     // because that read is the one carrying the ceiling for client queries.
-    let (offset, limit, _) = crate::entities::page_params(st, params)?;
+    let (offset, limit, _) = crate::paging::page_params(st, params)?;
     let (page_docs, total) = st.store.list_slice(&tenant, kind, offset, limit)?;
-    let (page, count_hdr, links) = crate::entities::paginate_pre_accept(
+    let (page, count_hdr, links) = crate::paging::paginate_pre_accept(
         st,
         params,
         page_docs,

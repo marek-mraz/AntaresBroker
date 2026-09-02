@@ -89,6 +89,7 @@ pub fn dt_key(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::dt_key;
     #[test]
     fn meta_members_are_the_non_attribute_members_of_an_entity() {
         for k in [
@@ -116,5 +117,21 @@ mod tests {
         ] {
             assert!(!super::is_meta(k), "{k}");
         }
+    }
+
+    /// 4.6.3 DateTime: only a DateTime has a canonical key — anything else
+    /// is returned unchanged, including a multi-byte string that ends in
+    /// `Z` and is long enough to reach the seconds position in bytes.
+    #[test]
+    fn non_datetime_input_is_returned_unchanged() {
+        for s in ["", "Z", "not-a-date", "ααααααααααZ", "urn:ngsi-ld:nullZ"] {
+            assert_eq!(dt_key(s), s, "{s:?}");
+        }
+        // a real DateTime still normalizes to its comparison key
+        assert_eq!(dt_key("2026-05-01T00:00:00Z"), "2026-05-01T00:00:00.000000");
+        assert_eq!(
+            dt_key("2026-05-01T00:00:00,5Z"),
+            "2026-05-01T00:00:00.500000"
+        );
     }
 }

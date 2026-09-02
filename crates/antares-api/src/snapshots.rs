@@ -569,7 +569,7 @@ async fn run_query(
         .as_object()
         .ok_or_else(|| bad("Query must be an object".into()))?;
     let mut vp: HashMap<String, String> = HashMap::new();
-    crate::batch::query_doc_params(qo, false, &mut vp)?;
+    crate::paging::query_doc_params(qo, false, &mut vp)?;
     for k in ["limit", "offset", "count"] {
         vp.remove(k);
     }
@@ -618,7 +618,7 @@ async fn run_temporal_query(
         .as_object()
         .ok_or_else(|| bad("Query must be an object".into()))?;
     let mut vp: HashMap<String, String> = HashMap::new();
-    crate::batch::query_doc_params(qo, true, &mut vp)?;
+    crate::paging::query_doc_params(qo, true, &mut vp)?;
     for k in ["limit", "offset", "count"] {
         vp.remove(k);
     }

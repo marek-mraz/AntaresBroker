@@ -671,7 +671,7 @@ fn query_body_params(
         .as_object()
         .ok_or_else(|| NgsiError::BadRequestData("query body must be an object".into()))?;
     let mut vp: HashMap<String, String> = params.clone();
-    crate::batch::query_doc_params(qo, temporal, &mut vp)?;
+    crate::paging::query_doc_params(qo, temporal, &mut vp)?;
     Ok(vp)
 }
 

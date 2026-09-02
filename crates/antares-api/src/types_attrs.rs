@@ -93,7 +93,7 @@ fn scan(
 /// client in the `NGSILD-Warning` header of 6.3.17.
 fn mark_partial(resp: &mut Response, partial: bool, alias: &str) {
     if partial {
-        crate::entities::attach_warnings(
+        crate::paging::attach_warnings(
             resp,
             &[crate::federation::warning(
                 199,

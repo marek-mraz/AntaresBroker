@@ -23,6 +23,7 @@ pub mod history;
 pub mod mirror;
 pub mod negotiate;
 pub mod notify;
+pub mod paging;
 pub mod qeval;
 pub mod regexcache;
 pub mod repr;

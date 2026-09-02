@@ -60,9 +60,10 @@ module's header comment.
 |---|---|---|
 | `lib.rs` | 5 500 | the router (`/ngsi-ld/v1` nest, `/q/*` admin, `/info`), tenant purge, shared helpers |
 | `negotiate.rs` | 1 800 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
-| `entities.rs` | 4 700 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, paging, distributed write fan-out |
+| `entities.rs` | 4 200 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, distributed write fan-out |
+| `paging.rs` | 1 400 | 4.12, 6.3.10 limit/offset/count and the next/prev links, 4.23 ordering and ICU collation, 6.3.17 `NGSILD-Warning`, the query body of 5.2.23 lifted into parameters; every list operation pages through it |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
-| `batch.rs` | 2 400 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
+| `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
 | `temporal.rs` | 4 200 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
 | `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
@@ -206,13 +207,17 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
-- `antares-api` has one strongly connected component of 11 of its 26
+- `antares-api` has one strongly connected component of 10 of its 27
   modules, counted from every `crate::<module>` reference per file:
-  `attrs, batch, csource, distsub, entities, entity_maps, federation,
-  notify, snapshots, subscriptions, temporal`. `state.rs` sits outside it
+  `attrs, csource, distsub, entities, entity_maps, federation, notify,
+  snapshots, subscriptions, temporal`. `state.rs` sits outside it
   since the change event and the two document mirrors (`Change`,
   `SubMirror`, `DocMirror`) live in the leaf `mirror.rs`, which names no
-  other module; `contexts` and `history` left with it. `cargo modules`
+  other module; `contexts` and `history` left with it. `batch.rs` left
+  once paging, ordering and the query-body lift moved to the leaf
+  `paging.rs`, which names `state`, `negotiate`, `geo` and `bounds` and
+  no resource module; `dt_key` is named from `antares-model`, where it
+  lives. `cargo modules`
   does not show such a cycle because it records call edges and not field
   types, so the source-level count is the one to measure: `dev/module-graph.py` prints
   it per crate and `xray.yml` ratchets the largest component of every
@@ -233,15 +238,16 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `tokio::sync::Mutex` (`REGISTRATION_WRITE`) shared by every tenant, and
   the 5.9.2.4 overlap check of an idPattern-only registration walks up to
   `MAX_UNDECIDED_ROWS` under it.
-- The distributed-write prologue (`CsrSpec` → `write_regs` →
-  `handle_via_loop` → `strip_covered_expanded`) is repeated in
-  `entities.rs`, `attrs.rs`, `batch.rs`, `temporal.rs`. One helper.
+- Every distributed write takes its registrations and the `Via` loop
+  answer from `federation::write_plan` (`WritePlan::Forward` or
+  `Answered`); the read-path prologue (csf, the two-binding rule) is
+  still spelled per query path.
 - Oversized functions carrying one clause's whole validation matrix:
   `purge_inner`, `batch_write`, `query_temporal_inner`,
   `normalize_subscription`, `expand_instance`, `normalize_registration`,
   `deliver_as`. Split by member on touch.
 - Misplaced helpers: the error constructor `bad` lives in
-  `snapshots.rs` and is used crate-wide; `is_meta` exists three times.
+  `snapshots.rs` and is used crate-wide.
 - Per-notification cost is one row update. The Postgres arm writes it as
   a single statement (`pg::doc::record_delivery`), so the row lock is held
   for the statement rather than across a round trip and the Rust closure —

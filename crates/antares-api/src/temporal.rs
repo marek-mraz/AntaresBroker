@@ -5,7 +5,7 @@ use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::compact::compact_instance;
 use antares_jsonld::{expand_entity, parse_datetime, Context, ExpandOpts};
-use antares_model::NgsiError;
+use antares_model::{dt_key, NgsiError};
 use antares_ql::parse_q;
 use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
@@ -374,64 +374,6 @@ impl TemporalQ {
         }
     }
 }
-
-/// 5.2.21 TemporalQuery (JSON form): flatten the object's members into
-/// query-param form, enforcing the Table 5.2.21-1 value spaces — the string
-/// members must be JSON strings, aggrMethods a comma separated list of
-/// string (string or string-array spelling), lastN a positive integer.
-/// Vocabulary/range rules are then enforced by the shared param validators
-/// (TemporalQ::from_params, parse_trepr).
-pub(crate) fn temporal_q_params(
-    tq: &Map<String, Value>,
-    out: &mut HashMap<String, String>,
-) -> Result<(), NgsiError> {
-    let bad = NgsiError::BadRequestData;
-    for k in [
-        "timerel",
-        "timeAt",
-        "endTimeAt",
-        "timeproperty",
-        "aggrPeriodDuration",
-    ] {
-        match tq.get(k) {
-            None => {}
-            Some(Value::String(s)) => {
-                out.insert(k.into(), s.clone());
-            }
-            Some(_) => return Err(bad(format!("temporalQ {k} must be a string (5.2.21)"))),
-        }
-    }
-    if let Some(n) = tq.get("lastN") {
-        let v = n
-            .as_u64()
-            .filter(|v| *v >= 1)
-            .ok_or_else(|| bad("temporalQ lastN must be a positive integer (5.2.21)".into()))?;
-        out.insert("lastN".into(), v.to_string());
-    }
-    match tq.get("aggrMethods") {
-        None => {}
-        Some(Value::String(s)) => {
-            out.insert("aggrMethods".into(), s.clone());
-        }
-        Some(Value::Array(a)) => {
-            let mut parts = Vec::with_capacity(a.len());
-            for m in a {
-                parts.push(m.as_str().ok_or_else(|| {
-                    bad("temporalQ aggrMethods entries must be strings (5.2.21)".into())
-                })?);
-            }
-            out.insert("aggrMethods".into(), parts.join(","));
-        }
-        Some(_) => {
-            return Err(bad(
-                "temporalQ aggrMethods must be a comma separated list of string (5.2.21)".into(),
-            ))
-        }
-    }
-    Ok(())
-}
-
-pub(crate) use antares_model::dt_key;
 
 /// Windowed per-entity temporal data: filtered+ordered instances per attr.
 struct Windowed {
@@ -1734,7 +1676,7 @@ pub(crate) async fn query_temporal_inner(
     if let Some(csf) = params.get("csf") {
         parse_q(csf)?;
     }
-    crate::entities::check_collation(params)?;
+    crate::paging::check_collation(params)?;
     // 5.7.4.4: temporal ordering may only refer to the "id" entity member,
     // and only where the execution "is limited to the local scope (see
     // clause 5.5.13)" — 4.23.1 gives the reason: "Sort ordering is never
@@ -1819,7 +1761,7 @@ pub(crate) async fn query_temporal_inner(
         st.temporal
             .q_pushdown_exact(ast, r.as_ref(), &|t| ctx.expand_key(t))
     });
-    let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
+    let (p_offset, p_limit, _) = crate::paging::page_params(st, params)?;
     // 5.7.4.4 + 5.5.9: pagination applies to the MERGED federated union, so
     // the store may only pre-page when nothing will federate — otherwise
     // page 1 is local-page + every remote row (matrix-9 IOP_EXT_TMP_03_04).
@@ -1893,7 +1835,7 @@ pub(crate) async fn query_temporal_inner(
             .total
             .map(|t| t as usize)
             .unwrap_or(outcome.rows.len());
-        let (page, count_hdr, links) = crate::entities::paginate_pre(
+        let (page, count_hdr, links) = crate::paging::paginate_pre(
             st,
             params,
             outcome.rows,
@@ -2105,13 +2047,13 @@ pub(crate) async fn query_temporal_inner(
         matches.push(doc);
     }
     if let Some(spec) = params.get("orderBy") {
-        crate::entities::order_entities(&mut matches, spec, params, &ctx)?;
+        crate::paging::order_entities(&mut matches, spec, params, &ctx)?;
     }
     let (page, count_hdr, links) = if pre_paged {
         let total = pre_total.map(|t| t as usize).unwrap_or(matches.len());
-        crate::entities::paginate_pre(st, params, matches, "/ngsi-ld/v1/temporal/entities", total)?
+        crate::paging::paginate_pre(st, params, matches, "/ngsi-ld/v1/temporal/entities", total)?
     } else {
-        crate::entities::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?
+        crate::paging::paginate(st, params, matches, "/ngsi-ld/v1/temporal/entities")?
     };
     let core_only_pick = attrs_filter.as_ref().is_some_and(Vec::is_empty);
     let mut payload: Vec<Value> = Vec::new();
@@ -2170,7 +2112,7 @@ pub(crate) async fn query_temporal_inner(
         StatusCode::OK
     };
     let mut resp = crate::negotiate::respond_list(status, payload, &ctx, accept, &tenant);
-    crate::entities::attach_warnings(&mut resp, &warnings);
+    crate::paging::attach_warnings(&mut resp, &warnings);
     if let Some(cr) = cr {
         if let Ok(v) = cr.parse() {
             resp.headers_mut().insert("Content-Range", v);
@@ -2397,7 +2339,7 @@ async fn retrieve_temporal_inner(
                 resp.headers_mut().insert("Content-Range", v);
             }
         }
-        crate::entities::attach_warnings(&mut resp, &warnings);
+        crate::paging::attach_warnings(&mut resp, &warnings);
         Ok(resp)
     }
 }
@@ -3096,7 +3038,7 @@ pub async fn batch_temporal_query(
         // Table 5.2.23-1 value spaces enforced, incl. temporalQ (5.2.21)
         // and aggrParams (5.2.44).
         let mut vp: HashMap<String, String> = params.clone();
-        crate::batch::query_doc_params(q, true, &mut vp)?;
+        crate::paging::query_doc_params(q, true, &mut vp)?;
         query_temporal_inner(&st, &vp, &headers).await
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -4147,27 +4089,6 @@ mod clause_4_5_19 {
             assert_eq!(out["speed"]["totalCount"][0][0], json!(2));
             assert_eq!(out["speed"]["distinctCount"][0][0], json!(1));
         }
-    }
-}
-
-#[cfg(test)]
-mod clause_4_6_3 {
-    use super::dt_key;
-
-    /// 4.6.3 DateTime: only a DateTime has a canonical key — anything else
-    /// is returned unchanged, including a multi-byte string that ends in
-    /// `Z` and is long enough to reach the seconds position in bytes.
-    #[test]
-    fn non_datetime_input_is_returned_unchanged() {
-        for s in ["", "Z", "not-a-date", "ααααααααααZ", "urn:ngsi-ld:nullZ"] {
-            assert_eq!(dt_key(s), s, "{s:?}");
-        }
-        // a real DateTime still normalizes to its comparison key
-        assert_eq!(dt_key("2026-05-01T00:00:00Z"), "2026-05-01T00:00:00.000000");
-        assert_eq!(
-            dt_key("2026-05-01T00:00:00,5Z"),
-            "2026-05-01T00:00:00.500000"
-        );
     }
 }
 
