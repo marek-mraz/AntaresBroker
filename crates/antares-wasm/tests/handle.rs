@@ -210,14 +210,73 @@ async fn csr_tenant_federates_across_tenants_in_one_broker() {
         "local=true must not federate"
     );
 
-    // ...and space-b (no registrations) never sees space-a's side.
+    // ...retrieve-by-id forwards too, and returns space-b's entity, not an
+    // empty shell minted locally.
     let resp = broker
         .handle(with_tenant(
             req("GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:FedCar:b-1", ""),
             "space-a",
         ))
         .await;
-    assert_eq!(resp.status(), 200, "federated retrieve-by-id also works");
+    assert_eq!(
+        resp.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(resp.body())
+    );
+    let doc: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(doc["id"], "urn:ngsi-ld:FedCar:b-1");
+    assert_eq!(doc["speed"]["value"], 88, "the value came from space-b");
+
+    // ...and the registration is one-way: space-b holds none, so what
+    // space-a stores locally is invisible there (5.2.9 tenant scoping).
+    let a_car = r#"{
+        "id": "urn:ngsi-ld:FedCar:a-1",
+        "type": "FedCar",
+        "speed": {"type": "Property", "value": 7},
+        "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+    }"#;
+    let resp = broker
+        .handle(with_tenant(
+            req("POST", "/ngsi-ld/v1/entities", a_car),
+            "space-a",
+        ))
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "{}",
+        String::from_utf8_lossy(resp.body())
+    );
+    let resp = broker
+        .handle(with_tenant(
+            req("GET", "/ngsi-ld/v1/entities?type=FedCar", ""),
+            "space-b",
+        ))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let docs: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    let ids: Vec<&str> = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["urn:ngsi-ld:FedCar:b-1"],
+        "space-b must see only its own entity"
+    );
+
+    // Retrieving space-a's entity by id from space-b is a plain 404: no
+    // registration to forward through, and no cross-tenant read.
+    let resp = broker
+        .handle(with_tenant(
+            req("GET", "/ngsi-ld/v1/entities/urn:ngsi-ld:FedCar:a-1", ""),
+            "space-b",
+        ))
+        .await;
+    assert_eq!(resp.status(), 404);
 }
 
 #[tokio::test(flavor = "current_thread")]
