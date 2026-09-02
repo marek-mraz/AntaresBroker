@@ -6,10 +6,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release -p antares-broker
+# a shared build.target-dir puts the binary outside the repository
+TARGET=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
+BIN="$TARGET/release/antares"
 
 for p in $(ls /proc | grep -E '^[0-9]+$'); do
   case "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)" in
-    *target/release/antares*) kill "$p" 2>/dev/null || true;;
+    "$BIN"*) kill "$p" 2>/dev/null || true;;
   esac
 done
 sleep 0.5
@@ -23,7 +26,7 @@ for i in 0 1 2 3 4; do
   # http://{host_alias} is not resolvable between local processes.
   ANTARES_HTTP_PORT=$port ANTARES_HOST_ALIAS="antares$((i + 1))" \
     ANTARES_PUBLIC_URL="http://localhost:$port" \
-    nohup ./target/release/antares > "$LOGDIR/broker$((i + 1)).log" 2>&1 &
+    nohup "$BIN" > "$LOGDIR/broker$((i + 1)).log" 2>&1 &
 done
 sleep 1
 for i in 0 1 2 3 4; do

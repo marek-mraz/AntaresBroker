@@ -17,9 +17,13 @@ GZ_BUDGET=$((3 * 1024 * 1024))
 
 cargo build --profile wasm-release --target wasm32-unknown-unknown -p antares-wasm
 
+# where cargo actually wrote it: a shared build.target-dir (cargo config or
+# CARGO_TARGET_DIR) puts the artifact outside the repository.
+TARGET=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
+
 wasm-bindgen --target web --no-typescript \
   --out-dir "$OUT" \
-  target/wasm32-unknown-unknown/wasm-release/antares_wasm.wasm
+  "$TARGET/wasm32-unknown-unknown/wasm-release/antares_wasm.wasm"
 
 wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
   -o "$OUT/antares_wasm_bg.wasm" "$OUT/antares_wasm_bg.wasm"
