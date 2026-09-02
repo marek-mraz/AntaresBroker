@@ -94,6 +94,116 @@ async fn list_page_walks_every_row_in_id_order_without_a_ceiling() {
         .expect("cleanup");
 }
 
+/// The walk is keyset — `WHERE id > $after ORDER BY id` — so the comparison
+/// that cuts the page and the one that orders it have to be the SAME
+/// comparison. The `id` column carries the database collation, which is not
+/// byte order: under `en_US.utf8` an underscore and letter case sort where a
+/// `memcmp` would not. A cursor compared one way and a sort done the other
+/// loses rows in the middle of the walk and never says so, and this walk is
+/// the one that seeds the subscription mirror — a lost row is a subscription
+/// that exists and never notifies. Ids that the two orders disagree about,
+/// walked one page at a time.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_cursor_and_the_page_order_are_the_same_comparison() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("pool");
+    let s = PgDocStore::new(pool.clone());
+    let t = TenantId::new("pgcollate").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    sqlx::query("DELETE FROM subscriptions WHERE tenant_id = 'pgcollate'")
+        .execute(&pool)
+        .await
+        .expect("clean");
+
+    // Case, underscore, hyphen and digits: byte order puts every upper-case
+    // letter before every lower-case one and `_` between them, the collation
+    // does neither. The last two also carry the LIKE metacharacters and a
+    // quote, which no statement on this path may treat as anything but text.
+    let ids = [
+        "urn:ngsi-ld:Subscription:Alpha",
+        "urn:ngsi-ld:Subscription:alpha",
+        "urn:ngsi-ld:Subscription:_alpha",
+        "urn:ngsi-ld:Subscription:alpha-2",
+        "urn:ngsi-ld:Subscription:alpha_2",
+        "urn:ngsi-ld:Subscription:ALPHA2",
+        "urn:ngsi-ld:Subscription:100%_x",
+        "urn:ngsi-ld:Subscription:o'brien",
+    ];
+    for id in ids {
+        s.upsert(
+            &t,
+            DocKind::Subscription,
+            id,
+            &json!({"id": id, "type": "Subscription"}),
+        )
+        .expect("seed");
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = s
+            .list_page(&t, DocKind::Subscription, after.as_deref(), 3)
+            .expect("page");
+        let short = page.len() < 3;
+        for d in &page {
+            let id = d["id"].as_str().expect("id").to_owned();
+            after = Some(id.clone());
+            seen.push(id);
+        }
+        if short {
+            break;
+        }
+    }
+    let mut once = seen.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(
+        (seen.len(), once.len()),
+        (ids.len(), ids.len()),
+        "the walk lost or repeated a row: {seen:?}"
+    );
+
+    // Ordered by the DATABASE's comparison, which is the one the statement
+    // used — asserting Rust's byte order here would assert the bug.
+    for w in seen.windows(2) {
+        let ordered: bool = sqlx::query_scalar("SELECT $1::text < $2::text")
+            .bind(&w[0])
+            .bind(&w[1])
+            .fetch_one(&pool)
+            .await
+            .expect("compare");
+        assert!(ordered, "{:?} was served before {:?}", w[0], w[1]);
+    }
+
+    // A page wider than the set ends the walk in one read, and the narrowest
+    // page that still advances reaches the last row.
+    assert_eq!(
+        s.list_page(&t, DocKind::Subscription, None, 100)
+            .expect("wide")
+            .len(),
+        ids.len()
+    );
+    let mut cursor = None;
+    let mut steps = 0;
+    while let Some(d) = s
+        .list_page(&t, DocKind::Subscription, cursor.as_deref(), 1)
+        .expect("one")
+        .pop()
+    {
+        cursor = Some(d["id"].as_str().expect("id").to_owned());
+        steps += 1;
+    }
+    assert_eq!(steps, ids.len(), "a page of one walked {steps} rows");
+
+    for id in ids {
+        assert!(
+            s.delete(&t, DocKind::Subscription, id).expect("delete"),
+            "the row is addressed by its own id: {id}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn doc_kinds_roundtrip_and_extract_bookkeeping() {
     let url = require_db!();

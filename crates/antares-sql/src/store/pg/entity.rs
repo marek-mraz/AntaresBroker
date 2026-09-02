@@ -773,7 +773,9 @@ impl PgEntityStore {
     /// refusing here would only break the readers that must see every row
     /// and have no TooManyResults to raise — 5.9.2.4's registration-vs-entity
     /// conflict check among them. Keyset over the primary key, not OFFSET:
-    /// the walk runs against a table being written to.
+    /// the walk runs against a table being written to. `after = None` is
+    /// bound as the empty string, which is below every id because an
+    /// Entity id is a URI and a URI is never empty.
     ///
     /// 4.22 at the entity level is in the statement, so a full page is a
     /// full page: the caller reads a short page as the end of the tenant,

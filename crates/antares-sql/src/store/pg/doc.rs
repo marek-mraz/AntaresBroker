@@ -619,6 +619,11 @@ impl PgDocStore {
     /// that must see every row — and one tenant's stored volume would
     /// decide whether another tenant's subscriptions are ever matched.
     /// Keyset, not OFFSET: the walk runs against a table being written to.
+    /// `after = None` is bound as the empty string rather than as a second
+    /// statement, which keeps the primary-key range scan; it is below every
+    /// id because a document id is a URI and a URI is never empty. A row
+    /// stored with an empty id would be returned by `list` and skipped by
+    /// every page of this walk.
     pub fn list_page(
         &self,
         tenant: &TenantId,
