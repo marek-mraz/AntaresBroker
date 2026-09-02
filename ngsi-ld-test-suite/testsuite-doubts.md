@@ -2939,3 +2939,38 @@ Raised in `docs/upstream/etsi-raises.md`: either 4.5.19.0 means "as many as
 there are periods holding data", or the fixtures and a response ceiling both
 need to change. Do not add a TP asserting either behaviour until it is
 settled, and do not change the broker.
+
+## The jsonldContext suite fetches a fixture from a third-party host
+
+`data/jsonldContext/subscription-with-implicitlycreated-contexts.jsonld` and
+`data/jsonldContext/@context-cached-valid.json` name
+`https://fiware.github.io/NGSI-LD_TestSuite/ldContext/testContext.jsonld`.
+The broker under test resolves that URL while serving the request the setup
+makes, so the conformance verdict depends on a third-party host being
+reachable from wherever the suite runs.
+
+When it is not, the failure surfaces far from its cause. Create Subscription
+answers `504 LdContextNotAvailable` — correct, per 5.5.6, the @context could
+not be retrieved — and the setup's next step reads a member of a response
+that is an error body:
+
+```
+Setup failed: Dictionary does not contain key 'jsonldContext'.
+Also teardown failed: 1) Variable '${subscription_id}' not found.
+```
+
+Nothing in that message names the network. Seen once on the timescale cell
+of a run whose file and postgres cells passed the same test point, so the
+whole conformance gate turns on one outbound fetch to `fiware.github.io`.
+
+The suite already mirrors the contexts it owns —
+`resources/jsonld-contexts/` served over
+`raw.githubusercontent.com/.../ngsi-ld-test-suite.jsonld`, and the same
+payload names it as its second entry — so the fixture the test needs can be
+served the same way. `testContext.jsonld` is the one that was left pointing
+at the third party.
+
+Upstream fix wanted: serve every @context a test point needs from the
+suite's own resources, and let a test that means to exercise an unreachable
+@context say so explicitly. Nothing here is a broker defect and nothing in
+the broker changes for it.
