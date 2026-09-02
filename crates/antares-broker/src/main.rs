@@ -50,6 +50,9 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_MAX_BATCH_ITEMS",
     "ANTARES_MAX_BODY_BYTES",
     "ANTARES_CORS_ORIGINS",
+    // How long the policy engine has to answer before the seam denies
+    // (ADR-0020). The built-in allow-all engine never waits.
+    "ANTARES_POLICY_TIMEOUT_MS",
     // The HTTP surfaces mounted beside the NGSI-LD API root, comma-separated;
     // default `admin` (/q). An unknown name is fatal and names the shelf.
     "ANTARES_API_SURFACES",

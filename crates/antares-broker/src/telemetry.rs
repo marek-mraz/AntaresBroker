@@ -211,6 +211,11 @@ fn describe() {
         "HTTP request service time"
     );
     describe_counter!(
+        "antares_policy_failures_total",
+        Unit::Count,
+        "policy decisions the seam had to make itself because the engine did not, by reason"
+    );
+    describe_counter!(
         "antares_notifications_sent_total",
         Unit::Count,
         "notifications delivered successfully, by sink scheme"

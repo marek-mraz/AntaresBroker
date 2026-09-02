@@ -25,6 +25,7 @@ pub mod mirror;
 pub mod negotiate;
 pub mod notify;
 pub(crate) mod paging;
+pub mod policy;
 pub mod qeval;
 pub(crate) mod regexcache;
 pub(crate) mod registry;

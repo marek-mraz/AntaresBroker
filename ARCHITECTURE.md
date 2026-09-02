@@ -85,6 +85,7 @@ module's header comment.
 | `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
+| `policy.rs` | 400 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, and the fail-closed call that denies on a panic or a timeout |
 | `state.rs` | 770 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
@@ -334,7 +335,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | the bus or roles | `broker/src/wiring.rs` | ADR-0002 |
 | a role's HTTP surface | `lib.rs` router construction by `roles` | a worker must 404 the API |
 | another standard's API beside NGSI-LD (SensorThings, OGC API, WFS) | an `ApiSurface` under `/x/…` in its own crate that drives the NGSI-LD router in process — `crates/antares-wasm/src/lib.rs` `handle` is the worked `tower::Service::call` | never under `/ngsi-ld/`; every façade request is an NGSI-LD request, so negotiation, bounds and tenancy are not repeated |
-| an authorization decision | nothing in the broker: the gateway in front of it, with the shared crates (`docs/src/shared-crates.md`, "The PEP boundary") | `surface.rs` refuses a surface under the API root for the same reason |
+| an authorization decision | no engine in the broker: `policy.rs` is the seam one attaches to, and the gateway keeps authentication and rate limiting (`docs/src/shared-crates.md`, "The PEP boundary") | conformance is asserted against the built-in allow-all engine, the way `surface.rs` refuses a surface under the API root |
 
 ## 10. Verification ladder
 

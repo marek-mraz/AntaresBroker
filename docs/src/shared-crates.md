@@ -44,7 +44,7 @@ trait another standard's surface implements, and `GIT_HASH` is what
 `DeliveryPolicy`, `page_sink` and `scope_matches` are re-exported from the
 crates that own them so a host names one dependency instead of three.
 
-Ten modules stay public because a host or a surface reaches into them:
+Eleven modules stay public because a host or a surface reaches into them:
 
 | module | what a host uses it for |
 |---|---|
@@ -55,6 +55,7 @@ Ten modules stay public because a host or a surface reaches into them:
 | `history` | `drain_errors`, the dead-letter counter |
 | `mirror` | `Mirror`, `DocMirror`, `SubMirror` and the `Change` tuple: the change pipeline a bus driver feeds |
 | `negotiate` | `ApiError`/`ApiResult`, `tenant_from`, `CleanParams`, `QUERY_PARAMS` — what an `ApiSurface` needs to answer like the broker |
+| `policy` | the policy seam (ADR-0020): `PolicyEngine`, `Subject`, `Operation`, `Decision`, `Filter`, `NotifyDecision`, the built-in `AllowAll`, and the fail-closed `decide`/`pre_notify` an engine is called through |
 | `notify` | `seed_mirror`, `process_change`, `record_temporal_change`, `interval_tick`: the pipeline steps a host drives |
 | `qeval` | `antares_ql::eval` re-exported: `eval_q`, in-memory `q` evaluation over a stored document |
 | `state` | `AppState` and its builders (`with_drivers`, `with_store`, `with_sink`, `with_surface`, `with_surfaces`) |

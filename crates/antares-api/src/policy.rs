@@ -1,0 +1,714 @@
+// SPDX-License-Identifier: EUPL-1.2
+//! The policy seam: one trait, one built-in engine, every engine an addon
+//! (ADR-0020).
+//!
+//! The broker takes no authorization decision of its own. It asks the
+//! engine a deployment gave it and obeys, and what an engine may answer is
+//! deliberately narrow: allow, deny, or narrow the operation. Nothing here
+//! parses a credential or validates a token — authentication, rate limiting
+//! and quotas stay in the gateway in front of the broker.
+//!
+//! Everything in this module is core code, compiled and tested in every
+//! build. The only engine the broker ships is [`AllowAll`], and conformance
+//! is asserted against it; any other engine is an addon crate outside
+//! `crates/`, behind an off-by-default `antares-broker` feature.
+//!
+//! The seam fails closed: an engine that errors, panics or runs past
+//! [`TIMEOUT`] denies. A deployment that wires in a broken engine loses
+//! service, never its access rules.
+
+use antares_ql::geo::GeoQuery;
+use antares_ql::QNode;
+use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::LazyLock;
+use std::time::Duration;
+
+/// What [`PolicyEngine::decide`] hands back. Boxed because an engine that
+/// asks a policy server has to await, and the trait must stay object-safe:
+/// the broker holds one `Arc<dyn PolicyEngine>` chosen at startup.
+pub type DecisionFuture<'a> = Pin<Box<dyn Future<Output = Decision> + Send + 'a>>;
+
+/// How long an engine has to answer before the broker stops waiting and
+/// denies. Deployment knob (`ANTARES_POLICY_TIMEOUT_MS`), read once at
+/// first use. The default is short on purpose: the seam sits in front of
+/// every request, and an engine that cannot answer inside it is an outage
+/// either way — failing closed at 250 ms is the difference between a 403
+/// and a broker that stops accepting.
+pub static TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    let ms = std::env::var("ANTARES_POLICY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &u64| *n > 0)
+        .unwrap_or(250);
+    Duration::from_millis(ms)
+});
+
+/// The reasons the seam denies on its own, rather than on an engine's word.
+/// Fixed strings: they reach the client in a ProblemDetails `detail`, and
+/// an engine's own text about why it failed is not the client's business.
+pub const ENGINE_TIMED_OUT: &str = "the policy engine did not answer in time";
+pub const ENGINE_FAILED: &str = "the policy engine failed";
+
+/// The clauses whose operations act on everything the tenant holds. There
+/// is no narrowed form of "delete every entity" or "snapshot the tenant",
+/// so a [`Decision::Filter`] on one of them is answered as a deny
+/// ([`resolve`]).
+pub const WHOLE_TENANT: [&str; 4] = ["5.6.21", "5.16.1", "5.16.2", "5.16.7"];
+
+/// Who is asking. The headers are the ones a deployment names for the
+/// seam to carry, copied verbatim and never interpreted: the broker does
+/// not know what a token is. They never leave this process — stripped from every
+/// forwarded request, absent from notifications, dead letters and logs,
+/// which is why [`std::fmt::Debug`] here prints names and not values.
+#[derive(Clone)]
+pub struct Subject {
+    pub tenant: antares_model::TenantId,
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subject")
+            .field("tenant", &self.tenant)
+            .field(
+                "headers",
+                &self.headers.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// What is being asked for, after negotiation and expansion: the request
+/// the broker is about to run, in the terms the operation itself uses.
+/// Every name is expanded, so an engine writes its rules against IRIs and
+/// not against whatever short name the caller's `@context` happened to use.
+pub struct Operation<'a> {
+    /// The CIM 009 clause of the operation, e.g. `"5.6.1"`.
+    pub clause: &'static str,
+    pub ids: &'a [String],
+    pub types: &'a [String],
+    pub attrs: &'a [String],
+    pub q: Option<&'a QNode>,
+    pub scope_q: Option<&'a str>,
+    pub geo: Option<&'a GeoQuery>,
+    /// The request body of a write, expanded. `None` for a read.
+    pub body: Option<&'a Value>,
+}
+
+/// Shape and counts, never the payload: an `Operation` carries the
+/// caller's data, and a log line is not where it belongs.
+impl std::fmt::Debug for Operation<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Operation")
+            .field("clause", &self.clause)
+            .field("ids", &self.ids.len())
+            .field("types", &self.types.len())
+            .field("attrs", &self.attrs.len())
+            .field("q", &self.q.is_some())
+            .field("scope_q", &self.scope_q.is_some())
+            .field("geo", &self.geo.is_some())
+            .field("body", &self.body.is_some())
+            .finish()
+    }
+}
+
+/// What an engine may answer. There is no third state: an operation is
+/// allowed, refused, or allowed over less than it asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    Allow,
+    /// Refused, with the engine's own reason. Answered 403 with a
+    /// ProblemDetails whose type is an Antares URI — Table 6.3.2-1 names no
+    /// access-denied error, so this is an Antares decision.
+    Deny(String),
+    /// Allowed over less. The caller cannot tell a hidden entity from an
+    /// absent one.
+    Filter(Filter),
+}
+
+/// How much less. Every member narrows and none widens: the `q` and
+/// `scopeQ` are conjoined with the caller's own, `pick` keeps a subset of
+/// the members, `omit` removes some.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filter {
+    /// Conjoined into the query the store runs, on the AST — never on the
+    /// query string, where the 4.9 precedence of `;` against `|` would have
+    /// to be re-derived by whoever writes the rule.
+    pub q: Option<QNode>,
+    /// Conjoined the same way with the request's own `scopeQ` (4.18).
+    pub scope_q: Option<String>,
+    /// Members removed from every document served.
+    pub omit: Vec<String>,
+    /// If non-empty, the only members served beside the document frame.
+    pub pick: Vec<String>,
+    /// Answer `NGSILD-Results-Restricted: true`, so a client can know the
+    /// answer was narrowed. Narrowing is otherwise silent.
+    pub restricted: bool,
+}
+
+/// What identifies the document rather than describing it: 5.2.4 makes
+/// `id` and `type` mandatory members of an Entity, and an answer without
+/// them is not an Entity at all. A projection never removes these.
+const FRAME: [&str; 3] = ["id", "type", "@context"];
+
+impl Filter {
+    /// Apply `pick`/`omit` to one served document. Removal only: whatever
+    /// members come out were in the document already, which is the property
+    /// [`run_policy_contract`] asserts.
+    pub fn project(&self, doc: &mut Value) {
+        let Some(obj) = doc.as_object_mut() else {
+            return;
+        };
+        if !self.pick.is_empty() {
+            obj.retain(|k, _| FRAME.contains(&k.as_str()) || self.pick.iter().any(|p| p == k));
+        }
+        for name in &self.omit {
+            if FRAME.contains(&name.as_str()) {
+                continue;
+            }
+            obj.remove(name);
+        }
+    }
+
+    /// True when the filter would change nothing, which is how an engine
+    /// that means "allow" can say so with an empty `Filter`.
+    pub fn is_empty(&self) -> bool {
+        self.q.is_none() && self.scope_q.is_none() && self.omit.is_empty() && self.pick.is_empty()
+    }
+}
+
+/// What an engine may answer about one notification, for one subscription.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NotifyDecision {
+    Deliver,
+    /// Send it, narrowed: the same projection the query path applies.
+    Filter(Filter),
+    /// Do not send. 5.8.6 counts this as no attempt at all — the
+    /// notification was never sent, so it is neither a success nor a
+    /// failure, and `timesSent` does not move.
+    Drop,
+}
+
+/// The seam. One implementation ships with the broker; every other one is
+/// an addon crate a deployment builds itself.
+pub trait PolicyEngine: Send + Sync {
+    /// The name a deployment selects the engine by, and the name
+    /// `/q/health` reports.
+    fn name(&self) -> &str;
+
+    /// Fires once per request, after negotiation and expansion, before the
+    /// operation and before any fan-out (ADR-0014 `on_request`).
+    fn decide<'a>(&'a self, subject: &'a Subject, op: &'a Operation<'a>) -> DecisionFuture<'a>;
+
+    /// Fires once per notification document per subscription, before the
+    /// egress check and the send (ADR-0014 `pre_notify`). Synchronous: it
+    /// sits inside the delivery the broker is about to make, and an engine
+    /// that has to ask a server for every notification is a design the seam
+    /// declines to make easy.
+    fn pre_notify(
+        &self,
+        subject: &Subject,
+        sub: &Value,
+        notification: &mut Value,
+    ) -> NotifyDecision;
+}
+
+/// The engine the broker ships, and the one conformance is asserted
+/// against: it decides nothing, so the broker behaves exactly as it did
+/// before the seam existed.
+pub struct AllowAll;
+
+impl PolicyEngine for AllowAll {
+    fn name(&self) -> &str {
+        "allow-all"
+    }
+
+    fn decide<'a>(&'a self, _subject: &'a Subject, _op: &'a Operation<'a>) -> DecisionFuture<'a> {
+        Box::pin(std::future::ready(Decision::Allow))
+    }
+
+    fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+        NotifyDecision::Deliver
+    }
+}
+
+/// A `Filter` on an operation that acts on the whole tenant has no
+/// meaning — "purge every entity, but only the ones you may see" is a
+/// different operation from the one the client asked for, and answering it
+/// would delete less than the 204 claims. Those operations take the strict
+/// reading: narrow means refuse.
+pub fn resolve(clause: &str, decision: Decision) -> Decision {
+    match decision {
+        Decision::Filter(f) if WHOLE_TENANT.contains(&clause) => {
+            if f.is_empty() {
+                Decision::Allow
+            } else {
+                Decision::Deny(format!(
+                    "{clause} acts on everything the tenant holds and cannot be narrowed"
+                ))
+            }
+        }
+        other => other,
+    }
+}
+
+/// Ask the engine, and fail closed. An engine that panics, or that runs
+/// past [`TIMEOUT`], denies: a seam that waved the request through on its
+/// own failure would turn a broken addon into an open door.
+///
+/// The panic is caught in place rather than on a spawned task, because the
+/// task boundary would demand `'static` of the operation, which borrows the
+/// request.
+pub async fn decide(engine: &dyn PolicyEngine, subject: &Subject, op: &Operation<'_>) -> Decision {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use futures_util::FutureExt as _;
+        let guarded = std::panic::AssertUnwindSafe(engine.decide(subject, op)).catch_unwind();
+        match tokio::time::timeout(*TIMEOUT, guarded).await {
+            Ok(Ok(d)) => resolve(op.clause, d),
+            Ok(Err(_)) => {
+                tracing::error!("policy engine {} panicked; denying", engine.name());
+                metrics::counter!("antares_policy_failures_total", "reason" => "panic")
+                    .increment(1);
+                Decision::Deny(ENGINE_FAILED.to_owned())
+            }
+            Err(_) => {
+                tracing::error!(
+                    "policy engine {} did not answer within {:?}; denying",
+                    engine.name(),
+                    *TIMEOUT
+                );
+                metrics::counter!("antares_policy_failures_total", "reason" => "timeout")
+                    .increment(1);
+                Decision::Deny(ENGINE_TIMED_OUT.to_owned())
+            }
+        }
+    }
+    // The browser build has no timer to race against and aborts on panic;
+    // it also loads no addon, so the engine is always the built-in one.
+    #[cfg(target_arch = "wasm32")]
+    {
+        resolve(op.clause, engine.decide(subject, op).await)
+    }
+}
+
+/// Ask the engine about one notification, and fail closed: an engine that
+/// panics drops the notification. The document it was handed may already be
+/// half-edited, and the broker cannot know which half — so it is not sent.
+pub fn pre_notify(
+    engine: &dyn PolicyEngine,
+    subject: &Subject,
+    sub: &Value,
+    notification: &mut Value,
+) -> NotifyDecision {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.pre_notify(subject, sub, notification)
+    })) {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::error!(
+                "policy engine {} panicked on a notification; dropping it",
+                engine.name()
+            );
+            metrics::counter!("antares_policy_failures_total", "reason" => "panic").increment(1);
+            NotifyDecision::Drop
+        }
+    }
+}
+
+/// The members of a JSON object, or nothing when it is not one.
+#[cfg(any(test, feature = "test-kit"))]
+fn members(v: &Value) -> Vec<String> {
+    v.as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// A request shaped like the ones the seam sees, for the contract to ask
+/// about.
+#[cfg(any(test, feature = "test-kit"))]
+fn sample_operation(clause: &'static str) -> Operation<'static> {
+    Operation {
+        clause,
+        ids: &[],
+        types: &[],
+        attrs: &[],
+        q: None,
+        scope_q: None,
+        geo: None,
+        body: None,
+    }
+}
+
+/// The contract every engine has to hold, so an addon's own tests can call
+/// it. It asserts the three things an engine can actually get wrong — it
+/// stops answering, it hands back an answer the seam has to override, or it
+/// puts something into a notification that was not there — and it asserts
+/// them through the seam, so an engine that passes here passes as the
+/// broker will call it.
+///
+/// The core runs it against [`AllowAll`]; `examples/plugin-example` runs it
+/// against the reference engine.
+#[cfg(any(test, feature = "test-kit"))]
+pub async fn run_policy_contract(engine: &dyn PolicyEngine) {
+    let name = engine.name();
+    assert!(!name.is_empty(), "an engine answers to a name");
+
+    let subject = Subject {
+        tenant: antares_model::TenantId::default(),
+        headers: vec![("X-Subject".into(), "someone".into())],
+    };
+    let doc = serde_json::json!({
+        "id": "urn:ngsi-ld:Vehicle:1",
+        "type": "Vehicle",
+        "speed": {"type": "Property", "value": 10},
+        "brand": {"type": "Property", "value": "Skoda"}
+    });
+
+    // The engine answers, and the answer is its own: a deny carrying one of
+    // the seam's own reasons means it timed out or panicked instead.
+    for clause in ["5.6.1", "5.7.2", "5.8.1"] {
+        match decide(engine, &subject, &sample_operation(clause)).await {
+            Decision::Allow => {}
+            Decision::Deny(why) => assert!(
+                why != ENGINE_TIMED_OUT && why != ENGINE_FAILED,
+                "{name}: {clause} was denied by the seam, not by the engine: {why}"
+            ),
+            Decision::Filter(f) => {
+                let mut narrowed = doc.clone();
+                f.project(&mut narrowed);
+                let before = members(&doc);
+                for key in members(&narrowed) {
+                    assert!(
+                        before.contains(&key),
+                        "{name}: the filter for {clause} added {key:?} to the answer"
+                    );
+                }
+            }
+        }
+    }
+
+    // An operation over everything the tenant holds is allowed or refused,
+    // never done to less than it says.
+    for clause in WHOLE_TENANT {
+        assert!(
+            !matches!(
+                decide(engine, &subject, &sample_operation(clause)).await,
+                Decision::Filter(_)
+            ),
+            "{name}: {clause} was answered with a filter"
+        );
+    }
+
+    // `pre_notify` holds the notification by `&mut`, which is the one place
+    // an engine can widen rather than narrow: a member it puts there is a
+    // member no subscriber asked for and no store answered with.
+    let sub = serde_json::json!({"id": "urn:ngsi-ld:Subscription:1", "type": "Subscription"});
+    let mut notification = serde_json::json!({
+        "id": "urn:ngsi-ld:Notification:1",
+        "type": "Notification",
+        "subscriptionId": "urn:ngsi-ld:Subscription:1",
+        "notifiedAt": "2026-01-01T00:00:00Z",
+        "data": [doc.clone()]
+    });
+    let before = members(&notification);
+    let entity_members = members(&doc);
+    if pre_notify(engine, &subject, &sub, &mut notification) != NotifyDecision::Drop {
+        for key in members(&notification) {
+            assert!(
+                before.contains(&key),
+                "{name}: pre_notify added {key:?} to the notification"
+            );
+        }
+        let served = notification
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for entity in &served {
+            for key in members(entity) {
+                assert!(
+                    entity_members.contains(&key),
+                    "{name}: pre_notify added {key:?} to a notified Entity"
+                );
+            }
+        }
+    }
+
+    // And the seam stops waiting for this engine, whatever it does.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let slow = Slow(engine);
+        assert_eq!(
+            decide(&slow, &subject, &sample_operation("5.6.1")).await,
+            Decision::Deny(ENGINE_TIMED_OUT.to_owned()),
+            "{name}: the seam waited past its timeout instead of denying"
+        );
+    }
+}
+
+/// The same engine, one timeout slower: what the contract wraps it in to
+/// prove the seam stops waiting.
+#[cfg(all(any(test, feature = "test-kit"), not(target_arch = "wasm32")))]
+struct Slow<'e>(&'e dyn PolicyEngine);
+
+#[cfg(all(any(test, feature = "test-kit"), not(target_arch = "wasm32")))]
+impl PolicyEngine for Slow<'_> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn decide<'a>(&'a self, subject: &'a Subject, op: &'a Operation<'a>) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            tokio::time::sleep(*TIMEOUT * 2 + Duration::from_millis(50)).await;
+            self.0.decide(subject, op).await
+        })
+    }
+
+    fn pre_notify(&self, s: &Subject, sub: &Value, n: &mut Value) -> NotifyDecision {
+        self.0.pre_notify(s, sub, n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::FutureExt as _;
+    use serde_json::json;
+
+    fn subject() -> Subject {
+        Subject {
+            tenant: antares_model::TenantId::default(),
+            headers: vec![("X-Subject".into(), "a-token-shaped-string".into())],
+        }
+    }
+
+    /// Run the contract and report whether it refused the engine.
+    async fn contract_holds(engine: &dyn PolicyEngine) -> bool {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::AssertUnwindSafe(run_policy_contract(engine))
+            .catch_unwind()
+            .await;
+        std::panic::set_hook(hook);
+        outcome.is_ok()
+    }
+
+    #[tokio::test]
+    async fn the_built_in_engine_holds_the_contract() {
+        run_policy_contract(&AllowAll).await;
+    }
+
+    /// An engine that narrows is what the seam is for, and the contract
+    /// must not stand in its way.
+    struct Narrowing;
+
+    impl PolicyEngine for Narrowing {
+        fn name(&self) -> &str {
+            "narrowing"
+        }
+        fn decide<'a>(&'a self, _s: &'a Subject, _o: &'a Operation<'a>) -> DecisionFuture<'a> {
+            Box::pin(std::future::ready(Decision::Filter(Filter {
+                omit: vec!["brand".into()],
+                restricted: true,
+                ..Filter::default()
+            })))
+        }
+        fn pre_notify(&self, _s: &Subject, _sub: &Value, n: &mut Value) -> NotifyDecision {
+            if let Some(data) = n.get_mut("data").and_then(Value::as_array_mut) {
+                for entity in data {
+                    if let Some(o) = entity.as_object_mut() {
+                        o.remove("brand");
+                    }
+                }
+            }
+            NotifyDecision::Filter(Filter {
+                omit: vec!["brand".into()],
+                ..Filter::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_only_narrows_holds_the_contract() {
+        assert!(contract_holds(&Narrowing).await);
+    }
+
+    /// The contract has teeth or it proves nothing: this engine puts a
+    /// member into a notification nobody asked for.
+    struct Widening;
+
+    impl PolicyEngine for Widening {
+        fn name(&self) -> &str {
+            "widening"
+        }
+        fn decide<'a>(&'a self, _s: &'a Subject, _o: &'a Operation<'a>) -> DecisionFuture<'a> {
+            Box::pin(std::future::ready(Decision::Allow))
+        }
+        fn pre_notify(&self, _s: &Subject, _sub: &Value, n: &mut Value) -> NotifyDecision {
+            if let Some(o) = n.as_object_mut() {
+                o.insert("stowaway".into(), json!(true));
+            }
+            NotifyDecision::Deliver
+        }
+    }
+
+    #[tokio::test]
+    async fn the_contract_refuses_an_engine_that_widens_a_notification() {
+        assert!(
+            !contract_holds(&Widening).await,
+            "the contract passed an engine that added a member to a notification"
+        );
+    }
+
+    #[test]
+    fn a_pick_keeps_the_frame_and_drops_the_rest() {
+        let mut doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle",
+                             "speed": 1, "brand": "Skoda"});
+        Filter {
+            pick: vec!["speed".into()],
+            ..Filter::default()
+        }
+        .project(&mut doc);
+        assert_eq!(
+            doc,
+            json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle", "speed": 1})
+        );
+    }
+
+    #[test]
+    fn an_omit_cannot_remove_what_makes_it_an_entity() {
+        let mut doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle", "speed": 1});
+        Filter {
+            omit: vec!["id".into(), "type".into(), "speed".into()],
+            ..Filter::default()
+        }
+        .project(&mut doc);
+        assert_eq!(
+            doc,
+            json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"})
+        );
+    }
+
+    #[test]
+    fn a_pick_of_something_absent_adds_nothing() {
+        let mut doc = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle", "speed": 1});
+        Filter {
+            pick: vec!["mileage".into()],
+            ..Filter::default()
+        }
+        .project(&mut doc);
+        assert_eq!(
+            doc,
+            json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle"})
+        );
+    }
+
+    #[test]
+    fn a_projection_leaves_a_non_object_alone() {
+        let mut doc = json!(["not", "an", "object"]);
+        Filter {
+            pick: vec!["speed".into()],
+            omit: vec!["brand".into()],
+            ..Filter::default()
+        }
+        .project(&mut doc);
+        assert_eq!(doc, json!(["not", "an", "object"]));
+    }
+
+    #[test]
+    fn narrowing_a_whole_tenant_operation_is_a_refusal() {
+        let narrowed = Decision::Filter(Filter {
+            omit: vec!["speed".into()],
+            ..Filter::default()
+        });
+        for clause in WHOLE_TENANT {
+            assert!(matches!(
+                resolve(clause, narrowed.clone()),
+                Decision::Deny(_)
+            ));
+        }
+        assert_eq!(resolve("5.6.1", narrowed.clone()), narrowed);
+    }
+
+    #[test]
+    fn an_empty_filter_on_a_whole_tenant_operation_is_not_a_refusal() {
+        assert_eq!(
+            resolve("5.6.21", Decision::Filter(Filter::default())),
+            Decision::Allow
+        );
+    }
+
+    struct Panicking;
+
+    impl PolicyEngine for Panicking {
+        fn name(&self) -> &str {
+            "panicking"
+        }
+        fn decide<'a>(&'a self, _s: &'a Subject, _o: &'a Operation<'a>) -> DecisionFuture<'a> {
+            Box::pin(async { panic!("the engine is broken") })
+        }
+        fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+            panic!("the engine is broken")
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_panics_denies_rather_than_allows() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let decided = decide(&Panicking, &subject(), &sample_operation("5.6.1")).await;
+        let mut notification = json!({"type": "Notification"});
+        let notified = pre_notify(&Panicking, &subject(), &json!({}), &mut notification);
+        std::panic::set_hook(hook);
+        assert_eq!(decided, Decision::Deny(ENGINE_FAILED.to_owned()));
+        assert_eq!(notified, NotifyDecision::Drop);
+    }
+
+    /// Real time, not a paused clock: the workspace tokio is built without
+    /// `test-util`, so the test pays the timeout it asserts.
+    #[tokio::test]
+    async fn an_engine_that_never_answers_denies() {
+        struct Never;
+        impl PolicyEngine for Never {
+            fn name(&self) -> &str {
+                "never"
+            }
+            fn decide<'a>(&'a self, _s: &'a Subject, _o: &'a Operation<'a>) -> DecisionFuture<'a> {
+                Box::pin(std::future::pending())
+            }
+            fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+                NotifyDecision::Deliver
+            }
+        }
+        assert_eq!(
+            decide(&Never, &subject(), &sample_operation("5.6.1")).await,
+            Decision::Deny(ENGINE_TIMED_OUT.to_owned())
+        );
+    }
+
+    #[test]
+    fn the_subject_never_prints_its_header_values() {
+        let printed = format!("{:?}", subject());
+        assert!(printed.contains("X-Subject"), "{printed}");
+        assert!(
+            !printed.contains("a-token-shaped-string"),
+            "a header value reached a log line: {printed}"
+        );
+    }
+
+    #[test]
+    fn an_operation_never_prints_the_payload() {
+        let body = json!({"id": "urn:ngsi-ld:Vehicle:1", "plate": "BB-123-XY"});
+        let printed = format!(
+            "{:?}",
+            Operation {
+                body: Some(&body),
+                ..sample_operation("5.6.1")
+            }
+        );
+        assert!(!printed.contains("BB-123-XY"), "{printed}");
+    }
+}
