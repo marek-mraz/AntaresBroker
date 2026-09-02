@@ -208,3 +208,32 @@ async fn clause_5_7_2_4_csf_matching_nothing_stays_local() {
         .collect();
     assert_eq!(ids, vec!["urn:ngsi-ld:Vehicle:local2"], "{body}");
 }
+
+/// 5.7.2.4: "If the list of Entity identifiers includes a URI which it is not
+/// valid, or the query, geoquery or context source filter are not
+/// syntactically valid (as per the referred clauses 4.9 and 4.10) an error of
+/// type BadRequestData shall be raised."
+///
+/// The GET path parses the csf and raises. Its POST twin (6.4.3.2 runs the
+/// same 5.7.2 behaviour over a Query, 5.2.23) only checked that the member is
+/// a String and carried it on to registration matching, which parses it again
+/// and drops what it cannot parse. A csf NARROWS the Context Sources a query
+/// reaches, so dropping it forwards the query to exactly the sources the
+/// client excluded — with a 200, and nothing in the answer saying so.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_7_2_4_an_unparseable_csf_is_refused_on_both_query_paths() {
+    let st = AppState::new("csf-invalid".into());
+    // unbalanced parentheses: not a 4.9 Query
+    let (status, body) = get(&st, "/ngsi-ld/v1/entities?type=Vehicle&csf=%28%28%28").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "GET: {body}");
+
+    let q = json!({
+        "type": "Query",
+        "entities": [{"type": "Vehicle"}],
+        "csf": "(((",
+    })
+    .to_string();
+    let (status, body) = post(&st, "/ngsi-ld/v1/entityOperations/query", q).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "POST: {body}");
+    assert_eq!(body["title"], "BadRequestData", "POST: {body}");
+}

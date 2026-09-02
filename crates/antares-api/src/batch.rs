@@ -1611,6 +1611,15 @@ async fn batch_query_inner(
     // without this a bare `{"type":"Query"}` reads the whole tenant and fans
     // the filterless query out to every matching registration.
     let q_ast = vp.get("q").map(|q| antares_ql::parse_q(q)).transpose()?;
+    // 5.7.2.4: "if ... the query, geoquery or context source filter are not
+    // syntactically valid (as per the referred clauses 4.9 and 4.10) an error
+    // of type BadRequestData shall be raised." Registration matching parses
+    // the csf again and drops what it cannot parse, which widens the fan-out
+    // to the Context Sources the filter was there to exclude — so it is
+    // refused here, the way the twin carrying the Query in the URI refuses it.
+    if let Some(csf) = vp.get("csf") {
+        antares_ql::parse_q(csf)?;
+    }
     if !crate::entities::qualifies_non_wide(&vp, q_ast.as_ref()) {
         return Err(NgsiError::BadRequestData(
             "query needs at least one of type, attrs, q, georel (5.7.2.4)".into(),
