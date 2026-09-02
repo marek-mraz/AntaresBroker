@@ -49,13 +49,40 @@ fn mock_replying(reply: &'static str) -> Mock {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
             seen.fetch_add(1, Ordering::SeqCst);
-            let mut buf = [0u8; 8192];
-            let n = s.read(&mut buf).unwrap_or(0);
-            *head.lock().expect("lock") = String::from_utf8_lossy(&buf[..n])
-                .split("\r\n\r\n")
-                .next()
-                .unwrap_or_default()
-                .to_owned();
+            // One `read` returns whatever has arrived, which is not the same
+            // as the request: a head split across TCP segments would be
+            // recorded truncated, and a body larger than the buffer would
+            // still be in flight when the reply closed the socket. Read to
+            // the blank line, then to the length the head declares.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let head_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap_or(buf.len());
+            let headers = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let want: usize = headers
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            while buf.len() - head_end < want {
+                match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            *head.lock().expect("lock") = headers.trim_end().to_owned();
             let _ = s.write_all(reply.as_bytes());
         }
     });
@@ -136,8 +163,11 @@ fn delete_with_via(tenant: Option<&str>, via: &str) -> Request<Body> {
 }
 
 fn state() -> AppState {
-    // the mock source is loopback, denied by the egress policy by default
-    std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true");
+    // The mock source is loopback, denied by the egress policy by default.
+    // Set once: a sibling test reading the variable while another rewrites
+    // it saw the policy missing and refused the forward.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| std::env::set_var("ANTARES_EGRESS_ALLOW_PRIVATE", "true"));
     AppState::new(ALIAS.into())
 }
 
@@ -286,6 +316,54 @@ async fn malformed_via_elements_are_tolerated() {
     // comment after the pseudonym is not part of the token
     let res = send(&st, delete_with_via(None, "1.1 antares1 (proxy)")).await;
     assert_eq!(res.status(), StatusCode::LOOP_DETECTED);
+}
+
+/// 6.3.18 Table 6.3.18-2 makes the outbound chain the inbound chain plus
+/// this broker, and a federation that spans many brokers arrives with the
+/// hops of all of them. A long chain is where the two halves of loop
+/// detection can quietly disagree: the parser has to read to the END of the
+/// list to find a pseudonym that is not near its front, and the forward has
+/// to carry the whole thing on so the next broker can do the same. A chain
+/// that outgrows one read of the socket is the case that shows both.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_via_chain_longer_than_one_read_is_parsed_and_forwarded_whole() {
+    let st = state();
+    let m = mock_replying("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    register(&st, None, "redirect", m.port, None).await;
+
+    // Long in bytes, not in hops: 30 elements stay under MAX_VIA_HOPS, and
+    // a Via pseudonym is a token, so the length lives in the names.
+    let hops: Vec<String> = (0..30)
+        .map(|i| format!("1.1 hop{i:02}{}", "x".repeat(300)))
+        .collect();
+    let chain = hops.join(", ");
+    assert!(chain.len() > 8 * 1024, "the chain spans more than one read");
+
+    let res = send(&st, delete_with_via(None, &chain)).await;
+    assert_ne!(
+        res.status(),
+        StatusCode::LOOP_DETECTED,
+        "no hop in the chain is this broker"
+    );
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "the forward must happen");
+
+    let head = m.last_head.lock().expect("lock").clone();
+    assert!(
+        head.contains("hop00") && head.contains("hop29"),
+        "the forwarded chain was cut: {} bytes",
+        head.len()
+    );
+    assert!(
+        head.contains(ALIAS),
+        "this broker appends its own pseudonym to what it passes on"
+    );
+
+    // The same chain with our pseudonym at its very END is still a loop:
+    // stopping the scan early is the failure this length is here to catch.
+    let looped = format!("{chain}, 1.1 {ALIAS}");
+    let res = send(&st, delete_with_via(None, &looped)).await;
+    assert_eq!(res.status(), StatusCode::LOOP_DETECTED, "{}", looped.len());
+    assert_eq!(m.hits.load(Ordering::SeqCst), 1, "no second forward");
 }
 
 /// 6.3.17 p.278, single proxied source: "404 Not Found — if resources not
