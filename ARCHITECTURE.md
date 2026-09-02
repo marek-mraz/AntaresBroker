@@ -206,17 +206,15 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
-- `antares-api` has one strongly connected component of 14 of its 24
+- `antares-api` has one strongly connected component of 11 of its 26
   modules, counted from every `crate::<module>` reference per file:
-  `attrs, batch, contexts, csource, distsub, entities, entity_maps,
-  federation, history, notify, snapshots, state, subscriptions, temporal`.
-  The other ten (`negotiate`, `bounds`, `repr`, `egress`, `surface`,
-  `conformance`, `geo`, `qeval`, `regexcache`, `types_attrs`) are leaves.
-  `state.rs` closes the component through three names from `notify.rs`:
-  `Change` (a tuple alias), `SubMirror` and `DocMirror`; moving the three
-  to a leaf module takes `state` out of it. `cargo modules` does not show
-  this cycle because it records call edges and not field types, so the
-  source-level count is the one to measure: `dev/module-graph.py` prints
+  `attrs, batch, csource, distsub, entities, entity_maps, federation,
+  notify, snapshots, subscriptions, temporal`. `state.rs` sits outside it
+  since the change event and the two document mirrors (`Change`,
+  `SubMirror`, `DocMirror`) live in the leaf `mirror.rs`, which names no
+  other module; `contexts` and `history` left with it. `cargo modules`
+  does not show such a cycle because it records call edges and not field
+  types, so the source-level count is the one to measure: `dev/module-graph.py` prints
   it per crate and `xray.yml` ratchets the largest component of every
   crate against `dev/module-baseline.json` (`antares-jsonld` holds a
   second one, `context` ↔ `loader`, of two).

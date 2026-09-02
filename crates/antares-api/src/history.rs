@@ -29,13 +29,13 @@ pub fn drain_errors() -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static BUFFER: std::cell::RefCell<Vec<TemporalEvent>>;
-    static CHANGES: std::cell::RefCell<Vec<crate::notify::Change>>;
+    static CHANGES: std::cell::RefCell<Vec<crate::mirror::Change>>;
 }
 
 /// Buffer one entity change for the request in flight so the matcher
 /// receives the whole request at once. Handed back when no request is in
 /// flight — the caller then gives it to the matcher on the spot.
-pub(crate) fn buffer_change(change: crate::notify::Change) -> Option<crate::notify::Change> {
+pub(crate) fn buffer_change(change: crate::mirror::Change) -> Option<crate::mirror::Change> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut slot = Some(change);

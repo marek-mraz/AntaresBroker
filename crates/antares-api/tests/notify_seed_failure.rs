@@ -283,7 +283,7 @@ async fn the_same_seed_fills_a_registration_mirror_past_a_refused_list() {
         "the double must actually refuse the read this is about"
     );
 
-    let mirror = antares_api::notify::DocMirror::default();
+    let mirror = antares_api::mirror::DocMirror::default();
     antares_api::notify::seed_mirror(&store, &mirror, Kind::Registration)
         .expect("a refused `list` is not a reason to serve an empty registration mirror");
 
@@ -301,7 +301,7 @@ async fn the_same_seed_fills_a_registration_mirror_past_a_refused_list() {
     // A mirror for a tenant that holds nothing is empty, not an error: the
     // domain may be a superset of the tenants holding this kind.
     assert!(
-        antares_api::notify::DocMirror::default()
+        antares_api::mirror::DocMirror::default()
             .docs("nobody")
             .is_empty(),
         "an unseeded tenant must read empty rather than borrow another tenant's rows"

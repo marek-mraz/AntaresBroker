@@ -20,6 +20,7 @@ pub mod entity_maps;
 pub mod federation;
 pub mod geo;
 pub mod history;
+pub mod mirror;
 pub mod negotiate;
 pub mod notify;
 pub mod qeval;

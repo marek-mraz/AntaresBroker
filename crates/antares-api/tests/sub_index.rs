@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)] // an unwrap here is the assertion
 
-use antares_api::notify::SubMirror;
+use antares_api::mirror::SubMirror;
 use serde_json::{json, Value};
 
 const T: &str = "t1";

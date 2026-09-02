@@ -111,11 +111,11 @@ pub struct AppState {
     /// bus=nats: the KV-watched compiled-subscription mirror the matcher
     /// reads, so the hot path never touches Postgres. `None` in local
     /// mode (the matcher reads the store directly).
-    pub sub_mirror: Option<Arc<crate::notify::SubMirror>>,
+    pub sub_mirror: Option<Arc<crate::mirror::SubMirror>>,
     /// bus=local: takes the entity changes one request buffered (the history
     /// layer hands them over after the handler) so the matcher sees a batch
     /// request as one unit. `None` until the local pipeline is wired.
-    pub change_flush: Option<Arc<dyn Fn(Vec<crate::notify::Change>) + Send + Sync>>,
+    pub change_flush: Option<Arc<dyn Fn(Vec<crate::mirror::Change>) + Send + Sync>>,
     /// bus=nats: called after every Registration CUD so the wiring can
     /// publish the delta on `ANTARES_REGISTRY`. `None` in local mode.
     #[allow(clippy::type_complexity)] // a boxed callback, named where it is installed
@@ -125,7 +125,7 @@ pub struct AppState {
     /// bus=nats: the ONE per-process compiled registration mirror,
     /// delta-fed from `ANTARES_REGISTRY`; expiry stays filtered at the single
     /// yield point (`federation::matching_regs`). `None` in local mode.
-    pub reg_mirror: Option<Arc<crate::notify::DocMirror>>,
+    pub reg_mirror: Option<Arc<crate::mirror::DocMirror>>,
     /// 5.2.34 (bus=nats): shares a cooldown stamp with the other api pods —
     /// a per-process stamp re-dials a failed source from every pod behind
     /// the LB. Seconds-scale state: broadcast on the

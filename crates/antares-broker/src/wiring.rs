@@ -264,7 +264,7 @@ pub async fn wire_nats(
         // Registration read side: the ONE compiled registration mirror this instance's
         // federation path reads. Consumer created BEFORE the hydrate so no
         // delta can fall between them; last-writer-wins per key converges.
-        let reg_mirror = Arc::new(antares_api::notify::DocMirror::default());
+        let reg_mirror = Arc::new(antares_api::mirror::DocMirror::default());
         let reg_consumer = bus.consume_registry_broadcast().await?;
         // Installed only if it is whole. A mirror that is present and SHORT
         // is read as the truth — `reg_docs` asks it and never the store — so
@@ -397,7 +397,7 @@ pub async fn wire_nats(
 
     if roles.matcher || roles.notifier {
         // Subscription read side: consumer-before-hydrate, same convergence argument.
-        let sub_mirror = Arc::new(antares_api::notify::SubMirror::default());
+        let sub_mirror = Arc::new(antares_api::mirror::SubMirror::default());
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
         // Same rule as the registration mirror, and the same one `bus=local`
@@ -512,7 +512,7 @@ fn mirror_sync_backoff(attempt: u32) -> std::time::Duration {
 /// Source Registration Subscription carries no document into the mirror: it
 /// is matched against registrations rather than entities, so the delta only
 /// wakes the interval sweep (5.11.7).
-fn apply_delta(mirror: &dyn antares_api::notify::Mirror, delta: &serde_json::Value) {
+fn apply_delta(mirror: &dyn antares_api::mirror::Mirror, delta: &serde_json::Value) {
     if delta.get("csub").and_then(serde_json::Value::as_bool) == Some(true) {
         mirror.csub_written();
         return;
@@ -562,7 +562,7 @@ fn resolve_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antares_api::notify::DocMirror;
+    use antares_api::mirror::DocMirror;
     use antares_bus::{ChangeOp, PayloadRef};
     use antares_model::EntityId;
     use serde_json::json;
@@ -632,7 +632,7 @@ mod tests {
     /// it wakes the interval sweep and touches nothing the matcher reads.
     #[test]
     fn a_csub_delta_only_wakes_the_sweep() {
-        let m = antares_api::notify::SubMirror::default();
+        let m = antares_api::mirror::SubMirror::default();
         apply_delta(
             &m,
             &serde_json::json!({

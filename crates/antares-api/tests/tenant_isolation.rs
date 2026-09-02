@@ -153,7 +153,7 @@ async fn cross_tenant_probe_is_indistinguishable_from_nonexistence() {
 /// subscriptions/registrations never appear in another tenant's yield.
 #[test]
 fn doc_mirror_is_tenant_keyed() {
-    let m = antares_api::notify::DocMirror::default();
+    let m = antares_api::mirror::DocMirror::default();
     m.apply(
         "tenant-a",
         "urn:s:1",
