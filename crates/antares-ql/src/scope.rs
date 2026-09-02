@@ -25,6 +25,9 @@ pub fn scope_matches(scope_q: &str, doc: &Value) -> bool {
     })
 }
 
+/// One 4.19 ScopeQ against one Entity Scope: `/`-separated levels compared
+/// in order, `+` standing for any single level and a trailing `#` for the
+/// rest of the hierarchy including the node itself.
 fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
     if pat == "/#" {
         return true;

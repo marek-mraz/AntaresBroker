@@ -100,7 +100,7 @@ pub struct AppState {
     /// Subscription CUD, so the mirror the matcher reads follows the store.
     /// On the bus the wiring pushes the change into the KV mirror bucket;
     /// in local mode it applies to this process's own mirror.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // a boxed callback, named where it is installed
     pub sub_sync: Option<
         Arc<
             dyn Fn(&antares_model::TenantId, antares_store::Kind, &str, Option<&serde_json::Value>)
@@ -118,7 +118,7 @@ pub struct AppState {
     pub change_flush: Option<Arc<dyn Fn(Vec<crate::notify::Change>) + Send + Sync>>,
     /// bus=nats: called after every Registration CUD so the wiring can
     /// publish the delta on `ANTARES_REGISTRY`. `None` in local mode.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // a boxed callback, named where it is installed
     pub reg_sync: Option<
         Arc<dyn Fn(&antares_model::TenantId, &str, Option<&serde_json::Value>) + Send + Sync>,
     >,
@@ -130,7 +130,7 @@ pub struct AppState {
     /// a per-process stamp re-dials a failed source from every pod behind
     /// the LB. Seconds-scale state: broadcast on the
     /// registry stream, deliberately not persisted. `None` in local mode.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // a boxed callback, named where it is installed
     pub reg_fail_sync: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
     /// Renders the Prometheus text format for /q/metrics. Installed by
     /// the broker (the only crate that knows an exporter exists);

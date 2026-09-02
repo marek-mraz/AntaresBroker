@@ -763,7 +763,7 @@ pub fn inline_join(
 
 /// Same, continuing an Entity Graph the client is already holding: the
 /// `containedBy` ids count as encountered (Table 6.4.3.2-1).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
 pub fn inline_join_beyond(
     st: &AppState,
     tenant: &TenantId,
@@ -835,7 +835,7 @@ fn lookup_joined(
     Some(c)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
 fn inline_join_value(
     st: &AppState,
     tenant: &TenantId,
@@ -936,7 +936,7 @@ pub fn collect_flat(
 
 /// Same, continuing an Entity Graph the client is already holding: the
 /// `containedBy` ids count as encountered (Table 6.4.3.2-1).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
 pub fn collect_flat_beyond(
     st: &AppState,
     tenant: &TenantId,
@@ -958,7 +958,7 @@ pub fn collect_flat_beyond(
     walk.complete
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per piece of the traversal's state
 fn collect_flat_walk(
     st: &AppState,
     tenant: &TenantId,

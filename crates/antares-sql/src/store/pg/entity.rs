@@ -143,7 +143,7 @@ fn extract(doc: &Value) -> Extracted {
 /// The outbox row's event JSON: what the drain turns into a
 /// `ChangeEvent`. Field names are the bus crate's serde names; `seq` and the
 /// claim check are the drain's business.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per outbox event field
 fn change_event(
     tenant: &TenantId,
     op: &str,
@@ -195,7 +195,7 @@ fn change_event(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per outbox event field
 async fn enqueue_change(
     tx: &mut sqlx::postgres::PgConnection,
     tenant: &TenantId,

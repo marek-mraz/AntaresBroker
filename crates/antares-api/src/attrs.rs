@@ -563,7 +563,7 @@ enum LocalOutcome {
 /// 6.7.3.3-2; 5.2.18 applies "regardless of whether local or distributed")
 /// — never the batch {success, errors} shape. Per-registration failures are
 /// listed per covered attribute with `registrationId` (5.2.19).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per input of the 6.3.17 answer
 fn combine_attr_parts(
     tenant: &antares_model::TenantId,
     attr_iris: &[String],

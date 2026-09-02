@@ -1990,7 +1990,7 @@ pub async fn fed_query(
 /// with split entities in play the value/geo/scope filters are removed
 /// before forwarding. Returns (registration id, returned EntityMap) pairs —
 /// the caller merges them into the local map's entityMap/linkedMaps.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub(crate) async fn fed_entity_maps(
     st: &AppState,
     tenant: &TenantId,
@@ -2344,7 +2344,7 @@ pub fn write_regs(
 }
 
 /// Execute one forwarded write and turn it into a Part.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn forward_part(
     st: &AppState,
     method: reqwest::Method,
@@ -2403,7 +2403,7 @@ pub async fn forward_part(
 }
 
 /// Forward one attribute-level write to every matching registration.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn fed_attr_parts(
     st: &AppState,
     headers: &HeaderMap,

@@ -305,9 +305,9 @@ impl SubMirror {
     }
 
     /// The interval sweep's whole input: the tenant's periodic (5.2.12
-    /// `timeInterval`) subscriptions. `docs` clones every subscription of the
-    /// tenant, which at 100 000 subscriptions is the sweep's dominant cost
-    /// even on a tick where nothing is due.
+    /// `timeInterval`) subscriptions. The walk is over every subscription the
+    /// tenant holds, but only the periodic ones are cloned — the sweep clocks
+    /// keep a tick with nothing due from reaching this at all.
     fn periodic_docs(&self, tenant: &str) -> Vec<Value> {
         self.map
             .read()
@@ -813,6 +813,8 @@ fn changed_instances(before: Option<&Value>, after: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// One string-valued member of a stored Subscription, absent or of another
+/// JSON type reading the same as absent.
 fn sub_str<'a>(sub: &'a Value, key: &str) -> Option<&'a str> {
     sub.get(key).and_then(Value::as_str)
 }
@@ -1013,7 +1015,7 @@ pub(crate) fn notif_shape(sub: &Value, ctx: &Context) -> NotifShape {
 }
 
 /// Build the notification `data` array for one change and one subscription.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per 5.8.6 payload input
 fn build_data(
     st: &AppState,
     tenant: &TenantId,
@@ -2080,7 +2082,6 @@ fn filter_csr(spec: &crate::csource::CsrSpec, reg: &Value, ctx: &Context) -> Val
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Table 5.2.15-1 `timeout`: per-endpoint delivery deadline in milliseconds.
 /// "The NGSI-LD system can override this value" — clamped to [100 ms, 30 s]
 /// so one subscription cannot park a delivery task for minutes. Default 5 s
@@ -2474,10 +2475,10 @@ async fn send_outbound(
     .map_err(|e| (e.timed_out, e.message))
 }
 
-/// Dead letters written by this process since start (`/q/health`
-/// deadLetters); the letters themselves live in the store.
 static DEAD_LETTERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Dead letters written by this process since start (`/q/health`
+/// deadLetters); the letters themselves live in the store.
 pub fn dead_letters_written() -> u64 {
     DEAD_LETTERS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -2486,7 +2487,7 @@ pub fn dead_letters_written() -> u64 {
 /// then the settlement: lastSuccess/status ok on success, a dead letter
 /// when the policy is exhausted.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per piece of the attempt's state
 async fn retry_and_settle(
     st: &AppState,
     tenant: &TenantId,
@@ -2569,7 +2570,7 @@ async fn retry_and_settle(
 
 /// The dead-letter document: everything a replay needs to send the very
 /// same request again, plus the attempt history.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one param per stored letter member
 fn dead_letter(
     sub_id: &str,
     uri: &str,

@@ -1182,7 +1182,6 @@ mod clause_5_5_6 {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod clause_5_16 {
     use super::*;
     use axum::body::Body;

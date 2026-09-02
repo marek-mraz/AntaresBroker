@@ -98,7 +98,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
-use negotiate::{echo_tenant, respond, tenant_from, Accept, ApiError};
+use negotiate::{echo_tenant, respond, tenant_from, ApiError};
 
 /// 5.5.4 Fragment applied to a stored document resource — a Subscription
 /// (5.8.2), a Context Source Registration (5.9.3) or a Context Source
@@ -1223,12 +1223,6 @@ async fn not_found(headers: HeaderMap, uri: axum::http::Uri) -> Response {
         ApiError::from(NgsiError::ResourceNotFound(format!("unknown path {path}"))).into_response();
     echo_tenant(&tenant, &mut resp);
     resp
-}
-
-// keep the Accept variants referenced (geo+json handled in entities)
-#[allow(dead_code)]
-fn _accept_variants(a: Accept) -> Accept {
-    a
 }
 
 #[cfg(test)]
