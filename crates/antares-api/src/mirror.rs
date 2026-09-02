@@ -205,7 +205,7 @@ impl SubMirror {
     /// the clock moves — these are matched against registrations rather than
     /// entities, so they are not carried in the candidate index, and the
     /// sweep reads the tenant's rows from the store once it wakes.
-    pub fn csub_written(&self) {
+    pub(crate) fn csub_written(&self) {
         self.next_csub_sweep_ms
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
@@ -238,6 +238,7 @@ impl SubMirror {
             .collect()
     }
 
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn docs(&self, tenant: &str) -> Vec<Value> {
         self.map
             .read()
@@ -266,6 +267,7 @@ impl SubMirror {
             .unwrap_or_default()
     }
 
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn tenants(&self) -> Vec<String> {
         self.map
             .read()
@@ -337,6 +339,7 @@ impl DocMirror {
             .unwrap_or_default()
     }
 
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn tenants(&self) -> Vec<String> {
         self.map
             .read()

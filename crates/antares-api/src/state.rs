@@ -407,6 +407,7 @@ impl AppState {
     /// shared — a clone already handed out keeps the registry it was made
     /// with.
     #[must_use]
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn with_sink(mut self, sink: Box<dyn antares_notifier::NotificationSink>) -> Self {
         match Arc::get_mut(&mut self.sinks) {
             Some(reg) => reg.register(sink),
@@ -466,7 +467,7 @@ impl AppState {
     /// what the mirror does with it: a Subscription is indexed as a document,
     /// a Context Source Registration Subscription only wakes the interval
     /// sweep (5.11.7) — it is matched against registrations, not entities.
-    pub fn sub_changed(
+    pub(crate) fn sub_changed(
         &self,
         tenant: &antares_model::TenantId,
         kind: antares_store::Kind,
@@ -481,7 +482,12 @@ impl AppState {
     /// 5.2.34: stamp the per-registration cooldown locally AND on the other
     /// api pods (no-op half in local mode). Keyed per tenant — the id alone
     /// is client-chosen per tenant (5.5.10) and must not gate a neighbour.
-    pub fn reg_cooldown_stamp(&self, tenant: &antares_model::TenantId, reg_id: &str, ok: bool) {
+    pub(crate) fn reg_cooldown_stamp(
+        &self,
+        tenant: &antares_model::TenantId,
+        reg_id: &str,
+        ok: bool,
+    ) {
         let key = crate::egress::reg_key(tenant.as_str(), reg_id);
         self.egress.reg_record(&key, ok);
         if let Some(h) = &self.reg_fail_sync {
@@ -492,7 +498,7 @@ impl AppState {
     }
 
     /// Fire the registration-delta hook (no-op in local mode).
-    pub fn reg_changed(
+    pub(crate) fn reg_changed(
         &self,
         tenant: &antares_model::TenantId,
         id: &str,

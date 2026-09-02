@@ -17,7 +17,7 @@ use serde_json::Value;
 
 /// Members of an entity that are NOT attributes.
 /// `"major.minor"` (4.3.6.8; a patch part as in `1.9.1` is tolerated).
-pub fn parse_version(s: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_version(s: &str) -> Option<(u32, u32)> {
     let mut it = s.trim().split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
@@ -28,7 +28,7 @@ pub fn parse_version(s: &str) -> Option<(u32, u32)> {
 const NATIVE: (u32, u32) = (1, 9);
 
 /// Amend one compacted entity document in place; true when anything changed.
-pub fn amend_entity(doc: &mut Value, ver: (u32, u32)) -> bool {
+pub(crate) fn amend_entity(doc: &mut Value, ver: (u32, u32)) -> bool {
     if ver >= NATIVE {
         return false;
     }
@@ -224,7 +224,7 @@ fn is_reserved_resource(o: &serde_json::Map<String, Value>) -> bool {
         .is_some_and(|t| RESERVED.contains(&t))
 }
 
-pub fn amend_payload(doc: &mut Value, ver: (u32, u32)) -> bool {
+pub(crate) fn amend_payload(doc: &mut Value, ver: (u32, u32)) -> bool {
     match doc {
         Value::Array(items) => {
             let mut changed = false;
@@ -251,7 +251,7 @@ pub fn amend_payload(doc: &mut Value, ver: (u32, u32)) -> bool {
 
 /// `Prefer: ngsi-ld=<version>` from a raw Prefer header value (RFC 7240 —
 /// preferences are comma-separated `token=value` pairs).
-pub fn preferred_version(prefer: &str) -> Option<(u32, u32)> {
+pub(crate) fn preferred_version(prefer: &str) -> Option<(u32, u32)> {
     prefer.split(',').find_map(|p| {
         let (k, v) = p.split_once('=')?;
         // RFC 9110 clause 5.6.2: a field name is case-insensitive, and RFC

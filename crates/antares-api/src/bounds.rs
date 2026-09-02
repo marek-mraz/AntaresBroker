@@ -148,7 +148,7 @@ impl LimitStats {
 
 /// Maximum brace/bracket nesting of a JSON byte stream, string-aware.
 /// A scan, not a parse — depth is checked before serde ever runs.
-pub fn json_depth(bytes: &[u8]) -> usize {
+pub(crate) fn json_depth(bytes: &[u8]) -> usize {
     let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
     for &b in bytes {
         if in_str {
@@ -174,7 +174,7 @@ pub fn json_depth(bytes: &[u8]) -> usize {
     max
 }
 
-pub async fn bounds_layer(
+pub(crate) async fn bounds_layer(
     axum::extract::State(st): axum::extract::State<crate::AppState>,
     req: Request<Body>,
     next: Next,

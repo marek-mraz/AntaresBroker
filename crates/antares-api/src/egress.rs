@@ -92,7 +92,7 @@ fn redacted(url: &str) -> String {
 /// another tenant's same-id registration into timeout. The unit separator
 /// cannot appear in either part (TenantId and EntityId both refuse C0
 /// controls).
-pub fn reg_key(tenant: &str, reg_id: &str) -> String {
+pub(crate) fn reg_key(tenant: &str, reg_id: &str) -> String {
     format!("{tenant}\u{1f}{reg_id}")
 }
 
@@ -109,7 +109,7 @@ impl Egress {
     /// period has expired, a timeout error response for the registration is
     /// automatically returned." True while the per-registration window is
     /// still open.
-    pub fn reg_in_cooldown(&self, reg_key: &str, cooldown_ms: u64) -> bool {
+    pub(crate) fn reg_in_cooldown(&self, reg_key: &str, cooldown_ms: u64) -> bool {
         self.reg_failures
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -159,7 +159,7 @@ impl Egress {
     /// socket owes that filter (`EgressPolicy::ip_is_metadata` and
     /// `ip_is_private` over the resolved answer, as `checked_addr` does for
     /// MQTT and `PolicyResolver` for every reqwest client).
-    pub async fn check_destination(&self, url: &str) -> Result<(), String> {
+    pub(crate) async fn check_destination(&self, url: &str) -> Result<(), String> {
         let parsed =
             reqwest::Url::parse(url).map_err(|e| format!("bad URL {}: {e}", redacted(url)))?;
         let host = parsed
@@ -202,7 +202,7 @@ impl Egress {
 
     /// Is this destination currently open-circuit FOR THIS TENANT? A tripped
     /// destination admits ONE probe per cooldown window (half-open).
-    pub fn is_open(&self, tenant: &str, url: &str) -> bool {
+    pub(crate) fn is_open(&self, tenant: &str, url: &str) -> bool {
         let mut map = self
             .breakers
             .lock()
@@ -220,14 +220,14 @@ impl Egress {
         }
     }
 
-    pub fn record_success(&self, tenant: &str, url: &str) {
+    pub(crate) fn record_success(&self, tenant: &str, url: &str) {
         self.breakers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&Self::key(tenant, url));
     }
 
-    pub fn record_failure(&self, tenant: &str, url: &str) {
+    pub(crate) fn record_failure(&self, tenant: &str, url: &str) {
         let mut map = self
             .breakers
             .lock()

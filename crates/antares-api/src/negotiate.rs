@@ -127,7 +127,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 /// `BadRequestData` — each of these headers selects the data the operation
 /// runs against, and a request must never be answered against a dataset
 /// the client did not name.
-pub fn single_header(headers: &HeaderMap, name: &str) -> ApiResult<Option<String>> {
+pub(crate) fn single_header(headers: &HeaderMap, name: &str) -> ApiResult<Option<String>> {
     let mut vals = headers.get_all(name).iter();
     match (vals.next(), vals.next()) {
         (None, _) => Ok(None),
@@ -251,7 +251,7 @@ fn negotiate(
 /// Accept negotiation (6.3.4): json, ld+json, geo+json, */*; 406 otherwise.
 /// Absent Accept ⇒ application/json. geo+json is only valid on
 /// Retrieve/Query Entities (6.3.15) — everywhere else it is a 406.
-pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
+pub(crate) fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
     negotiate(
         headers,
         &[
@@ -272,7 +272,7 @@ pub fn parse_accept_geo(headers: &HeaderMap) -> ApiResult<Accept> {
 /// is left out of the offered set rather than negotiated and then refused, so
 /// a client that weights geo+json highest but also accepts ld+json is served
 /// ld+json instead of a 406.
-pub fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
+pub(crate) fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
     negotiate(
         headers,
         &[
@@ -285,7 +285,7 @@ pub fn parse_accept(headers: &HeaderMap) -> ApiResult<Accept> {
 
 /// 6.3.6: "Prefer: body=json" on a GeoJSON response — the @context is
 /// conveyed only by the Link header and omitted from the payload body.
-pub fn prefer_body_json(headers: &HeaderMap) -> bool {
+pub(crate) fn prefer_body_json(headers: &HeaderMap) -> bool {
     // RFC 9110 clause 5.3: repeated field lines carry the same meaning as one
     // comma-separated list, so every Prefer line is searched.
     headers
@@ -299,7 +299,7 @@ pub fn prefer_body_json(headers: &HeaderMap) -> bool {
 /// 6.3.6: build a payload-carrying response honouring Prefer on GeoJSON —
 /// body=json keeps the @context out of the body (Link header only);
 /// omitted / body=ld+json embeds it (the respond() default).
-pub fn respond_prefer(
+pub(crate) fn respond_prefer(
     status: StatusCode,
     payload: Value,
     ctx: &Context,
@@ -336,7 +336,7 @@ pub fn respond_prefer(
 /// so `application/json` and `Application/JSON; charset=utf-8` are one
 /// answer, and an unreadable value still reports as the empty string, which
 /// the callers separate from an absent header by presence.
-pub fn content_type(headers: &HeaderMap) -> ApiResult<String> {
+pub(crate) fn content_type(headers: &HeaderMap) -> ApiResult<String> {
     let bare = |v: &axum::http::HeaderValue| {
         v.to_str()
             .unwrap_or("")
@@ -384,7 +384,7 @@ pub fn content_type(headers: &HeaderMap) -> ApiResult<String> {
 /// host a wrapper rather than send several links. The same target twice is
 /// not ambiguous — an intermediary may duplicate a field line verbatim — and
 /// is accepted.
-pub fn link_context(headers: &HeaderMap) -> ApiResult<Option<String>> {
+pub(crate) fn link_context(headers: &HeaderMap) -> ApiResult<Option<String>> {
     let mut found: Option<&str> = None;
     for link in headers.get_all(header::LINK) {
         let Ok(s) = link.to_str() else { continue };
@@ -476,13 +476,13 @@ impl ParsedBody {
     /// The caller supplies the error because Table 6.3.2-1 does not answer
     /// the same way everywhere: 5.6.1 raises InvalidRequest for an Entity,
     /// the fragment operations raise BadRequestData.
-    pub fn object(&self, err: NgsiError) -> ApiResult<&Map<String, Value>> {
+    pub(crate) fn object(&self, err: NgsiError) -> ApiResult<&Map<String, Value>> {
         self.value.as_object().ok_or_else(|| err.into())
     }
 }
 
 /// Parse a request body per the 6.3.5 @context rules.
-pub async fn parse_body(
+pub(crate) async fn parse_body(
     loader: &Loader,
     headers: &HeaderMap,
     bytes: &[u8],
@@ -561,7 +561,10 @@ fn body_context_member(v: &Value) -> Option<Value> {
 
 /// Context for GET/DELETE requests: Link header or core (6.3.5; the
 /// no-@context fallback to the Core @context is 5.5.5).
-pub async fn request_context(loader: &Loader, headers: &HeaderMap) -> ApiResult<Arc<Context>> {
+pub(crate) async fn request_context(
+    loader: &Loader,
+    headers: &HeaderMap,
+) -> ApiResult<Arc<Context>> {
     match link_context(headers)? {
         // 5.5.10: the Tenant bounds what the operation may see, and a locally
         // stored @context (5.13.1) is information related to the Tenant that
@@ -574,7 +577,7 @@ pub async fn request_context(loader: &Loader, headers: &HeaderMap) -> ApiResult<
 }
 
 /// Reject unknown query parameters with 400 InvalidRequest (6.3.20).
-pub fn check_params(
+pub(crate) fn check_params(
     params: &std::collections::HashMap<String, String>,
     allowed: &[&str],
 ) -> ApiResult<()> {
@@ -587,7 +590,7 @@ pub fn check_params(
 }
 
 /// The context URL to advertise in a response Link header.
-pub fn context_link_url(ctx: &Context) -> String {
+pub(crate) fn context_link_url(ctx: &Context) -> String {
     match &ctx.source {
         Value::String(url) => url.clone(),
         Value::Array(items) => match items.as_slice() {
@@ -609,7 +612,7 @@ pub(crate) fn link_header_value(ctx: &Context) -> String {
 /// `antares_model::ordered_vec`, shared with the notification bindings.
 pub(crate) use antares_model::{ordered_vec, SpecOrder};
 
-pub fn respond(
+pub(crate) fn respond(
     status: StatusCode,
     payload: Value,
     ctx: &Context,
@@ -704,7 +707,7 @@ pub(crate) fn sys_attrs_asked(params: &std::collections::HashMap<String, String>
 /// one entity of memory rather than the whole body.
 /// Json and LdJson only — GeoJSON wraps a FeatureCollection object and takes
 /// the buffered `respond` path.
-pub fn respond_list(
+pub(crate) fn respond_list(
     status: StatusCode,
     docs: Vec<Value>,
     ctx: &Context,
@@ -792,7 +795,7 @@ pub(crate) fn inject_context(payload: Value, ctx: &Context) -> Value {
 }
 
 /// 6.3.14: echo NGSILD-Tenant on responses when non-default.
-pub fn echo_tenant(tenant: &TenantId, resp: &mut Response) {
+pub(crate) fn echo_tenant(tenant: &TenantId, resp: &mut Response) {
     if tenant.as_str() != TenantId::DEFAULT {
         if let Ok(v) = tenant.as_str().parse() {
             resp.headers_mut().insert("NGSILD-Tenant", v);
@@ -801,20 +804,20 @@ pub fn echo_tenant(tenant: &TenantId, resp: &mut Response) {
 }
 
 /// 201 Created with Location header.
-pub fn created(location: String, tenant: &TenantId) -> Response {
+pub(crate) fn created(location: String, tenant: &TenantId) -> Response {
     let mut resp = (StatusCode::CREATED, [(header::LOCATION, location)]).into_response();
     echo_tenant(tenant, &mut resp);
     resp
 }
 
-pub fn no_content(tenant: &TenantId) -> Response {
+pub(crate) fn no_content(tenant: &TenantId) -> Response {
     let mut resp = StatusCode::NO_CONTENT.into_response();
     echo_tenant(tenant, &mut resp);
     resp
 }
 
 /// Multi-status (batch ops) — always application/json.
-pub fn multi_status(payload: Value, tenant: &TenantId) -> Response {
+pub(crate) fn multi_status(payload: Value, tenant: &TenantId) -> Response {
     let mut resp = (
         StatusCode::MULTI_STATUS,
         [(header::CONTENT_TYPE, "application/json")],
@@ -826,7 +829,7 @@ pub fn multi_status(payload: Value, tenant: &TenantId) -> Response {
 }
 
 /// ProblemDetails value for batch error entries.
-pub fn problem_value(e: &NgsiError) -> Value {
+pub(crate) fn problem_value(e: &NgsiError) -> Value {
     let pd = e.to_problem_details();
     serde_json::json!({
         "type": pd.r#type,
@@ -834,13 +837,6 @@ pub fn problem_value(e: &NgsiError) -> Value {
         "status": pd.status,
         "detail": pd.detail,
     })
-}
-
-/// Strip a possibly-present @context member (consumed during parsing).
-pub fn without_context(v: &Value) -> Map<String, Value> {
-    let mut o = v.as_object().cloned().unwrap_or_default();
-    o.remove("@context");
-    o
 }
 
 /// 5.2.12 `jsonldContext`: the @context a Notification of this Subscription
@@ -1917,16 +1913,6 @@ mod negotiation {
                 .and_then(|v| v.to_str().ok()),
             Some("application/json")
         );
-    }
-
-    /// The @context member is consumed during parsing and never re-served
-    /// from the stored document.
-    #[test]
-    fn without_context_strips_the_member() {
-        let o = without_context(&json!({"id": "urn:a", "@context": "https://x"}));
-        assert!(!o.contains_key("@context"));
-        assert!(o.contains_key("id"));
-        assert!(without_context(&json!("not an object")).is_empty());
     }
 }
 

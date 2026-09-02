@@ -7,35 +7,35 @@
 // futures deeper than the default 128 (nightly: recursion_depth_exceeding_limit)
 #![recursion_limit = "256"]
 
-pub mod attrs;
-pub mod batch;
+pub(crate) mod attrs;
+pub(crate) mod batch;
 pub mod bounds;
 pub mod conformance;
-pub mod contexts;
-pub mod csource;
-pub mod distsub;
+pub(crate) mod contexts;
+pub(crate) mod csource;
+pub(crate) mod distsub;
 pub mod egress;
-pub mod entities;
-pub mod entity_map;
-pub mod entity_maps;
-pub mod federation;
+pub(crate) mod entities;
+pub(crate) mod entity_map;
+pub(crate) mod entity_maps;
+pub(crate) mod federation;
 pub mod geo;
 pub mod history;
 pub mod mirror;
 pub mod negotiate;
 pub mod notify;
-pub mod paging;
+pub(crate) mod paging;
 pub mod qeval;
-pub mod regexcache;
-pub mod registry;
-pub mod repr;
-pub mod snapshots;
-pub mod stamp;
+pub(crate) mod regexcache;
+pub(crate) mod registry;
+pub(crate) mod repr;
+pub(crate) mod snapshots;
+pub(crate) mod stamp;
 pub mod state;
-pub mod subscriptions;
-pub mod temporal;
-pub mod temporalq;
-pub mod types_attrs;
+pub(crate) mod subscriptions;
+pub(crate) mod temporal;
+pub(crate) mod temporalq;
+pub(crate) mod types_attrs;
 
 pub use antares_notifier::DeliveryPolicy;
 pub use state::{AppState, TemporalRecord};
@@ -135,7 +135,7 @@ pub(crate) fn apply_doc_fragment(
     );
 }
 
-pub mod surface;
+pub(crate) mod surface;
 pub use surface::ApiSurface;
 
 pub use antares_ql::scope::scope_matches;

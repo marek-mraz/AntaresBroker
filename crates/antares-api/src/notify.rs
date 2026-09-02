@@ -48,12 +48,12 @@ fn queue_for_matching(
 }
 
 /// Changes dropped because the matcher queue was full, since process start.
-pub fn changes_dropped() -> u64 {
+pub(crate) fn changes_dropped() -> u64 {
     CHANGES_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Panics absorbed at the notification-task boundary, since process start.
-pub fn task_panics() -> u64 {
+pub(crate) fn task_panics() -> u64 {
     TASK_PANICS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -913,7 +913,7 @@ pub async fn process_change(
 /// match" — every change of one drain that matches the same subscription
 /// travels in one notification, so a batch of N entities is one POST with N
 /// data entries (and timesSent moves by one), never N POSTs.
-pub async fn process_changes(st: &AppState, changes: Vec<Change>) {
+pub(crate) async fn process_changes(st: &AppState, changes: Vec<Change>) {
     let mut groups: Vec<Matched> = Vec::new();
     // (tenant, subscription id) → its group. A scan for the group would be
     // linear in the subscriptions already matched, and a drain of
@@ -1574,7 +1574,7 @@ pub struct CsourceJob {
 /// order even on a slower store), and the caller spawns `send_csource_jobs`
 /// (network only — the ack must not block on the receiver: the ETSI mock
 /// replies only when the robot side wakes).
-pub async fn prepare_csource_jobs(
+pub(crate) async fn prepare_csource_jobs(
     st: &AppState,
     tenant: &TenantId,
     before: Option<Value>,
@@ -1631,7 +1631,7 @@ pub async fn prepare_csource_jobs(
     jobs
 }
 
-pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<CsourceJob>) {
+pub(crate) async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<CsourceJob>) {
     for job in jobs {
         // 5.11.7: re-check the subscription still exists right
         // before the send — a deleted subscription must never notify.
@@ -1671,7 +1671,7 @@ static CSOURCE_FANOUT: tokio::sync::Semaphore =
 
 /// Registration create/update/delete → prepare in the request path, send
 /// spawned (the ack must not block on the receiver), bounded as above.
-pub async fn csource_fanout(
+pub(crate) async fn csource_fanout(
     st: &AppState,
     tenant: &TenantId,
     before: Option<Value>,
@@ -1719,7 +1719,7 @@ async fn deliver_csource(
 
 /// Initial / post-update CSourceNotification with all currently matching
 /// registrations (5.11.2.4 / 5.11.3.4).
-pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
+pub(crate) async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     let Some(sub) = st
         .store
         .get(tenant, crate::registry::csr_kind(sub_id), sub_id)
@@ -2166,7 +2166,7 @@ static DEAD_LETTERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// Dead letters written by this process since start (`/q/health`
 /// deadLetters); the letters themselves live in the store.
-pub fn dead_letters_written() -> u64 {
+pub(crate) fn dead_letters_written() -> u64 {
     DEAD_LETTERS.load(std::sync::atomic::Ordering::Relaxed)
 }
 

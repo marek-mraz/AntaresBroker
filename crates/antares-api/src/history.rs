@@ -154,7 +154,7 @@ pub(crate) async fn layer(
 /// delete_temporal_on_core_delete: entity deletion removes its temporal
 /// representation too (suite configuration parity). Skipped on bus=nats
 /// api pods — the recorder applies the entityDeleted fence instead.
-pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
+pub(crate) fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
     if !st.record_locally() {
         return;
     }
@@ -169,7 +169,7 @@ pub fn mirror_delete_entity(st: &AppState, tenant: &TenantId, id: &str) {
 /// typed null shapes for the LanguageProperty/JsonProperty/Vocab/List
 /// subtypes). Each recorded instance carries an instanceId — the clause
 /// SHOULD that makes 5.6.14/5.6.15 selective modification possible.
-pub fn mirror_delete_attr(
+pub(crate) fn mirror_delete_attr(
     st: &AppState,
     tenant: &TenantId,
     id: &str,
