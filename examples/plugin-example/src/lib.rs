@@ -50,10 +50,15 @@ fn slot(kind: Kind) -> u8 {
     }
 }
 
-fn range(tenant: &TenantId, kind: Kind) -> std::ops::RangeInclusive<Slot> {
+/// A tenant's rows of one kind, as a half-open range up to the next kind.
+/// The end has to be a key no id can reach rather than the largest id anyone
+/// expects: an id sorting above the bound would be stored, retrievable by id
+/// and missing from every listing, query and page. `slot` never answers with
+/// the top of the type, so the successor exists.
+fn range(tenant: &TenantId, kind: Kind) -> std::ops::Range<Slot> {
     let k = slot(kind);
     (tenant.as_str().to_owned(), k, String::new())
-        ..=(tenant.as_str().to_owned(), k, "\u{10FFFF}".to_owned())
+        ..(tenant.as_str().to_owned(), k + 1, String::new())
 }
 
 /// Now, as the broker spells timestamps (4.11): UTC, milliseconds, `Z`.
@@ -520,17 +525,10 @@ impl CurrentStateDriver for ExampleStore {
         if !self.tenant_exists(tenant)? {
             return Ok(false);
         }
-        let mine: Vec<Slot> = self
-            .read()
-            .keys()
-            .filter(|(t, _, _)| t == tenant.as_str())
-            .cloned()
-            .collect();
-        let mut docs = self.write();
-        for k in &mine {
-            docs.remove(k);
-        }
-        drop(docs);
+        // One hold of the lock: collecting the keys under a read guard and
+        // removing them under a write guard leaves a window in which a row
+        // written for this tenant survives the purge.
+        self.write().retain(|(t, _, _), _| t != tenant.as_str());
         // The default tenant is emptied and keeps existing (5.5.10).
         if tenant.as_str() != TenantId::DEFAULT {
             self.tenants

@@ -156,3 +156,59 @@ fn a_socketless_binding_declares_itself() {
         "this sink keeps notifications in memory; it opens nothing"
     );
 }
+
+/// The store's ranges must hold for any id the seam accepts, not for the
+/// alphabet the demo happens to use. A tenant's rows of one kind are read as
+/// a range over `(tenant, kind, id)`, and an upper bound written as the
+/// largest id anyone expects is a bound some id sorts above: that row is
+/// stored, retrievable by id, and invisible to every listing, query and page
+/// — a silent partial answer, which is the one thing a driver may never give.
+#[test]
+fn a_row_is_listed_whatever_its_id_sorts_next_to() {
+    let store = ExampleStore::new();
+    let t = TenantId::new("pluginrange").expect("tenant");
+    let ids = [
+        "urn:ngsi-ld:Seam:plain",
+        "\u{10FFFF}",
+        "\u{10FFFF}\u{10FFFF}",
+        "\u{10FFFF}z",
+        "\u{fffd}",
+    ];
+    for id in ids {
+        store
+            .create(&t, Kind::Entity, id, json!({"id": id}))
+            .expect("create");
+        assert!(
+            store.get(&t, Kind::Entity, id).expect("get").is_some(),
+            "{id:?} is stored"
+        );
+    }
+
+    let listed = store.list(&t, Kind::Entity).expect("list").len();
+    assert_eq!(listed, ids.len(), "every stored row is listed");
+
+    let mut walked = 0;
+    let mut after: Option<String> = None;
+    loop {
+        let page = store
+            .list_page(&t, Kind::Entity, after.as_deref(), 2)
+            .expect("page");
+        if page.is_empty() {
+            break;
+        }
+        walked += page.len();
+        after = page
+            .last()
+            .and_then(|d| d["id"].as_str())
+            .map(str::to_owned);
+    }
+    assert_eq!(walked, ids.len(), "the cursor walk sees every row too");
+
+    let purged = store.purge_tenant(&t).expect("purge");
+    assert!(purged);
+    assert_eq!(
+        store.list(&t, Kind::Entity).expect("list").len(),
+        0,
+        "and the purge leaves nothing behind"
+    );
+}
