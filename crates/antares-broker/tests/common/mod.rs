@@ -29,13 +29,17 @@ pub fn free_port() -> u16 {
         if stale {
             let _ = std::fs::remove_file(&claim);
         }
-        if std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&claim)
-            .is_ok()
         {
-            return port;
+            Ok(_) => return port,
+            // Someone else holds this port: draw another one.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // Anything else is the directory itself refusing writes, and
+            // retrying cannot fix it — say so instead of spinning forever.
+            Err(e) => panic!("port reservation {}: {e}", claim.display()),
         }
     }
 }
