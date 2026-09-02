@@ -7,7 +7,8 @@
 #   DATABASE_URL=postgres://… dev/perf/shapes.sh   # + postgres
 #
 # Env: BIN (target/release/antares), OUT (results/perf), PORT (9471),
-#      DATABASE_URL, RUNS (3), DURATION (5s).
+#      DATABASE_URL, RUNS (3), DURATION (5s), SPECS ("query 50,query 200,
+#      retrieve 50": shape and closed-loop clients per row).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -41,7 +42,8 @@ print(f\"{s['http_reqs']['rate']:.0f} {s['http_req_duration']['p(99)']:.2f}\")")
       ANTARES_DATABASE_URL="${DATABASE_URL:-}" ANTARES_ALLOW_SHARED_LOCAL=1 \
       "$BIN" > "$OUT/shapes-$store.log" 2>&1 & PID=$!
     until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; done
-    for spec in "query 50" "query 200" "retrieve 50"; do
+    IFS=, read -ra specs <<<"${SPECS:-query 50,query 200,retrieve 50}"
+    for spec in "${specs[@]}"; do
       echo "shapes $store ${spec// /-c}" > "$OUT/phase"
       read -r shape vus <<<"$spec"
       read -r rps p99 < <(run "$shape" "$vus")

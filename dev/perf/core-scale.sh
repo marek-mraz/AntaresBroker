@@ -12,6 +12,7 @@
 # broker; the table stops at the largest step the box can isolate.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+. dev/perf/probe.sh
 
 BIN="${BIN:-target/release/antares}"
 OUT="${OUT:-results/perf}"
@@ -28,22 +29,24 @@ TOTAL=${#CORES[@]}
 DATA=$(mktemp -d); trap 'rm -rf "$DATA"; [ -n "${PID:-}" ] && kill "$PID" 2>/dev/null' EXIT
 
 {
-  echo "| broker cores | req/s | vs 1 core | efficiency |"
-  echo "|---|---|---|---|"
+  echo "| cores allotted | req/s | vs 1 core | efficiency | cores used | peak threads |"
+  echo "|---|---|---|---|---|---|"
   base=
   for n in 1 2 4 8 16; do
-    [ "$n" -le $(( TOTAL / 2 )) ] || { echo "| $n | (needs $((n * 2)) physical cores, box has $TOTAL) | | |"; break; }
+    [ "$n" -le $(( TOTAL / 2 )) ] || { echo "| $n | (needs $((n * 2)) physical cores, box has $TOTAL) | | | | |"; break; }
     bset=$(IFS=,; echo "${CORES[*]:0:$n}")
     lset=$(IFS=,; echo "${CORES[*]:$n}")
     ANTARES_STORE="$STORE" ANTARES_DATA_DIR="$DATA" ANTARES_HTTP_PORT="$PORT" \
       taskset -c "$bset" "$BIN" > "$OUT/core-scale-$n.log" 2>&1 & PID=$!
     until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; done
+    probe_start "$PID"
     taskset -c "$lset" k6 run --quiet --summary-export "$OUT/core-scale.json" \
       -e BROKER_URL="http://127.0.0.1:$PORT" -e SHAPE=query -e VUS=50 -e DURATION="$DURATION" \
       dev/perf/k6-shapes.js >/dev/null
     rps=$(python3 -c "import json; print(round(json.load(open('$OUT/core-scale.json'))['metrics']['http_reqs']['rate']))")
+    read -r used threads < <(probe_stop)
     kill "$PID"; wait "$PID" 2>/dev/null || true; PID=
-    if [ -z "$base" ]; then base=$rps; echo "| $n | $rps | — | — |"
-    else python3 -c "r=$rps/$base; print(f'| $n | $rps | {r:.2f}x | {100*r/$n:.0f}% |')"; fi
+    if [ -z "$base" ]; then base=$rps; echo "| $n | $rps | — | — | $used | $threads |"
+    else python3 -c "r=$rps/$base; print(f'| $n | $rps | {r:.2f}x | {100*r/$n:.0f}% | $used | $threads |')"; fi
   done
 } | tee "$OUT/core-scale.md"
