@@ -265,7 +265,7 @@ async fn create_entity_inner(
         .as_object()
         .map(|o| o.keys().filter(|k| !is_meta(k)).cloned().collect())
         .unwrap_or_default();
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.clone()]),
         types,
         attrs: (!attr_iris.is_empty()).then_some(attr_iris),
@@ -429,7 +429,7 @@ async fn retrieve_entity_inner(
     // 6.3.17: abnormal distributed-GET outcomes surface as NGSILD-Warning
     let mut warnings: Vec<String> = Vec::new();
     if crate::federation::active(params) && looped {
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.to_owned()]),
             ..Default::default()
         };
@@ -1771,7 +1771,7 @@ pub async fn delete_entity(
         let ctx = request_context(&st.loader, &headers).await?;
         // 4.17/5.6.6.4: the type selector gates the target — a registration
         // for a different type must not receive the forwarded delete.
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             types: params
                 .get("type")
@@ -2109,7 +2109,7 @@ async fn purge_inner(
     // distributed purge (5.6.21 / 6.4.3.3). Matching and the 6.3.17/6.3.18
     // loop check come first: 508 Loop Detected is an error status, so the
     // request it answers must not have deleted a page of Entities already.
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         types: params
             .get("type")
             .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
@@ -2228,7 +2228,7 @@ async fn merge_entity_inner(
     apply_common_observed_at(&mut fragment, observed_at);
     let ts = now_iso();
 
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
@@ -2554,7 +2554,7 @@ pub async fn replace_entity(
             .store
             .get(&tenant, Kind::Entity, &id)?
             .filter(|d| crate::attrs::matches_type_param(d, &params, &ctx0));
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };

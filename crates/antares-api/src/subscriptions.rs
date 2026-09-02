@@ -722,7 +722,7 @@ pub async fn create(
     // are stored outside the client kinds, under this id namespace: a
     // client document claiming it would be looked up in that store on the
     // notification path and would silently never notify.
-    if id.starts_with(crate::distsub::INTERNAL_CSR_PREFIX) {
+    if id.starts_with(crate::registry::INTERNAL_CSR_PREFIX) {
         return Err(NgsiError::BadRequestData(format!(
             "subscription id {id} is reserved by the broker"
         ))

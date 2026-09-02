@@ -369,7 +369,7 @@ async fn batch_write(
         serde_json::Map<String, Value>,
         std::sync::Arc<antares_jsonld::Context>,
     )> = Vec::new();
-    let mut spec = crate::csource::CsrSpec::default();
+    let mut spec = crate::registry::CsrSpec::default();
     let mut spec_types = Vec::new();
     let mut spec_ids = Vec::new();
     let mut spec_attrs = Vec::new();
@@ -1048,7 +1048,7 @@ pub async fn batch_delete(
             ))
             .into());
         }
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(
                 ids.iter()
                     .filter_map(Value::as_str)

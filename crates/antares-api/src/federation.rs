@@ -411,7 +411,7 @@ pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
 fn reg_docs(
     st: &AppState,
     tenant: &TenantId,
-    spec: &crate::csource::CsrSpec,
+    spec: &crate::registry::CsrSpec,
     ctx: &Context,
 ) -> Result<Vec<Value>, NgsiError> {
     match &st.reg_mirror {
@@ -439,18 +439,18 @@ fn reg_docs(
 /// filtered HERE and only here: the single yield point.
 fn reg_candidate<'a>(
     doc: &'a Value,
-    spec: &crate::csource::CsrSpec,
+    spec: &crate::registry::CsrSpec,
     ctx: &Context,
     seen: &[String],
 ) -> Option<Vec<&'a Value>> {
-    if crate::csource::reg_expired(doc) {
+    if crate::registry::reg_expired(doc) {
         return None;
     }
     // 5.7.2.4/5.7.4.4/5.6.21.4: a csf gates which Context Sources
     // are considered (evaluated over the registration's own
     // Context Source Properties, 5.10.2.4 semantics).
     if let Some(csf) = &spec.csf {
-        if !crate::csource::csf_matches(csf, doc, ctx) {
+        if !crate::registry::csf_matches(csf, doc, ctx) {
             return None;
         }
     }
@@ -483,7 +483,7 @@ fn reg_candidate<'a>(
     // interval the registration is unconstrained.
     if let Some(tq) = &spec.temporal {
         if (doc.get("observationInterval").is_some() || doc.get("managementInterval").is_some())
-            && !crate::csource::temporal_interval_matches(doc, tq)
+            && !crate::registry::temporal_interval_matches(doc, tq)
         {
             return None;
         }
@@ -496,7 +496,7 @@ fn reg_candidate<'a>(
     {
         return None;
     }
-    let infos = crate::csource::matching_infos(spec, doc, ctx);
+    let infos = crate::registry::matching_infos(spec, doc, ctx);
     if infos.is_empty() {
         None
     } else {
@@ -516,7 +516,7 @@ fn reg_candidate<'a>(
 pub fn matching_regs(
     st: &AppState,
     tenant: &TenantId,
-    spec: &crate::csource::CsrSpec,
+    spec: &crate::registry::CsrSpec,
     ctx: &Context,
     headers: &HeaderMap,
 ) -> Result<Vec<FedReg>, NgsiError> {
@@ -1344,7 +1344,7 @@ pub async fn fed_retrieve_temporal(
     map: Option<&Value>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<(bool, Value)>, NgsiError> {
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         temporal: crate::temporalq::TemporalQ::from_params(params, false)
             .ok()
@@ -1540,7 +1540,7 @@ pub async fn fed_retrieve(
     except_reg: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<(bool, Value)>, NgsiError> {
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
@@ -1655,7 +1655,7 @@ pub async fn fed_retrieve(
 
 /// Federated query: internal docs matching a type query, per registration.
 /// The `CsrSpec` a Query Entities request matches registrations against.
-fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource::CsrSpec {
+fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::registry::CsrSpec {
     // 4.17: the parameter is ONE Entity Type Selection, so it travels whole —
     // splitting it on commas turned a conjunction like (A;B) into two terms
     // that match nothing, and no registration was consulted for it.
@@ -1663,7 +1663,7 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::csource
     let ids: Option<Vec<String>> = params
         .get("id")
         .map(|s| s.split(',').map(str::to_owned).collect());
-    crate::csource::CsrSpec {
+    crate::registry::CsrSpec {
         types,
         ids,
         // 5.12: "the id pattern (if present)" is part of the query-side
@@ -1724,7 +1724,7 @@ pub fn would_federate(
 /// admits cannot be refused on the registration's pattern. A peer therefore
 /// contributes only ids inside its registration scope or inside what the
 /// client itself asked to see — never a third thing.
-fn admits_import(reg: &FedReg, spec: &crate::csource::CsrSpec, id: &str) -> bool {
+fn admits_import(reg: &FedReg, spec: &crate::registry::CsrSpec, id: &str) -> bool {
     reg.can_match_id(id)
         || spec
             .ids
@@ -2299,7 +2299,7 @@ pub enum WritePlan {
 pub fn write_plan(
     st: &AppState,
     tenant: &TenantId,
-    spec: &crate::csource::CsrSpec,
+    spec: &crate::registry::CsrSpec,
     ctx: &Context,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
@@ -2324,7 +2324,7 @@ pub fn write_plan(
 pub fn write_regs(
     st: &AppState,
     tenant: &TenantId,
-    spec: &crate::csource::CsrSpec,
+    spec: &crate::registry::CsrSpec,
     ctx: &Context,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
@@ -2639,7 +2639,7 @@ mod tests {
     fn a_response_id_the_query_selects_survives_the_registration_pattern() {
         let mut r = reg("inclusive");
         r.ent_patterns = vec!["^urn:ngsi-ld:V:sk_bb:.*$".into()];
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             id_pattern: Some("^urn:ngsi-ld:V:sk_zvolen:.*$".into()),
             ..Default::default()
         };
@@ -2656,10 +2656,10 @@ mod tests {
             "an id outside both the registration and the query is refused"
         );
         // no query selection at all: only the registration scope admits
-        let none = crate::csource::CsrSpec::default();
+        let none = crate::registry::CsrSpec::default();
         assert!(!admits_import(&r, &none, "urn:ngsi-ld:V:sk_zvolen:7"));
         // exact query ids admit exactly themselves
-        let exact = crate::csource::CsrSpec {
+        let exact = crate::registry::CsrSpec {
             ids: Some(vec!["urn:ngsi-ld:V:sk_zvolen:7".into()]),
             ..Default::default()
         };
@@ -2751,7 +2751,7 @@ mod tests {
                 .create(&tenant, Kind::Registration, id, doc)
                 .expect("seed registration");
         }
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             types: Some(vec![
                 "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
             ]),
@@ -2826,7 +2826,7 @@ mod tests {
                 .create(&tenant, Kind::Registration, id, doc)
                 .expect("seed registration");
         }
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             types: Some(vec![
                 "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
             ]),
@@ -2863,7 +2863,7 @@ mod tests {
         st.store
             .create(&tenant, Kind::Registration, id, doc)
             .expect("seed registration");
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             types: Some(vec![
                 "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
             ]),
@@ -2965,7 +2965,7 @@ mod tests {
             "exclusive",
             json!([{"idPattern": "urn:ngsi-ld:Bike:.*"}]),
         );
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
             ..Default::default()
         };
@@ -3001,7 +3001,7 @@ mod tests {
             "exclusive",
             json!([{"idPattern": "urn:ngsi-ld:Vehicle:.*"}]),
         );
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
             ..Default::default()
         };
@@ -3065,7 +3065,7 @@ mod tests {
                 .create(&tenant, Kind::Registration, id, doc)
                 .expect("seed registration");
         }
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             types: Some(vec![
                 "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
             ]),
@@ -3409,7 +3409,7 @@ mod tests {
                 }),
             )
             .expect("seed registration");
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             types: Some(vec![
                 "https://uri.etsi.org/ngsi-ld/default-context/Vehicle".into()
             ]),

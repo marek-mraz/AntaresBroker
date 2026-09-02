@@ -70,7 +70,8 @@ module's header comment.
 | `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
 | `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
 | `distsub.rs` | 1 750 | 5.8.1.4 distributed subscriptions, consumer half |
-| `csource.rs` | 2 500 | 5.9, 5.10 registrations, `csource_index` maintenance |
+| `csource.rs` | 2 100 | 5.9, 5.10 registrations, `csource_index` maintenance |
+| `registry.rs` | 400 | matching over a registration document: `CsrSpec`, the 4.3.6.1 information match, csf and scope filters, the temporal interval and expiry of a registration, the 5.11.2 subscription match; named by federation, notify, csource and every resource module that forwards |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
 | `entity_maps.rs` | 1 100 | 5.14 EntityMaps |
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
@@ -209,17 +210,19 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
-- `antares-api` has one strongly connected component of 10 of its 27
+- `antares-api` has one strongly connected component of 9 of its 29
   modules, counted from every `crate::<module>` reference per file:
-  `attrs, csource, distsub, entities, entity_maps, federation, notify,
+  `attrs, distsub, entities, entity_maps, federation, notify,
   snapshots, subscriptions, temporal`. `state.rs` sits outside it
   since the change event and the two document mirrors (`Change`,
   `SubMirror`, `DocMirror`) live in the leaf `mirror.rs`, which names no
   other module; `contexts` and `history` left with it. `batch.rs` left
   once paging, ordering and the query-body lift moved to the leaf
   `paging.rs`, which names `state`, `negotiate`, `geo` and `bounds` and
-  no resource module; `dt_key` is named from `antares-model`, where it
-  lives. `cargo modules`
+  no resource module; `csource.rs` left once registration matching moved
+  to the leaf `registry.rs` and the request's temporal query to
+  `temporalq.rs`; `dt_key`, `scope_matches` and `type_selection_matches`
+  are named from the crates where they live. `cargo modules`
   does not show such a cycle because it records call edges and not field
   types, so the source-level count is the one to measure: `dev/module-graph.py` prints
   it per crate and `xray.yml` ratchets the largest component of every

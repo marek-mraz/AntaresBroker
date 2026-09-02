@@ -18,34 +18,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 
-/// 5.8.1.4: "The mapping of the received subscriptionId with the own
-/// Subscription identifier is stored" (inbound), "a mapping of the id of
-/// the Context Source Registration to the received subscriptionId is
-/// stored" (remotes), and "the mapping of the id of the Subscription to the
-/// … Context Source Registration Subscription shall be stored" (csr_sub).
-/// All three live in the store (Kind::DistSub) so persistent modes keep the
-/// consumer half across restarts: one doc per (tenant, own Subscription id)
-/// = {"csr_sub": id, "remotes": {reg_id: [endpoint, remote sub id]}}, plus
-/// inbound index docs under the internal "distsub-index" tenant
-/// (id = remote subscriptionId, doc = {"tenant", "own"}).
-/// 5.8.1.4: the Registration Subscription the distributed half owns is
-/// broker plumbing, not a resource a Context Source Subscriber created —
-/// 5.11.5.4 lists the subscriptions clients made through 5.11.2, and this
-/// one carries the internal `urn:antares:distsub:` endpoint naming the
-/// tenant and the owning Subscription. It is stored under `Kind::DistSub`,
-/// so the 5.11 endpoints cannot read, patch or delete it, and its id
-/// namespace is what tells the two apart on the notification path.
-pub(crate) const INTERNAL_CSR_PREFIX: &str = "urn:ngsi-ld:CSourceSubscription:distsub:";
-
-/// The kind one Registration Subscription id is stored under.
-pub(crate) fn csr_kind(id: &str) -> Kind {
-    if id.starts_with(INTERNAL_CSR_PREFIX) {
-        Kind::DistSub
-    } else {
-        Kind::CSourceSubscription
-    }
-}
-
 fn ds_index_tenant() -> Option<TenantId> {
     TenantId::new("distsub-index").ok()
 }
@@ -235,7 +207,11 @@ pub(crate) fn on_subscription_created(st: &AppState, tenant: &TenantId, sub: &Va
     let Some(own_id) = sub.get("id").and_then(Value::as_str) else {
         return;
     };
-    let csr_id = format!("{INTERNAL_CSR_PREFIX}{}", uuid::Uuid::new_v4());
+    let csr_id = format!(
+        "{}{}",
+        crate::registry::INTERNAL_CSR_PREFIX,
+        uuid::Uuid::new_v4()
+    );
     let ts = now_iso();
     let mut doc = json!({
         "id": csr_id,
@@ -932,7 +908,7 @@ async fn remote_notify_inner(st: &AppState, body: &[u8]) -> ApiResult<Response> 
             // dropped.
             let ctx = crate::notify::sub_context(st, &tenant, &sub).await;
             let matches =
-                origin_reg.is_some_and(|reg| crate::csource::csf_matches(&ast, &reg, &ctx));
+                origin_reg.is_some_and(|reg| crate::registry::csf_matches(&ast, &reg, &ctx));
             if !matches {
                 // origin gated out — acknowledged, nothing forwarded
                 return Ok(StatusCode::OK.into_response());

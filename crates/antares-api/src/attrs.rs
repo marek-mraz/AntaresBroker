@@ -431,7 +431,7 @@ fn attr_fed_plan_iris(
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
 ) -> Result<crate::federation::WritePlan, NgsiError> {
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         attrs: (!attr_iris.is_empty()).then(|| attr_iris.to_vec()),
         ..Default::default()

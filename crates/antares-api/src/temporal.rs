@@ -74,7 +74,7 @@ pub async fn upsert_temporal(
         // modes without it are an error of type Conflict; inclusive ones
         // forward when supported. Matching attributes are removed from the
         // local fragment.
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
@@ -2405,7 +2405,7 @@ pub async fn add_temporal_attrs(
         // 5.6.12.4: forwarding — proxy modes without appendAttrsTemporal
         // are Conflict; supporting registrations receive the fragment and
         // the matching attributes are stripped from the local half.
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
@@ -2650,7 +2650,7 @@ fn temporal_write_regs(
     params: &HashMap<String, String>,
     id: &str,
 ) -> Result<Vec<crate::federation::FedReg>, Box<Response>> {
-    let spec = crate::csource::CsrSpec {
+    let spec = crate::registry::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };

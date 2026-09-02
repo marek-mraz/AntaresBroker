@@ -823,7 +823,7 @@ pub async fn purge_snapshots(
             .list(&tenant, Kind::Snapshot)
             .unwrap_or_default()
             .into_iter()
-            .filter(|meta| is_snapshot(meta) && crate::csource::csf_matches(&ast, meta, &ctx))
+            .filter(|meta| is_snapshot(meta) && crate::registry::csf_matches(&ast, meta, &ctx))
             .collect();
         for meta in victims {
             if let Some(id) = meta.get("id").and_then(Value::as_str) {

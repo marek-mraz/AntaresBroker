@@ -506,7 +506,7 @@ pub(crate) fn build_retrieve_map(
         srcs.push(json!("@none"));
     }
     if crate::federation::active(params) {
-        let spec = crate::csource::CsrSpec {
+        let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.to_owned()]),
             ..Default::default()
         };

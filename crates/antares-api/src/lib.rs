@@ -26,6 +26,7 @@ pub mod notify;
 pub mod paging;
 pub mod qeval;
 pub mod regexcache;
+pub mod registry;
 pub mod repr;
 pub mod snapshots;
 pub mod state;

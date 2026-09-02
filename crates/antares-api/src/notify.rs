@@ -1418,16 +1418,19 @@ pub async fn interval_tick(st: &AppState) {
                 continue;
             }
             let ctx = sub_context(st, &tenant, &sub).await;
-            let spec = crate::csource::spec_for_subscription(&sub);
+            let spec = crate::registry::spec_for_subscription(&sub);
             let data: Vec<Value> = read_or_warn(
                 st.store.list(&tenant, Kind::Registration),
                 "the registrations a periodic Context Source Notification carries",
             )
             .into_iter()
-            .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
+            .filter(|r| crate::registry::csr_matches_subscription(&sub, r, &ctx))
             .map(|r| {
-                let mut p =
-                    crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+                let mut p = crate::registry::present_registration(
+                    &filter_csr(&spec, &r, &ctx),
+                    &ctx,
+                    false,
+                );
                 arrayify_entity_types(&mut p);
                 p
             })
@@ -1525,7 +1528,7 @@ fn csource_trigger(
     ctx: &Context,
 ) -> Option<&'static str> {
     let m = |d: Option<&Value>| {
-        d.is_some_and(|d| crate::csource::csr_matches_subscription(sub, d, ctx))
+        d.is_some_and(|d| crate::registry::csr_matches_subscription(sub, d, ctx))
     };
     match (m(before), m(after)) {
         (false, true) => Some("newlyMatching"),
@@ -1587,7 +1590,8 @@ pub async fn prepare_csource_jobs(
     )
     .into_iter()
     .filter(|d| {
-        sub_str(d, "id").is_some_and(|id| crate::distsub::csr_kind(id) == Kind::CSourceSubscription)
+        sub_str(d, "id")
+            .is_some_and(|id| crate::registry::csr_kind(id) == Kind::CSourceSubscription)
     });
     let internal = read_or_warn(
         st.store.list(tenant, Kind::DistSub),
@@ -1603,7 +1607,7 @@ pub async fn prepare_csource_jobs(
         let Some(reason) = csource_trigger(&sub, before.as_ref(), after.as_ref(), &ctx) else {
             continue;
         };
-        let spec = crate::csource::spec_for_subscription(&sub);
+        let spec = crate::registry::spec_for_subscription(&sub);
         let source = if reason == "noLongerMatching" {
             &before
         } else {
@@ -1613,7 +1617,7 @@ pub async fn prepare_csource_jobs(
             continue;
         };
         let filtered = filter_csr(&spec, reg, &ctx);
-        let mut presented = crate::csource::present_registration(&filtered, &ctx, false);
+        let mut presented = crate::registry::present_registration(&filtered, &ctx, false);
         arrayify_entity_types(&mut presented);
         jobs.push(CsourceJob {
             sub,
@@ -1634,7 +1638,7 @@ pub async fn send_csource_jobs(st: &AppState, tenant: &TenantId, jobs: Vec<Csour
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let kind = crate::distsub::csr_kind(sub_id);
+        let kind = crate::registry::csr_kind(sub_id);
         if !matches!(st.store.get(tenant, kind, sub_id), Ok(Some(_))) {
             continue;
         }
@@ -1695,7 +1699,7 @@ async fn deliver_csource(
     ctx: &Context,
     reason: &str,
 ) {
-    let kind = crate::distsub::csr_kind(sub_str(sub, "id").unwrap_or_default());
+    let kind = crate::registry::csr_kind(sub_str(sub, "id").unwrap_or_default());
     for chunk in chunk_by_bytes(data, *crate::bounds::MAX_BODY_BYTES) {
         deliver_as(
             st,
@@ -1716,7 +1720,7 @@ async fn deliver_csource(
 pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
     let Some(sub) = st
         .store
-        .get(tenant, crate::distsub::csr_kind(sub_id), sub_id)
+        .get(tenant, crate::registry::csr_kind(sub_id), sub_id)
         .ok()
         .flatten()
     else {
@@ -1726,15 +1730,16 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
         return;
     }
     let ctx = sub_context(st, tenant, &sub).await;
-    let spec = crate::csource::spec_for_subscription(&sub);
+    let spec = crate::registry::spec_for_subscription(&sub);
     let data: Vec<Value> = read_or_warn(
         st.store.list(tenant, Kind::Registration),
         "the registrations an initial Context Source Notification carries",
     )
     .into_iter()
-    .filter(|r| crate::csource::csr_matches_subscription(&sub, r, &ctx))
+    .filter(|r| crate::registry::csr_matches_subscription(&sub, r, &ctx))
     .map(|r| {
-        let mut p = crate::csource::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
+        let mut p =
+            crate::registry::present_registration(&filter_csr(&spec, &r, &ctx), &ctx, false);
         arrayify_entity_types(&mut p);
         p
     })
@@ -1747,9 +1752,9 @@ pub async fn csource_initial(st: &AppState, tenant: &TenantId, sub_id: &str) {
 
 /// Registration copy reduced to the matching RegistrationInfo elements
 /// (5.10.2.5 / 5.11.7 "filtered Context Source Registrations").
-fn filter_csr(spec: &crate::csource::CsrSpec, reg: &Value, ctx: &Context) -> Value {
+fn filter_csr(spec: &crate::registry::CsrSpec, reg: &Value, ctx: &Context) -> Value {
     let mut out = reg.clone();
-    let matching: Vec<Value> = crate::csource::matching_infos(spec, reg, ctx)
+    let matching: Vec<Value> = crate::registry::matching_infos(spec, reg, ctx)
         .into_iter()
         .cloned()
         .collect();
