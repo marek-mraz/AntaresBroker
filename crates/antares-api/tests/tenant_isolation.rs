@@ -711,3 +711,99 @@ async fn no_discovery_or_batch_surface_reaches_another_tenants_entities() {
     assert!(theirs.contains("999"), "B reads its own upsert: {theirs}");
     assert!(after.contains("42"), "A still reads its own value: {after}");
 }
+
+/// 4.14 through the notification pipeline. "An NGSI-LD system shall behave
+/// as if the tenants were separate systems", and a delivery is decided by
+/// the matcher, not by a store read: the read-side isolation pinned above
+/// says nothing about a payload that has already left the process. Two
+/// tenants each hold a Subscription watching the same Entity Type, and a
+/// change in one must reach only that one.
+///
+/// The two Subscriptions carry DIFFERENT ids on purpose. `process_changes`
+/// groups matches by `(tenant, subscription id)` and the tenant it stamps is
+/// the CHANGE's, so under the same id a candidate that leaked in from
+/// another tenant folds into the owner's group and is never delivered
+/// separately — the delivery would be suppressed by the grouping rather than
+/// by the tenant boundary, and the assertion would pass without holding
+/// anything. Distinct ids leave the boundary as the only thing between the
+/// change and B's endpoint. Proved by making `subs_for` return both tenants'
+/// candidates: B's sink is then served, and this test fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_in_one_tenant_never_reaches_another_tenants_endpoint() {
+    use serde_json::Value;
+
+    async fn sink() -> (String, tokio::sync::mpsc::Receiver<Value>) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Value>(8);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().route(
+            "/notify",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx
+                        .send(serde_json::from_slice(&body).unwrap_or(Value::Null))
+                        .await;
+                    StatusCode::OK
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}/notify"), rx)
+    }
+
+    antares_jsonld::allow_private_egress(true);
+    let mut st = AppState::new("test-notify-isolation".into());
+    antares_api::notify::wire(&mut st);
+    const A: &str = "tenant-listener";
+    const B: &str = "tenant-eavesdropper";
+    const SUB_A: &str = "urn:ngsi-ld:Subscription:listener";
+    const SUB_B: &str = "urn:ngsi-ld:Subscription:eavesdropper";
+
+    let (uri_a, mut rx_a) = sink().await;
+    let (uri_b, mut rx_b) = sink().await;
+    for (tenant, id, uri) in [(A, SUB_A, &uri_a), (B, SUB_B, &uri_b)] {
+        let doc = format!(
+            r#"{{"id":"{id}","type":"Subscription",
+                 "entities":[{{"type":"Isolation"}}],
+                 "notification":{{"endpoint":{{"uri":"{uri}"}}}}}}"#
+        );
+        let (status, body) = send(
+            &st,
+            "POST",
+            "/ngsi-ld/v1/subscriptions",
+            Some(tenant),
+            Some(&doc),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "subscribe in {tenant}: {body}");
+    }
+
+    let doc = r#"{"id":"urn:ngsi-ld:Isolation:only-in-a","type":"Isolation",
+                  "speed":{"type":"Property","value":10}}"#;
+    let (status, body) = send(&st, "POST", "/ngsi-ld/v1/entities", Some(A), Some(doc)).await;
+    assert_eq!(status, StatusCode::CREATED, "seed in {A}: {body}");
+
+    let wait = std::time::Duration::from_secs(5 * antares_api::state::slow_factor());
+    let n = tokio::time::timeout(wait, rx_a.recv())
+        .await
+        .expect("A's own subscription must be served")
+        .expect("one notification");
+    assert_eq!(n["subscriptionId"], SUB_A, "{n}");
+    assert_eq!(n["data"][0]["id"], "urn:ngsi-ld:Isolation:only-in-a", "{n}");
+
+    // A was served, so the fan-out for this change has run — but a delivery
+    // to B would be a separate request on its own task, so `try_recv` here
+    // would race it and read silence that has not happened yet. The negative
+    // half is only worth its name if it waits.
+    let quiet = tokio::time::timeout(wait, rx_b.recv()).await;
+    assert!(
+        quiet.is_err(),
+        "a change in {A} was delivered to {B}'s endpoint: {:?}",
+        quiet.ok().flatten()
+    );
+}
