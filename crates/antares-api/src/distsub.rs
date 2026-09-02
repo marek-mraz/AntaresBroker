@@ -312,23 +312,40 @@ pub(crate) fn on_subscription_updated(st: &AppState, tenant: &TenantId, own_id: 
         }
         Some(csr_id) => {
             let _ = st.store.mutate(tenant, Kind::DistSub, &csr_id, |doc| {
+                // The mapping comes out of the store, and `Value`'s index
+                // panics on anything that is not an object — inside a
+                // closure `mutate` runs holding the write lock, so the shape
+                // is decided once, here, and a mapping that is not one is
+                // left exactly as it was found.
+                let Some(map) = doc.as_object_mut() else {
+                    return Ok(());
+                };
                 for k in CSR_MATCH_MEMBERS {
                     match sub.get(k) {
-                        Some(v) => doc[k] = v.clone(),
+                        Some(v) => {
+                            map.insert(k.to_owned(), v.clone());
+                        }
                         None => {
-                            doc.as_object_mut().map(|o| o.remove(k));
+                            map.remove(k);
                         }
                     }
                 }
-                match sub.get("notification").and_then(|n| n.get("attributes")) {
-                    Some(a) => doc["notification"]["attributes"] = a.clone(),
-                    None => {
-                        doc["notification"]
-                            .as_object_mut()
-                            .map(|n| n.remove("attributes"));
-                    }
+                let attrs = sub.get("notification").and_then(|n| n.get("attributes"));
+                match map.get_mut("notification").and_then(Value::as_object_mut) {
+                    Some(n) => match attrs {
+                        Some(a) => {
+                            n.insert("attributes".to_owned(), a.clone());
+                        }
+                        None => {
+                            n.remove("attributes");
+                        }
+                    },
+                    // no notification object to carry them: the copy this
+                    // mapping stands for is the one create built, so a
+                    // mapping without it is not one an update can complete
+                    None => return Ok(()),
                 }
-                doc["modifiedAt"] = Value::String(now_iso());
+                map.insert("modifiedAt".to_owned(), Value::String(now_iso()));
                 Ok::<(), NgsiError>(())
             });
         }
@@ -1479,6 +1496,113 @@ mod tests {
         );
         inbound_delete(&st, "urn:remote:1");
         assert!(inbound_get(&st, "urn:remote:1").is_none());
+    }
+
+    /// 5.8.2.4 keeps the Registration Subscription in step by mutating the
+    /// stored mapping document. That document comes out of the store, and
+    /// `Value`'s index panics on anything that is not an object or Null, so
+    /// the two shapes a driver can hand back — a mapping that is not an
+    /// object, and one whose `notification` member is not an object — decide
+    /// whether an update of an ordinary Subscription takes the process down.
+    /// The panic would land inside the closure `mutate` runs under the
+    /// store's write lock, so it is not one request that is lost.
+    #[test]
+    fn clause_5_8_2_a_stored_mapping_of_the_wrong_shape_is_not_indexed() {
+        for stored in [
+            json!("not an object"),
+            json!([1, 2, 3]),
+            json!(7),
+            Value::Null,
+            json!({"notification": "not an object"}),
+            json!({"notification": [1]}),
+        ] {
+            let st = AppState::new("antares-ds-shape".into());
+            let tenant = TenantId::new("shape").expect("tenant");
+            let own = "urn:ngsi-ld:Subscription:shape";
+            st.store
+                .create(
+                    &tenant,
+                    Kind::Subscription,
+                    own,
+                    json!({"id": own, "type": "Subscription",
+                           "entities": [{"type": "Vehicle"}],
+                           "notification": {"endpoint": {"uri": "http://127.0.0.1:9/n"},
+                                            "attributes": ["speed"]}}),
+                )
+                .expect("seed the subscription");
+            ds_put(&st, &tenant, own, json!({"csr_sub": "urn:csr:shape"}));
+            st.store
+                .create(&tenant, Kind::DistSub, "urn:csr:shape", stored.clone())
+                .expect("seed the mapping");
+
+            on_subscription_updated(&st, &tenant, own);
+
+            // the update completes, and a mapping that could not be brought
+            // into step is left as it was rather than half-written
+            let after = st
+                .store
+                .get(&tenant, Kind::DistSub, "urn:csr:shape")
+                .expect("read the mapping");
+            assert!(after.is_some(), "{stored}: the mapping was dropped");
+        }
+    }
+
+    /// The same path on a well-formed mapping still carries the update
+    /// through: the guard above refuses a shape, it does not refuse the work.
+    #[test]
+    fn clause_5_8_2_a_well_formed_mapping_is_brought_into_step() {
+        let st = AppState::new("antares-ds-step".into());
+        let tenant = TenantId::new("step").expect("tenant");
+        let own = "urn:ngsi-ld:Subscription:step";
+        st.store
+            .create(
+                &tenant,
+                Kind::Subscription,
+                own,
+                json!({"id": own, "type": "Subscription",
+                       "entities": [{"type": "Bus"}],
+                       "scopeQ": "/a/b",
+                       "notification": {"endpoint": {"uri": "http://127.0.0.1:9/n"},
+                                        "attributes": ["speed"]}}),
+            )
+            .expect("seed the subscription");
+        ds_put(&st, &tenant, own, json!({"csr_sub": "urn:csr:step"}));
+        st.store
+            .create(
+                &tenant,
+                Kind::DistSub,
+                "urn:csr:step",
+                json!({"id": "urn:csr:step", "type": "Subscription",
+                       "entities": [{"type": "Tram"}],
+                       "notification": {"endpoint": {"uri": "urn:antares:distsub:step"}}}),
+            )
+            .expect("seed the mapping");
+
+        on_subscription_updated(&st, &tenant, own);
+
+        let after = st
+            .store
+            .get(&tenant, Kind::DistSub, "urn:csr:step")
+            .ok()
+            .flatten()
+            .expect("the mapping is still there");
+        assert_eq!(
+            after["entities"],
+            json!([{"type": "Bus"}]),
+            "the match members follow the Subscription: {after}"
+        );
+        assert_eq!(after["scopeQ"], "/a/b", "{after}");
+        assert_eq!(
+            after["notification"]["attributes"],
+            json!(["speed"]),
+            "5.8.2.4: the notification attributes follow too: {after}"
+        );
+        assert!(
+            after["notification"]["endpoint"]["uri"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("urn:antares:distsub:")),
+            "the endpoint the copy points at is not rewritten: {after}"
+        );
     }
 
     /// The remotes index is read back from storage, so every malformed

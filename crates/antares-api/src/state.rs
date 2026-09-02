@@ -263,7 +263,10 @@ impl AppState {
                     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
                 });
                 match store.context_get(&id) {
-                    Ok(Some(mut doc)) => {
+                    // the row is what the store handed back, and `Value`'s
+                    // index panics on anything that is not an object; a row
+                    // that cannot carry the counters is left uncounted
+                    Ok(Some(mut doc)) if doc.is_object() => {
                         let hits = doc["numberOfHits"].as_u64().unwrap_or(0) + 1;
                         doc["numberOfHits"] = serde_json::json!(hits);
                         doc["lastUsage"] = serde_json::json!(now_iso());
@@ -275,6 +278,9 @@ impl AppState {
                         }
                         true
                     }
+                    // a row that cannot carry the counters is left
+                    // uncounted, and still exists: it must not be evicted
+                    Ok(Some(_)) => true,
                     Ok(None) => false,
                     // a store hiccup must never evict a healthy cache entry
                     Err(_) => true,

@@ -590,3 +590,105 @@ async fn clause_5_14_4_federated_map_merge() {
         "{map}"
     );
 }
+
+/// 5.5.14 makes a map usable only while a READABLE expiry is still in the
+/// future, and every route reads through that one condition. A row the store
+/// hands back in a shape no map can have — a plugin store, a corrupted file,
+/// an older writer — therefore reads as absent rather than as a map with
+/// missing parts, and no route indexes it as an object on the way. This
+/// pins the whole class at the route, so a future reader that judged
+/// "expired" instead of "live" would surface here as a panic or a 204.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_map_of_the_wrong_shape_reads_as_absent() {
+    use antares_model::TenantId;
+    use antares_store::Kind;
+
+    for (n, stored) in [
+        json!("not an object"),
+        json!([1, 2, 3]),
+        json!(7),
+        json!(true),
+        Value::Null,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let st = state();
+        let id = format!("urn:ngsi-ld:entitymap:shape-{n}");
+        st.store
+            .create(&TenantId::default(), Kind::EntityMap, &id, stored.clone())
+            .expect("seed the row");
+
+        let body = json!({"expiresAt": "2099-01-01T00:00:00.000Z"}).to_string();
+        let (status, _, resp) = send(
+            &st,
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/ngsi-ld/v1/entityMaps/{id}"))
+                .header("Content-Type", "application/json")
+                .header("Content-Length", body.len())
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await;
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "{stored}: an unusable row was reported as updated: {status} {resp}"
+        );
+        assert!(
+            resp["type"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("https://uri.etsi.org/ngsi-ld/errors/")),
+            "{stored}: the refusal is an NGSI-LD ProblemDetails: {resp}"
+        );
+    }
+}
+
+/// The other side: a well-formed map takes the update, and 5.5.14's lifetime
+/// ceiling binds the new expiry — a client asking for one far in the future
+/// gets the ceiling, not a refusal and not the value it asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_well_formed_map_takes_the_update_under_the_lifetime_ceiling() {
+    use antares_model::TenantId;
+    use antares_store::Kind;
+
+    let st = state();
+    let id = "urn:ngsi-ld:entitymap:shape-ok";
+    st.store
+        .create(
+            &TenantId::default(),
+            Kind::EntityMap,
+            id,
+            json!({"id": id, "type": "EntityMap",
+                   "expiresAt": "2098-01-01T00:00:00.000Z",
+                   "entityMap": {}, "linkedMaps": {}}),
+        )
+        .expect("seed the row");
+
+    let body = json!({"expiresAt": "2099-01-01T00:00:00.000Z"}).to_string();
+    let (status, _, resp) = send(
+        &st,
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/ngsi-ld/v1/entityMaps/{id}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{resp}");
+
+    let (status, _, got) = get(&st, &format!("/ngsi-ld/v1/entityMaps/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let stamp = got["expiresAt"].as_str().expect("an expiry");
+    assert_ne!(
+        stamp, "2098-01-01T00:00:00.000Z",
+        "the update did not reach the row: {got}"
+    );
+    assert!(
+        stamp < "2099-01-01T00:00:00.000Z",
+        "5.5.14: the lifetime ceiling binds every writer, so a far-future \
+         expiry comes back clamped: {got}"
+    );
+}
