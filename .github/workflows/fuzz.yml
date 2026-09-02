@@ -6,7 +6,9 @@ name: fuzz
 # Found a crash? Commit the input to fuzz/regressions/<target>/ with the
 # fix — strict.yml replays that corpus daily so it can never regress.
 # A crash also auto-files a security-labeled issue (per target, deduped) —
-# a red twice-a-week run must not sit unnoticed.
+# a red twice-a-week run must not sit unnoticed. A target that fails to
+# build alarms too, under its own title: it is not a crash, and a security
+# issue naming an artifact that was never written is one nobody can act on.
 on:
   schedule:
     - cron: "17 3 * * 1,4" # twice a week, Mon + Thu 03:17 UTC
@@ -33,8 +35,24 @@ jobs:
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Fuzz ${{ matrix.target }}
         run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
-      - name: Upload crash artifacts
+      - name: A crash leaves its input behind
+        # `cargo fuzz run` builds and runs under one command, so a target that
+        # fails to compile exits exactly like one that crashed. Only a crash
+        # writes an input under fuzz/artifacts/<target>: without one there is
+        # no corpus entry to commit and nothing a security issue can point at,
+        # so the two outcomes alarm separately.
         if: failure()
+        id: outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$(ls -A "fuzz/artifacts/${{ matrix.target }}" 2>/dev/null)" ]; then
+            echo "crash=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "crash=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload crash artifacts
+        if: steps.outcome.outputs.crash == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: fuzz-artifacts-${{ matrix.target }}
@@ -42,7 +60,7 @@ jobs:
       - name: File an issue on a crash
         # dispatch runs file too — a crash is a real bug worth tracking
         # either way, and the open issue dedupes repeats
-        if: failure()
+        if: steps.outcome.outputs.crash == 'true'
         uses: ./.github/actions/failure-issue
         with:
           title: "Fuzz crash in ${{ matrix.target }}"
@@ -52,3 +70,12 @@ jobs:
             input is uploaded as the `fuzz-artifacts-${{ matrix.target }}`
             artifact — commit it to `fuzz/regressions/${{ matrix.target }}/`
             with the fix so strict.yml's daily replay pins it.
+      - name: File an issue when the target never ran
+        if: failure() && steps.outcome.outputs.crash != 'true'
+        uses: ./.github/actions/failure-issue
+        with:
+          title: "Fuzz target ${{ matrix.target }} did not run"
+          body: >-
+            The `${{ matrix.target }}` job went red without leaving a crash
+            input, so the target did not build or the run never started. The
+            job log names the step; nothing is fuzzed until it is fixed.
