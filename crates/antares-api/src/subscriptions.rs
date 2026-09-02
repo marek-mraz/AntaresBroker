@@ -265,13 +265,30 @@ pub fn normalize_subscription(
                     nn.insert("attributes".into(), Value::Array(na));
                 }
                 for key in ["pick", "omit"] {
-                    if n.get(key)
-                        .and_then(Value::as_array)
-                        .is_some_and(Vec::is_empty)
-                    {
+                    let Some(members) = n.get(key).and_then(Value::as_array) else {
+                        continue;
+                    };
+                    if members.is_empty() {
                         return Err(bad(format!(
                             "notification.{key} must not be empty (5.2.14)"
                         )));
+                    }
+                    // Table 5.2.14.1-1: each member is "a valid attribute
+                    // projection language string as per clause 4.21". The
+                    // notification path parses it again at delivery and drops
+                    // a member it cannot parse, so an unparseable `omit`
+                    // accepted here would deliver the Attribute the subscriber
+                    // asked to have removed.
+                    for m in members {
+                        let term = m.as_str().ok_or_else(|| {
+                            bad(format!("notification.{key} members are Strings (5.2.14)"))
+                        })?;
+                        crate::repr::parse_projection(term, ctx).map_err(|_| {
+                            bad(format!(
+                                "notification.{key} member {term:?} is not an attribute \
+                                 projection language string (4.21)"
+                            ))
+                        })?;
                     }
                 }
                 let ep = n
@@ -1722,6 +1739,45 @@ mod tests {
             n["notification"]["attributes"][0],
             "https://uri.etsi.org/ngsi-ld/default-context/temperature"
         );
+    }
+
+    /// Table 5.2.14.1-1: a `pick` or `omit` member is "a valid attribute
+    /// projection language string as per clause 4.21". The notification path
+    /// parses the member again at delivery time and drops one it cannot
+    /// parse, so a Subscription accepted with an unparseable `omit` delivers
+    /// the Attribute the subscriber asked to have removed — the failure is
+    /// silent and it is in the leaking direction. The value space belongs at
+    /// the door, where 5.8.1.4 raises BadRequestData for a Subscription that
+    /// does not validate.
+    #[test]
+    fn clause_5_2_14_pick_and_omit_members_are_projection_language() {
+        let mk = |extra: Value| {
+            let mut n = json!({"endpoint": {"uri": "http://localhost:1111/notify"}});
+            let o = n.as_object_mut().expect("object");
+            for (k, v) in extra.as_object().expect("object") {
+                o.insert(k.clone(), v.clone());
+            }
+            sub(json!({ "notification": n }))
+        };
+        for key in ["pick", "omit"] {
+            for term in [
+                json!("street address"), // a space is outside the 4.21 character set
+                json!("{model"),         // unbalanced brace
+                json!("a,,b"),           // empty projection member
+                json!(""),               // empty term
+                json!("{model}"),        // a LinkedEntityTerm with no AttrName
+                json!(42),               // not a String
+            ] {
+                assert!(
+                    norm(&mk(json!({ key: [term] }))).is_err(),
+                    "notification.{key} member {term} is not 4.21 projection language"
+                );
+            }
+            assert!(
+                norm(&mk(json!({ key: ["refDevice{model}", "temperature"] }))).is_ok(),
+                "a nested term and a bare term are both valid 4.21 (notification.{key})"
+            );
+        }
     }
 
     /// Table 5.2.13-1 GeoQuery: georel is mandatory and the geoproperty
