@@ -64,7 +64,8 @@ module's header comment.
 | `paging.rs` | 1 400 | 4.12, 6.3.10 limit/offset/count and the next/prev links, 4.23 ordering and ICU collation, 6.3.17 `NGSILD-Warning`, the query body of 5.2.23 lifted into parameters; every list operation pages through it |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
 | `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
-| `temporal.rs` | 4 200 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
+| `temporal.rs` | 4 000 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
+| `temporalq.rs` | 200 | 5.2.21 `TemporalQ` from the timerel/timeAt/endTimeAt/timeproperty parameters and the 4.11 instance match; named by temporal, csource, federation and subscriptions |
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
 | `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
 | `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
@@ -77,6 +78,7 @@ module's header comment.
 | `conformance.rs` | 760 | 6.3.21 version negotiation |
 | `repr.rs` | 960 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs |
 | `history.rs` | 150 | the producer side of temporal recording (change buffer per request) |
+| `mirror.rs` | 350 | the change event and the two document mirrors (`Change`, `DocMirror`, `SubMirror`, `TenantIndex`) that state, notify and history share; names no other module |
 | `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
