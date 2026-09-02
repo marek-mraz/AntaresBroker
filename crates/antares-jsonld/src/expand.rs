@@ -642,9 +642,7 @@ fn check_prohibited_members(
     // 4.5.3.3 repeat the ban for a Relationship with no exception at
     // all, so the attribute name alone is not the test.
     let sealed_ok = attr_type == "Property" && name == "ngsildproof";
-    if !sealed_ok
-        && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed"))
-    {
+    if !sealed_ok && (obj.contains_key("entityIdSealed") || obj.contains_key("entityTypeSealed")) {
         return Err(bad(format!(
             "attribute {name}: entityIdSealed/entityTypeSealed are only allowed \
              on the ngsildproof Property (4.5.2.2, 4.5.3.2)"
