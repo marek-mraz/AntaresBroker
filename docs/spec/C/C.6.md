@@ -3,7 +3,10 @@ clause: C.6
 title: Date Representation
 pages: 407-408
 status: informative
-evidence: ''
+evidence: 'Both representations of a Date, DateTime or Time value are read as that datatype where the
+  datatype decides behaviour: temporal.rs value_datatype() takes the type from a JSON-LD typed value
+  and from a valueType coerced to its datatype URI, so Table 4.5.19.1-2 aggregation applies to either
+  spelling (temporal.rs clause_4_5_19::a_value_type_carries_the_datatype_as_far_as_the_typed_value_does).'
 notes: ''
 robot: []
 ---

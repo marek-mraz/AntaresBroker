@@ -63,7 +63,7 @@ module's header comment.
 | `entities.rs` | 4 700 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, paging, distributed write fan-out |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
 | `batch.rs` | 2 400 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
-| `temporal.rs` | 3 800 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
+| `temporal.rs` | 4 200 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
 | `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
 | `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |

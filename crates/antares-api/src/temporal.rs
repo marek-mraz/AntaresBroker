@@ -1127,16 +1127,61 @@ fn selection(r: &TRepr) -> Option<Vec<String>> {
 
 /// Aggregated representation (4.5.19): attr → `{type, <method>: [[v,start,end]]}`.
 /// Aggregation datatype class per 4.5.19.1 (Tables -1, -2, -3). Booleans
-/// count as numbers (1/0, table NOTE); DateTime/Date and plain strings share
-/// the lexicographic min/max column; Time additionally supports avg.
+/// count as numbers (1/0, table NOTE); a JSON String, a DateTime and a Date
+/// share the ordered min/max column; a Time additionally supports avg.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum AggrClass {
     Number,
     Text,
+    /// 4.6.3 DateTime or Date: ordered, and Table 4.5.19.1-2 gives it no
+    /// arithmetic.
+    Instant,
     TimeOfDay,
     List,
     Opaque,
     Relationship,
+}
+
+/// The 4.6.3 datatype a Property instance's value carries, in either
+/// representation C.6 gives for one: a JSON-LD typed value
+/// (`{"@type": "DateTime", "@value": …}`), or a string whose `valueType`
+/// names the datatype and is coerced to its URI on the way in (4.5.2.2).
+/// Table 4.5.19.1-2 applies to the datatype, not to the spelling.
+fn value_datatype(inst: &Value) -> Option<&str> {
+    fn term(s: &str) -> &str {
+        s.strip_prefix(antares_jsonld::NGSI_LD_BASE).unwrap_or(s)
+    }
+    if let Some(vt) = inst.get("valueType").and_then(Value::as_str) {
+        if inst.get("value").is_some_and(Value::is_string) {
+            return Some(term(vt));
+        }
+    }
+    inst.get("value")?
+        .get("@type")
+        .and_then(Value::as_str)
+        .map(term)
+}
+
+/// The lexical form of a value: the string itself, or the `@value` of a
+/// JSON-LD typed value.
+fn lexical_of(v: &Value) -> Option<&str> {
+    v.as_str()
+        .or_else(|| v.get("@value").and_then(Value::as_str))
+}
+
+/// The key the ordered classes compare by. A JSON String and a Date are
+/// compared as written — 4.6.3 fixes the width of every component of a Date,
+/// so lexicographical order is chronological — a DateTime by its canonical
+/// instant, since an optional seconds fraction is written before the `Z` it
+/// follows and sorts ahead of it, and a Time by its second of the day, at a
+/// fixed width so one string comparison serves all four.
+fn order_key(class: AggrClass, v: &Value) -> Option<String> {
+    let s = lexical_of(v)?;
+    Some(match class {
+        AggrClass::Instant => antares_model::dt_key(s),
+        AggrClass::TimeOfDay => format!("{:013.6}", seconds_of_day(s)?),
+        _ => s.to_owned(),
+    })
 }
 
 fn classify_instance(inst: &Value) -> AggrClass {
@@ -1153,9 +1198,13 @@ fn classify_instance(inst: &Value) -> AggrClass {
         // URI / JSON-object valued kinds: only counting methods apply
         return AggrClass::Opaque;
     }
+    match value_datatype(inst) {
+        Some("DateTime" | "Date") => return AggrClass::Instant,
+        Some("Time") => return AggrClass::TimeOfDay,
+        _ => {}
+    }
     match inst.get("value") {
         Some(Value::Number(_)) | Some(Value::Bool(_)) => AggrClass::Number,
-        Some(Value::String(s)) if seconds_of_day(s).is_some() => AggrClass::TimeOfDay,
         Some(Value::String(_)) => AggrClass::Text,
         Some(Value::Array(_)) => AggrClass::List,
         _ => AggrClass::Opaque,
@@ -1217,7 +1266,7 @@ fn numeric_of(class: AggrClass, v: &Value) -> Option<f64> {
             _ => v.as_f64(),
         },
         AggrClass::List => v.as_array().map(|a| a.len() as f64),
-        AggrClass::TimeOfDay => v.as_str().and_then(seconds_of_day),
+        AggrClass::TimeOfDay => lexical_of(v).and_then(seconds_of_day),
         _ => None,
     }
 }
@@ -1425,16 +1474,20 @@ fn aggregate_bucket(method: &str, class: AggrClass, vals: &[&Value]) -> Value {
             serde_json::json!(seen.len())
         }
         "min" | "max" => match class {
-            // lexicographic first/last for strings, dates and times
-            AggrClass::Text | AggrClass::TimeOfDay => {
-                let mut strs: Vec<&str> = vals.iter().filter_map(|v| v.as_str()).collect();
-                strs.sort_unstable();
+            // ordered classes: the first or last value in the order the
+            // tables give the datatype, returned as it was written
+            AggrClass::Text | AggrClass::Instant | AggrClass::TimeOfDay => {
+                let mut keyed: Vec<(String, &Value)> = vals
+                    .iter()
+                    .filter_map(|v| order_key(class, v).map(|k| (k, *v)))
+                    .collect();
+                keyed.sort_by(|a, b| a.0.cmp(&b.0));
                 let pick = if method == "min" {
-                    strs.first()
+                    keyed.first()
                 } else {
-                    strs.last()
+                    keyed.last()
                 };
-                pick.map_or(Value::Null, |s| Value::String((*s).to_owned()))
+                pick.map_or(Value::Null, |(_, v)| (*v).clone())
             }
             _ => {
                 let it = nums.iter().copied();
@@ -1457,7 +1510,13 @@ fn aggregate_bucket(method: &str, class: AggrClass, vals: &[&Value]) -> Value {
                     ((mean % 3600.0) / 60.0) as u32,
                     (mean % 60.0) as u32,
                 );
-                Value::String(format!("{h:02}:{m:02}:{sec:02}"))
+                // 4.6.3: a Time is `hh:mm:ssZ`, and its JSON-LD type is what
+                // tells a reader it is one — written bare it reads back as a
+                // JSON String, which Table 4.5.19.1-1 gives no average.
+                serde_json::json!({
+                    "@type": "Time",
+                    "@value": format!("{h:02}:{m:02}:{sec:02}Z"),
+                })
             } else {
                 finite(nums.iter().sum::<f64>() / nums.len() as f64)
             }
@@ -3906,6 +3965,201 @@ mod clause_4_5_19 {
                 [1, "2020-02-01T12:00:00Z", "2020-03-02T00:00:00Z"],
             ])
         );
+    }
+
+    /// One attribute whose instances carry the given members, an hour apart.
+    fn windowed_props(members: &[Value]) -> Windowed {
+        let instances: Vec<Value> = members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let mut inst = json!({
+                    "type": "Property",
+                    "observedAt": format!("2020-01-01T{i:02}:00:00Z"),
+                });
+                for (k, v) in m.as_object().expect("instance members") {
+                    inst[k] = v.clone();
+                }
+                inst
+            })
+            .collect();
+        let times: Vec<String> = instances
+            .iter()
+            .map(|i| i["observedAt"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("speed".to_owned(), instances);
+        Windowed {
+            attrs,
+            max_per_attr: members.len(),
+            ts_min: times.first().cloned(),
+            ts_max: times.last().cloned(),
+            truncated: false,
+        }
+    }
+
+    fn aggregate(w: &Windowed, methods: &[&str]) -> Result<Map<String, Value>, NgsiError> {
+        let r = TRepr {
+            aggregated: true,
+            aggr_methods: methods.iter().map(|m| (*m).to_string()).collect(),
+            ..Default::default()
+        };
+        render_aggregated(
+            w,
+            None,
+            &r,
+            &antares_jsonld::Context::default(),
+            "observedAt",
+        )
+    }
+
+    /// Table 4.5.19.1-2: on a DateTime and on a Date, `min` "calculates the
+    /// minimum value inside the period" and `max` the maximum. Both
+    /// datatypes reach the broker as a JSON-LD typed value — C.6's
+    /// `{"@type": "DateTime", "@value": "2018-12-04T12:00:00Z"}` — so the
+    /// aggregation reads the value through its type instead of treating the
+    /// wrapper as an opaque object.
+    #[test]
+    fn a_date_time_and_a_date_have_a_minimum_and_a_maximum() {
+        let dt = |v: &str| json!({"value": {"@type": "DateTime", "@value": v}});
+        let out = aggregate(
+            &windowed_props(&[
+                dt("2020-03-01T00:00:00Z"),
+                dt("2020-01-01T00:00:00Z"),
+                dt("2020-02-01T00:00:00Z"),
+            ]),
+            &["min", "max"],
+        )
+        .expect("DateTime is eligible for min and max");
+        assert_eq!(
+            out["speed"]["min"][0][0],
+            json!({"@type": "DateTime", "@value": "2020-01-01T00:00:00Z"})
+        );
+        assert_eq!(
+            out["speed"]["max"][0][0],
+            json!({"@type": "DateTime", "@value": "2020-03-01T00:00:00Z"})
+        );
+
+        let d = |v: &str| json!({"value": {"@type": "Date", "@value": v}});
+        let out = aggregate(
+            &windowed_props(&[d("2020-03-01"), d("2020-01-01")]),
+            &["min", "max"],
+        )
+        .expect("Date is eligible for min and max");
+        assert_eq!(
+            out["speed"]["min"][0][0],
+            json!({"@type": "Date", "@value": "2020-01-01"})
+        );
+        assert_eq!(
+            out["speed"]["max"][0][0],
+            json!({"@type": "Date", "@value": "2020-03-01"})
+        );
+    }
+
+    /// C.6 gives a second representation of the same datatypes: the value
+    /// stays a string and `valueType` (4.5.2.2) carries the type, coerced to
+    /// its datatype URI on the way in. Table 4.5.19.1-2 applies to the
+    /// datatype, not to the spelling, so this form aggregates identically.
+    #[test]
+    fn a_value_type_carries_the_datatype_as_far_as_the_typed_value_does() {
+        let dt =
+            |v: &str| json!({"value": v, "valueType": "https://uri.etsi.org/ngsi-ld/DateTime"});
+        let out = aggregate(
+            &windowed_props(&[dt("2020-03-01T00:00:00Z"), dt("2020-01-01T00:00:00Z")]),
+            &["min", "max"],
+        )
+        .expect("a valueType-coerced DateTime is eligible for min and max");
+        assert_eq!(out["speed"]["min"][0][0], json!("2020-01-01T00:00:00Z"));
+        assert_eq!(out["speed"]["max"][0][0], json!("2020-03-01T00:00:00Z"));
+    }
+
+    /// Table 4.5.19.1-2, Time column: `avg` "calculates the average time
+    /// inside the period", and min/max apply as well. 4.6.3 mandates
+    /// `hh:mm:ssZ` for a Time, so the computed average is one — carrying its
+    /// type, since a bare string would read back as a JSON String, whose own
+    /// column in Table 4.5.19.1-1 has no average at all.
+    #[test]
+    fn a_time_has_an_average_a_minimum_and_a_maximum() {
+        let t = |v: &str| json!({"value": {"@type": "Time", "@value": v}});
+        let out = aggregate(
+            &windowed_props(&[t("09:30:00Z"), t("08:30:00Z")]),
+            &["avg", "min", "max"],
+        )
+        .expect("Time is eligible for avg, min and max");
+        assert_eq!(
+            out["speed"]["avg"][0][0],
+            json!({"@type": "Time", "@value": "09:00:00Z"})
+        );
+        assert_eq!(
+            out["speed"]["min"][0][0],
+            json!({"@type": "Time", "@value": "08:30:00Z"})
+        );
+        assert_eq!(
+            out["speed"]["max"][0][0],
+            json!({"@type": "Time", "@value": "09:30:00Z"})
+        );
+    }
+
+    /// The N/A cells of Table 4.5.19.1-2 are refused, not computed: 5.7.4.4
+    /// p.211 raises InvalidRequest when an Attribute "is not eligible for at
+    /// least one of the aggregation methods specified in the request".
+    /// DateTime and Date have no avg, sum, stddev or sumsq; Time has no sum,
+    /// stddev or sumsq.
+    #[test]
+    fn the_methods_a_temporal_datatype_does_not_support_are_refused() {
+        let w = windowed_props(&[
+            json!({"value": {"@type": "DateTime", "@value": "2020-01-01T00:00:00Z"}}),
+        ]);
+        for method in ["avg", "sum", "stddev", "sumsq"] {
+            assert!(
+                matches!(aggregate(&w, &[method]), Err(NgsiError::InvalidRequest(_))),
+                "DateTime must not be eligible for {method}"
+            );
+        }
+        let w = windowed_props(&[json!({"value": {"@type": "Time", "@value": "08:30:00Z"}})]);
+        for method in ["sum", "stddev", "sumsq"] {
+            assert!(
+                matches!(aggregate(&w, &[method]), Err(NgsiError::InvalidRequest(_))),
+                "Time must not be eligible for {method}"
+            );
+        }
+    }
+
+    /// Table 4.5.19.1-1, JSON String column: `avg` is N/A. A string is a
+    /// JSON String whatever it spells, so a value that reads like a
+    /// time-of-day is averaged only when its datatype says it is a Time.
+    #[test]
+    fn a_json_string_has_no_average_however_it_reads() {
+        let w = windowed_props(&[json!({"value": "08:30:00Z"}), json!({"value": "09:30:00Z"})]);
+        assert!(matches!(
+            aggregate(&w, &["avg"]),
+            Err(NgsiError::InvalidRequest(_))
+        ));
+        // its own row of the table is unchanged: lexicographic min and max
+        let out = aggregate(&w, &["min", "max"]).expect("a string has min and max");
+        assert_eq!(out["speed"]["min"][0][0], json!("08:30:00Z"));
+        assert_eq!(out["speed"]["max"][0][0], json!("09:30:00Z"));
+    }
+
+    /// The counting methods have no N/A cell in any of the three tables:
+    /// `totalCount` "the number of times the value has been updated" and
+    /// `distinctCount` "the count of distinct values", for every datatype
+    /// including the ones with no other method at all.
+    #[test]
+    fn every_datatype_is_counted() {
+        for members in [
+            json!({"value": {"@type": "DateTime", "@value": "2020-01-01T00:00:00Z"}}),
+            json!({"value": {"@type": "Date", "@value": "2020-01-01"}}),
+            json!({"value": {"@type": "Time", "@value": "08:30:00Z"}}),
+            json!({"vocab": "urn:ngsi-ld:Colour:red"}),
+            json!({"object": "urn:ngsi-ld:Car:1"}),
+        ] {
+            let w = windowed_props(&[members.clone(), members.clone()]);
+            let out = aggregate(&w, &["totalCount", "distinctCount"])
+                .unwrap_or_else(|e| panic!("{members} must be counted: {e:?}"));
+            assert_eq!(out["speed"]["totalCount"][0][0], json!(2));
+            assert_eq!(out["speed"]["distinctCount"][0][0], json!(1));
+        }
     }
 }
 

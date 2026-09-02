@@ -131,8 +131,13 @@ bucket, ending one second after the last instance:
 "totalCount": [[3, "2026-08-26T08:00:00Z", "2026-08-26T10:00:01Z"]]
 ```
 
-Which methods apply to which value type follows Table 4.5.19.1-1; a
-method that does not apply to the attribute's values is a 400.
+Which methods apply to which value type follows Tables 4.5.19.1-1 to -3;
+a method that does not apply to the attribute's values is a 400. A value
+carrying a `Date`, `DateTime` or `Time` datatype — written as a JSON-LD
+typed value, `{"@type": "DateTime", "@value": "..."}`, or as a string with
+`valueType` — is ordered by that datatype, so `min` and `max` apply to it
+and a `Time` also has an `avg`, returned as a `Time`. A plain JSON string
+is ordered lexicographically and has no average.
 
 On postgres and timescale the aggregation runs in SQL when the query is
 exact there: no `q`, `geoQ` or `scopeQ`, the page pushed down, no `omit`,
