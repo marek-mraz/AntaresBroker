@@ -337,8 +337,13 @@ async fn stalling_endpoint_still_trips_the_breaker() {
 async fn one_tenants_timeouts_never_suppress_another_tenants_notifications() {
     let st = state();
     // Alive, and answers well inside tenant-b's deadline — but not inside
-    // tenant-a's, which sits at the 6.3.8 floor.
-    let (port, ids) = mock_slow(600);
+    // tenant-a's, which sits at the 6.3.8 floor. The endpoint deadline the
+    // broker arms is `endpoint.timeout` STRETCHED by `slow_factor` under a
+    // sanitizer, so the mock's delay has to move with it: left at 600 ms it
+    // lands INSIDE tenant-a's stretched 1 s, every delivery succeeds, and the
+    // premise this test rests on — that tenant A trips its own breaker —
+    // silently stops holding.
+    let (port, ids) = mock_slow(600 * antares_api::state::slow_factor());
     subscribe_as(&st, "brk-tenant-a", "impatient", port, 100).await;
 
     // Tenant A earns its own breaker: each delivery must finish timing out
