@@ -226,7 +226,13 @@ if [ "${WASM:-0}" = 1 ]; then
       || { echo "wasm shim image build failed — aborting"; exit 1; }
     WASM_STORE_DIR="$(mktemp -d)"
     for port in 9090 9091 9092 9093 9094; do
+      # The store is a bind mount of a host directory, and a bind mount keeps
+      # the host's ownership: the image's own unprivileged user cannot write
+      # there and the shim exits on its first open. Running as the invoking
+      # user keeps the container unprivileged and leaves the redb files owned
+      # by whoever started the run.
       docker run -d --name "antares-wasm-$port" --network host \
+        --user "$(id -u):$(id -g)" \
         -e ANTARES_STORE="$STORE" -e ANTARES_FILE="/data/antares-$port.redb" \
         -e ANTARES_SWEEP_SECS="${ANTARES_SWEEP_SECS:-2}" \
         -e ANTARES_HOST_ALIAS="antares$((port - 9089))" \

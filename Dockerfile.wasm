@@ -16,7 +16,9 @@ COPY www/node-shim.mjs ./node-shim.mjs
 # The shim needs nothing but read access to its own bundle, so it runs as the
 # image's unprivileged user. `file` mode writes to /data: a fresh named volume
 # inherits the mountpoint's ownership, so the directory is pre-created for
-# that user — nothing chowns at runtime.
+# that user — nothing chowns at runtime. A BIND mount keeps the host
+# directory's ownership instead, so a caller mounting one passes
+# `--user "$(id -u):$(id -g)"` and stays unprivileged that way.
 RUN mkdir /data && chown node:node /data
 USER node
 ENTRYPOINT ["node", "node-shim.mjs"]
