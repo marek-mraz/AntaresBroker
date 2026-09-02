@@ -173,16 +173,12 @@ async fn write_attrs(
             ..Default::default()
         },
     )?;
-    let (mut regs, all_attr_iris) =
+    let (plan, all_attr_iris) =
         attr_fed_plan(st, &tenant, id, &fragment, &parsed.ctx, params, headers)?;
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
-        return Ok(r);
-    }
+    let regs = match plan {
+        crate::federation::WritePlan::Answered(r) => return Ok(*r),
+        crate::federation::WritePlan::Forward(regs) => regs,
+    };
     let local_covered = proxies_cover_all(&regs, &all_attr_iris);
     let fragment = crate::federation::strip_covered_expanded(&fragment, &regs);
     let local_iris = attr_iris_of(&fragment);
@@ -420,10 +416,10 @@ fn attr_fed_plan(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> Result<(Vec<crate::federation::FedReg>, Vec<String>), NgsiError> {
+) -> Result<(crate::federation::WritePlan, Vec<String>), NgsiError> {
     let attr_iris = attr_iris_of(fragment);
-    let regs = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers)?;
-    Ok((regs, attr_iris))
+    let plan = attr_fed_plan_iris(st, tenant, id, &attr_iris, ctx, params, headers)?;
+    Ok((plan, attr_iris))
 }
 
 fn attr_fed_plan_iris(
@@ -434,13 +430,13 @@ fn attr_fed_plan_iris(
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
     headers: &axum::http::HeaderMap,
-) -> Result<Vec<crate::federation::FedReg>, NgsiError> {
+) -> Result<crate::federation::WritePlan, NgsiError> {
     let spec = crate::csource::CsrSpec {
         ids: Some(vec![id.to_owned()]),
         attrs: (!attr_iris.is_empty()).then(|| attr_iris.to_vec()),
         ..Default::default()
     };
-    crate::federation::write_regs(st, tenant, &spec, ctx, params, headers)
+    crate::federation::write_plan(st, tenant, &spec, ctx, params, headers)
 }
 
 /// The registrations an attribute-level operation has to consider, with the
@@ -456,15 +452,12 @@ fn attr_regs_or_loop(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> Result<(Vec<crate::federation::FedReg>, Option<Response>), NgsiError> {
-    let mut regs =
-        attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers)?;
-    let loop_answer = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, tenant),
-        tenant,
-        &mut regs,
-    );
-    Ok((regs, loop_answer))
+    Ok(
+        match attr_fed_plan_iris(st, tenant, id, &[attr_iri.to_owned()], ctx, params, headers)? {
+            crate::federation::WritePlan::Answered(r) => (Vec::new(), Some(*r)),
+            crate::federation::WritePlan::Forward(regs) => (regs, None),
+        },
+    )
 }
 
 /// The local half of a distributed attribute write is skipped only when every

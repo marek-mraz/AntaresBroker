@@ -2323,6 +2323,43 @@ pub fn loop_508(tenant: &TenantId) -> Response {
     resp
 }
 
+/// What a distributed write does with its registrations once the 6.3.18
+/// loop rule has spoken: forward to these, or answer with the chain's own
+/// response and touch nothing locally.
+pub enum WritePlan {
+    /// The non-auxiliary registrations that match the operation's entity
+    /// specification, `Via` chain already applied; empty means local only.
+    Forward(Vec<FedReg>),
+    /// The loop chain's answer (Table 6.3.18-2, or 508 past the hop cap):
+    /// the operation ends here, before anything local happens.
+    Answered(Box<Response>),
+}
+
+/// The prologue every distributed write shares (4.3.6, 6.3.18): the
+/// registrations of [`write_regs`] with [`handle_via_loop`] applied, so
+/// no operation re-derives the pair and the two cannot disagree.
+pub fn write_plan(
+    st: &AppState,
+    tenant: &TenantId,
+    spec: &crate::csource::CsrSpec,
+    ctx: &Context,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> Result<WritePlan, NgsiError> {
+    let mut regs = write_regs(st, tenant, spec, ctx, params, headers)?;
+    Ok(
+        match handle_via_loop(
+            headers,
+            &alias_for(&st.host_alias, tenant),
+            tenant,
+            &mut regs,
+        ) {
+            Some(answer) => WritePlan::Answered(Box::new(answer)),
+            None => WritePlan::Forward(regs),
+        },
+    )
+}
+
 /// 4.3.6.2: "Auxiliary distributed operations are limited to context
 /// information consumption operations (see clause 5.7)" — so a write op
 /// only ever considers non-auxiliary matching registrations.
@@ -2947,6 +2984,124 @@ mod tests {
         assert_eq!(reg(&["queryBatch"]).query_op(), Some("queryBatch"));
         assert_eq!(reg(&["federationOps"]).query_op(), Some("queryEntity"));
         assert_eq!(reg(&["retrieveOps"]).query_op(), Some("queryEntity"));
+    }
+
+    fn seed_reg(
+        st: &AppState,
+        tenant: &antares_model::TenantId,
+        id: &str,
+        mode: &str,
+        entities: Value,
+    ) {
+        let doc = json!({
+            "id": id,
+            "type": "ContextSourceRegistration",
+            "mode": mode,
+            "operations": ["redirectionOps"],
+            "endpoint": "http://peer:9090",
+            "information": [{"entities": entities}],
+        });
+        st.store
+            .create(tenant, Kind::Registration, id, doc)
+            .expect("seed registration");
+    }
+
+    /// 5.2.9 / 5.12: an `idPattern` in the registration's EntityInfo matches
+    /// a write addressed by id, so the write forwards to that source; a
+    /// pattern the id does not match keeps the write local.
+    #[test]
+    fn write_plan_forwards_a_write_by_id_to_an_id_pattern_registration() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        seed_reg(
+            &st,
+            &tenant,
+            "urn:ngsi-ld:ContextSourceRegistration:cars",
+            "exclusive",
+            json!([{"idPattern": "urn:ngsi-ld:Vehicle:.*"}]),
+        );
+        seed_reg(
+            &st,
+            &tenant,
+            "urn:ngsi-ld:ContextSourceRegistration:bikes",
+            "exclusive",
+            json!([{"idPattern": "urn:ngsi-ld:Bike:.*"}]),
+        );
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
+            ..Default::default()
+        };
+        let plan = write_plan(
+            &st,
+            &tenant,
+            &spec,
+            &ctx,
+            &HashMap::new(),
+            &HeaderMap::new(),
+        )
+        .expect("plan");
+        let WritePlan::Forward(regs) = plan else {
+            panic!("no Via chain, so nothing answers early");
+        };
+        let ids: Vec<&str> = regs.iter().map(|r| r.reg_id.as_str()).collect();
+        assert_eq!(ids, vec!["urn:ngsi-ld:ContextSourceRegistration:cars"]);
+    }
+
+    /// 6.3.18: a `Via` chain that already names this broker is answered by
+    /// the chain rule before any registration is used — with a single
+    /// exclusive source that is the 508 of Table 6.3.18-2 — and a chain
+    /// past the hop cap is 508 regardless of what matched.
+    #[test]
+    fn write_plan_answers_a_via_loop_before_forwarding() {
+        let st = AppState::new("me".into());
+        let tenant = antares_model::TenantId::new("default").expect("tenant");
+        let ctx = st.loader.core();
+        seed_reg(
+            &st,
+            &tenant,
+            "urn:ngsi-ld:ContextSourceRegistration:cars",
+            "exclusive",
+            json!([{"idPattern": "urn:ngsi-ld:Vehicle:.*"}]),
+        );
+        let spec = crate::csource::CsrSpec {
+            ids: Some(vec!["urn:ngsi-ld:Vehicle:1".into()]),
+            ..Default::default()
+        };
+        let looped = write_plan(
+            &st,
+            &tenant,
+            &spec,
+            &ctx,
+            &HashMap::new(),
+            &hdrs(Some("1.1 me")),
+        )
+        .expect("plan");
+        let WritePlan::Answered(resp) = looped else {
+            panic!("a Via chain naming this broker with one exclusive source is answered, not forwarded");
+        };
+        assert_eq!(resp.status(), 508);
+        let deep: String = (0..=MAX_VIA_HOPS)
+            .map(|i| format!("1.1 hop{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let WritePlan::Answered(resp) = write_plan(
+            &st,
+            &tenant,
+            &spec,
+            &ctx,
+            &HashMap::new(),
+            &hdrs(Some(&deep)),
+        )
+        .expect("plan") else {
+            panic!("a chain past the hop cap is refused outright");
+        };
+        assert_eq!(resp.status(), 508);
+        // no chain, no early answer: the same registration forwards
+        assert!(matches!(
+            write_plan(&st, &tenant, &spec, &ctx, &HashMap::new(), &HeaderMap::new()).expect("plan"),
+            WritePlan::Forward(regs) if regs.len() == 1
+        ));
     }
 
     /// 4.3.6.2: "Auxiliary distributed operations are limited to context

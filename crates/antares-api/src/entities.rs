@@ -270,15 +270,11 @@ async fn create_entity_inner(
         attrs: (!attr_iris.is_empty()).then_some(attr_iris),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params, headers)?;
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
-        return Ok(r);
-    }
+    let regs =
+        match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)? {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
     if !regs.is_empty() {
         let mut conflicts = Vec::new();
         let mut fwd = Vec::new();
@@ -1951,15 +1947,11 @@ pub async fn delete_entity(
                 .map(|s| s.split(',').map(|t| ctx.expand_key(t.trim())).collect()),
             ..Default::default()
         };
-        let mut regs = crate::federation::write_regs(&st, &tenant, &spec, &ctx, &params, &headers)?;
-        if let Some(r) = crate::federation::handle_via_loop(
-            &headers,
-            &crate::federation::alias_for(&st.host_alias, &tenant),
-            &tenant,
-            &mut regs,
-        ) {
-            return Ok(r);
-        }
+        let regs =
+            match crate::federation::write_plan(&st, &tenant, &spec, &ctx, &params, &headers)? {
+                crate::federation::WritePlan::Answered(r) => return Ok(*r),
+                crate::federation::WritePlan::Forward(regs) => regs,
+            };
         // 5.6.6.4: the ?type selector narrows the target — an entity of a
         // non-matching type is "not known" for this delete. The selector is
         // tested inside the delete, under the row lock: read first and delete
@@ -2298,15 +2290,10 @@ async fn purge_inner(
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &ctx, params, headers)?;
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
-        return Ok(r);
-    }
+    let regs = match crate::federation::write_plan(st, &tenant, &spec, &ctx, params, headers)? {
+        crate::federation::WritePlan::Answered(r) => return Ok(*r),
+        crate::federation::WritePlan::Forward(regs) => regs,
+    };
     purge_locally(st, &tenant, params, &ctx, &keep, &drop)?;
     if !regs.is_empty() {
         let mut parts = vec![crate::federation::Part {
@@ -2414,15 +2401,11 @@ async fn merge_entity_inner(
         ids: Some(vec![id.to_owned()]),
         ..Default::default()
     };
-    let mut regs = crate::federation::write_regs(st, &tenant, &spec, &parsed.ctx, params, headers)?;
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
-        &tenant,
-        &mut regs,
-    ) {
-        return Ok(r);
-    }
+    let regs =
+        match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)? {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
     if !regs.is_empty() {
         let proxies: Vec<&crate::federation::FedReg> =
             regs.iter().filter(|r| r.is_proxy()).collect();
@@ -2744,16 +2727,11 @@ pub async fn replace_entity(
             ids: Some(vec![id.clone()]),
             ..Default::default()
         };
-        let mut regs =
-            crate::federation::write_regs(&st, &tenant, &spec, &ctx0, &params, &headers)?;
-        if let Some(r) = crate::federation::handle_via_loop(
-            &headers,
-            &crate::federation::alias_for(&st.host_alias, &tenant),
-            &tenant,
-            &mut regs,
-        ) {
-            return Ok(r);
-        }
+        let regs =
+            match crate::federation::write_plan(&st, &tenant, &spec, &ctx0, &params, &headers)? {
+                crate::federation::WritePlan::Answered(r) => return Ok(*r),
+                crate::federation::WritePlan::Forward(regs) => regs,
+            };
         if regs.is_empty() {
             // 5.6.18: an unknown target is 404 before body validation (057_03).
             // The read above answers that; the write below decides again

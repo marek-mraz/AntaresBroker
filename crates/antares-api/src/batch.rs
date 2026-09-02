@@ -402,16 +402,17 @@ async fn batch_write(
     if !spec_attrs.is_empty() {
         spec.attrs = Some(spec_attrs);
     }
-    let mut fed_regs =
-        crate::federation::write_regs(st, &tenant, &spec, &st.loader.core(), params, headers)?;
-    if let Some(r) = crate::federation::handle_via_loop(
-        headers,
-        &crate::federation::alias_for(&st.host_alias, &tenant),
+    let fed_regs = match crate::federation::write_plan(
+        st,
         &tenant,
-        &mut fed_regs,
-    ) {
-        return Ok(r);
-    }
+        &spec,
+        &st.loader.core(),
+        params,
+        headers,
+    )? {
+        crate::federation::WritePlan::Answered(r) => return Ok(*r),
+        crate::federation::WritePlan::Forward(regs) => regs,
+    };
     let mut out = BatchOutcome {
         success: vec![],
         errors: vec![],
@@ -1055,22 +1056,17 @@ pub async fn batch_delete(
             ),
             ..Default::default()
         };
-        let mut regs = crate::federation::write_regs(
+        let regs = match crate::federation::write_plan(
             &st,
             &tenant,
             &spec,
             &st.loader.core(),
             &params,
             &headers,
-        )?;
-        if let Some(r) = crate::federation::handle_via_loop(
-            &headers,
-            &crate::federation::alias_for(&st.host_alias, &tenant),
-            &tenant,
-            &mut regs,
-        ) {
-            return Ok(r);
-        }
+        )? {
+            crate::federation::WritePlan::Answered(r) => return Ok(*r),
+            crate::federation::WritePlan::Forward(regs) => regs,
+        };
         let mut out = BatchOutcome {
             success: vec![],
             errors: vec![],
