@@ -154,8 +154,10 @@ pub fn seed_mirror(
 /// walk, paid once per tenant at startup.
 const SEED_PAGE: usize = 1_000;
 
-/// Wire the store hook and background tasks. Call once at startup.
-pub(crate) fn wire(state: &mut AppState) {
+/// Install the subscription mirror, the store change hook that feeds the
+/// matcher, and the background tasks the pipeline needs. Called once at
+/// startup, by `crate::wire`.
+pub(crate) fn wire_matcher(state: &mut AppState) {
     // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
@@ -2760,7 +2762,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-mirror-booked".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         subscribe(&st, "booked", &uri, 30_000).await;
         assert_eq!(create_vehicle(&st, 7).await, 201);
         let deadline = std::time::Instant::now()
@@ -2806,7 +2808,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-panic-guard".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         subscribe(&st, "guard", &uri, 2_000).await;
         // Poison the mirror lock while a change is in flight: whatever the
         // matcher does with that (recover, or panic into the supervision
@@ -2862,7 +2864,7 @@ mod change_pipeline {
             }
         });
         let mut st = AppState::new("antares-queue-bound".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         // the stall is bounded by the outbound client's own 5 s timeout, not
         // by endpoint.timeout: after each timeout the consumer frees another
         // CHANGE_BATCH slots, and on a slow runner a single-queue-depth loop
@@ -2892,7 +2894,7 @@ mod change_pipeline {
         crate::allow_private();
         let (uri, hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-pending-changes".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         subscribe(&st, "counter", &uri, 30_000).await;
         for n in 0..20 {
             assert_eq!(create_vehicle(&st, 5_000 + n).await, 201);
@@ -2929,7 +2931,7 @@ mod change_pipeline {
         let (uri, hits) = counting_endpoint().await;
         let (quiet_uri, quiet_hits) = counting_endpoint().await;
         let mut st = AppState::new("antares-trigger-equivalence".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         let sub = |id: &str, trigger: &str, uri: &str| {
             json!({
                 "id": format!("urn:ngsi-ld:Subscription:{id}"),
@@ -4421,7 +4423,7 @@ mod clause_5_8_6_grouped_delivery {
         crate::allow_private();
         let (uri, seen) = recording_endpoint().await;
         let mut st = AppState::new("antares-grouped-delivery".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         assert_eq!(
             post(
                 &st,
@@ -4577,7 +4579,7 @@ mod change_grouping {
     async fn every_change_of_a_drain_reaches_each_matching_subscription_once() {
         crate::allow_private();
         let mut st = AppState::new("antares-grouping-test".into());
-        wire(&mut st);
+        crate::wire(&mut st);
         let tenant = TenantId::new("default").expect("tenant");
         let posts: StdArc<AtomicUsize> = StdArc::default();
         let entities: StdArc<std::sync::Mutex<Vec<usize>>> = StdArc::default();

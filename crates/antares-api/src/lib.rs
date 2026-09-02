@@ -217,7 +217,7 @@ impl ApiSurface for Admin {
 /// internal endpoint is handed to `distsub` from here, so the delivery path
 /// never names it. Every root that serves requests calls this once.
 pub fn wire(state: &mut AppState) {
-    notify::wire(state);
+    notify::wire_matcher(state);
     state.csource_notification = Some(std::sync::Arc::new(|st, tenant, own_id, reason, regs| {
         Box::pin(distsub::on_csource_notification(
             st, tenant, own_id, reason, regs,
