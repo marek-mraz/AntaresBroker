@@ -21,14 +21,9 @@ DURATION="${DURATION:-60s}"
 command -v k6 >/dev/null || { echo "k6 missing"; exit 1; }
 
 # what the broker holds, from its own tenant counts
-read -r ENT SUB REG < <(curl -sf "$BROKER_URL/q/tenants" | python3 -c '
-import sys,json
-rows=json.load(sys.stdin)
-rows=rows if isinstance(rows,list) else rows.get("tenants",[])
-c=[r["counts"] for r in rows]
-print(sum(x["entities"] for x in c), sum(x["subscriptions"] for x in c), sum(x["registrations"] for x in c))')
+read -r ENT SUB REG TENANT_COUNT < <(python3 dev/perf/tenant_totals.py "$BROKER_URL")
 {
-  echo "In the broker: $ENT entities, $SUB subscriptions, $REG registrations over $(curl -sf "$BROKER_URL/q/tenants" | python3 -c 'import sys,json; r=json.load(sys.stdin); print(len(r if isinstance(r,list) else r.get("tenants",[])))') tenants."
+  echo "In the broker: $ENT entities, $SUB subscriptions, $REG registrations over $TENANT_COUNT tenants."
   echo
   echo "| rate (rps) | updates | deletes | reads | failed ops (conn/4xx/5xx) | entity notifications due | delivered | delivered % | subscriptions that fired | notification POSTs | POSTs/s | quiet after (s) | dropped by broker | dead letters | PATCH p99 (ms) | GET p99 (ms) | broker cores | host busy cores |"
   echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"

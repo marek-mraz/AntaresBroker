@@ -20,10 +20,7 @@ RATES="${RATES:-50 100 200 500}"
 DURATION="${DURATION:-30s}"
 TENANTS="${TENANTS:-10}"
 
-REGS=$(curl -sf "$BROKER_URL/q/tenants" | python3 -c '
-import sys,json
-r=json.load(sys.stdin); rows=r if isinstance(r,list) else r.get("tenants",[])
-print(sum(int(x["counts"]["registrations"]) for x in rows))')
+REGS=$(python3 dev/perf/tenant_totals.py "$BROKER_URL" | cut -d' ' -f3)
 echo "Federated queries over $REGS registrations (every source is the sink, answering empty)." | tee "$OUT/fed.md"
 echo "" | tee -a "$OUT/fed.md"
 echo "| rate (rps) | queries | failed (conn/4xx/5xx) | with a source warning | GET p99 (ms) | source calls | calls per query | broker cores | host busy cores |" | tee -a "$OUT/fed.md"
