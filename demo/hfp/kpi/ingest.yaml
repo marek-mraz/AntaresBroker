@@ -124,7 +124,7 @@ output:
               - mapping: |
                   root = if this.changed.exists("nextStop") && this.prev.nextStop != null && this.prev.nextStop != "" {
                     {
-                      "id": "urn:ngsi-ld:StopArrival:" + this.id.slice(22) + ":" + this.tst.ts_unix().string(),
+                      "id": "urn:ngsi-ld:StopArrival:" + this.id.slice(24) + ":" + this.tst.ts_unix().string(),
                       "type": "StopArrival",
                       "line": {"type": "Property", "value": this.route},
                       "stop": {"type": "Property", "value": this.prev.nextStop},
@@ -163,4 +163,6 @@ logger:
   level: INFO
 
 http:
-  address: 0.0.0.0:42021
+  # Bento serves /metrics and its own config on this endpoint. The demo has
+  # no reason to offer either to the network.
+  address: 127.0.0.1:42021

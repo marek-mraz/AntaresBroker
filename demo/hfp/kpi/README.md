@@ -13,11 +13,23 @@ Built and run against live `mqtt.hsl.fi:8883`.
 | `ingest.yaml` | HFP MQTT -> change-only NGSI-LD upserts + derived arrival events |
 | `kpi.yaml` | reads two entity types -> wasm -> upserts KPI entities to the KPI tenant |
 | `wasm-kpi/src/lib.rs` | the algorithm: p95 speed, per-stop headway, bunching |
+| `ui/` | the map + KPI panel, and the tenant-aware proxy that serves it |
+| `run.sh` | builds the module and brings the whole stack up, down, or reports it |
 
-Broker: `antares` release build on `:42020`, memory store.
+Broker: `antares` release build on `:42020`. The store defaults to `timescale`,
+because the memory store grows without bound under a continuous firehose;
+`STORE=file` keeps everything native, `STORE=memory` suits a throwaway run.
 Bento: v1.20.0 (`warpstreamlabs/bento`, the MIT fork).
 
 ## Run it
+
+```bash
+./run.sh start     # module tests, wasm build, broker, both pipelines, UI
+./run.sh status    # what is running, and how many entities each tenant holds
+./run.sh stop
+```
+
+Or by hand:
 
 ```bash
 # 1. broker
@@ -127,16 +139,16 @@ stops would report 2 false bunching incidents.
 
 ## Live UI
 
-`AntaresBroker/demo/hfp/kpi-live/` — the original HFP map (viewport-bounded
-`georel=within` paging, transport-mode colours, click a vehicle for its temporal
-trail plus speed/delay spark charts and a data table) with a KPI panel beside
-it, polling the second tenant every 4 s and flashing rows that changed.
+`ui/` — the original HFP map (viewport-bounded `georel=within` paging,
+transport-mode colours, click a vehicle for its temporal trail plus speed/delay
+spark charts and a data table) with a KPI panel beside it, polling the second
+tenant every 4 s and flashing rows that changed.
 
 ```bash
-python3 AntaresBroker/demo/hfp/kpi-live/serve.py   # http://localhost:42030
+python3 ui/serve.py   # http://localhost:42030
 ```
 
-`serve.py` is a tenant-aware sibling of `../map/serve.py`: it proxies
+`ui/serve.py` is a tenant-aware sibling of `../map/serve.py`: it proxies
 `/api/<tenant>/<path>` to the broker with the `NGSILD-Tenant` header set from
 the path segment, because the broker sends no CORS headers and sits outside the
 published port range.

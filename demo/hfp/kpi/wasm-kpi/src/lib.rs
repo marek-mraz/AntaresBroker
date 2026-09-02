@@ -153,10 +153,9 @@ fn compute(samples: Vec<Sample>) -> Vec<Kpi> {
             } else {
                 Some(gaps.iter().sum::<f64>() / gaps.len() as f64)
             };
-            let min_headway = gaps
-                .iter()
-                .copied()
-                .fold(None, |acc: Option<f64>, g| Some(acc.map_or(g, |a| a.min(g))));
+            let min_headway = gaps.iter().copied().fold(None, |acc: Option<f64>, g| {
+                Some(acc.map_or(g, |a| a.min(g)))
+            });
 
             // Punctuality, over the vehicles that reported a schedule deviation.
             let mut delays: Vec<f64> = rows.iter().filter_map(|r| r.delay).collect();
@@ -172,16 +171,17 @@ fn compute(samples: Vec<Sample>) -> Vec<Kpi> {
             // i.e. the latest vehicle. Report it as positive seconds late.
             let worst_late = delays.first().filter(|d| **d < 0.0).map(|d| -d);
 
-            let moving: Vec<f64> = rows.iter().filter_map(|r| r.speed).collect();
-            let stopped_pct = if moving.is_empty() {
+            // `speeds` is the same set, already sorted; a count of the ones
+            // under the threshold does not care about the order.
+            let stopped_pct = if speeds.is_empty() {
                 None
             } else {
-                let n = moving.iter().filter(|s| **s < STOPPED_KMH).count();
-                Some(100.0 * n as f64 / moving.len() as f64)
+                let n = speeds.iter().filter(|s| **s < STOPPED_KMH).count();
+                Some(100.0 * n as f64 / speeds.len() as f64)
             };
 
             Kpi {
-                vehicle_count: rows.iter().filter(|r| r.speed.is_some()).count(),
+                vehicle_count: speeds.len(),
                 arrival_count: rows.iter().filter(|r| r.at_stop.is_some()).count(),
                 on_time_percent: on_time,
                 median_delay_seconds: median_delay,
@@ -224,6 +224,13 @@ pub extern "C" fn process() {
     // `deallocate` once it has copied the bytes out.
     let size = out.len() as u32;
     let dst = allocate(size);
+    if dst == 0 {
+        // `alloc` answers with null when the module's memory cannot grow. The
+        // host reads whatever the last `v0_msg_set_bytes` named, so writing
+        // through the null pointer would be the one way to turn an allocation
+        // failure into a corrupted message.
+        return;
+    }
     unsafe {
         std::ptr::copy_nonoverlapping(out.as_ptr(), dst as *mut u8, out.len());
         v0_msg_set_bytes(dst, size);
@@ -280,10 +287,7 @@ mod tests {
 
     #[test]
     fn vehicles_not_at_a_stop_are_excluded_from_headway() {
-        let out = compute(vec![
-            s("5", 10.0, 0.0, None),
-            s("5", 10.0, 30.0, None),
-        ]);
+        let out = compute(vec![s("5", 10.0, 0.0, None), s("5", 10.0, 30.0, None)]);
         assert_eq!(out[0].vehicle_count, 2);
         assert_eq!(out[0].arrival_count, 0, "no at_stop rows here");
         assert_eq!(out[0].mean_headway_seconds, None);
@@ -316,7 +320,11 @@ mod tests {
         assert_eq!(out[0].on_time_percent, Some(50.0));
         // Worst lateness is reported POSITIVE even though HFP's sign is negative.
         assert_eq!(out[0].worst_late_seconds, Some(120.0));
-        assert_eq!(out[0].median_delay_seconds, Some(-10.0), "nearest-rank median");
+        assert_eq!(
+            out[0].median_delay_seconds,
+            Some(-10.0),
+            "nearest-rank median"
+        );
     }
 
     #[test]
@@ -343,6 +351,27 @@ mod tests {
         let out = compute(vec![s("3", 20.0, 0.0, Some("stopA"))]);
         assert_eq!(out[0].on_time_percent, None);
         assert_eq!(out[0].median_delay_seconds, None);
+    }
+
+    /// A line seen only through arrivals has no speed anywhere, and every
+    /// KPI derived from speed has to be absent rather than zero: an empty
+    /// sample set means "not measured", and a p95 of 0 or "100% standing
+    /// still" on a moving tram line would be read as a finding.
+    #[test]
+    fn a_line_known_only_from_arrivals_reports_no_speed_kpi() {
+        let arrival = |line: &str, at: f64| Sample {
+            line: line.into(),
+            speed: None,
+            observed: Some(at),
+            at_stop: Some("stopA".into()),
+            delay: None,
+        };
+        let out = compute(vec![arrival("6", 0.0), arrival("6", 300.0)]);
+        assert_eq!(out[0].vehicle_count, 0, "no sample carried a speed");
+        assert_eq!(out[0].arrival_count, 2);
+        assert_eq!(out[0].p95_speed_kmh, None);
+        assert_eq!(out[0].stopped_percent, None, "unmeasured is not stopped");
+        assert_eq!(out[0].mean_headway_seconds, Some(300.0));
     }
 
     #[test]

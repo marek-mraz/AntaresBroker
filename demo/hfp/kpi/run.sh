@@ -5,13 +5,17 @@
 #   ./run.sh stop      stop everything this script started
 #   ./run.sh status    what is running, and whether data is fresh
 #
-# Everything runs natively; nothing here needs Docker.
+# The broker, both Bento pipelines and the UI run natively. Only the default
+# store needs a container for its database: STORE=file or STORE=memory
+# removes even that.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 # rustup installs here and non-login shells often miss it.
 [ -d "$HOME/.cargo/bin" ] && PATH="$HOME/.cargo/bin:$PATH"
 
+# The two Bento configs address the broker by literal port, so moving this
+# means editing the url: lines in ingest.yaml and kpi.yaml with it.
 BROKER_PORT="${BROKER_PORT:-42020}"
 UI_PORT="${UI_PORT:-42030}"
 # The memory store grows without bound under a continuous firehose (measured at
@@ -55,7 +59,7 @@ start() {
       docker run -d --name "$DB_CONTAINER" \
         -e POSTGRES_USER=antares -e POSTGRES_PASSWORD=antares -e POSTGRES_DB=antares \
         -e TS_TUNE_MEMORY=2GB -e TS_TUNE_NUM_CPUS=2 \
-        -p 5432:5432 timescale/timescaledb-ha:pg17 >/dev/null
+        -p 127.0.0.1:5432:5432 timescale/timescaledb-ha:pg17 >/dev/null
       until docker exec "$DB_CONTAINER" pg_isready -U antares >/dev/null 2>&1; do sleep 2; done
     fi
     echo "database ready"

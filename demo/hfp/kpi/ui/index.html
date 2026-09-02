@@ -209,6 +209,13 @@ document.getElementById("legend").innerHTML =
   Object.entries({bus:"#1c7ed6",tram:"#2f9e44",train:"#9c36b5",metro:"#e8590c",ferry:"#0b7285"})
     .map(([k,c]) => `<span style="background:${c}"></span>${k} `).join("");
 
+// Feed values reach this page as broker data, and a Property value is
+// whatever a writer put in it. Every one of them lands in innerHTML below,
+// so escape before interpolating — in attribute position too, where a bare
+// quote is enough to break out.
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 const markers = new Map();   // id -> L.circleMarker
 const prevKpi = new Map();   // line -> last p95, to flash the row on change
 const destOf = new Map();    // route id -> most recent headsign received
@@ -303,10 +310,10 @@ async function tick() {
       m._route = v.route != null ? String(v.route) : null;
       styleMarker(m);
       if (v.route && v.headsign) destOf.set(String(v.route), v.headsign);
-      m._info = `<b>${v.transportMode || "?"} ${v.route || ""}</b> · ` +
-        `${v.id.replace("urn:ngsi-ld:Vehicle:HSL:", "")}<br>` +
+      m._info = `<b>${esc(v.transportMode || "?")} ${esc(v.route || "")}</b> · ` +
+        `${esc(v.id.replace("urn:ngsi-ld:Vehicle:HSL:", ""))}<br>` +
         `speed ${v.speed != null ? (v.speed * 3.6).toFixed(0) : "?"} km/h · ` +
-        `delay ${v.delay != null ? v.delay + " s" : "?"}`;
+        `delay ${v.delay != null ? esc(v.delay) + " s" : "?"}`;
     }
     for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
     document.getElementById("count").textContent = seen.size;
@@ -368,9 +375,9 @@ async function tickKpi() {
         const tip = `${x.arrivalCount ?? 0} arrivals · ${worst}${stopped ? " · " + stopped : ""}`;
 
         return `<tr class="${moved ? "changed" : ""}${selected === key ? " sel" : ""}"` +
-          ` data-route="${key}" title="${tip}">` +
-          `<td class="line" style="color:${COLORS.tram}">${lineLabel(key)}` +
-            `<span class="sub2">${key}${dest ? " · " + dest : ""}</span></td>` +
+          ` data-route="${esc(key)}" title="${esc(tip)}">` +
+          `<td class="line" style="color:${COLORS.tram}">${esc(lineLabel(key))}` +
+            `<span class="sub2">${esc(key)}${dest ? " · " + esc(dest) : ""}</span></td>` +
           `<td>${x.vehicleCount ?? "–"}</td>` +
           `<td>${otCell}</td>` +
           `<td>${dCell}</td>` +

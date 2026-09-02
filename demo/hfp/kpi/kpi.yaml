@@ -11,6 +11,10 @@
 #
 # Two reads feed one module: Vehicle carries speed, StopArrival carries the
 # arrival times. The Sample struct tolerates both shapes.
+#
+# Both reads take one page. A tram fleet fits, but arrivals accumulate for
+# their whole 30-minute expiry and can pass a page: past that the KPIs are
+# computed over the first page of arrivals, not all of them.
 
 input:
   generate:

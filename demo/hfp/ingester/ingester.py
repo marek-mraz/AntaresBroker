@@ -3,9 +3,10 @@
 Subscribes to mqtt.hsl.fi (TLS 8883), buffers the latest VP message per
 vehicle, and every FLUSH_MS posts one /entityOperations/upsert?options=update
 batch with expiresAt = now + TTL_SECS on every entity. Prints a stats line
-every 10 s (consumed rate, batch size, upsert latency, HTTP errors).
+every 10 s (consumed rate, batches posted, upsert latency, HTTP errors).
 """
 
+import collections
 import json
 import os
 import ssl
@@ -32,8 +33,10 @@ WORKERS = int(os.environ.get("WORKERS", "4"))
 
 pending = {}  # entity id -> entity doc (latest wins)
 lock = threading.Lock()
+# lat_ms is bounded: the reporter reads the last 100 latencies and this runs
+# for days, so an unbounded list would be a slow leak and nothing else.
 stats = {"msgs": 0, "bad": 0, "batches": 0, "upserted": 0,
-         "http_err": 0, "lat_ms": []}
+         "http_err": 0, "lat_ms": collections.deque(maxlen=100)}
 
 
 def prop(value, observed_at=None):
@@ -133,7 +136,7 @@ def reporter():
     last_msgs = 0
     while True:
         time.sleep(10)
-        lat = sorted(stats["lat_ms"][-100:])
+        lat = sorted(stats["lat_ms"])
         p50 = lat[len(lat) // 2] if lat else 0
         p95 = lat[int(len(lat) * 0.95)] if lat else 0
         rate = (stats["msgs"] - last_msgs) / 10

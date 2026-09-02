@@ -35,6 +35,13 @@ document.getElementById("legend").innerHTML =
   Object.entries({bus:"#1c7ed6",tram:"#2f9e44",train:"#9c36b5",metro:"#e8590c",ferry:"#0b7285"})
     .map(([k,c]) => `<span style="background:${c}"></span>${k} `).join("");
 
+// Feed values reach this page as broker data, and a Property value is
+// whatever a writer put in it. Every one of them lands in innerHTML below,
+// so escape before interpolating — in attribute position too, where a bare
+// quote is enough to break out.
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 const markers = new Map();   // id -> L.circleMarker
 let trail = null;
 
@@ -74,10 +81,10 @@ async function tick() {
       } else {
         m.setLatLng(ll);
       }
-      m._info = `<b>${v.transportMode || "?"} ${v.route || ""}</b> · ` +
-        `${v.id.replace("urn:ngsi-ld:Vehicle:HSL:", "")}<br>` +
+      m._info = `<b>${esc(v.transportMode || "?")} ${esc(v.route || "")}</b> · ` +
+        `${esc(v.id.replace("urn:ngsi-ld:Vehicle:HSL:", ""))}<br>` +
         `speed ${v.speed != null ? (v.speed * 3.6).toFixed(0) : "?"} km/h · ` +
-        `delay ${v.delay != null ? v.delay + " s" : "?"}`;
+        `delay ${v.delay != null ? esc(v.delay) + " s" : "?"}`;
     }
     for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
     document.getElementById("count").textContent = seen.size;
