@@ -1047,11 +1047,7 @@ async fn query_entities_outer(
     mut params: HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    let Some(map_ref) = headers
-        .get("NGSILD-EntityMap")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-    else {
+    let Some(map_ref) = single_header(headers, "NGSILD-EntityMap")? else {
         return query_entities_inner(st, &params, headers).await;
     };
     let tenant = tenant_from(headers)?;

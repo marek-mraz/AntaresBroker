@@ -298,3 +298,69 @@ async fn clause_5_7_4_4_unknown_map_recreates_201() {
     let loc = map_header(&headers).expect("fresh map");
     assert!(!loc.contains(":gone"), "{loc}");
 }
+
+/// Table 6.4.3.2-2 gives NGSILD-EntityMap cardinality 0..1, and the ETSI
+/// OpenAPI types it as a single URI. Two values name no map: the header is
+/// not list-type, so its repeated lines cannot be joined (RFC 9110 clause
+/// 5.3), and taking the first pins the pages of the answer to a map the
+/// client did not choose. Every operation that reads the header — the two
+/// query paths and the retrieval that carries it through — refuses.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_6_4_3_2_2_a_repeated_entitymap_header_names_no_map() {
+    let st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:dup1", 30).await;
+
+    // a live map to make the first value a plausible one: a request naming
+    // it alone succeeds, so only the second value can be what is refused
+    let (status, headers, body) =
+        get(&st, "/ngsi-ld/v1/entities?type=Vehicle&entityMap=true").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let live = map_header(&headers).expect("map location");
+    let (status, _, body) = get_with_map(&st, "/ngsi-ld/v1/entities?type=Vehicle", &live).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for uri in [
+        "/ngsi-ld/v1/entities?type=Vehicle",
+        "/ngsi-ld/v1/entities/urn:ngsi-ld:Vehicle:dup1",
+        "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after\
+         &timeAt=2000-01-01T00:00:00Z&timeproperty=createdAt",
+    ] {
+        let (status, _, body) = send(
+            &st,
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("NGSILD-EntityMap", live.as_str())
+                .header("NGSILD-EntityMap", "urn:ngsi-ld:entitymap:other")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a repeated NGSILD-EntityMap names no map on {uri}: {body}"
+        );
+    }
+
+    // an unreadable value is not "unknown", it is unusable: it must not be
+    // dropped on the floor and answered as if no map had been named
+    let (status, _, body) = send(
+        &st,
+        Request::builder()
+            .method("GET")
+            .uri("/ngsi-ld/v1/entities?type=Vehicle")
+            .header(
+                "NGSILD-EntityMap",
+                axum::http::HeaderValue::from_bytes(b"\xff\xfe").expect("raw header"),
+            )
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unreadable NGSILD-EntityMap must not be treated as absent: {body}"
+    );
+}

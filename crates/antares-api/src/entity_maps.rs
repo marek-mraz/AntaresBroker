@@ -566,10 +566,8 @@ where
     Fut: std::future::Future<Output = ApiResult<Response>>,
 {
     let tenant = tenant_from(headers)?;
-    let map_ref = headers
-        .get("NGSILD-EntityMap")
-        .and_then(|v| v.to_str().ok())
-        .map(|r| r.rsplit('/').next().unwrap_or(r).to_owned());
+    let map_ref = single_header(headers, "NGSILD-EntityMap")?
+        .map(|r| r.rsplit('/').next().unwrap_or(&r).to_owned());
     if let Some(map) = map_ref
         .as_deref()
         .and_then(|mid| map_if_accessible(st, &tenant, mid))

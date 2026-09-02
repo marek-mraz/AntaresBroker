@@ -117,23 +117,33 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// The one value of a request header CIM 009 gives cardinality 0..1
+/// (`NGSILD-Tenant` 6.3.14, `NGSILD-Snapshot` 6.3.22, `NGSILD-EntityMap`
+/// Table 6.4.3.2-2). Such a field is not list-type, so repeated field lines
+/// cannot be joined into one value (RFC 9110 clause 5.3) and the request
+/// names nothing; `HeaderMap::get` would answer with the first of them, and
+/// a value that is not ASCII would read as no header at all. Both are
+/// `BadRequestData` — each of these headers selects the data the operation
+/// runs against, and a request must never be answered against a dataset
+/// the client did not name.
+pub fn single_header(headers: &HeaderMap, name: &str) -> ApiResult<Option<String>> {
+    let mut vals = headers.get_all(name).iter();
+    match (vals.next(), vals.next()) {
+        (None, _) => Ok(None),
+        (Some(_), Some(_)) => Err(NgsiError::BadRequestData(format!("repeated {name}")).into()),
+        (Some(v), None) => Ok(Some(
+            v.to_str()
+                .map_err(|_| NgsiError::BadRequestData(format!("non-ASCII {name}")))?
+                .to_owned(),
+        )),
+    }
+}
+
 /// Tenant from the NGSILD-Tenant header (6.3.14).
 pub fn tenant_from(headers: &HeaderMap) -> ApiResult<TenantId> {
-    // NGSILD-Tenant carries one value (6.3.14), so it is not a list-type
-    // field: repeated field lines cannot be joined (RFC 9110 clause 5.3) and
-    // silently taking the first would let a second value decide nothing while
-    // looking like it should.
-    if headers.get_all("NGSILD-Tenant").iter().count() > 1 {
-        return Err(NgsiError::BadRequestData("repeated NGSILD-Tenant".into()).into());
-    }
-    match headers.get("NGSILD-Tenant") {
+    match single_header(headers, "NGSILD-Tenant")? {
         None => Ok(TenantId::default()),
-        Some(v) => {
-            let raw = v
-                .to_str()
-                .map_err(|_| NgsiError::BadRequestData("non-ASCII NGSILD-Tenant".into()))?;
-            Ok(TenantId::new(raw)?)
-        }
+        Some(raw) => Ok(TenantId::new(&raw)?),
     }
 }
 
