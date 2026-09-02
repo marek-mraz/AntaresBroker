@@ -256,18 +256,15 @@ fn double_start_refuses_the_lock_instead_of_corrupting() {
     let mut first = start(port, &dir, "file");
     wait_healthy(port);
 
-    // second process, same data dir, different port: must refuse to start
-    let out = Command::new(env!("CARGO_BIN_EXE_antares"))
-        .env("ANTARES_HTTP_PORT", free_port().to_string())
-        .env("ANTARES_STORE", "file")
-        .env("ANTARES_DATA_DIR", &dir)
-        .output()
-        .expect("run second broker");
-    assert!(
-        !out.status.success(),
-        "a second broker on the same volume must NOT start"
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
+    // second process, same data dir, different port: must refuse to start.
+    // Bounded, not `output()`: a second broker that DID take the volume
+    // would serve forever and hang the suite instead of failing it.
+    let port2 = free_port().to_string();
+    let err = fatal_stderr(&[
+        ("ANTARES_HTTP_PORT", &port2),
+        ("ANTARES_STORE", "file"),
+        ("ANTARES_DATA_DIR", dir.to_str().expect("utf-8 tempdir")),
+    ]);
     assert!(
         err.contains("Cannot acquire lock"),
         "the refusal must name the lock, not fail obscurely: {err}"
@@ -457,8 +454,16 @@ fn sigterm_flips_health_before_it_closes_the_socket() {
 #[test]
 fn unknown_store_mode_is_fatal() {
     let dir = tempdir("badmode");
-    let status = start(23999, &dir, "bogus").wait().expect("wait");
-    assert!(!status.success(), "unknown ANTARES_STORE must be fatal");
+    let port = free_port().to_string();
+    let err = fatal_stderr(&[
+        ("ANTARES_HTTP_PORT", &port),
+        ("ANTARES_STORE", "bogus"),
+        ("ANTARES_DATA_DIR", dir.to_str().expect("utf-8 tempdir")),
+    ]);
+    assert!(
+        err.contains("ANTARES_STORE"),
+        "the refusal must name the key an operator has to fix: {err}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
