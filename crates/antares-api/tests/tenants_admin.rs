@@ -63,7 +63,7 @@ fn entity(id: &str) -> Value {
 
 fn state() -> AppState {
     let mut st = AppState::new("antares-test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

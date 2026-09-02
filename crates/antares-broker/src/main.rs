@@ -824,7 +824,7 @@ async fn run(
             .map_err(|_| "ANTARES_BUS=nats requires ANTARES_NATS_URL")?;
         wiring::wire_nats(&mut state, &url, roles).await?;
     } else {
-        antares_api::notify::wire(&mut state); // in-process matcher + notifier + interval firing
+        antares_api::wire(&mut state); // in-process matcher + notifier + interval firing
     }
     telemetry::spawn_sampler(state.clone());
 

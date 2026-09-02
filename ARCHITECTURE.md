@@ -212,19 +212,22 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
-- `antares-api` has one strongly connected component of 9 of its 29
-  modules, counted from every `crate::<module>` reference per file:
-  `attrs, distsub, entities, entity_maps, federation, notify,
-  snapshots, subscriptions, temporal`. `state.rs` sits outside it
-  since the change event and the two document mirrors (`Change`,
-  `SubMirror`, `DocMirror`) live in the leaf `mirror.rs`, which names no
-  other module; `contexts` and `history` left with it. `batch.rs` left
-  once paging, ordering and the query-body lift moved to the leaf
-  `paging.rs`, which names `state`, `negotiate`, `geo` and `bounds` and
-  no resource module; `csource.rs` left once registration matching moved
-  to the leaf `registry.rs` and the request's temporal query to
-  `temporalq.rs`; `dt_key`, `scope_matches` and `type_selection_matches`
-  are named from the crates where they live. `cargo modules`
+- `antares-api` is acyclic: no module reaches itself through
+  `crate::<module>` references, so the largest strongly connected
+  component of its 31 modules is one. What two resources share lives in
+  a leaf that names no resource module: the change event and the two
+  document mirrors in `mirror.rs`, paging, ordering and the query-body
+  lift in `paging.rs`, the request's temporal query in `temporalq.rs`,
+  registration matching in `registry.rs`, the system attributes of a
+  write in `stamp.rs`, one EntityMap document in `entity_map.rs`, and
+  4.5.23 Linked Entity Retrieval with the 4.5.16 GeoJSON shapes in
+  `repr.rs`. `dt_key`, `check_attr_name`, `scope_matches`,
+  `type_selection_matches` and `redact_userinfo` are named from the
+  crates that own them. The one call that pointed back up the pipeline —
+  the delivery path handing a notification on the internal endpoint to
+  `distsub` — is a seam: `AppState::csource_notification`, installed by
+  `antares_api::wire`, absent and therefore dropped on a state nobody
+  wired. `cargo modules`
   does not show such a cycle because it records call edges and not field
   types, so the source-level count is the one to measure: `dev/module-graph.py` prints
   it per crate and `xray.yml` ratchets the largest component of every

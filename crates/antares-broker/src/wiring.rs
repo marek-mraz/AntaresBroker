@@ -3,7 +3,7 @@
 //! place that knows both the bus variant and which consumers exist.
 //!
 //! bus=local — single process, all roles: the store's change hook feeds the
-//! in-process matcher (`notify::wire`), temporal recording stays synchronous
+//! in-process matcher (`antares_api::wire`), temporal recording stays synchronous
 //! in the write path. Exactly v0's behaviour; the ETSI pipeline runs this.
 //!
 //! bus=nats — the scale-out spine:
@@ -401,7 +401,7 @@ pub async fn wire_nats(
         let kv = bus.subs_kv().await?;
         let watch = kv.watch_all().await?;
         // Same rule as the registration mirror, and the same one `bus=local`
-        // applies in `notify::wire`: a subscription absent from an installed
+        // applies in `antares_api::wire`: a subscription absent from an installed
         // mirror never fires again, because the matcher reads candidates
         // from the mirror alone.
         match antares_api::notify::seed_mirror(

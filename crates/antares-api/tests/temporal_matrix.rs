@@ -32,7 +32,7 @@ const T2: &str = "2026-01-01T11:00:00Z";
 fn state(mode: TemporalRecord) -> AppState {
     let mut st = AppState::new("me".into());
     st.temporal_record = mode;
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

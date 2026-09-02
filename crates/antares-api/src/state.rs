@@ -42,6 +42,20 @@ impl std::str::FromStr for TemporalRecord {
     }
 }
 
+/// The handler `wire` installs for a notification that arrives on the
+/// internal distributed-subscription endpoint (5.8.1.4).
+pub type CsourceNotification = Arc<
+    dyn for<'a> Fn(
+            &'a AppState,
+            &'a antares_model::TenantId,
+            &'a str,
+            Option<&'a str>,
+            &'a [serde_json::Value],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn CurrentStateDriver>,
@@ -136,6 +150,13 @@ pub struct AppState {
     /// the broker (the only crate that knows an exporter exists);
     /// `None` = 404, the facade calls elsewhere stay no-ops.
     pub metrics_render: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    /// 5.8.1.4 consumer half: a notification addressed to the internal
+    /// `urn:antares:distsub:` endpoint never leaves the broker, it re-enters
+    /// it. The delivery path hands it here instead of naming the module that
+    /// owns distributed subscriptions; `wire` installs the handler. `None`
+    /// drops such a notification, which is what a broker that never created
+    /// an internal subscription should do with one.
+    pub csource_notification: Option<CsourceNotification>,
     /// True only under bus=nats (set by the broker's wiring): multiple
     /// processes share the store, so interval-subscription firings must be
     /// claimed single-winner. bus=local keeps the direct path — a
@@ -371,6 +392,7 @@ impl AppState {
             reg_fail_sync: None,
             reg_mirror: None,
             metrics_render: None,
+            csource_notification: None,
             nats: false,
             temporal_record: TemporalRecord::All,
             public_url,

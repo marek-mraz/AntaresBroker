@@ -46,7 +46,7 @@ async fn send(
 /// query that matches more than one of them has a next page to point at.
 async fn seeded(cats: [&str; 3]) -> AppState {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     for (n, cat) in (1..=3).zip(cats) {
         let body = format!(
             r#"{{"id":"urn:ngsi-ld:Bldg:{n}","type":"Bldg",

@@ -19,7 +19,7 @@ use tower::ServiceExt;
 fn state() -> AppState {
     let store = Arc::new(AnyStore::Mem(Store::default()));
     let mut st = AppState::with_drivers("me".into(), store.clone(), store, "memory");
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

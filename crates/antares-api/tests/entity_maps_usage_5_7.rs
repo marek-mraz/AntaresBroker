@@ -14,7 +14,7 @@ use tower::ServiceExt;
 
 fn state() -> AppState {
     let mut st = AppState::new("antares-em-usage".into());
-    antares_api::notify::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st); // temporal auto-recording
     st
 }
 

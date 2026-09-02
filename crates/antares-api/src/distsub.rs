@@ -1732,4 +1732,23 @@ mod tests {
             "the local Subscription id must not leak to the peer: {text}"
         );
     }
+
+    /// 5.8.1.4 consumer half, as a seam: the delivery path hands a
+    /// notification on the internal endpoint to the handler `wire` installs
+    /// and to nothing else. An unwired state has no handler, so such a
+    /// notification is dropped rather than delivered somewhere — the seam
+    /// fails closed, and a caller cannot reach `distsub` by bypassing it.
+    #[tokio::test]
+    async fn the_internal_endpoint_is_reached_only_through_the_installed_handler() {
+        let bare = AppState::new("antares".into());
+        assert!(
+            bare.csource_notification.is_none(),
+            "a state nobody wired carries no handler"
+        );
+        let wired = crate::wired_state("antares");
+        assert!(
+            wired.csource_notification.is_some(),
+            "wire installs the consumer half"
+        );
+    }
 }

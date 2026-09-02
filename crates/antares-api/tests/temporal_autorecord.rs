@@ -22,7 +22,7 @@ async fn send(st: &AppState, req: Request<Body>) -> (StatusCode, String) {
 #[tokio::test(flavor = "multi_thread")]
 async fn partial_update_appends_temporal_instances() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let (status, body) = send(
         &st,
@@ -97,7 +97,7 @@ async fn partial_update_appends_temporal_instances() {
 #[tokio::test(flavor = "multi_thread")]
 async fn scope_update_appends_temporal_property_instance() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:2","type":"Rec","scope":"/A",
         "v":{"type":"Property","value":1}}"#;
@@ -156,7 +156,7 @@ async fn scope_update_appends_temporal_property_instance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn property_deletion_records_null_instance() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:3","type":"Rec",
         "v":{"type":"Property","value":7,"observedAt":"2026-08-10T00:00:00Z"}}"#;
@@ -214,7 +214,7 @@ async fn property_deletion_records_null_instance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn relationship_deletion_records_null_instance() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:4","type":"Rec",
         "r":{"type":"Relationship","object":"urn:ngsi-ld:X:1",
@@ -279,7 +279,7 @@ async fn relationship_deletion_records_null_instance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn simplified_temporal_pairs_per_attribute_type() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:5","type":"Rec",
         "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},
@@ -373,7 +373,7 @@ async fn simplified_temporal_pairs_per_attribute_type() {
 #[tokio::test(flavor = "multi_thread")]
 async fn aggregated_temporal_representation() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:6","type":"Rec",
         "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},
@@ -459,7 +459,7 @@ async fn aggregated_temporal_representation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn absurd_aggr_period_duration_is_400_not_a_panic() {
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let create = r#"{"id":"urn:ngsi-ld:Rec:7","type":"Rec",
         "speed":[{"type":"Property","value":1,"observedAt":"2026-08-10T00:00:01Z"},

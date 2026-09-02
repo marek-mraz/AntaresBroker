@@ -97,7 +97,7 @@ async fn wait_ready_h(st: &AppState, loc: &str, extra: &[(&str, &str)]) -> Value
 
 fn state() -> AppState {
     let mut st = AppState::new("antares-snap".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

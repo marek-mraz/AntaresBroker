@@ -44,7 +44,7 @@ async fn get(st: &AppState, uri: &str) -> (StatusCode, Value) {
 #[tokio::test(flavor = "multi_thread")]
 async fn clause_5_7_4_3_expand_values_coerces_the_temporal_query() {
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st); // temporal auto-recording
+    antares_api::wire(&mut st); // temporal auto-recording
 
     let body = json!({"id": "urn:ngsi-ld:Shop:ev1", "type": "Shop",
         "category": {"type": "VocabProperty", "vocab": "commercial"}})

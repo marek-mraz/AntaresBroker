@@ -59,7 +59,7 @@ impl Broker {
         );
         // Same in-process matcher/notifier path as bus=local: the
         // store's change hook feeds it, no bus process exists to talk to.
-        antares_api::notify::wire(&mut state);
+        antares_api::wire(&mut state);
         // 5.8.1.4: distributed subscriptions hand this URL to the remote
         // broker as the notification callback. wasm32 has no process env
         // (the native default reads ANTARES_PUBLIC_URL + appends the port),

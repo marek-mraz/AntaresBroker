@@ -143,7 +143,7 @@ fn linked_entity(n: &Value) -> Value {
 async fn clause_4_21_nested_term_constrains_the_linked_entity() {
     allow_private();
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     seed_device(&st).await;
 
     let rx = subscribe(&st, json!(["id", "type", "speed", "refDevice{model}"])).await;
@@ -178,7 +178,7 @@ async fn clause_4_21_nested_term_constrains_the_linked_entity() {
 async fn clause_4_21_bare_term_selects_the_whole_linked_entity() {
     allow_private();
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     seed_device(&st).await;
 
     let rx = subscribe(&st, json!(["id", "type", "speed", "refDevice"])).await;
@@ -200,7 +200,7 @@ async fn clause_4_21_bare_term_selects_the_whole_linked_entity() {
 async fn clause_4_21_pipe_and_comma_are_equivalent_in_notifications() {
     allow_private();
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     seed_device(&st).await;
 
     // one array element carrying a disjunction, and a pipe inside the braces
@@ -225,7 +225,7 @@ async fn clause_4_21_pipe_and_comma_are_equivalent_in_notifications() {
 async fn clause_4_21_omit_with_children_constrains_the_linked_entity() {
     allow_private();
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     seed_device(&st).await;
 
     let (uri, mut rx) = capture_server().await;

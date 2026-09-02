@@ -211,13 +211,27 @@ impl ApiSurface for Admin {
     }
 }
 
+/// Installs the in-process pipeline on a state: the subscription mirror and
+/// matcher (5.8.6), the interval firing, and the consumer half of a
+/// distributed subscription (5.8.1.4) — a notification arriving on the
+/// internal endpoint is handed to `distsub` from here, so the delivery path
+/// never names it. Every root that serves requests calls this once.
+pub fn wire(state: &mut AppState) {
+    notify::wire(state);
+    state.csource_notification = Some(std::sync::Arc::new(|st, tenant, own_id, reason, regs| {
+        Box::pin(distsub::on_csource_notification(
+            st, tenant, own_id, reason, regs,
+        ))
+    }));
+}
+
 /// An `AppState` with the notification pipeline installed, for tests that
 /// exercise a route which notifies. The router does not wire it: a caller
 /// that only reads never pays for the mirror seed.
 #[cfg(any(test, feature = "test-kit"))]
 pub fn wired_state(host_alias: &str) -> AppState {
     let mut st = AppState::new(host_alias.to_owned());
-    notify::wire(&mut st);
+    wire(&mut st);
     st
 }
 
@@ -5833,7 +5847,7 @@ mod clause_6_3_11 {
     #[tokio::test]
     async fn clause_6_3_11_expires_at_gated_by_sysattrs() {
         let mut st = AppState::new("antares-test".into());
-        crate::notify::wire(&mut st);
+        crate::wire(&mut st);
         let app = router(st);
         let entity = serde_json::json!({
             "id": "urn:ngsi-ld:Building:exp6311", "type": "Building",

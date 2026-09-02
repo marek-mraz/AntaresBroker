@@ -83,7 +83,7 @@ async fn subscribe(st: &AppState, id: &str, uri: &str, trigger: Option<&str>) {
 async fn an_attribute_less_create_reaches_only_the_subscription_that_asked_for_it() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("test-triggers".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let (uri_default, mut rx_default) = sink().await;
     let (uri_created, mut rx_created) = sink().await;

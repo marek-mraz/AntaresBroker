@@ -98,7 +98,7 @@ async fn a_mirror_seed_that_cannot_read_the_store_does_not_silence_the_tenant() 
     allow_private();
 
     let mut first = AppState::new("me".into());
-    antares_api::notify::wire(&mut first);
+    antares_api::wire(&mut first);
 
     let (uri, mut rx) = capture_server().await;
     let (status, body) = send(
@@ -126,7 +126,7 @@ async fn a_mirror_seed_that_cannot_read_the_store_does_not_silence_the_tenant() 
     // is refused the way the Postgres arm refuses one past its ceiling.
     let mut restarted = AppState::new("me".into());
     restarted.store = Arc::new(Double::flaky_list(first.store.clone(), 1));
-    antares_api::notify::wire(&mut restarted);
+    antares_api::wire(&mut restarted);
 
     let (status, body) = send(
         &restarted,
@@ -155,7 +155,7 @@ async fn a_seed_that_reads_the_store_installs_the_mirror() {
     allow_private();
 
     let mut first = AppState::new("me".into());
-    antares_api::notify::wire(&mut first);
+    antares_api::wire(&mut first);
 
     let (uri, _rx) = capture_server().await;
     let (status, body) = send(
@@ -169,7 +169,7 @@ async fn a_seed_that_reads_the_store_installs_the_mirror() {
 
     let mut restarted = AppState::new("me".into());
     restarted.store = Arc::new(Double::flaky_list(first.store.clone(), 0));
-    antares_api::notify::wire(&mut restarted);
+    antares_api::wire(&mut restarted);
 
     assert!(
         restarted.sub_mirror.is_some(),
@@ -196,7 +196,7 @@ async fn a_tenant_over_the_list_ceiling_does_not_take_the_mirror_down_for_everyo
     allow_private();
 
     let mut first = AppState::new("me".into());
-    antares_api::notify::wire(&mut first);
+    antares_api::wire(&mut first);
 
     let (uri, mut rx) = capture_server().await;
     let (status, body) = send(
@@ -212,7 +212,7 @@ async fn a_tenant_over_the_list_ceiling_does_not_take_the_mirror_down_for_everyo
     // past its ceiling, while the paged read it leaves uncapped still works.
     let mut restarted = AppState::new("me".into());
     restarted.store = Arc::new(Double::flaky_list(first.store.clone(), usize::MAX));
-    antares_api::notify::wire(&mut restarted);
+    antares_api::wire(&mut restarted);
 
     assert!(
         restarted.sub_mirror.is_some(),

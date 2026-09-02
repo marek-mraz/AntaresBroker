@@ -66,7 +66,7 @@ async fn capture_server() -> (String, tokio::sync::mpsc::Receiver<Value>) {
 async fn a_miss_on_one_attribute_notifies_nobody() {
     allow_private();
     let mut st = AppState::new("test".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let (status, body) = call(
         &st,

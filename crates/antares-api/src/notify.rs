@@ -155,7 +155,7 @@ pub fn seed_mirror(
 const SEED_PAGE: usize = 1_000;
 
 /// Wire the store hook and background tasks. Call once at startup.
-pub fn wire(state: &mut AppState) {
+pub(crate) fn wire(state: &mut AppState) {
     // bus=local: the same indexed mirror the nats wiring builds, fed
     // synchronously by the CUD hook — the matcher never rescans the store.
     let mirror = Arc::new(SubMirror::default());
@@ -1843,9 +1843,10 @@ async fn deliver_as(
     // 5.8.1.4 consumer half: the internal CSR subscription's notifications
     // are handled in-process (urn:antares:distsub:{tenant}\n{own sub id})
     if let Some(own) = uri.strip_prefix("urn:antares:distsub:") {
-        if let Some((_, own_id)) = own.split_once('\n') {
-            crate::distsub::on_csource_notification(st, tenant, own_id, trigger_reason, &data)
-                .await;
+        if let (Some((_, own_id)), Some(handler)) =
+            (own.split_once('\n'), st.csource_notification.as_ref())
+        {
+            handler(st, tenant, own_id, trigger_reason, &data).await;
         }
         return;
     }

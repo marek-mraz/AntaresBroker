@@ -58,7 +58,7 @@ fn file_state(dir: &std::path::Path) -> AppState {
         Arc::new(AnyStore::Mem(store)),
         "file",
     );
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

@@ -78,7 +78,7 @@ async fn send(st: &AppState, path: &str, doc: Value) -> (StatusCode, String) {
 
 fn state(tx: mpsc::Sender<(String, Outbound)>) -> AppState {
     let mut st = AppState::new("plugin-sink".into()).with_sink(Box::new(MemorySink(tx)));
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
     st
 }
 

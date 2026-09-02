@@ -59,7 +59,7 @@ async fn capture_server() -> (String, tokio::sync::mpsc::Receiver<Value>) {
 async fn clause_4_9_linked_q_resolves_through_the_store_in_notifications() {
     antares_jsonld::allow_private_egress(true);
     let mut st = AppState::new("me".into());
-    antares_api::notify::wire(&mut st);
+    antares_api::wire(&mut st);
 
     let (status, body) = send(
         &st,
