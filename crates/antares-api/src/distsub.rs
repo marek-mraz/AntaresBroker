@@ -1498,6 +1498,30 @@ mod tests {
         assert!(inbound_get(&st, "urn:remote:1").is_none());
     }
 
+    /// 4.14 — "an NGSI-LD system shall behave as if the tenants were
+    /// separate systems" — through the one index every tenant's inbound
+    /// mappings share. Its key is the remote subscriptionId the Context
+    /// Source echoes back on every notification (5.8.1.4), and the tenant
+    /// the index names is the tenant the data is delivered to: nothing later
+    /// on that path re-derives it. So a mapping claiming a key another
+    /// tenant already holds must lose. An index where the newer write won
+    /// would let a Context Source hand one tenant's notifications to another
+    /// tenant's subscriber by returning a subscriptionId already in use.
+    #[test]
+    fn clause_5_8_1_an_inbound_key_is_never_taken_from_the_tenant_holding_it() {
+        let st = AppState::new("antares-ds-claim".into());
+        let a = TenantId::new("alpha").expect("tenant");
+        let b = TenantId::new("beta").expect("tenant");
+        let shared = "urn:ngsi-ld:Subscription:distsub:collide";
+        inbound_put(&st, shared, &a, "urn:ngsi-ld:Subscription:a");
+        inbound_put(&st, shared, &b, "urn:ngsi-ld:Subscription:b");
+        assert_eq!(
+            inbound_get(&st, shared),
+            Some(("alpha".to_owned(), "urn:ngsi-ld:Subscription:a".to_owned())),
+            "the second tenant took the first tenant's inbound route"
+        );
+    }
+
     /// 5.8.2.4 keeps the Registration Subscription in step by mutating the
     /// stored mapping document. That document comes out of the store, and
     /// `Value`'s index panics on anything that is not an object or Null, so
