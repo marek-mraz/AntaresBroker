@@ -4,3 +4,9 @@
 # atomics on every run. Nothing here is broker code.
 race:tokio::runtime::io::scheduled_io
 race:tokio::runtime::io::driver
+# moka's MiniArc drops a reference with fetch_sub(Release) and pairs it with
+# atomic::fence(Acquire) before freeing — the same pattern as the standard
+# library's Arc. ThreadSanitizer does not model fences, so it reports the
+# free as racing with the other thread's decrement. Scoped to that one
+# module: a real race elsewhere in moka is still reported.
+race:moka::common::concurrent::arc
