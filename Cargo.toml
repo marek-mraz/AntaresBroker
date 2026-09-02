@@ -112,6 +112,18 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # client/futures are !Send but axum demands Send everywhere.
 send_wrapper = { version = "0.6", features = ["futures"] }
 
+# Debug and test builds carry line tables instead of full DWARF. The
+# workspace's test binaries are linked once per feature configuration, and
+# full debuginfo makes those copies the largest thing on the disk they
+# share; a panic still reports the file and line it came from.
+[profile.dev]
+debug = "line-tables-only"
+
+# `test` inherits from `dev`, and states the same value so a profile
+# override on one of them cannot leave the other on full DWARF.
+[profile.test]
+debug = "line-tables-only"
+
 # The browser artifact optimizes for size (opt-level z + fat LTO); the
 # native release profile stays throughput-tuned and untouched.
 [profile.release]
