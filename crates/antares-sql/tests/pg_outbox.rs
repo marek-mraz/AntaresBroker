@@ -151,14 +151,14 @@ async fn outbox_ack_never_deletes_an_unpublished_gap_row() {
         "A is uncommitted, not peekable"
     );
 
-    // A commits between peek and ack — the audited loss window
+    // A commits between peek and ack — the loss window
     tx_a.commit().await.expect("commit a");
 
     // Ack exactly OUR published seq — not the whole peeked page: sibling
-    // tests share this table and acking their in-flight rows steals them
-    // (CI #101 flake: the transactional test's own ack then deletes 0 rows).
-    // The regression power is unchanged — under the old blanket
-    // `DELETE WHERE seq <= max` an ack of just seq_b still kills seq_a.
+    // tests share this table, so acking their in-flight rows steals them and
+    // the sibling's own ack then deletes nothing. The regression power is
+    // unchanged — under a blanket `DELETE WHERE seq <= max` an ack of just
+    // seq_b still kills seq_a.
     outbox::ack(&pool, &[seq_b]).expect("ack");
 
     // the gap row MUST survive to be published next round

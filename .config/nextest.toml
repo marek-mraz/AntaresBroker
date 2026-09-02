@@ -23,8 +23,8 @@ store-failure-output = true
 # these integration suites carry (nats_e2e's SERIAL mutex, pg_temporal's
 # PARTITION_DDL lock) serializes nothing here — and the pentest/outbox tests
 # assert EXCLUSIVE database state that a concurrently running broker's outbox
-# drain legitimately destroys (seen as CI #113: the drain published the rows
-# the sigkill drill and the RLS pentest had just seeded). One serial group
+# drain legitimately destroys — it publishes the rows the sigkill drill and
+# the RLS pentest have just seeded, out from under them. One serial group
 # restores the sequencing `cargo test`'s one-binary-at-a-time execution used
 # to provide. Defined on the default profile; ci inherits.
 [test-groups]
