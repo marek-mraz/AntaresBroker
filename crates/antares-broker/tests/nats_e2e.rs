@@ -454,7 +454,18 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
     }
     api.0.kill().expect("SIGKILL api");
     let _ = api.0.wait();
-    let pending = store.outbox_peek(1000).expect("peek").len();
+    // Scoped to this run's tenant: the outbox is shared, so counting every
+    // row would fold in a sibling's — or an aborted earlier run's — and
+    // make the drain below wait on rows this test never wrote.
+    let mine = || {
+        store
+            .outbox_peek(1000)
+            .expect("peek")
+            .into_iter()
+            .filter(|(_, t, _)| *t == tenant)
+            .count()
+    };
+    let pending = mine();
     assert!(
         pending >= caught.len(),
         "expected every acked write unpublished at death, found {pending}"
@@ -469,10 +480,8 @@ fn sigkill_between_commit_and_publish_republishes_from_outbox() {
         let seen = seen.lock().expect("seen");
         caught.iter().all(|id| seen.iter().any(|b| b.contains(id)))
     });
-    // and the outbox drains to empty — nothing wedged
-    wait_for("outbox drained", 30, || {
-        store.outbox_peek(1).expect("peek").is_empty()
-    });
+    // and this run's rows drain away — nothing wedged
+    wait_for("outbox drained", 30, || mine() == 0);
 }
 
 /// Decode an HTTP response body (Content-Length or chunked) from a raw
@@ -554,7 +563,9 @@ fn role_pairs_exactly_once_semantics() {
         });
     }
 
-    // Negative: a worker pod must NOT serve the NGSI-LD surface
+    // Negative: a worker pod must NOT serve the NGSI-LD surface. The status
+    // is asserted rather than "not 2xx", because `http` answers an empty
+    // string when it cannot connect at all — which no worker pod may pass on.
     let (m1, _) = workers[0];
     let r = http(
         m1,
@@ -564,8 +575,8 @@ fn role_pairs_exactly_once_semantics() {
         Some(r#"{"id":"urn:x:1","type":"X"}"#),
     );
     assert!(
-        !r.contains("HTTP/1.1 2"),
-        "worker pod accepted an API write: {r}"
+        r.starts_with("HTTP/1.1 404"),
+        "a worker pod mounts the ops routes only: {r}"
     );
 
     // ---- exactly-once through matcher×2 + notifier×2 ----
@@ -792,6 +803,24 @@ fn kill_proxy(p: &Proxy) {
     let _ = TcpStream::connect(("127.0.0.1", p.port));
 }
 
+/// A source that ACCEPTS and never answers: every forward to it is
+/// timeout-class, and the accepted connections are the dial count.
+fn silent_source() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind source");
+    let port = listener.local_addr().expect("addr").port();
+    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n = dials.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            let Ok(s) = stream else { continue };
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(s); // keep the socket open, never reply
+        }
+    });
+    (port, dials)
+}
+
 /// Kill NATS mid-run: /q/health flips `bus.connected` to false while the
 /// API keeps serving writes; on restart the client reconnects (reconnects
 /// counter increments), the outbox drains what queued during the outage, and
@@ -942,20 +971,8 @@ fn cooldown_stamp_is_shared_across_api_pods() {
     let tenant = format!("cool{run}");
     let etype = format!("CoolProbe{run}");
 
-    // a source that ACCEPTS and never answers: every forward is
-    // timeout-class, and accepted connections are the dial count
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind source");
-    let src_port = listener.local_addr().expect("addr").port();
-    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let n = dials.clone();
-    std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for stream in listener.incoming() {
-            let Ok(s) = stream else { continue };
-            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            held.push(s); // keep the socket open, never reply
-        }
-    });
+    let (src_port, dials) = silent_source();
+    let (ctrl_port, ctrl_dials) = silent_source();
 
     let api1 = free_port();
     let api2 = free_port();
@@ -979,8 +996,43 @@ fn cooldown_stamp_is_shared_across_api_pods() {
         Some(&csr),
     );
     assert!(resp.starts_with("HTTP/1.1 201"), "csr: {resp}");
-    // both pods' registration mirrors must know the CSR before the queries
-    std::thread::sleep(Duration::from_millis(500));
+
+    // A control registration for a source api-2 must actually dial. Without
+    // it, "api-2 did not dial" is equally what an api-2 whose mirror never
+    // learned the registration produces, and the suppression below could not
+    // fail for the reason it exists. It is registered AFTER the one under
+    // test on the same broadcast subject, so an api-2 that has the control
+    // has the other too.
+    let ctrl_type = format!("CtrlProbe{run}");
+    let ctrl_csr = format!(
+        r#"{{"id":"urn:ngsi-ld:ContextSourceRegistration:ctrl:{run}",
+            "type":"ContextSourceRegistration",
+            "information":[{{"entities":[{{"type":"{ctrl_type}"}}]}}],
+            "management":{{"timeout":500}},
+            "endpoint":"http://127.0.0.1:{ctrl_port}"}}"#
+    );
+    let resp = http(
+        api1,
+        "POST",
+        "/ngsi-ld/v1/csourceRegistrations",
+        Some(&tenant),
+        Some(&ctrl_csr),
+    );
+    assert!(resp.starts_with("HTTP/1.1 201"), "control csr: {resp}");
+    wait_for(
+        "api-2's mirror to forward to a registered source",
+        30,
+        || {
+            let _ = http(
+                api2,
+                "GET",
+                &format!("/ngsi-ld/v1/entities?type={ctrl_type}"),
+                Some(&tenant),
+                None,
+            );
+            ctrl_dials.load(std::sync::atomic::Ordering::SeqCst) > 0
+        },
+    );
 
     // pod 1 dials, times out (~500 ms), stamps the cooldown
     let r = http(
