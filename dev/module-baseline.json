@@ -1,0 +1,13 @@
+{
+  "antares-api": 14,
+  "antares-broker": 1,
+  "antares-bus": 1,
+  "antares-jsonld": 2,
+  "antares-matcher": 1,
+  "antares-model": 1,
+  "antares-notifier": 1,
+  "antares-ql": 1,
+  "antares-sql": 1,
+  "antares-store": 1,
+  "antares-wasm": 1
+}

@@ -40,12 +40,20 @@ jobs:
           node-version: 22
       - name: Duplication gate
         run: ./dev/dup-check.sh
+      - name: Module graph gate
+        if: always()
+        run: python3 dev/module-graph.py | tee results/dup/module-graph.txt
       - name: Step summary
         if: always()
         run: |
           {
             echo "## Duplication gate"
             cat results/dup/summary.md
+            echo
+            echo "## Module graph gate"
+            echo '```'
+            cat results/dup/module-graph.txt
+            echo '```'
             echo
             echo '```'
             head -30 results/dup/clones.txt

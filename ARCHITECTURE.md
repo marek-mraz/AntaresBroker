@@ -216,7 +216,10 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `Change` (a tuple alias), `SubMirror` and `DocMirror`; moving the three
   to a leaf module takes `state` out of it. `cargo modules` does not show
   this cycle because it records call edges and not field types, so the
-  source-level count is the one to measure.
+  source-level count is the one to measure: `dev/module-graph.py` prints
+  it per crate and `xray.yml` ratchets the largest component of every
+  crate against `dev/module-baseline.json` (`antares-jsonld` holds a
+  second one, `context` ↔ `loader`, of two).
 - `antares-api` names `antares-sql` in live code at two places:
   `state.rs` composes the built-in `AnyStore` for `AppState::new`, and
   `temporal.rs` calls `compile::temporal::InstanceRange` and
