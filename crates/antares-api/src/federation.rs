@@ -723,8 +723,8 @@ fn merge_same_source(regs: Vec<FedReg>) -> Vec<FedReg> {
 /// part of contextSourceInfo"), connection/binding-managed headers cannot be
 /// overridden ("shall be ignored"), and the 4.3.6.6 processed keys (accept,
 /// contentType, jsonldContext, ngsildConformance) are TRANSFORMED by
-/// `forward` rather than passed through raw
-/// would corrupt negotiation instead.
+/// `forward` rather than passed through raw, which would corrupt
+/// negotiation instead.
 const CSI_SKIP: &[&str] = &[
     "ngsild-tenant",
     "content-length",

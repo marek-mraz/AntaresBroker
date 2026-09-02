@@ -182,7 +182,7 @@ The fifteen untested clauses with the most SHALL statements:
 | 5.2.36 | ListProperty | 7 | 0 | 0 |
 | 5.2.5 | Property | 7 | 0 | 0 |
 | 5.2.7 | GeoProperty | 7 | 0 | 0 |
-| 6.3.8 | Notification behaviour | 7 | 0 | 4 |
+| 6.3.8 | Notification behaviour | 7 | 0 | 6 |
 | 5.2.37 | ListRelationship | 6 | 0 | 0 |
 | 5.2.6 | Relationship | 6 | 0 | 0 |
 

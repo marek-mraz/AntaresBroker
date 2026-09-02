@@ -2267,6 +2267,7 @@ async fn deliver_as(
     // them into HTTP headers (6.3.8) or an MQTT metadata object (Table
     // 7.2-2).
     let mut info = receiver_info;
+    strip_reserved_markers(&mut info);
     if hdr_tenant.as_str() != "default" {
         info.push(("NGSILD-Tenant".into(), hdr_tenant.as_str().to_owned()));
     }
@@ -2431,6 +2432,19 @@ fn kv_pairs(v: Option<&Value>) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 6.3.22 / 6.3.8: `NGSILD-Tenant` and `NGSILD-Snapshot` on a notification
+/// are the broker's own statement of where the data came from, appended to
+/// the `receiverInfo` pairs. The HTTP binding appends every pair it is
+/// handed, so a subscriber naming one of the two in `receiverInfo` would
+/// put a second value of it on the wire beside the broker's, and a receiver
+/// reading "the" tenant of a notification could not tell which one the
+/// broker meant. Ordinary custom headers are untouched.
+fn strip_reserved_markers(info: &mut Vec<(String, String)>) {
+    info.retain(|(k, _)| {
+        !k.eq_ignore_ascii_case("NGSILD-Tenant") && !k.eq_ignore_ascii_case("NGSILD-Snapshot")
+    });
 }
 
 /// One attempt on the wire, through the binding the registry holds for the
@@ -2726,6 +2740,33 @@ mod interval_tests {
             .expect("anchor")
             .timestamp_millis();
         assert_eq!(due_at_ms(&sub, 30.0), anchor + 30_000);
+    }
+
+    /// A subscriber cannot put its own value of a marker the broker sets on
+    /// the wire: the pair is dropped before the broker appends its own, and
+    /// the drop is by ASCII case-insensitive name, since a header name is
+    /// case-insensitive (IETF RFC 9110 clause 5.1) and the pair would
+    /// otherwise slip past under a different spelling.
+    #[test]
+    fn a_subscriber_cannot_add_its_own_notification_markers() {
+        let mut info = vec![
+            ("Authorization".to_owned(), "Bearer t".to_owned()),
+            ("ngsild-tenant".to_owned(), "victim".to_owned()),
+            ("NGSILD-Tenant".to_owned(), "victim".to_owned()),
+            (
+                "NGSILD-SNAPSHOT".to_owned(),
+                "urn:ngsi-ld:Snapshot:x".to_owned(),
+            ),
+            ("X-NGSILD-Tenant".to_owned(), "kept".to_owned()),
+        ];
+        strip_reserved_markers(&mut info);
+        assert_eq!(
+            info,
+            [
+                ("Authorization".to_owned(), "Bearer t".to_owned()),
+                ("X-NGSILD-Tenant".to_owned(), "kept".to_owned()),
+            ]
+        );
     }
 
     /// The sweep's own clock takes the same offset, so the same overflow

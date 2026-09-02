@@ -115,7 +115,18 @@ fn headers(out: &Outbound) -> Vec<(String, String)> {
     if out.accept != "application/ld+json" {
         h.push(("Link".to_owned(), out.link.clone()));
     }
-    h.extend(out.receiver_info.iter().cloned());
+    // The client APPENDS every header it is handed, so a receiverInfo pair
+    // keyed like one of the two above would travel beside it rather than
+    // replace it, and this clause names the source of both: the MIME type
+    // comes from endpoint.accept, the Link from the served @context. The
+    // colliding pair is dropped, not doubled.
+    let own = h.len();
+    for (k, v) in &out.receiver_info {
+        if h[..own].iter().any(|(n, _)| n.eq_ignore_ascii_case(k)) {
+            continue;
+        }
+        h.push((k.clone(), v.clone()));
+    }
     h
 }
 
@@ -201,6 +212,45 @@ mod tests {
         assert_eq!(h[0].1, "application/json");
         assert_eq!(h[2], ("Authorization".to_owned(), "Bearer t".to_owned()));
         assert_eq!(h[3], ("NGSILD-Tenant".to_owned(), "acme".to_owned()));
+    }
+
+    /// 6.3.8 fixes the MIME type of the POST to `endpoint.accept` and, for
+    /// the other two types, mandates the Link header carrying the @context
+    /// reference. The client appends each header it is handed, so a
+    /// receiverInfo pair keyed like either one travels BESIDE the
+    /// binding's: two Content-Type fields make the request malformed (IETF
+    /// RFC 9110 clause 5.5.1 makes it a singleton field) and a second Link
+    /// leaves the receiver two @context references to choose between.
+    #[test]
+    fn receiver_info_cannot_double_the_headers_the_binding_owns() {
+        for accept in ["application/json", "application/geo+json"] {
+            let h = headers(&out(
+                accept,
+                &[
+                    ("content-type", "text/plain"),
+                    ("LINK", "<https://evil>"),
+                    ("X-Kept", "yes"),
+                ],
+            ));
+            let named = |n: &str| {
+                h.iter()
+                    .filter(|(k, _)| k.eq_ignore_ascii_case(n))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(named("Content-Type").len(), 1, "{accept}");
+            assert_eq!(named("Content-Type")[0].1, accept);
+            assert_eq!(named("Link").len(), 1, "{accept}");
+            assert!(named("Link")[0].1.contains("json-ld#context"), "{accept}");
+            assert_eq!(named("X-Kept").len(), 1, "an ordinary pair still travels");
+        }
+        // ld+json sets no Link of its own, so a pair keyed Link is ordinary
+        let h = headers(&out("application/ld+json", &[("Link", "<https://x>")]));
+        assert_eq!(
+            h.iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Link"))
+                .count(),
+            1
+        );
     }
 
     /// 5.2.15 dereferenceable URI: this binding needs an absolute http(s)

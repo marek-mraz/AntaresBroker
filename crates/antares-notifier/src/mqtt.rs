@@ -144,14 +144,18 @@ pub fn build_message(
     receiver_info: &[(String, String)],
 ) -> Value {
     let mut metadata = Map::new();
+    // receiverInfo goes in first: 7.2 adds its entries "additionally", while
+    // Table 7.2-2 names endpoint.accept as the source of Content-Type and
+    // the served @context as the source of Link. A pair keyed like one of
+    // those two is an entry, never that parameter's value.
+    for (k, v) in receiver_info {
+        metadata.insert(k.clone(), Value::String(v.clone()));
+    }
     metadata.insert("Content-Type".into(), Value::String(content_type.into()));
     if content_type == "application/json" {
         if let Some(l) = link {
             metadata.insert("Link".into(), Value::String(l.to_owned()));
         }
-    }
-    for (k, v) in receiver_info {
-        metadata.insert(k.clone(), Value::String(v.clone()));
     }
     let mut msg = Map::new();
     msg.insert("metadata".into(), Value::Object(metadata));
@@ -810,5 +814,32 @@ mod tests {
         let m = build_message(&body, "application/ld+json", Some("<x>"), &[]);
         assert_eq!(m["metadata"]["Content-Type"], "application/ld+json");
         assert!(m["metadata"].get("Link").is_none());
+    }
+
+    /// Table 7.2-2 names the source of two metadata keys: `Content-Type`
+    /// comes from `endpoint.accept` and `Link` from the served @context.
+    /// receiverInfo entries are added "additionally", so one keyed like a
+    /// table parameter cannot become that parameter's value — a subscriber
+    /// would otherwise decide the MIME type of its own notifications
+    /// against 6.3.8's "changed by means of the endpoint.accept member",
+    /// and could strip the @context reference the clause requires.
+    #[test]
+    fn receiver_info_cannot_take_over_a_table_7_2_2_parameter() {
+        let body = json!({"id": "urn:n:1", "type": "Notification"});
+        let link = "<https://ctx>; rel=\"http://www.w3.org/ns/json-ld#context\"";
+        let m = build_message(
+            &body,
+            "application/json",
+            Some(link),
+            &[
+                ("Content-Type".into(), "text/plain".into()),
+                ("Link".into(), "<https://evil>".into()),
+                ("NGSILD-Tenant".into(), "acme".into()),
+            ],
+        );
+        assert_eq!(m["metadata"]["Content-Type"], "application/json");
+        assert_eq!(m["metadata"]["Link"], link);
+        // every other pair is still added, this one by the caller (6.3.22)
+        assert_eq!(m["metadata"]["NGSILD-Tenant"], "acme");
     }
 }
