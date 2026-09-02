@@ -3,8 +3,17 @@ clause: B
 title: 'Annex B (normative): Core NGSI-LD @context definition'
 pages: 365-371
 status: implemented
-evidence: 'antares-jsonld loader.rs pinned(): the Annex B core @context (v1.9 document, 206 terms transcribed from pages 365-371) compiled in alongside v1.3-v1.8, resolvable without network (tests pinned_versions_resolve_without_network, the_v1_9_core_context_carries_the_terms_v1_9_added); the annex Scoped Context on ngsildproof merges through Context::merge_core_object, outside 5.5.7''s user-@context prohibition; protected core terms win on merge (4.4)'
-notes: 'audited 2026-08-12: the DEFAULT core (CORE_CONTEXT) is pinned to the v1.8 document by the 5.2.3 ecosystem decision — the official suite''s 68 strict expectations compare against it; the Annex B v1.9 core is pinned and served on request. A resolve of the v1.9 URL therefore sees the union of both documents, since 4.4 merges the served core last. The Scoped Context the annex defines on ngsildproof is dropped rather than applied: entityIdSealed and entityTypeSealed expand through @vocab, which needs a per-term active context to fix.'
+evidence: 'antares-jsonld loader.rs pinned(): the Annex B core @context (v1.9 document, 206 terms transcribed
+  from pages 365-371) compiled in alongside v1.3-v1.8, resolvable without network (tests pinned_versions_resolve_without_network,
+  the_v1_9_core_context_carries_the_terms_v1_9_added); the annex Scoped Context on ngsildproof merges
+  through Context::merge_core_object, outside 5.5.7''s user-@context prohibition; protected core terms
+  win on merge (4.4)'
+notes: 'the DEFAULT core (CORE_CONTEXT) is pinned to the v1.8 document by the 5.2.3 ecosystem decision
+  — the official suite''s 68 strict expectations compare against it; the Annex B v1.9 core is pinned and
+  served on request. A resolve of the v1.9 URL therefore sees the union of both documents, since 4.4 merges
+  the served core last. The Scoped Context the annex defines on ngsildproof is dropped rather than applied:
+  entityIdSealed and entityTypeSealed expand through @vocab, which needs a per-term active context to
+  fix.'
 robot: []
 ---
 

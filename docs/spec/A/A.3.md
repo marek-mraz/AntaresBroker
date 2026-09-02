@@ -3,8 +3,10 @@ clause: A.3
 title: NGSI-LD namespace
 pages: 364-365
 status: implemented
-evidence: 'all broker-generated identifiers use the lowercase urn:ngsi-ld: namespace prefix (notification ids, EntityMap ids urn:ngsi-ld:entitymap:…, ContextSourceIdentity ids) — the annex''s one broker-facing SHALL; the URN scheme itself is accepted like any URI'
-notes: 'audited 2026-08-12: namespace IANA registration is ETSI''s action, not broker surface.'
+evidence: 'all broker-generated identifiers use the lowercase urn:ngsi-ld: namespace prefix (notification
+  ids, EntityMap ids urn:ngsi-ld:entitymap:…, ContextSourceIdentity ids) — the annex''s one broker-facing
+  SHALL; the URN scheme itself is accepted like any URI'
+notes: namespace IANA registration is ETSI's action, not broker surface.
 robot: []
 ---
 

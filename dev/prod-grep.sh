@@ -22,8 +22,12 @@ case "${1-}" in
   *) usage ;;
 esac
 
-# CHANGELOG.md is dated by definition; lockfiles are generated.
-skip='^(tasks\.md|antares-audit-tasks\.md|claude\.md|CHANGELOG\.md|dev/prod-grep\.sh|target/|ngsi-ld-test-suite/|docs/spec/)'
+# CHANGELOG.md is dated by definition; lockfiles are generated. A gate has
+# to name what it forbids, so this script and dev/spec.py are not their own
+# subjects. docs/spec/ is skipped because a clause file's body is the ETSI
+# text verbatim and is not ours to edit; the half that IS ours — the
+# evidence and notes fields — is gated by `dev/spec.py check`.
+skip='^(tasks\.md|antares-audit-tasks\.md|claude\.md|CHANGELOG\.md|dev/prod-grep\.sh|dev/spec\.py|target/|ngsi-ld-test-suite/|docs/spec/)'
 if [ "$subject" = all ]; then
   mapfile -t files < <(git ls-files | { "$GREP" -vE "$skip" || true; } | { "$GREP" -vE '(\.lock|-lock\.json|\.pdf|\.png|\.jpg|\.gif|\.woff2?|\.ico)$' || true; })
 else

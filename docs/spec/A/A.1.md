@@ -4,7 +4,7 @@ title: Introduction
 pages: '364'
 status: informative
 evidence: ''
-notes: 'audited 2026-08-12: introduction prose.'
+notes: introduction prose.
 robot: []
 ---
 

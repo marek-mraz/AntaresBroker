@@ -886,6 +886,37 @@ def wrapped_literal_violations():
     return out
 
 
+def ledger_prose_violations():
+    """The hand-written fields are release material, and `dev/prod-grep.sh`
+    cannot reach them: its subject is whole files, and the body of a clause
+    file is the ETSI text verbatim, which is not ours to edit — so the ledger
+    is on its skip list and this is the gate for the half that IS ours.
+    `status` already carries the verdict and git already carries the when, so
+    a stamp or a mention of how the line was produced only dates the record."""
+    banned = re.compile(
+        r"(?i)\b(audit(ed|s|ing)?|this session|session (log|note)|backlog|"
+        r"work-item|user (rule|request)|scratchpad|subagent|claude|mempalace|"
+        r"phase [A-Z])\b|20\d\d-\d\d-\d\d(?!T)"
+    )
+    out = []
+    for path in sorted(SPEC.rglob("*.md")):
+        try:
+            meta = read_frontmatter(path)
+        except yaml.YAMLError:
+            continue  # the parse failure is reported by cmd_check itself
+        for field in ("evidence", "notes"):
+            value = (meta or {}).get(field)
+            if not isinstance(value, str):
+                continue
+            m = banned.search(value)
+            if m:
+                out.append(
+                    f"{path.relative_to(ROOT)}: {field} carries {m.group(0)!r} "
+                    f"— the ledger records the clause, not the work"
+                )
+    return out
+
+
 def cmd_check():
     """Ledger integrity gate. A clause file that stops parsing would silently
     DROP OUT of every other command's count — this is the command that makes
@@ -915,6 +946,7 @@ def cmd_check():
         if meta.get("robot") != tps.get(meta.get("clause"), []):
             errors.append(f"{path}: robot list drifted — run `dev/spec.py robot`")
 
+    errors.extend(ledger_prose_violations())
     errors.extend(chapter_violations())
     errors.extend(statement_coverage_violations())
     errors.extend(vendored_openapi_violations())
