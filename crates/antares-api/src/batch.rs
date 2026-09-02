@@ -42,7 +42,7 @@ async fn parse_batch(
     headers: &HeaderMap,
     body: &[u8],
 ) -> ApiResult<Vec<(Value, ApiResult<std::sync::Arc<antares_jsonld::Context>>)>> {
-    let ct = content_type(headers);
+    let ct = content_type(headers)?;
     let ld = match ct.as_str() {
         "application/json" => false,
         "application/ld+json" => true,
@@ -1020,7 +1020,7 @@ pub async fn batch_delete(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["local"])?;
-        let ct = content_type(&headers);
+        let ct = content_type(&headers)?;
         if ct != "application/json" && ct != "application/ld+json" {
             return Err(ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE));
         }

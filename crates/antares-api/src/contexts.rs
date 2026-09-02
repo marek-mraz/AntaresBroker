@@ -230,7 +230,7 @@ pub async fn add_context(
         // entity routes — but a header that is present and unreadable is not
         // absent, and `content_type` reports both as the empty string. The
         // presence of the header is what separates them.
-        let ct = content_type(&headers);
+        let ct = content_type(&headers)?;
         if headers.contains_key(header::CONTENT_TYPE)
             && ct != "application/ld+json"
             && ct != "application/json"

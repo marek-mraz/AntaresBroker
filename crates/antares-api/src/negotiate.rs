@@ -323,16 +323,43 @@ pub fn respond_prefer(
 }
 
 /// Content-Type of the request (media type only, parameters dropped).
-pub fn content_type(headers: &HeaderMap) -> String {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase()
+///
+/// Two field lines naming DIFFERENT media types are `BadRequestData`. The
+/// field is not list-type (RFC 9110 clause 8.3), and this one decides where
+/// the @context comes from under 6.3.5 — `application/json` takes it from
+/// the Link header and refuses a body member, `application/ld+json` does the
+/// opposite. Reading the first of two leaves anything in front of the broker
+/// free to read the second and inspect the request as a different media type
+/// than the one it is stored under. Repeated lines naming the SAME media
+/// type are not ambiguous: the parameters are dropped before the comparison,
+/// so `application/json` and `Application/JSON; charset=utf-8` are one
+/// answer, and an unreadable value still reports as the empty string, which
+/// the callers separate from an absent header by presence.
+pub fn content_type(headers: &HeaderMap) -> ApiResult<String> {
+    let bare = |v: &axum::http::HeaderValue| {
+        v.to_str()
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    };
+    let mut found: Option<String> = None;
+    for v in headers.get_all(header::CONTENT_TYPE) {
+        let ct = bare(v);
+        match &found {
+            Some(first) if *first != ct => {
+                return Err(NgsiError::BadRequestData(
+                    "repeated Content-Type names two media types".into(),
+                )
+                .into())
+            }
+            Some(_) => {}
+            None => found = Some(ct),
+        }
+    }
+    Ok(found.unwrap_or_default())
 }
 
 /// Extract the JSON-LD context URL from Link headers (6.3.5, which takes the
@@ -460,7 +487,7 @@ pub async fn parse_body(
     bytes: &[u8],
     kind: BodyKind,
 ) -> ApiResult<ParsedBody> {
-    let ct = content_type(headers);
+    let ct = content_type(headers)?;
     let ld = match ct.as_str() {
         "application/json" => false,
         "application/ld+json" => true,
@@ -1511,6 +1538,7 @@ mod negotiation {
     /// Request Content-Type is compared as a bare media type.
     #[test]
     fn content_type_strips_parameters_and_case() {
+        let content_type = |h: &HeaderMap| content_type(h).expect("one media type");
         assert_eq!(content_type(&HeaderMap::new()), "");
         assert_eq!(
             content_type(&hdr("content-type", "Application/LD+JSON; charset=UTF-8")),
@@ -1519,6 +1547,38 @@ mod negotiation {
         assert_eq!(
             content_type(&hdr("content-type", " application/json ")),
             "application/json"
+        );
+    }
+
+    /// RFC 9110 clause 8.3 gives Content-Type one value, and 6.3.5 branches
+    /// on it: `application/json` takes the @context from the Link header and
+    /// refuses a body member, `application/ld+json` does the reverse. Two
+    /// field lines naming different media types therefore name two different
+    /// readings of the same bytes, and the broker refuses rather than taking
+    /// the first. Repeats that agree once the parameters are dropped are not
+    /// ambiguous.
+    #[test]
+    fn two_content_types_naming_different_media_types_are_refused() {
+        let two = |a: &str, b: &str| {
+            let mut h = HeaderMap::new();
+            for v in [a, b] {
+                h.append(header::CONTENT_TYPE, HeaderValue::from_str(v).expect("ct"));
+            }
+            h
+        };
+        assert!(
+            content_type(&two("application/json", "application/ld+json")).is_err(),
+            "json and ld+json read the same body two ways"
+        );
+        assert!(
+            content_type(&two("application/ld+json", "application/json")).is_err(),
+            "order does not make one of them the answer"
+        );
+        assert_eq!(
+            content_type(&two("application/json", "Application/JSON; charset=utf-8"))
+                .expect("one media type"),
+            "application/json",
+            "case and parameters do not make a repeat ambiguous"
         );
     }
 
