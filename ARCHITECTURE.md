@@ -202,7 +202,8 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   makes every round trip a cross-thread wakeup (measured p99 at 500
   updates/s: 49 ms to 2 s), so it is not the exit. This is the single
   largest architectural lever left; reversing it touches every driver
-  and ~60 call sites in `antares-api`, and the object-safe shape for it
+  and every store call in `antares-api` (115 `st.store.` and 21
+  `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
 - `antares-api` has one strongly connected component of 14 of its 24

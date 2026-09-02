@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! PgStore, first slice: entity CRUD over the `entities`
 //! table. Sync facade — same signatures as the in-memory `Store`, sqlx driven
-//! internally via `block_in_place` + `Handle::block_on`, so the 63 existing
-//! call sites in `antares-api` never change when the cutover lands.
+//! internally via `block_in_place` + `Handle::block_on`, so the call
+//! sites in `antares-api` keep their signatures.
 //!
 //! Extracted columns are computed in Rust at write time (no triggers):
 //! `types`, `scopes`, `created_at`, `modified_at`, `expires_at` and
