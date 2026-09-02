@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # The workspace dep is default-features=false so the wasm crate can shed
 # the Pg arm; the native binary turns everything back on here.
-antares-api = { workspace = true, features = ["postgres"] }
+antares-api = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -69,6 +69,8 @@ tikv-jemallocator = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
 
 [dev-dependencies]
+# the wiring tests build a state over the built-in store
+antares-api = { workspace = true, features = ["test-kit"] }
 # mqtt e2e: sync rumqttc client against a live mosquitto
 rumqttc = { workspace = true }
 serde_json = { workspace = true }

@@ -692,6 +692,19 @@ pub trait TemporalDriver: Send + Sync {
         shell: &Value,
         additions: &Value,
     ) -> Result<(), NgsiError>;
+    /// Would `query_temporal` page EXACTLY under this `q` and range — the
+    /// driver's own entity verdict equal to the evaluator's on every row,
+    /// so a page it cuts is the page the caller would have cut? A driver
+    /// that pages after an in-process evaluation, or not at all, answers
+    /// `false`, and the caller pages the merged result itself (5.7.4.4).
+    fn q_pushdown_exact(
+        &self,
+        _q: &antares_ql::QNode,
+        _range: Option<&filter::InstanceRange<'_>>,
+        _expand: &dyn Fn(&str) -> String,
+    ) -> bool {
+        false
+    }
     /// Query Temporal Evolution (5.7.4) with pushdown where possible.
     fn query_temporal(
         &self,

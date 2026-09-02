@@ -1397,6 +1397,25 @@ impl antares_store::TemporalDriver for AnyStore {
     ) -> Result<(), NgsiError> {
         AnyStore::temporal_append(self, tenant, id, shell, additions)
     }
+    /// Only the Postgres arm pages in SQL, and only an exact prefilter
+    /// makes that page the evaluator's page; the memory arm answers
+    /// `paged: false` and the caller pages.
+    fn q_pushdown_exact(
+        &self,
+        q: &antares_ql::QNode,
+        range: Option<&crate::store::filter::InstanceRange<'_>>,
+        expand: &dyn Fn(&str) -> String,
+    ) -> bool {
+        match self {
+            // the memory arm pages nothing, so the filter is not its business
+            AnyStore::Mem(_) => {
+                let _ = (q, range, expand);
+                false
+            }
+            #[cfg(feature = "postgres")]
+            AnyStore::Pg(_) => crate::compile::qprefilter::prefilter_exact(q, range, expand),
+        }
+    }
     fn query_temporal(
         &self,
         tenant: &TenantId,

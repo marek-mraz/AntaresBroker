@@ -21,6 +21,10 @@ one.
 CI builds and tests each of them standalone and fails on any dependency
 path back into the broker, the API crate or a storage backend
 (`shared-crates` job in `workspace.yml`).
+The same job checks that `antares-api` itself names no storage backend:
+a consumer composes its two drivers and hands them to
+`AppState::with_drivers`; the built-in memory and file store behind
+`AppState::new` is a dev-dependency the crate's own tests enable.
 
 ## Stability
 

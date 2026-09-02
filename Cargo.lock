@@ -49,6 +49,7 @@ dependencies = [
 name = "antares-api"
 version = "0.1.0"
 dependencies = [
+ "antares-api",
  "antares-jsonld",
  "antares-matcher",
  "antares-model",

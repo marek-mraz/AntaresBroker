@@ -1814,15 +1814,14 @@ pub(crate) async fn query_temporal_inner(
     // entity verdict then equals the evaluator's. datasetId/pick still
     // block: their entity drops happen at presentation, after the page.
     let q_page_exact = q_ast.as_ref().is_none_or(|ast| {
-        let r = tq
-            .as_ref()
-            .map(|t| antares_sql::compile::temporal::InstanceRange {
-                timerel: &t.timerel,
-                time_at: &t.time_at,
-                end_time_at: t.end_time_at.as_deref(),
-                timeproperty: &t.timeproperty,
-            });
-        antares_sql::compile::qprefilter::prefilter_exact(ast, r.as_ref(), &|t| ctx.expand_key(t))
+        let r = tq.as_ref().map(|t| antares_store::filter::InstanceRange {
+            timerel: &t.timerel,
+            time_at: &t.time_at,
+            end_time_at: t.end_time_at.as_deref(),
+            timeproperty: &t.timeproperty,
+        });
+        st.temporal
+            .q_pushdown_exact(ast, r.as_ref(), &|t| ctx.expand_key(t))
     });
     let (p_offset, p_limit, _) = crate::entities::page_params(st, params)?;
     // 5.7.4.4 + 5.5.9: pagination applies to the MERGED federated union, so
@@ -1861,14 +1860,12 @@ pub(crate) async fn query_temporal_inner(
             ids: ids.as_deref(),
             types: types.as_deref(),
             attrs: entity_attr_filter.as_deref(),
-            range: tq
-                .as_ref()
-                .map(|t| antares_sql::compile::temporal::InstanceRange {
-                    timerel: &t.timerel,
-                    time_at: &t.time_at,
-                    end_time_at: t.end_time_at.as_deref(),
-                    timeproperty: &t.timeproperty,
-                }),
+            range: tq.as_ref().map(|t| antares_store::filter::InstanceRange {
+                timerel: &t.timerel,
+                time_at: &t.time_at,
+                end_time_at: t.end_time_at.as_deref(),
+                timeproperty: &t.timeproperty,
+            }),
             last_n: match (last_n, exact_push) {
                 (Some(n), true) => Some(n as i64),
                 _ => None,
@@ -2272,14 +2269,12 @@ async fn retrieve_temporal_inner(
         // Instance pruning pushed into the store (no q=/geo on retrieve,
         // so it is always safe here); window() below stays the arbiter.
         let tf = antares_store::filter::TemporalFilter {
-            range: tq
-                .as_ref()
-                .map(|t| antares_sql::compile::temporal::InstanceRange {
-                    timerel: &t.timerel,
-                    time_at: &t.time_at,
-                    end_time_at: t.end_time_at.as_deref(),
-                    timeproperty: &t.timeproperty,
-                }),
+            range: tq.as_ref().map(|t| antares_store::filter::InstanceRange {
+                timerel: &t.timerel,
+                time_at: &t.time_at,
+                end_time_at: t.end_time_at.as_deref(),
+                timeproperty: &t.timeproperty,
+            }),
             last_n: last_n.map(|n| n as i64),
             timeproperty: tq
                 .as_ref()

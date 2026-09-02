@@ -48,12 +48,13 @@ impl Broker {
         mode: &str,
         host_alias: Option<String>,
     ) -> Self {
-        let store = antares_sql::store::any::AnyStore::Mem(store);
+        let store = std::sync::Arc::new(antares_sql::store::any::AnyStore::Mem(store));
         // wasm compositions only ever carry the Mem arm — anything but a
         // known Mem-arm mode name is a caller bug, defaulted to memory.
-        let mut state = antares_api::AppState::with_store(
+        let mut state = antares_api::AppState::with_drivers(
             host_alias.unwrap_or_else(|| "antares-wasm".to_owned()),
-            std::sync::Arc::new(store),
+            store.clone(),
+            store,
             mode,
         );
         // Same in-process matcher/notifier path as bus=local: the

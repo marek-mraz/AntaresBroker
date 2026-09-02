@@ -2,8 +2,8 @@
 //! Shared application state.
 
 use antares_jsonld::Loader;
-use antares_sql::store::any::AnyStore;
-use antares_sql::store::Store;
+#[cfg(feature = "test-kit")]
+use antares_sql::store::{any::AnyStore, Store};
 use antares_store::{CurrentStateDriver, TemporalDriver};
 use std::sync::Arc;
 // Clock rule: std Instant panics on wasm32.
@@ -166,7 +166,8 @@ impl AppState {
     /// variable `ANTARES_TEST_STORE=file` — a fresh on-disk redb store per
     /// state, so the same test binary proves the durable backend without a
     /// second copy of every test. The broker's own boot path never calls
-    /// this; it composes from `ANTARES_STORE` in `with_store`.
+    /// this; it composes from `ANTARES_STORE` in `with_drivers`.
+    #[cfg(feature = "test-kit")]
     pub fn new(host_alias: String) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var("ANTARES_TEST_STORE").as_deref() == Ok("file") {
@@ -188,6 +189,7 @@ impl AppState {
 
     /// Convenience over the built-in backends: one `AnyStore` serves as
     /// both drivers.
+    #[cfg(feature = "test-kit")]
     pub fn with_store(host_alias: String, store: Arc<AnyStore>, store_name: &str) -> Self {
         let temporal: Arc<dyn TemporalDriver> = store.clone();
         Self::with_drivers(host_alias, store, temporal, store_name)

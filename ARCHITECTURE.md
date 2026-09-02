@@ -218,12 +218,13 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   it per crate and `xray.yml` ratchets the largest component of every
   crate against `dev/module-baseline.json` (`antares-jsonld` holds a
   second one, `context` ↔ `loader`, of two).
-- `antares-api` names `antares-sql` in live code at two places:
-  `state.rs` composes the built-in `AnyStore` for `AppState::new`, and
-  `temporal.rs` calls `compile::temporal::InstanceRange` and
-  `compile::qprefilter::prefilter_exact`, AST-level helpers that live in
-  the SQL crate. Until both move, the crate cannot be built without a
-  backend the way the five shared crates are.
+- `antares-api` names no storage backend in a normal build: `antares-sql`
+  is an optional dependency behind the dev-only `test-kit` and `postgres`
+  features (`AppState::new` over the built-in store, the Postgres-backed
+  integration tests), the roots compose their drivers with
+  `AppState::with_drivers`, and the temporal query's paging decision asks
+  `TemporalDriver::q_pushdown_exact`, which only the Postgres arm answers
+  from its prefilter. `workspace.yml` checks the dependency tree.
 - ADR-0014 names five hook phases; two of them, `on_request` and
   `pre_notify`, have no seam in code. The seams that exist are the
   `ChangeHook`, the temporal drain, the `NotificationSink` boundary and the

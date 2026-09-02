@@ -15,7 +15,10 @@ antares-store = { workspace = true }
 antares-jsonld = { workspace = true }
 antares-ql = { workspace = true }
 antares-matcher = { workspace = true }
-antares-sql = { workspace = true, default-features = false }
+# Test-only: the built-in memory/file store behind `AppState::new`, and the
+# Postgres-backed integration tests. A consumer composes its drivers itself,
+# so a normal build of this crate names no storage backend.
+antares-sql = { workspace = true, default-features = false, optional = true }
 antares-notifier = { workspace = true, default-features = false }
 sonic-rs = { workspace = true, optional = true }
 # `std` spelled out: guarded()'s catch_unwind lives behind it, and a
@@ -56,16 +59,19 @@ web-time = { workspace = true }
 
 [features]
 # Clause 7 MQTT notification binding; on by default — the 058 TPs need it.
-# `postgres` forwards the antares-sql gate: on for every native build, off
-# for the browser, where the memory store is the only backend.
-default = ["mqtt", "postgres"]
+default = ["mqtt"]
 mqtt = ["antares-notifier/mqtt"]
-postgres = ["antares-sql/postgres"]
+# Both reachable only through the dev-dependency below: `test-kit` gives
+# the tests `AppState::new` over the built-in store, `postgres` the
+# Postgres-backed integration tests.
+test-kit = ["dep:antares-sql"]
+postgres = ["test-kit", "antares-sql/postgres"]
 # sonic-rs on the batch-ingest hot path (x86_64/aarch64); serde_json is
 # always the compiled fallback.
 sonic = ["dep:sonic-rs"]
 
 [dev-dependencies]
+antares-api = { workspace = true, features = ["test-kit", "postgres"] }
 http-body-util = { workspace = true }
 
 [lints]

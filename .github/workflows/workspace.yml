@@ -273,6 +273,15 @@ jobs:
       # accumulate unseen until something in this shape stops compiling.
       - run: RUSTFLAGS="-D warnings" cargo check --locked -p antares-sql --no-default-features -j 2
         if: matrix.crate == 'antares-store'
+      # The API crate composes no store: a normal build of it names no
+      # storage backend (the built-in store is a dev-dependency for tests).
+      - name: API crate names no backend
+        if: matrix.crate == 'antares-store'
+        run: |
+          if cargo tree --locked -p antares-api -e normal --prefix none \
+             | grep -E '^(antares-sql|sqlx|redb) '; then
+            echo "::error::antares-api depends on a storage backend"; exit 1
+          fi
       # The public surface a gateway author reads: every item documented
       # (#![deny(missing_docs)] in the crate) and no broken intra-doc link.
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items -p ${{ matrix.crate }}
