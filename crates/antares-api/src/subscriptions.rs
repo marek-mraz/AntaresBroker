@@ -25,472 +25,500 @@ fn resource_path(kind: Kind) -> &'static str {
     }
 }
 
-/// Validate + normalize a subscription document (5.8.1). Types/attribute
-/// names are expanded to IRIs; the rest is stored verbatim.
-pub fn normalize_subscription(
-    doc: &Map<String, Value>,
-    ctx: &Context,
-    is_patch: bool,
-) -> Result<Map<String, Value>, NgsiError> {
+/// Table 5.2.33-1 EntitySelector: the `entities` member of a Subscription
+/// (5.2.12). A selector needs a type; ids are URIs, an idPattern is a
+/// regular expression, and a type-selection expression (4.17) stays raw
+/// because it is evaluated at match time.
+fn norm_entity_selectors(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
     let bad = |m: String| NgsiError::BadRequestData(m);
-    // 5.5.4: first-level member nulls are only legal in fragments (patch)
-    if !is_patch {
-        antares_jsonld::reject_first_level_nulls(doc)?;
-    }
-    let mut out = Map::new();
-    for (k, v) in doc {
-        // 5.4 Fragment member removal: null and the NGSI-LD Null both delete
-        // the member. Read literally, the NGSI-LD Null was stored as the
-        // string it is spelled with, so the member survived carrying it.
-        if is_patch && k != "id" && (v.is_null() || v.as_str() == Some("urn:ngsi-ld:null")) {
-            if ["type", "notification"].contains(&k.as_str()) {
-                return Err(bad(format!("cannot remove mandatory member {k} (5.8.3)")));
-            }
-            out.insert(k.clone(), Value::Null);
-            continue;
-        }
-        match k.as_str() {
-            "@context" | "createdAt" | "modifiedAt" | "status" => continue,
-            "id" => {
-                let id = v
-                    .as_str()
-                    .ok_or_else(|| bad("subscription id must be a string URI".into()))?;
-                antares_model::EntityId::new(id)?;
-                out.insert("id".into(), v.clone());
-            }
-            "type" => {
-                if v.as_str() != Some("Subscription") {
-                    return Err(bad("type must be \"Subscription\" (5.2.12)".into()));
+    let arr = v
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| bad("entities must be a non-empty array".into()))?;
+    let mut entities = Vec::new();
+    for e in arr {
+        let eo = e
+            .as_object()
+            .ok_or_else(|| bad("entities entries must be objects".into()))?;
+        let mut ne = Map::new();
+        for (ek, ev) in eo {
+            match ek.as_str() {
+                "type" => {
+                    let t = ev
+                        .as_str()
+                        .filter(|t| !t.is_empty())
+                        .ok_or_else(|| bad("EntitySelector type is required".into()))?;
+                    // 4.17 type-selection expressions stay raw and
+                    // are evaluated at match time (046_16). Table
+                    // 5.2.33-1's "*" — "a request for all
+                    // Entities" — is not a term either: expanded,
+                    // it becomes an IRI no entity carries and the
+                    // subscription notifies nothing.
+                    if t == "*" || t.contains(['|', ',', ';', '(']) {
+                        ne.insert("type".into(), ev.clone());
+                    } else {
+                        ne.insert("type".into(), Value::String(ctx.expand_key(t)));
+                    }
                 }
-                out.insert("type".into(), v.clone());
-            }
-            "entities" => {
-                let arr = v
-                    .as_array()
-                    .filter(|a| !a.is_empty())
-                    .ok_or_else(|| bad("entities must be a non-empty array".into()))?;
-                let mut entities = Vec::new();
-                for e in arr {
-                    let eo = e
-                        .as_object()
-                        .ok_or_else(|| bad("entities entries must be objects".into()))?;
-                    let mut ne = Map::new();
-                    for (ek, ev) in eo {
-                        match ek.as_str() {
-                            "type" => {
-                                let t = ev
-                                    .as_str()
-                                    .filter(|t| !t.is_empty())
-                                    .ok_or_else(|| bad("EntitySelector type is required".into()))?;
-                                // 4.17 type-selection expressions stay raw and
-                                // are evaluated at match time (046_16). Table
-                                // 5.2.33-1's "*" — "a request for all
-                                // Entities" — is not a term either: expanded,
-                                // it becomes an IRI no entity carries and the
-                                // subscription notifies nothing.
-                                if t == "*" || t.contains(['|', ',', ';', '(']) {
-                                    ne.insert("type".into(), ev.clone());
-                                } else {
-                                    ne.insert("type".into(), Value::String(ctx.expand_key(t)));
-                                }
-                            }
-                            "id" => {
-                                // Table 5.2.33-1: id is "String or String[]"
-                                // of valid URIs
-                                match ev {
-                                    Value::String(id) => {
-                                        antares_model::EntityId::new(id)?;
-                                    }
-                                    Value::Array(a) => {
-                                        for i in a {
-                                            let id = i.as_str().ok_or_else(|| {
-                                                bad("EntitySelector id entries must be URIs (5.2.33)"
-                                                    .into())
-                                            })?;
-                                            antares_model::EntityId::new(id)?;
-                                        }
-                                    }
-                                    _ => return Err(bad(
-                                        "EntitySelector id must be a URI string or array (5.2.33)"
-                                            .into(),
-                                    )),
-                                }
-                                ne.insert("id".into(), ev.clone());
-                            }
-                            "idPattern" => {
-                                let p = ev
-                                    .as_str()
-                                    .ok_or_else(|| bad("idPattern must be a string".into()))?;
-                                crate::regexcache::compile(p)
-                                    .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
-                                ne.insert("idPattern".into(), ev.clone());
-                            }
-                            _ => {
-                                ne.insert(ek.clone(), ev.clone());
+                "id" => {
+                    // Table 5.2.33-1: id is "String or String[]"
+                    // of valid URIs
+                    match ev {
+                        Value::String(id) => {
+                            antares_model::EntityId::new(id)?;
+                        }
+                        Value::Array(a) => {
+                            for i in a {
+                                let id = i.as_str().ok_or_else(|| {
+                                    bad("EntitySelector id entries must be URIs (5.2.33)".into())
+                                })?;
+                                antares_model::EntityId::new(id)?;
                             }
                         }
-                    }
-                    if !ne.contains_key("type") {
-                        return Err(bad("EntitySelector requires type (5.2.33)".into()));
-                    }
-                    entities.push(Value::Object(ne));
-                }
-                out.insert("entities".into(), Value::Array(entities));
-            }
-            "watchedAttributes" => {
-                let arr = v
-                    .as_array()
-                    .filter(|a| !a.is_empty())
-                    .ok_or_else(|| bad("watchedAttributes must be a non-empty array".into()))?;
-                let mut attrs = Vec::new();
-                for a in arr {
-                    let s = a
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| bad("watchedAttributes entries must be strings".into()))?;
-                    attrs.push(Value::String(ctx.expand_key(s)));
-                }
-                out.insert("watchedAttributes".into(), Value::Array(attrs));
-            }
-            "q" => {
-                let q = v.as_str().ok_or_else(|| bad("q must be a string".into()))?;
-                // Validate the string the MATCHER will parse. `conditions_match`
-                // percent-decodes first (4.9, 046_05), so validating the raw
-                // form would let `%28%28%28…` through create-time checks and
-                // only become thousands of real parens at notification time —
-                // inside a spawned task, where the parser's own limits are the
-                // last line of defence.
-                let decoded = crate::negotiate::percent_decode(q.as_bytes());
-                antares_ql::parse_q(&decoded)?;
-                out.insert("q".into(), v.clone());
-            }
-            "geoQ" => {
-                let g = v
-                    .as_object()
-                    .ok_or_else(|| bad("geoQ must be an object".into()))?;
-                crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))?
-                    .ok_or_else(|| bad("geoQ requires georel (5.2.13)".into()))?;
-                let mut ng = g.clone();
-                if let Some(gp) = g.get("geoproperty").and_then(Value::as_str) {
-                    ng.insert("geoproperty".into(), Value::String(ctx.expand_key(gp)));
-                }
-                out.insert("geoQ".into(), Value::Object(ng));
-            }
-            "notification" => {
-                let n = v
-                    .as_object()
-                    .ok_or_else(|| bad("notification must be an object (5.2.14)".into()))?;
-                let mut nn = n.clone();
-                // 5.2.14.2: output-only members are read-only — provided
-                // ones are ignored, never stored.
-                for k in [
-                    "timesSent",
-                    "timesFailed",
-                    "lastNotification",
-                    "lastSuccess",
-                    "lastFailure",
-                ] {
-                    nn.remove(k);
-                }
-                if let Some(f) = n.get("format").and_then(Value::as_str) {
-                    if !["normalized", "keyValues", "simplified", "concise"].contains(&f) {
-                        return Err(bad(format!("invalid notification format {f:?}")));
-                    }
-                }
-                // Table 5.2.14.1-1 p.120: "showChanges cannot be true in case
-                // format is keyValues" — "simplified" is the declared synonym
-                if n.get("showChanges").and_then(Value::as_bool) == Some(true)
-                    && matches!(
-                        n.get("format").and_then(Value::as_str),
-                        Some("keyValues") | Some("simplified")
-                    )
-                {
-                    return Err(bad(
-                        "showChanges cannot be true when format is keyValues (5.2.14)".into(),
-                    ));
-                }
-                // Table 5.2.14.1-1: join / joinLevel / sysAttrs /
-                // showChanges value spaces.
-                if let Some(j) = n.get("join") {
-                    if !j
-                        .as_str()
-                        .is_some_and(|j| ["flat", "inline", "@none"].contains(&j))
-                    {
-                        return Err(bad(format!("invalid notification join {j:?} (5.2.14)")));
-                    }
-                }
-                // Table 5.2.14.1-1: a positive integer. The depth it names is
-                // the same Linked Entity traversal (4.5.23) a query drives, so
-                // it carries the same ceiling — every notification of this
-                // Subscription pays that traversal, and an unbounded level
-                // makes one accepted Subscription an amplification lever.
-                if let Some(jl) = n.get("joinLevel") {
-                    let cap = crate::bounds::MAX_JOIN_LEVEL as u64;
-                    let ok = jl.as_u64().is_some_and(|v| (1..=cap).contains(&v));
-                    if !ok {
-                        return Err(bad(format!(
-                            "notification.joinLevel must be an integer in 1..={cap} (5.2.14)"
-                        )));
-                    }
-                }
-                for key in ["sysAttrs", "showChanges"] {
-                    if n.get(key).is_some_and(|v| !v.is_boolean()) {
-                        return Err(bad(format!(
-                            "notification.{key} must be a boolean (5.2.14)"
-                        )));
-                    }
-                }
-                if let Some(attrs) = n.get("attributes").and_then(Value::as_array) {
-                    // Table 5.2.14.1-1 p.119: "Empty array (0 length) is not
-                    // allowed" — same restriction on pick and omit below
-                    if attrs.is_empty() {
-                        return Err(bad(
-                            "notification.attributes must not be empty (5.2.14)".into()
-                        ));
-                    }
-                    let mut na = Vec::new();
-                    for a in attrs {
-                        let s = a
-                            .as_str()
-                            .ok_or_else(|| bad("notification.attributes must be strings".into()))?;
-                        // "A synonym for pick, except that id, type, scope
-                        // are not allowed."
-                        if ["id", "type", "scope"].contains(&s) {
-                            return Err(bad(format!(
-                                "notification.attributes may not name {s:?} (5.2.14)"
-                            )));
-                        }
-                        na.push(Value::String(ctx.expand_key(s)));
-                    }
-                    nn.insert("attributes".into(), Value::Array(na));
-                }
-                for key in ["pick", "omit"] {
-                    let Some(members) = n.get(key).and_then(Value::as_array) else {
-                        continue;
-                    };
-                    if members.is_empty() {
-                        return Err(bad(format!(
-                            "notification.{key} must not be empty (5.2.14)"
-                        )));
-                    }
-                    // Table 5.2.14.1-1: each member is "a valid attribute
-                    // projection language string as per clause 4.21". The
-                    // notification path parses it again at delivery and drops
-                    // a member it cannot parse, so an unparseable `omit`
-                    // accepted here would deliver the Attribute the subscriber
-                    // asked to have removed.
-                    for m in members {
-                        let term = m.as_str().ok_or_else(|| {
-                            bad(format!("notification.{key} members are Strings (5.2.14)"))
-                        })?;
-                        crate::repr::parse_projection(term, ctx).map_err(|_| {
-                            bad(format!(
-                                "notification.{key} member {term:?} is not an attribute \
-                                 projection language string (4.21)"
+                        _ => {
+                            return Err(bad(
+                                "EntitySelector id must be a URI string or array (5.2.33)".into(),
                             ))
-                        })?;
+                        }
                     }
+                    ne.insert("id".into(), ev.clone());
                 }
-                let ep = n
-                    .get("endpoint")
-                    .and_then(Value::as_object)
-                    .ok_or_else(|| bad("notification.endpoint is required (5.2.14)".into()))?;
-                let uri = ep
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| bad("endpoint.uri is required (5.2.15)".into()))?;
-                antares_model::EntityId::new(uri)
-                    .map_err(|_| bad(format!("endpoint.uri is not a valid URI: {uri:?}")))?;
+                "idPattern" => {
+                    let p = ev
+                        .as_str()
+                        .ok_or_else(|| bad("idPattern must be a string".into()))?;
+                    crate::regexcache::compile(p)
+                        .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
+                    ne.insert("idPattern".into(), ev.clone());
+                }
+                _ => {
+                    ne.insert(ek.clone(), ev.clone());
+                }
+            }
+        }
+        if !ne.contains_key("type") {
+            return Err(bad("EntitySelector requires type (5.2.33)".into()));
+        }
+        entities.push(Value::Object(ne));
+    }
+    Ok(Value::Array(entities))
+}
 
-                let member_names = |key: &str| -> Vec<String> {
-                    n.get(key)
-                        .and_then(Value::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_owned)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
-                let pick = member_names("pick");
-                let omit = member_names("omit");
-                if !pick.is_empty() && n.contains_key("attributes") {
-                    return Err(bad("notification.pick and attributes are exclusive".into()));
-                }
-                if !omit.is_empty() && n.contains_key("attributes") {
-                    return Err(bad("notification.omit and attributes are exclusive".into()));
-                }
-                if pick.iter().any(|p| omit.contains(p)) {
-                    return Err(bad(
-                        "notification.pick and omit name the same entity member".into(),
-                    ));
-                }
-                // Table 5.2.15-1: receiverInfo/notifierInfo are
-                // KeyValuePair[] — per Table 5.2.22-1 both key and value
-                // are Strings, cardinality 1.
-                for key in ["receiverInfo", "notifierInfo"] {
-                    if let Some(arr) = ep.get(key) {
-                        let ok = arr.as_array().is_some_and(|a| {
-                            a.iter().all(|kv| {
-                                kv.get("key").is_some_and(Value::is_string)
-                                    && kv.get("value").is_some_and(Value::is_string)
-                            })
-                        });
-                        if !ok {
-                            return Err(bad(format!(
-                                "endpoint.{key} entries must be {{key, value}} pairs (5.2.15/5.2.22)"
-                            )));
-                        }
-                    }
-                }
-                // 6.3.8 and 6.3.9: each receiverInfo pair becomes one custom
-                // header on the notification POST, and "'Key' and 'value'
-                // members shall adhere to IETF RFC 7230 ... definitions
-                // concerning HTTP headers". A pair that cannot be a header is
-                // input the operation cannot meet (5.8.1.4), so it is refused
-                // here rather than accepted into a Subscription that can only
-                // ever dead-letter. notifierInfo is not headers — its own
-                // binding validates it through the sink.
-                if let Some(arr) = ep.get("receiverInfo").and_then(Value::as_array) {
-                    for kv in arr {
-                        let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
-                        if !k.is_some_and(is_field_name) || !v.is_some_and(is_field_value) {
-                            return Err(bad(format!(
-                                "endpoint.receiverInfo entry {kv} is not a valid HTTP header \
-                                 (RFC 7230, 6.3.8)"
-                            )));
-                        }
-                    }
-                }
-                // Table 5.2.15-1: cooldown and timeout are Numbers "Greater
-                // than 0"
-                for key in ["cooldown", "timeout"] {
-                    if let Some(v) = ep.get(key) {
-                        v.as_f64().filter(|n| *n > 0.0).ok_or_else(|| {
-                            bad(format!(
-                                "endpoint.{key} must be a number greater than 0 (5.2.15)"
-                            ))
-                        })?;
-                    }
-                }
-                if let Some(acc) = ep.get("accept").and_then(Value::as_str) {
-                    if ![
-                        "application/json",
-                        "application/ld+json",
-                        "application/geo+json",
-                    ]
-                    .contains(&acc)
-                    {
-                        return Err(bad(format!("invalid endpoint accept {acc:?}")));
-                    }
-                }
-                out.insert("notification".into(), Value::Object(nn));
+/// Table 5.2.14.1-1 NotificationParams: the `notification` member of a
+/// Subscription (5.2.12). Output-only members are dropped, every other
+/// member is held to its value space, and the Endpoint is checked by
+/// `check_endpoint_params`.
+fn norm_notification(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let n = v
+        .as_object()
+        .ok_or_else(|| bad("notification must be an object (5.2.14)".into()))?;
+    let mut nn = n.clone();
+    // 5.2.14.2: output-only members are read-only — provided
+    // ones are ignored, never stored.
+    for k in [
+        "timesSent",
+        "timesFailed",
+        "lastNotification",
+        "lastSuccess",
+        "lastFailure",
+    ] {
+        nn.remove(k);
+    }
+    if let Some(f) = n.get("format").and_then(Value::as_str) {
+        if !["normalized", "keyValues", "simplified", "concise"].contains(&f) {
+            return Err(bad(format!("invalid notification format {f:?}")));
+        }
+    }
+    // Table 5.2.14.1-1 p.120: "showChanges cannot be true in case
+    // format is keyValues" — "simplified" is the declared synonym
+    if n.get("showChanges").and_then(Value::as_bool) == Some(true)
+        && matches!(
+            n.get("format").and_then(Value::as_str),
+            Some("keyValues") | Some("simplified")
+        )
+    {
+        return Err(bad(
+            "showChanges cannot be true when format is keyValues (5.2.14)".into(),
+        ));
+    }
+    // Table 5.2.14.1-1: join / joinLevel / sysAttrs /
+    // showChanges value spaces.
+    if let Some(j) = n.get("join") {
+        if !j
+            .as_str()
+            .is_some_and(|j| ["flat", "inline", "@none"].contains(&j))
+        {
+            return Err(bad(format!("invalid notification join {j:?} (5.2.14)")));
+        }
+    }
+    // Table 5.2.14.1-1: a positive integer. The depth it names is
+    // the same Linked Entity traversal (4.5.23) a query drives, so
+    // it carries the same ceiling — every notification of this
+    // Subscription pays that traversal, and an unbounded level
+    // makes one accepted Subscription an amplification lever.
+    if let Some(jl) = n.get("joinLevel") {
+        let cap = crate::bounds::MAX_JOIN_LEVEL as u64;
+        let ok = jl.as_u64().is_some_and(|v| (1..=cap).contains(&v));
+        if !ok {
+            return Err(bad(format!(
+                "notification.joinLevel must be an integer in 1..={cap} (5.2.14)"
+            )));
+        }
+    }
+    for key in ["sysAttrs", "showChanges"] {
+        if n.get(key).is_some_and(|v| !v.is_boolean()) {
+            return Err(bad(format!(
+                "notification.{key} must be a boolean (5.2.14)"
+            )));
+        }
+    }
+    if let Some(attrs) = n.get("attributes").and_then(Value::as_array) {
+        // Table 5.2.14.1-1 p.119: "Empty array (0 length) is not
+        // allowed" — same restriction on pick and omit below
+        if attrs.is_empty() {
+            return Err(bad(
+                "notification.attributes must not be empty (5.2.14)".into()
+            ));
+        }
+        let mut na = Vec::new();
+        for a in attrs {
+            let s = a
+                .as_str()
+                .ok_or_else(|| bad("notification.attributes must be strings".into()))?;
+            // "A synonym for pick, except that id, type, scope
+            // are not allowed."
+            if ["id", "type", "scope"].contains(&s) {
+                return Err(bad(format!(
+                    "notification.attributes may not name {s:?} (5.2.14)"
+                )));
             }
-            "expiresAt" => {
-                let s = v
-                    .as_str()
-                    .filter(|s| parse_datetime(s))
-                    .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
-                // 4.6.3 admits several spellings of one instant, so whether a
-                // DateTime has passed cannot be read off the raw strings.
-                if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
-                    return Err(bad("expiresAt is in the past (5.8.1)".into()));
-                }
-                out.insert("expiresAt".into(), v.clone());
-            }
-            "throttling" => {
-                v.as_f64()
-                    .filter(|n| *n > 0.0)
-                    .ok_or_else(|| bad("throttling must be a positive number".into()))?;
-                out.insert("throttling".into(), v.clone());
-            }
-            "timeInterval" => {
-                v.as_f64()
-                    .filter(|n| *n > 0.0)
-                    .ok_or_else(|| bad("timeInterval must be a positive number".into()))?;
-                out.insert("timeInterval".into(), v.clone());
-            }
-            // Table 5.2.12-1: all three are Booleans. `localOnly` and
-            // `splitEntities` decide how far the Subscription reaches — a
-            // string read through `as_bool()` is falsy, so accepting one
-            // would turn a subscriber's request for local scope (5.5.13)
-            // into a distributed subscription without telling it.
-            "isActive" | "localOnly" | "splitEntities" => {
-                if !v.is_boolean() {
-                    return Err(bad(format!("{k} must be a boolean (5.2.12)")));
-                }
-                out.insert(k.clone(), v.clone());
-            }
-            "temporalQ" => {
-                // 5.2.21 TemporalQuery: timerel and timeAt are cardinality 1
-                // and every member must sit in its Table 5.2.21-1 value
-                // space (used by CSR subscriptions, 5.11.7).
-                let tq = v.as_object().ok_or_else(|| {
-                    bad("temporalQ must be a TemporalQuery object (5.2.21)".into())
-                })?;
-                let mut p = std::collections::HashMap::new();
-                crate::paging::temporal_q_params(tq, &mut p)?;
-                crate::temporalq::TemporalQ::from_params(&p, true)?;
-                out.insert(k.clone(), v.clone());
-            }
-            // Table 5.2.12-1: "Valid notification triggers are entityCreated,
-            // entityUpdated, entityDeleted, attributeCreated, attributeUpdated,
-            // attributeDeleted." A trigger outside that set is accepted and
-            // then matches nothing, leaving a subscription that never fires.
-            "notificationTrigger" => {
-                const TRIGGERS: [&str; 6] = [
-                    "entityCreated",
-                    "entityUpdated",
-                    "entityDeleted",
-                    "attributeCreated",
-                    "attributeUpdated",
-                    "attributeDeleted",
-                ];
-                let list = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
-                    bad("notificationTrigger must be a non-empty array of strings (5.2.12)".into())
-                })?;
-                for t in list {
-                    let t = t.as_str().ok_or_else(|| {
-                        bad("notificationTrigger entries must be strings (5.2.12)".into())
-                    })?;
-                    if !TRIGGERS.contains(&t) {
-                        return Err(bad(format!(
-                            "{t} is not a valid notification trigger (5.2.12)"
-                        )));
-                    }
-                }
-                out.insert(k.clone(), v.clone());
-            }
-            // Table 5.2.12-1: csf is "A valid query string as per clause 4.9".
-            // Unparsed here it is stored and only fails at Context Source
-            // Registration matching (5.11.2.4), where it silently matches
-            // nothing instead of telling the subscriber the filter is broken.
-            "csf" => {
-                let s = v
-                    .as_str()
-                    .ok_or_else(|| bad("csf must be a query string (5.2.12)".into()))?;
-                antares_ql::parse_q(s)?;
-                out.insert(k.clone(), v.clone());
-            }
-            // 5.8.6: the @context governing a subscription's notifications is
-            // the @context of the creating request, held in a broker-internal
-            // member. This function only ever sees client input — a create
-            // body or a patch fragment — so dropping the member here stops a
-            // subscriber both from seeding it and from replacing it later.
-            // __via is the same class: the 6.3.18 chain comes from the Via
-            // HTTP header of the creating request, never from the body.
-            "__context" | "__via" => continue,
-            "scopeQ" | "lang" | "subscriptionName" | "name" | "description" | "jsonldContext"
-            | "ngsildConformance" | "datasetId" => {
-                out.insert(k.clone(), v.clone());
-            }
-            // tolerant reader: keep unknown members
-            _ => {
-                out.insert(k.clone(), v.clone());
+            na.push(Value::String(ctx.expand_key(s)));
+        }
+        nn.insert("attributes".into(), Value::Array(na));
+    }
+    for key in ["pick", "omit"] {
+        let Some(members) = n.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        if members.is_empty() {
+            return Err(bad(format!(
+                "notification.{key} must not be empty (5.2.14)"
+            )));
+        }
+        // Table 5.2.14.1-1: each member is "a valid attribute
+        // projection language string as per clause 4.21". The
+        // notification path parses it again at delivery and drops
+        // a member it cannot parse, so an unparseable `omit`
+        // accepted here would deliver the Attribute the subscriber
+        // asked to have removed.
+        for m in members {
+            let term = m
+                .as_str()
+                .ok_or_else(|| bad(format!("notification.{key} members are Strings (5.2.14)")))?;
+            crate::repr::parse_projection(term, ctx).map_err(|_| {
+                bad(format!(
+                    "notification.{key} member {term:?} is not an attribute \
+                     projection language string (4.21)"
+                ))
+            })?;
+        }
+    }
+    let ep = n
+        .get("endpoint")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad("notification.endpoint is required (5.2.14)".into()))?;
+    let uri = ep
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("endpoint.uri is required (5.2.15)".into()))?;
+    antares_model::EntityId::new(uri)
+        .map_err(|_| bad(format!("endpoint.uri is not a valid URI: {uri:?}")))?;
+
+    let member_names = |key: &str| -> Vec<String> {
+        n.get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let pick = member_names("pick");
+    let omit = member_names("omit");
+    if !pick.is_empty() && n.contains_key("attributes") {
+        return Err(bad("notification.pick and attributes are exclusive".into()));
+    }
+    if !omit.is_empty() && n.contains_key("attributes") {
+        return Err(bad("notification.omit and attributes are exclusive".into()));
+    }
+    if pick.iter().any(|p| omit.contains(p)) {
+        return Err(bad(
+            "notification.pick and omit name the same entity member".into(),
+        ));
+    }
+    check_endpoint_params(ep)?;
+    Ok(Value::Object(nn))
+}
+
+/// Table 5.2.15-1 Endpoint: the members that decide how a notification is
+/// sent. `uri` is checked by the caller, which needs it first.
+fn check_endpoint_params(ep: &Map<String, Value>) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    // Table 5.2.15-1: receiverInfo/notifierInfo are
+    // KeyValuePair[] — per Table 5.2.22-1 both key and value
+    // are Strings, cardinality 1.
+    for key in ["receiverInfo", "notifierInfo"] {
+        if let Some(arr) = ep.get(key) {
+            let ok = arr.as_array().is_some_and(|a| {
+                a.iter().all(|kv| {
+                    kv.get("key").is_some_and(Value::is_string)
+                        && kv.get("value").is_some_and(Value::is_string)
+                })
+            });
+            if !ok {
+                return Err(bad(format!(
+                    "endpoint.{key} entries must be {{key, value}} pairs (5.2.15/5.2.22)"
+                )));
             }
         }
     }
+    // 6.3.8 and 6.3.9: each receiverInfo pair becomes one custom
+    // header on the notification POST, and "'Key' and 'value'
+    // members shall adhere to IETF RFC 7230 ... definitions
+    // concerning HTTP headers". A pair that cannot be a header is
+    // input the operation cannot meet (5.8.1.4), so it is refused
+    // here rather than accepted into a Subscription that can only
+    // ever dead-letter. notifierInfo is not headers — its own
+    // binding validates it through the sink.
+    if let Some(arr) = ep.get("receiverInfo").and_then(Value::as_array) {
+        for kv in arr {
+            let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
+            if !k.is_some_and(is_field_name) || !v.is_some_and(is_field_value) {
+                return Err(bad(format!(
+                    "endpoint.receiverInfo entry {kv} is not a valid HTTP header \
+                     (RFC 7230, 6.3.8)"
+                )));
+            }
+        }
+    }
+    // Table 5.2.15-1: cooldown and timeout are Numbers "Greater
+    // than 0"
+    for key in ["cooldown", "timeout"] {
+        if let Some(v) = ep.get(key) {
+            v.as_f64().filter(|n| *n > 0.0).ok_or_else(|| {
+                bad(format!(
+                    "endpoint.{key} must be a number greater than 0 (5.2.15)"
+                ))
+            })?;
+        }
+    }
+    if let Some(acc) = ep.get("accept").and_then(Value::as_str) {
+        if ![
+            "application/json",
+            "application/ld+json",
+            "application/geo+json",
+        ]
+        .contains(&acc)
+        {
+            return Err(bad(format!("invalid endpoint accept {acc:?}")));
+        }
+    }
+    Ok(())
+}
+
+/// Table 5.2.12-1: "Valid notification triggers are entityCreated,
+/// entityUpdated, entityDeleted, attributeCreated, attributeUpdated,
+/// attributeDeleted." A trigger outside that set is accepted and then
+/// matches nothing, leaving a subscription that never fires.
+fn check_notification_triggers(v: &Value) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    const TRIGGERS: [&str; 6] = [
+        "entityCreated",
+        "entityUpdated",
+        "entityDeleted",
+        "attributeCreated",
+        "attributeUpdated",
+        "attributeDeleted",
+    ];
+    let list = v.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+        bad("notificationTrigger must be a non-empty array of strings (5.2.12)".into())
+    })?;
+    for t in list {
+        let t = t
+            .as_str()
+            .ok_or_else(|| bad("notificationTrigger entries must be strings (5.2.12)".into()))?;
+        if !TRIGGERS.contains(&t) {
+            return Err(bad(format!(
+                "{t} is not a valid notification trigger (5.2.12)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One member of Table 5.2.12-1, validated and normalized into `out`.
+/// A member the table does not name is kept verbatim: 5.5.9 asks a
+/// receiver to tolerate what it does not know.
+fn norm_member(
+    k: &str,
+    v: &Value,
+    ctx: &Context,
+    out: &mut Map<String, Value>,
+) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    match k {
+        "@context" | "createdAt" | "modifiedAt" | "status" => return Ok(()),
+        "id" => {
+            let id = v
+                .as_str()
+                .ok_or_else(|| bad("subscription id must be a string URI".into()))?;
+            antares_model::EntityId::new(id)?;
+            out.insert("id".into(), v.clone());
+        }
+        "type" => {
+            if v.as_str() != Some("Subscription") {
+                return Err(bad("type must be \"Subscription\" (5.2.12)".into()));
+            }
+            out.insert("type".into(), v.clone());
+        }
+        "entities" => {
+            out.insert("entities".into(), norm_entity_selectors(v, ctx)?);
+        }
+        "watchedAttributes" => {
+            let arr = v
+                .as_array()
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| bad("watchedAttributes must be a non-empty array".into()))?;
+            let mut attrs = Vec::new();
+            for a in arr {
+                let s = a
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| bad("watchedAttributes entries must be strings".into()))?;
+                attrs.push(Value::String(ctx.expand_key(s)));
+            }
+            out.insert("watchedAttributes".into(), Value::Array(attrs));
+        }
+        "q" => {
+            let q = v.as_str().ok_or_else(|| bad("q must be a string".into()))?;
+            // Validate the string the MATCHER will parse. `conditions_match`
+            // percent-decodes first (4.9, 046_05), so validating the raw
+            // form would let `%28%28%28…` through create-time checks and
+            // only become thousands of real parens at notification time —
+            // inside a spawned task, where the parser's own limits are the
+            // last line of defence.
+            let decoded = crate::negotiate::percent_decode(q.as_bytes());
+            antares_ql::parse_q(&decoded)?;
+            out.insert("q".into(), v.clone());
+        }
+        "geoQ" => {
+            let g = v
+                .as_object()
+                .ok_or_else(|| bad("geoQ must be an object".into()))?;
+            crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))?
+                .ok_or_else(|| bad("geoQ requires georel (5.2.13)".into()))?;
+            let mut ng = g.clone();
+            if let Some(gp) = g.get("geoproperty").and_then(Value::as_str) {
+                ng.insert("geoproperty".into(), Value::String(ctx.expand_key(gp)));
+            }
+            out.insert("geoQ".into(), Value::Object(ng));
+        }
+        "notification" => {
+            out.insert("notification".into(), norm_notification(v, ctx)?);
+        }
+        "expiresAt" => {
+            let s = v
+                .as_str()
+                .filter(|s| parse_datetime(s))
+                .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
+            // 4.6.3 admits several spellings of one instant, so whether a
+            // DateTime has passed cannot be read off the raw strings.
+            if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
+                return Err(bad("expiresAt is in the past (5.8.1)".into()));
+            }
+            out.insert("expiresAt".into(), v.clone());
+        }
+        "throttling" => {
+            v.as_f64()
+                .filter(|n| *n > 0.0)
+                .ok_or_else(|| bad("throttling must be a positive number".into()))?;
+            out.insert("throttling".into(), v.clone());
+        }
+        "timeInterval" => {
+            v.as_f64()
+                .filter(|n| *n > 0.0)
+                .ok_or_else(|| bad("timeInterval must be a positive number".into()))?;
+            out.insert("timeInterval".into(), v.clone());
+        }
+        // Table 5.2.12-1: all three are Booleans. `localOnly` and
+        // `splitEntities` decide how far the Subscription reaches — a
+        // string read through `as_bool()` is falsy, so accepting one
+        // would turn a subscriber's request for local scope (5.5.13)
+        // into a distributed subscription without telling it.
+        "isActive" | "localOnly" | "splitEntities" => {
+            if !v.is_boolean() {
+                return Err(bad(format!("{k} must be a boolean (5.2.12)")));
+            }
+            out.insert(k.to_owned(), v.clone());
+        }
+        "temporalQ" => {
+            // 5.2.21 TemporalQuery: timerel and timeAt are cardinality 1
+            // and every member must sit in its Table 5.2.21-1 value
+            // space (used by CSR subscriptions, 5.11.7).
+            let tq = v
+                .as_object()
+                .ok_or_else(|| bad("temporalQ must be a TemporalQuery object (5.2.21)".into()))?;
+            let mut p = std::collections::HashMap::new();
+            crate::paging::temporal_q_params(tq, &mut p)?;
+            crate::temporalq::TemporalQ::from_params(&p, true)?;
+            out.insert(k.to_owned(), v.clone());
+        }
+        // Table 5.2.12-1: "Valid notification triggers are entityCreated,
+        // entityUpdated, entityDeleted, attributeCreated, attributeUpdated,
+        // attributeDeleted." A trigger outside that set is accepted and
+        // then matches nothing, leaving a subscription that never fires.
+        "notificationTrigger" => {
+            check_notification_triggers(v)?;
+            out.insert(k.to_owned(), v.clone());
+        }
+        // Table 5.2.12-1: csf is "A valid query string as per clause 4.9".
+        // Unparsed here it is stored and only fails at Context Source
+        // Registration matching (5.11.2.4), where it silently matches
+        // nothing instead of telling the subscriber the filter is broken.
+        "csf" => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| bad("csf must be a query string (5.2.12)".into()))?;
+            antares_ql::parse_q(s)?;
+            out.insert(k.to_owned(), v.clone());
+        }
+        // 5.8.6: the @context governing a subscription's notifications is
+        // the @context of the creating request, held in a broker-internal
+        // member. This function only ever sees client input — a create
+        // body or a patch fragment — so dropping the member here stops a
+        // subscriber both from seeding it and from replacing it later.
+        // __via is the same class: the 6.3.18 chain comes from the Via
+        // HTTP header of the creating request, never from the body.
+        "__context" | "__via" => return Ok(()),
+        "scopeQ" | "lang" | "subscriptionName" | "name" | "description" | "jsonldContext"
+        | "ngsildConformance" | "datasetId" => {
+            out.insert(k.to_owned(), v.clone());
+        }
+        // tolerant reader: keep unknown members
+        _ => {
+            out.insert(k.to_owned(), v.clone());
+        }
+    }
+    Ok(())
+}
+
+/// The Table 5.2.12-1 rules that hold between members rather than over
+/// one: what a Subscription must carry, and the pairs it may not.
+fn check_subscription_members(out: &Map<String, Value>, is_patch: bool) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
     if !is_patch {
         if !out.contains_key("type") {
             return Err(bad("type must be \"Subscription\" (5.2.12)".into()));
@@ -518,6 +546,36 @@ pub fn normalize_subscription(
             "timeInterval and throttling are mutually exclusive (5.2.12)".into(),
         ));
     }
+    Ok(())
+}
+
+/// Validate + normalize a subscription document (5.8.1). Types/attribute
+/// names are expanded to IRIs; the rest is stored verbatim.
+pub fn normalize_subscription(
+    doc: &Map<String, Value>,
+    ctx: &Context,
+    is_patch: bool,
+) -> Result<Map<String, Value>, NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    // 5.5.4: first-level member nulls are only legal in fragments (patch)
+    if !is_patch {
+        antares_jsonld::reject_first_level_nulls(doc)?;
+    }
+    let mut out = Map::new();
+    for (k, v) in doc {
+        // 5.4 Fragment member removal: null and the NGSI-LD Null both delete
+        // the member. Read literally, the NGSI-LD Null was stored as the
+        // string it is spelled with, so the member survived carrying it.
+        if is_patch && k != "id" && (v.is_null() || v.as_str() == Some("urn:ngsi-ld:null")) {
+            if ["type", "notification"].contains(&k.as_str()) {
+                return Err(bad(format!("cannot remove mandatory member {k} (5.8.3)")));
+            }
+            out.insert(k.clone(), Value::Null);
+            continue;
+        }
+        norm_member(k, v, ctx, &mut out)?;
+    }
+    check_subscription_members(&out, is_patch)?;
     Ok(out)
 }
 
