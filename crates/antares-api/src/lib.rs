@@ -681,6 +681,11 @@ async fn options_204(
 /// The build-time git hash (build.rs) — re-exported for --version.
 pub const GIT_HASH: &str = env!("ANTARES_GIT_HASH");
 
+/// Liveness plus the deployment's own description: which drivers are
+/// running, what they are, every configured cap with its rejection counters,
+/// the mounted surfaces and the notification schemes they can deliver to.
+/// 503 while draining, so a load balancer stops routing here before the
+/// listener stops accepting.
 async fn health(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
@@ -773,11 +778,6 @@ async fn health(
     (code, axum::Json(body))
 }
 
-/// Readiness, distinct from /q/health liveness: ready = not
-/// draining AND the store answers a trivial request AND (when bus=nats) the
-/// bus is connected. On a Postgres failover or a NATS partition the pod is
-/// still alive (liveness stays 200 — a restart fixes nothing) but must stop
-/// receiving traffic, so the readinessProbe points HERE.
 /// The tenant an admin dead-letter call addresses: `?tenant=` (default
 /// tenant when absent), grammar-checked, never a reserved internal one.
 fn admin_tenant(q: &std::collections::HashMap<String, String>) -> Result<TenantId, NgsiError> {
@@ -801,11 +801,20 @@ fn admin_tenant(q: &std::collections::HashMap<String, String>) -> Result<TenantI
 /// values a replay has to send — only what leaves through this route loses
 /// them.
 fn redact_letter(l: &mut serde_json::Value) {
-    if let Some(u) = l["uri"].as_str() {
-        l["uri"] = serde_json::Value::String(notify::redact_userinfo(u));
+    // Assigning through `Value`'s index panics on anything but an object,
+    // and the row comes from the store rather than from this process.
+    let Some(letter) = l.as_object_mut() else {
+        return;
+    };
+    if let Some(u) = letter.get("uri").and_then(serde_json::Value::as_str) {
+        let redacted = serde_json::Value::String(notify::redact_userinfo(u));
+        letter.insert("uri".into(), redacted);
     }
     for member in ["receiverInfo", "notifierInfo", "headers"] {
-        let Some(pairs) = l[member].as_array_mut() else {
+        let Some(pairs) = letter
+            .get_mut(member)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
             continue;
         };
         for pair in pairs {
@@ -889,9 +898,17 @@ async fn dead_letter_replay(
             let ts = state::now_iso();
             let w = why.clone();
             let _ = st.store.mutate(&tenant, Kind::DeadLetter, &id, move |d| {
-                d["attempts"] = (d["attempts"].as_u64().unwrap_or(0) + 1).into();
-                d["lastError"] = serde_json::Value::String(w);
-                d["lastAt"] = serde_json::Value::String(ts);
+                let Some(letter) = d.as_object_mut() else {
+                    return Ok::<(), NgsiError>(());
+                };
+                let n = letter
+                    .get("attempts")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    + 1;
+                letter.insert("attempts".into(), n.into());
+                letter.insert("lastError".into(), serde_json::Value::String(w));
+                letter.insert("lastAt".into(), serde_json::Value::String(ts));
                 Ok::<(), NgsiError>(())
             });
             (
@@ -903,6 +920,9 @@ async fn dead_letter_replay(
     }
 }
 
+/// Drop one dead letter without replaying it: 204 when it was there, 404
+/// when it was not. The letter is the only copy of a notification the
+/// delivery policy gave up on, so this is the one route that discards it.
 async fn dead_letter_delete(
     axum::extract::State(st): axum::extract::State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1105,6 +1125,11 @@ async fn tenant_purge(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Readiness, distinct from `/q/health` liveness: ready = not draining AND
+/// the store answers a trivial request AND (when bus=nats) the bus is
+/// connected. On a Postgres failover or a NATS partition the pod is still
+/// alive (liveness stays 200 — a restart fixes nothing) but must stop
+/// receiving traffic, so the readinessProbe points HERE.
 async fn ready(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> (StatusCode, axum::Json<serde_json::Value>) {

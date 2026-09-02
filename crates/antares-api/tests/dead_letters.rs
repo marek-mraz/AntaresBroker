@@ -511,3 +511,52 @@ async fn the_listing_blanks_every_credential_a_letter_carries() {
     assert_eq!(kept["notifierInfo"][1][1], "hunter2");
     assert_eq!(kept["headers"][1][1], "Bearer legacy-token");
 }
+
+/// A DeadLetter row that is not a JSON object reaches the listing the same
+/// way every other row does — the store hands back whatever it holds, and a
+/// row written by an older binary, a migration or an operator with psql is
+/// not this process's own `json!` literal. Redaction has to survive it: the
+/// listing is the route that exists so credentials do NOT leave, and a panic
+/// there takes the connection with it.
+#[tokio::test]
+async fn a_stored_letter_of_the_wrong_shape_does_not_take_the_listing_down() {
+    let st = state();
+    let t = TenantId::new("acme").expect("tenant");
+    for (id, doc) in [
+        ("urn:ngsi-ld:DeadLetter:string", Value::String("x".into())),
+        ("urn:ngsi-ld:DeadLetter:array", Value::Array(vec![])),
+        ("urn:ngsi-ld:DeadLetter:number", Value::from(7)),
+        ("urn:ngsi-ld:DeadLetter:null", Value::Null),
+    ] {
+        assert!(st
+            .store
+            .create(&t, Kind::DeadLetter, id, doc)
+            .expect("seed"));
+    }
+    seed(
+        &st,
+        "acme",
+        "urn:ngsi-ld:DeadLetter:ok",
+        "urn:s:1",
+        "http://user:secret@127.0.0.1:9/n",
+        "2026-01-01T00:00:01Z",
+    );
+
+    let (s, b) = send(&st, "GET", "/q/dead-letters?tenant=acme").await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let listed = b.as_array().expect("array");
+    assert_eq!(listed.len(), 5, "every row is listed: {b}");
+    assert!(
+        !b.to_string().contains("secret"),
+        "the userinfo of the well-formed row is still redacted: {b}"
+    );
+
+    // and the replay bookkeeping writes through the same shape
+    let (s, _) = send(
+        &st,
+        "POST",
+        "/q/dead-letters/urn:ngsi-ld:DeadLetter:string/replay?tenant=acme",
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "an unreadable letter is a 502");
+}

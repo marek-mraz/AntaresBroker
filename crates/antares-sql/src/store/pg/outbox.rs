@@ -3,7 +3,7 @@
 //! INSERTed in the SAME transaction as the entity write, so a broker crash
 //! between commit and publish can never lose an event. The drain loop
 //! publishes rows to the bus with `Nats-Msg-Id` = `seq` for dedup, then acks
-//! by deleting up to the published seq.
+//! by deleting exactly the seqs it published — never a range, see [`ack`].
 //!
 //! Producer wiring into the entity write paths lands WITH the drain:
 //! enqueuing events nothing consumes would only grow the table
