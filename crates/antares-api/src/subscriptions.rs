@@ -1777,6 +1777,20 @@ mod tests {
                 norm(&mk(json!({ key: ["refDevice{model}", "temperature"] }))).is_ok(),
                 "a nested term and a bare term are both valid 4.21 (notification.{key})"
             );
+            // 5.8.2.4 replaces the member from a fragment, so the same value
+            // space has to hold on that way in: the delivery path cannot tell
+            // which operation wrote the Subscription it reads. The fragment
+            // carries a complete endpoint deliberately — `notification`
+            // without one is refused for the missing endpoint (5.2.14,
+            // cardinality 1), which would make this assertion pass while
+            // proving nothing about the projection member.
+            let ctx = antares_jsonld::Loader::new().core();
+            let fragment = json!({"notification": {
+                "endpoint": {"uri": "http://localhost:1111/notify"}, key: ["a b"]}});
+            assert!(
+                normalize_subscription(fragment.as_object().expect("object"), &ctx, true).is_err(),
+                "an update fragment wrote a notification.{key} the 4.21 grammar refuses"
+            );
         }
     }
 
