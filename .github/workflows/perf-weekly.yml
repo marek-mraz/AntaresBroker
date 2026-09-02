@@ -32,9 +32,12 @@ on:
       store:
         description: memory, or postgres (adds the same tables against a PostgreSQL container on the box, at pool 20 and 100)
         default: memory
+      server:
+        description: Hetzner instance type. ccx33 is the pinned one every published number comes from; ccx53 doubles the physical cores so core-scale.sh can run its 4- and 8-core steps, and its numbers belong to their own history
+        default: ccx33
 
 env:
-  SERVER_TYPE: ccx33
+  SERVER_TYPE: ${{ inputs.server || 'ccx33' }}
   SERVER_IMAGE: ubuntu-24.04
   SERVER_LOCATION: hel1
   TTL_HOURS: 1
