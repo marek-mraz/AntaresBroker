@@ -78,8 +78,13 @@ async fn create_vehicle(st: &AppState, id: &str, speed: i64) {
 /// Poll the snapshot until it leaves "preparing" (the fill runs in the
 /// background per 5.16.1.4).
 async fn wait_ready(st: &AppState, loc: &str) -> Value {
-    for _ in 0..100 {
-        let (status, body) = send(st, "GET", loc, None).await;
+    wait_ready_h(st, loc, &[]).await
+}
+
+/// The same wait for a request that carries headers, a tenant above all.
+async fn wait_ready_h(st: &AppState, loc: &str, extra: &[(&str, &str)]) -> Value {
+    for _ in 0..100 * antares_api::state::slow_factor() {
+        let (status, _, body) = send_h(st, "GET", loc, None, extra).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         if body["snapshotStatus"] != "preparing" {
             return body;
@@ -856,15 +861,8 @@ async fn clause_5_5_15_snapshot_is_tenant_scoped() {
     let (status, h, b) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(snap), tenant).await;
     assert_eq!(status, StatusCode::CREATED, "{b}");
     let loc = h.get("Location").unwrap().to_str().unwrap().to_owned();
-    for _ in 0..100 {
-        let (_, _, s) = send_h(&st, "GET", &loc, None, tenant).await;
-        if s["snapshotStatus"] != "preparing" {
-            assert_eq!(s["snapshotStatus"], "success", "{s}");
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let (_, _, ready) = send_h(&st, "GET", &loc, None, tenant).await;
+    let ready = wait_ready_h(&st, &loc, tenant).await;
+    assert_eq!(ready["snapshotStatus"], "success", "{ready}");
     let sid = ready["id"].as_str().expect("id").to_owned();
 
     // both headers → the snapshot serves the tenant's frozen copy
@@ -942,6 +940,78 @@ async fn clause_6_3_22_unknown_snapshot_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// 6.3.22 gives NGSILD-Snapshot one value, the way 6.3.14 gives
+/// NGSILD-Tenant one — and `tenant_from` already refuses a repeated
+/// NGSILD-Tenant, because a field that is not list-type cannot have its
+/// repeated lines joined (RFC 9110 clause 5.3) and silently taking the
+/// first lets a second value decide nothing while looking like it should.
+/// The same reasoning holds one header over, and the stakes are higher:
+/// the header decides whether a request is answered from a frozen copy or
+/// from live data, so a value the broker and an intermediary read
+/// differently is a request served against the wrong dataset. A header the
+/// broker cannot read at all is the same question with an obvious wrong
+/// answer — running unscoped hands back live data to a client that asked
+/// for a snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_6_3_22_an_ambiguous_snapshot_header_is_refused() {
+    let st = state();
+    create_vehicle(&st, "urn:ngsi-ld:Vehicle:amb", 10).await;
+    let body = json!({
+        "id": "urn:ngsi-ld:snapshot:amb", "type": "Snapshot",
+        "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]
+    })
+    .to_string();
+    let (status, headers, b) = send_h(&st, "POST", "/ngsi-ld/v1/snapshots", Some(body), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{b}");
+    let loc = headers
+        .get("Location")
+        .expect("Location")
+        .to_str()
+        .expect("ascii")
+        .to_owned();
+    wait_ready(&st, &loc).await;
+
+    // Two values, one of which is a snapshot that exists: the answer may not
+    // be "the first one wins".
+    let (status, _, body) = send_h(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Vehicle",
+        None,
+        &[
+            ("NGSILD-Snapshot", "urn:ngsi-ld:snapshot:amb"),
+            ("NGSILD-Snapshot", "urn:ngsi-ld:snapshot:other"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a repeated NGSILD-Snapshot names no single snapshot: {body}"
+    );
+
+    // A value the header parser cannot read is not "no header": answering it
+    // unscoped serves live data to a request that asked for a frozen copy.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/ngsi-ld/v1/entities?type=Vehicle")
+        .header(
+            "NGSILD-Snapshot",
+            axum::http::HeaderValue::from_bytes(b"\xff\xfe").expect("opaque header value"),
+        )
+        .body(Body::empty())
+        .expect("request");
+    let res = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("response");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "an unreadable NGSILD-Snapshot must not fall through to live data"
+    );
 }
 
 /// How many snap-index reverse-lookup markers point at `sid`. The markers

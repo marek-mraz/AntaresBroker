@@ -1063,13 +1063,29 @@ pub async fn snapshot_layer(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Some(sid) = req
-        .headers()
-        .get("NGSILD-Snapshot")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-    else {
-        return next.run(req).await;
+    // 6.3.22 gives the header one value, the way 6.3.14 gives NGSILD-Tenant
+    // one. A field that is not list-type cannot have its repeated lines
+    // joined (RFC 9110 clause 5.3), and this header decides whether the
+    // request is answered from a frozen copy or from live data: taking the
+    // first of two, or running unscoped because the value cannot be read,
+    // serves the request against a dataset nobody named.
+    let sid = {
+        let mut vals = req.headers().get_all("NGSILD-Snapshot").iter();
+        match (vals.next(), vals.next()) {
+            (None, _) => Ok(None),
+            (Some(_), Some(_)) => Err("repeated NGSILD-Snapshot"),
+            (Some(v), None) => v
+                .to_str()
+                .map(|s| Some(s.to_owned()))
+                .map_err(|_| "non-ASCII NGSILD-Snapshot"),
+        }
+    };
+    let sid = match sid {
+        Ok(None) => return next.run(req).await,
+        Ok(Some(sid)) => sid,
+        Err(why) => {
+            return ApiError::from(NgsiError::BadRequestData(why.to_owned())).into_response()
+        }
     };
     // 6.3.22: "If the HTTP header NGSILD-Snapshot is present in the HTTP
     // request, it shall also be present in HTTP response" — every exit,
