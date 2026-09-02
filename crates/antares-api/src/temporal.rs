@@ -17,12 +17,7 @@ use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
 
-fn is_meta(k: &str) -> bool {
-    matches!(
-        k,
-        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
-    )
-}
+use antares_model::is_meta;
 
 /// 5.6.11 input: the pushed Temporal Evolution may carry the 4.5.7
 /// deleted-instance representation (value = NGSI-LD Null), which 5.5.4

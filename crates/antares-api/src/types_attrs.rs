@@ -104,12 +104,7 @@ fn mark_partial(resp: &mut Response, partial: bool, alias: &str) {
     }
 }
 
-fn is_meta(k: &str) -> bool {
-    matches!(
-        k,
-        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
-    )
-}
+use antares_model::is_meta;
 
 /// type IRI → (entity count, attr IRI → attribute types seen)
 type TypeStats = BTreeMap<String, (usize, BTreeMap<String, BTreeSet<String>>)>;
@@ -443,34 +438,6 @@ mod discovery_folds {
             .store
             .create(&tid(tenant), Kind::Entity, id, doc)
             .expect("create"));
-    }
-
-    /// The Entity members and system temporal attributes of 4.5.1/6.3.11 are
-    /// not Attributes and never enter the 5.7.5-5.7.10 folds.
-    #[test]
-    fn is_meta_matches_only_entity_members() {
-        for k in [
-            "id",
-            "type",
-            "scope",
-            "createdAt",
-            "modifiedAt",
-            "deletedAt",
-            "expiresAt",
-        ] {
-            assert!(is_meta(k), "{k} is an Entity member, not an Attribute");
-        }
-        for k in [
-            "",
-            "v",
-            "location",
-            "Type",
-            "ID",
-            "created_at",
-            "createdAtX",
-        ] {
-            assert!(!is_meta(k), "{k} must be treated as an Attribute");
-        }
     }
 
     /// 5.2.26: entityCount is the number of entity instances of the type;

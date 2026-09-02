@@ -23,12 +23,7 @@ use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
 
-fn is_meta(k: &str) -> bool {
-    matches!(
-        k,
-        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
-    )
-}
+use antares_model::is_meta;
 
 pub(crate) use antares_ql::type_selection_matches;
 

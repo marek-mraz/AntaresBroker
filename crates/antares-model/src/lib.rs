@@ -55,6 +55,18 @@ pub fn ordered_vec(v: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&SpecOrder(v)).unwrap_or_default()
 }
 
+/// 5.2.4 Entity, Table 5.2.4-1, with the common members of Table 5.2.2-1:
+/// the members of an Entity that are not Attributes — `id`, `type`,
+/// `scope`, `expiresAt`, `createdAt`, `modifiedAt`, `deletedAt`. Every
+/// other member is a Property or Relationship (`location` and the two
+/// other default GeoProperties included).
+pub fn is_meta(k: &str) -> bool {
+    matches!(
+        k,
+        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
+    )
+}
+
 /// Canonical lexicographic comparison key for a 4.6.3 DateTime: the trailing
 /// `Z` dropped and the optional seconds fraction (`.` or the request-side `,`
 /// separator) zero-padded to six digits, so string order equals temporal
@@ -73,4 +85,36 @@ pub fn dt_key(s: &str) -> String {
         .or_else(|| frac.strip_prefix(','))
         .unwrap_or("");
     format!("{base}.{digits:0<6}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn meta_members_are_the_non_attribute_members_of_an_entity() {
+        for k in [
+            "id",
+            "type",
+            "scope",
+            "createdAt",
+            "modifiedAt",
+            "deletedAt",
+            "expiresAt",
+        ] {
+            assert!(super::is_meta(k), "{k}");
+        }
+        for k in [
+            "",
+            "v",
+            "Type",
+            "location",
+            "observationSpace",
+            "operationSpace",
+            "speed",
+            "@context",
+            "observedAt",
+            "datasetId",
+        ] {
+            assert!(!super::is_meta(k), "{k}");
+        }
+    }
 }
