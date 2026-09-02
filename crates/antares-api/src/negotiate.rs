@@ -345,7 +345,19 @@ pub fn content_type(headers: &HeaderMap) -> String {
 /// space-separated list of relation types as its value — never the target's
 /// own text: a link whose URL merely spells the relation is a different link,
 /// and resolving it would fetch a document the client never designated.
-pub fn link_context(headers: &HeaderMap) -> Option<String> {
+///
+/// Two links naming DIFFERENT @context documents are `BadRequestData`. The
+/// @context decides what every term in the request means, so picking one of
+/// them silently stores the request under an expansion the client did not
+/// designate — and the policy layer in front of the broker (CIM 009 defines
+/// no authorization model, so there is one) can read the other. JSON-LD 1.1
+/// clause 6.2 raises a multiple context link headers error for the same
+/// reason, and Annex C.8 tells a client with several @context documents to
+/// host a wrapper rather than send several links. The same target twice is
+/// not ambiguous — an intermediary may duplicate a field line verbatim — and
+/// is accepted.
+pub fn link_context(headers: &HeaderMap) -> ApiResult<Option<String>> {
+    let mut found: Option<&str> = None;
     for link in headers.get_all(header::LINK) {
         let Ok(s) = link.to_str() else { continue };
         for value in split_unquoted(s, ',') {
@@ -367,12 +379,22 @@ pub fn link_context(headers: &HeaderMap) -> Option<String> {
                         .split_ascii_whitespace()
                         .any(|rel| rel == JSONLD_CONTEXT_REL)
             });
-            if is_context {
-                return Some(target.to_owned());
+            if !is_context {
+                continue;
+            }
+            match found {
+                Some(first) if first != target => {
+                    return Err(NgsiError::BadRequestData(
+                        "two Link headers name different @context documents (6.3.5)".into(),
+                    )
+                    .into())
+                }
+                Some(_) => {}
+                None => found = Some(target),
             }
         }
     }
-    None
+    Ok(found.map(str::to_owned))
 }
 
 /// Split on `sep` only where it separates: not inside a bracketed
@@ -466,7 +488,7 @@ pub async fn parse_body(
         return Err(NgsiError::InvalidRequest("request body must be a JSON object".into()).into());
     }
 
-    let link = link_context(headers);
+    let link = link_context(headers)?;
     let ctx = if ld {
         if link.is_some() {
             return Err(NgsiError::BadRequestData(
@@ -512,7 +534,7 @@ fn body_context_member(v: &Value) -> Option<Value> {
 /// Context for GET/DELETE requests: Link header or core (6.3.5; the
 /// no-@context fallback to the Core @context is 5.5.5).
 pub async fn request_context(loader: &Loader, headers: &HeaderMap) -> ApiResult<Arc<Context>> {
-    match link_context(headers) {
+    match link_context(headers)? {
         // 5.5.10: the Tenant bounds what the operation may see, and a locally
         // stored @context (5.13.1) is information related to the Tenant that
         // stored it — so the URL resolves only for that Tenant.
@@ -1329,25 +1351,31 @@ mod negotiation {
         assert!(matches!(err, ApiError::Ngsi(NgsiError::InvalidRequest(_))));
     }
 
+    /// `link_context` for the cases that cannot be ambiguous; the ambiguous
+    /// ones have their own test below.
+    fn link_context_ok(h: &HeaderMap) -> Option<String> {
+        link_context(h).expect("this header names at most one @context")
+    }
+
     /// 6.3.5: the @context Link header is the one with the JSON-LD context
     /// relation, and only a properly bracketed URI-reference counts.
     #[test]
     fn link_header_context_extraction() {
         let link = |v: &str| hdr("link", v);
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://example.org/c.jsonld>; rel=\"{JSONLD_CONTEXT_REL}\"; type=\"application/ld+json\""
             ))),
             Some("https://example.org/c.jsonld".to_owned())
         );
-        assert_eq!(link_context(&HeaderMap::new()), None);
+        assert_eq!(link_context_ok(&HeaderMap::new()), None);
         assert_eq!(
-            link_context(&link("<https://example.org/c.jsonld>; rel=\"alternate\"")),
+            link_context_ok(&link("<https://example.org/c.jsonld>; rel=\"alternate\"")),
             None,
             "another relation is not the @context"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "https://example.org/c.jsonld; rel=\"{JSONLD_CONTEXT_REL}\""
             ))),
             None,
@@ -1367,8 +1395,64 @@ mod negotiation {
             .expect("link"),
         );
         assert_eq!(
-            link_context(&h),
+            link_context_ok(&h),
             Some("https://example.org/c.jsonld".to_owned())
+        );
+    }
+
+    /// 6.3.5 takes the Link header "as mandated by JSON-LD [2], section 6.2",
+    /// and that clause raises a multiple context link headers error rather
+    /// than choosing between them: the @context decides what every term in
+    /// the request means, so serving a request against one of two is serving
+    /// it against an expansion nobody designated. The same target twice is
+    /// not ambiguous — an intermediary may repeat a field line — and Annex
+    /// C.8 tells a client that needs several documents to host a wrapper.
+    #[test]
+    fn two_link_headers_naming_different_contexts_are_refused() {
+        let ctx = |u: &str| format!("<{u}>; rel=\"{JSONLD_CONTEXT_REL}\"");
+        let two = |a: &str, b: &str| {
+            let mut h = HeaderMap::new();
+            for v in [a, b] {
+                h.append(header::LINK, HeaderValue::from_str(v).expect("link"));
+            }
+            h
+        };
+
+        let h = two(
+            &ctx("https://example.org/a.jsonld"),
+            &ctx("https://evil.example/b.jsonld"),
+        );
+        assert!(
+            link_context(&h).is_err(),
+            "two @context targets name no single expansion"
+        );
+
+        // one field line carrying both is the same ambiguity, spelled the
+        // other way RFC 8288 allows
+        let one = format!(
+            "{}, {}",
+            ctx("https://example.org/a.jsonld"),
+            ctx("https://evil.example/b.jsonld")
+        );
+        let mut h = HeaderMap::new();
+        h.append(header::LINK, HeaderValue::from_str(&one).expect("link"));
+        assert!(link_context(&h).is_err(), "one field line, two targets");
+
+        // the same target twice is one @context
+        let same = ctx("https://example.org/a.jsonld");
+        assert_eq!(
+            link_context(&two(&same, &same)).expect("not ambiguous"),
+            Some("https://example.org/a.jsonld".to_owned())
+        );
+
+        // a second link that is not a @context changes nothing
+        let h = two(
+            &ctx("https://example.org/a.jsonld"),
+            "<https://a/x>; rel=\"self\"",
+        );
+        assert_eq!(
+            link_context(&h).expect("not ambiguous"),
+            Some("https://example.org/a.jsonld".to_owned())
         );
     }
 
@@ -1381,42 +1465,42 @@ mod negotiation {
     fn link_header_is_parsed_as_rfc_8288_link_values() {
         let link = |v: &str| hdr("link", v);
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://example.org/c.jsonld?v=1,2;a=b>; rel=\"{JSONLD_CONTEXT_REL}\""
             ))),
             Some("https://example.org/c.jsonld?v=1,2;a=b".to_owned()),
             "a separator inside the bracketed target is part of the URI"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://example.org/x#{JSONLD_CONTEXT_REL}>; rel=\"describedby\""
             ))),
             None,
             "the relation is the rel parameter, not the target's text"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://a/s.css>; rel=\"stylesheet {JSONLD_CONTEXT_REL}\""
             ))),
             Some("https://a/s.css".to_owned()),
             "rel is a space-separated list of relation types"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://example.org/c.jsonld>; REL={JSONLD_CONTEXT_REL}"
             ))),
             Some("https://example.org/c.jsonld".to_owned()),
             "parameter names are case-insensitive and the value may be bare"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://a/x>; rel=\"self\", <https://example.org/c.jsonld>; rel=\"{JSONLD_CONTEXT_REL}\""
             ))),
             Some("https://example.org/c.jsonld".to_owned()),
             "one field line may carry several link-values"
         );
         assert_eq!(
-            link_context(&link(&format!(
+            link_context_ok(&link(&format!(
                 "<https://a/x>; title=\"a, b; rel=\\\"{JSONLD_CONTEXT_REL}\\\"\""
             ))),
             None,

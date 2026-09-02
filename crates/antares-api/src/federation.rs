@@ -407,7 +407,9 @@ fn pct_encode(s: &str, keep: impl Fn(u8) -> bool) -> String {
 
 /// The @context URL to advertise on forwarded requests.
 pub fn ctx_link_url(headers: &HeaderMap, source: &Value) -> String {
-    if let Some(url) = link_context(headers) {
+    // the request was validated on the way in, so an ambiguous Link is
+    // already a 400 and cannot reach a forward
+    if let Ok(Some(url)) = link_context(headers) {
         return url;
     }
     match source {

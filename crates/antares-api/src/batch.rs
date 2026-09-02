@@ -69,7 +69,7 @@ async fn parse_batch(
         ))
         .into());
     }
-    let link = link_context(headers);
+    let link = link_context(headers)?;
     if ld && link.is_some() {
         return Err(NgsiError::BadRequestData(
             "application/ld+json batch must not also carry a Link @context (6.3.5)".into(),
