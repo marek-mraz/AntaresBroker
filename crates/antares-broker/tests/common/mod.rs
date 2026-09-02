@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Helpers shared by the broker's end-to-end tests.
 
 /// A TCP port no other test process of the same run will hand out.
