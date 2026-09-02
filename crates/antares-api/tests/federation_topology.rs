@@ -334,3 +334,77 @@ async fn tenantless_registration_targets_the_peer_default_tenant() {
         "a tenant-less CSR must reach the peer's default tenant, got {ids:?}"
     );
 }
+
+/// 4.3.6.5: "As Tenant information, if applicable, is directly specified in
+/// the CSourceRegistration, it shall not be part of contextSourceInfo", and
+/// 6.3.19: "Headers derived from other elements of the CSourceRegistration,
+/// e.g. NGSILD-Tenant, take precedence and cannot be overridden using
+/// contextSourceInfo." The key is a valid RFC 7230 header name, so the
+/// registration is accepted at the door and the forward is the only place
+/// left to ignore it. A broker that passed it through would hand anyone who
+/// may create a registration every tenant of the source: the source answers
+/// whichever tenant the header names. The pair is spelled in lower case
+/// because a header name is case-insensitive (RFC 7230 clause 3.2) and a
+/// skip list that matched only the canonical spelling would be no list.
+#[tokio::test(flavor = "multi_thread")]
+async fn context_source_info_cannot_name_the_tenant_the_forward_targets() {
+    allow_private();
+    const HIDDEN: &str = "urn:ngsi-ld:Vehicle:town-b-only";
+    let hub = AppState::new("hub4".into());
+    let peer = AppState::new("peer4".into());
+    let peer_port = serve(&peer).await;
+
+    // the peer holds one Vehicle in its default tenant and a different one in
+    // `town-b`, so the answer says which tenant the forward reached
+    create_entity(&peer, None).await;
+    let body = serde_json::json!({
+        "id": HIDDEN, "type": "Vehicle",
+        "brandName": {"type": "Property", "value": "hidden"},
+    })
+    .to_string();
+    let req = with_tenant(
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/entities")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len()),
+        Some("town-b"),
+    )
+    .body(Body::from(body))
+    .expect("request");
+    assert_eq!(send(&peer, req).await.status(), StatusCode::CREATED);
+
+    // hub, tenant town-a: no `tenant` member, and a contextSourceInfo pair
+    // asking for the peer's town-b
+    let doc = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:csi-tenant",
+        "type": "ContextSourceRegistration",
+        "mode": "inclusive",
+        "operations": ["federationOps"],
+        "information": [{"entities": [{"type": "Vehicle"}]}],
+        "endpoint": format!("http://127.0.0.1:{peer_port}"),
+        "contextSourceInfo": [{"key": "ngsild-tenant", "value": "town-b"}],
+    })
+    .to_string();
+    let req = with_tenant(
+        Request::builder()
+            .method("POST")
+            .uri("/ngsi-ld/v1/csourceRegistrations")
+            .header("Content-Type", "application/json")
+            .header("Content-Length", doc.len()),
+        Some("town-a"),
+    )
+    .body(Body::from(doc))
+    .expect("request");
+    assert_eq!(send(&hub, req).await.status(), StatusCode::CREATED);
+
+    let ids = query_ids(&hub, Some("town-a")).await;
+    assert!(
+        !ids.contains(&HIDDEN.to_owned()),
+        "contextSourceInfo re-tenanted the forward and read the peer's town-b, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&ENTITY.to_owned()),
+        "the forward must still reach the peer's default tenant, got {ids:?}"
+    );
+}
