@@ -25,6 +25,7 @@ Commands:
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -942,22 +943,38 @@ def ledger_body_violations():
 
 
 def ledger_citation_violations():
-    """Evidence is only evidence if a reader can reach it. A file named in
-    `evidence` or `notes` that is nowhere in the tree points at nothing — the
-    clause then rests on a claim no one can check, and the commonest way it
-    happens is a citation of an internal planning document, which is never the
+    """Evidence is only evidence if a reader can reach it. A file or a test the
+    hand-written fields name, and the repository does not hold, points at
+    nothing — the clause then rests on a claim no one can grep. The two ways it
+    happens are a citation of an internal planning document, which is never the
     requirement in the first place (the requirement is the CIM 009 clause, and
-    the proof is code and tests). Matching is by basename: the ledger cites
-    `entities.rs` and `filter_pushdown_5_7_2.rs`, not repository paths."""
-    cited = re.compile(r"\b[A-Za-z0-9_.\-/]+\.(?:rs|py|sh|toml|robot|yml|yaml|md)\b")
-    skip = {".git", "book", "node_modules", "pkg", "results", "target", ".venv"}
-    have = set()
-    for f in ROOT.rglob("*"):
-        if f.is_dir():
+    the proof is code and tests), and a test whose name drifted after a rename.
+    Files match by basename and tests by identifier, because the ledger cites
+    `entities.rs` and `clause_5_16_2_clone_and_5_16_5_delete`, not repository
+    paths."""
+    named_file = re.compile(r"\b[A-Za-z0-9_.\-/]+\.(?:rs|py|sh|toml|robot|yml|yaml|md)\b")
+    # a function or test name: snake_case with at least four segments, which is
+    # what this repo's clause tests are named and what prose does not produce
+    named_item = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b")
+    sources = {".rs", ".py", ".sh", ".robot", ".md", ".yml", ".toml", ".resource", ".sql"}
+    # what git tracks, not what the directory holds: build output, the vendored
+    # virtualenv and the scratch worktrees under wt/ are old or generated copies
+    # of this same tree, and a citation that finds itself in one of them proves
+    # nothing about the repository a reader clones
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split("\0")
+    files, items = set(), set()
+    for name in tracked:
+        if not name:
             continue
-        if skip & set(f.relative_to(ROOT).parts):
-            continue
-        have.add(f.name)
+        f = ROOT / name
+        files.add(f.name)
+        # the ledger is not its own evidence: reading it back in would let a
+        # citation prove itself and the gate could never fail
+        if f.suffix in sources and SPEC not in f.parents and f.is_file():
+            items.add(f.stem)
+            items.update(named_item.findall(f.read_text(errors="replace")))
     out = []
     for path in sorted(SPEC.rglob("*.md")):
         try:
@@ -968,13 +985,19 @@ def ledger_citation_violations():
             value = (meta or {}).get(field)
             if not isinstance(value, str):
                 continue
-            for name in sorted(set(cited.findall(value))):
-                if Path(name).name in have:
-                    continue
-                out.append(
-                    f"{path.relative_to(ROOT)}: {field} cites {name!r}, "
-                    f"which is not in the tree — evidence has to be reachable"
-                )
+            for name in sorted(set(named_file.findall(value))):
+                if Path(name).name not in files:
+                    out.append(
+                        f"{path.relative_to(ROOT)}: {field} cites {name!r}, "
+                        f"which is not in the tree — evidence has to be reachable"
+                    )
+            for name in sorted(set(named_item.findall(value))):
+                if name not in items:
+                    out.append(
+                        f"{path.relative_to(ROOT)}: {field} cites {name!r}, "
+                        f"which nothing in the tree defines — a renamed test "
+                        f"leaves the clause resting on a name no one can grep"
+                    )
     return out
 
 
