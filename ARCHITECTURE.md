@@ -64,13 +64,13 @@ module's header comment.
 | `paging.rs` | 1 400 | 4.12, 6.3.10 limit/offset/count and the next/prev links, 4.23 ordering and ICU collation, 6.3.17 `NGSILD-Warning`, the query body of 5.2.23 lifted into parameters; every list operation pages through it |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
 | `batch.rs` | 2 000 | 5.6.7–5.6.10, 5.6.20 `/entityOperations/*` |
-| `temporal.rs` | 4 000 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
+| `temporal.rs` | 4 100 | 5.6.11–5.6.16, 5.7.3–5.7.4 `/temporal/entities` |
 | `temporalq.rs` | 200 | 5.2.21 `TemporalQ` from the timerel/timeAt/endTimeAt/timeproperty parameters and the 4.11 instance match; named by temporal, csource, federation and subscriptions |
 | `types_attrs.rs` | 900 | 5.7.5–5.7.10 `/types`, `/attributes` |
-| `subscriptions.rs` | 1 800 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
+| `subscriptions.rs` | 1 900 | 5.8, 5.11 `/subscriptions`, `/csourceSubscriptions` |
 | `notify.rs` | 4 800 | 5.8.6 matching and delivery, the subscription mirror, interval sweeps, csource notifications |
 | `distsub.rs` | 1 750 | 5.8.1.4 distributed subscriptions, consumer half |
-| `csource.rs` | 2 100 | 5.9, 5.10 registrations, `csource_index` maintenance |
+| `csource.rs` | 2 200 | 5.9, 5.10 registrations, `csource_index` maintenance |
 | `registry.rs` | 470 | matching over a registration document: `CsrSpec`, the 4.3.6.1 information match, csf and scope filters, the temporal interval and expiry of a registration, the 5.11.2 subscription match; named by federation, notify, csource and every resource module that forwards |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
 | `entity_maps.rs` | 320 | 5.14 the `/entityMaps` resources (6.32, 6.34, 6.35): create from a query, retrieve, update, delete |

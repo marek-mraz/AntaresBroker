@@ -33,6 +33,18 @@ fn parse_batch_body(body: &[u8]) -> Result<Value, String> {
     serde_json::from_slice(body).map_err(|e| e.to_string())
 }
 
+/// One entry of a batch array as it arrives: the item and the result of
+/// resolving the `@context` that governs it. A failed resolution is carried
+/// per item, because 5.6.7 answers the array with one error per entity.
+type BatchItem = (Value, ApiResult<std::sync::Arc<antares_jsonld::Context>>);
+
+/// One entry of a batch as a forward sends it: the object and the `@context`
+/// that expanded it.
+type FwdItem = (
+    serde_json::Map<String, Value>,
+    std::sync::Arc<antares_jsonld::Context>,
+);
+
 /// One batch body into (item, its resolved @context) pairs. Each item's
 /// `@context` — or the Link header standing in for it — resolves within the
 /// requesting Tenant (5.5.10): a Hosted @context belongs to the Tenant that
@@ -43,7 +55,7 @@ async fn parse_batch(
     tenant: &antares_model::TenantId,
     headers: &HeaderMap,
     body: &[u8],
-) -> ApiResult<Vec<(Value, ApiResult<std::sync::Arc<antares_jsonld::Context>>)>> {
+) -> ApiResult<Vec<BatchItem>> {
     let ct = content_type(headers)?;
     let ld = match ct.as_str() {
         "application/json" => false,
@@ -344,6 +356,263 @@ enum BatchMode {
     Merge,
 }
 
+/// The registration-matching input of a batch (4.3.6.1): the ids, the
+/// expanded types and the expanded Attribute names the whole array carries,
+/// as one `CsrSpec`, together with the items in the shape a forward sends
+/// them. An entry whose body is not an object, or whose `@context` did not
+/// resolve, contributes nothing and is left to the local arm to report.
+fn batch_spec(items: &[BatchItem]) -> (crate::registry::CsrSpec, Vec<FwdItem>) {
+    let mut fwd_items = Vec::new();
+    let mut spec = crate::registry::CsrSpec::default();
+    let (mut types, mut ids, mut attrs) = (Vec::new(), Vec::new(), Vec::new());
+    for (item, ctx) in items {
+        let (Some(o), Ok(c)) = (item.as_object(), ctx.as_ref()) else {
+            continue;
+        };
+        if let Some(id) = o.get("id").and_then(Value::as_str) {
+            ids.push(id.to_owned());
+        }
+        match o.get("type") {
+            Some(Value::String(t)) => types.push(c.expand_key(t)),
+            Some(Value::Array(a)) => {
+                types.extend(a.iter().filter_map(Value::as_str).map(|t| c.expand_key(t)))
+            }
+            _ => {}
+        }
+        for k in o.keys() {
+            if !matches!(k.as_str(), "id" | "type" | "scope" | "@context") {
+                attrs.push(c.expand_key(k));
+            }
+        }
+        fwd_items.push((o.clone(), c.clone()));
+    }
+    if !types.is_empty() {
+        spec.types = Some(types);
+    }
+    if !ids.is_empty() {
+        spec.ids = Some(ids);
+    }
+    if !attrs.is_empty() {
+        spec.attrs = Some(attrs);
+    }
+    (spec, fwd_items)
+}
+
+/// The distributed arm of a batch write (5.6.7.4, 5.6.8.4, 5.6.9.4,
+/// 5.6.20.4): one forwarded request per matching registration, whose
+/// outcomes merge into the same S and E arrays the local arm fills, as
+/// Entity ids and BatchEntityErrors (5.2.16, 5.2.17) rather than opaque
+/// part descriptors.
+#[allow(clippy::too_many_arguments)]
+async fn forward_batch(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    mode: BatchMode,
+    tenant: &antares_model::TenantId,
+    update_mode: bool,
+    no_overwrite: bool,
+    fed_regs: &[crate::federation::FedReg],
+    fwd_items: &[FwdItem],
+    out: &mut BatchOutcome,
+    created_ids: &mut Vec<String>,
+    any_created: &mut bool,
+) {
+    fn one_outcome(
+        id: &str,
+        status: u16,
+        created: bool,
+        ok: &mut Vec<(String, bool)>,
+        err: &mut Vec<Value>,
+    ) {
+        if (200..300).contains(&status) && status != 207 {
+            ok.push((id.to_owned(), created && status == 201));
+        } else {
+            err.push(err_remote(
+                Some(id),
+                status,
+                &format!("forwarded operation returned {status}"),
+            ));
+        }
+    }
+    let (op, res_path) = match mode {
+        BatchMode::Create => ("createBatch", "create"),
+        BatchMode::Upsert => ("upsertBatch", "upsert"),
+        BatchMode::Update => ("updateBatch", "update"),
+        BatchMode::Merge => ("mergeBatch", "merge"),
+    };
+    let src = fwd_items
+        .first()
+        .map(|(_, c)| c.source.clone())
+        .unwrap_or(Value::Null);
+    let ctx_url = crate::federation::ctx_link_url(headers, &src);
+    let mut query: Vec<(String, String)> = Vec::new();
+    if let Some(o) = params.get("options") {
+        query.push(("options".into(), o.clone()));
+    }
+    let replace_mode = !update_mode;
+    let mut remote_ok: Vec<(String, bool)> = Vec::new();
+    let mut remote_err: Vec<Value> = Vec::new();
+    for reg in fed_regs {
+        let arr: Vec<Value> = fwd_items
+            .iter()
+            .filter_map(|(o, c)| crate::federation::reduce_to_scope(o, reg, c))
+            .collect();
+        if arr.is_empty() {
+            continue;
+        }
+        let sent_ids: Vec<String> = arr
+            .iter()
+            .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        if reg.supports(op) {
+            let (status, body, _) = crate::federation::forward(
+                st,
+                reqwest::Method::POST,
+                format!("{}/ngsi-ld/v1/entityOperations/{res_path}", reg.endpoint),
+                &query,
+                headers,
+                tenant,
+                reg,
+                &ctx_url,
+                Some(Value::Array(arr)),
+            )
+            .await;
+            // 5.6.8.5: an upsert forward only CREATED entities when the
+            // remote said so — 201 (body lists the created ids); a 204
+            // means every forwarded entity was updated.
+            merge_remote_batch(
+                status,
+                &body,
+                &sent_ids,
+                mode == BatchMode::Create || (mode == BatchMode::Upsert && status == 201),
+                &mut remote_ok,
+                &mut remote_err,
+            );
+            continue;
+        }
+        // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 single-op fallbacks. These
+        // never inherit the batch `options` parameter — e.g.
+        // options=update is no Create Entity parameter (5.6.1.3) and
+        // would 400 the forward; the append fallback re-adds
+        // noOverwrite explicitly (5.6.9.4).
+        let mut handled = true;
+        match mode {
+            BatchMode::Create if reg.supports("createEntity") => {
+                let call = BatchFwd::create();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            BatchMode::Upsert if reg.supports("createEntity") => {
+                let create = BatchFwd::create();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent.clone(), &create).await;
+                    // 5.6.8.4: an Entity the peer already holds is not a
+                    // failed upsert — it falls through to the operation
+                    // that updates the one that is there.
+                    let fallback = match () {
+                        _ if status != 409 => None,
+                        _ if replace_mode && reg.supports("replaceEntity") => {
+                            Some(BatchFwd::replace())
+                        }
+                        _ if !replace_mode && reg.supports("updateEntity") => {
+                            Some(BatchFwd::update())
+                        }
+                        _ => {
+                            // 5.6.8.4: neither replace nor update available
+                            remote_err.push(err_remote(
+                                Some(&id),
+                                422,
+                                &format!("OperationNotSupported: no upsert path for {id}"),
+                            ));
+                            continue;
+                        }
+                    };
+                    match fallback {
+                        None => one_outcome(&id, status, true, &mut remote_ok, &mut remote_err),
+                        Some(call) => {
+                            let (id, status) =
+                                forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                            one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                        }
+                    }
+                }
+            }
+            BatchMode::Upsert if replace_mode && reg.supports("replaceEntity") => {
+                let call = BatchFwd::replace();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            BatchMode::Upsert if !replace_mode && reg.supports("updateEntity") => {
+                let call = BatchFwd::update();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            BatchMode::Update if !no_overwrite && reg.supports("updateEntity") => {
+                let call = BatchFwd::update();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            BatchMode::Merge if reg.supports("mergeEntity") => {
+                // 5.6.20.4 support ladder: no mergeBatch -> per-entity
+                // Merge Entity (5.6.17) forwards.
+                let call = BatchFwd::merge();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            BatchMode::Update if no_overwrite && reg.supports("appendAttrs") => {
+                // 5.6.9.4: append with Attribute overwrite disabled.
+                let call = BatchFwd::append_no_overwrite();
+                for ent in arr.clone() {
+                    let (id, status) =
+                        forward_one(st, reg, headers, tenant, &ctx_url, ent, &call).await;
+                    one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
+                }
+            }
+            _ => handled = false,
+        }
+        if !handled && reg.is_proxy() {
+            // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 last rung: "In case CSR is
+            // an exclusive or redirect Context Source Registration, add an
+            // Error of type Conflict for each Entity in IN to E."
+            for id in &sent_ids {
+                remote_err.push(err_entry(
+                    Some(id),
+                    &NgsiError::Conflict(format!(
+                        "registration does not accept the operation {op}"
+                    )),
+                ));
+            }
+        }
+    }
+    for (id, was_created) in remote_ok {
+        if was_created {
+            *any_created = true;
+            created_ids.push(id.clone());
+        }
+        if !out.success.iter().any(|v| v.as_str() == Some(id.as_str())) {
+            out.success.push(Value::String(id));
+        }
+    }
+    out.errors.extend(remote_err);
+}
+
 async fn batch_write(
     st: &AppState,
     params: &HashMap<String, String>,
@@ -366,44 +635,7 @@ async fn batch_write(
     let no_overwrite = has_option("noOverwrite");
     let items = parse_batch(st, &tenant, headers, body).await?;
     // distributed batch (4.3.6): one forwarded request per matching source
-    let mut fwd_items: Vec<(
-        serde_json::Map<String, Value>,
-        std::sync::Arc<antares_jsonld::Context>,
-    )> = Vec::new();
-    let mut spec = crate::registry::CsrSpec::default();
-    let mut spec_types = Vec::new();
-    let mut spec_ids = Vec::new();
-    let mut spec_attrs = Vec::new();
-    for (item, ctx) in &items {
-        let (Some(o), Ok(c)) = (item.as_object(), ctx.as_ref()) else {
-            continue;
-        };
-        if let Some(id) = o.get("id").and_then(Value::as_str) {
-            spec_ids.push(id.to_owned());
-        }
-        match o.get("type") {
-            Some(Value::String(t)) => spec_types.push(c.expand_key(t)),
-            Some(Value::Array(a)) => {
-                spec_types.extend(a.iter().filter_map(Value::as_str).map(|t| c.expand_key(t)))
-            }
-            _ => {}
-        }
-        for k in o.keys() {
-            if !matches!(k.as_str(), "id" | "type" | "scope" | "@context") {
-                spec_attrs.push(c.expand_key(k));
-            }
-        }
-        fwd_items.push((o.clone(), c.clone()));
-    }
-    if !spec_types.is_empty() {
-        spec.types = Some(spec_types);
-    }
-    if !spec_ids.is_empty() {
-        spec.ids = Some(spec_ids);
-    }
-    if !spec_attrs.is_empty() {
-        spec.attrs = Some(spec_attrs);
-    }
+    let (spec, fwd_items) = batch_spec(&items);
     let fed_regs = match crate::federation::write_plan(
         st,
         &tenant,
@@ -675,207 +907,21 @@ async fn batch_write(
     // carries Entity IDs and BatchEntityErrors (5.2.16/5.2.17), never
     // opaque part descriptors.
     if !fed_regs.is_empty() {
-        fn one_outcome(
-            id: &str,
-            status: u16,
-            created: bool,
-            ok: &mut Vec<(String, bool)>,
-            err: &mut Vec<Value>,
-        ) {
-            if (200..300).contains(&status) && status != 207 {
-                ok.push((id.to_owned(), created && status == 201));
-            } else {
-                err.push(err_remote(
-                    Some(id),
-                    status,
-                    &format!("forwarded operation returned {status}"),
-                ));
-            }
-        }
-        let (op, res_path) = match mode {
-            BatchMode::Create => ("createBatch", "create"),
-            BatchMode::Upsert => ("upsertBatch", "upsert"),
-            BatchMode::Update => ("updateBatch", "update"),
-            BatchMode::Merge => ("mergeBatch", "merge"),
-        };
-        let src = fwd_items
-            .first()
-            .map(|(_, c)| c.source.clone())
-            .unwrap_or(Value::Null);
-        let ctx_url = crate::federation::ctx_link_url(headers, &src);
-        let mut query: Vec<(String, String)> = Vec::new();
-        if let Some(o) = params.get("options") {
-            query.push(("options".into(), o.clone()));
-        }
-        let replace_mode = !update_mode;
-        let mut remote_ok: Vec<(String, bool)> = Vec::new();
-        let mut remote_err: Vec<Value> = Vec::new();
-        for reg in &fed_regs {
-            let arr: Vec<Value> = fwd_items
-                .iter()
-                .filter_map(|(o, c)| crate::federation::reduce_to_scope(o, reg, c))
-                .collect();
-            if arr.is_empty() {
-                continue;
-            }
-            let sent_ids: Vec<String> = arr
-                .iter()
-                .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_owned))
-                .collect();
-            if reg.supports(op) {
-                let (status, body, _) = crate::federation::forward(
-                    st,
-                    reqwest::Method::POST,
-                    format!("{}/ngsi-ld/v1/entityOperations/{res_path}", reg.endpoint),
-                    &query,
-                    headers,
-                    &tenant,
-                    reg,
-                    &ctx_url,
-                    Some(Value::Array(arr)),
-                )
-                .await;
-                // 5.6.8.5: an upsert forward only CREATED entities when the
-                // remote said so — 201 (body lists the created ids); a 204
-                // means every forwarded entity was updated.
-                merge_remote_batch(
-                    status,
-                    &body,
-                    &sent_ids,
-                    mode == BatchMode::Create || (mode == BatchMode::Upsert && status == 201),
-                    &mut remote_ok,
-                    &mut remote_err,
-                );
-                continue;
-            }
-            // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 single-op fallbacks. These
-            // never inherit the batch `options` parameter — e.g.
-            // options=update is no Create Entity parameter (5.6.1.3) and
-            // would 400 the forward; the append fallback re-adds
-            // noOverwrite explicitly (5.6.9.4).
-            let mut handled = true;
-            match mode {
-                BatchMode::Create if reg.supports("createEntity") => {
-                    let call = BatchFwd::create();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                BatchMode::Upsert if reg.supports("createEntity") => {
-                    let create = BatchFwd::create();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent.clone(), &create)
-                                .await;
-                        // 5.6.8.4: an Entity the peer already holds is not a
-                        // failed upsert — it falls through to the operation
-                        // that updates the one that is there.
-                        let fallback = match () {
-                            _ if status != 409 => None,
-                            _ if replace_mode && reg.supports("replaceEntity") => {
-                                Some(BatchFwd::replace())
-                            }
-                            _ if !replace_mode && reg.supports("updateEntity") => {
-                                Some(BatchFwd::update())
-                            }
-                            _ => {
-                                // 5.6.8.4: neither replace nor update available
-                                remote_err.push(err_remote(
-                                    Some(&id),
-                                    422,
-                                    &format!("OperationNotSupported: no upsert path for {id}"),
-                                ));
-                                continue;
-                            }
-                        };
-                        match fallback {
-                            None => one_outcome(&id, status, true, &mut remote_ok, &mut remote_err),
-                            Some(call) => {
-                                let (id, status) =
-                                    forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call)
-                                        .await;
-                                one_outcome(
-                                    &id,
-                                    status,
-                                    call.created,
-                                    &mut remote_ok,
-                                    &mut remote_err,
-                                );
-                            }
-                        }
-                    }
-                }
-                BatchMode::Upsert if replace_mode && reg.supports("replaceEntity") => {
-                    let call = BatchFwd::replace();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                BatchMode::Upsert if !replace_mode && reg.supports("updateEntity") => {
-                    let call = BatchFwd::update();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                BatchMode::Update if !no_overwrite && reg.supports("updateEntity") => {
-                    let call = BatchFwd::update();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                BatchMode::Merge if reg.supports("mergeEntity") => {
-                    // 5.6.20.4 support ladder: no mergeBatch -> per-entity
-                    // Merge Entity (5.6.17) forwards.
-                    let call = BatchFwd::merge();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                BatchMode::Update if no_overwrite && reg.supports("appendAttrs") => {
-                    // 5.6.9.4: append with Attribute overwrite disabled.
-                    let call = BatchFwd::append_no_overwrite();
-                    for ent in arr.clone() {
-                        let (id, status) =
-                            forward_one(st, reg, headers, &tenant, &ctx_url, ent, &call).await;
-                        one_outcome(&id, status, call.created, &mut remote_ok, &mut remote_err);
-                    }
-                }
-                _ => handled = false,
-            }
-            if !handled && reg.is_proxy() {
-                // 5.6.7.4/5.6.8.4/5.6.9.4/5.6.20.4 last rung: "In case CSR is
-                // an exclusive or redirect Context Source Registration, add an
-                // Error of type Conflict for each Entity in IN to E."
-                for id in &sent_ids {
-                    remote_err.push(err_entry(
-                        Some(id),
-                        &NgsiError::Conflict(format!(
-                            "registration does not accept the operation {op}"
-                        )),
-                    ));
-                }
-            }
-        }
-        for (id, was_created) in remote_ok {
-            if was_created {
-                any_created = true;
-                created_ids.push(id.clone());
-            }
-            if !out.success.iter().any(|v| v.as_str() == Some(id.as_str())) {
-                out.success.push(Value::String(id));
-            }
-        }
-        out.errors.extend(remote_err);
+        forward_batch(
+            st,
+            params,
+            headers,
+            mode,
+            &tenant,
+            update_mode,
+            no_overwrite,
+            &fed_regs,
+            &fwd_items,
+            &mut out,
+            &mut created_ids,
+            &mut any_created,
+        )
+        .await;
     }
     // 5.6.8.5: the created-only S array is the ALL-SUCCEEDED reading ("if all
     // Entities not existing prior to this request have been successfully
