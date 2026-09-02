@@ -139,12 +139,17 @@ interval firings are claimed through the store so one pod fires.
 `ANTARES_STORE=memory|file|postgres|timescale` (ADR-0004), one trait
 pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
 `0002_dead_letters.sql`, `0003_comma_seconds_fraction.sql`,
-`0004_drop_entity_maps.sql`).
+`0004_drop_entity_maps.sql`, `0005_service_escape_by_command.sql`).
 
 - Tenancy: one shared schema, `tenant_id` on every row, Row-Level
   Security with `FORCE` on every tenant table (ADR-0001). RLS is a belt
   only when the role is not a superuser: `ANTARES_REQUIRE_RLS=1` refuses
-  to boot otherwise, and the shipped manifests set it.
+  to boot otherwise, and the shipped manifests set it. The one hole in
+  the belt is the transaction-scoped `antares.service` GUC, which the
+  outbox drain and the two 4.22 reaps arm to work across tenants; it
+  opens `SELECT` and `DELETE` on `entities`, `outbox` and (plain mode)
+  `attr_instances`, and nothing else — the setting is not privileged, so
+  the commands it reaches are the whole of its blast radius.
 - Documents other than entities (subscriptions, registrations, entity
   maps, snapshots, dist-sub mappings, dead letters) are `Kind`-tagged
   JSON rows with the same trait surface (ADR-0012).
