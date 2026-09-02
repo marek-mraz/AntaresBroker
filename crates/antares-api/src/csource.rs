@@ -20,15 +20,485 @@ use serde_json::{Map, Value};
 
 use crate::negotiate::CleanParams;
 
-/// Validate + normalize a CSourceRegistration (5.2.9): types and attribute
-/// names inside `information` expand to IRIs.
 /// Cardinality caps on a CSourceRegistration. Generous against any real
 /// federation topology (a tenant is sized at 1000+ registrations, not one
 /// registration at 1000+ selectors) and small enough that the worst case is
 /// MAX_INFORMATION × MAX_INFO_MEMBERS² index rows, not 10^10.
 const MAX_INFORMATION: usize = 128;
 const MAX_INFO_MEMBERS: usize = 128;
+/// Table 5.2.10-1 RegistrationInfo: the `information` member of a
+/// Context Source Registration (5.2.9). Each entry names what the
+/// source holds — entities, property names, relationship names — and
+/// every name is expanded, because matching (5.11.2) compares IRIs.
+fn norm_registration_info(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let arr = v
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| bad("information must be a non-empty array (5.2.9)".into()))?;
+    // The csource_index explosion is |entities| ×
+    // (|propertyNames| + |relationshipNames|) PER information
+    // element, materialised in memory before any SQL runs. Under
+    // only the 4 MiB body cap that is ~10^10 objects — an OOM from
+    // one request. Cardinality is capped at the validation
+    // boundary, where the error is a 400 and not a dead pod:
+    // there is no query here to be too complex, and 5.9.2.4 gives
+    // BadRequestData for a registration whose content is refused.
+    if arr.len() > MAX_INFORMATION {
+        return Err(bad(format!(
+            "information has {} entries (limit {MAX_INFORMATION})",
+            arr.len()
+        )));
+    }
+    let mut infos = Vec::new();
+    for info in arr {
+        let io = info
+            .as_object()
+            .ok_or_else(|| bad("information entries must be objects".into()))?;
+        for key in ["entities", "propertyNames", "relationshipNames"] {
+            if let Some(n) = io.get(key).and_then(Value::as_array).map(Vec::len) {
+                if n > MAX_INFO_MEMBERS {
+                    return Err(bad(format!(
+                        "information.{key} has {n} entries (limit {MAX_INFO_MEMBERS})"
+                    )));
+                }
+            }
+        }
+        let mut ni = Map::new();
+        for (ik, iv) in io {
+            match ik.as_str() {
+                "entities" => {
+                    let es = iv
+                        .as_array()
+                        .filter(|a| !a.is_empty())
+                        .ok_or_else(|| bad("entities must be a non-empty array".into()))?;
+                    let mut nes = Vec::new();
+                    for e in es {
+                        let eo = e
+                            .as_object()
+                            .ok_or_else(|| bad("entities entries must be objects".into()))?;
+                        let mut ne = Map::new();
+                        for (ek, ev) in eo {
+                            match ek.as_str() {
+                                // 5.2.8: type is "String or String[]" — both forms legal.
+                                "type" => {
+                                    let expand_one = |t: &Value| -> Result<Value, NgsiError> {
+                                        let t = t.as_str().filter(|t| !t.is_empty()).ok_or_else(|| {
+                                            bad("EntityInfo type must be a non-empty string (5.2.8)".into())
+                                        })?;
+                                        Ok(Value::String(ctx.expand_key(t)))
+                                    };
+                                    let expanded = match ev {
+                                        Value::Array(ts) if !ts.is_empty() => Value::Array(
+                                            ts.iter().map(expand_one).collect::<Result<_, _>>()?,
+                                        ),
+                                        Value::Array(_) => {
+                                            return Err(bad(
+                                                "EntityInfo type array must not be empty (5.2.8)"
+                                                    .into(),
+                                            ))
+                                        }
+                                        other => expand_one(other)?,
+                                    };
+                                    ne.insert("type".into(), expanded);
+                                }
+                                "id" => {
+                                    let id = ev
+                                        .as_str()
+                                        .ok_or_else(|| bad("EntityInfo id must be a URI".into()))?;
+                                    antares_model::EntityId::new(id)?;
+                                    ne.insert("id".into(), ev.clone());
+                                }
+                                "idPattern" => {
+                                    let p = ev
+                                        .as_str()
+                                        .ok_or_else(|| bad("idPattern must be a string".into()))?;
+                                    crate::regexcache::compile(p)
+                                        .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
+                                    ne.insert("idPattern".into(), ev.clone());
+                                }
+                                _ => {
+                                    ne.insert(ek.clone(), ev.clone());
+                                }
+                            }
+                        }
+                        // type is optional in EntityInfo when an
+                        // id/idPattern identifies the entities
+                        if !ne.contains_key("type")
+                            && !ne.contains_key("id")
+                            && !ne.contains_key("idPattern")
+                        {
+                            return Err(bad(
+                                "EntityInfo requires type, id or idPattern (5.2.8)".into()
+                            ));
+                        }
+                        nes.push(Value::Object(ne));
+                    }
+                    ni.insert("entities".into(), Value::Array(nes));
+                }
+                "propertyNames" | "relationshipNames" => {
+                    // 5.2.10: "Empty array is not allowed"
+                    let names = iv
+                        .as_array()
+                        .filter(|a| !a.is_empty())
+                        .ok_or_else(|| bad(format!("{ik} must be a non-empty array (5.2.10)")))?;
+                    let mut nn = Vec::new();
+                    for n in names {
+                        let s = n
+                            .as_str()
+                            .ok_or_else(|| bad(format!("{ik} entries must be strings")))?;
+                        nn.push(Value::String(ctx.expand_key(s)));
+                    }
+                    ni.insert(ik.clone(), Value::Array(nn));
+                }
+                _ => {
+                    ni.insert(ik.clone(), iv.clone());
+                }
+            }
+        }
+        infos.push(Value::Object(ni));
+    }
+    Ok(Value::Array(infos))
+}
 
+/// 4.3.6.5 and Table 5.2.22-1: the `contextSourceInfo` pairs a broker
+/// sends when it contacts the source. Every pair becomes an HTTP header
+/// on a forward, and the four keys 4.3.6.6 processes have value spaces
+/// of their own.
+fn check_context_source_info(v: &Value) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let arr = v
+        .as_array()
+        .ok_or_else(|| bad("contextSourceInfo must be an array (5.2.9)".into()))?;
+    for kv in arr {
+        let Some(key) = kv.get("key").and_then(Value::as_str) else {
+            return Err(bad(
+                "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
+            ));
+        };
+        // Table 5.2.22-1: value is a String, cardinality 1.
+        let Some(value) = kv.get("value").filter(|v| v.is_string()) else {
+            return Err(bad(
+                "contextSourceInfo entries must be {key, value} pairs of Strings (5.2.22)".into(),
+            ));
+        };
+        // 6.3.19: "Key and value members shall adhere to IETF
+        // RFC 7230 definitions concerning HTTP headers". The pair
+        // becomes a header on every forward, so the transport's
+        // own RFC 7230 parsers are the judge — a name or a value
+        // they refuse can only fail later, at a forward whose
+        // error names no registration.
+        if !crate::negotiate::is_field_name(key) {
+            return Err(bad(format!(
+                "contextSourceInfo key {key:?} is not an RFC 7230 header name (6.3.19)"
+            )));
+        }
+        if !value.as_str().is_some_and(crate::negotiate::is_field_value) {
+            return Err(bad(format!(
+                "contextSourceInfo value for {key:?} is not an RFC 7230 header value \
+                 (6.3.19)"
+            )));
+        }
+        // 4.3.6.6: the four processed keys have constrained
+        // value spaces — reject bad ones at registration, not at
+        // first forward
+        let sval = value.as_str();
+        match key.to_ascii_lowercase().as_str() {
+            "accept" | "contenttype" => {
+                if !matches!(sval, Some("application/json" | "application/ld+json")) {
+                    return Err(bad(format!(
+                        "contextSourceInfo {key} must be application/json or \
+                         application/ld+json (4.3.6.6)"
+                    )));
+                }
+            }
+            "jsonldcontext" => {
+                if sval.is_none_or(|s| antares_model::EntityId::new(s).is_err()) {
+                    return Err(bad(
+                        "contextSourceInfo jsonldContext must be a URL (4.3.6.6)".into(),
+                    ));
+                }
+            }
+            "ngsildconformance"
+                if sval.is_none_or(|s| crate::conformance::parse_version(s).is_none()) =>
+            {
+                return Err(bad(
+                    "contextSourceInfo ngsildConformance must be major.minor \
+                         (4.3.6.6)"
+                        .into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Table 5.2.9-1: `operations` entries "are limited to the named API
+/// operations and named operation groups (see clause 4.20)".
+fn check_operations(v: &Value) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let arr = v
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| bad("operations must be a non-empty array (5.2.9)".into()))?;
+    for op in arr {
+        let name = op.as_str().unwrap_or_default();
+        if !OPERATION_NAMES.contains(&name) && !OPERATION_GROUPS.contains(&name) {
+            return Err(bad(format!(
+                "unknown operation {name:?} — entries are limited to the \
+                 4.20 names and groups (5.2.9)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Table 5.2.34-1 RegistrationManagementInfo: `cacheDuration` an ISO 8601
+/// duration, `cooldown` and `timeout` numbers greater than 0, `localOnly`
+/// a Boolean.
+fn check_registration_management(v: &Value) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    let m = v.as_object().ok_or_else(|| {
+        bad("management must be a RegistrationManagementInfo object (5.2.34)".into())
+    })?;
+    if let Some(d) = m.get("cacheDuration") {
+        if !d.as_str().is_some_and(valid_iso8601_duration) {
+            return Err(bad(
+                "management cacheDuration must be an ISO 8601 duration (5.2.34)".into(),
+            ));
+        }
+    }
+    for key in ["cooldown", "timeout"] {
+        if let Some(n) = m.get(key) {
+            if !n.as_f64().is_some_and(|n| n > 0.0) {
+                return Err(bad(format!(
+                    "management {key} must be a number greater than 0 (5.2.34)"
+                )));
+            }
+        }
+    }
+    if let Some(l) = m.get("localOnly") {
+        if !l.is_boolean() {
+            return Err(bad("management localOnly must be a boolean (5.2.34)".into()));
+        }
+    }
+    Ok(())
+}
+
+/// One member of Table 5.2.9-1, validated and normalized into `out`.
+/// A member the table does not name is kept verbatim: 5.5.9 asks a
+/// receiver to tolerate what it does not know.
+fn norm_reg_member(
+    k: &str,
+    v: &Value,
+    ctx: &Context,
+    out: &mut Map<String, Value>,
+) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    match k {
+        "@context" | "createdAt" | "modifiedAt" | "status" => return Ok(()),
+        "id" => {
+            let id = v
+                .as_str()
+                .ok_or_else(|| bad("registration id must be a string URI".into()))?;
+            antares_model::EntityId::new(id)?;
+            out.insert("id".into(), v.clone());
+        }
+        "type" => {
+            if v.as_str() != Some("ContextSourceRegistration") {
+                return Err(bad(
+                    "type must be \"ContextSourceRegistration\" (5.2.9)".into()
+                ));
+            }
+            out.insert("type".into(), v.clone());
+        }
+        "information" => {
+            out.insert("information".into(), norm_registration_info(v, ctx)?);
+        }
+        "mode" => {
+            let m = v
+                .as_str()
+                .filter(|m| ["inclusive", "auxiliary", "exclusive", "redirect"].contains(m))
+                .ok_or_else(|| {
+                    bad("mode must be inclusive, auxiliary, exclusive or redirect (5.2.9)".into())
+                })?;
+            out.insert("mode".into(), Value::String(m.to_owned()));
+        }
+        "endpoint" => {
+            let uri = v
+                .as_str()
+                .ok_or_else(|| bad("endpoint must be a URI string".into()))?;
+            antares_model::EntityId::new(uri)
+                .map_err(|_| bad(format!("endpoint is not a valid URI: {uri:?}")))?;
+            out.insert("endpoint".into(), v.clone());
+        }
+        "expiresAt" => {
+            let s = v
+                .as_str()
+                .filter(|s| parse_datetime(s))
+                .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
+            // the instant decides, not the spelling: now_iso always
+            // carries 3 fraction digits, a client's expiresAt 0 to 6
+            if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
+                return Err(bad("expiresAt is in the past".into()));
+            }
+            out.insert("expiresAt".into(), v.clone());
+        }
+        // 5.2.9 `tenant`: the Tenant to use in all requests to this
+        // source — validated with the same rules as the header (4.14).
+        "tenant" => {
+            let t = v
+                .as_str()
+                .ok_or_else(|| bad("tenant must be a string (5.2.9)".into()))?;
+            antares_model::TenantId::new(t)?;
+            out.insert("tenant".into(), v.clone());
+        }
+        // 4.3.6.5: KeyValuePair[] conveyed when contacting the source.
+        "contextSourceInfo" => {
+            check_context_source_info(v)?;
+            out.insert("contextSourceInfo".into(), v.clone());
+        }
+        // Table 5.2.9-1: operations entries "are limited to the named
+        // API operations and named operation groups (see clause 4.20)".
+        "operations" => {
+            check_operations(v)?;
+            out.insert("operations".into(), v.clone());
+        }
+        // 4.3.6.4 / 5.2.9: localOnly is a Boolean.
+        "localOnly" => {
+            if !v.is_boolean() {
+                return Err(bad("localOnly must be a boolean (5.2.9)".into()));
+            }
+            out.insert("localOnly".into(), v.clone());
+        }
+        // Table 5.2.9-1: a non-empty RFC 7230 pseudonym token.
+        "contextSourceAlias" => {
+            let a = v
+                .as_str()
+                .filter(|a| crate::negotiate::is_field_name(a))
+                .ok_or_else(|| {
+                    bad(
+                        "contextSourceAlias must be a non-empty RFC 7230 pseudonym token \
+                     (5.2.9)"
+                            .into(),
+                    )
+                })?;
+            out.insert("contextSourceAlias".into(), Value::String(a.to_owned()));
+        }
+        // Table 5.2.9-1: non-empty strings.
+        "description" | "registrationName" => {
+            if v.as_str().is_none_or(str::is_empty) {
+                return Err(bad(format!("{k} must be a non-empty string (5.2.9)")));
+            }
+            out.insert(k.to_owned(), v.clone());
+        }
+        // Table 5.2.9-1: valid URIs, "@none" for the default instances.
+        "datasetId" => {
+            let arr = v
+                .as_array()
+                .ok_or_else(|| bad("datasetId must be an array of URIs (5.2.9)".into()))?;
+            for d in arr {
+                let d = d.as_str().unwrap_or_default();
+                if d != "@none" && antares_model::EntityId::new(d).is_err() {
+                    return Err(bad(format!("datasetId entry {d:?} is not a URI (5.2.9)")));
+                }
+            }
+            out.insert("datasetId".into(), v.clone());
+        }
+        // Table 5.2.9-1: scope(s) per the 4.18 grammar.
+        "scope" => {
+            let all_valid = match v {
+                Value::String(s) => antares_jsonld::valid_scope_value(s),
+                Value::Array(a) => a
+                    .iter()
+                    .all(|s| s.as_str().is_some_and(antares_jsonld::valid_scope_value)),
+                _ => false,
+            };
+            if !all_valid {
+                return Err(bad("scope violates the 4.18 grammar (5.2.9)".into()));
+            }
+            out.insert("scope".into(), v.clone());
+        }
+        // Table 5.2.9-1: GeoJSON geometries per 4.7.
+        // Table 5.2.9-1: each is a GeoJSON geometry (4.7).
+        "location" | "observationSpace" | "operationSpace" => {
+            let ok = v
+                .as_object()
+                .and_then(|o| Some((o.get("type")?.as_str()?, o.get("coordinates")?)))
+                .is_some_and(|(t, c)| crate::geo::parse_ref_geometry(t, c).is_ok());
+            if !ok {
+                return Err(bad(format!("{k} must be a 4.7 GeoJSON geometry (5.2.9)")));
+            }
+            out.insert(k.to_owned(), v.clone());
+        }
+        // Table 5.2.34-1 (RegistrationManagementInfo): cacheDuration an
+        // ISO 8601 duration, cooldown/timeout numbers greater than 0,
+        // localOnly a boolean.
+        "management" => {
+            check_registration_management(v)?;
+            out.insert("management".into(), v.clone());
+        }
+        // Table 5.2.9-1: an ISO 8601 duration.
+        "refreshRate" => {
+            let ok = v.as_str().is_some_and(valid_iso8601_duration);
+            if !ok {
+                return Err(bad(
+                    "refreshRate must be an ISO 8601 duration (5.2.9)".into()
+                ));
+            }
+            out.insert("refreshRate".into(), v.clone());
+        }
+        "observationInterval" | "managementInterval" => {
+            let o = v
+                .as_object()
+                .ok_or_else(|| bad(format!("{k} must be a TimeInterval object")))?;
+            let start = o
+                .get("startAt")
+                .and_then(Value::as_str)
+                .filter(|s| parse_datetime(s));
+            if start.is_none() {
+                return Err(bad(format!("{k}.startAt must be an ISO 8601 DateTime")));
+            }
+            if let Some(e) = o.get("endAt") {
+                e.as_str()
+                    .filter(|s| parse_datetime(s))
+                    .ok_or_else(|| bad(format!("{k}.endAt must be an ISO 8601 DateTime")))?;
+            }
+            out.insert(k.to_owned(), v.clone());
+        }
+        _ => {
+            // tolerant reader: keep unknown members
+            out.insert(k.to_owned(), v.clone());
+        }
+    }
+    Ok(())
+}
+
+/// The Table 5.2.9-1 rules that hold between members rather than over
+/// one: what a Context Source Registration must carry, and the modes
+/// that exclude each other.
+fn check_registration_members(out: &Map<String, Value>, is_patch: bool) -> Result<(), NgsiError> {
+    let bad = |m: String| NgsiError::BadRequestData(m);
+    if !is_patch {
+        if !out.contains_key("type") {
+            return Err(bad(
+                "type must be \"ContextSourceRegistration\" (5.2.9)".into()
+            ));
+        }
+        if !out.contains_key("endpoint") {
+            return Err(bad("endpoint is required (5.2.9)".into()));
+        }
+        if !out.contains_key("information") {
+            return Err(bad("information is required (5.2.9)".into()));
+        }
+        validate_exclusive(out)?;
+    }
+    Ok(())
+}
+
+/// Validate + normalize a CSourceRegistration (5.2.9): types and attribute
+/// names inside `information` expand to IRIs.
 pub fn normalize_registration(
     doc: &Map<String, Value>,
     ctx: &Context,
@@ -49,428 +519,9 @@ pub fn normalize_registration(
             out.insert(k.clone(), Value::Null);
             continue;
         }
-        match k.as_str() {
-            "@context" | "createdAt" | "modifiedAt" | "status" => continue,
-            "id" => {
-                let id = v
-                    .as_str()
-                    .ok_or_else(|| bad("registration id must be a string URI".into()))?;
-                antares_model::EntityId::new(id)?;
-                out.insert("id".into(), v.clone());
-            }
-            "type" => {
-                if v.as_str() != Some("ContextSourceRegistration") {
-                    return Err(bad(
-                        "type must be \"ContextSourceRegistration\" (5.2.9)".into()
-                    ));
-                }
-                out.insert("type".into(), v.clone());
-            }
-            "information" => {
-                let arr = v
-                    .as_array()
-                    .filter(|a| !a.is_empty())
-                    .ok_or_else(|| bad("information must be a non-empty array (5.2.9)".into()))?;
-                // The csource_index explosion is |entities| ×
-                // (|propertyNames| + |relationshipNames|) PER information
-                // element, materialised in memory before any SQL runs. Under
-                // only the 4 MiB body cap that is ~10^10 objects — an OOM from
-                // one request. Cardinality is capped at the validation
-                // boundary, where the error is a 400 and not a dead pod:
-                // there is no query here to be too complex, and 5.9.2.4 gives
-                // BadRequestData for a registration whose content is refused.
-                if arr.len() > MAX_INFORMATION {
-                    return Err(bad(format!(
-                        "information has {} entries (limit {MAX_INFORMATION})",
-                        arr.len()
-                    )));
-                }
-                let mut infos = Vec::new();
-                for info in arr {
-                    let io = info
-                        .as_object()
-                        .ok_or_else(|| bad("information entries must be objects".into()))?;
-                    for key in ["entities", "propertyNames", "relationshipNames"] {
-                        if let Some(n) = io.get(key).and_then(Value::as_array).map(Vec::len) {
-                            if n > MAX_INFO_MEMBERS {
-                                return Err(bad(format!(
-                                    "information.{key} has {n} entries (limit {MAX_INFO_MEMBERS})"
-                                )));
-                            }
-                        }
-                    }
-                    let mut ni = Map::new();
-                    for (ik, iv) in io {
-                        match ik.as_str() {
-                            "entities" => {
-                                let es =
-                                    iv.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
-                                        bad("entities must be a non-empty array".into())
-                                    })?;
-                                let mut nes = Vec::new();
-                                for e in es {
-                                    let eo = e.as_object().ok_or_else(|| {
-                                        bad("entities entries must be objects".into())
-                                    })?;
-                                    let mut ne = Map::new();
-                                    for (ek, ev) in eo {
-                                        match ek.as_str() {
-                                            // 5.2.8: type is "String or String[]" — both forms legal.
-                                            "type" => {
-                                                let expand_one =
-                                                    |t: &Value| -> Result<Value, NgsiError> {
-                                                        let t = t.as_str().filter(|t| !t.is_empty()).ok_or_else(|| {
-                                                        bad("EntityInfo type must be a non-empty string (5.2.8)".into())
-                                                    })?;
-                                                        Ok(Value::String(ctx.expand_key(t)))
-                                                    };
-                                                let expanded = match ev {
-                                                    Value::Array(ts) if !ts.is_empty() => Value::Array(
-                                                        ts.iter().map(expand_one).collect::<Result<_, _>>()?,
-                                                    ),
-                                                    Value::Array(_) => {
-                                                        return Err(bad(
-                                                            "EntityInfo type array must not be empty (5.2.8)".into(),
-                                                        ))
-                                                    }
-                                                    other => expand_one(other)?,
-                                                };
-                                                ne.insert("type".into(), expanded);
-                                            }
-                                            "id" => {
-                                                let id = ev.as_str().ok_or_else(|| {
-                                                    bad("EntityInfo id must be a URI".into())
-                                                })?;
-                                                antares_model::EntityId::new(id)?;
-                                                ne.insert("id".into(), ev.clone());
-                                            }
-                                            "idPattern" => {
-                                                let p = ev.as_str().ok_or_else(|| {
-                                                    bad("idPattern must be a string".into())
-                                                })?;
-                                                crate::regexcache::compile(p).map_err(|_| {
-                                                    bad(format!("invalid idPattern {p:?}"))
-                                                })?;
-                                                ne.insert("idPattern".into(), ev.clone());
-                                            }
-                                            _ => {
-                                                ne.insert(ek.clone(), ev.clone());
-                                            }
-                                        }
-                                    }
-                                    // type is optional in EntityInfo when an
-                                    // id/idPattern identifies the entities
-                                    if !ne.contains_key("type")
-                                        && !ne.contains_key("id")
-                                        && !ne.contains_key("idPattern")
-                                    {
-                                        return Err(bad(
-                                            "EntityInfo requires type, id or idPattern (5.2.8)"
-                                                .into(),
-                                        ));
-                                    }
-                                    nes.push(Value::Object(ne));
-                                }
-                                ni.insert("entities".into(), Value::Array(nes));
-                            }
-                            "propertyNames" | "relationshipNames" => {
-                                // 5.2.10: "Empty array is not allowed"
-                                let names =
-                                    iv.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
-                                        bad(format!("{ik} must be a non-empty array (5.2.10)"))
-                                    })?;
-                                let mut nn = Vec::new();
-                                for n in names {
-                                    let s = n.as_str().ok_or_else(|| {
-                                        bad(format!("{ik} entries must be strings"))
-                                    })?;
-                                    nn.push(Value::String(ctx.expand_key(s)));
-                                }
-                                ni.insert(ik.clone(), Value::Array(nn));
-                            }
-                            _ => {
-                                ni.insert(ik.clone(), iv.clone());
-                            }
-                        }
-                    }
-                    infos.push(Value::Object(ni));
-                }
-                out.insert("information".into(), Value::Array(infos));
-            }
-            "mode" => {
-                let m = v
-                    .as_str()
-                    .filter(|m| ["inclusive", "auxiliary", "exclusive", "redirect"].contains(m))
-                    .ok_or_else(|| {
-                        bad(
-                            "mode must be inclusive, auxiliary, exclusive or redirect (5.2.9)"
-                                .into(),
-                        )
-                    })?;
-                out.insert("mode".into(), Value::String(m.to_owned()));
-            }
-            "endpoint" => {
-                let uri = v
-                    .as_str()
-                    .ok_or_else(|| bad("endpoint must be a URI string".into()))?;
-                antares_model::EntityId::new(uri)
-                    .map_err(|_| bad(format!("endpoint is not a valid URI: {uri:?}")))?;
-                out.insert("endpoint".into(), v.clone());
-            }
-            "expiresAt" => {
-                let s = v
-                    .as_str()
-                    .filter(|s| parse_datetime(s))
-                    .ok_or_else(|| bad("expiresAt must be an ISO 8601 DateTime".into()))?;
-                // the instant decides, not the spelling: now_iso always
-                // carries 3 fraction digits, a client's expiresAt 0 to 6
-                if antares_model::dt_key(s) < antares_model::dt_key(&now_iso()) {
-                    return Err(bad("expiresAt is in the past".into()));
-                }
-                out.insert("expiresAt".into(), v.clone());
-            }
-            // 5.2.9 `tenant`: the Tenant to use in all requests to this
-            // source — validated with the same rules as the header (4.14).
-            "tenant" => {
-                let t = v
-                    .as_str()
-                    .ok_or_else(|| bad("tenant must be a string (5.2.9)".into()))?;
-                antares_model::TenantId::new(t)?;
-                out.insert("tenant".into(), v.clone());
-            }
-            // 4.3.6.5: KeyValuePair[] conveyed when contacting the source.
-            "contextSourceInfo" => {
-                let arr = v
-                    .as_array()
-                    .ok_or_else(|| bad("contextSourceInfo must be an array (5.2.9)".into()))?;
-                for kv in arr {
-                    let Some(key) = kv.get("key").and_then(Value::as_str) else {
-                        return Err(bad(
-                            "contextSourceInfo entries must be {key, value} pairs (5.2.22)".into(),
-                        ));
-                    };
-                    // Table 5.2.22-1: value is a String, cardinality 1.
-                    let Some(value) = kv.get("value").filter(|v| v.is_string()) else {
-                        return Err(bad(
-                            "contextSourceInfo entries must be {key, value} pairs of Strings (5.2.22)"
-                                .into(),
-                        ));
-                    };
-                    // 6.3.19: "Key and value members shall adhere to IETF
-                    // RFC 7230 definitions concerning HTTP headers". The pair
-                    // becomes a header on every forward, so the transport's
-                    // own RFC 7230 parsers are the judge — a name or a value
-                    // they refuse can only fail later, at a forward whose
-                    // error names no registration.
-                    if !crate::negotiate::is_field_name(key) {
-                        return Err(bad(format!(
-                            "contextSourceInfo key {key:?} is not an RFC 7230 header name (6.3.19)"
-                        )));
-                    }
-                    if !value.as_str().is_some_and(crate::negotiate::is_field_value) {
-                        return Err(bad(format!(
-                            "contextSourceInfo value for {key:?} is not an RFC 7230 header value \
-                             (6.3.19)"
-                        )));
-                    }
-                    // 4.3.6.6: the four processed keys have constrained
-                    // value spaces — reject bad ones at registration, not at
-                    // first forward
-                    let sval = value.as_str();
-                    match key.to_ascii_lowercase().as_str() {
-                        "accept" | "contenttype" => {
-                            if !matches!(sval, Some("application/json" | "application/ld+json")) {
-                                return Err(bad(format!(
-                                    "contextSourceInfo {key} must be application/json or \
-                                     application/ld+json (4.3.6.6)"
-                                )));
-                            }
-                        }
-                        "jsonldcontext" => {
-                            if sval.is_none_or(|s| antares_model::EntityId::new(s).is_err()) {
-                                return Err(bad(
-                                    "contextSourceInfo jsonldContext must be a URL (4.3.6.6)"
-                                        .into(),
-                                ));
-                            }
-                        }
-                        "ngsildconformance"
-                            if sval
-                                .is_none_or(|s| crate::conformance::parse_version(s).is_none()) =>
-                        {
-                            return Err(bad(
-                                "contextSourceInfo ngsildConformance must be major.minor \
-                                     (4.3.6.6)"
-                                    .into(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                out.insert("contextSourceInfo".into(), v.clone());
-            }
-            // Table 5.2.9-1: operations entries "are limited to the named
-            // API operations and named operation groups (see clause 4.20)".
-            "operations" => {
-                let arr = v
-                    .as_array()
-                    .filter(|a| !a.is_empty())
-                    .ok_or_else(|| bad("operations must be a non-empty array (5.2.9)".into()))?;
-                for op in arr {
-                    let name = op.as_str().unwrap_or_default();
-                    if !OPERATION_NAMES.contains(&name) && !OPERATION_GROUPS.contains(&name) {
-                        return Err(bad(format!(
-                            "unknown operation {name:?} — entries are limited to the \
-                             4.20 names and groups (5.2.9)"
-                        )));
-                    }
-                }
-                out.insert("operations".into(), v.clone());
-            }
-            // 4.3.6.4 / 5.2.9: localOnly is a Boolean.
-            "localOnly" => {
-                if !v.is_boolean() {
-                    return Err(bad("localOnly must be a boolean (5.2.9)".into()));
-                }
-                out.insert("localOnly".into(), v.clone());
-            }
-            // Table 5.2.9-1: a non-empty RFC 7230 pseudonym token.
-            "contextSourceAlias" => {
-                let a = v
-                    .as_str()
-                    .filter(|a| crate::negotiate::is_field_name(a))
-                    .ok_or_else(|| {
-                        bad(
-                            "contextSourceAlias must be a non-empty RFC 7230 pseudonym token \
-                             (5.2.9)"
-                                .into(),
-                        )
-                    })?;
-                out.insert("contextSourceAlias".into(), Value::String(a.to_owned()));
-            }
-            // Table 5.2.9-1: non-empty strings.
-            "description" | "registrationName" => {
-                if v.as_str().is_none_or(str::is_empty) {
-                    return Err(bad(format!("{k} must be a non-empty string (5.2.9)")));
-                }
-                out.insert(k.clone(), v.clone());
-            }
-            // Table 5.2.9-1: valid URIs, "@none" for the default instances.
-            "datasetId" => {
-                let arr = v
-                    .as_array()
-                    .ok_or_else(|| bad("datasetId must be an array of URIs (5.2.9)".into()))?;
-                for d in arr {
-                    let d = d.as_str().unwrap_or_default();
-                    if d != "@none" && antares_model::EntityId::new(d).is_err() {
-                        return Err(bad(format!("datasetId entry {d:?} is not a URI (5.2.9)")));
-                    }
-                }
-                out.insert("datasetId".into(), v.clone());
-            }
-            // Table 5.2.9-1: scope(s) per the 4.18 grammar.
-            "scope" => {
-                let all_valid = match v {
-                    Value::String(s) => antares_jsonld::valid_scope_value(s),
-                    Value::Array(a) => a
-                        .iter()
-                        .all(|s| s.as_str().is_some_and(antares_jsonld::valid_scope_value)),
-                    _ => false,
-                };
-                if !all_valid {
-                    return Err(bad("scope violates the 4.18 grammar (5.2.9)".into()));
-                }
-                out.insert("scope".into(), v.clone());
-            }
-            // Table 5.2.9-1: GeoJSON geometries per 4.7.
-            "location" | "observationSpace" | "operationSpace" => {
-                let ok = v
-                    .as_object()
-                    .and_then(|o| Some((o.get("type")?.as_str()?, o.get("coordinates")?)))
-                    .is_some_and(|(t, c)| crate::geo::parse_ref_geometry(t, c).is_ok());
-                if !ok {
-                    return Err(bad(format!("{k} must be a 4.7 GeoJSON geometry (5.2.9)")));
-                }
-                out.insert(k.clone(), v.clone());
-            }
-            // Table 5.2.34-1 (RegistrationManagementInfo): cacheDuration an
-            // ISO 8601 duration, cooldown/timeout numbers greater than 0,
-            // localOnly a boolean.
-            "management" => {
-                let m = v.as_object().ok_or_else(|| {
-                    bad("management must be a RegistrationManagementInfo object (5.2.34)".into())
-                })?;
-                if let Some(d) = m.get("cacheDuration") {
-                    if !d.as_str().is_some_and(valid_iso8601_duration) {
-                        return Err(bad(
-                            "management cacheDuration must be an ISO 8601 duration (5.2.34)".into(),
-                        ));
-                    }
-                }
-                for key in ["cooldown", "timeout"] {
-                    if let Some(n) = m.get(key) {
-                        if !n.as_f64().is_some_and(|n| n > 0.0) {
-                            return Err(bad(format!(
-                                "management {key} must be a number greater than 0 (5.2.34)"
-                            )));
-                        }
-                    }
-                }
-                if let Some(l) = m.get("localOnly") {
-                    if !l.is_boolean() {
-                        return Err(bad("management localOnly must be a boolean (5.2.34)".into()));
-                    }
-                }
-                out.insert("management".into(), v.clone());
-            }
-            // Table 5.2.9-1: an ISO 8601 duration.
-            "refreshRate" => {
-                let ok = v.as_str().is_some_and(valid_iso8601_duration);
-                if !ok {
-                    return Err(bad(
-                        "refreshRate must be an ISO 8601 duration (5.2.9)".into()
-                    ));
-                }
-                out.insert("refreshRate".into(), v.clone());
-            }
-            "observationInterval" | "managementInterval" => {
-                let o = v
-                    .as_object()
-                    .ok_or_else(|| bad(format!("{k} must be a TimeInterval object")))?;
-                let start = o
-                    .get("startAt")
-                    .and_then(Value::as_str)
-                    .filter(|s| parse_datetime(s));
-                if start.is_none() {
-                    return Err(bad(format!("{k}.startAt must be an ISO 8601 DateTime")));
-                }
-                if let Some(e) = o.get("endAt") {
-                    e.as_str()
-                        .filter(|s| parse_datetime(s))
-                        .ok_or_else(|| bad(format!("{k}.endAt must be an ISO 8601 DateTime")))?;
-                }
-                out.insert(k.clone(), v.clone());
-            }
-            _ => {
-                // tolerant reader: keep unknown members
-                out.insert(k.clone(), v.clone());
-            }
-        }
+        norm_reg_member(k, v, ctx, &mut out)?;
     }
-    if !is_patch {
-        if !out.contains_key("type") {
-            return Err(bad(
-                "type must be \"ContextSourceRegistration\" (5.2.9)".into()
-            ));
-        }
-        if !out.contains_key("endpoint") {
-            return Err(bad("endpoint is required (5.2.9)".into()));
-        }
-        if !out.contains_key("information") {
-            return Err(bad("information is required (5.2.9)".into()));
-        }
-        validate_exclusive(&out)?;
-    }
+    check_registration_members(&out, is_patch)?;
     Ok(out)
 }
 
