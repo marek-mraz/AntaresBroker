@@ -11,6 +11,9 @@ use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::free_port;
+
 struct Broker(Child);
 
 impl Drop for Broker {
@@ -18,18 +21,6 @@ impl Drop for Broker {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn free_port() -> u16 {
-    // The kernel hands out ephemeral ports without repeating a just-freed
-    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
-    // hundreds of nextest processes pick the same port and one test talk
-    // to the other's broker.
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
 }
 
 fn http(port: u16, method: &str, path: &str, body: Option<&str>) -> String {

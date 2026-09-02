@@ -9,9 +9,12 @@
 #![cfg(all(unix, feature = "mqtt"))]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+
+mod common;
+use common::free_port;
 
 /// Kills the child on the way out, including out of a failed assertion: a
 /// broker left behind holds its port and the next run talks to it instead.
@@ -21,14 +24,6 @@ impl Drop for Broker {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
 }
 
 fn http(port: u16, request: &str) -> String {

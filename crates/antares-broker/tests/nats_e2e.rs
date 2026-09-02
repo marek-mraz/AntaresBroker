@@ -17,34 +17,15 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod common;
+use common::free_port;
+
 struct Broker(Child);
 
 impl Drop for Broker {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-fn free_port() -> u16 {
-    // Kernel-chosen ports (a pid-keyed pool of 100 ports per 120 pids once
-    // made two nextest processes share one). A closed LISTENING socket
-    // never enters TIME_WAIT, so a burst of ten draws can repeat a port:
-    // two brokers then race for it, the loser exits, and the test talks
-    // to the wrong role (an api port answering a worker's 404). Every
-    // port handed out in this process is remembered and never reused.
-    static TAKEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind")
-            .local_addr()
-            .expect("addr")
-            .port();
-        let mut taken = TAKEN.lock().expect("taken");
-        if !taken.contains(&port) {
-            taken.push(port);
-            return port;
-        }
     }
 }
 

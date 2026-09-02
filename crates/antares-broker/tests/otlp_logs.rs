@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::free_port;
+
 struct Broker(Child);
 impl Drop for Broker {
     fn drop(&mut self) {
@@ -118,14 +121,6 @@ fn collector() -> (u16, Seen) {
         }
     });
     (port, seen)
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
 }
 
 /// A collector that accepts and then says nothing, holding every connection

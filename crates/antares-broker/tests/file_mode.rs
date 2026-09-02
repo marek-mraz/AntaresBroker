@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::free_port;
+
 fn http(port: u16, request: &str) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     s.write_all(request.as_bytes()).expect("write");
@@ -111,18 +114,6 @@ fn wait_healthy(port: u16) -> String {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn free_port() -> u16 {
-    // The kernel hands out ephemeral ports without repeating a just-freed
-    // one; a pid-keyed pool of 100 ports per 120 pids made two of the
-    // hundreds of nextest processes pick the same port and one test talk
-    // to the other's broker.
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
 }
 
 fn tempdir(name: &str) -> PathBuf {
