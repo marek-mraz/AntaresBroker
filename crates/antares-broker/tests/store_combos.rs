@@ -215,19 +215,26 @@ fn diagnostics(port: u16, dir: &Path) -> String {
     )
 }
 
-fn history_present(port: u16, dir: &Path, row: &str) -> bool {
-    // history is recorded after the response (the temporal drain), so
-    // poll until both instants show or the entity is absent
+/// Is the history there? `want` steers the polling only: the temporal
+/// write lands AFTER the response, so a backend that will hold the history
+/// answers 404 for a moment first — waiting only while the answer is 200
+/// read that window as "no history" and made the row fail on timing. The
+/// caller still asserts what it got, so a poll that times out reports the
+/// state it actually found.
+fn history_is(port: u16, dir: &Path, row: &str, want: bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let full = |resp: &str| {
+        resp.starts_with("HTTP/1.1 200")
+            && resp.contains("2026-01-01T00:00:00Z")
+            && resp.contains("2026-01-01T00:00:01Z")
+    };
     let mut resp = history(port, row);
-    let mut both = resp.contains("2026-01-01T00:00:00Z") && resp.contains("2026-01-01T00:00:01Z");
-    while resp.starts_with("HTTP/1.1 200") && !both && std::time::Instant::now() < deadline {
+    while full(&resp) != want && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
         resp = history(port, row);
-        both = resp.contains("2026-01-01T00:00:00Z") && resp.contains("2026-01-01T00:00:01Z");
     }
     assert!(
-        (resp.starts_with("HTTP/1.1 200") && both) || resp.starts_with("HTTP/1.1 404"),
+        full(&resp) || resp.starts_with("HTTP/1.1 404"),
         "temporal retrieve must be the full history or 404: {resp}\n{}",
         diagnostics(port, dir)
     );
@@ -275,7 +282,7 @@ fn local_row(store: &str, temporal: &str) {
     );
     write_twice(port, &row);
     assert!(current_state_present(port, &row));
-    assert!(history_present(port, &dir, &row));
+    assert!(history_is(port, &dir, &row, true));
     broker.0.kill().expect("SIGKILL");
     broker.0.wait().expect("reap");
 
@@ -287,7 +294,7 @@ fn local_row(store: &str, temporal: &str) {
         "current state after kill -9 must follow the {store} store"
     );
     assert_eq!(
-        history_present(port, &dir, &row),
+        history_is(port, &dir, &row, survives(temporal)),
         survives(temporal),
         "history after kill -9 must follow the {temporal} temporal backend"
     );
@@ -461,7 +468,7 @@ fn pg_row(url: &str, store: &str, temporal: &str) {
             "temporal read under none: {resp}"
         );
     } else {
-        assert!(history_present(port, &dir, &row));
+        assert!(history_is(port, &dir, &row, true));
     }
     let (entities, instances) = pg_rows_blocking(url, &row);
     assert_eq!(entities, i64::from(db_store), "entities rows for {row}");
@@ -482,7 +489,7 @@ fn pg_row(url: &str, store: &str, temporal: &str) {
     );
     if temporal != "none" {
         assert_eq!(
-            history_present(port, &dir, &row),
+            history_is(port, &dir, &row, db_temporal || survives(temporal)),
             db_temporal || survives(temporal),
             "history after kill -9 must follow the {temporal} temporal backend"
         );
@@ -775,7 +782,12 @@ fn redb_temporal_doc(dir: &Path, row: &str) -> Option<serde_json::Value> {
     store.get(&tenant, antares_store::Kind::Temporal, &id(row))
 }
 
-fn record_file_row(record: &str) -> Option<serde_json::Value> {
+/// The temporal write lands AFTER the response, so a `kill -9` straight
+/// after the 201 races the drain: the recording row would read an empty
+/// redb, and the `none` row would pass merely for having killed first —
+/// the one outcome its assertion cannot tell from success. `records` says
+/// which side of that the caller is proving.
+fn record_file_row(record: &str, records: bool) -> Option<serde_json::Value> {
     let row = format!("file-record-{record}");
     let dir = tempdir(&row);
     let port = free_port();
@@ -788,6 +800,31 @@ fn record_file_row(record: &str) -> Option<serde_json::Value> {
     );
     wait_healthy(port);
     write_mixed(port, &row);
+    let observed = "2026-01-01T00:00:00Z";
+    if records {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !history(port, &row).contains(observed) {
+            assert!(
+                Instant::now() < deadline,
+                "the drain never recorded the observed instance under {record}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        // ponytail: a fixed window rather than a drain signal the broker
+        // does not publish — two seconds is twenty times the latency the
+        // recording row measures. A /q/health drain counter would let this
+        // wait on the event instead of the clock.
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            let resp = history(port, &row);
+            assert!(
+                !resp.contains(observed),
+                "an instance reached the history under {record}: {resp}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     broker.0.kill().expect("SIGKILL");
     broker.0.wait().expect("reap");
     redb_temporal_doc(&dir, &row)
@@ -795,7 +832,7 @@ fn record_file_row(record: &str) -> Option<serde_json::Value> {
 
 #[test]
 fn file_record_observed() {
-    let doc = record_file_row("observed").expect("the observed instance is in redb");
+    let doc = record_file_row("observed", true).expect("the observed instance is in redb");
     let keys: Vec<&str> = doc
         .as_object()
         .expect("doc")
@@ -812,7 +849,7 @@ fn file_record_observed() {
 #[test]
 fn file_record_none() {
     assert!(
-        record_file_row("none").is_none(),
+        record_file_row("none", false).is_none(),
         "nothing may reach redb under none"
     );
 }
