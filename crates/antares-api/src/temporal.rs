@@ -1484,6 +1484,244 @@ async fn query_temporal_outer(
     Ok(resp)
 }
 
+/// The 5.7.4.4 preconditions of a temporal query, before any store is
+/// touched: the filter must qualify, Linked Entity conditions are not
+/// defined for it, a context source filter must parse, and ordering may
+/// name only `id` and only where the execution stays local (4.23.1).
+fn check_temporal_query(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    headers: &HeaderMap,
+    tenant: &TenantId,
+    ctx: &Context,
+    q_ast: Option<&antares_ql::QNode>,
+) -> ApiResult<()> {
+    let attrs_qualify = params.get("attrs").is_some_and(|a| {
+        a.split(',')
+            .any(|n| antares_ql::is_non_system_attr(n.trim()))
+    });
+    let q_qualifies = q_ast.is_some_and(|ast| {
+        ast.attribute_paths()
+            .iter()
+            .any(|h| antares_ql::is_non_system_attr(h))
+    });
+    let has_filter = params.contains_key("type")
+        || attrs_qualify
+        || q_qualifies
+        || params.contains_key("georel")
+        || params.get("local").map(String::as_str) == Some("true");
+    if !has_filter {
+        return Err(NgsiError::BadRequestData(
+            "temporal query needs at least one of type, attrs, q, georel (5.7.4)".into(),
+        )
+        .into());
+    }
+    // 5.7.4.4: Linked Entity retrieval is not defined for temporal queries —
+    // linked filter conditions are an unconditional BadRequestData
+    if q_ast.map(antares_ql::QNode::max_link_depth).unwrap_or(0) > 0 {
+        return Err(NgsiError::BadRequestData(
+            "temporal q must not reference Linked Entity attributes (5.7.4.4)".into(),
+        )
+        .into());
+    }
+    // 5.7.4.4: a syntactically invalid context source filter is 400; the
+    // filter itself gates registrations in federation::reg_matches.
+    if let Some(csf) = params.get("csf") {
+        parse_q(csf)?;
+    }
+    crate::paging::check_collation(params)?;
+    // 5.7.4.4: temporal ordering may only refer to the "id" entity member,
+    // and only where the execution "is limited to the local scope (see
+    // clause 5.5.13)" — 4.23.1 gives the reason: "Sort ordering is never
+    // applied to distributed operations." The subject is the EXECUTION, so a
+    // query nothing would federate to orders without `local=true`.
+    if let Some(spec) = params.get("orderBy") {
+        if crate::federation::would_federate(st, tenant, ctx, params, headers)? {
+            return Err(NgsiError::BadRequestData(
+                "orderBy requires local scope — ordering is never applied to \
+                 distributed operations (5.7.4.4, 4.23.1)"
+                    .into(),
+            )
+            .into());
+        }
+        let non_id = spec.split(',').any(|part| {
+            let m = part.trim().split(';').next().unwrap_or("").trim();
+            m.split('[').next().unwrap_or(m) != "id"
+        });
+        if non_id {
+            return Err(NgsiError::BadRequestData(
+                "temporal orderBy may only name \"id\" (5.7.4.4)".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// 4.5.19: the aggregated answer of a temporal query. The store computed
+/// the bucket matrix, so the page is presented with the core members the
+/// instance path renders and the aggregated attribute objects copied
+/// under their compacted names.
+#[allow(clippy::too_many_arguments)]
+fn respond_aggregated(
+    st: &AppState,
+    params: &HashMap<String, String>,
+    tenant: &TenantId,
+    ctx: &Context,
+    accept: Accept,
+    trepr: &TRepr,
+    tq: Option<&TemporalQ>,
+    attrs_filter: Option<&Vec<String>>,
+    outcome: antares_store::filter::TemporalOutcome,
+) -> ApiResult<Response> {
+    let total = outcome
+        .total
+        .map(|t| t as usize)
+        .unwrap_or(outcome.rows.len());
+    let (page, count_hdr, links) = crate::paging::paginate_pre(
+        st,
+        params,
+        outcome.rows,
+        "/ngsi-ld/v1/temporal/entities",
+        total,
+    )?;
+    let timeprop = tq.map_or("observedAt", |t| t.timeproperty.as_str());
+    let none = Windowed {
+        attrs: Default::default(),
+        max_per_attr: 0,
+        ts_min: None,
+        ts_max: None,
+        truncated: false,
+    };
+    let mut payload: Vec<Value> = Vec::new();
+    for d in &page {
+        // core members exactly as the instance path presents them; the
+        // aggregated attribute objects are copied under compacted names
+        let mut presented = present_temporal(d, &none, ctx, trepr, tq, timeprop)?;
+        let Some(out) = presented.as_object_mut() else {
+            continue;
+        };
+        let mut any = false;
+        for (k, v) in d.as_object().into_iter().flatten() {
+            if is_meta(k) || attrs_filter.is_some_and(|a| !a.contains(k)) {
+                continue;
+            }
+            out.insert(ctx.compact_iri(k), v.clone());
+            any = true;
+        }
+        if any {
+            payload.push(presented);
+        }
+    }
+    let mut resp = crate::negotiate::respond_list(StatusCode::OK, payload, ctx, accept, tenant);
+    attach_paging(&mut resp, count_hdr, &links);
+    Ok(resp)
+}
+
+/// The two Table 5.2.33-1 selectors that need no compiled pattern: the
+/// type set, and the `attrs` list, which excludes an entity carrying
+/// none of the named Attributes. Each drops an entity the store could
+/// not narrow away itself.
+fn type_and_attrs_match(
+    doc: &Value,
+    types: Option<&Vec<String>>,
+    entity_attr_filter: Option<&Vec<String>>,
+) -> bool {
+    if let Some(types) = types {
+        let etypes = doc["type"].as_array().cloned().unwrap_or_default();
+        if !etypes
+            .iter()
+            .any(|t| types.iter().any(|w| Some(w.as_str()) == t.as_str()))
+        {
+            return false;
+        }
+    }
+    if let Some(want) = entity_attr_filter {
+        if !want.iter().any(|a| doc.get(a).is_some()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 5.7.4.4 S2/S3: the values filter and the geoquery are judged on the
+/// Attribute instances WITHIN the temporal-query interval, so an
+/// out-of-window instance must not satisfy either.
+fn window_conditions_match(
+    doc: &Value,
+    tq: Option<&TemporalQ>,
+    q_ast: Option<&antares_ql::QNode>,
+    geo: Option<&crate::geo::GeoQuery>,
+    ctx: &Context,
+) -> bool {
+    // 5.7.4.4 S2/S3: the values filter and geoquery are checked against
+    // the Attribute instances WITHIN the temporal-query interval — an
+    // out-of-window instance must not satisfy them
+    let mut eval_doc = doc.clone();
+    if let (Some(tqv), Some(o)) = (tq, eval_doc.as_object_mut()) {
+        for (k, v) in o.iter_mut() {
+            if is_meta(k) {
+                continue;
+            }
+            if let Some(arr) = v.as_array_mut() {
+                arr.retain(|inst| tqv.instance_matches(inst));
+            }
+        }
+    }
+    if let Some(ast) = q_ast {
+        if !crate::qeval::eval_q(ast, &eval_doc, ctx, &|_| None) {
+            return false;
+        }
+    }
+    if let Some(g) = geo {
+        if !g.matches(&eval_doc, ctx) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 5.7.4.4 S4 — and S7: the federation merge precedes this check, so
+/// split and aggregated entities are re-filtered here too. The entity
+/// qualifies if one of its scope's 4.18 validity intervals intersects
+/// the query window; attribute instances outside every matching interval
+/// are excluded (annex C.5.16).
+fn scope_window_retain(doc: &mut Value, sq: &str, tq: Option<&TemporalQ>, timeprop: &str) -> bool {
+    let iv = scope_match_intervals(doc, sq);
+    let (wstart, wend) = match tq {
+        Some(t) => match t.timerel.as_str() {
+            "before" => (None, Some(t.time_at.as_str())),
+            "after" => (Some(t.time_at.as_str()), None),
+            "between" => (Some(t.time_at.as_str()), t.end_time_at.as_deref()),
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+    let intersects = iv.iter().any(|(s, e)| {
+        wend.is_none_or(|w| s.as_str() < w)
+            && e.as_deref().is_none_or(|e| wstart.is_none_or(|w| e > w))
+    });
+    if !intersects {
+        return false;
+    }
+    if let Some(o) = doc.as_object_mut() {
+        for (k, v) in o.iter_mut() {
+            if is_meta(k) {
+                continue;
+            }
+            if let Some(arr) = v.as_array_mut() {
+                arr.retain(|inst| {
+                    inst.get(timeprop).and_then(Value::as_str).is_some_and(|t| {
+                        iv.iter()
+                            .any(|(s, e)| t >= s.as_str() && e.as_deref().is_none_or(|e| t < e))
+                    })
+                });
+            }
+        }
+    }
+    true
+}
+
 pub(crate) async fn query_temporal_inner(
     st: &AppState,
     params: &HashMap<String, String>,
@@ -1544,70 +1782,7 @@ pub(crate) async fn query_temporal_inner(
         crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
     });
     let scope_q = params.get("scopeQ").map(String::as_str);
-    let attrs_qualify = params.get("attrs").is_some_and(|a| {
-        a.split(',')
-            .any(|n| antares_ql::is_non_system_attr(n.trim()))
-    });
-    let q_qualifies = q_ast.as_ref().is_some_and(|ast| {
-        ast.attribute_paths()
-            .iter()
-            .any(|h| antares_ql::is_non_system_attr(h))
-    });
-    let has_filter = params.contains_key("type")
-        || attrs_qualify
-        || q_qualifies
-        || params.contains_key("georel")
-        || params.get("local").map(String::as_str) == Some("true");
-    if !has_filter {
-        return Err(NgsiError::BadRequestData(
-            "temporal query needs at least one of type, attrs, q, georel (5.7.4)".into(),
-        )
-        .into());
-    }
-    // 5.7.4.4: Linked Entity retrieval is not defined for temporal queries —
-    // linked filter conditions are an unconditional BadRequestData
-    if q_ast
-        .as_ref()
-        .map(antares_ql::QNode::max_link_depth)
-        .unwrap_or(0)
-        > 0
-    {
-        return Err(NgsiError::BadRequestData(
-            "temporal q must not reference Linked Entity attributes (5.7.4.4)".into(),
-        )
-        .into());
-    }
-    // 5.7.4.4: a syntactically invalid context source filter is 400; the
-    // filter itself gates registrations in federation::reg_matches.
-    if let Some(csf) = params.get("csf") {
-        parse_q(csf)?;
-    }
-    crate::paging::check_collation(params)?;
-    // 5.7.4.4: temporal ordering may only refer to the "id" entity member,
-    // and only where the execution "is limited to the local scope (see
-    // clause 5.5.13)" — 4.23.1 gives the reason: "Sort ordering is never
-    // applied to distributed operations." The subject is the EXECUTION, so a
-    // query nothing would federate to orders without `local=true`.
-    if let Some(spec) = params.get("orderBy") {
-        if crate::federation::would_federate(st, &tenant, &ctx, params, headers)? {
-            return Err(NgsiError::BadRequestData(
-                "orderBy requires local scope — ordering is never applied to \
-                 distributed operations (5.7.4.4, 4.23.1)"
-                    .into(),
-            )
-            .into());
-        }
-        let non_id = spec.split(',').any(|part| {
-            let m = part.trim().split(';').next().unwrap_or("").trim();
-            m.split('[').next().unwrap_or(m) != "id"
-        });
-        if non_id {
-            return Err(NgsiError::BadRequestData(
-                "temporal orderBy may only name \"id\" (5.7.4.4)".into(),
-            )
-            .into());
-        }
-    }
+    check_temporal_query(st, params, headers, &tenant, &ctx, q_ast.as_ref())?;
     let tq = TemporalQ::from_params(params, true)?;
     let trepr = parse_trepr(params, &ctx)?;
     // 5.7.4.4: {…} projection is Linked Entity retrieval — unconditional 400
@@ -1737,51 +1912,17 @@ pub(crate) async fn query_temporal_inner(
         st.temporal.query_temporal(&tenant, &tf)?
     };
     if outcome.aggregated {
-        let total = outcome
-            .total
-            .map(|t| t as usize)
-            .unwrap_or(outcome.rows.len());
-        let (page, count_hdr, links) = crate::paging::paginate_pre(
+        return respond_aggregated(
             st,
             params,
-            outcome.rows,
-            "/ngsi-ld/v1/temporal/entities",
-            total,
-        )?;
-        let timeprop = tq
-            .as_ref()
-            .map_or("observedAt", |t| t.timeproperty.as_str());
-        let none = Windowed {
-            attrs: Default::default(),
-            max_per_attr: 0,
-            ts_min: None,
-            ts_max: None,
-            truncated: false,
-        };
-        let mut payload: Vec<Value> = Vec::new();
-        for d in &page {
-            // core members exactly as the instance path presents them; the
-            // aggregated attribute objects are copied under compacted names
-            let mut presented = present_temporal(d, &none, &ctx, &trepr, tq.as_ref(), timeprop)?;
-            let Some(out) = presented.as_object_mut() else {
-                continue;
-            };
-            let mut any = false;
-            for (k, v) in d.as_object().into_iter().flatten() {
-                if is_meta(k) || attrs_filter.as_ref().is_some_and(|a| !a.contains(k)) {
-                    continue;
-                }
-                out.insert(ctx.compact_iri(k), v.clone());
-                any = true;
-            }
-            if any {
-                payload.push(presented);
-            }
-        }
-        let mut resp =
-            crate::negotiate::respond_list(StatusCode::OK, payload, &ctx, accept, &tenant);
-        attach_paging(&mut resp, count_hdr, &links);
-        return Ok(resp);
+            &tenant,
+            &ctx,
+            accept,
+            &trepr,
+            tq.as_ref(),
+            attrs_filter.as_ref(),
+            outcome,
+        );
     }
     let (all, pre_paged, pre_total) = (outcome.rows, outcome.paged, outcome.total);
     // 5.7.4.4: fan the query out to matching queryTemporal registrations
@@ -1855,86 +1996,17 @@ pub(crate) async fn query_temporal_inner(
                 }
             }
         }
-        if let Some(types) = &types {
-            let etypes = doc["type"].as_array().cloned().unwrap_or_default();
-            if !etypes
-                .iter()
-                .any(|t| types.iter().any(|w| Some(w.as_str()) == t.as_str()))
-            {
-                continue;
-            }
+        if !type_and_attrs_match(&doc, types.as_ref(), entity_attr_filter.as_ref()) {
+            continue;
         }
-        if let Some(want) = &entity_attr_filter {
-            if !want.iter().any(|a| doc.get(a).is_some()) {
-                continue;
-            }
+        if (q_ast.is_some() || geo.is_some())
+            && !window_conditions_match(&doc, tq.as_ref(), q_ast.as_ref(), geo.as_ref(), &ctx)
+        {
+            continue;
         }
-        // 5.7.4.4 S2/S3: the values filter and geoquery are checked against
-        // the Attribute instances WITHIN the temporal-query interval — an
-        // out-of-window instance must not satisfy them
-        if q_ast.is_some() || geo.is_some() {
-            let mut eval_doc = doc.clone();
-            if let (Some(tqv), Some(o)) = (tq.as_ref(), eval_doc.as_object_mut()) {
-                for (k, v) in o.iter_mut() {
-                    if is_meta(k) {
-                        continue;
-                    }
-                    if let Some(arr) = v.as_array_mut() {
-                        arr.retain(|inst| tqv.instance_matches(inst));
-                    }
-                }
-            }
-            if let Some(ast) = &q_ast {
-                if !crate::qeval::eval_q(ast, &eval_doc, &ctx, &|_| None) {
-                    continue;
-                }
-            }
-            if let Some(g) = &geo {
-                if !g.matches(&eval_doc, &ctx) {
-                    continue;
-                }
-            }
-        }
-        // 5.7.4.4 S4 — and S7: the federation merge above precedes this
-        // check, so split/aggregated entities are re-filtered here too. The
-        // entity qualifies if one of its scope's 4.18 validity intervals
-        // intersects the query window; attribute instances outside every
-        // matching interval are excluded (annex C.5.16).
         if let Some(sq) = scope_q {
-            let iv = scope_match_intervals(&doc, sq);
-            let (wstart, wend) = match tq.as_ref() {
-                Some(t) => match t.timerel.as_str() {
-                    "before" => (None, Some(t.time_at.as_str())),
-                    "after" => (Some(t.time_at.as_str()), None),
-                    "between" => (Some(t.time_at.as_str()), t.end_time_at.as_deref()),
-                    _ => (None, None),
-                },
-                None => (None, None),
-            };
-            let intersects = iv.iter().any(|(s, e)| {
-                wend.is_none_or(|w| s.as_str() < w)
-                    && e.as_deref().is_none_or(|e| wstart.is_none_or(|w| e > w))
-            });
-            if !intersects {
+            if !scope_window_retain(&mut doc, sq, tq.as_ref(), timeprop.as_str()) {
                 continue;
-            }
-            if let Some(o) = doc.as_object_mut() {
-                for (k, v) in o.iter_mut() {
-                    if is_meta(k) {
-                        continue;
-                    }
-                    if let Some(arr) = v.as_array_mut() {
-                        arr.retain(|inst| {
-                            inst.get(timeprop.as_str())
-                                .and_then(Value::as_str)
-                                .is_some_and(|t| {
-                                    iv.iter().any(|(s, e)| {
-                                        t >= s.as_str() && e.as_deref().is_none_or(|e| t < e)
-                                    })
-                                })
-                        });
-                    }
-                }
             }
         }
         // entity qualifies only if some instance falls in the window
