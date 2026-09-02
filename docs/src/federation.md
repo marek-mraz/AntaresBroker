@@ -53,6 +53,22 @@ to that source (4.3.6.5); `localOnly` adds `local=true` to every
 forward (4.3.6.4). `observationInterval` and `managementInterval` gate
 temporal forwards to the sources whose window overlaps the query.
 
+A `contextSourceInfo` value of `urn:ngsi-ld:request` is not sent as that
+string: it copies the same-named header off the request that triggered the
+forward, and sends nothing when the triggering request carried no such
+header (4.3.6.5, 6.3.19). `{"key": "Authorization", "value":
+"urn:ngsi-ld:request"}` is how a source behind the same identity provider is
+given the caller's credential, and it is the reason creating a registration
+is a privileged operation: the key names any header and the endpoint is
+whatever the registration says. Two groups of keys never reach the source as
+a raw header. Headers the registration's other members already decide take
+precedence and cannot be overridden (6.3.19), which is `NGSILD-Tenant`, and
+so do the ones the binding sets itself: `Host`, `Via`, `Link`, `Connection`,
+`Content-Type`, `Content-Length`. The `accept`, `contentType`,
+`jsonldContext` and `ngsildConformance` keys are the ones 4.3.6.6 and
+4.3.6.8 give their own meaning; the forward acts on them, and passing them
+through raw would corrupt the negotiation they steer.
+
 ### Timeout and cooldown
 
 `management.timeout` (5.2.34) bounds one forward in milliseconds; the
