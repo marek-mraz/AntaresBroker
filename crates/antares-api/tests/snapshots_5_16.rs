@@ -840,8 +840,6 @@ async fn clause_6_3_22_snapshot_scoped_subscription_notification_header() {
         .is_some_and(|t| t.starts_with("snap-"));
     assert!(!leaked, "synthetic tenant must not leak into NGSILD-Tenant");
     assert_eq!(nb["data"][0]["id"], "urn:ngsi-ld:Vehicle:sn1", "{nb}");
-
-    let _ = loc;
 }
 
 /// 5.5.15: Snapshots are orthogonal to Tenants — a snapshot created on a

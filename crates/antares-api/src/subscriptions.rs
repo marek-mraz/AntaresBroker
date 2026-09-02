@@ -383,11 +383,9 @@ pub fn normalize_subscription(
                 out.insert("expiresAt".into(), v.clone());
             }
             "throttling" => {
-                let n = v
-                    .as_f64()
+                v.as_f64()
                     .filter(|n| *n > 0.0)
                     .ok_or_else(|| bad("throttling must be a positive number".into()))?;
-                let _ = n;
                 out.insert("throttling".into(), v.clone());
             }
             "timeInterval" => {
