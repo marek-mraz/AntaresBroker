@@ -799,14 +799,14 @@ pub async fn forward(
         // peer URL loses its userinfo on the way into the log.
         tracing::warn!(
             "federation forward to {} refused: {e}",
-            crate::notify::redact_userinfo(&url)
+            antares_notifier::redact_userinfo(&url)
         );
         return (502, Value::Null, Vec::new());
     }
     if st.egress.is_open(tenant.as_str(), &url) {
         tracing::debug!(
             "federation forward to {} short-circuited (breaker open)",
-            crate::notify::redact_userinfo(&url)
+            antares_notifier::redact_userinfo(&url)
         );
         return (503, Value::Null, Vec::new());
     }
@@ -2371,7 +2371,7 @@ pub async fn forward_part(
     // provoke a partial failure cannot enumerate the peers.
     tracing::debug!(
         "distributed operation to {} returned {status}",
-        crate::notify::redact_userinfo(&url)
+        antares_notifier::redact_userinfo(&url)
     );
     let detail = format!(
         "distributed operation to registration {} returned {status}",

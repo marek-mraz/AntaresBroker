@@ -56,7 +56,7 @@ fn opaque(what: &str, e: &dyn std::fmt::Debug) -> NgsiError {
 /// system limit (5.16.1.4 "applying the configured limit").
 fn expires_at(meta: &Map<String, Value>) -> Result<String, NgsiError> {
     let secs = match meta.get("snapshotLifetime").and_then(Value::as_str) {
-        Some(d) => crate::entity_maps::iso8601_secs(d)
+        Some(d) => crate::entity_map::iso8601_secs(d)
             .ok_or_else(|| {
                 bad(format!(
                     "snapshotLifetime is not an ISO 8601 duration: {d:?}"
@@ -294,7 +294,7 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
     if let Some(l) = o.get("snapshotLifetime") {
         let ok = l
             .as_str()
-            .and_then(crate::entity_maps::iso8601_secs)
+            .and_then(crate::entity_map::iso8601_secs)
             .is_some();
         if !ok {
             return Err(bad(
@@ -322,8 +322,8 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
             .ok_or_else(|| bad("receiverInfo must be a KeyValuePair array (5.2.41)".into()))?;
         for kv in pairs {
             let (k, v) = (kv["key"].as_str(), kv["value"].as_str());
-            if !k.is_some_and(crate::subscriptions::is_field_name)
-                || !v.is_some_and(crate::subscriptions::is_field_value)
+            if !k.is_some_and(crate::negotiate::is_field_name)
+                || !v.is_some_and(crate::negotiate::is_field_value)
             {
                 return Err(bad(format!(
                     "receiverInfo entry {kv} is not a valid HTTP header (RFC 7230, 6.3.8)"
@@ -1189,9 +1189,7 @@ mod clause_5_16 {
     use tower::ServiceExt;
 
     fn state() -> AppState {
-        let mut st = AppState::new("antares-snapshots".into());
-        crate::notify::wire(&mut st);
-        st
+        crate::wired_state("antares-snapshots")
     }
 
     /// One request through the full router — the 6.3.22 middleware included.

@@ -16,6 +16,7 @@ pub mod csource;
 pub mod distsub;
 pub mod egress;
 pub mod entities;
+pub mod entity_map;
 pub mod entity_maps;
 pub mod federation;
 pub mod geo;
@@ -208,6 +209,16 @@ impl ApiSurface for Admin {
     fn version_info(&self) -> serde_json::Value {
         serde_json::json!({"routes": Self::PATHS.len()})
     }
+}
+
+/// An `AppState` with the notification pipeline installed, for tests that
+/// exercise a route which notifies. The router does not wire it: a caller
+/// that only reads never pays for the mirror seed.
+#[cfg(any(test, feature = "test-kit"))]
+pub fn wired_state(host_alias: &str) -> AppState {
+    let mut st = AppState::new(host_alias.to_owned());
+    notify::wire(&mut st);
+    st
 }
 
 pub fn router(state: AppState) -> Router {

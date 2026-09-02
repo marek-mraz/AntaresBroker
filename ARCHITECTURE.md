@@ -39,7 +39,7 @@ broker nor a storage backend (`antares-api`, `antares-broker`,
 
 | Crate | Lines | Owns | Must not |
 |---|---|---|---|
-| `antares-model` | 880 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
+| `antares-model` | 990 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
 | `antares-ql` | 4 500 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
 | `antares-jsonld` | 8 100 | `@context` loader with caches and pinned core contexts, expansion/compaction, structural validation, the one outbound `client_builder` | do business logic |
 | `antares-matcher` | 380 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
@@ -59,7 +59,7 @@ module's header comment.
 | Module | Lines | Surface |
 |---|---|---|
 | `lib.rs` | 5 500 | the router (`/ngsi-ld/v1` nest, `/q/*` admin, `/info`), tenant purge, shared helpers |
-| `negotiate.rs` | 1 800 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
+| `negotiate.rs` | 2 000 | 6.3.4–6.3.6: tenant, Accept, Content-Type, `@context` resolution, parameter allow-lists (the query set of 6.4.3.2 included) and the RFC 7230 header-syntax checks. Every handler passes through `tenant_from`, `check_params`, `parse_body`, `request_context` |
 | `entities.rs` | 3 500 | 5.6.1–5.6.6, 5.7.1–5.7.2 `/entities`, distributed write fan-out |
 | `paging.rs` | 1 400 | 4.12, 6.3.10 limit/offset/count and the next/prev links, 4.23 ordering and ICU collation, 6.3.17 `NGSILD-Warning`, the query body of 5.2.23 lifted into parameters; every list operation pages through it |
 | `attrs.rs` | 1 900 | 5.6.2–5.6.5 attribute operations |
@@ -73,7 +73,8 @@ module's header comment.
 | `csource.rs` | 2 100 | 5.9, 5.10 registrations, `csource_index` maintenance |
 | `registry.rs` | 470 | matching over a registration document: `CsrSpec`, the 4.3.6.1 information match, csf and scope filters, the temporal interval and expiry of a registration, the 5.11.2 subscription match; named by federation, notify, csource and every resource module that forwards |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
-| `entity_maps.rs` | 1 100 | 5.14 EntityMaps |
+| `entity_maps.rs` | 320 | 5.14 the `/entityMaps` resources (6.32, 6.34, 6.35): create from a query, retrieve, update, delete |
+| `entity_map.rs` | 690 | one EntityMap document (5.2.39): store it under its tenant with a lifetime, read it back while it lives, take a page's candidate ids from it, merge what a distributed query reached, and serve a retrieve through a presented map |
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
 | `contexts.rs` | 760 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 760 | 6.3.21 version negotiation |

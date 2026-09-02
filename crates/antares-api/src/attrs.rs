@@ -5,7 +5,7 @@ use crate::federation::path_segment;
 use crate::negotiate::*;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, ExpandOpts};
-use antares_model::NgsiError;
+use antares_model::{check_attr_name, NgsiError};
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
 use axum::body::Bytes;
@@ -22,37 +22,6 @@ use crate::negotiate::CleanParams;
 /// operations that address it (5.6.4.4, 5.6.5.4, 5.6.19.4) compare against
 /// both spellings.
 const SCOPE_IRI: &str = "https://uri.etsi.org/ngsi-ld/scope";
-
-/// Attribute names in paths must be valid terms/IRIs (4.6.2) — 400 otherwise.
-pub(crate) fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
-    // 4.6.2 supported names: no '@' (keyword territory), no parens/quotes/etc.
-    let ok = !attr.is_empty()
-        && attr
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+".contains(c))
-        && !has_dot_segment(attr);
-    if ok {
-        Ok(())
-    } else {
-        Err(NgsiError::BadRequestData(format!(
-            "invalid attribute name {attr:?}"
-        )))
-    }
-}
-
-/// A 4.6.2 name begins with a letter, so no valid Attribute name is a relative
-/// path dot-segment (RFC 3986 clause 5.2.4). The name is interpolated into the
-/// request URLs of forwarded operations, where a `.`/`..` segment addresses a
-/// different resource of the registration endpoint — `/entities/{id}/attrs/..`
-/// is that endpoint's Entity resource. Percent triplets are folded once first,
-/// because the endpoint decodes the path it is given.
-fn has_dot_segment(attr: &str) -> bool {
-    attr.to_ascii_lowercase()
-        .replace("%2e", ".")
-        .replace("%2f", "/")
-        .split('/')
-        .any(|seg| seg == "." || seg == "..")
-}
 
 /// Outcome of a multi-attribute write: 204 when everything applied, else 207
 /// with an UpdateResult (5.2.18).
@@ -471,25 +440,6 @@ fn proxies_cover_all(regs: &[crate::federation::FedReg], attr_iris: &[String]) -
         && attr_iris
             .iter()
             .all(|a| regs.iter().any(|r| r.is_proxy() && r.covers_attr(a)))
-}
-
-/// 5.6.2.4 (and sibling attribute operations): with a `?type` selector the
-/// target Entity must ALSO match the 4.17 Entity Type Selection — otherwise
-/// the entity is "not known" for this operation (ResourceNotFound).
-pub(crate) fn matches_type_param(
-    doc: &Value,
-    params: &HashMap<String, String>,
-    ctx: &antares_jsonld::Context,
-) -> bool {
-    let Some(sel) = params.get("type").filter(|s| *s != "*") else {
-        return true;
-    };
-    let types: Vec<&str> = doc
-        .get("type")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    crate::entities::type_selection_matches(sel, &types, ctx)
 }
 
 /// The URL parameters that travel with a forwarded attribute operation.

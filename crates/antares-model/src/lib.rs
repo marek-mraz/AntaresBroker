@@ -87,6 +87,37 @@ pub fn dt_key(s: &str) -> String {
     format!("{base}.{digits:0<6}")
 }
 
+/// Attribute names in paths must be valid terms/IRIs (4.6.2) — 400 otherwise.
+pub fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
+    // 4.6.2 supported names: no '@' (keyword territory), no parens/quotes/etc.
+    let ok = !attr.is_empty()
+        && attr
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_:.#/%-+".contains(c))
+        && !has_dot_segment(attr);
+    if ok {
+        Ok(())
+    } else {
+        Err(NgsiError::BadRequestData(format!(
+            "invalid attribute name {attr:?}"
+        )))
+    }
+}
+
+/// A 4.6.2 name begins with a letter, so no valid Attribute name is a relative
+/// path dot-segment (RFC 3986 clause 5.2.4). The name is interpolated into the
+/// request URLs of forwarded operations, where a `.`/`..` segment addresses a
+/// different resource of the registration endpoint — `/entities/{id}/attrs/..`
+/// is that endpoint's Entity resource. Percent triplets are folded once first,
+/// because the endpoint decodes the path it is given.
+fn has_dot_segment(attr: &str) -> bool {
+    attr.to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2f", "/")
+        .split('/')
+        .any(|seg| seg == "." || seg == "..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::dt_key;

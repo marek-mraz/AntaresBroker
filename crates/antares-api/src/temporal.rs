@@ -6,14 +6,14 @@ use crate::state::{now_iso, AppState};
 use crate::temporalq::TemporalQ;
 use antares_jsonld::compact::compact_instance;
 use antares_jsonld::{expand_entity, Context, ExpandOpts};
-use antares_model::{dt_key, NgsiError};
+use antares_model::{dt_key, NgsiError, TenantId};
 use antares_ql::parse_q;
 use antares_store::TemporalDriverExt as _;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
@@ -1407,7 +1407,7 @@ async fn query_temporal_outer(
     };
     let tenant = tenant_from(headers)?;
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_maps::map_if_accessible(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
         params.insert("entityMap".into(), "true".into());
         return query_temporal_inner(st, &params, headers).await;
     };
@@ -1415,7 +1415,7 @@ async fn query_temporal_outer(
     // 5.5.9.3: the map fixes the candidate set and the request's own filters
     // narrow it, so `id=` on this request selects from the map rather than
     // replacing it.
-    let candidates = crate::entity_maps::candidate_ids(&map, &params);
+    let candidates = crate::entity_map::candidate_ids(&map, &params);
     // "filters shall be rechecked before returning results" and "Entities not
     // or no longer fitting the query shall be removed from the Entity map
     // during pagination" — so the recheck asks about the map's OWN Entities,
@@ -1462,7 +1462,7 @@ async fn query_temporal_outer(
             emap.remove(&k);
         }
     }
-    crate::entity_maps::map_put(st, &tenant, map.clone())?;
+    crate::entity_map::map_put(st, &tenant, map.clone())?;
     // fix the query to the candidates that survived the recheck (5.5.14)
     let ids: Vec<&str> = candidates
         .iter()
@@ -2028,8 +2028,7 @@ pub(crate) async fn query_temporal_inner(
     // 6.18.3.2: entityMap=true — the temporal EntityMap for this query is
     // (re)created; the response carries NGSILD-EntityMap and 201 Created.
     if params.get("entityMap").map(String::as_str) == Some("true") {
-        let map =
-            crate::entity_maps::build_temporal_map(st, &tenant, headers, &ctx, params).await?;
+        let map = build_temporal_map(st, &tenant, headers, &ctx, params).await?;
         *resp.status_mut() = StatusCode::CREATED;
         if let Some(id) = map.get("id").and_then(Value::as_str) {
             if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
@@ -2063,7 +2062,7 @@ async fn retrieve_temporal_outer(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    crate::entity_maps::retrieve_with_map(st, id, params, headers, true, |map| async move {
+    crate::entity_map::retrieve_with_map(st, id, params, headers, true, |map| async move {
         retrieve_temporal_inner(st, id, params, headers, map.as_ref()).await
     })
     .await
@@ -2546,7 +2545,7 @@ pub async fn delete_temporal_attr(
         // the one that also refuses dot segments — the name is interpolated
         // into the forwarded request path, where `..` addresses the peer's
         // Temporal Evolution resource instead of its attribute.
-        crate::attrs::check_attr_name(&attr)?;
+        antares_model::check_attr_name(&attr)?;
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
@@ -2754,7 +2753,7 @@ pub async fn modify_temporal_instance(
             return Err(ApiError::Bare(StatusCode::METHOD_NOT_ALLOWED));
         }
         antares_model::EntityId::new(&id)?;
-        crate::attrs::check_attr_name(&attr)?;
+        antares_model::check_attr_name(&attr)?;
         antares_model::EntityId::new(&instance_id)
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
@@ -2858,7 +2857,7 @@ pub async fn delete_temporal_instance(
     let go = async {
         let tenant = tenant_from(&headers)?;
         antares_model::EntityId::new(&id)?;
-        crate::attrs::check_attr_name(&attr)?;
+        antares_model::check_attr_name(&attr)?;
         antares_model::EntityId::new(&instance_id)
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
@@ -2948,6 +2947,79 @@ pub async fn batch_temporal_query(
         query_temporal_inner(&st, &vp, &headers).await
     };
     go.await.unwrap_or_else(|e| e.into_response())
+}
+
+/// 5.14.5.4: temporal query required; the S1–S4 candidate selection is the
+/// temporal query pipeline itself (5.7.4.4) run unpaged — the ids of its
+/// result set form the EntityMap; the createEntityMapQueryTemporal
+/// registrations are then merged like 5.14.4.
+/// Known ceiling: candidate ids are read from the internal 5.7.4 response capped
+/// at max_limit; raise the cap if temporal sets outgrow it.
+pub(crate) async fn build_temporal_map(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &antares_jsonld::Context,
+    params: &HashMap<String, String>,
+) -> ApiResult<Value> {
+    if !params.contains_key("timerel") {
+        return Err(NgsiError::BadRequestData(
+            "a temporal query is required to create a temporal EntityMap (5.14.5.4)".into(),
+        )
+        .into());
+    }
+    let local_scope = params.get("local").map(String::as_str) == Some("true");
+    let split = params.get("splitEntities").map(String::as_str) == Some("true");
+    let mut eff: HashMap<String, String> = if split && !local_scope {
+        params
+            .iter()
+            .filter(|(k, _)| {
+                [
+                    "id",
+                    "idPattern",
+                    "type",
+                    "local",
+                    "timerel",
+                    "timeAt",
+                    "endTimeAt",
+                    "timeproperty",
+                ]
+                .contains(&k.as_str())
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    } else {
+        params.clone()
+    };
+    for k in [
+        "entityMap",
+        "entityMapLifetime",
+        "splitEntities",
+        "offset",
+        "count",
+    ] {
+        eff.remove(k);
+    }
+    eff.insert("limit".into(), st.max_limit.to_string());
+    // Box::pin: build_temporal_map is reachable from query_temporal_inner
+    // (entityMap=true), so this recursive edge needs indirection.
+    let resp = Box::pin(query_temporal_inner(st, &eff, headers)).await?;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .map_err(|e| NgsiError::InternalError(format!("temporal candidate read: {e}")))?;
+    // 5.5.14: the map FIXES the Entities considered by every later request, so
+    // an unreadable candidate set must fail rather than become "no candidates".
+    let candidates: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| NgsiError::InternalError("temporal candidate parse".into()))?;
+    let mut emap = Map::new();
+    if let Some(arr) = candidates.as_array() {
+        for d in arr {
+            if let Some(id) = d.get("id").and_then(Value::as_str) {
+                emap.insert(id.to_owned(), json!(["@none"]));
+            }
+        }
+    }
+    crate::entity_map::merge_and_store_map(st, tenant, headers, ctx, params, true, emap).await
 }
 
 #[cfg(test)]

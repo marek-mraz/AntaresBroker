@@ -22,14 +22,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use crate::negotiate::CleanParams;
 
 use antares_model::is_meta;
-
-pub(crate) use antares_ql::type_selection_matches;
 
 // ---------- temporal mirroring (auto-recording; Scorpio ENTITY-topic parity) ----------
 //
@@ -212,7 +210,7 @@ async fn retrieve_entity_outer(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    crate::entity_maps::retrieve_with_map(st, id, params, headers, false, |map| async move {
+    crate::entity_map::retrieve_with_map(st, id, params, headers, false, |map| async move {
         retrieve_entity_inner(st, id, params, headers, map.as_ref()).await
     })
     .await
@@ -336,7 +334,7 @@ async fn retrieve_entity_inner(
     };
     // 5.7.1.4: no entity "whose id (URI), and where specified type, is
     // equivalent" — the optional ?type selector (4.17) narrows the target
-    if !crate::attrs::matches_type_param(&doc, params, &ctx) {
+    if !crate::negotiate::matches_type_param(&doc, params, &ctx) {
         return Err(NgsiError::ResourceNotFound(format!(
             "entity {id} does not match the type selector"
         ))
@@ -530,7 +528,7 @@ async fn query_entities_outer(
     // for this request, whether or not it carries an EntityMap reference —
     // and the paged fetch below walks the whole map, locally and forwarded,
     // before the inner call would reach these same two checks.
-    check_params(&params, QUERY_PARAMS)?;
+    check_params(&params, crate::negotiate::QUERY_PARAMS)?;
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
     if !qualifies_non_wide(&params, q_ast.as_ref()) {
         return Err(NgsiError::BadRequestData(
@@ -539,7 +537,7 @@ async fn query_entities_outer(
         .into());
     }
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_maps::map_if_accessible(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
         params.insert("entityMap".into(), "true".into());
         return query_entities_inner(st, &params, headers).await;
@@ -562,7 +560,7 @@ async fn query_entities_outer(
     // (5.5.14). Memory per request is O(chunk), never O(map) — the reason
     // EntityMaps exist for the distributed case. count=true walks every
     // candidate (the total needs each id checked), still chunk-bounded.
-    let ids: Vec<String> = crate::entity_maps::candidate_ids(&map, &params);
+    let ids: Vec<String> = crate::entity_map::candidate_ids(&map, &params);
     let looped = crate::federation::via_loop(
         headers,
         &crate::federation::alias_for(&st.host_alias, &tenant),
@@ -625,7 +623,7 @@ async fn query_entities_outer(
     if count {
         more = total > offset + limit;
     }
-    crate::entity_maps::map_put(st, &tenant, map.clone())?;
+    crate::entity_map::map_put(st, &tenant, map.clone())?;
     // fix the final fetch to exactly the page's survivors (5.5.14: an empty
     // set is fixed to nothing); one extra page-sized fetch keeps the whole
     // repr pipeline shared instead of forked
@@ -684,50 +682,13 @@ async fn query_entities_outer(
     Ok(resp)
 }
 
-pub const QUERY_PARAMS: &[&str] = &[
-    "id",
-    "idPattern",
-    "type",
-    "attrs",
-    "q",
-    "georel",
-    "geometry",
-    "coordinates",
-    "geoproperty",
-    "scopeQ",
-    "csf",
-    "limit",
-    "offset",
-    "count",
-    "options",
-    "format",
-    "pick",
-    "omit",
-    "lang",
-    "local",
-    "entityMap",
-    "geometryProperty",
-    "expandValues",
-    "jsonKeys",
-    "datasetId",
-    "join",
-    "joinLevel",
-    "containedBy",
-    "orderBy",
-    "orderFrom",
-    "orderGeometry",
-    "collation",
-    "entityMapLifetime",
-    "splitEntities",
-];
-
 async fn query_entities_inner(
     st: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
-    check_params(params, QUERY_PARAMS)?;
+    check_params(params, crate::negotiate::QUERY_PARAMS)?;
     let accept = parse_accept_geo(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
 
@@ -926,7 +887,7 @@ async fn query_entities_inner(
     // 6.4.3.2: entityMap=true — the EntityMap for this query is (re)created;
     // the response carries NGSILD-EntityMap and 201 Created.
     if params.get("entityMap").map(String::as_str) == Some("true") {
-        let map = crate::entity_maps::build_query_map(st, &tenant, headers, &ctx, params).await?;
+        let map = build_query_map(st, &tenant, headers, &ctx, params).await?;
         *resp.status_mut() = StatusCode::CREATED;
         if let Some(id) = map.get("id").and_then(Value::as_str) {
             if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
@@ -1281,7 +1242,7 @@ pub async fn delete_entity(
         // tested inside the delete, under the row lock: read first and delete
         // after, and the document that answered the test is not necessarily
         // the one the delete removes.
-        let keep = |d: &Value| crate::attrs::matches_type_param(d, &params, &ctx);
+        let keep = |d: &Value| crate::negotiate::matches_type_param(d, &params, &ctx);
         if !regs.is_empty() {
             let proxy_match = regs.iter().any(|r| r.is_proxy());
             let mut parts = Vec::new();
@@ -1741,7 +1702,7 @@ async fn merge_entity_inner(
         let local_exists = st
             .store
             .get(&tenant, Kind::Entity, id)?
-            .is_some_and(|d| crate::attrs::matches_type_param(&d, params, &parsed.ctx));
+            .is_some_and(|d| crate::negotiate::matches_type_param(&d, params, &parsed.ctx));
         if (local_exists || proxies.is_empty()) && has_attrs {
             let mut local_frag = expand_entity(
                 &rest,
@@ -1756,7 +1717,7 @@ async fn merge_entity_inner(
             )?;
             apply_common_observed_at(&mut local_frag, observed_at);
             let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
-                if !crate::attrs::matches_type_param(doc, params, &parsed.ctx) {
+                if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
                     return Err(NgsiError::ResourceNotFound(format!(
                         "entity {id} does not match the type selector"
                     )));
@@ -1816,7 +1777,7 @@ async fn merge_entity_inner(
 
     let res = st.store.mutate(&tenant, Kind::Entity, id, |doc| {
         // 5.6.17.4: the ?type selector narrows the merge target
-        if !crate::attrs::matches_type_param(doc, params, &parsed.ctx) {
+        if !crate::negotiate::matches_type_param(doc, params, &parsed.ctx) {
             return Err(NgsiError::ResourceNotFound(format!(
                 "entity {id} does not match the type selector"
             )));
@@ -2046,7 +2007,7 @@ pub async fn replace_entity(
         let local_doc = st
             .store
             .get(&tenant, Kind::Entity, &id)?
-            .filter(|d| crate::attrs::matches_type_param(d, &params, &ctx0));
+            .filter(|d| crate::negotiate::matches_type_param(d, &params, &ctx0));
         let spec = crate::registry::CsrSpec {
             ids: Some(vec![id.clone()]),
             ..Default::default()
@@ -2077,7 +2038,7 @@ pub async fn replace_entity(
             let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
                 // 5.6.18.4: the ?type selector narrows the target here too —
                 // the type of the row being written is the one that counts
-                if !crate::attrs::matches_type_param(doc, &params, &ctx0) {
+                if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
                     return Err(NgsiError::ResourceNotFound(format!(
                         "entity {id} does not match the type selector"
                     )));
@@ -2127,7 +2088,7 @@ pub async fn replace_entity(
                 // the same row lock as the local-only path above: the read
                 // that found the target is not the write that replaces it
                 let res = st.store.mutate(&tenant, Kind::Entity, &id, |doc| {
-                    if !crate::attrs::matches_type_param(doc, &params, &ctx0) {
+                    if !crate::negotiate::matches_type_param(doc, &params, &ctx0) {
                         return Err(NgsiError::ResourceNotFound(format!(
                             "entity {id} does not match the type selector"
                         )));
@@ -2234,7 +2195,7 @@ async fn retrieve_attr_inner(
     let ctx = request_context(&st.loader, headers).await?;
     let repr = parse_repr(params, &ctx)?;
     antares_model::EntityId::new(id)?;
-    crate::attrs::check_attr_name(attr)?;
+    antares_model::check_attr_name(attr)?;
     let doc = st
         .store
         .get(&tenant, Kind::Entity, id)?
@@ -2282,6 +2243,72 @@ async fn retrieve_attr_inner(
     };
     let accept = parse_accept(headers)?;
     Ok(respond(StatusCode::OK, body, &ctx, accept, &tenant))
+}
+
+/// 5.14.4.4: run the (split-reduced when applicable) local query and record
+/// each matching id under the "@none" local marker; forward to matching
+/// registrations supporting createEntityMapQueryEntity and merge each
+/// returned EntityMap (ids → registration id, linkedMaps → remote map id);
+/// store the local EntityMap and return it.
+/// Known ceiling: the local candidate ids are the first max_limit matches —
+/// the query is paged into the store instead of materializing every matching
+/// Entity document, so one request cannot pull a whole tenant into memory.
+/// Raise the cap if local candidate sets outgrow it.
+pub(crate) async fn build_query_map(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    ctx: &antares_jsonld::Context,
+    params: &HashMap<String, String>,
+) -> ApiResult<Value> {
+    let q_ast = params
+        .get("q")
+        .map(|q| antares_ql::parse_q(q))
+        .transpose()?;
+    // 5.14.4.4 a-e: too wide query
+    if !qualifies_non_wide(params, q_ast.as_ref()) {
+        return Err(NgsiError::BadRequestData(
+            "EntityMap query needs at least one of type, attrs, q, georel, or local=true \
+             (5.14.4.4 — too wide query)"
+                .into(),
+        )
+        .into());
+    }
+    // 5.14.4.4: invalid entity ids / csf are BadRequestData
+    if let Some(ids) = params.get("id") {
+        for id in ids.split(',') {
+            antares_model::EntityId::new(id.trim())?;
+        }
+    }
+    if let Some(csf) = params.get("csf") {
+        antares_ql::parse_q(csf)?;
+    }
+    let local_scope = params.get("local").map(String::as_str) == Some("true");
+    let split = params.get("splitEntities").map(String::as_str) == Some("true");
+    // Split entities: only id/type/idPattern narrow the local candidate set —
+    // value/geo/scope filters cannot be judged on a fragment (5.14.4.4).
+    let eff: HashMap<String, String> = if split && !local_scope {
+        params
+            .iter()
+            .filter(|(k, _)| ["id", "idPattern", "type", "local"].contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    } else {
+        params.clone()
+    };
+    // idPattern is invisible to the store, so a pushed page would slice the
+    // wrong set — there the ceiling below is the only bound.
+    let page = (!eff.contains_key("idPattern")).then_some((0, st.max_limit));
+    let mut local_docs = filter_entities_paged(st, tenant, &eff, ctx, Vec::new(), page, None)?.docs;
+    local_docs.truncate(st.max_limit);
+    let mut emap = Map::new();
+    for d in &local_docs {
+        if let Some(id) = d.get("id").and_then(Value::as_str) {
+            // "@none" refers to an Entity held locally (5.2.39)
+            emap.insert(id.to_owned(), json!(["@none"]));
+        }
+    }
+    crate::entity_map::merge_and_store_map(st, tenant, headers, ctx, params, false, emap).await
 }
 
 #[cfg(test)]
@@ -2427,8 +2454,8 @@ mod clause_4_16 {
 
 #[cfg(test)]
 mod clause_4_17 {
-    use super::*;
     use antares_jsonld::Loader;
+    use antares_ql::type_selection_matches;
 
     /// 4.17: disjunction via `|` or `,`, conjunction via `(a;b)`; short
     /// names expand against the @context.

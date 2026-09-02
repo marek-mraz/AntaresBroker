@@ -7,6 +7,7 @@ use antares_model::{NgsiError, TenantId};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const JSONLD_CONTEXT_REL: &str = "http://www.w3.org/ns/json-ld#context";
@@ -841,6 +842,89 @@ pub fn without_context(v: &Value) -> Map<String, Value> {
     o.remove("@context");
     o
 }
+
+/// 5.2.12 `jsonldContext`: the @context a Notification of this Subscription
+/// is compacted against, so the member is dereferenced here rather than at
+/// first delivery — a shape that is not a URL or an array of URLs is 400,
+/// one that does not resolve is 504.
+///
+/// Resolution is Tenant-scoped (5.5.10): a Hosted @context belongs to the
+/// Tenant that stored it (5.13.1), and resolving the URL outside that Tenant
+/// would compact every Notification of this Subscription against another
+/// Tenant's term mappings. For any other Tenant the URL is as absent as one
+/// that never existed.
+/// RFC 7230 `field-name`: a `token`, one or more `tchar`.
+pub(crate) fn is_field_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// RFC 7230 `field-value`: visible ASCII, space and horizontal tab, with no
+/// leading or trailing whitespace. Empty is legal; `obs-text` and the
+/// deprecated `obs-fold` are not generated, so a byte outside that set — a
+/// bare CR or LF above all — makes the pair unsendable as a header.
+pub(crate) fn is_field_value(s: &str) -> bool {
+    !s.starts_with([' ', '\t'])
+        && !s.ends_with([' ', '\t'])
+        && s.bytes().all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
+}
+
+/// 5.6.2.4 (and sibling attribute operations): with a `?type` selector the
+/// target Entity must ALSO match the 4.17 Entity Type Selection — otherwise
+/// the entity is "not known" for this operation (ResourceNotFound).
+pub(crate) fn matches_type_param(
+    doc: &Value,
+    params: &HashMap<String, String>,
+    ctx: &antares_jsonld::Context,
+) -> bool {
+    let Some(sel) = params.get("type").filter(|s| *s != "*") else {
+        return true;
+    };
+    let types: Vec<&str> = doc
+        .get("type")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    antares_ql::type_selection_matches(sel, &types, ctx)
+}
+
+pub const QUERY_PARAMS: &[&str] = &[
+    "id",
+    "idPattern",
+    "type",
+    "attrs",
+    "q",
+    "georel",
+    "geometry",
+    "coordinates",
+    "geoproperty",
+    "scopeQ",
+    "csf",
+    "limit",
+    "offset",
+    "count",
+    "options",
+    "format",
+    "pick",
+    "omit",
+    "lang",
+    "local",
+    "entityMap",
+    "geometryProperty",
+    "expandValues",
+    "jsonKeys",
+    "datasetId",
+    "join",
+    "joinLevel",
+    "containedBy",
+    "orderBy",
+    "orderFrom",
+    "orderGeometry",
+    "collation",
+    "entityMapLifetime",
+    "splitEntities",
+];
 
 #[cfg(test)]
 mod clause_5_5_3 {

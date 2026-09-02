@@ -262,15 +262,12 @@ pub fn normalize_registration(
                     // own RFC 7230 parsers are the judge — a name or a value
                     // they refuse can only fail later, at a forward whose
                     // error names no registration.
-                    if !crate::subscriptions::is_field_name(key) {
+                    if !crate::negotiate::is_field_name(key) {
                         return Err(bad(format!(
                             "contextSourceInfo key {key:?} is not an RFC 7230 header name (6.3.19)"
                         )));
                     }
-                    if !value
-                        .as_str()
-                        .is_some_and(crate::subscriptions::is_field_value)
-                    {
+                    if !value.as_str().is_some_and(crate::negotiate::is_field_value) {
                         return Err(bad(format!(
                             "contextSourceInfo value for {key:?} is not an RFC 7230 header value \
                              (6.3.19)"
@@ -341,7 +338,7 @@ pub fn normalize_registration(
             "contextSourceAlias" => {
                 let a = v
                     .as_str()
-                    .filter(|a| crate::subscriptions::is_field_name(a))
+                    .filter(|a| crate::negotiate::is_field_name(a))
                     .ok_or_else(|| {
                         bad(
                             "contextSourceAlias must be a non-empty RFC 7230 pseudonym token \
