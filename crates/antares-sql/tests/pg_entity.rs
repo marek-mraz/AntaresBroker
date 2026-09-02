@@ -582,6 +582,89 @@ async fn clause_5_5_6_undecided_query_past_the_ceiling_is_refused() {
     clean().await;
 }
 
+/// The four batch seams answer per INPUT item, and the API maps those
+/// answers positionally into the 5.6.7/5.6.8/5.6.9/5.6.10 success and error
+/// arrays. So a result that is shorter than its input attributes one
+/// entity's outcome to another id, and a batch whose ids repeat must not
+/// reach `ON CONFLICT` twice in one statement ("cannot affect row a second
+/// time" is a 500 for a request the spec has an answer for). The empty
+/// batch is the other end of the same seam: every statement here is
+/// set-returning (`jsonb_array_elements`, `= ANY`), which a rewrite to a
+/// VALUES list would turn into a syntax error nothing else would catch.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_batch_seams_answer_per_input_item_for_empty_and_repeated_input() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgbatchedge").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+    let id = "urn:ngsi-ld:Test:edge1";
+    let _ = s.delete(&t, id);
+
+    // Empty in, empty out — and no row of this tenant is touched.
+    assert!(s.batch_create(&t, &[]).expect("empty create").is_empty());
+    assert!(s.batch_delete(&t, &[]).expect("empty delete").is_empty());
+    assert!(s
+        .batch_upsert_replace(&t, &[])
+        .expect("empty upsert")
+        .is_empty());
+    assert!(s
+        .batch_mutate(&t, &[], |_id, _d| Ok::<(), ()>(()))
+        .expect("empty mutate")
+        .is_empty());
+    assert!(s.get(&t, id).expect("get").is_none(), "nothing was written");
+
+    // The same id three times, upserted: one answer per input item, all of
+    // them describing the one row the batch left behind.
+    let three: Vec<(String, serde_json::Value)> =
+        (1..=3).map(|n| (id.to_owned(), doc(id, n))).collect();
+    let out = s
+        .batch_upsert_replace(&t, &three)
+        .expect("a repeated id must not reach ON CONFLICT twice");
+    assert_eq!(out.len(), three.len(), "one answer per input item");
+    assert!(
+        out.iter().all(|(created, prev)| *created && prev.is_none()),
+        "the row did not exist, so every instance of it reports a creation \
+         over no before-image: {out:?}"
+    );
+    assert_eq!(
+        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        1,
+        "5.5.11.1: the first instance of a repeated id is the one that wins"
+    );
+
+    // Repeated ids through the read-modify-write batch: the closure runs
+    // once per distinct row, and the answers still line up with the input.
+    let ids = vec![id.to_owned(), id.to_owned(), "urn:ngsi-ld:Test:gone".into()];
+    let mut calls = 0;
+    let out = s
+        .batch_mutate(&t, &ids, |_id, d| {
+            calls += 1;
+            d["n"]["value"] = json!(calls);
+            Ok::<(), ()>(())
+        })
+        .expect("batch mutate");
+    assert_eq!(out.len(), ids.len(), "one answer per input item: {out:?}");
+    assert!(
+        matches!(out[0], Some(Ok(()))) && matches!(out[1], Some(Ok(()))),
+        "both instances of a present id report the same outcome: {out:?}"
+    );
+    assert!(out[2].is_none(), "an absent id is None: {out:?}");
+    assert_eq!(calls, 2, "5.6.9.4 runs 5.6.3 once per input item");
+    assert_eq!(
+        s.get(&t, id).expect("get").expect("present")["n"]["value"],
+        2,
+        "the row holds the LAST application, not an intermediate one"
+    );
+
+    // And the delete: a repeated id is one row, returned once.
+    let deleted = s
+        .batch_delete(&t, &[id.to_owned(), id.to_owned()])
+        .expect("batch delete");
+    assert_eq!(deleted.len(), 1, "one row, one before-image: {deleted:?}");
+    assert!(s.get(&t, id).expect("get").is_none());
+}
+
 /// 4.22 through the batch paths.
 ///
 /// 5.6.7.4 (p.170): "For each of the NGSI-LD Entities included in the input

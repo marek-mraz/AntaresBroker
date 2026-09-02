@@ -1198,7 +1198,14 @@ impl PgEntityStore {
                 .map(|r| (r.get::<String, _>(0), r.get::<Value, _>(1)))
                 .collect();
             let mut results: Vec<Option<Result<(), E>>> = Vec::with_capacity(ids.len());
-            let mut payload = Vec::new();
+            // 5.6.9.4 is clause 5.6.3 run per item, so a repeated id applies
+            // its closure once per item onto the SAME document and the last
+            // application is the state the row must end at. The writeback
+            // below is one `UPDATE … FROM`, which updates a target row once
+            // from whichever source row the join happens to reach, so the
+            // statement is fed one row per id — the document as the whole
+            // batch left it — rather than one per input item.
+            let mut write_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
             let mut changed: Vec<(String, Value, Value)> = Vec::new(); // id, before, after
             for id in ids {
                 match docs.get_mut(id) {
@@ -1212,13 +1219,7 @@ impl PgEntityStore {
                             }
                             Ok(()) => {
                                 if *doc != before {
-                                    let e = extract(doc);
-                                    payload.push(serde_json::json!({
-                                        "id": id, "doc": &*doc, "types": e.types,
-                                        "scopes": e.scopes, "modified": e.modified,
-                                        "expires": e.expires, "location": e.location,
-                                        "loc_ambiguous": e.location_ambiguous,
-                                    }));
+                                    write_ids.insert(id.as_str());
                                     changed.push((id.clone(), before, doc.clone()));
                                 }
                                 results.push(Some(Ok(())));
@@ -1227,6 +1228,19 @@ impl PgEntityStore {
                     }
                 }
             }
+            let payload: Vec<Value> = write_ids
+                .iter()
+                .filter_map(|id| docs.get(*id).map(|doc| (*id, doc)))
+                .map(|(id, doc)| {
+                    let e = extract(doc);
+                    serde_json::json!({
+                        "id": id, "doc": doc, "types": e.types,
+                        "scopes": e.scopes, "modified": e.modified,
+                        "expires": e.expires, "location": e.location,
+                        "loc_ambiguous": e.location_ambiguous,
+                    })
+                })
+                .collect();
             if !payload.is_empty() {
                 let updated = sqlx::query(
                     "UPDATE entities t SET
