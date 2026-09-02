@@ -221,20 +221,20 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 - Registration counters of Table 5.2.9-2 (`timesSent`, `timesFailed`,
   `lastSuccess`, `lastFailure`, `status`) are not produced.
 - Duplication has a measured floor rather than a target of zero.
-  `dev/dup-check.sh` ratchets the workspace at 78 token clones over 1032
-  lines (`dev/dup-baseline.json`), 890 of them in `antares-api`. What the
-  ratchet still allows:
-  - 68 lines are `use` blocks in files serving neighbouring clauses. A
+  `dev/dup-check.sh` ratchets the workspace at 65 token clones over 779
+  lines (`dev/dup-baseline.json`), 590 of them in `antares-api`, and at 12
+  groups of functions sharing one signature. What the ratchet still allows:
+  - 37 lines are `use` blocks in files serving neighbouring clauses. A
     `use` list is not logic, and a shared prelude would hide what each
     module depends on.
-  - 51 lines are the Entity Type List and Attribute List discovery
+  - 52 lines are the Entity Type List and Attribute List discovery
     operations (5.7.5, 5.7.6). That parallel is the specification's: the
     two build different representations from different tables
     (5.2.24/5.2.25 against 5.2.27/5.2.28), so one generic over both would
     take more parameters than it removes and would let a change to one
     table reshape the other.
-  - Roughly 230 lines are per-operation handler heads and tails of nine to
-    fifteen lines each. What those share is already extracted --
+  - The largest remaining share is per-operation handler heads and tails,
+    nine to fifteen lines each. What those share is already extracted --
     `tenant_from`, `check_params`, `request_context`,
     `ParsedBody::object`, `attach_paging`, `entity_maps::retrieve_with_map`
     -- and what remains is the part that differs: the parameter
@@ -243,20 +243,26 @@ Stated so they are not rediscovered. Each is measured, not guessed.
     allowlists, and only two share the eleven-name query prefix; one
     allowlist for operations whose allowlists deliberately differ would
     widen what each endpoint accepts.
+  - Two signature groups are coincidences of shape rather than shared
+    logic: `check_ring`, `check_position` and `check_vertex_budget` all
+    take a `&Value` and return `Result<(), String>` while validating three
+    unrelated rules (RFC 7946 ring closure, WGS84 range, a vertex budget),
+    and `temporal_key` and `pattern_regex` are both
+    `(&str) -> Option<String>` over different vocabularies. Merging either
+    would name one function after two rules.
   - One signature group is the reference plugin's, and stays: because
     `examples/plugin-example` implements the same two driver traits as the
     in-binary memory store, its `live`, `rows` and `emit` necessarily carry
     the memory store's signatures. That is the seam being demonstrated, so
-    the ratchet holds it at ten rather than nine.
-  - The remainder is real debt, in four places, each reading one rule more
-    than once: the temporal attribute writes (147 lines, the local part
-    plus the forwarded part plus the local answer, shared by
-    `delete_temporal_attr`, `delete_temporal_instance` and
-    `modify_temporal_instance`), the batch forwarding arm (107 lines, six
-    copies of forwarding one Entity to one registration), the federation
-    entry points (86 lines, `fed_query`/`fed_query_temporal`/
-    `fed_retrieve_temporal` and `import_entity`/`import_temporal`) and the
-    EntityMap and snapshot document handlers (137 lines).
+    the ratchet holds it at twelve rather than eleven.
+  - Three clusters are real debt, each reading one rule more than once:
+    the temporal writes (80 lines inside `temporal.rs`, `add_temporal_attrs`
+    against `upsert_temporal` and `delete_temporal_instance` against
+    `delete_temporal_attr`), the federation entry points (72 lines,
+    `fed_query`/`fed_query_temporal`, `fed_retrieve`/`fed_retrieve_temporal`
+    and `import_entity`/`import_temporal`) and the snapshot document
+    handlers (24 lines across `retrieve_snapshot`, `update_snapshot` and
+    `clone_snapshot`).
 
 ## 9. To change X, touch Y
 

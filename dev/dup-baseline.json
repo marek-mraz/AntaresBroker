@@ -1,7 +1,7 @@
 {
- "clone_lines": 1032,
- "clones": 78,
- "same_signature": 10,
+ "clone_lines": 779,
+ "clones": 65,
+ "same_signature": 12,
  "same_name": 2,
  "same_fields": 0,
  "dead_surface": 0
