@@ -66,6 +66,10 @@ jobs:
           sys.exit(0 if all(checks.values()) else 1)
           EOF
           curl -sf localhost:9090/x/example/entities/count
+          # the façade seam: a route that answers in a shape NGSI-LD does not
+          # define, served by driving the broker's own router in process
+          curl -sf 'localhost:9090/x/example/things?kind=Vehicle' | tee things.json
+          python3 -c 'import json,sys; d=json.load(open("things.json")); sys.exit(0 if isinstance(d.get("value"), list) else 1)'
 
       - name: The conformance suite through the plugin driver
         # MQTT TPs need mosquitto and are the image cells' job; everything
