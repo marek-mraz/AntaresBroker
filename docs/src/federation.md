@@ -283,6 +283,19 @@ hold the page's entities instead of re-broadcasting the query. Maps
 expire (`expiresAt`, one hour by default) and are honoured on retrieve
 and temporal paths.
 
+A federated map is merged from the maps the Context Sources return, so
+what a source sends is held to Table 5.2.39-2 before it becomes part of
+a document this broker stores under its own id and serves. A key that is
+not an Entity id is dropped, per key rather than per source, and so is
+the `@none` a source uses for what it holds locally — that marker is
+about the source, and this broker has no Entity id to record it under.
+A source's own map id reaches `linkedMaps` only if it is a valid URI,
+because it travels back out as the `NGSILD-EntityMap` header of every
+later forwarded page; a source without a usable one simply re-runs its
+query when the page arrives. One source contributes at most as many
+entries as the broker's own page ceiling (5.5.9, 1 000 by default),
+which is the ceiling the local half of the map already carries.
+
 ## Tenancy across the federation
 
 The client's `NGSILD-Tenant` never propagates to forwards (4.14); a CSR

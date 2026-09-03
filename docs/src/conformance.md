@@ -180,7 +180,7 @@ The fifteen untested clauses with the most SHALL statements:
 | 6.18.3.2 | Resource methods › GET | 23 | 0 | 1 |
 | 6.8.3.2 | Resource methods › GET | 17 | 0 | 0 |
 | 6.5.3.1 | Resource methods › GET | 11 | 0 | 0 |
-| 5.2.39 | EntityMap | 10 | 0 | 2 |
+| 5.2.39 | EntityMap | 10 | 0 | 4 |
 | 4.2.3 | Cross Domain Ontology | 8 | 0 | 1 |
 | 5.2.35 | VocabProperty | 8 | 0 | 0 |
 | 5.2.38 | JsonProperty | 8 | 0 | 0 |

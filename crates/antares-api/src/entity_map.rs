@@ -291,6 +291,27 @@ pub(crate) fn map_id_check(id: &str) -> Result<(), NgsiError> {
         .map_err(|_| NgsiError::BadRequestData(format!("EntityMap id is not a valid URI: {id:?}")))
 }
 
+/// Table 5.2.39-2 on the way in: a returned EntityMap's `entityMap` is "a
+/// set of key-value pairs whose keys shall be strings representing Entity
+/// ids", so a key from a Context Source is checked before it becomes a key
+/// of the map this broker stores under its own id and serves from
+/// `/entityMaps/{id}`. Per key, not per peer: a source that names one
+/// unusable id still contributes its usable ones. `@none` fails the check
+/// with everything else, which is what it deserves here — it is the PEER's
+/// "held locally" marker (5.2.39) and stands for no Entity id on this side.
+/// `cap` is the ceiling the local half of the map already carries
+/// (`st.max_limit`), so no one Context Source is larger than the broker.
+fn peer_entity_ids(remote: &Value, cap: usize) -> Vec<&String> {
+    remote
+        .get("entityMap")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(serde_json::Map::keys)
+        .filter(|k| antares_model::EntityId::new(k).is_ok())
+        .take(cap)
+        .collect()
+}
+
 /// 5.14.4.4 and 5.14.5.4 end the same way: "The mapping between the Context
 /// Source Registration and the EntityMap Id is added to the linkedMaps
 /// element of the local EntityMap and for the Entity ids included in the
@@ -322,19 +343,26 @@ pub(crate) async fn merge_and_store_map(
             crate::federation::fed_entity_maps(st, tenant, headers, ctx, params, split, op, path)
                 .await?
         {
-            if let Some(obj) = remote.get("entityMap").and_then(Value::as_object) {
-                for eid in obj.keys() {
-                    if let Some(a) = emap
-                        .entry(eid.clone())
-                        .or_insert_with(|| json!([]))
-                        .as_array_mut()
-                    {
-                        a.push(json!(reg_id.clone()));
-                    }
+            for eid in peer_entity_ids(&remote, st.max_limit) {
+                if let Some(a) = emap
+                    .entry(eid.clone())
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                {
+                    a.push(json!(reg_id.clone()));
                 }
             }
-            if let Some(mid) = remote.get("id").and_then(Value::as_str) {
-                linked.insert(reg_id, json!(mid));
+            // Table 5.2.39-1 restricts an EntityMap id to a valid URI, and
+            // 5.14.1.4 refuses one that is not from a client. The peer's id
+            // travels back out as the `NGSILD-EntityMap` header of every
+            // later forwarded page (`federation::map_gate`), so it is held
+            // to the same rule; without a usable id the registration simply
+            // carries no linked map and the peer re-runs its own query.
+            match remote.get("id").and_then(Value::as_str) {
+                Some(mid) if map_id_check(mid).is_ok() => {
+                    linked.insert(reg_id, json!(mid));
+                }
+                _ => {}
             }
         }
     }
