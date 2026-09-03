@@ -106,6 +106,105 @@ pub fn dt_key(s: &str) -> String {
     format!("{base}.{digits:0<6}")
 }
 
+/// One ISO 8601 duration — `P[nY][nM][nW][nD][T[nH][nM][nS]]` — read into
+/// its components. Three NGSI-LD members carry this syntax and weigh it
+/// differently: a Context Source registration's refresh rate (5.2.9) and an
+/// EntityMap's `entityMapLifetime` (Table 6.4.3.2-1) want a span in seconds,
+/// where a month is a nominal thirty days, while a temporal aggregation
+/// period (4.5.19) keeps months as calendar months because that is what its
+/// buckets are cut on. The scan is one function; the weighing belongs to
+/// the caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct IsoDuration {
+    /// `nY`.
+    pub years: f64,
+    /// `nM` before the `T` — calendar months.
+    pub months: f64,
+    /// `nW`.
+    pub weeks: f64,
+    /// `nD`.
+    pub days: f64,
+    /// `nH`.
+    pub hours: f64,
+    /// `nM` after the `T`.
+    pub minutes: f64,
+    /// `nS`.
+    pub seconds: f64,
+    /// Every component present is a plain digit run within `i64`: no
+    /// fraction, no magnitude a whole-second span could not hold.
+    pub whole: bool,
+    /// No component at all — a bare `P`.
+    pub empty: bool,
+}
+
+/// Read the syntax, in the designator order ISO 8601 fixes. `None` for
+/// anything that is not it: a missing `P`, a component with no digit, a
+/// designator out of order, repeated or in the wrong half, a number that
+/// does not parse, digits with no designator to weigh them, or a `T` with
+/// no time component after it.
+pub fn parse_iso_duration(s: &str) -> Option<IsoDuration> {
+    /// One half of the duration — the date designators or the time ones.
+    /// `out` takes the values in `units` order; the answer is whether the
+    /// half carried anything.
+    fn scan(part: &str, units: &[char], out: &mut [f64], whole: &mut bool) -> Option<bool> {
+        let mut p = part;
+        // each designator is read at most once and in order: the search for
+        // the next one starts after the last one matched
+        let mut next = 0usize;
+        let mut any = false;
+        while !p.is_empty() {
+            let i = p.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))?;
+            let (num, rest) = p.split_at(i);
+            let unit = rest.chars().next()?;
+            let slot = units.iter().skip(next).position(|u| *u == unit)? + next;
+            next = slot + 1;
+            if !num.bytes().any(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            *whole &= num.parse::<i64>().is_ok();
+            // 4.6.3 leaves the fraction separator open, here as everywhere
+            let value: f64 = num.replace(',', ".").parse().ok()?;
+            if !value.is_finite() {
+                return None;
+            }
+            out[slot] = value;
+            any = true;
+            p = &rest[unit.len_utf8()..];
+        }
+        Some(any)
+    }
+
+    let rest = s.strip_prefix('P')?;
+    let (date, time) = match rest.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (rest, None),
+    };
+    let mut v = [0f64; 7];
+    let mut whole = true;
+    let date_any = scan(date, &['Y', 'M', 'W', 'D'], &mut v[..4], &mut whole)?;
+    let time_any = match time {
+        None => false,
+        Some(t) => {
+            // a `T` with nothing to designate is not a duration
+            if !scan(t, &['H', 'M', 'S'], &mut v[4..], &mut whole)? {
+                return None;
+            }
+            true
+        }
+    };
+    Some(IsoDuration {
+        years: v[0],
+        months: v[1],
+        weeks: v[2],
+        days: v[3],
+        hours: v[4],
+        minutes: v[5],
+        seconds: v[6],
+        whole,
+        empty: !date_any && !time_any,
+    })
+}
+
 /// Attribute names in paths must be valid terms/IRIs (4.6.2) — 400 otherwise.
 pub fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
     // 4.6.2 supported names: no '@' (keyword territory), no parens/quotes/etc.
@@ -190,6 +289,71 @@ mod tests {
             dt_key("2026-05-01T00:00:00,5Z"),
             "2026-05-01T00:00:00.500000"
         );
+    }
+
+    /// One scan serves three weighings, so the syntax it accepts is the
+    /// syntax all three accept: designators in ISO order, each at most once
+    /// and in its own half, every component a number with a digit.
+    #[test]
+    fn a_duration_is_read_into_its_components() {
+        let d = super::parse_iso_duration("P3Y6M4WT12H30M5.5S").expect("a duration");
+        assert_eq!((d.years, d.months, d.weeks, d.days), (3.0, 6.0, 4.0, 0.0));
+        assert_eq!((d.hours, d.minutes, d.seconds), (12.0, 30.0, 5.5));
+        assert!(!d.whole, "a fractional component is not whole");
+        assert!(!d.empty);
+        // 4.6.3 leaves the fraction separator open
+        assert_eq!(
+            super::parse_iso_duration("PT0,5S").map(|d| d.seconds),
+            Some(0.5)
+        );
+        // a bare P carries nothing to weigh, and is the only accepted shape
+        // that carries nothing
+        let bare = super::parse_iso_duration("P").expect("a bare P scans");
+        assert!(bare.empty && bare.whole);
+        for bad in [
+            "",
+            "PT",
+            "P1DT", // a T with no time component after it
+            "1Y",
+            "P1",
+            "PT1H1", // digits with no designator
+            "P1X",
+            "p1d",
+            "P-1D",
+            "P+1D",
+            "P 1D",
+            "PT1H ",
+            " PT1H",
+            "1PD",
+            "P1H",
+            "PT1D", // a designator in the wrong half
+            "P1D2M",
+            "PT1S1S", // out of order, and repeated
+            "P,D",
+            "P.D",
+            "P..D",
+            "P1.2.3D", // not a number
+            "P\u{661}D",
+            "P1D\u{0}",
+        ] {
+            assert_eq!(super::parse_iso_duration(bad), None, "{bad:?}");
+        }
+    }
+
+    /// `whole` is what an EntityMap lifetime asks: the component is a plain
+    /// digit run an `i64` of seconds can still hold.
+    #[test]
+    fn a_magnitude_past_i64_is_not_whole() {
+        for s in ["PT99999999999999999999S", "PT1.5S", "PT1,5S"] {
+            let d = super::parse_iso_duration(s).expect("it scans");
+            assert!(!d.whole, "{s:?}");
+        }
+        for s in ["PT9223372036854775807S", "P0D", "PT0S"] {
+            assert!(
+                super::parse_iso_duration(s).expect("it scans").whole,
+                "{s:?}"
+            );
+        }
     }
 
     /// The two views of the same list stay one list: `is_meta` answers

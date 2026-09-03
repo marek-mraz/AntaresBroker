@@ -195,57 +195,23 @@ pub(crate) fn map_delete(st: &AppState, tenant: &TenantId, id: &str) -> Result<b
 /// Parse an ISO 8601 duration (entityMapLifetime, Table 6.4.3.2-1) to whole
 /// seconds; years/months are approximated (365/30 days), fractions rejected.
 pub(crate) fn iso8601_secs(s: &str) -> Option<i64> {
-    let rest = s.strip_prefix('P')?;
-    if rest.is_empty() {
-        return None;
-    }
-    let (date, time) = match rest.split_once('T') {
-        Some((d, t)) => (d, Some(t)),
-        None => (rest, None),
-    };
-    let mut secs: i64 = 0;
-    let mut num = String::new();
-    for c in date.chars() {
-        if c.is_ascii_digit() {
-            num.push(c);
-        } else {
-            let n: i64 = num.parse().ok()?;
-            num.clear();
-            secs = secs.checked_add(n.checked_mul(match c {
-                'Y' => 31_536_000,
-                'M' => 2_592_000,
-                'W' => 604_800,
-                'D' => 86_400,
-                _ => return None,
-            })?)?;
-        }
-    }
-    if !num.is_empty() {
-        return None; // trailing digits without a designator
-    }
-    if let Some(t) = time {
-        if t.is_empty() {
-            return None;
-        }
-        for c in t.chars() {
-            if c.is_ascii_digit() {
-                num.push(c);
-            } else {
-                let n: i64 = num.parse().ok()?;
-                num.clear();
-                secs = secs.checked_add(n.checked_mul(match c {
-                    'H' => 3600,
-                    'M' => 60,
-                    'S' => 1,
-                    _ => return None,
-                })?)?;
-            }
-        }
-        if !num.is_empty() {
-            return None;
-        }
-    }
-    Some(secs)
+    // A lifetime is a span, so the calendar components are weighed at their
+    // nominal length — a year 365 days, a month 30 — and a fractional or
+    // absent component has no whole-second span to weigh.
+    let d = antares_model::parse_iso_duration(s).filter(|d| d.whole && !d.empty)?;
+    [
+        (d.years, 31_536_000),
+        (d.months, 2_592_000),
+        (d.weeks, 604_800),
+        (d.days, 86_400),
+        (d.hours, 3_600),
+        (d.minutes, 60),
+        (d.seconds, 1),
+    ]
+    .into_iter()
+    .try_fold(0i64, |acc, (n, per)| {
+        acc.checked_add((n as i64).checked_mul(per)?)
+    })
 }
 
 /// The expiresAt the broker assigns (5.2.39): now + suggested lifetime,

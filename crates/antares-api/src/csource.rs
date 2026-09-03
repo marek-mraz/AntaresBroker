@@ -534,43 +534,7 @@ pub fn normalize_registration(
 /// ISO 8601 duration (5.2.9 refreshRate): `P[nY][nM][nW][nD][T[nH][nM][nS]]`,
 /// at least one component, digits (fraction allowed in seconds).
 fn valid_iso8601_duration(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix('P') else {
-        return false;
-    };
-    if rest.is_empty() {
-        return false;
-    }
-    let (date, time) = match rest.split_once('T') {
-        Some((d, t)) => (d, Some(t)),
-        None => (rest, None),
-    };
-    let take = |part: &str, units: &[char]| -> bool {
-        let mut p = part;
-        let mut any = false;
-        for u in units {
-            if let Some(i) = p.find(*u) {
-                let num = &p[..i];
-                // A component is a number: at least one digit, and nothing
-                // but digits and a decimal separator. Without the digit test
-                // the separators alone pass, and `P,D` reads as a duration.
-                if !num.bytes().any(|b| b.is_ascii_digit())
-                    || !num
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || b == b'.' || b == b',')
-                {
-                    return false;
-                }
-                any = true;
-                p = &p[i + 1..];
-            }
-        }
-        p.is_empty() && (any || part.is_empty())
-    };
-    let date_ok = take(date, &['Y', 'M', 'W', 'D']);
-    match time {
-        None => date_ok && !date.is_empty(),
-        Some(t) => date_ok && !t.is_empty() && take(t, &['H', 'M', 'S']),
-    }
+    antares_model::parse_iso_duration(s).is_some_and(|d| !d.empty)
 }
 
 /// 5.9.2.4: an auxiliary registration may only offer "retrieveOps",

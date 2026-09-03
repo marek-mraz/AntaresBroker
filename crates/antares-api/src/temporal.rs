@@ -768,48 +768,21 @@ enum AggrPeriod {
 }
 
 fn parse_iso_duration(s: &str) -> Option<AggrPeriod> {
-    let rest = s.strip_prefix('P')?;
-    let (date, time) = match rest.split_once('T') {
-        Some((d, t)) => (d, t),
-        None => (rest, ""),
-    };
-    let mut months = 0u32;
-    let mut secs = 0i64;
-    let mut num = String::new();
-    for c in date.chars() {
-        if c.is_ascii_digit() || c == '.' {
-            num.push(c);
-        } else {
-            let n: f64 = num.parse().ok()?;
-            num.clear();
-            // saturating: an absurd magnitude must not panic (debug) or wrap
-            // (release) — f64→int `as` casts already saturate, guard the ops.
-            match c {
-                'Y' => months = months.saturating_add((n as u32).saturating_mul(12)),
-                'M' => months = months.saturating_add(n as u32),
-                'W' => secs = secs.saturating_add((n * 604800.0) as i64),
-                'D' => secs = secs.saturating_add((n * 86400.0) as i64),
-                _ => return None,
-            }
-        }
-    }
-    for c in time.chars() {
-        if c.is_ascii_digit() || c == '.' {
-            num.push(c);
-        } else {
-            let n: f64 = num.parse().ok()?;
-            num.clear();
-            match c {
-                'H' => secs = secs.saturating_add((n * 3600.0) as i64),
-                'M' => secs = secs.saturating_add((n * 60.0) as i64),
-                'S' => secs = secs.saturating_add(n as i64),
-                _ => return None,
-            }
-        }
-    }
-    if !num.is_empty() {
-        return None;
-    }
+    let d = antares_model::parse_iso_duration(s)?;
+    // saturating: an absurd magnitude must not panic (debug) or wrap
+    // (release) — f64→int `as` casts already saturate, guard the ops.
+    let months = (d.years as u32)
+        .saturating_mul(12)
+        .saturating_add(d.months as u32);
+    let secs = [
+        (d.weeks, 604_800.0),
+        (d.days, 86_400.0),
+        (d.hours, 3_600.0),
+        (d.minutes, 60.0),
+        (d.seconds, 1.0),
+    ]
+    .into_iter()
+    .fold(0i64, |acc, (n, per)| acc.saturating_add((n * per) as i64));
     Some(match (months, secs) {
         (0, 0) => AggrPeriod::Whole,
         (0, sc) => AggrPeriod::Seconds(sc),
