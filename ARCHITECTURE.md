@@ -86,7 +86,7 @@ module's header comment.
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
 | `policy.rs` | 890 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, the fail-closed calls that deny on a panic or a timeout, and the stored subject a notification is decided under |
-| `state.rs` | 830 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
+| `state.rs` | 930 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
 own nothing: each is a handful of lines re-exporting `antares_ql::geo`,
@@ -334,7 +334,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | federation behaviour | `federation.rs` (`forward` is the one outbound chokepoint) | 4.3.6 narrowing is spec-mandated; keep it |
 | the bus or roles | `broker/src/wiring.rs` | ADR-0002 |
 | a role's HTTP surface | `lib.rs` router construction by `roles` | a worker must 404 the API |
-| another standard's API beside NGSI-LD (SensorThings, OGC API, WFS) | an `ApiSurface` under `/x/…` in its own crate that drives the NGSI-LD router in process — `crates/antares-wasm/src/lib.rs` `handle` is the worked `tower::Service::call` | never under `/ngsi-ld/`; every façade request is an NGSI-LD request, so negotiation, bounds and tenancy are not repeated |
+| another standard's API beside NGSI-LD (SensorThings, OGC API, WFS) | an `ApiSurface` under `/x/…` in its own crate that calls `AppState::call` — the in-process handle over this broker's own router, built once per state on first use | never under `/ngsi-ld/`; every façade request is an NGSI-LD request, so negotiation, bounds and tenancy are not repeated. The handle carries `NGSILD-Tenant`, `NGSILD-Snapshot`, `Link` and the policy subject headers from the caller, so a façade cannot be the way around any of them |
 | an authorization decision | no engine in the broker: `policy.rs` is the seam one attaches to, and the gateway keeps authentication and rate limiting (`docs/src/shared-crates.md`, "The PEP boundary") | conformance is asserted against the built-in allow-all engine, the way `surface.rs` refuses a surface under the API root |
 | an NGSI-LD operation | one `policy::gate` call where the request enters its handler, naming the clause | exactly once per request: the shared query engines below a handler (`query_entities_inner`, `query_temporal_inner`) never gate, and `tests/policy_gate_seam.rs` walks every route of `router()` to prove both halves |
 | a broker-held record of one query that outlives its request (an EntityMap, a Snapshot, a Subscription) | the subject it was made for, stored in `__subject` and read back through `policy::belongs_to` | the record is reused later, by a request the seam decides separately: a map's `entityMap` member is the id set a narrowing withholds, a snapshot's fill runs after its request is answered, and a notification has no request at all. The `__` prefix is the broker's — `policy::strip_internal` is the one serve-side filter, so a member added later is hidden by construction |

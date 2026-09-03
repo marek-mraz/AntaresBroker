@@ -34,6 +34,14 @@ the only crates that depend on it are hosts that run that surface —
 small on purpose, because everything a host needs it reaches through the
 router or through `AppState`.
 
+`AppState::call` is how a surface reaches the NGSI-LD API without a socket:
+it serves one request through this broker's own router, carrying the
+caller's `NGSILD-Tenant`, `NGSILD-Snapshot`, `Link` and policy subject
+headers into it. There is no second data path — a façade for another
+standard is a translation in front of the same handlers, so negotiation,
+the bounds wall, tenancy, the policy seam, history and notifications apply
+to its callers exactly as they do to an NGSI-LD client.
+
 At the crate root: `router(state)` builds the NGSI-LD router,
 `ops_router(state)` the operational one behind `Admin::PATHS`, and
 `wire(&mut state)` installs the notification pipeline that a read-only host
@@ -58,7 +66,7 @@ Eleven modules stay public because a host or a surface reaches into them:
 | `policy` | the policy seam (ADR-0020): `PolicyEngine`, `Subject`, `Operation`, `Decision`, `Filter`, `NotifyDecision`, the built-in `AllowAll`, and the fail-closed `decide`/`pre_notify` an engine is called through |
 | `notify` | `seed_mirror`, `process_change`, `record_temporal_change`, `interval_tick`: the pipeline steps a host drives |
 | `qeval` | `antares_ql::eval` re-exported: `eval_q`, in-memory `q` evaluation over a stored document |
-| `state` | `AppState` and its builders (`with_drivers`, `with_store`, `with_sink`, `with_surface`, `with_surfaces`) |
+| `state` | `AppState`, its builders (`with_drivers`, `with_store`, `with_sink`, `with_surface`, `with_surfaces`, `with_policy`) and `call`, the in-process handle a façade surface drives the NGSI-LD router through |
 
 Everything else is `pub(crate)`. There is no ratchet on this: once an item
 is crate-visible the compiler's dead-code lint is the gate, and it fires

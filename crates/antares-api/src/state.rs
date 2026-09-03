@@ -56,6 +56,16 @@ pub type CsourceNotification = Arc<
         + Sync,
 >;
 
+/// The request headers an in-process call carries from its caller
+/// ([`AppState::call`]): the two that select WHICH data the operation runs
+/// against, and the one that says what its terms mean. Everything else is
+/// the façade's own to set — an inner request is not the outer one.
+static PROPAGATED: [axum::http::HeaderName; 3] = [
+    axum::http::HeaderName::from_static("ngsild-tenant"),
+    axum::http::HeaderName::from_static("ngsild-snapshot"),
+    axum::http::HeaderName::from_static("link"),
+];
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn CurrentStateDriver>,
@@ -92,6 +102,11 @@ pub struct AppState {
     /// own reserved prefix; `with_surface` adds one. The admin surface is
     /// here by default.
     pub surfaces: Arc<Vec<Box<dyn crate::ApiSurface>>>,
+    /// The router [`AppState::call`] serves in-process requests through,
+    /// built on first use. Empty until a façade actually calls: building it
+    /// costs about 1.5 ms, which is worth memoizing per state and not worth
+    /// paying in a host that never makes an in-process call.
+    pub(crate) inbound: Arc<std::sync::OnceLock<axum::Router>>,
     /// Bounds-wall rejection counters (exported by /q/health).
     pub limits: Arc<crate::bounds::LimitStats>,
     /// Allocator stats provider (set by the broker; None in tests/wasm).
@@ -383,6 +398,7 @@ impl AppState {
                 std::time::Duration::from_secs(8 * slow_factor()),
             ),
             sinks: Arc::new(sinks),
+            inbound: Arc::new(std::sync::OnceLock::new()),
             surfaces: Arc::new(vec![Box::new(crate::Admin)]),
             limits: Arc::new(crate::bounds::LimitStats::default()),
             mem_stats: None,
@@ -475,6 +491,92 @@ impl AppState {
             self = self.with_surface(s)?;
         }
         Ok(self)
+    }
+
+    /// Serve one request through this broker's own router, in process.
+    ///
+    /// This is the seam a façade for another standard (SensorThings, OGC
+    /// API, WFS, OData) is built on: the façade is an [`crate::ApiSurface`]
+    /// under `/x/<standard>` that translates its own request into an NGSI-LD
+    /// one and calls this. There is no second data path — the inner request
+    /// takes the same route as one off the socket, so negotiation, the
+    /// bounds wall, tenancy, the policy seam, history and notifications all
+    /// apply exactly once and exactly as they do for an NGSI-LD client.
+    ///
+    /// `caller` is the outer request's headers, and the ones that decide
+    /// WHICH data an operation runs against are copied into the inner
+    /// request when it does not set them itself:
+    ///
+    /// - `NGSILD-Tenant` (6.3.14) — a façade that forgot it would answer
+    ///   every caller out of the default tenant, so it is not left to the
+    ///   façade to remember;
+    /// - `NGSILD-Snapshot` (6.3.22) — for the same reason: a façade called
+    ///   inside a snapshot request must not quietly serve live data;
+    /// - `Link` (6.3.5) — the `@context` the caller supplied, so a term
+    ///   means the same thing on both sides of the translation;
+    /// - every header `ANTARES_POLICY_SUBJECT_HEADERS` names, so the policy
+    ///   engine is asked about the caller rather than about the façade.
+    ///
+    /// All values of a copied header are carried, never just the first: a
+    /// repeated `NGSILD-Tenant` is `BadRequestData` (6.3.14), and a façade
+    /// must not be the place where a repeat is laundered into a single valid
+    /// value.
+    ///
+    /// `&self` on purpose — an inner call runs while the outer handler is
+    /// suspended on it, and the router clone is an `Arc` bump over the same
+    /// state. The router itself is built once per state, on the first call:
+    /// building one costs about 1.5 ms, which no façade should pay per
+    /// request. After that first call the state counts as shared, so
+    /// `with_surface` and the other builders refuse — which is the rule
+    /// they already state.
+    pub async fn call(
+        &self,
+        caller: &axum::http::HeaderMap,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let router = self.inbound.get_or_init(|| {
+            // Every layer of a built router captured an `AppState` clone, so
+            // the memo owns states. The clone it is built from must NOT be
+            // able to reach THIS cell: a state that could would hold itself
+            // alive for the life of the process and pin its store handle
+            // with it — a file store would keep its lock after the host
+            // dropped everything. A fresh cell means the memo of a nested
+            // façade call hangs off this one and dies with it.
+            let mut inner = self.clone();
+            inner.inbound = Arc::new(std::sync::OnceLock::new());
+            crate::router(inner)
+        });
+        let (mut parts, body) = req.into_parts();
+        for name in &PROPAGATED {
+            if parts.headers.contains_key(name) {
+                continue;
+            }
+            for v in caller.get_all(name) {
+                parts.headers.append(name.clone(), v.clone());
+            }
+        }
+        for name in crate::policy::SUBJECT_HEADERS.iter() {
+            let Ok(name) = axum::http::HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            if parts.headers.contains_key(&name) {
+                continue;
+            }
+            for v in caller.get_all(&name) {
+                parts.headers.append(name.clone(), v.clone());
+            }
+        }
+        let req = axum::http::Request::from_parts(parts, body);
+        match tower::ServiceExt::oneshot(router.clone(), req).await {
+            Ok(r) => r,
+            // `Router`'s error is `Infallible`; the arm stays honest rather
+            // than unwrapping (the workspace denies unwrap outside tests).
+            Err(_) => crate::negotiate::ApiError::from(antares_model::NgsiError::InternalError(
+                "the in-process router failed".into(),
+            ))
+            .into_response(),
+        }
     }
 
     /// Temporal auto-recording happens synchronously in the write path in
