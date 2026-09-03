@@ -217,6 +217,14 @@ jobs:
       # from a list kept by hand, so a new route cannot ship undocumented.
       - name: Route docs check
         run: ./dev/check-route-docs.sh
+      # A version belongs in [workspace.dependencies] alone. The wasm32
+      # target sections cannot say `workspace = true` — cargo features are
+      # additive, so they can neither drop a workspace feature nor turn
+      # defaults off — so they spell one out, and nothing else keeps the two
+      # in step. A drift shows up as a wasm-only build failure long after
+      # the bump that caused it.
+      - name: Target-specific pins equal the workspace
+        run: python3 dev/check-wasm-pins.py
       # No addon in the shipped build: an engine, a façade or a driver from
       # outside `crates/` is an off-by-default feature, and conformance is
       # asserted against the core alone. The gate self-tests — it proves the

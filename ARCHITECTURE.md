@@ -190,7 +190,10 @@ pair, one schema (`crates/antares-sql/migrations/`: `0001_init.sql`,
 4. No dynamic SQL outside the compiler (CI gate); `unsafe` forbidden;
    `unwrap`/`expect` denied outside tests.
 5. Every env variable is in `KNOWN_KEYS` (`broker/src/main.rs`) and in
-   `docs/src/configuration.md` (`dev/check-env-docs.sh`).
+   `docs/src/configuration.md` (`dev/check-env-docs.sh`). Every version is
+   in `[workspace.dependencies]`; the `wasm32` target sections, which
+   cannot say `workspace = true` because cargo features are additive, are
+   held equal to it by `dev/check-wasm-pins.py`.
 6. `/q/health` lists every cap; a new cap is added to the health snapshot
    and its test (`bounds::tests`).
 7. A store returns `NgsiError`, never a backend error; a handler never
