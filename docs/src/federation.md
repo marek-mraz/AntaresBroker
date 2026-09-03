@@ -69,6 +69,14 @@ so do the ones the binding sets itself: `Host`, `Via`, `Link`, `Connection`,
 4.3.6.8 give their own meaning; the forward acts on them, and passing them
 through raw would corrupt the negotiation they steer.
 
+A `contextSourceInfo` value goes on the wire and nowhere else. The broker
+names the registration, and the endpoint with its userinfo stripped, in the
+log line, the warning, the error body and the dead letter that a failed
+forward produces; it never writes the pairs themselves, so a bearer token
+handed over for one connection is not later readable from an operator's log
+or from `/q/dead-letters`. The registration document itself still carries
+the value, because 5.9.4 serves the registration back as it was written.
+
 ### The registered `@context`
 
 `"jsonldContext"` names a `@context` the Context Source reads its terms in,

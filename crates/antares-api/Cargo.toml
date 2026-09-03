@@ -73,6 +73,8 @@ sonic = ["dep:sonic-rs"]
 [dev-dependencies]
 antares-api = { workspace = true, features = ["test-kit", "postgres"] }
 http-body-util = { workspace = true }
+# capturing subscriber: the tests that prove a credential is not logged
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
