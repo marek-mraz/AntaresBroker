@@ -212,6 +212,11 @@ jobs:
 
       - name: Env-var docs check
         run: ./dev/check-env-docs.sh
+      # The routes outside /ngsi-ld/v1 are the ones no clause describes, so
+      # the book is the only place they exist. Read from the router, not
+      # from a list kept by hand, so a new route cannot ship undocumented.
+      - name: Route docs check
+        run: ./dev/check-route-docs.sh
       # SQL-injection guard: dynamically assembled SQL (AssertSqlSafe, or an
       # sqlx query built with format!) belongs to the antares-sql backend
       # source and nowhere else. Everything a request supplies reaches the

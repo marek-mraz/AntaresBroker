@@ -1,9 +1,14 @@
 # Admin API
 
-Everything under `/q/` is the operator surface: it sits outside
-`/ngsi-ld/v1`, carries no NGSI-LD semantics and belongs behind the
-gateway. A worker pod (`ANTARES_ROLES` without `api`) serves only these
-routes. Errors use the same problem-details shape as the NGSI-LD API.
+This chapter is every route the broker serves OUTSIDE `/ngsi-ld/v1`.
+There are three groups and no others: `/q/` is the operator surface,
+`/ex/v1/` is the peer-facing wire between brokers, and `/x/` is whatever a
+deployment mounted. Everything else the broker answers is CIM 009, and the
+[conformance ledger](conformance.md) owns it.
+
+`/q/` carries no NGSI-LD semantics and belongs behind the gateway. A worker
+pod (`ANTARES_ROLES` without `api`) serves only these routes. Errors use the
+same problem-details shape as the NGSI-LD API.
 
 | Route | Purpose |
 |---|---|
@@ -16,6 +21,7 @@ routes. Errors use the same problem-details shape as the NGSI-LD API.
 | `GET /q/dead-letters` | Notifications the delivery policy gave up on |
 | `POST /q/dead-letters/{id}/replay` | One more delivery attempt |
 | `DELETE /q/dead-letters/{id}` | Drop a dead letter |
+| `POST /ex/v1/remote-notify` | The 5.8.1.4 receiver other brokers post to |
 
 ## GET /q/health
 
@@ -116,7 +122,9 @@ because service time reaches tens of seconds once the accept path saturates.
 
 ## Tenants
 
-`GET /q/tenants` answers the names, sorted, and nothing else:
+### GET /q/tenants
+
+Answers the names, sorted, and nothing else:
 
 ```text
 GET /q/tenants
@@ -125,7 +133,10 @@ GET /q/tenants
 
 Names only on purpose. A deployment runs up to 10 000 tenants (ADR-0001), and
 a list carrying per-kind counts would cost a count per kind per tenant on one
-request. Pick a name, then read its detail:
+request. `200` always; the route takes no parameters. Pick a name, then read
+its detail:
+
+### GET /q/tenants/{tenant}
 
 ```text
 GET /q/tenants/acme
@@ -138,7 +149,9 @@ tenant grammar or one of the broker's internal names. `createdAt` is present
 on Postgres, where the `tenants` table records it. The default tenant always
 exists (5.5.10) and is always readable, even when empty.
 
-`DELETE /q/tenants/{tenant}` purges the tenant: `204` when done, `404` for
+### DELETE /q/tenants/{tenant}
+
+Purges the tenant: `204` when done, `404` for
 an unknown tenant (`{"title":"ResourceNotFound","detail":"tenant nope"}`),
 `409` while a distributed subscription of it still holds a copy at a
 Context Source, `400` for a name outside the tenant grammar. The default
@@ -148,13 +161,70 @@ tenant is emptied and keeps existing. The path names the tenant; an
 
 ## Dead letters
 
-| Call | Effect |
-|---|---|
-| `GET /q/dead-letters?tenant=&subscription=&limit=` | Letters of one tenant (the default tenant when `tenant` is absent), newest first, `limit` 100 by default; `400` for a `limit` that is not a positive integer or a tenant outside the grammar. Endpoint userinfo, `receiverInfo`, `notifierInfo` and the rendered `headers` of an older letter are shown blanked; the stored letter keeps them so a replay still authenticates. |
-| `POST /q/dead-letters/{id}/replay?tenant=` | One attempt through the same binding under the egress policy of the moment: `204` and the letter is gone, `502` with the failure text and the letter kept, `404` when the tenant holds no such letter. |
-| `DELETE /q/dead-letters/{id}?tenant=` | `204`, or `404` when the tenant holds no such letter. |
-
 A letter carries the subscription id, tenant, endpoint, headers, body,
 attempt count, first and last error and timestamps. What produces one and
 why an egress refusal never does:
 [notification delivery](operations.md#notification-delivery).
+
+### GET /q/dead-letters
+
+`?tenant=&subscription=&limit=` — letters of one tenant (the default tenant
+when `tenant` is absent), newest first, `limit` 100 by default; `400` for a
+`limit` that is not a positive integer or a tenant outside the grammar.
+Endpoint userinfo, `receiverInfo`, `notifierInfo` and the rendered `headers`
+of an older letter are shown blanked; the stored letter keeps them so a
+replay still authenticates.
+
+### POST /q/dead-letters/{id}/replay
+
+`?tenant=` — one attempt through the same binding under the egress policy of
+the moment: `204` and the letter is gone, `502` with the failure text and the
+letter kept, `404` when the tenant holds no such letter.
+
+### DELETE /q/dead-letters/{id}
+
+`?tenant=` — `204`, or `404` when the tenant holds no such letter.
+
+## The peer-facing wire
+
+### POST /ex/v1/remote-notify
+
+Where a Context Source posts a notification for a distributed subscription
+this broker created (5.8.1.4). It is the one non-standard route that cannot
+be firewalled off with `/q/`: every Context Source a subscription copy was
+forwarded to has to reach it, and `ANTARES_PUBLIC_URL` is what that copy
+advertises. It sits outside the `/ngsi-ld` prefix ETSI owns, and `v1`
+versions the broker-to-broker wire independently of the NGSI-LD API version
+(ADR-0019).
+
+The body is an NGSI-LD Notification. Its `subscriptionId` is the routing
+key, and it is a broker-generated UUID rather than the subscriber's own
+Subscription id, so a Context Source learns nothing about the subscriber and
+cannot address any other subscription. That key resolves through the stored
+mapping to the tenant and the local subscription; the request's
+`NGSILD-Tenant` header is not read on this route at all.
+
+`200` when the notification was accepted — including when the mapping
+resolves but nothing was left to deliver. `400` for a body that is not JSON,
+a body without `subscriptionId`, or a `data` array carrying more Entities
+than `ANTARES_MAX_BATCH_ITEMS` (the cap is applied before any store touch:
+one notification drives one local retrieve and one federated fan-out per
+Entity, so an uncapped array is an amplification lever). `404` when no
+distributed subscription maps the key. Like `/q/`, this route carries the
+body limit and the bounds wall itself — a peer-facing write path must not be
+the one route where the documented caps do not apply.
+
+## Deployment surfaces under /x
+
+`/x`, and any path below it, belongs to the deployment. A surface registered
+there ([extending](extending.md#api-surfaces)) mounts its own routes and
+documents them itself; the broker only guarantees the ground rules. A prefix
+outside `/q`, `/x` and below-`/x` is refused at startup, as is one that
+overlaps a surface already mounted, so a deployment route can never shadow a
+spec resource or race another surface for a path. `ANTARES_API_SURFACES`
+names which surfaces are mounted, and `/q/health` reports each one's prefix
+and route count under `surfaces`.
+
+The shipped binary mounts `admin` and nothing else. The reference plugin
+(`examples/plugin-example`, off by default) mounts `/x/example` and is the
+worked example of both a surface and a façade.
