@@ -28,6 +28,7 @@ pub async fn retrieve_entity_map(
 ) -> Response {
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.14.1", ids: &[&id]).await?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
         let doc = map_get(&st, &tenant, &id)?
@@ -49,6 +50,7 @@ pub async fn update_entity_map(
 ) -> Response {
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.14.2", ids: &[&id]).await?;
         let frag: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let obj = frag.as_object().ok_or_else(|| {
@@ -78,6 +80,7 @@ pub async fn delete_entity_map(
 ) -> Response {
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.14.3", ids: &[&id]).await?;
         if !map_delete(&st, &tenant, &id)? {
             return Err(NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into());
         }
@@ -125,6 +128,13 @@ async fn create_map(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        gate!(
+            st,
+            &tenant,
+            &headers,
+            if temporal { "5.14.5" } else { "5.14.4" }
+        )
+        .await?;
         let allowed = if temporal {
             allowed_temporal_create_params()
         } else {

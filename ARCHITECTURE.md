@@ -73,10 +73,10 @@ module's header comment.
 | `csource.rs` | 2 200 | 5.9, 5.10 registrations, `csource_index` maintenance |
 | `registry.rs` | 470 | matching over a registration document: `CsrSpec`, the 4.3.6.1 information match, csf and scope filters, the temporal interval and expiry of a registration, the 5.11.2 subscription match; named by federation, notify, csource and every resource module that forwards |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
-| `entity_maps.rs` | 320 | 5.14 the `/entityMaps` resources (6.32, 6.34, 6.35): create from a query, retrieve, update, delete |
+| `entity_maps.rs` | 370 | 5.14 the `/entityMaps` resources (6.32, 6.34, 6.35): create from a query, retrieve, update, delete |
 | `entity_map.rs` | 690 | one EntityMap document (5.2.39): store it under its tenant with a lifetime, read it back while it lives, take a page's candidate ids from it, merge what a distributed query reached, and serve a retrieve through a presented map |
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
-| `contexts.rs` | 760 | 5.13 `/jsonldContexts` |
+| `contexts.rs` | 880 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 760 | 6.3.21 version negotiation |
 | `repr.rs` | 1 500 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs; 4.5.23 Linked Entity Retrieval (inline and flat, the lookup budget) and the 4.5.16 GeoJSON Feature/FeatureCollection shapes — what every module needs to render a document |
 | `history.rs` | 260 | the producer side of temporal recording: the per-request change buffer and the 4.5.7/4.5.8 delete mirrors that record a deleted Entity or Attribute in history |
@@ -85,7 +85,7 @@ module's header comment.
 | `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
-| `policy.rs` | 400 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, and the fail-closed call that denies on a panic or a timeout |
+| `policy.rs` | 780 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, and the fail-closed call that denies on a panic or a timeout |
 | `state.rs` | 770 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
@@ -336,6 +336,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 | a role's HTTP surface | `lib.rs` router construction by `roles` | a worker must 404 the API |
 | another standard's API beside NGSI-LD (SensorThings, OGC API, WFS) | an `ApiSurface` under `/x/…` in its own crate that drives the NGSI-LD router in process — `crates/antares-wasm/src/lib.rs` `handle` is the worked `tower::Service::call` | never under `/ngsi-ld/`; every façade request is an NGSI-LD request, so negotiation, bounds and tenancy are not repeated |
 | an authorization decision | no engine in the broker: `policy.rs` is the seam one attaches to, and the gateway keeps authentication and rate limiting (`docs/src/shared-crates.md`, "The PEP boundary") | conformance is asserted against the built-in allow-all engine, the way `surface.rs` refuses a surface under the API root |
+| an NGSI-LD operation | one `policy::gate` call where the request enters its handler, naming the clause | exactly once per request: the shared query engines below a handler (`query_entities_inner`, `query_temporal_inner`) never gate, and `tests/policy_gate_seam.rs` walks every route of `router()` to prove both halves |
 
 ## 10. Verification ladder
 

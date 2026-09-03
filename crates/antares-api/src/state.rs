@@ -103,6 +103,11 @@ pub struct AppState {
     /// One egress policy for notifications and federation forwards
     /// (scheme allowlist, private-range deny, per-destination breakers).
     pub egress: Arc<crate::egress::Egress>,
+    /// The policy engine every operation is asked about (ADR-0020).
+    /// `AllowAll` unless a deployment attached its own with
+    /// [`AppState::with_policy`], so the broker behaves exactly as it did
+    /// before the seam existed.
+    pub policy: Arc<dyn crate::policy::PolicyEngine>,
     /// Set the moment SIGTERM arrives, BEFORE the listener stops
     /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
     /// takes this instance out while its socket still works.
@@ -383,6 +388,7 @@ impl AppState {
             mem_stats: None,
             bus_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
+            policy: Arc::new(crate::policy::AllowAll),
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_changes: Arc::default(),
             sub_sync: None,
@@ -399,6 +405,16 @@ impl AppState {
             snapshot_cap: 1024,
             delivery: antares_notifier::DeliveryPolicy::default(),
         }
+    }
+
+    /// Attach a policy engine (ADR-0020). One engine per broker, chosen at
+    /// startup: an engine that could be swapped per request would make what
+    /// a caller may see a function of when they asked. Call before the
+    /// state is shared.
+    #[must_use]
+    pub fn with_policy(mut self, engine: Arc<dyn crate::policy::PolicyEngine>) -> Self {
+        self.policy = engine;
+        self
     }
 
     /// Register one more notification binding (6.3.8). A deployment adds a

@@ -217,6 +217,7 @@ pub async fn entity_types(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.7.5").await?;
         let (stats, partial) =
             type_stats(&st, &tenant, *crate::bounds::MAX_FOLD_DOCS, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
@@ -266,6 +267,7 @@ pub async fn entity_type_info(
         check_params(&params, &["local"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.7.7").await?;
         let iri = ctx.expand_key(&type_name);
         // Only instances of this type carry its entityCount and its
         // attributeDetails (5.2.26), so the fold asks the datastore for those
@@ -327,6 +329,7 @@ pub async fn attributes(
         check_params(&params, &["details", "local", "count"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.7.8").await?;
         let (stats, partial) =
             attr_stats(&st, &tenant, *crate::bounds::MAX_FOLD_DOCS, Narrow::Tenant)?;
         let details = params.get("details").map(String::as_str) == Some("true");
@@ -375,6 +378,7 @@ pub async fn attribute_info(
         check_params(&params, &["local"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.7.10").await?;
         // 5.7.10 / Table 6.28.2-1: the FQN or a shortname the request
         // @context defines. Discovery reads the tenant's attribute
         // inventory and touches no stored document, so a name that

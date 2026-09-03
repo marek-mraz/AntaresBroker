@@ -230,6 +230,7 @@ pub async fn add_context(
         // entity routes — but a header that is present and unreadable is not
         // absent, and `content_type` reports both as the empty string. The
         // presence of the header is what separates them.
+        gate!(st, &tenant, &headers, "5.13.2").await?;
         let ct = content_type(&headers)?;
         if headers.contains_key(header::CONTENT_TYPE)
             && ct != "application/ld+json"
@@ -291,6 +292,8 @@ pub async fn list_contexts(
         // resource — it serves the whole list, so a pagination parameter would
         // be accepted and silently ignored.
         check_params(&params, &["kind", "details", "local"])?;
+        gate!(st, &tenant, &headers, "5.13.3").await?;
+
         let details = details_param(&params)?;
         let kind_filter = params.get("kind");
         if let Some(k) = kind_filter {
@@ -380,6 +383,7 @@ pub async fn serve_context(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["details", "local"])?;
+        gate!(st, &tenant, &headers, "5.13.4").await?;
         let details = details_param(&params)?;
         let entry = find_entry(&st, &tenant, &id)
             .await?
@@ -467,6 +471,8 @@ pub async fn delete_context(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["reload", "local"])?;
+        gate!(st, &tenant, &headers, "5.13.5").await?;
+
         let reload = reload_param(&params)?;
         let entry = find_entry(&st, &tenant, &id).await?;
         if reload {

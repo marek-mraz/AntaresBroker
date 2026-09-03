@@ -725,6 +725,18 @@ async fn check_jsonld_context(
     Ok(())
 }
 
+/// One function serves both subscription resources, and they are different
+/// clauses: 5.8 for Subscriptions, 5.11 for Context Source Registration
+/// Subscriptions. The seam is asked about the operation the caller actually
+/// made.
+fn clause_of(kind: Kind, sub: &'static str, csub: &'static str) -> &'static str {
+    if kind == Kind::CSourceSubscription {
+        csub
+    } else {
+        sub
+    }
+}
+
 pub async fn create(
     st: &AppState,
     kind: Kind,
@@ -738,6 +750,7 @@ pub async fn create(
     let obj = parsed.object(NgsiError::BadRequestData(
         "subscription must be a JSON object".into(),
     ))?;
+    gate!(st, &tenant, headers, clause_of(kind, "5.8.1", "5.11.2")).await?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
     check_endpoint(st, &norm)?;
     check_jsonld_context(st, &tenant, &norm).await?;
@@ -836,6 +849,7 @@ pub async fn retrieve(
     check_params(params, &["options", "format", "sysAttrs", "local"])?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, clause_of(kind, "5.8.3", "5.11.4"), ids: &[id]).await?;
     let doc = st
         .store
         .get(&tenant, kind, id)?
@@ -860,6 +874,7 @@ pub async fn list(
     )?;
     let accept = parse_accept(headers)?;
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, clause_of(kind, "5.8.4", "5.11.5")).await?;
     // 5.5.9.1: "only up to a maximum of L NGSI-LD Elements are RETRIEVED
     // and returned". 5.8.4 takes no filter parameters — `check_params`
     // above is the whole list — so the tenant IS the match set and the
@@ -903,6 +918,7 @@ pub async fn update(
     antares_model::EntityId::new(id)
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
+    gate!(st, &tenant, headers, clause_of(kind, "5.8.2", "5.11.3"), ids: &[id]).await?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::MergePatch).await?;
     let obj = parsed.object(NgsiError::BadRequestData(
         "fragment must be a JSON object".into(),
@@ -959,6 +975,7 @@ pub async fn delete(
     antares_model::EntityId::new(id)
         .map_err(|_| NgsiError::BadRequestData(format!("invalid subscription id {id:?}")))?;
     check_params(params, &["local"])?;
+    gate!(st, &tenant, headers, clause_of(kind, "5.8.5", "5.11.6"), ids: &[id]).await?;
     if st.store.delete(&tenant, kind, id)? {
         st.sub_changed(&tenant, kind, id, None);
         if kind == Kind::Subscription {

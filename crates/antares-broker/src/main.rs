@@ -50,8 +50,12 @@ const KNOWN_KEYS: &[&str] = &[
     "ANTARES_MAX_BATCH_ITEMS",
     "ANTARES_MAX_BODY_BYTES",
     "ANTARES_CORS_ORIGINS",
-    // How long the policy engine has to answer before the seam denies
-    // (ADR-0020). The built-in allow-all engine never waits.
+    // The policy engine every operation is asked about, and how long it has
+    // to answer before the seam denies (ADR-0020). The built-in allow-all
+    // engine decides nothing and never waits; the header list is what an
+    // engine is given to identify the caller by.
+    "ANTARES_POLICY",
+    "ANTARES_POLICY_SUBJECT_HEADERS",
     "ANTARES_POLICY_TIMEOUT_MS",
     // The HTTP surfaces mounted beside the NGSI-LD API root, comma-separated;
     // default `admin` (/q). An unknown name is fatal and names the shelf.
@@ -475,6 +479,41 @@ fn api_surfaces(raw: Option<&str>) -> Result<Vec<(&'static str, SurfaceCtor)>, S
     Ok(chosen)
 }
 
+/// One entry of the policy shelf: the name a deployment selects the engine
+/// with, and how to build it.
+type PolicyCtor = fn() -> std::sync::Arc<dyn antares_api::policy::PolicyEngine>;
+
+/// The policy engines this binary was built with (ADR-0020). `allow-all` is
+/// the one the broker ships and the one conformance is asserted against; an
+/// engine from outside this workspace joins the list behind its own
+/// off-by-default feature, exactly as a store or a surface does, and is
+/// absent from a release build.
+const POLICY_SHELF: &[(&str, PolicyCtor)] = &[("allow-all", || {
+    std::sync::Arc::new(antares_api::policy::AllowAll)
+})];
+
+/// ANTARES_POLICY → the engine every operation is asked about; absent =
+/// `allow-all`. An unknown name is fatal and names the shelf: a deployment
+/// that meant to run its engine and got a typo would otherwise serve every
+/// request wide open and never know.
+fn policy_engine(raw: Option<&str>) -> Result<(&'static str, PolicyCtor), String> {
+    let name = raw
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("allow-all");
+    POLICY_SHELF
+        .iter()
+        .find(|(n, _)| *n == name)
+        .copied()
+        .ok_or_else(|| {
+            let shelf: Vec<&str> = POLICY_SHELF.iter().map(|(n, _)| *n).collect();
+            format!(
+                "ANTARES_POLICY: unknown policy engine {name:?}; built with {}",
+                shelf.join("|")
+            )
+        })
+}
+
 /// The backend registry: the two driver seams from their configured names.
 /// Every backend is one arm of `build_store`; the temporal driver is by
 /// default the same instance (history recorded and served by the
@@ -801,6 +840,13 @@ async fn run(
     // default mounting put there, before the state is shared.
     let selected = api_surfaces(std::env::var("ANTARES_API_SURFACES").ok().as_deref())?;
     state = state.with_surfaces(selected.iter().map(|(_, build)| build()).collect())?;
+    // The policy engine, from configuration and from the shelf this binary
+    // was built with. Without one the broker asks `allow-all` and behaves
+    // exactly as it did before the seam existed.
+    let (policy_name, build_policy) =
+        policy_engine(std::env::var("ANTARES_POLICY").ok().as_deref())?;
+    tracing::info!("policy engine: {policy_name}");
+    state = state.with_policy(build_policy());
     // A notification binding compiled in from outside the workspace mounts
     // exactly like the two shipped ones: one registration, no core-crate
     // edit. It is not in a release build — the feature is off by default,

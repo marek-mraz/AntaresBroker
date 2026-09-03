@@ -108,6 +108,17 @@ async fn create_entity_inner(
         attrs: (!attr_iris.is_empty()).then_some(attr_iris),
         ..Default::default()
     };
+    // ADR-0020: the policy seam, once per request, after expansion and
+    // before the operation or any fan-out. Everything the engine is given
+    // is the expanded form the store would see.
+    gate!(
+        st, &tenant, headers, "5.6.1",
+        ids: &[&id],
+        types: spec.types.as_deref().unwrap_or(&[]),
+        attrs: spec.attrs.as_deref().unwrap_or(&[]),
+        body: Some(&expanded),
+    )
+    .await?;
     let regs =
         match crate::federation::write_plan(st, &tenant, &spec, &parsed.ctx, params, headers)? {
             crate::federation::WritePlan::Answered(r) => return Ok(*r),
@@ -253,6 +264,7 @@ async fn retrieve_entity_inner(
         .into());
     }
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
     let repr = parse_repr(params, &ctx)?;
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
@@ -520,16 +532,22 @@ async fn query_entities_outer(
     mut params: HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
+    gate!(
+        st, &tenant, headers, "5.7.2",
+        q: q_ast.as_ref(),
+        scope_q: params.get("scopeQ").map(String::as_str),
+    )
+    .await?;
     let Some(map_ref) = single_header(headers, "NGSILD-EntityMap")? else {
         return query_entities_inner(st, &params, headers).await;
     };
-    let tenant = tenant_from(headers)?;
     // 5.7.2.4: an unknown parameter and a too-wide query are BadRequestData
     // for this request, whether or not it carries an EntityMap reference —
     // and the paged fetch below walks the whole map, locally and forwarded,
     // before the inner call would reach these same two checks.
     check_params(&params, crate::negotiate::QUERY_PARAMS)?;
-    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
     if !qualifies_non_wide(&params, q_ast.as_ref()) {
         return Err(NgsiError::BadRequestData(
             "query needs at least one of type, attrs, q, georel (5.7.2)".into(),
@@ -1223,6 +1241,7 @@ pub async fn delete_entity(
         // the client meant, and the delete then removes an Entity the
         // client's selector excluded.
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.6.6", ids: &[&id]).await?;
         // 4.17/5.6.6.4: the type selector gates the target — a registration
         // for a different type must not receive the forwarded delete.
         let spec = crate::registry::CsrSpec {
@@ -1490,6 +1509,8 @@ async fn purge_inner(
         ],
     )?;
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, "5.6.21", scope_q: params.get("scopeQ").map(String::as_str))
+        .await?;
     // 5.6.21.4: exactly five qualifying conditions —
     //   a) selector of Entity Types
     //   b) list of Attribute names, including at least one non-system Attribute
@@ -1668,6 +1689,7 @@ async fn merge_entity_inner(
             ..Default::default()
         },
     )?;
+    gate!(st, &tenant, headers, "5.6.17", ids: &[id], body: Some(&fragment)).await?;
     // 5.6.17.3: a common observedAt timestamp to use across merged
     // Attributes, and a common language tag for merged LanguageMaps.
     let observed_at = params.get("observedAt").map(String::as_str);
@@ -2002,6 +2024,7 @@ pub async fn replace_entity(
         // (5.6.18: an unknown target is 404 before body validation), so the
         // header context is resolved on its own here.
         let ctx0 = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.6.18", ids: &[&id]).await?;
         // 5.6.18.4: the ?type selector narrows the target — a non-matching
         // entity is "not known" for this replace.
         let local_doc = st
@@ -2193,6 +2216,7 @@ async fn retrieve_attr_inner(
     let tenant = tenant_from(headers)?;
     check_params(params, &["options", "format", "lang", "datasetId", "local"])?;
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
     let repr = parse_repr(params, &ctx)?;
     antares_model::EntityId::new(id)?;
     antares_model::check_attr_name(attr)?;

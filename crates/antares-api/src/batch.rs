@@ -300,6 +300,12 @@ fn ngsi_of(e: ApiError) -> NgsiError {
         ApiError::Overloaded(_) => {
             NgsiError::InternalError(antares_model::error::DB_OVERLOADED.into())
         }
+        // The policy gate runs once per request, before the array is
+        // touched, so a refusal is the whole array's 403 and never one
+        // entry's — this arm is exhaustiveness, not a path. If a per-item
+        // gate is ever added, 422 is the nearest thing Table 6.3.2-1 has:
+        // the entry was refused, and the reason travels with it.
+        ApiError::Denied(why) => NgsiError::OperationNotSupported(why),
     }
 }
 
@@ -361,6 +367,19 @@ enum BatchMode {
     Upsert,
     Update,
     Merge,
+}
+
+impl BatchMode {
+    /// The clause the policy seam is asked about: one function serves the
+    /// four batch write operations, and they are four clauses.
+    const fn clause(self) -> &'static str {
+        match self {
+            Self::Create => "5.6.7",
+            Self::Upsert => "5.6.8",
+            Self::Update => "5.6.9",
+            Self::Merge => "5.6.20",
+        }
+    }
 }
 
 /// The registration-matching input of a batch (4.3.6.1): the ids, the
@@ -641,6 +660,10 @@ async fn batch_write(
     let update_mode = has_option("update");
     let no_overwrite = has_option("noOverwrite");
     let items = parse_batch(st, &tenant, headers, body).await?;
+    // ADR-0020: one verdict for the whole array, before any item is written
+    // and before any forward — the batch is one operation (5.6.7 to 5.6.20)
+    // and a per-item gate would let half of it land on a refusal.
+    gate!(st, &tenant, headers, mode.clause()).await?;
     // distributed batch (4.3.6): one forwarded request per matching source
     let (spec, fwd_items) = batch_spec(&items);
     let fed_regs = match crate::federation::write_plan(
@@ -1080,6 +1103,7 @@ pub async fn batch_delete(
         if ct != "application/json" && ct != "application/ld+json" {
             return Err(ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE));
         }
+        gate!(st, &tenant, &headers, "5.6.10").await?;
         let value: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let ids = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
@@ -1304,6 +1328,7 @@ async fn batch_query_inner(
     )?;
     // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
     let accept = parse_accept_geo(headers)?;
+    gate!(st, &tenant, headers, "5.7.2").await?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
     let q = parsed.object(NgsiError::BadRequestData(
         "query body must be an object".into(),

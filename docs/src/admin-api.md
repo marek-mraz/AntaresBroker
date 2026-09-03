@@ -34,6 +34,7 @@ progress). A memory-store broker answers:
   "changesDropped": 0,
   "taskPanics": 0,
   "temporalDrainErrors": 0,
+  "policy": { "engine": "allow-all", "timeoutMs": 250 },
   "surfaces": { "admin": { "prefix": "/q", "routes": 8 } },
   "limits": {
     "maxBatchItems": 1000,
@@ -72,6 +73,7 @@ progress). A memory-store broker answers:
 | `changesDropped` | Changes the bounded matcher queue refused since start, each one a notification never matched: delivery is slower than the write rate. |
 | `taskPanics` | Panics absorbed at the notification-task boundary since start, each one a lost notification. Reported here because the Prometheus recorder is off unless `ANTARES_TELEMETRY` is set. |
 | `temporalDrainErrors` | Post-response history writes that failed since start; the client's 2xx stands, the counter and a warning record the loss. |
+| `policy` | The policy engine this binary was started with (`ANTARES_POLICY`, `allow-all` unless a deployment registered another) and the deadline one decision gets (`ANTARES_POLICY_TIMEOUT_MS`). An engine that overruns it is a refusal, not a delay. |
 | `surfaces` | The mounted admin surfaces by name, each with its prefix and route count. |
 | `limits` | The bounds wall: every `max*` cap in force and the `rejected*` counters of requests refused by it. |
 | `memory` | jemalloc live (`allocatedBytes`) and resident (`residentBytes`) bytes. |

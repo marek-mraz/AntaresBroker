@@ -19,6 +19,7 @@
 
 use antares_ql::geo::GeoQuery;
 use antares_ql::QNode;
+use axum::http::HeaderMap;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -87,7 +88,9 @@ impl std::fmt::Debug for Subject {
 pub struct Operation<'a> {
     /// The CIM 009 clause of the operation, e.g. `"5.6.1"`.
     pub clause: &'static str,
-    pub ids: &'a [String],
+    /// The Entity identifiers the operation names, as the handler holds
+    /// them; empty for a query that names none.
+    pub ids: &'a [&'a str],
     pub types: &'a [String],
     pub attrs: &'a [String],
     pub q: Option<&'a QNode>,
@@ -111,6 +114,24 @@ impl std::fmt::Debug for Operation<'_> {
             .field("geo", &self.geo.is_some())
             .field("body", &self.body.is_some())
             .finish()
+    }
+}
+
+impl Operation<'_> {
+    /// The operation with nothing but its clause: what a handler that
+    /// carries no ids, types or attributes passes, and the base every other
+    /// call site fills in with struct-update syntax.
+    pub const fn new(clause: &'static str) -> Operation<'static> {
+        Operation {
+            clause,
+            ids: &[],
+            types: &[],
+            attrs: &[],
+            q: None,
+            scope_q: None,
+            geo: None,
+            body: None,
+        }
     }
 }
 
@@ -318,28 +339,77 @@ pub fn pre_notify(
     }
 }
 
+/// The ProblemDetails `type` and `title` of a refusal. Table 6.3.2-1 names
+/// no access-denied error, so none is invented under the ETSI namespace: a
+/// refusal is answered with this broker's own URN, documented in the book
+/// and noted in the 6.3.2 ledger entry. A client that reads error types can
+/// tell a policy refusal from a spec error by the namespace alone.
+pub const ACCESS_DENIED_TYPE: &str = "urn:antares:error:AccessDenied";
+pub const ACCESS_DENIED_TITLE: &str = "AccessDenied";
+
+/// The request headers copied into a [`Subject`], comma-separated
+/// (`ANTARES_POLICY_SUBJECT_HEADERS`), matched case-insensitively and read
+/// once at first use. Empty by default: an engine that wants an identity
+/// names the header that carries it, and a broker that copied every header
+/// into the subject would be handing an addon the whole request.
+pub static SUBJECT_HEADERS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    std::env::var("ANTARES_POLICY_SUBJECT_HEADERS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+});
+
+/// Who this request is from, as far as the seam is concerned: the tenant it
+/// addresses and the headers a deployment named. A header the request does
+/// not carry is simply absent — the seam invents nothing.
+pub fn subject_of(tenant: &antares_model::TenantId, headers: &HeaderMap) -> Subject {
+    let mut carried = Vec::new();
+    for name in SUBJECT_HEADERS.iter() {
+        for value in headers.get_all(name.as_str()) {
+            if let Ok(v) = value.to_str() {
+                carried.push((name.clone(), v.to_owned()));
+            }
+        }
+    }
+    Subject {
+        tenant: tenant.clone(),
+        headers: carried,
+    }
+}
+
+/// A refusal on its way out of a handler. Its own type rather than an
+/// `ApiError`, so this module names nothing above it and stays a leaf; the
+/// `?` in a handler converts it through `From`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Denied(pub String);
+
+/// The one call a handler makes. Every operation passes through it exactly
+/// once, which is what `every_route_asks_the_policy_engine_once` asserts by
+/// walking the router with a counting engine.
+///
+/// The returned [`Filter`] is what the answer has to be narrowed by; an
+/// allow returns the empty filter, which narrows nothing.
+pub async fn gate(
+    engine: &dyn PolicyEngine,
+    tenant: &antares_model::TenantId,
+    headers: &HeaderMap,
+    op: &Operation<'_>,
+) -> Result<Filter, Denied> {
+    match decide(engine, &subject_of(tenant, headers), op).await {
+        Decision::Allow => Ok(Filter::default()),
+        Decision::Filter(f) => Ok(f),
+        Decision::Deny(why) => Err(Denied(why)),
+    }
+}
+
 /// The members of a JSON object, or nothing when it is not one.
 #[cfg(any(test, feature = "test-kit"))]
 fn members(v: &Value) -> Vec<String> {
     v.as_object()
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default()
-}
-
-/// A request shaped like the ones the seam sees, for the contract to ask
-/// about.
-#[cfg(any(test, feature = "test-kit"))]
-fn sample_operation(clause: &'static str) -> Operation<'static> {
-    Operation {
-        clause,
-        ids: &[],
-        types: &[],
-        attrs: &[],
-        q: None,
-        scope_q: None,
-        geo: None,
-        body: None,
-    }
 }
 
 /// The contract every engine has to hold, so an addon's own tests can call
@@ -370,7 +440,7 @@ pub async fn run_policy_contract(engine: &dyn PolicyEngine) {
     // The engine answers, and the answer is its own: a deny carrying one of
     // the seam's own reasons means it timed out or panicked instead.
     for clause in ["5.6.1", "5.7.2", "5.8.1"] {
-        match decide(engine, &subject, &sample_operation(clause)).await {
+        match decide(engine, &subject, &Operation::new(clause)).await {
             Decision::Allow => {}
             Decision::Deny(why) => assert!(
                 why != ENGINE_TIMED_OUT && why != ENGINE_FAILED,
@@ -395,7 +465,7 @@ pub async fn run_policy_contract(engine: &dyn PolicyEngine) {
     for clause in WHOLE_TENANT {
         assert!(
             !matches!(
-                decide(engine, &subject, &sample_operation(clause)).await,
+                decide(engine, &subject, &Operation::new(clause)).await,
                 Decision::Filter(_)
             ),
             "{name}: {clause} was answered with a filter"
@@ -442,7 +512,7 @@ pub async fn run_policy_contract(engine: &dyn PolicyEngine) {
     {
         let slow = Slow(engine);
         assert_eq!(
-            decide(&slow, &subject, &sample_operation("5.6.1")).await,
+            decide(&slow, &subject, &Operation::new("5.6.1")).await,
             Decision::Deny(ENGINE_TIMED_OUT.to_owned()),
             "{name}: the seam waited past its timeout instead of denying"
         );
@@ -659,7 +729,7 @@ mod tests {
     async fn an_engine_that_panics_denies_rather_than_allows() {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let decided = decide(&Panicking, &subject(), &sample_operation("5.6.1")).await;
+        let decided = decide(&Panicking, &subject(), &Operation::new("5.6.1")).await;
         let mut notification = json!({"type": "Notification"});
         let notified = pre_notify(&Panicking, &subject(), &json!({}), &mut notification);
         std::panic::set_hook(hook);
@@ -684,7 +754,7 @@ mod tests {
             }
         }
         assert_eq!(
-            decide(&Never, &subject(), &sample_operation("5.6.1")).await,
+            decide(&Never, &subject(), &Operation::new("5.6.1")).await,
             Decision::Deny(ENGINE_TIMED_OUT.to_owned())
         );
     }
@@ -706,7 +776,7 @@ mod tests {
             "{:?}",
             Operation {
                 body: Some(&body),
-                ..sample_operation("5.6.1")
+                ..Operation::new("5.6.1")
             }
         );
         assert!(!printed.contains("BB-123-XY"), "{printed}");

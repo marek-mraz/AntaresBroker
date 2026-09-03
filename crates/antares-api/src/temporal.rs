@@ -69,6 +69,7 @@ pub async fn upsert_temporal(
         ))?;
         let expanded = expand_entity(obj, &parsed.ctx, TEMPORAL_OPTS)?;
         let id = antares_jsonld::expanded_id(&expanded)?.to_owned();
+        gate!(st, &tenant, &headers, "5.6.11", ids: &[&id]).await?;
         // 5.6.11.4: exclusive/redirect registrations matching the input are
         // forwarded when "Create or Update Temporal" is supported; proxy
         // modes without it are an error of type Conflict; inclusive ones
@@ -1402,10 +1403,11 @@ async fn query_temporal_outer(
     mut params: HashMap<String, String>,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
+    let tenant = tenant_from(headers)?;
+    gate!(st, &tenant, headers, "5.7.4", scope_q: params.get("scopeQ").map(String::as_str)).await?;
     let Some(map_ref) = single_header(headers, "NGSILD-EntityMap")? else {
         return query_temporal_inner(st, &params, headers).await;
     };
-    let tenant = tenant_from(headers)?;
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
     let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
         params.insert("entityMap".into(), "true".into());
@@ -2173,6 +2175,7 @@ async fn retrieve_temporal_inner(
         )?;
         let accept = parse_accept(headers)?;
         let ctx = request_context(&st.loader, headers).await?;
+        gate!(st, &tenant, headers, "5.7.3", ids: &[id]).await?;
         let tq = TemporalQ::from_params(params, false)?;
         let trepr = parse_trepr(params, &ctx)?;
         // 5.7.3.4: "If projection attributes are present and indicate the
@@ -2415,6 +2418,7 @@ pub async fn delete_temporal(
         // 5.6.16.4: forward to registrations supporting the operation;
         // unsupported proxy modes are Conflict.
         let ctx = st.loader.core();
+        gate!(st, &tenant, &headers, "5.6.16", ids: &[&id]).await?;
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
             Ok(regs) => regs,
             Err(refused) => return Ok(*refused),
@@ -2460,6 +2464,7 @@ pub async fn add_temporal_attrs(
         let obj = parsed.object(NgsiError::BadRequestData(
             "fragment must be a JSON object".into(),
         ))?;
+        gate!(st, &tenant, &headers, "5.6.12", ids: &[&id]).await?;
         // 5.6.12 input is pushed history — the 4.5.7 deleted-instance
         // representation is legal (5.5.4 temporal exception), hence
         // allow_null (mirrors 5.6.11).
@@ -2620,6 +2625,7 @@ pub async fn delete_temporal_attr(
         antares_model::check_attr_name(&attr)?;
         check_params(&params, &["datasetId", "deleteAll", "local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.6.13", ids: &[&id]).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
         let want_ds = params.get("datasetId").cloned();
@@ -2829,6 +2835,7 @@ pub async fn modify_temporal_instance(
         antares_model::EntityId::new(&instance_id)
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
+        gate!(st, &tenant, &headers, "5.6.14", ids: &[&id]).await?;
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::MergePatch).await?;
         let obj = parsed.object(NgsiError::BadRequestData(
             "fragment must be a JSON object".into(),
@@ -2934,6 +2941,7 @@ pub async fn delete_temporal_instance(
             .map_err(|_| NgsiError::BadRequestData("invalid instance id".into()))?;
         check_params(&params, &["local"])?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.6.15", ids: &[&id]).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id) {
             Ok(regs) => regs,
@@ -2998,12 +3006,14 @@ pub async fn batch_temporal_query(
         // operation cannot serve are both refused here. Neither VALUE is
         // needed — the inner query reads the headers again — but the request
         // must not reach it having skipped either check.
-        tenant_from(&headers)?;
+        let tenant = tenant_from(&headers)?;
         check_params(
             &params,
             &["limit", "offset", "count", "options", "format", "local"],
         )?;
         parse_accept(&headers)?;
+        gate!(st, &tenant, &headers, "5.7.4").await?;
+
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let q = parsed.object(NgsiError::BadRequestData(
             "query body must be an object".into(),

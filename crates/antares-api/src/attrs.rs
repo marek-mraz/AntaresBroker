@@ -75,6 +75,9 @@ struct AttrWrite {
     allow_null: bool,
     op: &'static str,
     method: reqwest::Method,
+    /// The clause the policy seam is asked about, since one function serves
+    /// both of these operations.
+    clause: &'static str,
 }
 
 const APPEND: AttrWrite = AttrWrite {
@@ -82,6 +85,7 @@ const APPEND: AttrWrite = AttrWrite {
     allow_null: false,
     op: "appendAttrs",
     method: reqwest::Method::POST,
+    clause: "5.6.3",
 };
 
 const UPDATE: AttrWrite = AttrWrite {
@@ -89,6 +93,7 @@ const UPDATE: AttrWrite = AttrWrite {
     allow_null: true,
     op: "updateEntity",
     method: reqwest::Method::PATCH,
+    clause: "5.6.2",
 };
 
 /// Why an attribute write never reached the store. `Untouched` is not a
@@ -132,6 +137,7 @@ async fn write_attrs(
     let obj = parsed.object(NgsiError::BadRequestData(
         "fragment must be a JSON object".into(),
     ))?;
+    gate!(st, &tenant, headers, mode.clause, ids: &[id]).await?;
     let fragment = expand_entity(
         obj,
         &parsed.ctx,
@@ -775,6 +781,7 @@ async fn partial_update_inner(
     let obj = parsed.object(NgsiError::BadRequestData(
         "fragment must be a JSON object".into(),
     ))?;
+    gate!(st, &tenant, headers, "5.6.4", ids: &[id]).await?;
     let frag_inst = antares_jsonld::expand_attr_fragment(obj, &parsed.ctx)?;
     // 5.6.4.4: "Apply term expansion as mandated by clause 5.5.7, so that
     // the fully qualified name (URI) associated to the target Attribute is
@@ -916,6 +923,7 @@ pub async fn replace_attr(
         // 5.5.7 term expansion first, then 5.6.19.4: "If the target Attribute
         // is scope, then an error of type BadRequestData shall be raised" —
         // the target is the expanded name, so the IRI spelling counts too.
+        gate!(st, &tenant, &headers, "5.6.19", ids: &[&id]).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &parsed.ctx)?;
         if attr == "scope" || attr_iri == SCOPE_IRI {
             return Err(NgsiError::BadRequestData(
@@ -1058,6 +1066,7 @@ async fn delete_attr_inner(
     check_attr_name(attr)?;
     check_params(params, &["datasetId", "deleteAll", "local", "type"])?;
     let ctx = request_context(&st.loader, headers).await?;
+    gate!(st, &tenant, headers, "5.6.5", ids: &[id]).await?;
     // 5.6.5.4 expands the path name the same way 5.6.4.4 does, and then
     // addresses `scope` as itself rather than as an Attribute. The target is
     // what the name expands to, so both spellings — the reserved short name

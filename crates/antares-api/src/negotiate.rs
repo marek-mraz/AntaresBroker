@@ -77,6 +77,15 @@ pub enum ApiError {
     /// The store has no connection to give inside its acquire timeout.
     /// 503 with `Retry-After`, carrying the seconds to wait.
     Overloaded(u64),
+    /// The policy engine refused the operation (ADR-0020), carrying its
+    /// reason. 403 with a ProblemDetails in this broker's own namespace.
+    Denied(String),
+}
+
+impl From<crate::policy::Denied> for ApiError {
+    fn from(d: crate::policy::Denied) -> Self {
+        Self::Denied(d.0)
+    }
 }
 
 /// How long a client is told to wait after a 503. The store waited its whole
@@ -129,6 +138,22 @@ impl IntoResponse for ApiError {
             Self::Overloaded(secs) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::RETRY_AFTER, secs.to_string())],
+            )
+                .into_response(),
+            // Table 6.3.2-1 names no access-denied error, and 6.3.2's open
+            // list of binding errors is about the HTTP binding, not about
+            // who may see what. So the refusal is answered in a namespace
+            // that is visibly not ETSI's, with the engine's own reason as
+            // the detail — narrowing stays silent, only a refusal speaks.
+            Self::Denied(why) => (
+                StatusCode::FORBIDDEN,
+                [(header::CONTENT_TYPE, "application/json")],
+                axum::Json(serde_json::json!({
+                    "type": crate::policy::ACCESS_DENIED_TYPE,
+                    "title": crate::policy::ACCESS_DENIED_TITLE,
+                    "status": StatusCode::FORBIDDEN.as_u16(),
+                    "detail": why,
+                })),
             )
                 .into_response(),
             // 6.3.4: "the body of the message shall contain the list of the

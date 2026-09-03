@@ -927,6 +927,7 @@ pub async fn create_registration(
         let obj = parsed.value.as_object().ok_or_else(|| {
             NgsiError::BadRequestData("registration must be a JSON object".into())
         })?;
+        gate!(st, &tenant, &headers, "5.9.2").await?;
         let mut norm = normalize_registration(obj, &parsed.ctx, false)?;
         let id = match norm.get("id").and_then(Value::as_str) {
             Some(id) => id.to_owned(),
@@ -982,6 +983,7 @@ pub async fn retrieve_registration(
         check_params(&params, &["options", "format", "local"])?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(st, &tenant, &headers, "5.10.1", ids: &[&id]).await?;
         let doc = st
             .store
             .get(&tenant, Kind::Registration, &id)?
@@ -1034,6 +1036,11 @@ pub async fn query_registrations(
         )?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        gate!(
+            st, &tenant, &headers, "5.10.2",
+            scope_q: params.get("scopeQ").map(String::as_str),
+        )
+        .await?;
         let bad = |m: String| NgsiError::BadRequestData(m);
         let mut spec = CsrSpec::default();
         if let Some(s) = params.get("id") {
@@ -1278,6 +1285,7 @@ pub async fn update_registration(
         let obj = parsed.object(NgsiError::BadRequestData(
             "fragment must be a JSON object".into(),
         ))?;
+        gate!(st, &tenant, &headers, "5.9.3", ids: &[&id]).await?;
         let norm = normalize_registration(obj, &parsed.ctx, true)?;
         let ts = now_iso();
         // The 5.9.3.4 re-checks below read the registration set that the
@@ -1344,6 +1352,7 @@ pub async fn delete_registration(
         antares_model::EntityId::new(&id)
             .map_err(|_| NgsiError::BadRequestData(format!("invalid registration id {id:?}")))?;
         check_params(&params, &["local"])?;
+        gate!(st, &tenant, &headers, "5.9.4", ids: &[&id]).await?;
         let before = take_live_registration(&st, &tenant, &id)?;
         if st.store.delete(&tenant, Kind::Registration, &id)? {
             st.reg_changed(&tenant, &id, None);

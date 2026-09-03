@@ -455,6 +455,7 @@ pub async fn create_snapshot(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["local"])?;
+        gate!(st, &tenant, &headers, "5.16.1").await?;
         // 6.3.5: the @context rules apply to the snapshot body like to any
         // other POST payload (media type, Link header, body @context)
         let v = parse_body(&st.loader, &headers, &body, BodyKind::Standard)
@@ -783,6 +784,7 @@ pub async fn purge_snapshots(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["q", "local"])?;
+        gate!(st, &tenant, &headers, "5.16.7").await?;
         // 5.16.7.4: the query is mandatory and restricted to Snapshot members
         let q = params
             .get("q")
@@ -861,6 +863,7 @@ pub async fn retrieve_snapshot(
 ) -> Response {
     let go = async {
         let tenant = open_snapshot(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.16.3", ids: &[&id]).await?;
         let accept = parse_accept(&headers)?;
         let meta = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
@@ -885,6 +888,7 @@ pub async fn update_snapshot(
 ) -> Response {
     let go = async {
         let tenant = open_snapshot(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.16.4", ids: &[&id]).await?;
         let accept = parse_accept(&headers)?;
         // 5.16.4.4 binds this operation to 5.5.4, hence to the 6.3.5 rules
         let v = parse_body(&st.loader, &headers, &body, BodyKind::Standard)
@@ -943,6 +947,7 @@ pub async fn delete_snapshot(
 ) -> Response {
     let go = async {
         let tenant = open_snapshot(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.16.5", ids: &[&id]).await?;
         let meta = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
         snap_remove(&st, &tenant, &id, &meta);
@@ -962,6 +967,7 @@ pub async fn clone_snapshot(
 ) -> Response {
     let go = async {
         let tenant = open_snapshot(&params, &headers, &id)?;
+        gate!(st, &tenant, &headers, "5.16.2", ids: &[&id]).await?;
         let src = snap_get(&st, &tenant, &id)
             .ok_or_else(|| NgsiError::ResourceNotFound(format!("snapshot {id} not found")))?;
         // 5.16.2.3 makes the clone body optional; a body that IS sent obeys

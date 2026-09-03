@@ -7,6 +7,32 @@
 // futures deeper than the default 128 (nightly: recursion_depth_exceeding_limit)
 #![recursion_limit = "256"]
 
+/// Ask the policy engine about one operation (ADR-0020), where the request
+/// enters its handler:
+///
+/// ```ignore
+/// gate!(st, &tenant, headers, "5.6.6", ids: &[&id]).await?;
+/// ```
+///
+/// The named members go into the [`policy::Operation`]; every other member
+/// keeps the empty default of `Operation::new`. The awaited value is the
+/// `Filter` the engine narrowed the operation to, or the refusal that
+/// becomes a 403. It is a macro because a gate reads as one line at the
+/// call site and the alternative is the same eight lines in every handler.
+macro_rules! gate {
+    ($st:expr, $tenant:expr, $headers:expr, $clause:expr $(, $field:ident: $value:expr)* $(,)?) => {
+        $crate::policy::gate(
+            $st.policy.as_ref(),
+            $tenant,
+            $headers,
+            &$crate::policy::Operation {
+                $($field: $value,)*
+                ..$crate::policy::Operation::new($clause)
+            },
+        )
+    };
+}
+
 pub(crate) mod attrs;
 pub(crate) mod batch;
 pub mod bounds;
@@ -759,6 +785,13 @@ async fn health(
         body["commitQueueDepth"] = depth.into();
         body["commitQueuePeak"] = peak.into();
     }
+    // The policy engine this binary was started with, and how long it has
+    // to answer before the seam denies for it (ADR-0020). An operator
+    // reading `allow-all` here knows no engine is attached.
+    body["policy"] = serde_json::json!({
+        "engine": state.policy.name(),
+        "timeoutMs": u64::try_from(policy::TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+    });
     // Configured caps + rejection counters, for observability.
     body["limits"] = state.limits.snapshot();
     // History events a driver failed to record after the write stood.
@@ -1197,6 +1230,7 @@ async fn source_identity(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
+        gate!(state, &tenant, &headers, "5.15.1").await?;
         let accept = negotiate::parse_accept(&headers)?;
         let ctx = state.loader.core();
         let uptime = state.started.elapsed().as_secs();
@@ -1372,6 +1406,51 @@ mod tests {
         .await;
         assert_eq!(body["store"], "memory");
         assert_eq!(body["temporal"], "none");
+    }
+
+    /// /q/health names the policy engine and the deadline one decision
+    /// gets, so an operator can tell an allow-all broker from one an addon
+    /// engine was registered into without reading the process environment.
+    #[tokio::test]
+    async fn health_names_the_policy_engine_and_its_timeout() {
+        use policy::PolicyEngine as _;
+        let body = body_json(
+            app()
+                .oneshot(Request::get("/q/health").body(Body::empty()).expect("req"))
+                .await
+                .expect("resp"),
+        )
+        .await;
+        assert_eq!(body["policy"]["engine"], policy::AllowAll.name());
+        assert_eq!(
+            body["policy"]["timeoutMs"],
+            u64::try_from(policy::TIMEOUT.as_millis()).unwrap_or(u64::MAX)
+        );
+
+        struct Named;
+        impl policy::PolicyEngine for Named {
+            fn name(&self) -> &str {
+                "named-engine"
+            }
+            fn decide<'a>(
+                &'a self,
+                _s: &'a policy::Subject,
+                _o: &'a policy::Operation<'a>,
+            ) -> policy::DecisionFuture<'a> {
+                Box::pin(async { policy::Decision::Allow })
+            }
+            fn pre_notify(
+                &self,
+                _s: &policy::Subject,
+                _sub: &serde_json::Value,
+                _n: &mut serde_json::Value,
+            ) -> policy::NotifyDecision {
+                policy::NotifyDecision::Deliver
+            }
+        }
+        let st = AppState::new("h".into()).with_policy(std::sync::Arc::new(Named));
+        let (_, body) = health(axum::extract::State(st)).await;
+        assert_eq!(body.0["policy"]["engine"], "named-engine");
     }
 
     /// /q/health reports the bus — `bus: {mode,
