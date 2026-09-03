@@ -40,6 +40,34 @@ pre-production checklist as `ANTARES_REQUIRE_RLS=1`, because a subscription
 or registration endpoint is client-supplied and the default lets one name an
 address inside your network.
 
+### What the egress wall does not cover
+
+A destination is judged twice: the host as WRITTEN, before the request path
+commits to it, and the ADDRESS the transport is about to dial. The second
+judgement is where a name is decided. With private egress allowed — the
+default — a destination written as a name is not resolved at the first
+check; the resolver runs once, inside the transport, where `PolicyResolver`
+(every reqwest client) and the MQTT connector's own address check drop the
+instance-metadata addresses whatever the configuration says, and the private
+ones under the switch. Resolving at the first check as well would buy no
+different verdict and would cost a second DNS query on every notification
+delivery and every cold `@context` fetch.
+
+Two consequences follow, and both are accepted:
+
+- A notification binding a deployment registers itself is handed a
+  destination the wall has cleared as written — `NotificationSink::network()`
+  defaults to `true`, so a binding is policed unless it declares that it
+  opens no socket — but the address filter belongs to whatever transport it
+  dials with. A binding that opens a raw socket owes that filter itself.
+- An embedder that hands `Loader::with_client` its own HTTP client owes it
+  too: the DNS pin and the per-hop redirect cap live in
+  `antares_jsonld::client_builder`, so build on that and add the proxy,
+  timeouts and trust anchors to it.
+
+Inside the workspace that invariant is a CI gate: no HTTP client is
+constructed anywhere but `client_builder`.
+
 **Out of core by standing decision:** authentication, rate limiting,
 quotas, DID/VC/ODRL — the PEP/gateway in front of the broker owns them.
 The broker takes no authorization decision of its own either: it exposes a

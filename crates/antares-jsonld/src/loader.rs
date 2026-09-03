@@ -768,7 +768,12 @@ pub fn core_context() -> Context {
 impl Loader {
     /// A loader over the caller's own HTTP client — a gateway with its own
     /// proxy, allowlist or TLS setup fetches @contexts through it. `policy`
-    /// still governs the private-range deny and the redirect cap; every
+    /// still clears every URL before the fetch (`check_host`), but the
+    /// transport belongs to the caller: the DNS pin (`PolicyResolver`) and
+    /// the per-hop redirect cap live in `client_builder`, so a client built
+    /// any other way resolves names unfiltered and follows redirects under
+    /// reqwest's own default. Start from `client_builder(policy)` and add
+    /// the timeouts, proxy and trust anchors to it to keep both. Every
     /// cache is per instance, nothing here is process-global.
     pub fn with_client(policy: EgressPolicy, client: reqwest::Client) -> Self {
         let core = core_context();

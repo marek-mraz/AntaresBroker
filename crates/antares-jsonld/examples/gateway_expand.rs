@@ -7,18 +7,23 @@
 //!
 //!     cargo run -p antares-jsonld --example gateway_expand
 
-use antares_jsonld::loader::{EgressPolicy, Loader};
+use antares_jsonld::loader::{client_builder, EgressPolicy, Loader};
 use antares_jsonld::{expand_entity, ExpandOpts};
 use serde_json::{json, Value};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // the gateway's client: its own timeouts, proxy, trust anchors…
-    let client = reqwest::Client::builder()
+    // The gateway's client: its own timeouts, proxy, trust anchors — built
+    // ON `client_builder`, because the DNS pin and the redirect cap live
+    // there. A client constructed straight from reqwest would resolve names
+    // unfiltered and follow redirects under reqwest's own default, which
+    // `EgressPolicy` alone cannot make up for.
+    let policy = EgressPolicy::from_env();
+    let client = client_builder(policy)
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .expect("client");
-    let loader = Loader::with_client(EgressPolicy::from_env(), client);
+    let loader = Loader::with_client(policy, client);
 
     // an incoming create request carrying only the core @context
     let body = json!({

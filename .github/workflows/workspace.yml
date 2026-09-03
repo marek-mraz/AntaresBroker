@@ -239,6 +239,22 @@ jobs:
               crates/ examples/ --include='*.rs' \
             | grep -vE 'crates/antares-sql/src/|/tests/'
 
+      # ARCHITECTURE.md §9: outbound HTTP anywhere goes through
+      # `antares_jsonld::client_builder`. That function is where the DNS pin
+      # (PolicyResolver), the per-hop redirect cap and the extra-CA trust
+      # widening live, so a client built any other way dials names the
+      # egress policy never judged — `EgressPolicy::check_host` alone does
+      # not resolve a name while private egress is allowed, which is the
+      # default.
+      - name: no outbound HTTP client outside client_builder
+        run: |
+          # the pattern must exist where expected (guard self-test) …
+          grep -rqn 'reqwest::Client::builder' crates/antares-jsonld/src/loader.rs
+          # … and nowhere else in the workspace, examples and tests included
+          ! grep -rnE 'reqwest::(Client|ClientBuilder)::(builder|new)\(' \
+              crates/ examples/ --include='*.rs' \
+            | grep -v 'crates/antares-jsonld/src/loader.rs:'
+
 
   msrv:
     # The declared rust-version stays PROVEN as stable moves on.
