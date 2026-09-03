@@ -1780,11 +1780,18 @@ pub(crate) async fn query_temporal_inner(
     // 5.7.4.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
     // list / q must include at least one non-system Attribute to qualify.
     // 5.7.4.3 expandValues: the same 4.9 EXAMPLE 12 coercion as the entity
-    // query — term values expanded against the @context before executing;
-    // jsonKeys needs no action (raw JSON targets are navigated without term
-    // expansion by default).
+    // query — term values expanded against the @context before executing,
+    // less the Attributes jsonKeys declares uninterpretable.
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
-        crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
+        crate::qeval::apply_expand_values(
+            ast,
+            crate::qeval::expansion_list(
+                params.get("expandValues").map(String::as_str),
+                params.get("jsonKeys").map(String::as_str),
+            )
+            .as_deref(),
+            &ctx,
+        )
     });
     check_temporal_query(st, params, headers, &tenant, &ctx, q_ast.as_ref())?;
     // ADR-0020: the engine's narrowing joins the request's own filters after
@@ -1793,7 +1800,15 @@ pub(crate) async fn query_temporal_inner(
     let narrowed = filter.narrow_params(params)?;
     let params = &narrowed;
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
-        crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
+        crate::qeval::apply_expand_values(
+            ast,
+            crate::qeval::expansion_list(
+                params.get("expandValues").map(String::as_str),
+                params.get("jsonKeys").map(String::as_str),
+            )
+            .as_deref(),
+            &ctx,
+        )
     });
     let scope_q = params.get("scopeQ").map(String::as_str);
     let tq = TemporalQ::from_params(params, true)?;

@@ -1091,11 +1091,15 @@ pub fn filter_entities_paged(
     let q_ast = match params.get("q") {
         // 4.9 expandValues: "attributes whose values should be expanded
         // against the supplied @context using JSON-LD type coercion prior to
-        // executing the query" (EXAMPLE 12). jsonKeys needs no action — raw
-        // JSON targets are navigated without term expansion by default.
+        // executing the query" (EXAMPLE 12), less the Attributes jsonKeys
+        // declares uninterpretable as JSON-LD.
         Some(q) => Some(crate::qeval::apply_expand_values(
             parse_q(q)?,
-            params.get("expandValues").map(String::as_str),
+            crate::qeval::expansion_list(
+                params.get("expandValues").map(String::as_str),
+                params.get("jsonKeys").map(String::as_str),
+            )
+            .as_deref(),
             ctx,
         )),
         None => None,
