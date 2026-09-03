@@ -32,6 +32,10 @@ tokio = { version = "1", default-features = false, features = ["sync", "macros"]
 [dev-dependencies]
 # The driver contract kit: the backends in this crate are held to it.
 antares-store = { workspace = true, features = ["test-kit"] }
+# This crate again, with `test-kit` on: the row-level assertions the
+# integration tests below make read columns no operation of the broker
+# reads, and those readers are compiled for a test build only.
+antares-sql = { workspace = true, features = ["test-kit"] }
 
 [features]
 # The Pg arm is the only part of this crate that cannot cross to wasm32
@@ -40,6 +44,10 @@ antares-store = { workspace = true, features = ["test-kit"] }
 # only — every gated item keeps its behaviour verbatim.
 default = ["postgres"]
 postgres = ["dep:sqlx", "dep:metrics"]
+# Row readers that exist for the integration tests in tests/ and for
+# nothing else: the broker's own operations never call them, so a release
+# build never compiles them.
+test-kit = []
 
 [lints]
 workspace = true

@@ -213,6 +213,7 @@ version = "0.1.0"
 dependencies = [
  "antares-model",
  "antares-ql",
+ "antares-sql",
  "antares-store",
  "chrono",
  "futures-util",

@@ -1300,6 +1300,7 @@ impl PgEntityStore {
     }
 
     /// Current row version (test hook for the version-monotonicity assertions).
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn version(&self, tenant: &TenantId, id: &str) -> Result<Option<i64>, sqlx::Error> {
         wait(async {
             let mut tx = super::begin(&self.pool).await?;

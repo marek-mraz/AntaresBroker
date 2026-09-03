@@ -816,6 +816,7 @@ impl PgDocStore {
     }
 
     /// Bookkeeping columns straight from the row (test hook: rows are truth).
+    #[cfg(any(test, feature = "test-kit"))]
     pub fn status_row(
         &self,
         tenant: &TenantId,
