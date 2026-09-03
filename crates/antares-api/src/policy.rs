@@ -355,12 +355,28 @@ pub fn resolve(clause: &str, decision: Decision) -> Decision {
 ///
 /// The panic is caught in place rather than on a spawned task, because the
 /// task boundary would demand `'static` of the operation, which borrows the
-/// request.
+/// request. It is caught TWICE, because an engine has two places to fail:
+/// `decide` returns a boxed future, and a synchronous engine does its whole
+/// decision in the call that builds that future — the reference engine is
+/// `Box::pin(ready(self.judge(..)))` — so guarding only the future guards
+/// the half that does nothing.
+///
+/// [`TIMEOUT`] can only race the future. Work done before the future exists
+/// holds the executor thread, and no timer inside the same task can
+/// interrupt it; an engine that blocks is a deployment's own bug, and the
+/// bound that catches it is the request timeout in front of the broker.
 pub async fn decide(engine: &dyn PolicyEngine, subject: &Subject, op: &Operation<'_>) -> Decision {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use futures_util::FutureExt as _;
-        let guarded = std::panic::AssertUnwindSafe(engine.decide(subject, op)).catch_unwind();
+        let built =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.decide(subject, op)));
+        let Ok(fut) = built else {
+            tracing::error!("policy engine {} panicked; denying", engine.name());
+            metrics::counter!("antares_policy_failures_total", "reason" => "panic").increment(1);
+            return Decision::Deny(ENGINE_FAILED.to_owned());
+        };
+        let guarded = std::panic::AssertUnwindSafe(fut).catch_unwind();
         match tokio::time::timeout(*TIMEOUT, guarded).await {
             Ok(Ok(d)) => resolve(op.clause, d),
             Ok(Err(_)) => {
@@ -853,6 +869,32 @@ mod tests {
         fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
             panic!("the engine is broken")
         }
+    }
+
+    /// The other half of the same failure: a synchronous engine decides in
+    /// the call that BUILDS the future, so a guard around the future alone
+    /// never sees it. The reference engine has exactly this shape.
+    struct PanickingEagerly;
+
+    impl PolicyEngine for PanickingEagerly {
+        fn name(&self) -> &str {
+            "panicking-eagerly"
+        }
+        fn decide<'a>(&'a self, _s: &'a Subject, _o: &'a Operation<'a>) -> DecisionFuture<'a> {
+            panic!("the engine is broken")
+        }
+        fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+            NotifyDecision::Deliver
+        }
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_panics_before_it_returns_a_future_denies_too() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let decided = decide(&PanickingEagerly, &subject(), &Operation::new("5.6.1")).await;
+        std::panic::set_hook(hook);
+        assert_eq!(decided, Decision::Deny(ENGINE_FAILED.to_owned()));
     }
 
     #[tokio::test]

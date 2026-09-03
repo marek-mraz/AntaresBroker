@@ -124,7 +124,14 @@ carries one (5.8.3/5.8.4 serve the 5.2.12 data type, which defines none), and
 the 5.8.1.4 copy forwarded to a Context Source is stripped of all of them.
 
 **Fail closed.** An engine error, panic or timeout
-(`ANTARES_POLICY_TIMEOUT_MS`) is `Deny`. `AllowAll` has no error path.
+(`ANTARES_POLICY_TIMEOUT_MS`) is `Deny`. `AllowAll` has no error path. An
+engine has two places to panic and both deny: the call that builds the
+future `decide` returns, and the future itself — a synchronous engine
+decides entirely in the first, so a guard around the second alone would
+guard the half that does nothing. The timeout can only race the future:
+work done before the future exists holds the executor thread and no timer
+in the same task can interrupt it, so an engine that blocks is bounded by
+the request timeout in front of the broker and not by this seam.
 
 **The subject never travels.** The subject headers are stripped from
 every forwarded request in `federation::forward`, and never enter a
