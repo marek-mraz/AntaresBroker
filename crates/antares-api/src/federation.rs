@@ -632,26 +632,51 @@ pub fn matching_regs(
     Ok(merge_same_source(regs))
 }
 
+/// The API operations a registration is willing to answer, EXPANDED: 5.2.9
+/// lets `operations` name groups as well as operations, so `["federationOps"]`
+/// and the names it stands for are the same subset written two ways, and only
+/// the expansion can tell two registrations apart by what they will serve.
+fn op_set(r: &FedReg) -> std::collections::BTreeSet<&'static str> {
+    antares_model::operations::OPERATION_NAMES
+        .iter()
+        .copied()
+        .filter(|op| r.supports(op))
+        .collect()
+}
+
 /// Registrations naming the same Context Source (same endpoint, mode,
 /// tenant, contextSourceAlias, contextSourceInfo, localOnly) fold into ONE
 /// forwarded request (5.2.9: the alias identifies a source, so a different
 /// alias is a different source even behind one endpoint):
 /// attribute and entity scopes union (an unscoped one covers everything),
-/// operations union, the first registration's id and timing stay. Two calls
-/// to one source for one query would return the same data twice.
+/// the first registration's id and timing stay. Two calls to one source for
+/// one query would return the same data twice.
+///
+/// Registrations that declare DIFFERENT operations are not the same source
+/// for this purpose. 4.3.6.1: a source "may indicate that they are only
+/// willing to respond to a limited subset of API operations. Context Brokers
+/// shall respect this" — and the fold unions the entity and attribute scope,
+/// so an operation only one of them declared would then travel for the
+/// other's Entities. They stay separate instead, each filtered by `supports`
+/// on its own. The cost is one extra request to a source that registered
+/// itself twice with different operation lists and both lists cover the
+/// operation at hand; 4.5.5 merges the two answers by Entity id, so the
+/// caller sees the same data either way.
 fn merge_same_source(regs: Vec<FedReg>) -> Vec<FedReg> {
-    let mut out: Vec<FedReg> = Vec::new();
+    let mut out: Vec<(FedReg, std::collections::BTreeSet<&'static str>)> = Vec::new();
     for r in regs {
-        let same = out.iter_mut().find(|o| {
+        let ops = op_set(&r);
+        let same = out.iter_mut().find(|(o, o_ops)| {
             o.endpoint == r.endpoint
                 && o.mode == r.mode
                 && o.tenant == r.tenant
                 && o.alias == r.alias
                 && o.csi == r.csi
                 && o.local_only == r.local_only
+                && *o_ops == ops
         });
-        let Some(o) = same else {
-            out.push(r);
+        let Some((o, _)) = same else {
+            out.push((r, ops));
             continue;
         };
         o.attrs = match (o.attrs.take(), r.attrs) {
@@ -665,17 +690,12 @@ fn merge_same_source(regs: Vec<FedReg>) -> Vec<FedReg> {
             }
             _ => None,
         };
-        for x in r.ops {
-            if !o.ops.contains(&x) {
-                o.ops.push(x);
-            }
-        }
         o.ent_ids.extend(r.ent_ids);
         o.ent_types.extend(r.ent_types);
         o.ent_patterns.extend(r.ent_patterns);
         o.ent_unrestricted |= r.ent_unrestricted;
     }
-    out
+    out.into_iter().map(|(r, _)| r).collect()
 }
 
 /// contextSourceInfo keys the forward must NOT copy into headers: the tenant
@@ -3744,5 +3764,52 @@ mod same_source_merge {
         other_mode.mode = "exclusive".into();
         let merged = merge_same_source(vec![reg("urn:r:1", "http://a", None, &[]), other_mode]);
         assert_eq!(merged.len(), 2, "a different mode is a different forward");
+    }
+
+    /// 4.3.6.1: a source "may indicate that they are only willing to respond
+    /// to a limited subset of API operations. Context Brokers shall respect
+    /// this". The fold unions the entity and attribute scope, so folding two
+    /// registrations that declare different operations would send an
+    /// operation only one of them offered for the OTHER's Entities.
+    #[test]
+    fn registrations_of_one_source_that_offer_different_operations_do_not_fold() {
+        let mut reads = reg("urn:r:1", "http://a", None, &["Vehicle"]);
+        reads.ops = vec!["queryEntity".into()];
+        let mut writes = reg("urn:r:2", "http://a", None, &["Bike"]);
+        writes.ops = vec!["createEntity".into()];
+        let merged = merge_same_source(vec![reads, writes]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "a different operation subset is a different forward"
+        );
+        assert!(
+            merged[0].supports("queryEntity") && !merged[0].supports("createEntity"),
+            "the read registration must not gain the write registration's operation"
+        );
+        assert_eq!(
+            merged[0].ent_types,
+            ["Vehicle"],
+            "and must not gain its Entity scope either"
+        );
+
+        // the same subset written two ways is still one source: 5.2.9 lets
+        // `operations` name a group, and the default IS a group
+        let mut spelled_out = reg("urn:r:2", "http://a", None, &["Bike"]);
+        spelled_out.ops = antares_model::operations::group_members("federationOps")
+            .expect("the default group")
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let merged = merge_same_source(vec![
+            reg("urn:r:1", "http://a", None, &["Vehicle"]),
+            spelled_out,
+        ]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "federationOps and the names it stands for are one subset"
+        );
+        assert_eq!(merged[0].ent_types, ["Vehicle", "Bike"]);
     }
 }
