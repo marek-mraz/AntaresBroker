@@ -156,7 +156,9 @@ projecting the entities it carries.
 The `Operation` an engine is given names the clause, the ids, types and
 attributes the request selects, its `q`, `scopeQ` and geo query, and a
 write's body — every name already expanded, so an engine never has to
-carry a JSON-LD context. The `Subject` is the tenant plus the request
+carry a JSON-LD context. A batch is one operation carrying every Entity id
+its array names, asked once before any item is written, so a rule written
+over ids reaches the same verdict whichever surface the caller used. The `Subject` is the tenant plus the request
 headers `ANTARES_POLICY_SUBJECT_HEADERS` names, and it stays in this
 process: the seam strips those headers from every forwarded request and
 keeps them out of notifications, logs and dead letters.

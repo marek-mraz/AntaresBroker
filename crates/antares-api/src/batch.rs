@@ -660,12 +660,22 @@ async fn batch_write(
     let update_mode = has_option("update");
     let no_overwrite = has_option("noOverwrite");
     let items = parse_batch(st, &tenant, headers, body).await?;
+    let (spec, fwd_items) = batch_spec(&items);
     // ADR-0020: one verdict for the whole array, before any item is written
     // and before any forward — the batch is one operation (5.6.7 to 5.6.20)
-    // and a per-item gate would let half of it land on a refusal.
-    gate!(st, &tenant, headers, mode.clause()).await?;
-    // distributed batch (4.3.6): one forwarded request per matching source
-    let (spec, fwd_items) = batch_spec(&items);
+    // and a per-item gate would let half of it land on a refusal. The
+    // engine is given what the array names, the same members the
+    // single-Entity write hands it: an engine that decides by Entity id,
+    // type or Attribute has to reach the same verdict whether the request
+    // came one Entity at a time or as one array.
+    let gate_ids: Vec<&str> = spec.ids.iter().flatten().map(String::as_str).collect();
+    gate!(
+        st, &tenant, headers, mode.clause(),
+        ids: &gate_ids,
+        types: spec.types.as_deref().unwrap_or(&[]),
+        attrs: spec.attrs.as_deref().unwrap_or(&[]),
+    )
+    .await?;
     let fed_regs = match crate::federation::write_plan(
         st,
         &tenant,
@@ -1103,7 +1113,6 @@ pub async fn batch_delete(
         if ct != "application/json" && ct != "application/ld+json" {
             return Err(ApiError::Bare(StatusCode::UNSUPPORTED_MEDIA_TYPE));
         }
-        gate!(st, &tenant, &headers, "5.6.10").await?;
         let value: Value = serde_json::from_slice(&body)
             .map_err(|e| NgsiError::InvalidRequest(format!("body is not valid JSON: {e}")))?;
         let ids = value.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
@@ -1126,13 +1135,14 @@ pub async fn batch_delete(
             ))
             .into());
         }
+        // ADR-0020, as for the write batches: one verdict for the whole
+        // array, carrying the Entity ids it names. The body has to be read
+        // to know them, so the gate sits behind the parse the way the
+        // single-Entity delete sits behind its path parameter.
+        let gate_ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+        gate!(st, &tenant, &headers, "5.6.10", ids: &gate_ids).await?;
         let spec = crate::registry::CsrSpec {
-            ids: Some(
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect(),
-            ),
+            ids: Some(gate_ids.iter().map(|id| (*id).to_owned()).collect()),
             ..Default::default()
         };
         let regs = match crate::federation::write_plan(
