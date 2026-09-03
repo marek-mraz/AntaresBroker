@@ -16,6 +16,17 @@ witness is a unit test shows up as such (the [spec-statement
 table](conformance.md#spec-statement-coverage) is the clause-level view
 of the same question).
 
+The merged table's function columns count *source* functions, not compiled
+ones. An lcov tracefile names functions mangled, so one generic appears once
+per instantiation and one closure once per test binary that linked it — and a
+binary that never linked an instantiation records it as a miss. Counted that
+way the workspace has about twice as many functions as it has, half of them
+permanently uncovered, and the merged figure cannot be compared with the
+floors above. The table therefore keys a function by the start line of its
+`FN` record, which reproduces what `cargo llvm-cov --summary-only` reports to
+within a point. `dev/coverage-attribution.py --selftest` pins that, and
+`workspace.yml` runs it.
+
 ## Reading the uncovered lines
 
 Uncovered code falls into two kinds, and they call for different work:

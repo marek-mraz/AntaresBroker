@@ -204,6 +204,11 @@ jobs:
       # broken (an empty column reads as "nothing happened") — check them here.
       - name: ETSI sampling self-check
         run: python3 dev/etsi-selftest.py
+      # Same failure shape one layer over: the merged coverage table counts
+      # functions from lcov FN records, and a wrong key there prints a
+      # plausible percentage rather than an error.
+      - name: Coverage attribution self-check
+        run: python3 dev/coverage-attribution.py --selftest
       # Ledger integrity: a clause file that stops parsing silently
       # drops out of every count — make that (and status typos, robot drift)
       # a red build instead.

@@ -83,10 +83,20 @@ def per_crate_json(json_path):
 def per_crate_lcov(path):
     """lcov tracefile -> the same shape. The merge job's inputs are tracefiles:
     `lcov -a` unions the cells per line and per function, which per-file
-    summary counts cannot do."""
+    summary counts cannot do.
+
+    Functions are keyed by the FN record's START LINE, never by its name. A
+    tracefile names them mangled, so one generic function appears once per
+    instantiation and one closure once per test binary that linked it — and a
+    binary that never linked an instantiation reports it as a miss. Keyed by
+    name the workspace has about 9 400 "functions" of which half are never
+    called; keyed by line it has about 4 900, and the covered share matches
+    what `cargo llvm-cov --summary-only` gates on to within a point. The JSON
+    path needs none of this: llvm-cov's own summary already counts source
+    functions."""
     acc = {}
     crate = None
-    seen_lines, seen_fns = set(), {}
+    seen_lines, seen_fns, fn_line = set(), {}, {}
 
     def flush():
         if crate is None:
@@ -103,7 +113,7 @@ def per_crate_lcov(path):
         if line.startswith("SF:"):
             flush()
             crate = crate_of(line[3:])
-            seen_lines, seen_lines_hit, seen_fns = set(), {}, {}
+            seen_lines, seen_lines_hit, seen_fns, fn_line = set(), {}, {}, {}
         elif crate is None:
             continue
         elif line.startswith("DA:"):
@@ -111,11 +121,14 @@ def per_crate_lcov(path):
             seen_lines.add(ln)
             seen_lines_hit[ln] = seen_lines_hit.get(ln, False) or int(cnt) > 0
         elif line.startswith("FN:"):
-            name = line[3:].split(",", 1)[-1]
-            seen_fns.setdefault(name, False)
+            start, name = line[3:].split(",", 1)
+            fn_line[name] = start
+            seen_fns.setdefault(start, False)
         elif line.startswith("FNDA:"):
             cnt, name = line[5:].split(",", 1)
-            seen_fns[name] = seen_fns.get(name, False) or int(cnt) > 0
+            start = fn_line.get(name)
+            if start is not None:
+                seen_fns[start] = seen_fns.get(start, False) or int(cnt) > 0
     flush()
     return acc
 
@@ -165,7 +178,30 @@ def table(out_dir, sources):
     print(md, end="")
 
 
+def selftest():
+    """One generic function, two instantiations, one of them never called:
+    keyed by name that reads as 2 functions and 50 % covered, keyed by start
+    line as the 1 source function it is, covered."""
+    import tempfile
+
+    tracefile = (
+        "SF:/w/crates/antares-model/src/x.rs\n"
+        "FN:7,_ZN1f17hAAAE\nFN:7,_ZN1f17hBBBE\nFNDA:3,_ZN1f17hAAAE\n"
+        "FNDA:0,_ZN1f17hBBBE\nDA:7,3\nDA:8,0\nend_of_record\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".info", delete=False) as fh:
+        fh.write(tracefile)
+        path = fh.name
+    row = per_crate_lcov(path)["antares-model"]
+    Path(path).unlink()
+    assert row == [2, 1, 1, 1], row
+    print("selftest ok")
+
+
 def main():
+    if sys.argv[1:2] == ["--selftest"]:
+        selftest()
+        return
     if sys.argv[1:2] == ["--table"]:
         out_dir = Path(sys.argv[2])
         sources = []
