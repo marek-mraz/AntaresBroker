@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "antares-api",
  "antares-bus",
+ "antares-jsonld",
  "antares-model",
  "antares-plugin-example",
  "antares-sql",

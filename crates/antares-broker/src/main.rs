@@ -236,6 +236,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().any(|a| a == "--health") {
         return health_probe();
     }
+    // reqwest is built provider-less, so the FIRST client anything in this
+    // process builds decides whether it panics — and the OTLP exporter
+    // builds one inside `opentelemetry-http`, before any broker code runs.
+    // Installed here, ahead of telemetry, rather than only in
+    // `client_builder`, which a dependency does not call.
+    antares_jsonld::install_crypto_provider();
+
     // Tracing (fmt + env-gated OTLP [+ console feature]) and, with the
     // `telemetry` feature, the Prometheus recorder rendering /q/metrics.
     let metrics_render = telemetry::init()?;

@@ -21,7 +21,7 @@ pub use expand::{
     reject_first_level_nulls, valid_scope_value, ExpandOpts, RESERVED_MEMBERS,
 };
 pub use loader::{
-    allow_private_egress, client_builder, core_context, http_interaction, io_deadline, slow_factor,
-    with_timeouts, wrap_client, CtxUsage, EgressPolicy, HttpClient, Loader, CORE_CONTEXT,
-    INTERNAL_FETCH_HEADER, MAX_CONTEXT_URLS, MAX_REDIRECTS,
+    allow_private_egress, client_builder, core_context, http_interaction, install_crypto_provider,
+    io_deadline, slow_factor, with_timeouts, wrap_client, CtxUsage, EgressPolicy, HttpClient,
+    Loader, CORE_CONTEXT, INTERNAL_FETCH_HEADER, MAX_CONTEXT_URLS, MAX_REDIRECTS,
 };

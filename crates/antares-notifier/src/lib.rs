@@ -470,7 +470,11 @@ mod tests {
     fn every_shipped_sink_is_policed() {
         let mut reg = SinkRegistry::default();
         reg.register(Box::new(crate::HttpSink::new(
-            antares_jsonld::HttpClient::default(),
+            antares_jsonld::client_builder(antares_jsonld::EgressPolicy {
+                allow_private: true,
+            })
+            .build()
+            .expect("client"),
         )));
         #[cfg(feature = "mqtt")]
         reg.register(Box::new(crate::mqtt::MqttSink::default()));

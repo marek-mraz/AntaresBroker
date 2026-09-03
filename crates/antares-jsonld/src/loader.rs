@@ -394,8 +394,13 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// the workspace's only provider, so a second call here would be the same
 /// choice; the result is discarded because another crate installing the same
 /// provider first is success, not a conflict.
+///
+/// `client_builder` calls it, so every client this workspace builds is
+/// covered. It is public because a DEPENDENCY can build a client too — the
+/// OTLP exporter does, from inside `opentelemetry-http` — and a binary must
+/// therefore install the provider before it wires anything up.
 #[cfg(not(target_arch = "wasm32"))]
-fn install_crypto_provider() {
+pub fn install_crypto_provider() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();

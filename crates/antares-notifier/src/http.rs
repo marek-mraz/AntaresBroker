@@ -176,7 +176,13 @@ mod tests {
     }
 
     fn sink() -> HttpSink {
-        HttpSink::new(antares_jsonld::HttpClient::default())
+        HttpSink::new(
+            antares_jsonld::client_builder(antares_jsonld::EgressPolicy {
+                allow_private: true,
+            })
+            .build()
+            .expect("client"),
+        )
     }
 
     /// 6.3.8: json and geo+json carry the @context in a Link header,
