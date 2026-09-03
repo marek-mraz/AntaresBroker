@@ -514,9 +514,25 @@ fn temporal_key(s: &str) -> Option<String> {
         Some(i) => (&body[..i], &body[i + 1..]),
         None => (body, ""),
     };
-    // hh:mm:ss (Time) or YYYY-MM-DDThh:mm:ss (DateTime)
-    let shaped = matches!(base.len(), 8 | 19) && frac.len() <= 6;
-    (shaped && frac.bytes().all(|c| c.is_ascii_digit())).then(|| format!("{base}.{frac:0<6}"))
+    // hh:mm:ss (Time) or YYYY-MM-DDThh:mm:ss (DateTime). What counts as a
+    // DateTime is 4.6.3's shape, and it is decided by the one function every
+    // other layer asks: a length of nineteen is not a date, and treating an
+    // arbitrary nineteen-character string ending in Z as an instant is how a
+    // string range stops being a string range (4.9 p.92).
+    let shaped = match base.len() {
+        19 => antares_jsonld::parse_datetime(s),
+        // a Time carries no calendar part to validate, only its own shape
+        8 => base.bytes().enumerate().all(|(i, b)| {
+            if i == 2 || i == 5 {
+                b == b':'
+            } else {
+                b.is_ascii_digit()
+            }
+        }),
+        _ => false,
+    };
+    (shaped && frac.len() <= 6 && frac.bytes().all(|c| c.is_ascii_digit()))
+        .then(|| format!("{base}.{frac:0<6}"))
 }
 
 /// `t ∈ [lo, hi]`, both included (4.9 p.90). The parser guarantees both
@@ -1360,5 +1376,45 @@ mod tests {
                 "q={q} target={target}"
             );
         }
+    }
+}
+
+/// What the evaluator treats as an instant rather than as a string.
+#[cfg(test)]
+mod temporal_keys {
+    use super::*;
+
+    /// 4.9 p.92: a Range or an ordering over dates or times is an interval
+    /// on the temporal axis, and everything else is a string comparison.
+    /// Nineteen characters and a trailing `Z` are not a DateTime.
+    #[test]
+    fn only_a_real_instant_gets_a_temporal_key() {
+        for s in [
+            "2020-01-01T00:00:00Z",
+            "2020-01-01T00:00:00.5Z",
+            "2020-01-01T00:00:00,5Z",
+            "12:00:00Z",
+            "12:00:00.250Z",
+        ] {
+            assert!(temporal_key(s).is_some(), "{s} is an instant");
+        }
+        for s in [
+            "aaaaaaaaaaaaaaaaaaaZ",         // nineteen characters and a Z
+            "2020-01-01T00:00:00",          // no Z
+            "2020-13-01T00:00:00Z",         // no such month
+            "2020-01-01 00:00:00Z",         // no T
+            "99999999Z",                    // eight characters, no colons
+            "2020-01-01Z",                  // a Date is neither
+            "2020-01-01T00:00:00.1234567Z", // fraction past six digits
+            "",
+        ] {
+            assert!(temporal_key(s).is_none(), "{s:?} is not an instant");
+        }
+        // the key is the padded form, so string order is temporal order
+        assert_eq!(
+            temporal_key("2020-01-01T00:00:00,5Z"),
+            temporal_key("2020-01-01T00:00:00.500000Z")
+        );
+        assert!(temporal_key("2020-01-01T00:00:00Z") < temporal_key("2020-01-01T00:00:00.5Z"));
     }
 }
