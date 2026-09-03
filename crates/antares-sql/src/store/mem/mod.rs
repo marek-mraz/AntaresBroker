@@ -61,23 +61,13 @@ fn oldest_cached(contexts: &BTreeMap<String, Value>) -> Vec<String> {
 /// entity or temporal doc; an attribute whose last instance expired is
 /// removed entirely. Returns whether the doc changed.
 fn prune_expired_instances(doc: &mut Value, now: &str) -> bool {
-    const DOC_META: [&str; 8] = [
-        "id",
-        "type",
-        "scope",
-        "@context",
-        "createdAt",
-        "modifiedAt",
-        "deletedAt",
-        "expiresAt",
-    ];
     let Some(obj) = doc.as_object_mut() else {
         return false;
     };
     let mut changed = false;
     let attrs: Vec<String> = obj
         .keys()
-        .filter(|k| !DOC_META.contains(&k.as_str()))
+        .filter(|k| !antares_model::ENTITY_META_KEYS.contains(&k.as_str()))
         .cloned()
         .collect();
     for k in attrs {

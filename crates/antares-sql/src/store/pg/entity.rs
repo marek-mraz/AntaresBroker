@@ -157,27 +157,18 @@ fn change_event(
     // changed_attrs = top-level attribute IRIs that differ between the
     // before- and after-images (meta members excluded). Create lists every
     // attr, delete lists every prior attr.
-    let meta = [
-        "id",
-        "type",
-        "scope",
-        "createdAt",
-        "modifiedAt",
-        "deletedAt",
-        "expiresAt",
-    ];
-    fn keys<'a>(v: Option<&'a Value>, meta: &[&str]) -> Vec<&'a str> {
+    fn keys(v: Option<&Value>) -> Vec<&str> {
         v.and_then(Value::as_object)
             .map(|o| {
                 o.keys()
                     .map(String::as_str)
-                    .filter(|k| !meta.contains(k))
+                    .filter(|k| !antares_model::is_meta(k))
                     .collect()
             })
             .unwrap_or_default()
     }
     let mut changed: Vec<&str> = Vec::new();
-    for k in keys(prev, &meta).into_iter().chain(keys(next, &meta)) {
+    for k in keys(prev).into_iter().chain(keys(next)) {
         if !changed.contains(&k) && prev.and_then(|p| p.get(k)) != next.and_then(|n| n.get(k)) {
             changed.push(k);
         }

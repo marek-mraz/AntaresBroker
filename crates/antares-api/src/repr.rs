@@ -252,16 +252,7 @@ pub fn proj_depth(nodes: &[ProjNode]) -> usize {
 /// `conformance`, the registration-scope narrowing in `federation`. A layer
 /// with its own copy is a layer that will disagree with the others about
 /// what an attribute is.
-pub(crate) const ENTITY_META: &[&str] = &[
-    "id",
-    "type",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-    "@context",
-];
+pub(crate) const ENTITY_META: &[&str] = antares_model::ENTITY_META_KEYS;
 
 /// One node of a 4.21 attribute-projection expression; `children` carries a
 /// nested `{…}` selection (applied to linked entities on join).

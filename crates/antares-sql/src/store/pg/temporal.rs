@@ -48,16 +48,7 @@ use super::entity::types_scopes_stamps as extract;
 /// Entity-doc members that are NOT temporal attributes. `scope` may itself be
 /// instance-shaped (deletion instances, 020_19/20) — it lives in `meta`
 /// verbatim either way, exactly as the bridge kept it unpruned.
-const DOC_META: &[&str] = &[
-    "id",
-    "type",
-    "scope",
-    "@context",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-];
+const DOC_META: &[&str] = antares_model::ENTITY_META_KEYS;
 
 /// The meta-only document stored in `temporal_entities.meta`.
 fn meta_of(doc: &Value) -> Value {

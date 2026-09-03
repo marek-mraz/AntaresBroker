@@ -56,15 +56,34 @@ pub fn ordered_vec(v: &serde_json::Value) -> Vec<u8> {
 }
 
 /// 5.2.4 Entity, Table 5.2.4-1, with the common members of Table 5.2.2-1:
-/// the members of an Entity that are not Attributes — `id`, `type`,
-/// `scope`, `expiresAt`, `createdAt`, `modifiedAt`, `deletedAt`. Every
-/// other member is a Property or Relationship (`location` and the two
-/// other default GeoProperties included).
+/// the members of an Entity document that are not Attributes. Every other
+/// member is a Property or a Relationship (`location` and the two other
+/// default GeoProperties included), so this list is what every layer that
+/// has to tell an attribute from an entity member reads — the query
+/// projection, the notification diff, the temporal split, the outbox event.
+/// A layer with its own copy is a layer that will disagree with the others
+/// about what an attribute is.
+///
+/// `@context` is in the list because a stored or rendered document carries
+/// it and it is not an Attribute either. It is the one member Table 5.2.4-1
+/// does not name, which is why [`is_meta`] — the Entity's OWN members, the
+/// question 5.2.4 asks — leaves it out.
+pub const ENTITY_META_KEYS: &[&str] = &[
+    "id",
+    "type",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "expiresAt",
+    "@context",
+];
+
+/// The members of an Entity that are not Attributes — `id`, `type`,
+/// `scope`, `expiresAt`, `createdAt`, `modifiedAt`, `deletedAt`. See
+/// [`ENTITY_META_KEYS`] for the document-level list this narrows.
 pub fn is_meta(k: &str) -> bool {
-    matches!(
-        k,
-        "id" | "type" | "scope" | "createdAt" | "modifiedAt" | "deletedAt" | "expiresAt"
-    )
+    k != "@context" && ENTITY_META_KEYS.contains(&k)
 }
 
 /// Canonical lexicographic comparison key for a 4.6.3 DateTime: the trailing
@@ -171,5 +190,34 @@ mod tests {
             dt_key("2026-05-01T00:00:00,5Z"),
             "2026-05-01T00:00:00.500000"
         );
+    }
+
+    /// The two views of the same list stay one list: `is_meta` answers
+    /// Table 5.2.4-1's question — the Entity's OWN members — and
+    /// `ENTITY_META_KEYS` answers the document's, which is the same set plus
+    /// the `@context` a stored or rendered document carries.
+    #[test]
+    fn the_document_list_and_the_entity_list_agree() {
+        for k in super::ENTITY_META_KEYS {
+            assert_eq!(
+                super::is_meta(k),
+                *k != "@context",
+                "{k} is in the document list"
+            );
+        }
+        assert_eq!(
+            super::ENTITY_META_KEYS.len(),
+            8,
+            "seven Entity members plus @context"
+        );
+        for k in [
+            "location",
+            "speed",
+            "https://uri.etsi.org/ngsi-ld/default-context/x",
+            "",
+        ] {
+            assert!(!super::is_meta(k), "{k:?} is an Attribute, not a member");
+            assert!(!super::ENTITY_META_KEYS.contains(&k), "{k:?}");
+        }
     }
 }
