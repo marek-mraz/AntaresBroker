@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Registration matching over a registration document: the `CsrSpec`
 //! of a request or subscription, the 5.9 information/registration
 //! match (4.3.6.1), the csf and scope filters, the temporal interval

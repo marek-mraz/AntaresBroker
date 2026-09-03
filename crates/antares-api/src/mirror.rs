@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The tenant-keyed document mirrors the notification pipeline and the
 //! bus wiring share: a registration mirror, a subscription mirror with
 //! its inverted candidate index and sweep clocks, and the change event

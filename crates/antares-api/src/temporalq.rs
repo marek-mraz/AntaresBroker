@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The temporal query of a request: `TemporalQ` parsed from the
 //! timerel/timeAt/endTimeAt/timeproperty parameters (5.2.21, Table
 //! 5.2.21-1) and the instance match it defines (4.11).

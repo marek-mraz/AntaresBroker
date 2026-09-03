@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! The system attributes of a write: `createdAt`/`modifiedAt` on the
 //! entity and on every attribute instance (4.8, 5.2.4), stamped at the
 //! moment the operation is applied.

@@ -212,6 +212,12 @@ jobs:
 
       - name: Env-var docs check
         run: ./dev/check-env-docs.sh
+      # EUPL-1.2 is the licence the repository ships under; a source file
+      # without the line is one a downstream reader cannot place. The
+      # script existed and nothing ran it, so five files had drifted past
+      # it — which is what an unenforced check always turns into.
+      - name: Licence headers
+        run: ./dev/spdx-check.sh
       # The routes outside /ngsi-ld/v1 are the ones no clause describes, so
       # the book is the only place they exist. Read from the router, not
       # from a list kept by hand, so a new route cannot ship undocumented.

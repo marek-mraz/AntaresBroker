@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: EUPL-1.2
 //! Paging, ordering and the query-body parameters shared by every list
 //! operation: the limit/offset/count triple and the next/prev links
 //! (4.12, 6.3.10), entity ordering and ICU collation (4.23), the
