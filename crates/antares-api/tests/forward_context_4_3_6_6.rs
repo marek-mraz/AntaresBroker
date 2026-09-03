@@ -319,3 +319,60 @@ async fn a_delete_of_a_named_attribute_translates_its_path() {
         "`speed` under the registered @context is another Attribute entirely: {head}"
     );
 }
+
+/// A registered `@context` is client-supplied and binds terms this broker
+/// then writes into a forwarded request line. 4.3.6.6 asks for the Attribute
+/// the path names to be compacted with that context, and a context is free to
+/// bind the term `..` — which is not a name but a relative reference: RFC 3986
+/// clause 5.2.4 removes it together with the segment before it, so
+/// `/entities/{id}/attrs/..` is the Context Source's *Entity* resource and a
+/// forwarded 5.6.5 Delete Attribute would arrive there as a Delete Entity.
+///
+/// 4.6.2 gives an Attribute name a first letter, so no dot segment is one:
+/// the compacted form is refused the same way the client's own name is at the
+/// door, and the request stays in the `@context` its names are already in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_context_cannot_rename_an_attribute_into_a_dot_segment() {
+    let st = state();
+    let doc = r#"{"@context":{"..":"https://uri.etsi.org/ngsi-ld/default-context/speed"}}"#;
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{doc}",
+        doc.len()
+    );
+    let ctx = format!("http://127.0.0.1:{}/ctx.jsonld", serve(reply));
+    let m = mock_source();
+    register(&st, m.port, &ctx, &["deleteAttrs"]).await;
+
+    let (status, body) = send(
+        &st,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{ENTITY}/attrs/speed"),
+        None,
+    )
+    .await;
+    assert!(status < 400, "delete attribute: {status} {body}");
+
+    let head = m.head.lock().expect("lock").clone();
+    assert!(!head.is_empty(), "the delete must reach the Context Source");
+    let target = target_of(&head);
+    let named = target
+        .rsplit_once("/attrs/")
+        .map(|(_, seg)| seg.split('/').next().unwrap_or_default().to_owned());
+    assert_eq!(
+        named.as_deref(),
+        Some("speed"),
+        "the forward names the Attribute the client named: {head}"
+    );
+    assert!(
+        target.contains(&format!("/entities/{ENTITY}/attrs/")),
+        "the request must still address the Attribute resource: {head}"
+    );
+    // …and, the request not being expressible in the registered context, it
+    // travels in the one its names ARE in (the positive control above shows
+    // the registered context is advertised when the compaction does hold).
+    assert!(
+        !link_of(&head).unwrap_or_default().contains(&ctx),
+        "an untranslated request must not advertise the registered context: {head}"
+    );
+}

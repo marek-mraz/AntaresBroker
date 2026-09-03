@@ -108,9 +108,16 @@ pub fn check_attr_name(attr: &str) -> Result<(), NgsiError> {
 /// path dot-segment (RFC 3986 clause 5.2.4). The name is interpolated into the
 /// request URLs of forwarded operations, where a `.`/`..` segment addresses a
 /// different resource of the registration endpoint — `/entities/{id}/attrs/..`
-/// is that endpoint's Entity resource. Percent triplets are folded once first,
-/// because the endpoint decodes the path it is given.
-fn has_dot_segment(attr: &str) -> bool {
+/// is that endpoint's Entity resource, and a URL parser resolves the segment
+/// before the request leaves this process. Percent triplets are folded once
+/// first, because the endpoint decodes the path it is given.
+///
+/// The name a client sends is checked by [`check_attr_name`], but that is not
+/// the only form that reaches a path: 4.3.6.6 compacts the name again with a
+/// registered `@context`, which is client-supplied and may bind any term. The
+/// compacted form is held to this same rule before it is written into a
+/// forwarded URL.
+pub fn has_dot_segment(attr: &str) -> bool {
     attr.to_ascii_lowercase()
         .replace("%2e", ".")
         .replace("%2f", "/")

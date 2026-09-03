@@ -958,7 +958,23 @@ pub async fn forward(
             // whole request stays in the @context its names are already in.
             let path_swap = match path_attr_segment(&url) {
                 Some((range, name)) => match antares_jsonld::expand_attr_name(&name, &orig) {
-                    Ok(iri) => Some((range, path_segment(&target.compact_iri(&iri)))),
+                    // The compacted term is written into the request PATH, so
+                    // it is held to the rule the client's own name was held to
+                    // at the door (`antares_model::check_attr_name`): a `.` or
+                    // `..` segment names a different resource of the Context
+                    // Source endpoint, and a URL parser resolves it before the
+                    // request is sent. A registered @context is client-supplied
+                    // and may bind any term, so a term that is a dot segment
+                    // means the request cannot be expressed in that context.
+                    Ok(iri) => {
+                        let term = target.compact_iri(&iri);
+                        if antares_model::has_dot_segment(&term) {
+                            can_switch = false;
+                            None
+                        } else {
+                            Some((range, path_segment(&term)))
+                        }
+                    }
                     Err(_) => {
                         can_switch = false;
                         None
