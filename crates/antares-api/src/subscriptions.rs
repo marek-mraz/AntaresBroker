@@ -754,7 +754,16 @@ pub async fn create(
     let obj = parsed.object(NgsiError::BadRequestData(
         "subscription must be a JSON object".into(),
     ))?;
-    gate!(st, &tenant, headers, clause_of(kind, "5.8.1", "5.11.2")).await?;
+    // ADR-0020: the client may choose the id (5.8.1.4 / 5.11.2.4), and it is
+    // in hand here — an engine that owns a segment of the id space has to be
+    // told which one is being claimed. A body that names none leaves the
+    // list empty, which is right: there is no client choice to decide about.
+    let named = obj.get("id").and_then(Value::as_str);
+    gate!(
+        st, &tenant, headers, clause_of(kind, "5.8.1", "5.11.2"),
+        ids: named.as_slice(),
+    )
+    .await?;
     let mut norm = normalize_subscription(obj, &parsed.ctx, false)?;
     check_endpoint(st, &norm)?;
     check_jsonld_context(st, &tenant, &norm).await?;

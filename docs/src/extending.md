@@ -158,7 +158,11 @@ attributes the request selects, its `q`, `scopeQ` and geo query, and a
 write's body — every name already expanded, so an engine never has to
 carry a JSON-LD context. A batch is one operation carrying every Entity id
 its array names, asked once before any item is written, so a rule written
-over ids reaches the same verdict whichever surface the caller used. The `Subject` is the tenant plus the request
+over ids reaches the same verdict whichever surface the caller used. The
+same holds for the resources that are not Entities: a Subscription, a
+Context Source Registration, a Snapshot, an EntityMap or a stored
+`@context` is named by its own id, whether the request carries it in the
+path or chose it in the body of a create. The `Subject` is the tenant plus the request
 headers `ANTARES_POLICY_SUBJECT_HEADERS` names, and it stays in this
 process: the seam strips those headers from every forwarded request and
 keeps them out of notifications, logs and dead letters.

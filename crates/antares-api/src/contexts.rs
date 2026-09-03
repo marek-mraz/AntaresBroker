@@ -387,7 +387,7 @@ pub async fn serve_context(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["details", "local"])?;
-        gate!(st, &tenant, &headers, "5.13.4").await?;
+        gate!(st, &tenant, &headers, "5.13.4", ids: &[&id]).await?;
         let details = details_param(&params)?;
         let entry = find_entry(&st, &tenant, &id)
             .await?
@@ -475,7 +475,7 @@ pub async fn delete_context(
     let go = async {
         let tenant = tenant_from(&headers)?;
         check_params(&params, &["reload", "local"])?;
-        gate!(st, &tenant, &headers, "5.13.5").await?;
+        gate!(st, &tenant, &headers, "5.13.5", ids: &[&id]).await?;
 
         let reload = reload_param(&params)?;
         let entry = find_entry(&st, &tenant, &id).await?;

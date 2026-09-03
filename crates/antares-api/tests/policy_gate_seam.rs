@@ -49,6 +49,26 @@ impl PolicyEngine for Counting {
     }
 }
 
+/// An engine that records the ids of every operation it is asked about.
+struct Recording(Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+impl PolicyEngine for Recording {
+    fn name(&self) -> &str {
+        "recording"
+    }
+
+    fn decide<'a>(&'a self, _s: &'a Subject, op: &'a Operation<'a>) -> DecisionFuture<'a> {
+        if let Ok(mut v) = self.0.lock() {
+            v.push(op.ids.iter().map(|id| (*id).to_owned()).collect());
+        }
+        Box::pin(std::future::ready(Decision::Allow))
+    }
+
+    fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+        NotifyDecision::Deliver
+    }
+}
+
 /// The two router entries that are not operations: `PATCH`/`PUT /entities`
 /// exist only to answer "an Entity id is required" (5.6.x address the
 /// resource `/entities/{id}`), so there is nothing for an engine to decide
@@ -296,4 +316,92 @@ async fn the_subject_carries_no_header_the_deployment_did_not_name() {
         seen.is_empty(),
         "the subject carried headers no deployment named: {seen:?}"
     );
+}
+
+/// A route whose path names a resource tells the engine which one.
+///
+/// ADR-0020 gives the engine "the ids ... the request selects", and a rule
+/// that reads them is how a deployment splits one broker between
+/// organizations. A handler that holds the id and gates without it does not
+/// fail: it silently hands every engine the empty list, so a rule written
+/// over ids allows what it was written to refuse. That is a bypass reachable
+/// from a socket, and it is invisible to a test that only counts the calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_route_that_names_a_resource_tells_the_engine_which_one() {
+    let mut missing = Vec::new();
+    let mut checked = 0;
+    for (method, path) in declared_routes() {
+        if !path.contains("{id}") || EXEMPT.contains(&(method.as_str(), path.as_str())) {
+            continue;
+        }
+        let want = concrete("{id}");
+        let seen: Arc<std::sync::Mutex<Vec<Vec<String>>>> = Arc::default();
+        let st = AppState::new("me".into()).with_policy(Arc::new(Recording(seen.clone())));
+        let _ = antares_api::router(st)
+            .oneshot(request_for(&method, &path))
+            .await
+            .expect("response");
+        checked += 1;
+        let asked = seen.lock().expect("lock").clone();
+        if !asked.iter().any(|ids| ids.contains(&want)) {
+            missing.push(format!("{method} {path}: engine was told {asked:?}"));
+        }
+    }
+    assert!(checked > 20, "the route walk found only {checked} routes");
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+/// A create whose body names the id tells the engine that id too.
+///
+/// 5.8.1, 5.9.2 and 5.11.2 let the client choose the identifier of the
+/// resource it is creating, and both handlers have the parsed body in hand
+/// when they gate. An engine that owns a segment of the id space has to see
+/// that id, or a caller creates a Subscription or a Context Source
+/// Registration under another organization's name and the rule that was
+/// written to stop it never sees one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_create_that_names_its_own_id_tells_the_engine_that_id() {
+    for (path, doc) in [
+        (
+            "/subscriptions",
+            json!({"id": "urn:ngsi-ld:Subscription:policy:1", "type": "Subscription",
+                   "entities": [{"type": "Vehicle"}],
+                   "notification": {"endpoint": {"uri": "http://sink.invalid/n"}}}),
+        ),
+        (
+            "/csourceSubscriptions",
+            json!({"id": "urn:ngsi-ld:Subscription:policy:1", "type": "Subscription",
+                   "entities": [{"type": "ContextSourceRegistration"}],
+                   "notification": {"endpoint": {"uri": "http://sink.invalid/n"}}}),
+        ),
+        (
+            "/csourceRegistrations",
+            json!({"id": "urn:ngsi-ld:ContextSourceRegistration:policy:1",
+                   "type": "ContextSourceRegistration",
+                   "information": [{"entities": [{"type": "Vehicle"}]}],
+                   "endpoint": "http://csr.invalid/"}),
+        ),
+    ] {
+        let want = doc["id"].as_str().expect("id").to_owned();
+        let payload = doc.to_string();
+        let seen: Arc<std::sync::Mutex<Vec<Vec<String>>>> = Arc::default();
+        let st = AppState::new("me".into()).with_policy(Arc::new(Recording(seen.clone())));
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/ngsi-ld/v1{path}"))
+            .header("Content-Type", "application/json")
+            .header("Content-Length", payload.len())
+            .body(Body::from(payload))
+            .expect("request");
+        let resp = antares_api::router(st)
+            .oneshot(req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::CREATED, "POST {path}");
+        let asked = seen.lock().expect("lock").clone();
+        assert!(
+            asked.iter().any(|ids| ids.contains(&want)),
+            "POST {path}: engine was told {asked:?}"
+        );
+    }
 }

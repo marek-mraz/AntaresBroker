@@ -933,7 +933,10 @@ pub async fn create_registration(
         let obj = parsed.value.as_object().ok_or_else(|| {
             NgsiError::BadRequestData("registration must be a JSON object".into())
         })?;
-        gate!(st, &tenant, &headers, "5.9.2").await?;
+        // ADR-0020: 5.9.2 lets the client choose the registration id, and
+        // it is in hand here — see the same note on subscription create.
+        let named = obj.get("id").and_then(Value::as_str);
+        gate!(st, &tenant, &headers, "5.9.2", ids: named.as_slice()).await?;
         let mut norm = normalize_registration(obj, &parsed.ctx, false)?;
         let id = match norm.get("id").and_then(Value::as_str) {
             Some(id) => id.to_owned(),
