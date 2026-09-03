@@ -969,7 +969,7 @@ pub(crate) async fn process_changes(st: &AppState, changes: Vec<Change>) {
         for g in groups {
             let st = st.clone();
             set.spawn(async move {
-                let _permit = DELIVERY_SLOTS.acquire().await;
+                let _permits = delivery_permits(&g.tenant).await;
                 deliver(&st, &g.tenant, &g.sub, g.data, &g.ctx).await;
             });
         }
@@ -1005,6 +1005,51 @@ fn note_drop() {
 const DELIVERY_WIDTH: usize = 64;
 #[cfg(not(target_arch = "wasm32"))]
 static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(DELIVERY_WIDTH);
+
+/// Of that width, what one tenant may hold. A Subscription belongs to one
+/// tenant (5.2.12), and a delivery to an endpoint that accepts and never
+/// answers holds its slot for the endpoint's whole timeout — up to 30 s
+/// (Table 5.2.15-1). Sharing the width with no per-tenant bound, a single
+/// tenant with enough dead endpoints holds every slot and nothing leaves
+/// the broker for anyone else. The share is a fraction of the width and not
+/// a fair split of it: a tenant delivering alone still gets several slots,
+/// and eight of them is what a full width of 64 divides into before the
+/// per-tenant queue becomes the bottleneck for an ordinary fan-out.
+const DELIVERY_WIDTH_PER_TENANT: usize = 8;
+
+#[cfg(not(target_arch = "wasm32"))]
+type TenantSlots = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>;
+#[cfg(not(target_arch = "wasm32"))]
+static TENANT_SLOTS: std::sync::LazyLock<TenantSlots> =
+    std::sync::LazyLock::new(TenantSlots::default);
+
+/// The tenant's share, created on first use. An entry lives only while a
+/// delivery is holding it: a lookup that has to create one first drops every
+/// entry nothing else still references, so this map is bounded by the
+/// delivery width and not by how many of the broker's 10 000 tenants have
+/// ever had a subscription fire.
+#[cfg(not(target_arch = "wasm32"))]
+fn tenant_slots(tenant: &TenantId) -> Arc<tokio::sync::Semaphore> {
+    // A poisoned map is a panic in some past delivery, not a reason to stop
+    // delivering: what it holds is rebuildable and bounded either way.
+    let mut map = TENANT_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(s) = map.get(tenant.as_str()) {
+        return Arc::clone(s);
+    }
+    map.retain(|_, s| Arc::strong_count(s) > 1);
+    let slots = Arc::new(tokio::sync::Semaphore::new(DELIVERY_WIDTH_PER_TENANT));
+    map.insert(tenant.as_str().to_owned(), Arc::clone(&slots));
+    slots
+}
+
+/// Both permits one delivery holds until it settles. The tenant's share is
+/// taken first, so a tenant already at its share waits there instead of
+/// waiting inside one of the broker's slots.
+#[cfg(not(target_arch = "wasm32"))]
+async fn delivery_permits(tenant: &TenantId) -> impl Sized {
+    let share = tenant_slots(tenant).acquire_owned().await;
+    (share, DELIVERY_SLOTS.acquire().await)
+}
 
 async fn matches_for(
     st: &AppState,
@@ -1399,7 +1444,7 @@ pub async fn interval_tick(st: &AppState) {
             {
                 let (st, tenant, ctx) = (st.clone(), tenant.clone(), Arc::clone(&ctx));
                 sending.spawn(async move {
-                    let _permit = DELIVERY_SLOTS.acquire().await;
+                    let _permits = delivery_permits(&tenant).await;
                     deliver(&st, &tenant, &sub, matching, &ctx).await;
                 });
             }
@@ -4853,5 +4898,91 @@ mod stable_comparison {
         assert!(stable_eq(&json!(null), &json!(null)));
         assert!(!stable_eq(&json!({}), &json!([])));
         assert!(!stable_eq(&json!(1), &json!("1")));
+    }
+}
+
+/// How much of the notification width one tenant may hold.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod delivery_share {
+    use super::*;
+
+    /// A Subscription belongs to one tenant (5.2.12), and a delivery to an
+    /// endpoint that accepts and never answers holds its slot until the
+    /// endpoint's timeout expires — up to 30 s (Table 5.2.15-1). A tenant
+    /// that points more subscriptions than the whole width at such an
+    /// endpoint would, with one width shared broker-wide, hold every slot
+    /// for that long and stop every other tenant's notifications. A tenant
+    /// therefore takes a share of the width, never all of it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_tenant_takes_a_share_of_the_delivery_width_not_all_of_it() {
+        crate::allow_private();
+        // accepts and never answers: each connection is held for the whole
+        // endpoint timeout, so the connections open at once ARE the
+        // deliveries in flight
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let opened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&opened);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s);
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let st = AppState::new("antares-share-test".into());
+        let tenant = TenantId::new("hog").expect("tenant");
+        st.store
+            .create(
+                &tenant,
+                Kind::Entity,
+                "urn:ngsi-ld:Vehicle:share",
+                json!({
+                    "id": "urn:ngsi-ld:Vehicle:share",
+                    "type": ["https://uri.etsi.org/ngsi-ld/default-context/Vehicle"],
+                }),
+            )
+            .expect("seed entity");
+        // more subscriptions than the whole width, so an unbounded tenant
+        // would hold every slot
+        let subs = DELIVERY_WIDTH + DELIVERY_WIDTH_PER_TENANT;
+        for i in 0..subs {
+            let id = format!("urn:ngsi-ld:Subscription:share-{i}");
+            st.store
+                .create(
+                    &tenant,
+                    Kind::Subscription,
+                    &id,
+                    json!({
+                        "id": id,
+                        "type": "Subscription",
+                        "status": "active",
+                        "timeInterval": 1,
+                        "createdAt": "2020-01-01T00:00:00Z",
+                        "entities": [{
+                            "type": "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"
+                        }],
+                        // long enough that nothing in the first round has
+                        // timed out and freed its slot while this is counted
+                        "notification": {"endpoint": {
+                            "uri": format!("http://{addr}/notify"),
+                            "timeout": 30_000,
+                        }},
+                    }),
+                )
+                .expect("seed subscription");
+        }
+        let sweep = tokio::spawn(async move { interval_tick(&st).await });
+        let settle = 400 * crate::state::slow_factor();
+        tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
+        let in_flight = opened.load(std::sync::atomic::Ordering::SeqCst);
+        sweep.abort();
+        assert!(in_flight > 0, "the sweep delivered nothing at all");
+        assert!(
+            in_flight <= DELIVERY_WIDTH_PER_TENANT,
+            "one tenant held {in_flight} of the {DELIVERY_WIDTH} delivery slots"
+        );
     }
 }

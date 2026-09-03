@@ -152,6 +152,16 @@ the rest of the tenant. Egress-policy refusals (private ranges, blocked
 schemes) are never retried and never dead-lettered: a policy verdict is
 not a transport failure.
 
+The notifications in flight at one moment are bounded broker-wide, and one
+tenant may hold only a share of that bound. A subscription belongs to one
+tenant, and a delivery to an endpoint that accepts the connection and never
+answers holds its slot until `endpoint.timeout` expires — up to 30 seconds.
+Without the per-tenant share, one tenant pointing enough subscriptions at
+dead endpoints would hold every slot for that long and nothing would leave
+the broker for anybody else. The share is a fraction of the bound rather
+than an equal split of it, so a tenant delivering alone still runs several
+notifications at once.
+
 ## Backup and restore, per store mode
 
 | Mode | Backup |
