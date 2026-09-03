@@ -122,14 +122,14 @@ pub fn narrow_projection(
     ctx: &Context,
 ) -> Result<(), NgsiError> {
     if !f.omit.is_empty() {
-        let mut nodes = policy_nodes(&f.omit, ctx);
+        let mut nodes = policy_nodes(&f.omit);
         match omit {
             Some(own) => own.append(&mut nodes),
             None => *omit = Some(nodes),
         }
     }
     if !f.pick.is_empty() {
-        let allowed = policy_nodes(&f.pick, ctx);
+        let allowed = policy_nodes(&f.pick);
         let mut kept = match pick.take() {
             None => allowed,
             Some(own) => own
@@ -158,7 +158,7 @@ pub fn narrow_projection(
 /// rather than silently matching nothing.
 pub fn compacted_filter(f: &crate::policy::Filter, ctx: &Context) -> crate::policy::Filter {
     let names = |raw: &[String]| -> Vec<String> {
-        policy_nodes(raw, ctx)
+        policy_nodes(raw)
             .iter()
             .map(|n| ctx.compact_iri(&n.iri))
             .collect()
@@ -170,8 +170,20 @@ pub fn compacted_filter(f: &crate::policy::Filter, ctx: &Context) -> crate::poli
     }
 }
 
-/// A policy's `pick`/`omit` names as projection nodes, expanded against the
-/// request's own `@context`.
+/// The `@context` a policy name is read in. Deliberately NOT the request's:
+/// [`antares_jsonld::Context::expand_key`] consults the term map before it
+/// decides a name is already an IRI, so a caller that binds the term a rule
+/// names — or binds the rule's own IRI as a term, which its own inline
+/// `@context` is enough to do — would move the rule off its target and walk
+/// out of the narrowing. A deployment's rule means the same thing whatever
+/// the caller sends. ADR-0020 asks an engine to write its rules as IRIs and
+/// those pass through unchanged; a short name is read here the way a name a
+/// request does not define is read anywhere else.
+static POLICY_CONTEXT: std::sync::LazyLock<Context> =
+    std::sync::LazyLock::new(antares_jsonld::core_context);
+
+/// A policy's `pick`/`omit` names as projection nodes, expanded against
+/// [`POLICY_CONTEXT`].
 ///
 /// Deliberately NOT the 4.21 parser: 6.5.3.1 lets those members name `"id"`,
 /// `"type"`, `"scope"` or one projected Attribute, and ADR-0020 asks an
@@ -180,12 +192,12 @@ pub fn compacted_filter(f: &crate::policy::Filter, ctx: &Context) -> crate::poli
 /// that grammar becomes the member `https://uri` and removes nothing. An
 /// engine names one member; it is expanded, and both forms of the name are
 /// kept so the projection matches a document whichever form its keys are in.
-fn policy_nodes(names: &[String], ctx: &Context) -> Vec<ProjNode> {
+fn policy_nodes(names: &[String]) -> Vec<ProjNode> {
     names
         .iter()
         .map(|n| ProjNode {
             raw: n.clone(),
-            iri: ctx.expand_key(n),
+            iri: POLICY_CONTEXT.expand_key(n),
             children: None,
         })
         .collect()

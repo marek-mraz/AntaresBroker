@@ -83,11 +83,18 @@ string, so the precedence trap a gateway rewrite has to distribute around
 cannot occur. Narrowing is silent: a caller cannot tell a hidden entity
 from an absent one, and a retrieve of a hidden entity is 404.
 
-A `pick`/`omit` name is expanded against the request's own `@context`, so
-an engine may write it either as a short name or as the IRI this decision
-asks for; it is one Attribute name (6.5.3.1), not a 4.21 projection
+A `pick`/`omit` name is one Attribute name (6.5.3.1), not a 4.21 projection
 expression, because that grammar reads a dot as the sub-attribute path
-separator and would truncate an IRI at the first dot of its authority.
+separator and would truncate an IRI at the first dot of its authority. It is
+read in the CORE `@context` and never in the request's own: `expand_key`
+consults the term map before it decides a name is already an IRI, so a
+caller that binds the rule's term — or the rule's IRI, as a term, which an
+inline `@context` on a Query body is enough to do — would move the rule off
+its target and walk out of the narrowing. A rule belongs to the deployment
+and means the same thing whatever the caller sends. Write it as the IRI and
+it passes through unchanged; write it as a short name and it is read the way
+a name the request does not define is read anywhere else, which covers the
+default `@context` and nothing more.
 
 **What a notification answer may be.** `pre_notify` narrows by projection
 only. `Drop` is not a failed delivery: 5.11.7 moves `notification.timesSent`

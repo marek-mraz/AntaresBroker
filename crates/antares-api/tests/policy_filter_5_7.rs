@@ -603,3 +603,66 @@ async fn a_peer_that_ignores_the_forwarded_narrowing_still_does_not_widen_it() {
         "a peer's answer outside the narrowing was served: {list}"
     );
 }
+
+/// A policy name is the deployment's, not the caller's. 4.21 names a member,
+/// and which member a name IS depends on the `@context` it is read in —
+/// `Context::expand_key` consults the term map before it decides a name is
+/// already an IRI, so a request that binds the rule's term (or the rule's
+/// own IRI, as a term) in its own inline `@context` would otherwise move the
+/// rule onto a member the document does not have and remove nothing. 5.5.7
+/// makes the Fully Qualified Name the identity of an Attribute; the seam
+/// reads its rules in the core `@context`, where a caller cannot reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_context_cannot_move_a_policy_name_off_its_target() {
+    let st = state(Filter {
+        omit: vec!["colour".into()],
+        ..Filter::default()
+    });
+    let (status, _) = send(
+        &st,
+        "POST",
+        "/ngsi-ld/v1/entities",
+        Some(json!({
+            "id": "urn:ngsi-ld:Vehicle:decoy",
+            "type": "Vehicle",
+            "colour": {"type": "Property", "value": "red"},
+            "speed": {"type": "Property", "value": 10}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // the caller binds the very term the rule names to somewhere else; an
+    // inline @context travels with ld+json (6.3.5), so the request is built
+    // here rather than through the json helper above
+    let payload = json!({
+        "@context": {"colour": "http://decoy.invalid/colour"},
+        "type": "Query",
+        "entities": [{"type": "Vehicle"}]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entityOperations/query")
+        .header("Content-Type", "application/ld+json")
+        .header("Content-Length", payload.len())
+        .body(Body::from(payload))
+        .expect("request");
+    let resp = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = body.to_string();
+    assert!(
+        !text.contains("red"),
+        "the policy still removes the member it names: {text}"
+    );
+    assert!(
+        text.contains("urn:ngsi-ld:Vehicle:decoy"),
+        "the Entity itself is still answered: {text}"
+    );
+}
