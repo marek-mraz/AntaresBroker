@@ -134,6 +134,87 @@ Adding one is a struct implementing the trait plus an entry in
 `SURFACE_SHELF` (`crates/antares-broker/src/main.rs`); no core crate
 changes.
 
+### Policy engines
+
+`PolicyEngine` (`crates/antares-api/src/policy.rs`) is the authorization
+seam, and it is the narrowest of the five on purpose. Authentication, rate
+limiting and request transforms belong to the gateway in front of the
+broker (SECURITY.md says so, and ADR-0020 records why); what a gateway
+cannot do from outside is narrow the query the store runs, project one
+subscription's notification, and filter a federated result before it is
+rendered. Those three are what an engine is for.
+
+An engine answers two questions. `decide` is asked once per operation and
+returns `Allow`, `Deny(reason)` — a `403` carrying
+`urn:antares:error:AccessDenied`, this broker's own URN because Table
+6.3.2-1 names no access-denied error — or `Filter`, the narrowing the
+answer is built under. `pre_notify` is asked once per notification, just
+before it is sent, and returns `Deliver`, `Drop` (no delivery attempt at
+all: `timesSent` and `lastNotification` do not move) or a `Filter`
+projecting the entities it carries.
+
+The `Operation` an engine is given names the clause, the ids, types and
+attributes the request selects, its `q`, `scopeQ` and geo query, and a
+write's body — every name already expanded, so an engine never has to
+carry a JSON-LD context. The `Subject` is the tenant plus the request
+headers `ANTARES_POLICY_SUBJECT_HEADERS` names, and it stays in this
+process: the seam strips those headers from every forwarded request and
+keeps them out of notifications, logs and dead letters.
+
+A `Filter` may only narrow. Its `q` and `scopeQ` are conjoined into the
+condition the store already had, and its `pick`/`omit` project members out
+of what is served; there is no member it can add and no row it can widen
+the answer to. Set `restricted` and a narrowed read answers
+`Antares-Results-Restricted: true`, so an operator can tell a short answer
+from an empty one. Three limits are the seam's, not the engine's: an
+operation over everything the tenant holds — delete-by-type, purge, the
+whole-tenant snapshot clauses — is `Allow` or `Deny` and never a `Filter`,
+because doing it to less than it says is a data-loss bug; a `Filter` on a
+notification carrying a `q` is a `Drop`, because the broker cannot re-run a
+query there and must not report a narrowing it did not apply; and an engine
+that panics or overruns `ANTARES_POLICY_TIMEOUT_MS` is a `Deny`. Fail
+closed is the whole posture: a deployment that wires in a broken engine
+loses service, never its access rules.
+
+`ANTARES_POLICY` names the engine, `allow-all` by default. That built-in
+engine decides nothing, and it is the one the shipped image and every CI
+gate run — conformance is asserted against it, never against an addon.
+An unknown name is fatal at startup and lists the shelf the binary was
+built with, so a typo cannot quietly serve every request wide open.
+
+Adding one is a struct implementing the trait plus an entry in
+`POLICY_SHELF` (`crates/antares-broker/src/main.rs`); no core crate
+changes. Hold it to `antares_api::policy::run_policy_contract` (behind the
+`test-kit` feature) from the crate's own tests: it asserts through the seam
+the three things an engine can get wrong — it stops answering, it hands
+back an answer the seam has to override, or it puts a member into an answer
+that was not there.
+
+`examples/plugin-example/src/policy.rs` is the worked one. Its rules are a
+JSON document named by `ANTARES_POLICY_RULES`, one entry per tenant:
+
+```json
+{
+  "acme": {
+    "denyTypes": ["Secret"],
+    "omit": ["price"],
+    "q": "speed<100"
+  }
+}
+```
+
+A tenant with no entry is unrestricted. `denyTypes` refuses any operation
+naming those Entity types — the request's own selector and a write's body
+type, matched against the short name or the expanded IRI; `omit` drops
+those Attributes from every document served and every notification sent;
+`q` is conjoined into every query that tenant runs. Rules are read once, at
+startup, and rules the engine cannot read make it refuse everything rather
+than allow everything. `examples/plugin-example/tests/policy.rs` runs the
+contract and then answers real requests through the router;
+`ngsi-ld-test-suite/AntaresSpecificTests/policy_engine.robot` does the same
+against a running broker, and `.github/workflows/examples.yml` runs the
+conformance suite on `allow-all` and that folder on the engine, in one job.
+
 ### How to add a storage backend
 
 `examples/plugin-example` is the worked answer: a crate outside `crates/`

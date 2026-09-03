@@ -5,6 +5,13 @@ places that check each other: the clause ledger in `docs/spec/`, and the
 ETSI Robot Framework suite vendored at `ngsi-ld-test-suite/`, run in a
 matrix of store modes on every push.
 
+Every claim on this page is a claim about the broker as it ships: the
+built-in `allow-all` policy engine, no addon crate, no feature this
+repository leaves off by default. A deployment that attaches its own
+policy engine ([Policy engines](extending.md#policy-engines)) narrows what
+its callers are answered with, and the conformance statement no longer
+describes what those callers see.
+
 ## The ledger
 
 `docs/spec/` holds one file per clause of CIM 009, 947 files, each

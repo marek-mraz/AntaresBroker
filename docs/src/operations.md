@@ -65,7 +65,7 @@ concurrency the database can actually serve, never to buy speed.
 
 Size it from the database, not from the broker:
 
-```
+```text
 ANTARES_PG_POOL  <=  (max_connections - superuser_reserved_connections - other clients)
                      / number of broker replicas
 ```
