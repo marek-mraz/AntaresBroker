@@ -129,6 +129,7 @@ jobs:
             --fail-under-lines 75 --fail-under-functions 73 > unit-cov.txt || rc=$?
           { echo "### Coverage floor — unit (lib + bins)"; echo '```'
             cat unit-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --lcov --output-path unit.lcov || true
           exit $rc
       # Named packages rather than --workspace: a package with no tests/
       # directory has no target matching the glob and cargo refuses the whole
@@ -143,7 +144,26 @@ jobs:
             --fail-under-lines 63 --fail-under-functions 64 > api-cov.txt || rc=$?
           { echo "### Coverage floor — api (integration binaries)"; echo '```'
             cat api-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --lcov --output-path api.lcov || true
           exit $rc
+      # The two lcov files say WHICH lines and functions no test reached, so
+      # the next test can be written against a name instead of a percentage.
+      # They are a map, never the gated number: `report` totals every object
+      # left in the coverage map, so the api file also carries the lib and bin
+      # objects of the step before it, counted with no data. The four gated
+      # figures are the ones in unit-cov.txt and api-cov.txt.
+      - name: Publish the coverage map
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-map
+          path: |
+            unit-cov.txt
+            api-cov.txt
+            unit.lcov
+            api.lcov
+          if-no-files-found: warn
+          retention-days: 14
 
   tsan:
     # ThreadSanitizer over the workspace tests — the machine check for the
