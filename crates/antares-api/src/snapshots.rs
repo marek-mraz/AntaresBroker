@@ -93,24 +93,19 @@ fn is_snapshot(meta: &Value) -> bool {
     meta.get("type").and_then(Value::as_str) == Some("Snapshot")
 }
 
-/// Registry access with lazy expiry (an expired snapshot is gone; its data
-/// purge runs in the background). Snapshot docs live in the store
-/// (Kind::Snapshot) so restarts keep them on persistent store modes.
+/// Registry access with lazy expiry: an expired snapshot is gone to every
+/// caller. Reading is a read — the meta row, its reverse-index entry and
+/// the synthetic tenant's data are freed by `sweep_expired_snapshots` on
+/// the sweep tick, not by the request that found the expiry. Snapshot docs
+/// live in the store (Kind::Snapshot) so restarts keep them on persistent
+/// store modes.
 pub(crate) async fn snap_get(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
-    let meta = st
-        .store
+    st.store
         .get(tenant, Kind::Snapshot, id)
         .await
         .ok()
-        .flatten()?;
-    if !is_snapshot(&meta) {
-        return None;
-    }
-    if expired(&meta) {
-        snap_remove(st, tenant, id, &meta).await;
-        return None;
-    }
-    Some(meta)
+        .flatten()
+        .filter(|meta| is_snapshot(meta) && !expired(meta))
 }
 
 /// 5.16.1.4: "If the NGSI-LD endpoint already knows about this Snapshot …
@@ -177,6 +172,33 @@ pub(crate) async fn snap_remove(st: &AppState, tenant: &TenantId, id: &str, meta
         let _ = st.store.delete(&idx, Kind::Snapshot, synth).await;
     }
     purge_data_bg(st, meta);
+}
+
+/// 4.22 for snapshots: `snap_get` refuses an expired one, and this is what
+/// removes it — meta, reverse-index entry and the synthetic tenant's data,
+/// through the same `snap_remove` a read used to call, so an expiry
+/// collected on the tick frees exactly what an expiry collected on a read
+/// freed.
+pub(crate) async fn sweep_expired_snapshots(st: &AppState, tenant: &TenantId) -> usize {
+    let mut dead: Vec<(String, Value)> = Vec::new();
+    if crate::csource::walk_docs(st, tenant, Kind::Snapshot, |doc| {
+        if is_snapshot(&doc) && expired(&doc) {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                dead.push((id.to_owned(), doc));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return 0;
+    }
+    let n = dead.len();
+    for (id, meta) in dead {
+        snap_remove(st, tenant, &id, &meta).await;
+    }
+    n
 }
 
 fn synth_tenant(meta: &Value) -> Option<TenantId> {
@@ -1288,6 +1310,100 @@ mod clause_5_16 {
         crate::wired_state("antares-snapshots").await
     }
 
+    /// 5.16 with RFC 9110 §9.2.1: reading an expired Snapshot must not
+    /// write. The meta row survives the read; the sweep is what frees it,
+    /// its reverse-index entry and the synthetic tenant's data.
+    #[tokio::test]
+    async fn an_expired_snapshot_is_refused_by_a_read_that_writes_nothing() {
+        let st = state().await;
+        let t = TenantId::default();
+        let id = "urn:ngsi-ld:Snapshot:stale";
+        let synth = "snap-default-stale";
+        st.store
+            .create(
+                &t,
+                Kind::Snapshot,
+                id,
+                json!({"id": id, "type": "Snapshot", "__tenant": synth,
+                       "expiresAt": "2000-01-01T00:00:00Z"}),
+            )
+            .await
+            .expect("seed");
+        let idx = TenantId::new("snap-index").expect("index tenant");
+        st.store
+            .create(&idx, Kind::Snapshot, synth, json!({"id": synth}))
+            .await
+            .expect("seed index");
+
+        assert!(snap_get(&st, &t, id).await.is_none(), "5.16: not served");
+        assert!(
+            st.store
+                .get(&t, Kind::Snapshot, id)
+                .await
+                .expect("store")
+                .is_some(),
+            "the read deleted the meta: a GET must be safe (RFC 9110 9.2.1)"
+        );
+
+        assert_eq!(sweep_expired_snapshots(&st, &t).await, 1, "the sweep reaps");
+        assert!(
+            st.store
+                .get(&t, Kind::Snapshot, id)
+                .await
+                .expect("store")
+                .is_none(),
+            "the sweep left the meta behind"
+        );
+        assert!(
+            st.store
+                .get(&idx, Kind::Snapshot, synth)
+                .await
+                .expect("store")
+                .is_none(),
+            "the sweep left the reverse-index entry behind"
+        );
+    }
+
+    /// The sweep takes the expiry and nothing else: a live Snapshot and the
+    /// reverse-index markers that share its storage both survive.
+    #[tokio::test]
+    async fn the_sweep_keeps_a_live_snapshot_and_the_index_markers() {
+        let st = state().await;
+        let t = TenantId::default();
+        let live = "urn:ngsi-ld:Snapshot:live";
+        st.store
+            .create(
+                &t,
+                Kind::Snapshot,
+                live,
+                json!({"id": live, "type": "Snapshot",
+                       "expiresAt": "2999-01-01T00:00:00Z"}),
+            )
+            .await
+            .expect("seed");
+        // a marker doc: same Kind, not a Snapshot, and long past any expiry
+        st.store
+            .create(
+                &t,
+                Kind::Snapshot,
+                "snap-default-marker",
+                json!({"id": "snap-default-marker", "expiresAt": "2000-01-01T00:00:00Z"}),
+            )
+            .await
+            .expect("seed marker");
+
+        assert_eq!(sweep_expired_snapshots(&st, &t).await, 0);
+        assert!(snap_get(&st, &t, live).await.is_some(), "live one survives");
+        assert!(
+            st.store
+                .get(&t, Kind::Snapshot, "snap-default-marker")
+                .await
+                .expect("store")
+                .is_some(),
+            "the sweep took a reverse-index marker for a Snapshot"
+        );
+    }
+
     /// One request through the full router — the 6.3.22 middleware included.
     async fn send(
         st: &AppState,
@@ -1772,6 +1888,20 @@ mod clause_5_16 {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "an expired snapshot: {b}");
+        assert!(
+            !st.store
+                .list(&synth, Kind::Entity)
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the GET freed the copy: reading must not write"
+        );
+        // The sweep is what frees it, and the purge it starts is background.
+        assert_eq!(
+            sweep_expired_snapshots(&st, &TenantId::default()).await,
+            1,
+            "the sweep did not reap the expired snapshot"
+        );
         for _ in 0..100 {
             if st
                 .store

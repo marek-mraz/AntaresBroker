@@ -48,9 +48,11 @@ fn stamp_subject(doc: &mut Value, tenant: &TenantId, headers: &HeaderMap) {
     }
 }
 
-/// Fetch a live EntityMap; an expired one "cannot be accessed" (5.5.14) and
-/// is pruned on touch. Maps live in the store (Kind::EntityMap) so
-/// persistent modes survive restarts.
+/// Fetch a live EntityMap; an expired one "cannot be accessed" (5.5.14).
+/// Reading is a read: the row behind a map this refuses is freed by
+/// `sweep_expired_maps` on the sweep tick, not by the request that found
+/// it. Maps live in the store (Kind::EntityMap) so persistent modes survive
+/// restarts.
 pub(crate) async fn map_get(
     st: &AppState,
     tenant: &TenantId,
@@ -59,21 +61,49 @@ pub(crate) async fn map_get(
     let Some(doc) = st.store.get(tenant, Kind::EntityMap, id).await? else {
         return Ok(None);
     };
-    // 5.5.14 is a positive condition: a map is served only while a READABLE
-    // expiry is still in the future. Judging "expired" instead lets a map
-    // whose expiresAt is missing or unparseable outlive every ceiling.
-    let live = doc
-        .get("expiresAt")
+    Ok(map_live(&doc).then_some(doc))
+}
+
+/// 5.5.14 is a positive condition: a map is usable only while a READABLE
+/// expiry is still in the future. Judging "expired" instead lets a map whose
+/// `expiresAt` is missing or unparseable outlive every ceiling. One
+/// definition, so the sweep reaps exactly what a read refuses.
+fn map_live(doc: &Value) -> bool {
+    doc.get("expiresAt")
         .and_then(Value::as_str)
         .and_then(dt)
-        .is_some_and(|e| e > chrono::Utc::now());
-    if !live {
-        // Pruning is opportunistic: the map is unusable either way, and the
-        // expiry sweep collects what a refused delete leaves behind.
-        let _ = st.store.delete(tenant, Kind::EntityMap, id).await;
-        return Ok(None);
+        .is_some_and(|e| e > chrono::Utc::now())
+}
+
+/// 4.22 for EntityMaps: a map a read will not serve is a map nothing can
+/// reach, and this is what removes it.
+pub(crate) async fn sweep_expired_maps(st: &AppState, tenant: &TenantId) -> usize {
+    let mut dead: Vec<String> = Vec::new();
+    if crate::csource::walk_docs(st, tenant, Kind::EntityMap, |doc| {
+        if !map_live(&doc) {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                dead.push(id.to_owned());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return 0;
     }
-    Ok(Some(doc))
+    let mut n = 0;
+    for id in dead {
+        if st
+            .store
+            .delete(tenant, Kind::EntityMap, &id)
+            .await
+            .unwrap_or(false)
+        {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// The map a consumption request named, or nothing.
@@ -505,6 +535,69 @@ mod tests {
         map_get(st, tenant, id).await.expect("the store answers")
     }
 
+    /// 5.5.14 with RFC 9110 §9.2.1: reading a map the broker will not serve
+    /// must not write. The row survives the read, and the sweep is what
+    /// frees it.
+    #[tokio::test]
+    async fn an_expired_map_is_refused_by_a_read_that_writes_nothing() {
+        let st = crate::wired_state("antares-map-sweep").await;
+        let t = TenantId::default();
+        let id = "urn:ngsi-ld:EntityMap:stale";
+        st.store
+            .create(
+                &t,
+                Kind::EntityMap,
+                id,
+                json!({"id": id, "expiresAt": "2000-01-01T00:00:00Z"}),
+            )
+            .await
+            .expect("seed");
+
+        assert!(map_read(&st, &t, id).await.is_none(), "5.5.14: not served");
+        assert!(
+            st.store
+                .get(&t, Kind::EntityMap, id)
+                .await
+                .expect("store")
+                .is_some(),
+            "the read deleted the row: a GET must be safe (RFC 9110 9.2.1)"
+        );
+
+        assert_eq!(sweep_expired_maps(&st, &t).await, 1, "the sweep reaps it");
+        assert!(
+            st.store
+                .get(&t, Kind::EntityMap, id)
+                .await
+                .expect("store")
+                .is_none(),
+            "the sweep left the row behind"
+        );
+    }
+
+    /// The sweep removes exactly what a read refuses — never a map still in
+    /// its lifetime.
+    #[tokio::test]
+    async fn the_sweep_keeps_every_map_a_read_would_still_serve() {
+        let st = crate::wired_state("antares-map-sweep-live").await;
+        let t = TenantId::default();
+        let live = "urn:ngsi-ld:EntityMap:live";
+        st.store
+            .create(
+                &t,
+                Kind::EntityMap,
+                live,
+                json!({"id": live, "expiresAt": "2999-01-01T00:00:00Z"}),
+            )
+            .await
+            .expect("seed");
+        assert_eq!(
+            sweep_expired_maps(&st, &t).await,
+            0,
+            "a live map was reaped"
+        );
+        assert!(map_read(&st, &t, live).await.is_some(), "still served");
+    }
+
     /// Table 6.4.3.2-1: entityMapLifetime is an ISO 8601 duration.
     #[test]
     fn clause_5_14_4_lifetime_parse() {
@@ -648,8 +741,8 @@ mod tests {
                 .get(&t, Kind::EntityMap, "urn:ngsi-ld:entitymap:past")
                 .await
                 .expect("store")
-                .is_none(),
-            "an expired map is pruned on touch"
+                .is_some(),
+            "the read pruned the row: reading must not write"
         );
         for (id, expiry) in [
             ("urn:ngsi-ld:entitymap:none", None),
@@ -669,6 +762,8 @@ mod tests {
                 "{id} has no readable expiry and must not be served"
             );
         }
+        // What no read will serve, the sweep frees: the four seeded above.
+        assert_eq!(sweep_expired_maps(&st, &t).await, 4);
     }
 
     /// 5.14.1.1 storage: every buffer is bounded — the per-tenant EntityMap

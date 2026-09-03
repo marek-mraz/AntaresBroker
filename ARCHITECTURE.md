@@ -75,7 +75,7 @@ module's header comment.
 | `registry.rs` | 470 | matching over a registration document: `CsrSpec`, the 4.3.6.1 information match, csf and scope filters, the temporal interval and expiry of a registration, the 5.11.2 subscription match; named by federation, notify, csource and every resource module that forwards |
 | `federation.rs` | 3 500 | 4.3.6, 5.12, 6.3.17–6.3.19 forwarding, fan-out, result merge |
 | `entity_maps.rs` | 370 | 5.14 the `/entityMaps` resources (6.32, 6.34, 6.35): create from a query, retrieve, update, delete |
-| `entity_map.rs` | 690 | one EntityMap document (5.2.39): store it under its tenant with a lifetime, read it back while it lives, take a page's candidate ids from it, merge what a distributed query reached, and serve a retrieve through a presented map |
+| `entity_map.rs` | 850 | one EntityMap document (5.2.39): store it under its tenant with a lifetime, read it back while it lives, take a page's candidate ids from it, merge what a distributed query reached, and serve a retrieve through a presented map |
 | `snapshots.rs` | 1 800 | 5.16 snapshots under synthetic `snap-…` tenants |
 | `contexts.rs` | 880 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 855 | 6.3.21 version negotiation |

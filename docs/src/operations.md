@@ -209,10 +209,12 @@ Error: "open …/antares.redb: Database already open. Cannot acquire lock."
 
 One sweep loop per process, every `ANTARES_SWEEP_SECS` (default 900):
 
-- Expired entities and registrations (`expiresAt`, 4.22) are deleted.
-- Entity maps (5.14; one hour by default, a client-set `expiresAt`
-  capped at 24 hours) are not swept: an expired map is refused and
-  removed the next time anything touches it (5.5.14).
+- Expired entities (`expiresAt`, 4.22) are deleted.
+- Registrations, snapshots and entity maps (5.14; one hour by default, a
+  client-set `expiresAt` capped at 24 hours) carry their own expiry and
+  are deleted by the same loop. A read never deletes one: it refuses the
+  expired document and leaves the row for the sweep, so a broker pointed
+  at a read replica serves GET without writing.
 - With `ANTARES_TEMPORAL_RETENTION_DAYS` set, attribute instances older
   than the horizon are pruned from the postgres or timescale temporal
   half, wherever that half lives (a `file` store with `postgres` history

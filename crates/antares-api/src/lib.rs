@@ -262,6 +262,32 @@ pub async fn wire(state: &mut AppState) {
     }));
 }
 
+/// 4.22 for the documents that carry their own `expiresAt`: Registrations,
+/// Snapshots and EntityMaps. The store's own sweep reaps Entities, which is
+/// what 4.22 names; these three are refused by every read once their expiry
+/// passes but nothing collected them, so they stayed for the life of the
+/// broker. Each kind is reaped by the predicate its own reader uses, so the
+/// sweep removes exactly what a read already hides — never more.
+///
+/// Opportunistic by construction: a driver that cannot enumerate its
+/// tenants reaps nothing and the reads keep hiding what is left, and a
+/// tenant whose walk fails is skipped rather than failing the tick.
+pub async fn sweep_expired_docs(st: &AppState) -> usize {
+    let Ok(tenants) = st.store.tenant_ids().await else {
+        return 0;
+    };
+    let mut n = 0;
+    for name in tenants {
+        let Ok(tenant) = antares_model::TenantId::new(&name) else {
+            continue;
+        };
+        n += csource::sweep_expired_registrations(st, &tenant).await;
+        n += snapshots::sweep_expired_snapshots(st, &tenant).await;
+        n += entity_map::sweep_expired_maps(st, &tenant).await;
+    }
+    n
+}
+
 /// An `AppState` with the notification pipeline installed, for tests that
 /// exercise a route which notifies. The router does not wire it: a caller
 /// that only reads never pays for the mirror seed.
@@ -3776,6 +3802,60 @@ mod tests {
             !docs.to_string().contains("expiring"),
             "expired registration must not be listed: {docs}"
         );
+    }
+
+    /// 5.9.2.4 with RFC 9110 §9.2.1: the reads that hide an expired
+    /// registration write nothing, and `sweep_expired_docs` is what frees
+    /// the row — for every kind that carries its own expiry, over every
+    /// tenant the driver will name.
+    #[tokio::test]
+    async fn expired_documents_are_freed_by_the_sweep_and_by_no_read() {
+        use antares_store::Kind;
+        let st = AppState::new("antares-sweep".into());
+        let app = router(st.clone());
+        let t = antares_model::TenantId::default();
+        let id = "urn:ngsi-ld:ContextSourceRegistration:swept";
+        st.store
+            .create(
+                &t,
+                Kind::Registration,
+                id,
+                serde_json::json!({
+                    "id": id,
+                    "type": "ContextSourceRegistration",
+                    "expiresAt": "2000-01-01T00:00:00.000Z",
+                    "information": [{"entities": [{"type": "Building"}]}],
+                    "endpoint": "http://source.example.com",
+                }),
+            )
+            .await
+            .expect("seed");
+
+        let uri = format!("/ngsi-ld/v1/csourceRegistrations/{id}");
+        assert_eq!(
+            get_status(&app, &uri, None).await,
+            StatusCode::NOT_FOUND,
+            "5.9.2.4: an expired registration is gone to a reader"
+        );
+        assert!(
+            st.store
+                .get(&t, Kind::Registration, id)
+                .await
+                .expect("store")
+                .is_some(),
+            "the read deleted the row: a GET must be safe (RFC 9110 9.2.1)"
+        );
+
+        assert_eq!(sweep_expired_docs(&st).await, 1, "the sweep reaps it");
+        assert!(
+            st.store
+                .get(&t, Kind::Registration, id)
+                .await
+                .expect("store")
+                .is_none(),
+            "the sweep left the row behind"
+        );
+        assert_eq!(sweep_expired_docs(&st).await, 0, "the sweep is idempotent");
     }
 
     #[tokio::test]

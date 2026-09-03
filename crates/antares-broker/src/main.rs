@@ -946,6 +946,7 @@ async fn run(
     // every driver and asks it what it reaped: a backend whose GC lives
     // elsewhere — the Pg arm's is inside the maintenance job — answers 0.
     let sweeper = state.store.clone();
+    let doc_sweeper = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
         loop {
@@ -953,6 +954,13 @@ async fn run(
             let n = sweeper.sweep_expired().await;
             if n > 0 {
                 tracing::debug!("4.22 sweep reaped {n} expired entities");
+            }
+            // Registrations, Snapshots and EntityMaps carry their own
+            // expiry, and every read already refuses one that has passed;
+            // this is what frees the row behind it.
+            let n = antares_api::sweep_expired_docs(&doc_sweeper).await;
+            if n > 0 {
+                tracing::debug!("expiry sweep reaped {n} expired documents");
             }
         }
     });
@@ -1518,8 +1526,8 @@ mod driver_registry_tests {
     /// A driver compiled in from outside `crates/` is selected by name
     /// exactly like a built-in, and serves both storage seams.
     #[cfg(feature = "plugin-example")]
-    #[test]
-    fn a_plugin_backend_is_on_the_shelf_and_builds_both_seams() {
+    #[tokio::test]
+    async fn a_plugin_backend_is_on_the_shelf_and_builds_both_seams() {
         let name = antares_plugin_example::NAME;
         assert!(
             store_shelf().contains(&name),
@@ -1530,9 +1538,8 @@ mod driver_registry_tests {
             temporal_choice(name, None).expect("ok"),
             TemporalChoice::SameAsStore
         );
-        let drivers = super::runtime()
-            .expect("runtime")
-            .block_on(super::build_drivers(name))
+        let drivers = super::build_drivers(name)
+            .await
             .expect("the plugin driver builds");
         assert_eq!(drivers.temporal_name.as_deref(), Some(name));
         assert!(
@@ -1548,11 +1555,13 @@ mod driver_registry_tests {
                 "urn:ngsi-ld:Probe:1",
                 serde_json::json!({"id": "urn:ngsi-ld:Probe:1"}),
             )
+            .await
             .expect("create through the plugin driver");
         assert_eq!(
             drivers
                 .store
                 .list(&tenant, antares_store::Kind::Entity)
+                .await
                 .expect("list")
                 .len(),
             1

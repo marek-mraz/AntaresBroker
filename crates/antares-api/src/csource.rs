@@ -701,11 +701,14 @@ async fn check_entity_conflict(
 /// The stored registration for `id`, with 5.9.2.4's deletion applied: "If
 /// expiresAt is a date and time in the future, implementations shall delete
 /// the Registration when this point in time is reached." The sweep is lazy
-/// — "final deletion will always lag the expiresAt timestamp" — so the first
-/// operation to name an expired registration performs the deletion and then
-/// sees what every later one sees. A read raises ResourceNotFound (5.9.3.4,
-/// 5.9.4.4) and a create takes the id back, because 5.9.2.4 raises
-/// AlreadyExists only for a registration that exists. Unlike a Subscription
+/// — "final deletion will always lag the expiresAt timestamp" — so the write
+/// that names an expired registration performs the deletion and then sees
+/// what every later operation sees, which is what lets a create take the id
+/// back: 5.9.2.4 raises AlreadyExists only for a registration that exists,
+/// and the store's create is the atomic check-and-insert, so the row has to
+/// be gone before it runs. Only writes call this. The read handlers filter
+/// on `reg_expired` and touch nothing; the row they hide is freed by
+/// `sweep_expired_registrations` on the sweep tick. Unlike a Subscription
 /// (5.8.6), a Registration has no `status` member that keeps an expired one
 /// visible.
 async fn take_live_registration(
@@ -720,6 +723,43 @@ async fn take_live_registration(
         }
         live => Ok(live),
     }
+}
+
+/// 4.22 for registrations: the read paths refuse an expired registration
+/// (`reg_expired`), and this is what removes it. Without a collector the
+/// rows a read already hides stay for the life of the broker, so the
+/// predicate that hides one is the predicate that reaps it.
+///
+/// A tenant the driver refuses to enumerate reaps nothing rather than
+/// failing the tick: the sweep is opportunistic, and every read still
+/// hides what it leaves behind.
+pub(crate) async fn sweep_expired_registrations(st: &AppState, tenant: &TenantId) -> usize {
+    let mut dead: Vec<String> = Vec::new();
+    if walk_docs(st, tenant, Kind::Registration, |doc| {
+        if reg_expired(&doc) {
+            if let Some(id) = doc.get("id").and_then(Value::as_str) {
+                dead.push(id.to_owned());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return 0;
+    }
+    let mut n = 0;
+    for id in dead {
+        if st
+            .store
+            .delete(tenant, Kind::Registration, &id)
+            .await
+            .unwrap_or(false)
+        {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// 4.3.6.3 Proxied Registrations: "An exclusive registration shall always
