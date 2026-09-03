@@ -185,7 +185,7 @@ const FRAME: [&str; 3] = ["id", "type", "@context"];
 
 impl Filter {
     /// Apply `pick`/`omit` to one document by member name. This is the
-    /// reference semantics [`run_policy_contract`] holds an engine's answer
+    /// reference semantics `run_policy_contract` holds an engine's answer
     /// against; a served document is projected through the request's own
     /// 5.5.2 representation instead (`repr::narrow_projection`), where the
     /// names are expanded against the request `@context` first.
