@@ -27,7 +27,8 @@ pub fn stamp_new(doc: &mut Value, ts: &str) {
 /// Every write path that brings a new Attribute in uses this one: 5.6.1
 /// through `stamp_new`, 5.6.2 and 5.6.3 through `attrs.rs`, so the served
 /// representation does not depend on which operation wrote the Attribute.
-/// The temporal write path stamps differently (`temporal::stamp_instances`):
+/// The temporal write path stamps differently
+/// (`temporal::stamp_temporal_instances`):
 /// there an instance is the unit of history and carries an instanceId, and
 /// sub-Attributes are part of the instance, not stamped separately.
 pub fn stamp_instances(v: &mut Value, ts: &str) {

@@ -31,7 +31,14 @@ const TEMPORAL_OPTS: ExpandOpts = ExpandOpts {
     sys: false,
 };
 
-fn stamp_instances(doc: &mut Value, ts: &str) {
+/// 4.5.7 and 4.5.8: each recorded instance of a Property or Relationship
+/// carries an instanceId and the 4.8 timestamps. The id is minted here and
+/// only when the pushed instance brought none, because the temporal API is
+/// add-only (5.6.11.4, 5.6.12.1) and 5.6.14/5.6.15 address an instance by
+/// that id. Sub-Attributes are part of the instance and are not stamped
+/// separately -- the current-state path stamps them one level deeper
+/// (`crate::stamp::stamp_instances`).
+fn stamp_temporal_instances(doc: &mut Value, ts: &str) {
     if let Some(obj) = doc.as_object_mut() {
         for (k, v) in obj.iter_mut() {
             if is_meta(k) {
@@ -170,7 +177,7 @@ fn upsert_temporal_local(
     mut expanded: Value,
 ) -> ApiResult<StatusCode> {
     let ts = now_iso();
-    stamp_instances(&mut expanded, &ts);
+    stamp_temporal_instances(&mut expanded, &ts);
     // get->create/mutate is a TOCTOU pair: two concurrent first-upserts
     // both see "absent", and the loser's create must NOT be silently
     // dropped (201 with a discarded payload). Loop: a lost create retries
@@ -235,7 +242,7 @@ fn upsert_temporal_local(
                                     // same kind of in-place change ("The
                                     // createdAt property of the concerned
                                     // instance shall remain unchanged").
-                                    // `stamp_instances` has already put a
+                                    // `stamp_temporal_instances` has already put a
                                     // fresh pair on the incoming instance.
                                     Some(p) => {
                                         let mut ni = ni;
@@ -2555,7 +2562,7 @@ pub async fn add_temporal_attrs(
                     },
                 )?;
                 let ts = now_iso();
-                stamp_instances(&mut local, &ts);
+                stamp_temporal_instances(&mut local, &ts);
                 let res = st.temporal.mutate(&tenant, &id, |doc| {
                     add_temporal_instances(doc, &local, &ts);
                     Ok::<(), NgsiError>(())
@@ -2599,7 +2606,7 @@ pub async fn add_temporal_attrs(
             ));
         }
         let ts = now_iso();
-        stamp_instances(&mut expanded, &ts);
+        stamp_temporal_instances(&mut expanded, &ts);
         let res = st.temporal.mutate(&tenant, &id, |doc| {
             add_temporal_instances(doc, &expanded, &ts);
             Ok::<(), NgsiError>(())

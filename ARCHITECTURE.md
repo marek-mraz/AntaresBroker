@@ -276,13 +276,13 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   rows per federated query on a 10 000-registration registry; the
   `csource_index` needs a type-first shape.
 - Duplication has a measured floor rather than a target of zero.
-  `dev/dup-check.sh` ratchets the workspace at 65 token clones over 779
-  lines (`dev/dup-baseline.json`), 590 of them in `antares-api`, and at 12
+  `dev/dup-check.sh` ratchets the workspace at 64 token clones over 751
+  lines (`dev/dup-baseline.json`), 552 of them in `antares-api`, and at 13
   groups of functions sharing one signature. What the ratchet still allows:
-  - 37 lines are `use` blocks in files serving neighbouring clauses. A
+  - 35 lines are `use` blocks in files serving neighbouring clauses. A
     `use` list is not logic, and a shared prelude would hide what each
     module depends on.
-  - 52 lines are the Entity Type List and Attribute List discovery
+  - 51 lines are the Entity Type List and Attribute List discovery
     operations (5.7.5, 5.7.6). That parallel is the specification's: the
     two build different representations from different tables
     (5.2.24/5.2.25 against 5.2.27/5.2.28), so one generic over both would
@@ -298,18 +298,22 @@ Stated so they are not rediscovered. Each is measured, not guessed.
     allowlists, and only two share the eleven-name query prefix; one
     allowlist for operations whose allowlists deliberately differ would
     widen what each endpoint accepts.
-  - Two signature groups are coincidences of shape rather than shared
+  - Three signature groups are coincidences of shape rather than shared
     logic: `check_ring`, `check_position` and `check_vertex_budget` all
     take a `&Value` and return `Result<(), String>` while validating three
     unrelated rules (RFC 7946 ring closure, WGS84 range, a vertex budget),
-    and `temporal_key` and `pattern_regex` are both
-    `(&str) -> Option<String>` over different vocabularies. Merging either
-    would name one function after two rules.
+    `temporal_key` and `pattern_regex` are both
+    `(&str) -> Option<String>` over different vocabularies, and
+    `SubMirror::apply` and `DocMirror::apply` are the two implementations
+    of `Mirror::apply`, so that signature is the trait's rather than a
+    repetition: one keeps an inverted candidate index in step with the
+    document it stores, the other only stores the document. Merging any of
+    them would name one function after two rules.
   - One signature group is the reference plugin's, and stays: because
     `examples/plugin-example` implements the same two driver traits as the
     in-binary memory store, its `live`, `rows` and `emit` necessarily carry
     the memory store's signatures. That is the seam being demonstrated, so
-    the ratchet holds it at twelve rather than eleven.
+    the ratchet holds it at thirteen rather than twelve.
   - Three clusters are real debt, each reading one rule more than once:
     the temporal writes (80 lines inside `temporal.rs`, `add_temporal_attrs`
     against `upsert_temporal` and `delete_temporal_instance` against
