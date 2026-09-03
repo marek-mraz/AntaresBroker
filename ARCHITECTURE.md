@@ -253,10 +253,12 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `AppState::with_drivers`, and the temporal query's paging decision asks
   `TemporalDriver::q_pushdown_exact`, which only the Postgres arm answers
   from its prefilter. `workspace.yml` checks the dependency tree.
-- `csource.rs` serialises registration writes on one process-wide
-  `tokio::sync::Mutex` (`REGISTRATION_WRITE`) shared by every tenant, and
-  the 5.9.2.4 overlap check of an idPattern-only registration walks up to
-  `MAX_UNDECIDED_ROWS` under it.
+- `csource.rs` serialises registration writes per tenant on process-local
+  `tokio::sync::Mutex`es (`REGISTRATION_WRITE`), so the 5.9.2.4 overlap
+  check of an idPattern-only registration, which walks up to
+  `MAX_UNDECIDED_ROWS` under it, stalls only its own tenant. Two broker
+  pods do not exclude each other: a database-level lock held across the
+  check-then-write section is the remaining step.
 - Every distributed write takes its registrations and the `Via` loop
   answer from `federation::write_plan` (`WritePlan::Forward` or
   `Answered`); the read-path prologue (csf, the two-binding rule) is

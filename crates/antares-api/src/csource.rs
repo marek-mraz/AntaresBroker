@@ -907,15 +907,32 @@ pub fn check_proxied_overlap(
 /// for one Entity ID and Attribute the clause forbids. Every registration
 /// write holds it for the whole check-then-write sequence.
 ///
+/// One lock per tenant: the clause decides a conflict against the
+/// registrations of the tenant being written, and two tenants' sets are
+/// disjoint, so the overlap scan of one tenant's idPattern-only
+/// registration never stalls another tenant's write. The map only grows,
+/// one entry per tenant that ever wrote a registration.
+///
 /// Async on purpose: the Postgres driver answers a store call by parking
 /// the calling thread on the runtime's I/O driver, and a waiter blocked in
 /// a plain `Mutex::lock` would hold a runtime worker hostage; once the
 /// worker that owns the I/O driver is among the waiters, the holder never
 /// gets its query result and the whole broker stops accepting.
-static REGISTRATION_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+///
+/// ponytail: process-local, so two broker pods do not exclude each other;
+/// a database-level lock held across the section is the upgrade.
+static REGISTRATION_WRITE: std::sync::Mutex<
+    std::collections::BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-async fn registration_write_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    REGISTRATION_WRITE.lock().await
+async fn registration_write_lock(tenant: &TenantId) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = REGISTRATION_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(tenant.as_str().to_owned())
+        .or_default()
+        .clone();
+    lock.lock_owned().await
 }
 
 // ---------- handlers ----------
@@ -951,7 +968,7 @@ pub async fn create_registration(
         };
         validate_auxiliary_ops(&norm)?;
         let doc = {
-            let _serialized = registration_write_lock().await;
+            let _serialized = registration_write_lock(&tenant).await;
             take_live_registration(&st, &tenant, &id)?;
             check_entity_conflict(&st, &tenant, &norm)?;
             check_proxied_overlap(&st, &tenant, &norm, None, &parsed.ctx)?;
@@ -1301,7 +1318,7 @@ pub async fn update_registration(
         // mutate then writes — the pair is atomic or a concurrent write can
         // invalidate the checks between them.
         let (before, res) = {
-            let _serialized = registration_write_lock().await;
+            let _serialized = registration_write_lock(&tenant).await;
             let before = take_live_registration(&st, &tenant, &id)?;
             if let Some(prev) = before.as_ref().and_then(Value::as_object) {
                 // validate the post-merge document (4.3.6.3) BEFORE mutating:
@@ -2116,6 +2133,29 @@ mod csi_tests {
 mod concurrent_create_5_9_2_4 {
     use super::*;
     use std::collections::HashMap;
+
+    /// 5.9.2.4 decides a conflict against the registrations "already"
+    /// present in one tenant, and two tenants' sets are disjoint: a write
+    /// in one tenant never waits for the check-then-write section of
+    /// another, while a second write in the same tenant does.
+    #[tokio::test]
+    async fn the_write_section_of_one_tenant_does_not_hold_another() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+        let a = TenantId::new("locka").expect("tenant");
+        let b = TenantId::new("lockb").expect("tenant");
+        let held = registration_write_lock(&a).await;
+        let other = timeout(Duration::from_millis(200), registration_write_lock(&b)).await;
+        assert!(
+            other.is_ok(),
+            "tenant b waited behind tenant a's registration write"
+        );
+        let same = timeout(Duration::from_millis(200), registration_write_lock(&a)).await;
+        assert!(same.is_err(), "a second write in the same tenant must wait");
+        drop(held);
+        let again = timeout(Duration::from_millis(200), registration_write_lock(&a)).await;
+        assert!(again.is_ok(), "the section is free once its holder is done");
+    }
 
     fn exclusive_body(n: usize) -> Bytes {
         Bytes::from(format!(
