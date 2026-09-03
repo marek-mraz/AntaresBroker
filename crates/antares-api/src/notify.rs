@@ -285,17 +285,32 @@ where
     fut.await;
 }
 
-/// Strip volatile members before comparing attribute instance arrays.
-fn stable(v: &Value) -> Value {
-    match v {
-        Value::Array(a) => Value::Array(a.iter().map(stable).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "createdAt" | "modifiedAt" | "instanceId"))
-                .map(|(k, v)| (k.clone(), stable(v)))
-                .collect(),
-        ),
-        other => other.clone(),
+/// Whether two attribute instances are the same once the volatile members
+/// — the timestamps the broker itself stamps, and the instance identity —
+/// are set aside. Compared in place: this runs per changed attribute per
+/// matching subscription per event, and materializing two stripped copies of
+/// every JSON tree to throw them away one comparison later is the cost that
+/// multiplies by.
+fn stable_eq(a: &Value, b: &Value) -> bool {
+    fn volatile(k: &str) -> bool {
+        matches!(k, "createdAt" | "modifiedAt" | "instanceId")
+    }
+    match (a, b) {
+        (Value::Object(oa), Value::Object(ob)) => {
+            let count = |o: &Map<String, Value>| o.keys().filter(|k| !volatile(k)).count();
+            // by lookup rather than by zipped iteration: which order a
+            // serde_json Map yields is a cargo feature away from changing,
+            // and features are additive
+            count(oa) == count(ob)
+                && oa
+                    .iter()
+                    .filter(|(k, _)| !volatile(k))
+                    .all(|(k, va)| ob.get(k).is_some_and(|vb| stable_eq(va, vb)))
+        }
+        (Value::Array(aa), Value::Array(ab)) => {
+            aa.len() == ab.len() && aa.iter().zip(ab).all(|(x, y)| stable_eq(x, y))
+        }
+        _ => a == b,
     }
 }
 
@@ -340,14 +355,14 @@ fn diff(before: Option<&Value>, after: Option<&Value>) -> Vec<(String, ChangeCla
                     out.push((k.clone(), ChangeClass::Deleted));
                     let survivors_changed = by.iter().any(|ai| {
                         match bx.iter().find(|bi| instance_ds(bi) == instance_ds(ai)) {
-                            Some(bi) => stable(bi) != stable(ai),
+                            Some(bi) => !stable_eq(bi, ai),
                             None => true,
                         }
                     });
                     if survivors_changed {
                         out.push((k, ChangeClass::Updated));
                     }
-                } else if stable(x) != stable(y) {
+                } else if !stable_eq(x, y) {
                     out.push((k, ChangeClass::Updated));
                 }
             }
@@ -473,7 +488,7 @@ fn instance_id(entity: &str, attr: &str, inst: &serde_json::Map<String, Value>) 
 }
 
 /// The instances in `after` that are new or changed vs `before` — matched by
-/// datasetId, compared via `stable` (volatile members ignored). A newly
+/// datasetId, compared via `stable_eq` (volatile members ignored). A newly
 /// created attribute (`before` None) contributes every instance.
 fn changed_instances(before: Option<&Value>, after: &Value) -> Vec<Value> {
     let before_arr: Vec<&Value> = before
@@ -491,7 +506,7 @@ fn changed_instances(before: Option<&Value>, after: &Value) -> Vec<Value> {
                 .find(|bi| instance_ds(bi) == instance_ds(ai))
             {
                 None => true,
-                Some(bi) => stable(bi) != stable(ai),
+                Some(bi) => !stable_eq(bi, ai),
             }
         })
         .collect()
@@ -4778,5 +4793,65 @@ mod interval_sweep_concurrency {
             "the sweep took {elapsed} ms — {SUBS} deliveries of {TIMEOUT_MS} ms ran one after \
              the other instead of together"
         );
+    }
+}
+
+/// What `stable_eq` treats as the same attribute instance (5.8.6: a change
+/// notification carries the attributes that changed, and the members the
+/// broker stamps itself are not a change).
+#[cfg(test)]
+mod stable_comparison {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_volatile_members_may_differ() {
+        let base = json!({"type": "Property", "value": 1,
+                          "createdAt": "2020-01-01T00:00:00Z",
+                          "modifiedAt": "2020-01-01T00:00:00Z",
+                          "instanceId": "urn:ngsi-ld:Instance:1"});
+        // every volatile member differs, or is missing outright
+        assert!(stable_eq(&base, &json!({"type": "Property", "value": 1})));
+        assert!(stable_eq(
+            &base,
+            &json!({"type": "Property", "value": 1,
+                    "modifiedAt": "2021-06-06T00:00:00Z",
+                    "instanceId": "urn:ngsi-ld:Instance:2"})
+        ));
+        // a member that is not volatile
+        assert!(!stable_eq(&base, &json!({"type": "Property", "value": 2})));
+        assert!(!stable_eq(
+            &base,
+            &json!({"type": "Property", "value": 1, "unitCode": "CEL"})
+        ));
+        // same count of non-volatile members, different names
+        assert!(!stable_eq(
+            &json!({"a": 1, "b": 2}),
+            &json!({"a": 1, "c": 2})
+        ));
+        // volatile only counts as a member name, never as a value
+        assert!(!stable_eq(
+            &json!({"observedAt": "createdAt"}),
+            &json!({"observedAt": "modifiedAt"})
+        ));
+    }
+
+    #[test]
+    fn nesting_and_arrays_compare_element_by_element() {
+        assert!(stable_eq(
+            &json!({"value": {"a": [1, {"b": 2, "createdAt": "x"}]}}),
+            &json!({"value": {"a": [1, {"b": 2}]}})
+        ));
+        assert!(!stable_eq(
+            &json!({"value": {"a": [1, {"b": 2}]}}),
+            &json!({"value": {"a": [1, {"b": 3}]}})
+        ));
+        // order within an array is part of the value
+        assert!(!stable_eq(&json!([1, 2]), &json!([2, 1])));
+        assert!(!stable_eq(&json!([1, 2]), &json!([1, 2, 3])));
+        // scalars and mismatched kinds
+        assert!(stable_eq(&json!(null), &json!(null)));
+        assert!(!stable_eq(&json!({}), &json!([])));
+        assert!(!stable_eq(&json!(1), &json!("1")));
     }
 }
