@@ -68,3 +68,30 @@ Resource            ${EXECDIR}/resources/JsonUtils.resource
     Check Response Body Containing ProblemDetails Element Containing Type Element set to
     ...    ${response.json()}
     ...    ${ERROR_TYPE_BAD_REQUEST_DATA}
+
+455_01_04 Explicit @none DatasetId Deletes The Default Instance
+    [Documentation]    4.5.5.1: "If a datasetId is provided when creating,
+    ...    updating, appending or deleting Attributes, only instances with the
+    ...    same datasetId are affected" and "@none" is the default instance —
+    ...    ?datasetId=@none deletes the default one and leaves the dataset one.
+    [Tags]    e-create    e-delete    e-retrieve    4_5_5_1    5_6_5    since_v1.9.1
+    ${entity_id}=    Generate Random Vehicle Entity Id
+    ${payload}=    Evaluate
+    ...    {"id": $entity_id, "type": "Vehicle", "@context": [$ngsild_test_suite_context], "speed": [{"type": "Property", "value": 55}, {"type": "Property", "value": 11, "datasetId": "urn:ngsi-ld:Dataset:gps"}]}
+    ${response}=    Create Entity From JSON-LD Content    ${payload}
+    Check Response Status Code    201    ${response.status_code}
+    ${response}=    Delete Entity Attributes
+    ...    ${entity_id}
+    ...    speed
+    ...    @none
+    ...    ${EMPTY}
+    ...    context=${ngsild_test_suite_context}
+    Check Response Status Code    204    ${response.status_code}
+    ${response}=    Retrieve Entity    ${entity_id}    context=${ngsild_test_suite_context}
+    Check Response Status Code    200    ${response.status_code}
+    ${body}=    Set Variable    ${response.json()}
+    ${instances}=    Evaluate    $body['speed'] if isinstance($body['speed'], list) else [$body['speed']]
+    Length Should Be    ${instances}    1
+    ${survivor}=    Evaluate    $instances[0]['datasetId']
+    Should Be Equal As Strings    ${survivor}    urn:ngsi-ld:Dataset:gps
+    [Teardown]    Delete Entity    ${entity_id}

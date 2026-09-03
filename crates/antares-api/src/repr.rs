@@ -113,6 +113,20 @@ pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Rep
     Ok(r)
 }
 
+/// 4.5.5.1: the datasetId "is of datatype URI, or equal to the JSON-LD
+/// keyword `@none`", and "if no datasetId is provided, or `"datasetId":
+/// "@none"` is supplied, it is considered as the default Attribute
+/// instance". A default instance carries no datasetId of its own, so the
+/// write paths that select ONE instance by the `?datasetId=` parameter
+/// (5.6.5.4, 5.6.13.4) match `@none` against its absence. Instance members
+/// reach the same rule one layer earlier, in 5.5.7 expansion.
+pub fn target_dataset_id(params: &HashMap<String, String>) -> Option<&str> {
+    params
+        .get("datasetId")
+        .map(String::as_str)
+        .filter(|d| *d != "@none")
+}
+
 /// Narrow a representation by a policy decision (ADR-0020).
 ///
 /// `omit` is appended to whatever the request asked to omit: removing more

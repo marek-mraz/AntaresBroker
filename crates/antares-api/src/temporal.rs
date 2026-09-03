@@ -2652,7 +2652,7 @@ pub async fn delete_temporal_attr(
         gate!(st, &tenant, &headers, "5.6.13", ids: &[&id]).await?;
         let attr_iri = antares_jsonld::expand_attr_name(&attr, &ctx)?;
         let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
-        let want_ds = params.get("datasetId").cloned();
+        let want_ds = crate::repr::target_dataset_id(&params).map(String::from);
         let regs = match temporal_write_regs(&st, &tenant, &headers, &ctx, &params, &id).await {
             Ok(regs) => regs,
             Err(refused) => return Ok(*refused),

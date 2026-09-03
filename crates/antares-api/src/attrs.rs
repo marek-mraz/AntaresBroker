@@ -1093,7 +1093,7 @@ async fn delete_attr_inner(
         }
     };
     let delete_all = params.get("deleteAll").map(String::as_str) == Some("true");
-    let want_ds = params.get("datasetId").cloned();
+    let want_ds = crate::repr::target_dataset_id(params).map(String::from);
     let (regs, loop_answer) =
         attr_regs_or_loop(st, &tenant, id, &attr_iri, &ctx, params, headers).await?;
     if let Some(r) = loop_answer {
