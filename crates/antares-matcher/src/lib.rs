@@ -125,7 +125,32 @@ pub fn conditions_match(sub: &Value, doc: &Value, ctx: &Context, lookup: EntityL
         // parsed once per distinct q text, not once per event per candidate
         match antares_ql::regex::q_node(&q) {
             Some(node) => {
-                if !antares_ql::eval::eval_q(&node, doc, ctx, lookup) {
+                // Table 5.2.12-1 gives the Subscription the `expandValues`
+                // and `jsonKeys` pair 4.9 gives the query, and this
+                // condition IS that query: a term the first list names is
+                // compared after JSON-LD type coercion against the @context
+                // the Subscription was supplied with, less the names the
+                // second declares uninterpretable.
+                // ponytail: the coercion rebuilds the tree, so it costs one
+                // clone per event for a Subscription that names the list and
+                // nothing at all for one that does not; cache the coerced
+                // tree beside the parsed one if a deployment measures it.
+                let coerced;
+                let node: &antares_ql::QNode = match antares_ql::eval::expansion_list(
+                    sub_str(sub, "expandValues"),
+                    sub_str(sub, "jsonKeys"),
+                ) {
+                    None => &node,
+                    Some(list) => {
+                        coerced = antares_ql::eval::apply_expand_values(
+                            (*node).clone(),
+                            Some(&list),
+                            ctx,
+                        );
+                        &coerced
+                    }
+                };
+                if !antares_ql::eval::eval_q(node, doc, ctx, lookup) {
                     return false;
                 }
             }
@@ -226,6 +251,39 @@ mod tests {
                      "coordinates": "[-3.7,40.4]"},
             "notification": {"endpoint": {"uri": "http://x/n"}}
         })
+    }
+
+    /// Table 5.2.12-1 gives a Subscription the same `expandValues` and
+    /// `jsonKeys` pair 4.9 gives a query, and the notification condition IS
+    /// that query: a term whose Attribute `expandValues` names is compared
+    /// after JSON-LD type coercion, and a name `jsonKeys` carries as well is
+    /// left uninterpreted (6.4.3.2, the broker's precedence).
+    #[test]
+    fn clause_5_2_12_expand_values_coerces_the_condition_value() {
+        let c = ctx();
+        let none = |_: &str| None;
+        let doc = expand(json!({
+            "id": "urn:ngsi-ld:Vehicle:A1",
+            "type": "Vehicle",
+            "category": {"type": "Property", "value": format!("{DC}/Camping")}
+        }));
+        let mut s = sub();
+        s.as_object_mut().expect("object").remove("geoQ");
+        s["q"] = json!("category==\"Camping\"");
+        assert!(
+            !conditions_match(&s, &doc, &c, &none),
+            "the literal cannot match the expanded value on its own"
+        );
+        s["expandValues"] = json!("category");
+        assert!(
+            conditions_match(&s, &doc, &c, &none),
+            "expandValues coerces the term value"
+        );
+        s["jsonKeys"] = json!("category");
+        assert!(
+            !conditions_match(&s, &doc, &c, &none),
+            "a name in both lists is left uninterpreted"
+        );
     }
 
     /// 5.8.6: every predicate holds → the change would notify.

@@ -42,7 +42,7 @@ broker nor a storage backend (`antares-api`, `antares-broker`,
 | `antares-model` | 990 | CIM 009 types verbatim (`Entity`, `NgsiError` = Table 6.3.2-1), publishable | depend on anything Antares |
 | `antares-ql` | 4 500 | `q=`, `scopeQ`, `geoQ` parsers → typed AST; the in-memory evaluator (`eval`) | know HTTP or SQL |
 | `antares-jsonld` | 8 100 | `@context` loader with caches and pinned core contexts, expansion/compaction, structural validation, the one outbound `client_builder` | do business logic |
-| `antares-matcher` | 380 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
+| `antares-matcher` | 432 | subscription vs entity: selector, conditions, activity, throttling | touch a store |
 | `antares-store` | 2 600 | `CurrentStateDriver`, `TemporalDriver` (object-safe, `lib.rs:140`, `:385`), `Kind`, filters/paging (`filter.rs`) | pull a backend |
 | `antares-sql` | 9 400 | AST → SQL compiler (`compile/`), migrations, the sqlx drivers (`store/pg/`), the memory/redb drivers (`store/mem/`), `AnyStore` facade (`store/any.rs`) | be called from handlers directly (see §7) |
 | `antares-bus` | 760 | `ChangeEvent`, the JetStream bus, subjects | decide who consumes |
@@ -92,10 +92,12 @@ module's header comment.
 own almost nothing: each is a handful of lines re-exporting `antares_ql::geo`,
 `::eval` and `::regex` so the broker-side paths (`crate::geo::GeoQuery`,
 `crate::qeval::eval_q`, `crate::regexcache::compile`) stay stable while the
-evaluation itself lives in the crate a gateway can use on its own. The one
-exception is `qeval::expansion_list`, which settles the 4.9 precedence
-between `expandValues` and `jsonKeys` — a rule about two query parameters
-rather than about the query language, so it stays on the broker side.
+evaluation itself lives in the crate a gateway can use on its own. That
+includes the 4.9 precedence between `expandValues` and `jsonKeys`
+(`antares_ql::eval::expansion_list`): the entity query, the temporal query
+and a Subscription's notification condition (Table 5.2.12-1) all carry the
+pair, and the matcher cannot reach the broker crate, so the rule lives beside
+the coercion it feeds.
 
 ## 4. A request, end to end
 

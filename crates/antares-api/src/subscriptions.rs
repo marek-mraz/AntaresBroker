@@ -495,6 +495,20 @@ fn norm_member(
             antares_ql::parse_q(s)?;
             out.insert(k.to_owned(), v.clone());
         }
+        // Table 5.2.12-1: both are a String, "comma separated list of
+        // attribute names", and the pair decides how the notification
+        // condition compares a value (4.9). A non-string stored here reads
+        // as an absent list at matching time, so the Subscription would
+        // silently compare the wrong thing rather than say the member is
+        // malformed.
+        "expandValues" | "jsonKeys" => {
+            if !v.is_string() {
+                return Err(bad(format!(
+                    "{k} must be a comma separated list of attribute names (5.2.12)"
+                )));
+            }
+            out.insert(k.to_owned(), v.clone());
+        }
         // 5.8.6: the @context governing a subscription's notifications is
         // the @context of the creating request, held in a broker-internal
         // member. This function only ever sees client input — a create
@@ -1353,6 +1367,27 @@ mod tests {
                 let out = norm(&sub(json!({member: v.clone()}))).expect("a Boolean is accepted");
                 assert_eq!(out[member], v, "{member} is stored as given");
             }
+        }
+    }
+
+    /// Table 5.2.12-1: `expandValues` and `jsonKeys` are each a String,
+    /// "comma separated list of attribute names". They decide whether the
+    /// notification condition compares a term's value as written or after
+    /// JSON-LD type coercion (4.9), and a non-string reads as an absent
+    /// list at matching time — the Subscription would then quietly match on
+    /// the other reading instead of refusing the member.
+    #[test]
+    fn clause_5_2_12_expand_values_and_json_keys_are_strings() {
+        for member in ["expandValues", "jsonKeys"] {
+            for v in [json!(1), json!(["category"]), json!(true), json!({})] {
+                assert!(
+                    norm(&sub(json!({member: v.clone()}))).is_err(),
+                    "{member}: {v} is not a comma separated list (5.2.12)"
+                );
+            }
+            let v = json!("category,brandName");
+            let out = norm(&sub(json!({member: v.clone()}))).expect("a String is accepted");
+            assert_eq!(out[member], v, "{member} is stored as given");
         }
     }
 
