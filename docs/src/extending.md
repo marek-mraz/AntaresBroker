@@ -163,10 +163,11 @@ keeps them out of notifications, logs and dead letters.
 
 A `Filter` may only narrow. Its `q` and `scopeQ` are conjoined into the
 condition the store already had, and its `pick`/`omit` project members out
-of what is served; there is no member it can add and no row it can widen
-the answer to. A `pick`/`omit` name is read in the core `@context`, never in
-the caller's, so a request cannot rebind the term a rule names and step out
-from under it; write the rule as an IRI and it is used as written, write it
+of every document the answer carries, the Entities `join=` reaches over a
+Relationship included; there is no member it can add and no row it can
+widen the answer to. A `pick`/`omit` name is read in the core `@context`,
+never in the caller's, so a request cannot rebind the term a rule names
+and step out from under it; write the rule as an IRI and it is used as written, write it
 as a short name and it means what the default `@context` says. Set
 `restricted` and a narrowed read answers `Antares-Results-Restricted: true`,
 so an operator can tell a short answer from an empty one. Three limits are the seam's, not the engine's: an

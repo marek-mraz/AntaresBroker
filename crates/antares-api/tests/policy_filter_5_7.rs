@@ -666,3 +666,56 @@ async fn a_request_context_cannot_move_a_policy_name_off_its_target() {
         "the Entity itself is still answered: {text}"
     );
 }
+
+/// 4.5.23 Linked Entity Retrieval answers Entities the request never named:
+/// `join=flat` appends every Entity reached over a Relationship. A 4.21
+/// projection is written per level — a bare `omit` name leaves that member
+/// alone on the joined document, which is what the request asked for — but a
+/// narrowing is not a representation choice. A member the subject may not
+/// see is not less hidden one hop away, so the policy projection travels
+/// down the walk while the request's own does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_does_not_carry_a_narrowed_member_out_of_the_answer() {
+    let st = state(Filter {
+        omit: vec!["colour".into()],
+        ..Filter::default()
+    });
+    for (id, kind, colour, rel) in [
+        (
+            "urn:ngsi-ld:Vehicle:joined",
+            "Vehicle",
+            "red",
+            Some("urn:ngsi-ld:Person:owner"),
+        ),
+        ("urn:ngsi-ld:Person:owner", "Person", "blue", None),
+    ] {
+        let mut doc = json!({
+            "id": id,
+            "type": kind,
+            "colour": {"type": "Property", "value": colour}
+        });
+        if let Some(target) = rel {
+            doc["owner"] = json!({"type": "Relationship", "object": target});
+        }
+        let (code, body) = send(&st, "POST", "/ngsi-ld/v1/entities", Some(doc)).await;
+        assert_eq!(code, StatusCode::CREATED, "{body}");
+    }
+
+    let (status, body) = send(
+        &st,
+        "GET",
+        "/ngsi-ld/v1/entities?type=Vehicle&join=flat&joinLevel=1",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let text = body.to_string();
+    assert!(
+        text.contains("urn:ngsi-ld:Person:owner"),
+        "the linked Entity is still answered: {text}"
+    );
+    assert!(
+        !text.contains("red") && !text.contains("blue"),
+        "the narrowed member is gone from BOTH documents: {text}"
+    );
+}

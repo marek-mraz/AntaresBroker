@@ -25,6 +25,16 @@ pub struct Repr {
     /// omit= (4.21): nodes WITHOUT children omit their head; nodes WITH
     /// children only constrain the linked entity below that head.
     pub omit: Option<Vec<ProjNode>>,
+    /// The policy seam's own projection (ADR-0020), kept apart from the
+    /// request's. A 4.21 projection belongs to ONE level — its nested
+    /// selections describe the linked Entity below a head, so a bare `omit`
+    /// name leaves that member alone on a joined document — while a
+    /// narrowing is about what may be seen at all, and a member the subject
+    /// may not see is no more visible one Relationship away. These travel
+    /// down the join walk unchanged (`joined_repr`); `pick` and `omit` do
+    /// not.
+    pub policy_pick: Option<Vec<ProjNode>>,
+    pub policy_omit: Option<Vec<ProjNode>>,
     pub lang: Option<String>,
     /// datasetId= instance filter; entry "@none" selects default instances.
     pub dataset_id: Option<Vec<String>>,
@@ -145,6 +155,25 @@ pub fn narrow_projection(
         *pick = Some(kept);
     }
     Ok(())
+}
+
+/// The same narrowing on a current-state [`Repr`], which is the one a join
+/// walk descends. It goes into the policy fields rather than into the
+/// request's own projection, so every document the answer carries is
+/// narrowed and not only the one at the top: `?join=flat` returns Entities
+/// reached over a Relationship, and a member the subject may not see is not
+/// less hidden for being one hop away.
+///
+/// The Entity frame survives a policy pick — 5.2.4 makes `id` and `type`
+/// the Entity, and a document without them is not one — which is why the
+/// policy pick is applied to Attributes and never to the core members.
+pub fn narrow_repr(r: &mut Repr, f: &crate::policy::Filter) {
+    if !f.omit.is_empty() {
+        r.policy_omit = Some(policy_nodes(&f.omit));
+    }
+    if !f.pick.is_empty() {
+        r.policy_pick = Some(policy_nodes(&f.pick));
+    }
 }
 
 /// The same `pick`/`omit` names in the form an already-compacted document
@@ -339,6 +368,25 @@ pub fn check_projection_exclusive(params: &HashMap<String, String>) -> Result<()
     Ok(())
 }
 
+/// ADR-0020: does an Attribute survive the policy's own projection? Both
+/// forms of the name are tried, because a document reaches this function
+/// expanded on the query path and compacted on the notification path, and a
+/// rule names one Attribute either way.
+pub fn policy_projected(pick: Option<&[ProjNode]>, omit: Option<&[ProjNode]>, k: &str) -> bool {
+    let names = |n: &ProjNode| n.iri == *k || n.raw == *k;
+    if let Some(pick) = pick {
+        if !pick.iter().any(names) {
+            return false;
+        }
+    }
+    if let Some(omit) = omit {
+        if omit.iter().any(names) {
+            return false;
+        }
+    }
+    true
+}
+
 /// 4.21: does a core Entity member (id, type, scope, the system temporal
 /// Properties) survive the projection? `pick` constrains core members
 /// strictly — only what is named survives; `omit` drops a named member only
@@ -375,7 +423,12 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
                 "createdAt" | "modifiedAt" | "expiresAt" if !r.sys_attrs => continue,
                 _ => {}
             }
-            if !meta_projected(r.pick.as_deref(), r.omit.as_deref(), k) {
+            // the policy pick never reaches a core member: 5.2.4 makes id
+            // and type the Entity, so a narrowing that removed them would
+            // answer something that is not one
+            if !meta_projected(r.pick.as_deref(), r.omit.as_deref(), k)
+                || !meta_projected(None, r.policy_omit.as_deref(), k)
+            {
                 continue;
             }
             out.insert(k.clone(), v.clone());
@@ -395,6 +448,9 @@ pub fn apply(doc: &Value, r: &Repr) -> Value {
             if drop.iter().any(|n| n.iri == *k && n.children.is_none()) {
                 continue;
             }
+        }
+        if !policy_projected(r.policy_pick.as_deref(), r.policy_omit.as_deref(), k) {
+            continue;
         }
         let raw: Vec<Value> = v.as_array().cloned().unwrap_or_else(|| vec![v.clone()]);
         let kept: Vec<&Value> = raw
@@ -634,6 +690,10 @@ fn joined_repr(parent: &crate::repr::Repr, key_compact: &str, key_iri: &str) -> 
         key_values: parent.key_values,
         concise: parent.concise,
         lang: parent.lang.clone(),
+        // ADR-0020: the narrowing is not a per-level projection — it
+        // travels to every document the answer carries
+        policy_pick: parent.policy_pick.clone(),
+        policy_omit: parent.policy_omit.clone(),
         ..Default::default()
     };
     if let Some(pick) = &parent.pick {
@@ -936,6 +996,10 @@ fn collect_flat_walk(
             {
                 continue;
             }
+        }
+        // a Relationship the subject may not see is not a road either
+        if !policy_projected(repr.policy_pick.as_deref(), repr.policy_omit.as_deref(), k) {
+            continue;
         }
         let Some(instances) = v.as_array() else {
             continue;

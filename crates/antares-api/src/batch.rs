@@ -1407,7 +1407,7 @@ async fn batch_query_inner(
     // body members (pick/omit/attrs/lang/datasetId) shape the representation
     // exactly like their 6.3.7 query-parameter twins
     let mut repr = parse_repr(&page_params, &parsed.ctx)?;
-    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &parsed.ctx)?;
+    crate::repr::narrow_repr(&mut repr, &filter);
     let join = crate::entities::parse_join(&vp)?;
     crate::entities::check_linked_projection(&repr, &join)?;
     let mut payload: Vec<Value> = page

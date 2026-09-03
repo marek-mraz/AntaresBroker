@@ -266,7 +266,7 @@ async fn retrieve_entity_inner(
     let ctx = request_context(&st.loader, headers).await?;
     let filter = gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
     let mut repr = parse_repr(params, &ctx)?;
-    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &ctx)?;
+    crate::repr::narrow_repr(&mut repr, &filter);
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
     antares_model::EntityId::new(id)?;
@@ -788,7 +788,7 @@ async fn query_entities_inner(
     }
 
     let mut repr = parse_repr(params, &ctx)?;
-    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, filter, &ctx)?;
+    crate::repr::narrow_repr(&mut repr, filter);
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
     // 5.7.2.4: filter conditions using Linked Entity attributes need join,
@@ -2252,7 +2252,7 @@ async fn retrieve_attr_inner(
     let ctx = request_context(&st.loader, headers).await?;
     let filter = gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
     let mut repr = parse_repr(params, &ctx)?;
-    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &ctx)?;
+    crate::repr::narrow_repr(&mut repr, &filter);
     antares_model::EntityId::new(id)?;
     antares_model::check_attr_name(attr)?;
     let doc = st

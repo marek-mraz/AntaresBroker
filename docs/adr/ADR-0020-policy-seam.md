@@ -83,6 +83,15 @@ string, so the precedence trap a gateway rewrite has to distribute around
 cannot occur. Narrowing is silent: a caller cannot tell a hidden entity
 from an absent one, and a retrieve of a hidden entity is 404.
 
+A narrowing reaches every document the answer carries, not only the one the
+request named: 4.5.23 `join=` appends Entities reached over a Relationship,
+and a member the subject may not see is not less hidden one hop away. The
+policy projection is therefore kept apart from the request's own — a 4.21
+projection belongs to one level, where a bare `omit` name deliberately
+leaves that member alone on a joined document — and it travels down the
+join walk unchanged. A Relationship the narrowing removes is not traversed
+either.
+
 A `pick`/`omit` name is one Attribute name (6.5.3.1), not a 4.21 projection
 expression, because that grammar reads a dot as the sub-attribute path
 separator and would truncate an IRI at the first dot of its authority. It is
