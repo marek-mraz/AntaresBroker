@@ -6,7 +6,7 @@
 use crate::entity_map::{created_response, dt, map_delete, map_get, map_put, open_map};
 use crate::negotiate::*;
 use crate::state::AppState;
-use antares_model::NgsiError;
+use antares_model::{NgsiError, TenantId};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -17,6 +17,24 @@ use std::collections::HashMap;
 // ---------- storage (5.14.1.1: "internal storage, or memory") ----------
 
 // ---------- 5.14.1 / 5.14.2 / 5.14.3: /entityMaps/{id} (6.32) ----------
+
+/// The map under `id`, if it is this subject's.
+///
+/// 5.14.1.4 and 5.14.3.4 answer an id "that does not correspond to any
+/// existing EntityMap" with ResourceNotFound, and a map built for another
+/// subject is exactly that from here: its `entityMap` member IS the set of
+/// Entity ids a query matched, so serving one to whoever asks would hand
+/// over the ids a narrowing was there to withhold, and deleting one would
+/// end another subject's transaction (ADR-0020).
+///
+/// 5.5.14's one allowance for other components — they "shall only be allowed
+/// to update the expiry timestamp" — is why 5.14.2 Update is NOT routed
+/// through here: extending a lifetime is what the clause lets a stranger do.
+fn mine(st: &AppState, tenant: &TenantId, headers: &HeaderMap, id: &str) -> ApiResult<Value> {
+    map_get(st, tenant, id)?
+        .filter(|doc| crate::policy::belongs_to(doc, &crate::policy::subject_of(tenant, headers)))
+        .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into())
+}
 
 /// 5.14.1.4 Retrieve EntityMap: invalid-URI id → 400 BadRequestData, unknown
 /// id → 404 ResourceNotFound, else the 5.2.39 JSON-LD object.
@@ -31,8 +49,9 @@ pub async fn retrieve_entity_map(
         gate!(st, &tenant, &headers, "5.14.1", ids: &[&id]).await?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
-        let doc = map_get(&st, &tenant, &id)?
-            .ok_or_else(|| NgsiError::ResourceNotFound(format!("EntityMap {id} not found")))?;
+        let mut doc = mine(&st, &tenant, &headers, &id)?;
+        // 5.2.39 defines no member for whose map this is
+        crate::policy::strip_internal(&mut doc);
         Ok::<_, ApiError>(respond(StatusCode::OK, doc, &ctx, accept, &tenant))
     };
     go.await.unwrap_or_else(|e| e.into_response())
@@ -81,6 +100,7 @@ pub async fn delete_entity_map(
     let go = async {
         let tenant = open_map(&params, &headers, &id)?;
         gate!(st, &tenant, &headers, "5.14.3", ids: &[&id]).await?;
+        mine(&st, &tenant, &headers, &id)?;
         if !map_delete(&st, &tenant, &id)? {
             return Err(NgsiError::ResourceNotFound(format!("EntityMap {id} not found")).into());
         }

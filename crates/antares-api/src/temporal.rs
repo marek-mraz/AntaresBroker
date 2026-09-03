@@ -1411,7 +1411,7 @@ async fn query_temporal_outer(
         return query_temporal_inner(st, &params, headers, &filter).await;
     };
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id) else {
         params.insert("entityMap".into(), "true".into());
         return query_temporal_inner(st, &params, headers, &filter).await;
     };

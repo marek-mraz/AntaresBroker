@@ -196,9 +196,7 @@ fn purge_data_bg(st: &AppState, meta: &Value) {
 /// The snapshot document as presented to clients (internal members hidden).
 fn present(meta: &Value) -> Value {
     let mut out = meta.clone();
-    if let Some(o) = out.as_object_mut() {
-        o.remove("__tenant");
-    }
+    crate::policy::strip_internal(&mut out);
     out
 }
 
@@ -216,6 +214,9 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
         .cloned()
         .ok_or_else(|| bad("snapshot must be a JSON object".into()))?;
     o.remove("@context");
+    // the broker's own members (the synthetic tenant, the creating subject)
+    // are not the client's to send — see policy::strip_internal
+    o.retain(|k, _| !k.starts_with("__"));
     // output-only members (Table 5.2.41-2) "shall be ignored"
     for k in [
         "snapshotStatus",
@@ -336,7 +337,11 @@ fn validate(body: &Value, mode: Mode) -> Result<Map<String, Value>, NgsiError> {
 
 /// Fresh metadata for a new snapshot (create or clone) — 5.16.1.4/5.16.2.4:
 /// timestamps now, status "preparing", priority default 5, bounded expiresAt.
-fn new_meta(mut o: Map<String, Value>) -> Result<(String, Value), NgsiError> {
+fn new_meta(
+    mut o: Map<String, Value>,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+) -> Result<(String, Value), NgsiError> {
     let id = match o.get("id").and_then(Value::as_str) {
         Some(id) => {
             antares_model::EntityId::new(id)
@@ -363,6 +368,16 @@ fn new_meta(mut o: Map<String, Value>) -> Result<(String, Value), NgsiError> {
         "__tenant".into(),
         Value::String(format!("snap-{}", uuid::Uuid::new_v4().simple())),
     );
+    // Whose snapshot this is. 5.16.1's fill runs after the request has been
+    // answered, so the subject it copies under has to be recorded here or it
+    // is gone; and 5.16.1/5.16.2/5.16.7 act on everything the tenant holds,
+    // which is why a narrowing answer to any of them is a refusal
+    // (policy::WHOLE_TENANT) rather than a smaller snapshot.
+    if let Some(subject) =
+        crate::policy::subject_member(&crate::policy::subject_of(tenant, headers))
+    {
+        o.insert(crate::policy::SUBJECT_MEMBER.into(), subject);
+    }
     Ok((id, Value::Object(o)))
 }
 
@@ -462,7 +477,7 @@ pub async fn create_snapshot(
             .await?
             .value;
         let o = validate(&v, Mode::Create)?;
-        let (id, meta) = new_meta(o)?;
+        let (id, meta) = new_meta(o, &tenant, &headers)?;
         snap_insert(&st, &tenant, &id, &meta)?;
         evict_over_cap(&st, &tenant, &id);
         let (st2, t2, id2) = (st.clone(), tenant.clone(), id.clone());
@@ -996,7 +1011,7 @@ pub async fn clone_snapshot(
                 o.insert(k.into(), qv.clone());
             }
         }
-        let (new_id, meta) = new_meta(o)?;
+        let (new_id, meta) = new_meta(o, &tenant, &headers)?;
         snap_insert(&st, &tenant, &new_id, &meta)?;
         // a clone is a new snapshot: 5.5.15 resource pressure applies to it
         // exactly as it does to a create, so cloning cannot grow the

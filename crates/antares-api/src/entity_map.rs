@@ -35,6 +35,19 @@ pub(crate) fn dt(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|d| d.with_timezone(&chrono::Utc))
 }
 
+/// Record whose map this is, so 5.5.14's "cannot be accessed" covers a map
+/// built for someone else. A broker-internal member: 5.2.39 defines none, no
+/// served map carries it, and a client cannot supply one because every map
+/// the broker stores is one the broker built.
+fn stamp_subject(doc: &mut Value, tenant: &TenantId, headers: &HeaderMap) {
+    if let (Some(o), Some(subject)) = (
+        doc.as_object_mut(),
+        crate::policy::subject_member(&crate::policy::subject_of(tenant, headers)),
+    ) {
+        o.insert(crate::policy::SUBJECT_MEMBER.into(), subject);
+    }
+}
+
 /// Fetch a live EntityMap; an expired one "cannot be accessed" (5.5.14) and
 /// is pruned on touch. Maps live in the store (Kind::EntityMap) so
 /// persistent modes survive restarts.
@@ -70,8 +83,21 @@ pub(crate) fn map_get(
 /// new one shall be created." A store that refuses the read is one way a map
 /// cannot be accessed, so these paths recover the way they recover from an
 /// expiry — with a new map — instead of failing the request.
-pub(crate) fn map_if_accessible(st: &AppState, tenant: &TenantId, id: &str) -> Option<Value> {
-    map_get(st, tenant, id).ok().flatten()
+/// A map built for a DIFFERENT subject is one this one cannot access, so the
+/// clause's own recovery applies: a new map is created for this request. It
+/// has to be that and not a refusal — the map id came from a header the
+/// client may well be replaying honestly, and an error would tell it that
+/// someone else's transaction exists (ADR-0020).
+pub(crate) fn map_if_accessible(
+    st: &AppState,
+    tenant: &TenantId,
+    headers: &HeaderMap,
+    id: &str,
+) -> Option<Value> {
+    map_get(st, tenant, id)
+        .ok()
+        .flatten()
+        .filter(|doc| crate::policy::belongs_to(doc, &crate::policy::subject_of(tenant, headers)))
 }
 
 /// The Entities of a map a given request may be answered from.
@@ -312,13 +338,14 @@ pub(crate) async fn merge_and_store_map(
             }
         }
     }
-    let doc = json!({
+    let mut doc = json!({
         "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
         "type": "EntityMap",
         "expiresAt": expires_at(params)?,
         "entityMap": Value::Object(emap),
         "linkedMaps": Value::Object(linked),
     });
+    stamp_subject(&mut doc, tenant, headers);
     map_put(st, tenant, doc.clone())?;
     Ok(doc)
 }
@@ -363,13 +390,14 @@ pub(crate) fn build_retrieve_map(
     if !srcs.is_empty() {
         emap.insert(id.to_owned(), Value::Array(srcs));
     }
-    let doc = json!({
+    let mut doc = json!({
         "id": format!("urn:ngsi-ld:entitymap:{}", uuid::Uuid::new_v4()),
         "type": "EntityMap",
         "expiresAt": expires_at(params)?,
         "entityMap": Value::Object(emap),
         "linkedMaps": {},
     });
+    stamp_subject(&mut doc, tenant, headers);
     map_put(st, tenant, doc.clone())?;
     Ok(doc)
 }
@@ -408,7 +436,7 @@ where
         .map(|r| r.rsplit('/').next().unwrap_or(&r).to_owned());
     if let Some(map) = map_ref
         .as_deref()
-        .and_then(|mid| map_if_accessible(st, &tenant, mid))
+        .and_then(|mid| map_if_accessible(st, &tenant, headers, mid))
     {
         let mut resp = inner(Some(map)).await?;
         set_map_header(&mut resp, &map_ref.unwrap_or_default());
@@ -449,6 +477,8 @@ pub(crate) fn created_response(
         "/ngsi-ld/v1/entityMaps/{}",
         doc.get("id").and_then(Value::as_str).unwrap_or_default()
     );
+    let mut doc = doc;
+    crate::policy::strip_internal(&mut doc);
     let mut resp = respond(StatusCode::CREATED, doc, ctx, accept, tenant);
     if let Ok(v) = uri.parse() {
         resp.headers_mut().insert("NGSILD-EntityMap", v);

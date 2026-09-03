@@ -83,6 +83,8 @@ impl PolicyEngine for Notifier {
 }
 
 fn state(answer: NotifyDecision) -> (AppState, Asked) {
+    // before the first request: the header list is read once per process
+    subject_header();
     antares_jsonld::allow_private_egress(true);
     let (engine, seen) = Notifier::new(answer);
     let mut st = AppState::new("me".into()).with_policy(engine);

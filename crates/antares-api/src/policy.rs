@@ -488,6 +488,27 @@ pub(crate) fn stored_subject(tenant: &antares_model::TenantId, sub: &Value) -> S
     }
 }
 
+/// Remove every broker-internal member from a document about to be served.
+///
+/// The `__` prefix is the broker's: the notification `@context` (5.8.6), the
+/// 6.3.18 Via chain, a snapshot's synthetic tenant and [`SUBJECT_MEMBER`]
+/// all live under it, and no NGSI-LD data type defines a member there. One
+/// predicate rather than a list per document type, so a member added later
+/// is hidden by construction instead of by remembering every serve point.
+pub(crate) fn strip_internal(doc: &mut Value) {
+    if let Some(o) = doc.as_object_mut() {
+        o.retain(|k, _| !k.starts_with("__"));
+    }
+}
+
+/// Whether a stored document was made by this subject. Compared on the
+/// headers alone: the tenant is where the document already lives, and a
+/// deployment that named no header has no subjects to tell apart — every
+/// request is the same one, and everything it stored is its own.
+pub(crate) fn belongs_to(doc: &Value, subject: &Subject) -> bool {
+    stored_subject(&subject.tenant, doc).headers == subject.headers
+}
+
 /// A refusal on its way out of a handler. Its own type rather than an
 /// `ApiError`, so this module names nothing above it and stays a leaf; the
 /// `?` in a handler converts it through `From`.

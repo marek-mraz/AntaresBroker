@@ -99,6 +99,21 @@ conditions long before the seam sees them, there is nothing left to re-run a
 query against, and delivering unfiltered would report a narrowing that never
 happened.
 
+**A broker-held record outlives its request.** An EntityMap (5.14) and a
+Snapshot (5.16) are both a stored answer to one query, reused by later
+requests, so each records the subject it was made for in `__subject`. 5.5.14
+already says what to do with a map this subject cannot access — "no inference
+can be made … and a new one shall be created" — so a map presented by another
+subject is answered exactly as an expired one is, and the two cannot be told
+apart; retrieving or deleting it is `ResourceNotFound`, because its
+`entityMap` member is the id set a narrowing exists to withhold. The one
+allowance the clause makes in the other direction stands: other components
+"shall only be allowed to update the expiry timestamp", so 5.14.2 Update is
+open to a subject that did not build the map. A snapshot's fill runs after
+its request has been answered, which is why the subject is recorded there
+too — and why 5.16.1, 5.16.2 and 5.16.7 sit in the whole-tenant list with
+5.6.21: there is no narrowed form of "copy everything these queries match".
+
 **Whose subject a notification is under.** 5.8.6 delivery is
 broker-initiated, so no request is in flight when it is decided. The subject
 is the subscriber's, taken from the creating request and stored with the
@@ -180,6 +195,12 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
   crate, and the release gate proves no addon is in the shipped image.
 - A test that fails when a subject header survives `federation::forward`.
 - `/q/health` names the active engine and its timeout.
+- `tests/policy_maps_snapshots_5_14_5_16.rs`: a map built for one subject is
+  not reused by another and is answered like an expired one; retrieve and
+  delete of another subject's map are `ResourceNotFound` while the 5.5.14
+  expiry update stays open; no served map or snapshot carries an internal
+  member; a narrowing answer to 5.16.1, 5.16.2, 5.16.7 or 5.6.21 is a 403
+  while an empty filter is an allow.
 - `tests/policy_notify_5_8_6.rs`: a dropped notification is no attempt at
   all (no POST, no `timesSent`, no `lastNotification`, no `lastFailure`)
   while a delivered one still counts; the projection removes what the engine

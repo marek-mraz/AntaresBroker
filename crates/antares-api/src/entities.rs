@@ -572,7 +572,7 @@ async fn query_entities_outer(
         .into());
     }
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
-    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
+    let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, headers, &map_id) else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
         params.insert("entityMap".into(), "true".into());
         return query_entities_inner(st, &params, headers, &filter).await;
