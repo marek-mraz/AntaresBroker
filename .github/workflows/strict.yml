@@ -121,11 +121,26 @@ jobs:
       # `llvm-cov report` would total every file in the coverage map,
       # including targets this step never ran, and print a number that is not
       # the one being gated.
+      # Two things `--lib --bins` instruments that no in-crate test can
+      # execute, so counting them made the unit floor a number about the
+      # shape of the workspace rather than about its tests. Both are still
+      # measured, by the API step below, which is where their tests live.
+      # `antares-store/src/contract.rs` is the store contract kit: it is
+      # `test-kit`-gated and a store implementation's own integration tests
+      # are the only thing that links it. `antares-sql/src/store/pg/` needs
+      # a live database AND a multi-thread runtime, and an in-crate
+      # `#[tokio::test]` is current-thread — the constraint follows from the
+      # synchronous driver traits, so it is not going away; the drivers are
+      # proven by the integration files that declare
+      # `flavor = "multi_thread"` and by the postgres and timescale ETSI
+      # cells. Nothing else is excluded: a file that in-crate tests COULD
+      # reach and do not is exactly what this floor is for.
       - name: Unit surface floor (lib + bins)
         run: |
           set -eo pipefail
           rc=0
           cargo llvm-cov --locked --workspace --lib --bins --summary-only \
+            --ignore-filename-regex 'antares-store/src/contract\.rs|antares-sql/src/store/pg/' \
             --fail-under-lines 78 --fail-under-functions 76 > unit-cov.txt || rc=$?
           { echo "### Coverage floor — unit (lib + bins)"; echo '```'
             cat unit-cov.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
