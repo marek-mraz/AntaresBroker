@@ -30,7 +30,7 @@ fn resource_path(kind: Kind) -> &'static str {
 /// regular expression, and a type-selection expression (4.17) stays raw
 /// because it is evaluated at match time.
 fn norm_entity_selectors(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let arr = v
         .as_array()
         .filter(|a| !a.is_empty())
@@ -109,7 +109,7 @@ fn norm_entity_selectors(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
 /// member is held to its value space, and the Endpoint is checked by
 /// `check_endpoint_params`.
 fn norm_notification(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let n = v
         .as_object()
         .ok_or_else(|| bad("notification must be an object (5.2.14)".into()))?;
@@ -266,7 +266,7 @@ fn norm_notification(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
 /// Table 5.2.15-1 Endpoint: the members that decide how a notification is
 /// sent. `uri` is checked by the caller, which needs it first.
 fn check_endpoint_params(ep: &Map<String, Value>) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     // Table 5.2.15-1: receiverInfo/notifierInfo are
     // KeyValuePair[] — per Table 5.2.22-1 both key and value
     // are Strings, cardinality 1.
@@ -334,7 +334,7 @@ fn check_endpoint_params(ep: &Map<String, Value>) -> Result<(), NgsiError> {
 /// attributeDeleted." A trigger outside that set is accepted and then
 /// matches nothing, leaving a subscription that never fires.
 fn check_notification_triggers(v: &Value) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     const TRIGGERS: [&str; 6] = [
         "entityCreated",
         "entityUpdated",
@@ -368,7 +368,7 @@ fn norm_member(
     ctx: &Context,
     out: &mut Map<String, Value>,
 ) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     match k {
         "@context" | "createdAt" | "modifiedAt" | "status" => return Ok(()),
         "id" => {
@@ -534,7 +534,7 @@ fn norm_member(
 /// The Table 5.2.12-1 rules that hold between members rather than over
 /// one: what a Subscription must carry, and the pairs it may not.
 fn check_subscription_members(out: &Map<String, Value>, is_patch: bool) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     if !is_patch {
         if !out.contains_key("type") {
             return Err(bad("type must be \"Subscription\" (5.2.12)".into()));
@@ -572,7 +572,7 @@ pub fn normalize_subscription(
     ctx: &Context,
     is_patch: bool,
 ) -> Result<Map<String, Value>, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     // 5.5.4: first-level member nulls are only legal in fragments (patch)
     if !is_patch {
         antares_jsonld::reject_first_level_nulls(doc)?;

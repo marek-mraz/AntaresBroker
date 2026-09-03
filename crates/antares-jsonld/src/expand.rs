@@ -466,7 +466,7 @@ fn dataset_id_member(d: &Value) -> Result<Option<Value>, NgsiError> {
 /// Property value unchanged, so they carry the same two checks as the
 /// normalized path.
 fn check_value_nulls(name: &str, val: &Value, opts: ExpandOpts) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let nullish = match val {
         Value::String(s) => s == "urn:ngsi-ld:null",
         Value::Array(a) => a.iter().any(is_ngsi_null),
@@ -557,7 +557,7 @@ fn expand_attribute(
     opts: ExpandOpts,
     depth: usize,
 ) -> Result<Vec<Value>, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     if depth > 8 {
         return Err(bad(format!("attribute {name}: nesting too deep")));
     }
@@ -614,7 +614,7 @@ fn check_prohibited_members(
     opts: ExpandOpts,
     out: &mut Map<String, Value>,
 ) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     const VALUE_OWNERS: &[(&str, &[&str])] = &[
         ("value", &["Property", "GeoProperty"]),
         ("object", &["Relationship"]),
@@ -715,7 +715,7 @@ fn expand_common_members(
     opts: ExpandOpts,
     out: &mut Map<String, Value>,
 ) -> Result<(), NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     if let Some(d) = obj.get("datasetId") {
         if let Some(d) = dataset_id_member(d).map_err(|e| bad(format!("attribute {name}: {e}")))? {
             out.insert("datasetId".into(), d);
@@ -813,7 +813,7 @@ fn expand_instance(
     opts: ExpandOpts,
     depth: usize,
 ) -> Result<Value, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
 
     // NGSI-LD null: attribute deletion marker (merge-patch only).
     if is_ngsi_null(v) {
@@ -1148,7 +1148,7 @@ fn expand_instance(
 /// inference happens (a fragment `{providedBy: …}` patches the sub-attribute,
 /// it is not a concise Property value).
 pub fn expand_attr_fragment(obj: &Map<String, Value>, ctx: &Context) -> Result<Value, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let mut out = Map::new();
     for (k, v) in obj {
         match k.as_str() {

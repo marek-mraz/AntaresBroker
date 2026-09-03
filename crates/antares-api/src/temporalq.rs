@@ -26,7 +26,7 @@ impl TemporalQ {
         params: &HashMap<String, String>,
         required: bool,
     ) -> Result<Option<Self>, NgsiError> {
-        let bad = |m: String| NgsiError::BadRequestData(m);
+        let bad = NgsiError::BadRequestData;
         let Some(timerel) = params.get("timerel") else {
             if required {
                 return Err(bad("temporal query requires timerel (5.7.4)".into()));

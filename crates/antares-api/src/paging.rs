@@ -210,7 +210,7 @@ pub fn check_collation(params: &HashMap<String, String>) -> Result<(), NgsiError
 }
 
 fn build_collator(tag: &str) -> Result<icu_collator::CollatorBorrowed<'static>, NgsiError> {
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let locale: icu_locale_core::Locale = tag.parse().map_err(|_| {
         bad(format!(
             "collation is not an RFC 6067 tag: {tag:?} (4.23.3)"
@@ -255,7 +255,7 @@ pub fn order_entities(
         bracket: Option<Vec<String>>,
         dir: Dir,
     }
-    let bad = |m: String| NgsiError::BadRequestData(m);
+    let bad = NgsiError::BadRequestData;
     let mut keys = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();

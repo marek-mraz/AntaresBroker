@@ -188,7 +188,7 @@ impl GeoQuery {
             }
             return Ok(None);
         };
-        let bad = |m: String| NgsiError::BadRequestData(m);
+        let bad = NgsiError::BadRequestData;
         let mut parts = georel.split(';');
         let base = parts.next().unwrap_or("").trim();
         let mut max = None;
