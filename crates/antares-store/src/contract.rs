@@ -284,6 +284,59 @@ pub fn run_current_state_contract(
         "a tenant holding only a registration must appear in the mirror-hydration \
          domain, or its registration mirror hydrates empty: {domain:?}"
     );
+
+    // Table 5.2.9-2 forward bookkeeping, pinned here for the same reason as
+    // 5.2.14.2's: a backend may write it as one statement instead of a
+    // read-modify-write, and the result must not depend on which it chose.
+    let f1 = "2020-02-01T00:00:00.000Z";
+    let f2 = "2020-02-02T00:00:00.000Z";
+    let ok1 = d
+        .record_forward(&reg_only, &reg, f1, true)
+        .expect("record_forward")
+        .expect("the registration is there");
+    assert_eq!(
+        ok1["timesSent"], 1,
+        "the first forward moves timesSent to 1"
+    );
+    assert_eq!(ok1["lastSuccess"], f1, "lastSuccess takes the stamp");
+    assert_eq!(ok1["status"], "ok", "a 2xx leaves the registration ok");
+    assert!(
+        ok1.get("timesFailed").is_none() && ok1.get("lastFailure").is_none(),
+        "a registration that has only succeeded carries no failure members: {ok1}"
+    );
+
+    let bad = d
+        .record_forward(&reg_only, &reg, f2, false)
+        .expect("record_forward")
+        .expect("the registration is still there");
+    assert_eq!(
+        bad["timesSent"], 2,
+        "timesSent counts the failed attempt too (Table 5.2.9-2)"
+    );
+    assert_eq!(bad["timesFailed"], 1, "the failure moves timesFailed");
+    assert_eq!(bad["lastFailure"], f2, "lastFailure takes the stamp");
+    assert_eq!(bad["status"], "failed", "status names the LAST attempt");
+    assert_eq!(
+        bad["lastSuccess"], f1,
+        "a failure never rewinds the last success"
+    );
+
+    // A registration deleted while its forward was in flight has no row to
+    // book against, and the writeback must not resurrect it.
+    let vanished = format!("urn:ngsi-ld:ContextSourceRegistration:{prefix}:gone");
+    assert!(
+        d.record_forward(&reg_only, &vanished, f1, true)
+            .expect("record_forward")
+            .is_none(),
+        "an absent registration books nothing"
+    );
+    assert!(
+        d.get(&reg_only, Kind::Registration, &vanished)
+            .expect("get")
+            .is_none(),
+        "a bookkeeping writeback must never insert the row it missed"
+    );
+
     d.delete(&reg_only, Kind::Registration, &reg)
         .expect("delete");
     // `list_page` is how the readers that must see EVERY document read —

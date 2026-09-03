@@ -499,7 +499,33 @@ async fn no_operation_of_one_tenant_touches_another_tenants_document() {
     );
     assert_eq!(before.0, after.0, "the owner's Entity changed");
     assert_eq!(before.1, after.1, "the owner's Subscription changed");
-    assert_eq!(before.2, after.2, "the owner's Registration changed");
+    // The owner's own reads above fan out to this registration — its
+    // `information` matches the Entity they retrieve — and every forward
+    // books Table 5.2.9-2's history on it. That history is moved by tenant
+    // A's reads and by nothing tenant B did, so the comparison is made over
+    // every member a client owns. The cross-tenant half of the property
+    // (one tenant's forwards never land on another tenant's registration)
+    // is asserted in `registration_counters_5_2_9.rs`.
+    let without_history = |(status, body): (StatusCode, String)| {
+        let mut v: serde_json::Value = serde_json::from_str(&body).expect("registration json");
+        if let Some(o) = v.as_object_mut() {
+            for m in [
+                "timesSent",
+                "timesFailed",
+                "lastSuccess",
+                "lastFailure",
+                "status",
+            ] {
+                o.remove(m);
+            }
+        }
+        (status, v)
+    };
+    assert_eq!(
+        without_history(before.2),
+        without_history(after.2),
+        "the owner's Registration changed"
+    );
     let (status, temporal_after) = send(&st, "GET", &temporal_path, Some(A), None).await;
     assert_eq!(status, StatusCode::OK, "{temporal_after}");
     assert_eq!(

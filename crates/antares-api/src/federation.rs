@@ -772,6 +772,38 @@ where
         .await
 }
 
+/// Table 5.2.9-2 and 5.2.34: one forward's outcome, booked on the
+/// registration it was made for. `ok` is the table's own failure
+/// definition — "an HTTP response code other than 2xx".
+///
+/// Only an operation that reached the wire is booked. The three ways out of
+/// `forward` above this point — a destination the egress policy refuses, an
+/// open breaker, the declared 5.2.34 cooldown — are this broker declining to
+/// perform the operation, and the table counts operations that were
+/// performed: `lastFailure` is when a failure "was returned". Nothing is
+/// lost by that: the breaker opens only after failures that WERE attempted
+/// and booked, so a registration whose Context Source is down already reads
+/// `"failed"` before the first forward is suppressed.
+///
+/// The stamp never fails the forward. The answer is decided by the time this
+/// runs, and a store that cannot take a counter must not turn a served
+/// response into an error. The registration mirror is not refreshed either:
+/// it exists to decide which registrations match, and no member here does.
+fn note_forward(st: &AppState, tenant: &TenantId, reg: &FedReg, ok: bool) {
+    if reg.cooldown_ms.is_some() {
+        st.reg_cooldown_stamp(tenant, &reg.reg_id, ok);
+    }
+    if let Err(e) = st
+        .store
+        .record_forward(tenant, &reg.reg_id, &crate::state::now_iso(), ok)
+    {
+        tracing::warn!(
+            "forward bookkeeping for registration {} failed: {e}",
+            reg.reg_id
+        );
+    }
+}
+
 /// One forwarded request. `body` is compacted JSON (no @context member).
 #[allow(clippy::too_many_arguments)] // mirrors the wire: one param per forwarded request part
 pub async fn forward(
@@ -1070,9 +1102,7 @@ pub async fn forward(
             Some(r) => r,
             None => {
                 st.egress.record_failure(tenant.as_str(), &url);
-                if reg.cooldown_ms.is_some() {
-                    st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
-                }
+                note_forward(st, tenant, reg, false);
                 return (504, Value::Null, Vec::new());
             }
         };
@@ -1085,11 +1115,7 @@ pub async fn forward(
                 // else unrelated registrations sharing its host:port starve.
                 let status = resp.status().as_u16();
                 st.egress.record_success(tenant.as_str(), &url);
-                if reg.cooldown_ms.is_some() {
-                    // 5.2.9 Table 5.2.9-2 failure definition: any response
-                    // code other than 2xx
-                    st.reg_cooldown_stamp(tenant, &reg.reg_id, (200..300).contains(&status));
-                }
+                note_forward(st, tenant, reg, (200..300).contains(&status));
                 let peer_warnings: Vec<String> = resp
                     .headers()
                     .get_all("NGSILD-Warning")
@@ -1101,9 +1127,7 @@ pub async fn forward(
             }
             Err(e) if e.is_timeout() => {
                 st.egress.record_failure(tenant.as_str(), &url);
-                if reg.cooldown_ms.is_some() {
-                    st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
-                }
+                note_forward(st, tenant, reg, false);
                 (504, Value::Null, Vec::new())
             }
             Err(_) => {
@@ -1114,9 +1138,7 @@ pub async fn forward(
                 // response was received from the registration endpoint"),
                 // never 299 ("An error response ... was received").
                 st.egress.record_success(tenant.as_str(), &url);
-                if reg.cooldown_ms.is_some() {
-                    st.reg_cooldown_stamp(tenant, &reg.reg_id, false);
-                }
+                note_forward(st, tenant, reg, false);
                 (503, Value::Null, Vec::new())
             }
         }

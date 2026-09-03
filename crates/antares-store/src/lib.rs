@@ -198,6 +198,47 @@ pub fn record_delivery_via_mutate(
     Ok(out)
 }
 
+/// The forward stamp expressed as a `mutate`. This is the Table 5.2.9-2
+/// rule itself — what `timesSent`, `timesFailed`, `lastSuccess`,
+/// `lastFailure` and `status` become after one distributed operation — so a
+/// backend that reimplements [`CurrentStateDriver::record_forward`] in its
+/// own query language is reimplementing THIS, and the two must agree.
+///
+/// `timesSent` moves on EVERY attempt: the table defines it as the number of
+/// times the registration "triggered a distributed operation, including
+/// failed attempts". A member is written when it first has meaning, which is
+/// what cardinality 0..1 and "created on first successful operation" ask for:
+/// a registration that has only ever succeeded carries no `timesFailed` and
+/// no `lastFailure`, and one that has only ever failed carries no
+/// `lastSuccess`. `status` always names the LAST attempt.
+pub fn record_forward_via_mutate(
+    d: &(impl CurrentStateDriver + ?Sized),
+    tenant: &TenantId,
+    id: &str,
+    now: &str,
+    ok: bool,
+) -> Result<Option<Value>, NgsiError> {
+    let mut out: Option<Value> = None;
+    d.mutate::<(), ()>(tenant, Kind::Registration, id, |doc| {
+        if let Some(o) = doc.as_object_mut() {
+            let sent = o.get("timesSent").and_then(Value::as_i64).unwrap_or(0);
+            o.insert("timesSent".into(), serde_json::json!(sent + 1));
+            if ok {
+                o.insert("lastSuccess".into(), Value::String(now.to_owned()));
+                o.insert("status".into(), Value::String("ok".into()));
+            } else {
+                let failed = o.get("timesFailed").and_then(Value::as_i64).unwrap_or(0);
+                o.insert("timesFailed".into(), serde_json::json!(failed + 1));
+                o.insert("lastFailure".into(), Value::String(now.to_owned()));
+                o.insert("status".into(), Value::String("failed".into()));
+            }
+        }
+        out = Some(doc.clone());
+        Ok(())
+    })?;
+    Ok(out)
+}
+
 /// What one delivery attempt wrote: the stored subscription as it now
 /// stands (the mirror is fed from it) and the `lastSuccess` that was there
 /// before, which a failed attempt puts back.
@@ -418,6 +459,25 @@ pub trait CurrentStateDriver: Send + Sync {
     /// return 0).
     fn sweep_expired(&self) -> usize {
         0
+    }
+    /// Table 5.2.9-2 forward bookkeeping: stamp one distributed operation on
+    /// a registration and hand back the stored document. `None` means the row
+    /// is gone — the registration was deleted while its forward was in
+    /// flight, and a bookkeeping writeback must never resurrect it.
+    ///
+    /// The default expresses it as a `mutate`, which is correct everywhere.
+    // ponytail: one read-modify-write per forward, so a registration every
+    // request fans out to is one contended row; a backend whose `mutate`
+    // locks that row across a network round trip can collapse it into one
+    // statement the way `record_delivery` does, once a profile asks.
+    fn record_forward(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        now: &str,
+        ok: bool,
+    ) -> Result<Option<Value>, NgsiError> {
+        record_forward_via_mutate(self, tenant, id, now, ok)
     }
     /// 5.5.10: the default Tenant implicitly exists; others once created.
     fn tenant_exists(&self, tenant: &TenantId) -> Result<bool, NgsiError>;

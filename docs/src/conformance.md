@@ -36,7 +36,7 @@ Current counts (`python3 dev/spec.py status`):
   implemented       477
   informative       468
   partial             2
-  robot-tagged       192
+  robot-tagged       193
 ```
 
 A `partial` names its gap in `notes:` and is the honest status for a clause
@@ -47,7 +47,7 @@ gaps` lists leaf clauses without a TP.
 
 ## The suite
 
-The suite directory holds 669 `.robot` files under
+The suite directory holds 670 `.robot` files under
 `TP/NGSI-LD/{CommonBehaviours, ContextInformation, ContextSource,
 DistributedOperations, jsonldContext}`. Most carry ETSI's own numbering
 (`002_01`, `D018_01`); the rest are additions written here for normative
@@ -55,7 +55,7 @@ surface the official set leaves untested, either clause-numbered (`566_01`
 for 5.6.6, `5510_01` for 5.5.10, `4233_01` for 4.23.3) or slotted into the
 ETSI family they extend, and all following the same conventions and tagged
 with their clause so the ledger picks them up. Every file expands to test
-cases; one full run of a native cell is 1817 test cases:
+cases; one full run of a native cell is 1819 test cases:
 
 | suite | test cases |
 |---|---|
@@ -65,7 +65,7 @@ cases; one full run of a native cell is 1817 test cases:
 | Provision | 403 |
 | Snapshot | 5 |
 | Subscription | 156 |
-| ContextSource | 143 |
+| ContextSource | 145 |
 | DistributedOperations | 134 |
 | IOP | 286 |
 | jsonldContext | 68 |
@@ -79,7 +79,7 @@ than a CIM 009 requirement, with the reason the behaviour exists.
 
 ## The matrix
 
-The same 1817 cases run once per native cell; `wasm-file` runs 1805 of
+The same 1819 cases run once per native cell; `wasm-file` runs 1807 of
 them, the twelve MQTT cases having no broker socket to run against in the
 browser build. Every push gates on the quick preset; the full preset runs
 twice a week, on `v*` tags and on dispatch, and is what the report page and
@@ -95,7 +95,7 @@ the badges render.
 | timescale-nats | as above on TimescaleDB | full | same, on the temporal-heavy backend |
 | wasm-file | browser artifact over the file store | full | five Node shims driving the WebAssembly build; MQTT excluded, the browser has no broker socket |
 
-A native cell passes at 1817/1817, `wasm-file` at 1805/1805.
+A native cell passes at 1819/1819, `wasm-file` at 1807/1807.
 `dev/etsi-matrix-summary.py` folds the per-cell results into one table and
 lists every failure across the matrix; a release requires that list to be
 empty.
@@ -170,8 +170,8 @@ the TPs tagged with its number (or its operation's number) and the
 code/test anchors its evidence cites. It adds no tests; it names where the
 next ones belong.
 
-310 leaf clauses carry 1661 SHALL statements; 118 of them have no Robot
-TP (347 SHALLs), 63 cite no code/test anchor.
+310 leaf clauses carry 1661 SHALL statements; 117 of them have no Robot
+TP (338 SHALLs), 63 cite no code/test anchor.
 
 The fifteen untested clauses with the most SHALL statements:
 
@@ -181,7 +181,6 @@ The fifteen untested clauses with the most SHALL statements:
 | 6.8.3.2 | Resource methods › GET | 17 | 0 | 0 |
 | 6.5.3.1 | Resource methods › GET | 11 | 0 | 0 |
 | 5.2.39 | EntityMap | 10 | 0 | 2 |
-| 5.2.9 | CSourceRegistration | 9 | 0 | 2 |
 | 4.2.3 | Cross Domain Ontology | 8 | 0 | 1 |
 | 5.2.35 | VocabProperty | 8 | 0 | 0 |
 | 5.2.38 | JsonProperty | 8 | 0 | 0 |
@@ -192,6 +191,7 @@ The fifteen untested clauses with the most SHALL statements:
 | 6.3.8 | Notification behaviour | 7 | 0 | 6 |
 | 5.2.37 | ListRelationship | 6 | 0 | 0 |
 | 5.2.6 | Relationship | 6 | 0 | 0 |
+| 5.3.4 | SnapshotNotification | 6 | 0 | 2 |
 
 A SHALL count is a proxy: one sentence can carry several rules, and a
 clause's unit tests (the anchors column) may assert what no TP does. The

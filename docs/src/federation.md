@@ -84,6 +84,43 @@ HTTP/1.1 200 OK
 Ngsild-Warning: 199 broker-b "no response was received from the registration endpoint within the timeout period"
 ```
 
+### Forward history
+
+Every forward that reaches the wire is booked on the registration it was
+made for, in the five read-only members of Table 5.2.9-2:
+
+```json
+{
+  "id": "urn:ngsi-ld:ContextSourceRegistration:weather",
+  "type": "ContextSourceRegistration",
+  "endpoint": "http://source-b:8080/ngsi-ld/v1",
+  "information": [{"entities": [{"type": "WeatherObserved"}]}],
+  "timesSent": 412,
+  "timesFailed": 3,
+  "lastSuccess": "2026-05-05T11:02:44.118Z",
+  "lastFailure": "2026-05-04T22:17:09.640Z",
+  "status": "ok"
+}
+```
+
+`timesSent` counts every attempt, failures included; `timesFailed` counts
+the ones the table calls failures, which in the HTTP binding is any response
+code other than 2xx, a timeout and a refused connection. `status` names the
+last attempt alone, so a source that has recovered reads `"ok"` however
+large `timesFailed` is. A member appears when it first has something to say:
+a registration that has never failed carries no `timesFailed` and no
+`lastFailure`.
+
+Three outcomes are deliberately not counted, because the operation never
+left this broker: a destination the egress policy refuses, a source the
+circuit breaker is holding open, and a registration inside its own
+`management.cooldown` window. The breaker only opens after failures that
+were attempted and booked, so a source that has gone away reads `"failed"`
+before the first forward is suppressed.
+
+They are read-only. A create or update that carries any of them has that
+member dropped, not refused, which is what 5.2.9 asks for.
+
 ### Same source, several registrations
 
 Registrations naming the same source (same endpoint, mode, tenant,
