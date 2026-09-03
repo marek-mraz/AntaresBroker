@@ -111,4 +111,42 @@ mod clause_4_19 {
             assert!(!scope_matches(sel, &only_madrid), "{sel}");
         }
     }
+
+    /// The ABNF puts `andOp` inside the parenthesized `OrScopeQ` alone, so
+    /// `(a;b),(c;d)` is the only spelling it derives — yet the official
+    /// suite's `019_01_06 QueryWithAndScope` sends `a;b` bare and expects
+    /// 200 (`testsuite-doubts.md`). Both are served, and they have to MEAN
+    /// the same thing: `;` binds tighter than `,`/`|`, which is the reading
+    /// the parentheses would have forced. A gateway narrowing a request by
+    /// rewriting `scopeQ` may emit either form.
+    #[test]
+    fn a_conjunction_means_the_same_parenthesized_or_bare() {
+        let docs = [
+            doc(&[]),
+            doc(&["/A"]),
+            doc(&["/B"]),
+            doc(&["/C"]),
+            doc(&["/A", "/B"]),
+            doc(&["/C", "/D"]),
+            doc(&["/A", "/D"]),
+            doc(&["/A", "/B", "/C", "/D"]),
+        ];
+        for d in &docs {
+            assert_eq!(
+                scope_matches("(/A;/B),(/C;/D)", d),
+                scope_matches("/A;/B,/C;/D", d),
+                "the two spellings disagree on {d}"
+            );
+            assert_eq!(
+                scope_matches("(/A;/B)|(/C;/D)", d),
+                scope_matches("/A;/B|/C;/D", d),
+                "the two spellings disagree on {d}"
+            );
+        }
+        // and the grouping is the one the parentheses state, not the other
+        // one: `/A;/B,/C` is `(/A AND /B) OR /C`, never `/A AND (/B OR /C)`.
+        assert!(scope_matches("/A;/B,/C", &doc(&["/C"])));
+        assert!(!scope_matches("/A;/B,/C", &doc(&["/A"])));
+        assert!(scope_matches("/A;/B,/C", &doc(&["/A", "/B"])));
+    }
 }

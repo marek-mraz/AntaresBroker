@@ -164,6 +164,26 @@ mod tests {
         assert!(c.sql.contains("$3"), "sql: {}", c.sql);
     }
 
+    /// The pushdown has to read a `scopeQ` the way the in-memory arbiter
+    /// does, or `postgres` answers a query `memory` answers differently.
+    /// The ABNF derives only the parenthesized conjunction, the official
+    /// suite sends it bare (`testsuite-doubts.md`), and a gateway narrowing
+    /// a request may emit either — so the two spellings must compile to the
+    /// same predicate over the same binds.
+    #[test]
+    fn a_conjunction_compiles_the_same_parenthesized_or_bare() {
+        for (parens, bare) in [
+            ("(/A;/B),(/C;/D)", "/A;/B,/C;/D"),
+            ("(/A;/B)|(/C;/D)", "/A;/B|/C;/D"),
+            ("(/A;/B),/C", "/A;/B,/C"),
+        ] {
+            let p = compile_scope_q(parens, "scopes", 1).expect("parenthesized compiles");
+            let b = compile_scope_q(bare, "scopes", 1).expect("bare compiles");
+            assert_eq!(p.sql, b.sql, "{parens} vs {bare}");
+            assert_eq!(p.binds, b.binds, "{parens} vs {bare}");
+        }
+    }
+
     #[test]
     fn non_terminal_multilevel_wildcard_refuses() {
         // `scope_pattern_matches` only honours `#` in final position; rather

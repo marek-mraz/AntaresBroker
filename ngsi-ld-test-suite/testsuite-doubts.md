@@ -2974,3 +2974,46 @@ Upstream fix wanted: serve every @context a test point needs from the
 suite's own resources, and let a test that means to exercise an unreachable
 @context say so explicitly. Nothing here is a broker defect and nothing in
 the broker changes for it.
+
+## 4.19's ABNF parenthesizes every conjunction; `019_01_06 QueryWithAndScope` does not
+
+**Hit:** `TP/NGSI-LD/ContextInformation/Consumption/Entity/QueryEntities/019_01_06.robot`,
+case `QueryWithAndScope`, sends
+
+```
+scopeQ=/Madrid/Gardens/ParqueNorte;/CompanyA/OrganizationB/UnitC
+```
+
+and expects 200 with one entity, i.e. the bare `;` read as a conjunction.
+
+**Spec:** 4.19 (V1.9.1 p. 98) gives
+
+```
+ScopesQ  = OrScopeQ *(orOp OrScopeQ)
+OrScopeQ = %x28 ScopeQ *(andOp ScopeQ) %x29     ; (ScopeQ;ScopeQ)
+OrScopeQ =/ ScopeQ *1(%x2F %23)
+andOp    = %x3B                                 ; ;
+```
+
+`andOp` occurs in the parenthesized alternative alone, and the prose above
+the grammar says it in words: "For logical *and* grouping parenthesis are
+needed." A bare `a;b` is therefore not derivable from `ScopesQ`, and every
+one of the clause's own EXAMPLES 4 and 5 parenthesizes its conjunction.
+
+**Broker:** serves both spellings and reads them identically — `;` binds
+tighter than `,`/`|`, which is the grouping the parentheses would have
+forced. 5.7.2.4 lists the query, geoquery and context source filter as the
+members whose syntax raises BadRequestData and does not name the Scope
+query, so there is no clause to refuse a bare `;` under; refusing it would
+also fail this very test point. The equivalence is pinned in both places a
+`scopeQ` is evaluated, so `postgres` cannot answer differently from
+`memory`: `antares-ql` `scope::clause_4_19::a_conjunction_means_the_same_parenthesized_or_bare`
+and `antares-sql` `compile::scope::tests::a_conjunction_compiles_the_same_parenthesized_or_bare`.
+
+**Fix wanted:** either the grammar admits an unparenthesized conjunction
+with a stated precedence, or the test point parenthesizes it. As it stands
+a broker that implements the ABNF literally fails a conformance test, and
+one that accepts the bare form is guessing at a precedence the grammar
+never states — two implementations may guess differently, which matters
+because a gateway narrowing a request by rewriting `scopeQ` relies on that
+precedence to mean what it intends.

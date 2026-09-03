@@ -295,3 +295,40 @@ not recover the NGSI-LD names.
 
 Suggest defining both as `"ngsi-ld:attributeCount"` and
 `"ngsi-ld:attributeDetails"`, the form the rest of the annex uses.
+
+## 12. [spec+suite] 4.19's ABNF derives no unparenthesized conjunction, but a test point sends one
+
+Clause 4.19 (V1.9.1 p. 98) defines the Scope Query Language as
+
+```
+ScopesQ  = OrScopeQ *(orOp OrScopeQ)
+OrScopeQ = %x28 ScopeQ *(andOp ScopeQ) %x29     ; (ScopeQ;ScopeQ)
+OrScopeQ =/ ScopeQ *1(%x2F %23)
+andOp    = %x3B                                 ; ;
+orOp     = %x7C / %x2C                          ; |  ,
+```
+
+`andOp` appears in the parenthesized alternative only, the prose says "For
+logical *and* grouping parenthesis are needed", and EXAMPLES 4 and 5 both
+parenthesize. A bare `a;b` is not derivable from `ScopesQ`.
+
+The conformance suite nevertheless requires it. Test point
+`019_01_06 QueryWithAndScope` queries with
+
+```
+scopeQ=/Madrid/Gardens/ParqueNorte;/CompanyA/OrganizationB/UnitC
+```
+
+and expects 200 with the one entity carrying both Scopes. An implementation
+that follows the grammar literally fails that test point; one that accepts
+the bare form has to invent the precedence of `;` against `,`/`|`, which
+the grammar never states because it never needs to.
+
+The precedence is not academic. A deployment that narrows a consumer's
+request by rewriting `scopeQ` at its gateway emits exactly this shape
+(`(a;b),(c;d)` or `a;b,c;d`), and two brokers that guess differently
+disclose different sets of Entities for the same narrowed request.
+
+Suggest either extending `OrScopeQ` with an unparenthesized
+`ScopeQ *(andOp ScopeQ)` alternative and stating that `andOp` binds tighter
+than `orOp`, or parenthesizing the conjunction in `019_01_06`.
