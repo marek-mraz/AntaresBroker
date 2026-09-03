@@ -25,11 +25,80 @@ pub fn scope_matches(scope_q: &str, doc: &Value) -> bool {
     })
 }
 
+/// The Scope Query that selects what BOTH arguments select (4.19).
+///
+/// A Scope Query is a disjunction of conjunctions, and the conjunction is
+/// over predicates that are independent of each other — each pattern asks
+/// whether SOME Scope of the Entity matches it — so `and` distributes over
+/// `or` and the intersection is a disjunction of the pairwise unions:
+/// `(a1,a2)` and `(b1,b2)` select what `(a1;b1),(a1;b2),(a2;b1),(a2;b2)`
+/// selects. Every term of the result is a `;`-conjunction of plain
+/// `ScopeQ`s, which is what the grammar's parenthesized `OrScopeQ` derives,
+/// so the answer is a Scope Query and not a broker-private structure.
+///
+/// `None` when either side contributes no group, or when the product would
+/// exceed [`MAX_SCOPE_Q_BYTES`]: the caller then has an intersection it
+/// cannot express and must refuse rather than serve the wider of the two.
+pub fn intersect_scope_q(a: &str, b: &str) -> Option<String> {
+    let groups = |s: &str| -> Vec<String> {
+        s.split([',', '|'])
+            .map(|g| {
+                g.trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim()
+            })
+            .filter(|g| !g.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (ga, gb) = (groups(a), groups(b));
+    if ga.is_empty() || gb.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for x in &ga {
+        for y in &gb {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            // `/#` selects every Entity that carries any Scope at all, so it
+            // adds nothing to a conjunction that already names one — and it
+            // is the one ScopesQ alternative the grammar does not derive
+            // inside a parenthesized group.
+            match (x.as_str(), y.as_str()) {
+                (ANY_SCOPE, ANY_SCOPE) => out.push_str(ANY_SCOPE),
+                (ANY_SCOPE, term) | (term, ANY_SCOPE) => out.push_str(term),
+                (l, r) => {
+                    out.push('(');
+                    out.push_str(l);
+                    out.push(';');
+                    out.push_str(r);
+                    out.push(')');
+                }
+            }
+            if out.len() > MAX_SCOPE_Q_BYTES {
+                return None;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The ScopesQ that selects every Entity carrying a non-empty Scope (4.19).
+const ANY_SCOPE: &str = "/#";
+
+/// Ceiling on a Scope Query this crate will build. The store's own compiler
+/// declines a longer one and leaves it to the in-memory arbiter; an
+/// intersection past it is refused instead, so no caller is handed a query
+/// that is quietly wider than the one it asked for.
+pub const MAX_SCOPE_Q_BYTES: usize = 4096;
+
 /// One 4.19 ScopeQ against one Entity Scope: `/`-separated levels compared
 /// in order, `+` standing for any single level and a trailing `#` for the
 /// rest of the hierarchy including the node itself.
 fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
-    if pat == "/#" {
+    if pat == ANY_SCOPE {
         return true;
     }
     let pseg: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
@@ -51,7 +120,7 @@ fn scope_pattern_matches(pat: &str, scope: &str) -> bool {
 
 #[cfg(test)]
 mod clause_4_19 {
-    use super::scope_matches;
+    use super::{intersect_scope_q, scope_matches};
     use serde_json::json;
 
     fn doc(scopes: &[&str]) -> serde_json::Value {
@@ -148,5 +217,57 @@ mod clause_4_19 {
         assert!(scope_matches("/A;/B,/C", &doc(&["/C"])));
         assert!(!scope_matches("/A;/B,/C", &doc(&["/A"])));
         assert!(scope_matches("/A;/B,/C", &doc(&["/A", "/B"])));
+    }
+
+    /// The intersection has to select what BOTH select, for every Entity —
+    /// a policy engine narrowing a request that brought its own Scope Query
+    /// is the caller, and an intersection that is wider than either side is
+    /// a disclosure.
+    #[test]
+    fn an_intersection_selects_exactly_what_both_select() {
+        let docs = [
+            doc(&[]),
+            doc(&["/A"]),
+            doc(&["/B"]),
+            doc(&["/BB"]),
+            doc(&["/BB/Traffic"]),
+            doc(&["/A", "/B"]),
+            doc(&["/A", "/BB/Traffic"]),
+            doc(&["/BB", "/BB/Traffic"]),
+            doc(&["/A", "/B", "/BB", "/BB/Traffic"]),
+        ];
+        for (a, b) in [
+            ("/A", "/B"),
+            ("/A,/B", "/B,/C"),
+            ("/BB", "/BB/Traffic"),
+            ("/BB/#", "/BB/Traffic"),
+            ("(/A;/B)", "/BB/#"),
+            ("(/A;/B),/BB", "(/BB;/BB/Traffic),/A"),
+            ("/#", "/A,/B"),
+            ("/#", "/#"),
+            ("/A", "/A"),
+        ] {
+            let both = intersect_scope_q(a, b).expect("expressible");
+            for d in &docs {
+                assert_eq!(
+                    scope_matches(&both, d),
+                    scope_matches(a, d) && scope_matches(b, d),
+                    "{a} INTERSECT {b} = {both} disagrees on {d}"
+                );
+            }
+        }
+    }
+
+    /// Nothing to intersect, and an intersection too large to write down:
+    /// both leave the caller to refuse rather than serve the wider side.
+    #[test]
+    fn an_inexpressible_intersection_is_none() {
+        assert_eq!(intersect_scope_q("", "/A"), None);
+        assert_eq!(intersect_scope_q("/A", "  "), None);
+        let wide = (0..200)
+            .map(|n| format!("/S{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(intersect_scope_q(&wide, &wide), None, "200x200 groups");
     }
 }

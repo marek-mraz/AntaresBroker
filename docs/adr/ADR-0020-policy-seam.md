@@ -74,7 +74,7 @@ clause, ids, types, attrs, `q`, `scopeQ`, geo, body. `Decision` is
 |---|---|
 | `Allow` | nothing |
 | `Deny` | 403 with ProblemDetails whose `type` is an Antares URI — Table 6.3.2-1 has no access-denied type, so this is an Antares decision with its own `AntaresSpecificTests` and a 6.3.2 ledger note |
-| `Filter` | narrows: the `q` is conjoined into the query the store runs and travels on forwards, `omit`/`pick` go through the 5.2.14.1 projection the notification path already has, and a merged federated result is filtered after the merge |
+| `Filter` | narrows: the `q` and the `scopeQ` are conjoined into the query the store runs and travel on forwards, `omit`/`pick` go through the 5.2.14.1 projection the notification path already has, and a merged federated result is filtered after the merge |
 | `Filter { restricted: true }` | the same, plus `Antares-Results-Restricted: true` (see the amendment) |
 | `Filter` on anything outside `policy::FILTERABLE` | answered as `Deny` — there is no narrowed form of "delete everything", and no handler outside that list reads the filter at all |
 

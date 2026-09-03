@@ -487,26 +487,101 @@ async fn the_entity_map_lists_only_the_narrowed_candidates() {
     );
 }
 
-/// A `scopeQ` narrowing cannot be merged into a request that brought its
-/// own: 4.19 conjoins with `;` inside a parenthesised group while `,` and
-/// `|` separate groups outside it, so wrapping two expressions changes what
-/// they mean. The seam takes the answer that is not wider than the engine
-/// decided and refuses.
+/// Entities under three Scopes, for the narrowing below.
+async fn seed_scoped(st: &AppState) {
+    for (id, scope) in [
+        ("urn:ngsi-ld:Vehicle:traffic", "/BB/Traffic"),
+        ("urn:ngsi-ld:Vehicle:parking", "/BB/Parking"),
+        ("urn:ngsi-ld:Vehicle:other", "/Other"),
+    ] {
+        let (code, _) = send(
+            st,
+            "POST",
+            "/ngsi-ld/v1/entities",
+            Some(json!({
+                "id": id, "type": "Vehicle", "scope": scope,
+                "speed": {"type": "Property", "value": 10},
+            })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CREATED, "seed {id}");
+    }
+}
+
+/// The ids a narrowed query answers with, sorted.
+async fn sorted_ids(st: &AppState, uri: &str) -> Vec<String> {
+    let (code, body) = send(st, "GET", uri, None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let mut v = ids(&body);
+    v.sort();
+    v
+}
+
+/// A `scopeQ` narrowing joins a request that brought its own: 4.19's `and`
+/// is over independent per-pattern predicates, so it distributes over the
+/// `,`/`|` disjunction and the intersection is itself a Scope Query. The
+/// caller sees what both select and never more than the engine allowed —
+/// a gateway that narrows a subject to a scope subtree must not have to
+/// refuse every consumer that filters by Scope of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_scope_narrowing_the_seam_cannot_merge_is_a_refusal() {
+async fn a_scope_narrowing_intersects_the_requests_own() {
     let st = state(Filter {
-        scope_q: Some("/BB/Traffic".into()),
+        scope_q: Some("/BB/#".into()),
         ..Filter::default()
     });
-    seed(&st).await;
-    // no scopeQ of its own: the narrowing is simply the query's scope
-    let (code, _) = send(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
-    assert_eq!(code, StatusCode::OK);
+    seed_scoped(&st).await;
 
+    // no scopeQ of its own: the narrowing is simply the query's scope
+    assert_eq!(
+        sorted_ids(&st, "/ngsi-ld/v1/entities?type=Vehicle").await,
+        vec![
+            "urn:ngsi-ld:Vehicle:parking".to_owned(),
+            "urn:ngsi-ld:Vehicle:traffic".to_owned()
+        ],
+        "the engine's subtree alone"
+    );
+    // its own, inside the engine's: the intersection is the caller's
+    assert_eq!(
+        sorted_ids(&st, "/ngsi-ld/v1/entities?type=Vehicle&scopeQ=/BB/Traffic").await,
+        vec!["urn:ngsi-ld:Vehicle:traffic".to_owned()]
+    );
+    // its own, reaching outside: the part the engine forbids is dropped,
+    // and nothing the engine forbids is served
+    assert_eq!(
+        sorted_ids(
+            &st,
+            "/ngsi-ld/v1/entities?type=Vehicle&scopeQ=/BB/Traffic,/Other"
+        )
+        .await,
+        vec!["urn:ngsi-ld:Vehicle:traffic".to_owned()],
+        "an entity outside the engine's subtree is never served"
+    );
+    // disjoint: an empty answer, not a wider one
+    assert!(
+        sorted_ids(&st, "/ngsi-ld/v1/entities?type=Vehicle&scopeQ=/Other")
+            .await
+            .is_empty()
+    );
+}
+
+/// An intersection too large to write as a Scope Query leaves the seam the
+/// answer it had before: refuse, because serving either side alone is wider
+/// than the engine decided.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inexpressible_scope_intersection_is_still_a_refusal() {
+    let many = (0..200)
+        .map(|n| format!("/BB/S{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let st = state(Filter {
+        scope_q: Some(many.clone()),
+        ..Filter::default()
+    });
+    seed_scoped(&st).await;
     let (code, pd) = send(
         &st,
         "GET",
-        "/ngsi-ld/v1/entities?type=Vehicle&scopeQ=/BB",
+        &format!("/ngsi-ld/v1/entities?type=Vehicle&scopeQ={many}"),
         None,
     )
     .await;

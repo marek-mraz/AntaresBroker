@@ -169,7 +169,9 @@ the seam answers 403 rather than dropping it; decide those with `Allow` or
 `Deny`.
 
 A `Filter` may only narrow. Its `q` and `scopeQ` are conjoined into the
-condition the store already had, and its `pick`/`omit` project members out
+condition the store already had — a `scopeQ` by the 4.19 distribution, so a
+caller filtering by Scope of its own is served the Scopes both select and
+never a Scope the engine ruled out — and `pick`/`omit` project members out
 of every document the answer carries, the Entities `join=` reaches over a
 Relationship included; there is no member it can add and no row it can
 widen the answer to. A `pick`/`omit` name is read in the core `@context`,

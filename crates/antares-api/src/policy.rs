@@ -219,12 +219,13 @@ impl Filter {
     /// the store push-down, the local re-check that 5.7.2.4 runs over
     /// merged results, and the query the request is forwarded with.
     ///
-    /// A `scopeQ` narrowing is set when the request carries none. When it
-    /// carries one the two cannot be merged — 4.19 conjoins with `;` inside
-    /// a parenthesised group while `,` and `|` separate groups outside it,
-    /// so wrapping two arbitrary expressions changes what they mean — and
-    /// the seam answers the only way that is not wider than the engine
-    /// decided: it refuses.
+    /// A `scopeQ` narrowing is set when the request carries none, and
+    /// intersected with the request's own when it carries one. 4.19's `and`
+    /// is over independent per-pattern predicates, so it distributes over
+    /// the `,`/`|` disjunction and the intersection is itself a Scope
+    /// Query — `antares_ql::scope::intersect_scope_q` writes it. Where the
+    /// product cannot be written down the seam answers the only way that is
+    /// not wider than the engine decided: it refuses.
     /// Say the answer was narrowed, when the engine asked for it to be
     /// said. Narrowing is otherwise silent: a caller cannot tell an Entity
     /// it may not see from one that is not there.
@@ -254,10 +255,12 @@ impl Filter {
             out.insert("q".to_owned(), narrowed.to_string());
         }
         if let Some(scope) = &self.scope_q {
-            if out.contains_key("scopeQ") {
-                return Err(Denied(SCOPE_NOT_NARROWABLE.to_owned()));
-            }
-            out.insert("scopeQ".to_owned(), scope.clone());
+            let narrowed = match out.get("scopeQ") {
+                None => scope.clone(),
+                Some(own) => antares_ql::scope::intersect_scope_q(own, scope)
+                    .ok_or_else(|| Denied(SCOPE_NOT_NARROWABLE.to_owned()))?,
+            };
+            out.insert("scopeQ".to_owned(), narrowed);
         }
         Ok(out)
     }
@@ -272,8 +275,10 @@ impl Filter {
 /// than an invented `uri.etsi.org` type.
 pub const RESTRICTED_HEADER: &str = "Antares-Results-Restricted";
 
-/// The refusal a `scopeQ` narrowing gets when the request brought its own
-/// (see [`Filter::narrow_params`]).
+/// The refusal a `scopeQ` narrowing gets when its intersection with the
+/// request's own cannot be written as a Scope Query — one side selects
+/// nothing, or the distributed product is too large to express (see
+/// [`Filter::narrow_params`]).
 pub const SCOPE_NOT_NARROWABLE: &str =
     "the request's own scope query cannot be narrowed by the policy engine";
 
