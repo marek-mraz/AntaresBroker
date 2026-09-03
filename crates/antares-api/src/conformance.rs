@@ -287,6 +287,21 @@ pub async fn prefer_version_layer(req: Request<Body>, next: Next) -> Response {
     if resp.status() != StatusCode::OK || !is_json {
         return resp;
     }
+    // 6.3.6 owes `Preference-Applied` to every `Prefer: ngsi-ld=` request,
+    // but at or above the version this broker serves natively there is
+    // nothing to amend — every rule in Table 4.3.6.8-1 is guarded by
+    // `ver < …` and `amend_entity` returns immediately on `ver >= NATIVE`.
+    // So the header is the whole answer, and the handler's body reaches the
+    // client as the handler wrote it: never buffered whole, never parsed,
+    // never re-serialized, and (unlike the amend path below) with its own
+    // Content-Length intact.
+    if ver >= NATIVE {
+        let mut resp = resp;
+        if let Ok(v) = format!("ngsi-ld={}.{}", NATIVE.0, NATIVE.1).parse() {
+            resp.headers_mut().insert("Preference-Applied", v);
+        }
+        return resp;
+    }
     let (mut parts, body) = resp.into_parts();
     // Honouring the preference is optional (RFC 7240 section 2), so the
     // buffer is bounded by the same cap the request wall advertises: a
@@ -321,7 +336,7 @@ pub async fn prefer_version_layer(req: Request<Body>, next: Next) -> Response {
         }
     }
     let bytes = axum::body::Bytes::from(buf);
-    let conformant = if ver < NATIVE { ver } else { NATIVE };
+    let conformant = ver;
     let mut altered = false;
     let bytes = match serde_json::from_slice::<Value>(&bytes) {
         Ok(mut doc) => {
@@ -817,5 +832,24 @@ mod prefer_layer {
                 .and_then(|v| v.to_str().ok()),
             Some("ngsi-ld=1.5")
         );
+    }
+
+    /// 6.3.6: a `Prefer: ngsi-ld=` request is owed a `Preference-Applied`
+    /// header whatever version it names, including the one the broker serves
+    /// natively. At that version Table 4.3.6.8-1 has nothing to amend —
+    /// `amend_entity` returns on `ver >= NATIVE` — so the header is all that
+    /// is owed: the handler's bytes reach the client as they were written,
+    /// never buffered, parsed and re-serialized on the way.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_native_version_is_stamped_and_the_body_passes_through() {
+        // key order the egress serializer would rewrite, so a body that comes
+        // back reordered proves the layer round-tripped it through serde
+        let payload = r#"{"type":"T","id":"urn:a"}"#;
+        for asked in ["ngsi-ld=1.9", "ngsi-ld=2.0"] {
+            let (status, applied, body) = get(app("/e", payload), "/e", Some(asked)).await;
+            assert_eq!(status, StatusCode::OK, "{asked}");
+            assert_eq!(applied, "ngsi-ld=1.9", "{asked}");
+            assert_eq!(body, payload, "{asked}: the body is passed through");
+        }
     }
 }
