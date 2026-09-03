@@ -227,6 +227,13 @@ silence does. At most 4096 destinations are tracked. A refused or tripped
 delivery is booked on the subscription as a failure (`lastFailure`,
 `status: failed`) and, with a delivery policy configured, is not retried.
 
+An `@context` fetch is the one broker-initiated request that gets a second
+attempt: a connection carrying no response at all — refused, or dropped
+before a status line — is sent once more before the client is answered
+`LdContextNotAvailable`. A timeout, a redirect-cap breach and any response
+that did arrive are answers rather than accidents, so none of them is
+repeated, and the two attempts share one fetch deadline.
+
 ## Drain
 
 On SIGTERM the broker flips `/q/health` to 503, keeps serving for

@@ -1303,9 +1303,8 @@ impl Loader {
         let _permit = self.resolve_permits.acquire().await.ok();
         // The whole HTTP interaction is one Send unit (http_interaction);
         // only Send data (ttl + bytes) crosses back out.
-        let interact = async {
-            let resp = self
-                .http
+        let send = || {
+            self.http
                 .get(url)
                 .header("Accept", "application/ld+json, application/json")
                 // marks this as a broker-internal context resolution: the
@@ -1313,8 +1312,26 @@ impl Loader {
                 // instance's own bump_url (053_08 fleet double-count)
                 .header(INTERNAL_FETCH_HEADER, "1")
                 .send()
-                .await
-                .map_err(|e| err(format!("fetching {url}: {e}")))?;
+        };
+        let interact = async {
+            // 5.5.6 turns an @context that "is not available" into
+            // LdContextNotAvailable, and one connection that carried no
+            // response has not established that: a refused or dropped
+            // connection is asked once more. Only the send is repeated —
+            // a response that did arrive is the answer whatever its status,
+            // and a read that failed part-way already cost the bytes. The
+            // client timeout and the redirect cap are answers in themselves
+            // and are not retried, and both attempts share the deadline
+            // below, so the retry costs a reconnect and never a second wait.
+            let resp = match send().await {
+                Ok(r) => r,
+                Err(e) if e.is_timeout() || e.is_redirect() => {
+                    return Err(err(format!("fetching {url}: {e}")));
+                }
+                Err(_) => send()
+                    .await
+                    .map_err(|e| err(format!("fetching {url}: {e}")))?,
+            };
             if !resp.status().is_success() {
                 return Err(err(format!("fetching {url}: HTTP {}", resp.status())));
             }
@@ -2058,6 +2075,90 @@ mod tests {
         assert!(
             msg.contains("too large"),
             "cap must fire during the read, got {msg}"
+        );
+    }
+
+    /// 5.5.6: an @context is fetched again when the first connection carried
+    /// no response at all. "Not available" is a statement about the document,
+    /// and a connection dropped before a status line has not established it —
+    /// the server here closes the first connection without writing a byte and
+    /// answers the second, so the resolve returns the document. Exactly one
+    /// extra attempt: a server that is really down must not be hammered.
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_before_the_context_is_unavailable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // close before any response: reqwest reports a send
+                    // error, the shape a dropped connection takes
+                    drop(sock);
+                    continue;
+                }
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"@context":{"a":"https://example.org/a"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/ld+json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        loader
+            .resolve(&Value::String(format!("http://{addr}/c.jsonld")))
+            .await
+            .expect("one dropped connection is not an unavailable @context");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "the drop is retried once and no more"
+        );
+    }
+
+    /// The retry is bounded: a host that refuses every connection is reported
+    /// as unavailable after the second attempt, never tried a third time.
+    #[tokio::test]
+    async fn a_host_that_never_answers_is_unavailable_after_one_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                drop(sock);
+            }
+        });
+        let loader = Loader::with_policy(EgressPolicy {
+            allow_private: true,
+        });
+        let e = loader
+            .resolve(&Value::String(format!("http://{addr}/c.jsonld")))
+            .await
+            .expect_err("a host that answers nothing is unavailable");
+        assert!(
+            matches!(e, NgsiError::LdContextNotAvailable(_)),
+            "5.5.6: an unreachable @context is LdContextNotAvailable, got {e:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "two attempts in total, not a loop"
         );
     }
 
