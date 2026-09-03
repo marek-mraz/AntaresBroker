@@ -30,6 +30,11 @@
 //! twice. Retention is bounded in entries and in bytes —
 //! `MAX_REGEX_CACHE` and `MAX_REGEX_CACHE_BYTES` — because the key is
 //! client input and an unbounded map of it is a memory attack, not a cache.
+//! Crossing a bound drops the least recently used half, never the whole map:
+//! a subscription fan-out evaluates the same few patterns per event, and
+//! dropping those along with the one-off pattern that overflowed the map
+//! makes every one of them recompile at once, on the request that was
+//! unlucky enough to cross the line.
 
 /// Ceiling on the automaton compiled for one pattern, and with it on what
 /// one compile costs. The pattern is client input — the
@@ -68,8 +73,49 @@ use std::sync::{Arc, LazyLock, RwLock};
 /// retained as its message so the pattern is not rebuilt per candidate.
 type Outcome = Result<Arc<regex::Regex>, Box<str>>;
 
-static CACHE: LazyLock<RwLock<HashMap<Box<str>, Outcome>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+/// A retained entry: what it holds and when it was last handed out. `Entry`
+/// is what the eviction below orders by, so every cache here stores one.
+type Entry<V> = (V, AtomicU64);
+
+/// Source of the use stamps. Wrapping after 2^64 hand-outs would mis-order
+/// one eviction; nothing else depends on it.
+static CLOCK: AtomicU64 = AtomicU64::new(0);
+
+fn stamp<V>(v: V) -> Entry<V> {
+    (v, AtomicU64::new(CLOCK.fetch_add(1, Ordering::Relaxed)))
+}
+
+/// Record that an entry was just handed out. Done under the READ lock — the
+/// stamp is the only mutable part of an entry, and ordering evictions is the
+/// only thing that reads it, so a lost update costs one entry a place in the
+/// order and nothing else.
+fn touch<V>(e: &Entry<V>) -> &V {
+    e.1.store(CLOCK.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    &e.0
+}
+
+/// Drop the least recently used half. The entries a request in flight is
+/// using were stamped by that request, so they are on the surviving side:
+/// crossing a bound costs the pattern that crossed it, not the working set.
+fn evict_lru_half<V>(map: &mut HashMap<Box<str>, Entry<V>>) {
+    let keep = map.len() / 2;
+    if keep == 0 {
+        map.clear();
+        return;
+    }
+    let mut stamps: Vec<u64> = map.values().map(|e| e.1.load(Ordering::Relaxed)).collect();
+    stamps.sort_unstable();
+    // `keep` newest survive; a tie on the boundary stamp keeps both, which
+    // costs at most a few entries over the half and never a bound.
+    let cut = stamps[stamps.len() - keep];
+    map.retain(|_, e| e.1.load(Ordering::Relaxed) >= cut);
+}
+
+/// One bounded cache: client-supplied text to what it compiled or parsed
+/// to, each entry carrying the stamp [`evict_lru_half`] orders by.
+type Cache<V> = LazyLock<RwLock<HashMap<Box<str>, Entry<V>>>>;
+
+static CACHE: Cache<(Outcome, usize)> = LazyLock::new(|| RwLock::new(HashMap::new()));
 static COMPILES: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -83,7 +129,11 @@ fn build(pattern: &str, limit: usize) -> Result<regex::Regex, regex::Error> {
 /// [`MAX_REGEX_PROGRAM_BYTES`] — and each call site keeps mapping it to its
 /// own spec error.
 pub fn compile(pattern: &str) -> Result<Arc<regex::Regex>, String> {
-    if let Some(hit) = CACHE.read().ok().and_then(|c| c.get(pattern).cloned()) {
+    if let Some(hit) = CACHE
+        .read()
+        .ok()
+        .and_then(|c| c.get(pattern).map(|e| touch(e).0.clone()))
+    {
         return hit.map_err(String::from);
     }
     COMPILES.fetch_add(1, Ordering::Relaxed);
@@ -99,17 +149,18 @@ pub fn compile(pattern: &str) -> Result<Arc<regex::Regex>, String> {
         },
     };
     if let Ok(mut c) = CACHE.write() {
-        // A generational flush, not an LRU: the patterns the next requests
-        // use re-enter immediately, and the hit path pays no bookkeeping for
-        // the eviction order.
-        if c.len() >= MAX_REGEX_CACHE
-            || BYTES.load(Ordering::Relaxed).saturating_add(charge) > MAX_REGEX_CACHE_BYTES
+        // Halving is repeated rather than assumed sufficient: one charge can
+        // be the whole byte budget's worth of the tier above, so the loop —
+        // which halves what is left each pass — is what makes the bound hold.
+        let mut bytes = BYTES.load(Ordering::Relaxed);
+        while !c.is_empty()
+            && (c.len() >= MAX_REGEX_CACHE || bytes.saturating_add(charge) > MAX_REGEX_CACHE_BYTES)
         {
-            c.clear();
-            BYTES.store(0, Ordering::Relaxed);
+            evict_lru_half(&mut c);
+            bytes = c.values().map(|e| e.0 .1).sum();
         }
-        BYTES.fetch_add(charge, Ordering::Relaxed);
-        c.insert(pattern.into(), outcome.clone());
+        BYTES.store(bytes.saturating_add(charge), Ordering::Relaxed);
+        c.insert(pattern.into(), stamp((outcome.clone(), charge)));
     }
     outcome.map_err(String::from)
 }
@@ -117,10 +168,11 @@ pub fn compile(pattern: &str) -> Result<Arc<regex::Regex>, String> {
 /// The retained program for `pattern`, without compiling anything. A
 /// retained refusal holds no program and reads as `None` here.
 pub fn cached(pattern: &str) -> Option<Arc<regex::Regex>> {
-    CACHE
-        .read()
-        .ok()
-        .and_then(|c| c.get(pattern).and_then(|o| o.as_ref().ok()).cloned())
+    CACHE.read().ok().and_then(|c| {
+        c.get(pattern)
+            .and_then(|e| touch(e).0.as_ref().ok())
+            .cloned()
+    })
 }
 
 /// Compilations performed since process start (i.e. cache misses).
@@ -138,27 +190,29 @@ pub fn retained_bytes() -> usize {
     BYTES.load(Ordering::Relaxed)
 }
 
-static Q_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<crate::QNode>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-static GEO_CACHE: LazyLock<RwLock<HashMap<Box<str>, Arc<crate::geo::GeoQuery>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+static Q_CACHE: Cache<Arc<crate::QNode>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+static GEO_CACHE: Cache<Arc<crate::geo::GeoQuery>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// The parsed 4.9 query for `q`, shared across every event that evaluates the
 /// same subscription. Like the regex cache this changes no outcome: only an
 /// `Ok` parse is retained, so an invalid or over-complex `q` keeps exactly
 /// the handling its call site has (`parse_q` is re-run and its error stands).
 /// Entry size is already capped by the parser's own complexity ceiling
-/// (`MAX_Q_NODES`), entry count by the same generational flush as above.
+/// (`MAX_Q_NODES`), entry count by the same bound and eviction as above.
 pub fn q_node(q: &str) -> Option<Arc<crate::QNode>> {
-    if let Some(hit) = Q_CACHE.read().ok().and_then(|c| c.get(q).cloned()) {
+    if let Some(hit) = Q_CACHE
+        .read()
+        .ok()
+        .and_then(|c| c.get(q).map(|e| Arc::clone(touch(e))))
+    {
         return Some(hit);
     }
     let node = Arc::new(crate::parse_q(q).ok()?);
     if let Ok(mut c) = Q_CACHE.write() {
         if c.len() >= MAX_REGEX_CACHE {
-            c.clear();
+            evict_lru_half(&mut c);
         }
-        c.insert(q.into(), Arc::clone(&node));
+        c.insert(q.into(), stamp(Arc::clone(&node)));
     }
     Some(node)
 }
@@ -167,20 +221,24 @@ pub fn q_node(q: &str) -> Option<Arc<crate::QNode>> {
 /// caller's serialization of that member. `build` runs on a miss and only a
 /// `Some` is retained — a `geoQ` that does not parse keeps failing exactly as
 /// before, per call. Geometry size is already capped at the parse
-/// (`MAX_GEO_VERTICES`), entry count by the generational flush.
+/// (`MAX_GEO_VERTICES`), entry count by the same bound and eviction.
 pub fn geo_query(
     key: &str,
     build: impl FnOnce() -> Option<crate::geo::GeoQuery>,
 ) -> Option<Arc<crate::geo::GeoQuery>> {
-    if let Some(hit) = GEO_CACHE.read().ok().and_then(|c| c.get(key).cloned()) {
+    if let Some(hit) = GEO_CACHE
+        .read()
+        .ok()
+        .and_then(|c| c.get(key).map(|e| Arc::clone(touch(e))))
+    {
         return Some(hit);
     }
     let gq = Arc::new(build()?);
     if let Ok(mut c) = GEO_CACHE.write() {
         if c.len() >= MAX_REGEX_CACHE {
-            c.clear();
+            evict_lru_half(&mut c);
         }
-        c.insert(key.into(), Arc::clone(&gq));
+        c.insert(key.into(), stamp(Arc::clone(&gq)));
     }
     Some(gq)
 }
@@ -274,6 +332,50 @@ mod tests {
             );
         }
         assert!(len() > 0, "the cache must still be caching after a flush");
+    }
+
+    /// A subscription fan-out evaluates the same `idPattern` per event while
+    /// query traffic keeps bringing new `patternOp` operands in, so the
+    /// working set and the entries that overflow a bound are different
+    /// patterns. Crossing a bound must therefore cost the entries nothing is
+    /// using: recompiling the live working set on the request unlucky enough
+    /// to cross the line is the cost the eviction order exists to avoid.
+    #[test]
+    fn eviction_drops_the_least_recently_used_half() {
+        let mut map: HashMap<Box<str>, Entry<u32>> = HashMap::new();
+        for i in 0..8u32 {
+            map.insert(format!("p{i}").into(), stamp(i));
+        }
+        // three of the eight are in use and are stamped again
+        for k in ["p0", "p3", "p7"] {
+            touch(map.get(k).expect("present"));
+        }
+        evict_lru_half(&mut map);
+        assert_eq!(map.len(), 4, "half of eight is four");
+        for k in ["p0", "p3", "p7"] {
+            assert!(map.contains_key(k), "{k} was in use and must survive");
+        }
+        // the survivors are exactly the newest half: the fourth is the
+        // newest of the untouched ones
+        assert!(
+            map.contains_key("p6"),
+            "the newest untouched entry survives"
+        );
+        for k in ["p1", "p2", "p4", "p5"] {
+            assert!(!map.contains_key(k), "{k} was the oldest and must go");
+        }
+    }
+
+    /// The bound holds whatever the map's size, so the halving has to be
+    /// defined at the sizes where "half" is not a whole entry.
+    #[test]
+    fn eviction_of_a_map_too_small_to_halve_empties_it() {
+        let mut map: HashMap<Box<str>, Entry<u32>> = HashMap::new();
+        evict_lru_half(&mut map);
+        assert!(map.is_empty(), "an empty map stays empty");
+        map.insert("only".into(), stamp(0));
+        evict_lru_half(&mut map);
+        assert!(map.is_empty(), "one entry cannot be halved and is dropped");
     }
 
     /// 4.9 evaluates a `patternOp` per candidate Entity and 5.2.33 an
