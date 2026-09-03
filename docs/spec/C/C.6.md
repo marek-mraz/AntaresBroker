@@ -6,7 +6,10 @@ status: informative
 evidence: 'Both representations of a Date, DateTime or Time value are read as that datatype where the
   datatype decides behaviour: temporal.rs value_datatype() takes the type from a JSON-LD typed value
   and from a valueType coerced to its datatype URI, so Table 4.5.19.1-2 aggregation applies to either
-  spelling (temporal.rs clause_4_5_19::a_value_type_carries_the_datatype_as_far_as_the_typed_value_does).'
+  spelling (temporal.rs clause_4_5_19::a_value_type_carries_the_datatype_as_far_as_the_typed_value_does).
+  The 4.9 query language reads the same value: antares-ql/src/eval.rs untyped() compares the @value a typed
+  value carries, and antares-ql/src/sql.rs addresses it in the pushdown, so an Entity answers a Query Term
+  the same way whichever of the two representations it was written in.'
 notes: ''
 robot: []
 ---

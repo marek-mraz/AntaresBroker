@@ -939,3 +939,73 @@ async fn a_first_write_waits_for_the_tenant_row_lock() {
     assert!(created, "the entity was created");
     let _ = s.delete(&t, id);
 }
+
+/// 4.9: "If the target element is a Property, the target value is defined as
+/// the Value associated to such Property", and annex C.6 writes that Value
+/// either bare or as the JSON-LD typed value
+/// `{"@type": "DateTime", "@value": …}`. The pushdown decides `==` in the
+/// database, so a jsonpath that only addresses the member itself drops every
+/// row written the second way — rows the evaluator keeps.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_4_9_a_typed_value_is_not_dropped_by_the_pushdown() {
+    let url = require_db!();
+    let pool = pg::connect(&url, 5).await.expect("connect");
+    let s = PgEntityStore::new(pool.clone());
+    let t = TenantId::new("pgtyped").expect("tenant");
+    pg::ensure_tenant(&pool, &t).await.expect("tenant row");
+
+    let seed = [
+        (
+            "urn:ngsi-ld:Vehicle:typed",
+            json!({"testedAt": {"type": "Property",
+                   "value": {"@type": "DateTime", "@value": "2018-12-04T12:00:00Z"}},
+                   "speed": {"type": "Property",
+                   "value": {"@type": "Number", "@value": 60}}}),
+        ),
+        (
+            "urn:ngsi-ld:Vehicle:bare",
+            json!({"testedAt": {"type": "Property", "value": "2018-12-04T12:00:00Z"},
+                   "speed": {"type": "Property", "value": 60}}),
+        ),
+        (
+            "urn:ngsi-ld:Vehicle:other",
+            json!({"testedAt": {"type": "Property", "value": "2020-01-01T00:00:00Z"},
+                   "speed": {"type": "Property", "value": 10}}),
+        ),
+    ];
+    for (id, attrs) in &seed {
+        let _ = s.delete(&t, id);
+        assert!(
+            s.create(&t, id, &expanded(id, "Vehicle", attrs.clone()))
+                .expect("create"),
+            "seed {id}"
+        );
+    }
+
+    let q = |f: &antares_sql::store::pg::entity::EntityFilter<'_>| {
+        ids_of(&s.query(&t, f).expect("query").rows)
+    };
+    for (term, want) in [
+        (
+            "testedAt==2018-12-04T12:00:00Z",
+            vec!["urn:ngsi-ld:Vehicle:bare", "urn:ngsi-ld:Vehicle:typed"],
+        ),
+        (
+            "speed==60",
+            vec!["urn:ngsi-ld:Vehicle:bare", "urn:ngsi-ld:Vehicle:typed"],
+        ),
+        (
+            "speed>50",
+            vec!["urn:ngsi-ld:Vehicle:bare", "urn:ngsi-ld:Vehicle:typed"],
+        ),
+        ("speed==10", vec!["urn:ngsi-ld:Vehicle:other"]),
+    ] {
+        let ast = antares_ql::parse_q(term).expect("parse");
+        let f = antares_sql::store::pg::entity::EntityFilter {
+            q: Some(&ast),
+            expand: &ex,
+            ..Default::default()
+        };
+        assert_eq!(q(&f), want, "{term}");
+    }
+}

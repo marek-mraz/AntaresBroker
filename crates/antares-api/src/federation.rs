@@ -413,21 +413,28 @@ fn reg_docs(
     tenant: &TenantId,
     spec: &crate::registry::CsrSpec,
     ctx: &Context,
-) -> Result<Vec<Value>, NgsiError> {
+) -> Result<Vec<std::sync::Arc<Value>>, NgsiError> {
+    let types: Option<Vec<String>> = spec
+        .types
+        .as_ref()
+        .filter(|ts| {
+            !ts.iter()
+                .any(|t| t.contains([',', ';', '|', '(', ')', '*']))
+        })
+        .map(|ts| ts.iter().map(|t| ctx.expand_key(t)).collect());
+    // The id dimension is dropped whenever the query ALSO carries an
+    // idPattern: `entity_info_matches` lets a registration's own entity id
+    // match that pattern, so narrowing to the id list alone would drop a
+    // Context Source 5.12 matches — the one thing a prefilter may never do.
+    let ids = spec.ids.as_deref().filter(|_| spec.id_pattern.is_none());
     match &st.reg_mirror {
-        Some(m) => Ok(m.docs(tenant.as_str())),
-        None => {
-            let types: Option<Vec<String>> = spec
-                .types
-                .as_ref()
-                .filter(|ts| {
-                    !ts.iter()
-                        .any(|t| t.contains([',', ';', '|', '(', ')', '*']))
-                })
-                .map(|ts| ts.iter().map(|t| ctx.expand_key(t)).collect());
-            st.store
-                .matching_registrations(tenant, spec.ids.as_deref(), types.as_deref())
-        }
+        Some(m) => Ok(m.matching(tenant.as_str(), ids, types.as_deref())),
+        None => Ok(st
+            .store
+            .matching_registrations(tenant, ids, types.as_deref())?
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect()),
     }
 }
 

@@ -43,6 +43,16 @@ const VALUE_KEYS: &[&str] = &[
     "objectList",
 ];
 
+/// The members whose value a client may write as a JSON-LD typed value
+/// (annex C.6) — `qeval::push_target` unwraps exactly these. A JsonProperty
+/// is deliberately absent: the core `@context` types its `json` member
+/// `@json`, so an `@value` inside it is data.
+const TYPED_KEYS: &[&str] = &["value", "valueList"];
+
+/// The jsonpath arms one comparable-value OR expands to: every member, plus
+/// the typed-value step of the members that can carry one.
+const ARMS: usize = VALUE_KEYS.len() + TYPED_KEYS.len();
+
 /// A compiled SQL fragment: a boolean expression carrying `$n` placeholders
 /// numbered from the `first_bind` its compiler was given, plus the texts
 /// those placeholders bind to, in order. What a bind MEANS belongs to the
@@ -173,13 +183,20 @@ pub fn value_or_filter(
     first: usize,
     binds: &mut Vec<String>,
 ) -> String {
-    let mut parts = Vec::with_capacity(VALUE_KEYS.len());
-    for key in VALUE_KEYS {
+    let mut parts = Vec::with_capacity(ARMS);
+    let steps = VALUE_KEYS
+        .iter()
+        .map(|k| format!(".\"{k}\""))
+        // C.6: a value written as a JSON-LD typed value carries it under
+        // `@value`, and `qeval::untyped` compares that member — one more
+        // step for the members that can hold one.
+        .chain(TYPED_KEYS.iter().map(|k| format!(".\"{k}\".\"@value\"")));
+    for step in steps {
         // lax mode (the default) auto-unwraps arrays at every step, which is
         // exactly `qeval::compare`'s "any element of an array value matches".
         let jp = match filter {
-            Some(f) => format!("{prefix}.\"{key}\"{f}"),
-            None => format!("{prefix}.\"{key}\""),
+            Some(f) => format!("{prefix}{step}{f}"),
+            None => format!("{prefix}{step}"),
         };
         // the OPERATOR form of jsonb_path_exists: identical lax semantics,
         // but the planner can match `@?` against the GIN jsonb_path_ops
@@ -364,10 +381,16 @@ mod tests {
         let got = c("temperature>20").expect("compiles");
         // every placeholder is a bind; no client text in the SQL
         assert!(!got.sql.contains("temperature"), "sql: {}", got.sql);
-        assert_eq!(got.binds.len(), VALUE_KEYS.len());
+        assert_eq!(got.binds.len(), ARMS);
         assert_eq!(
             got.binds[0],
             "$.\"https://uri.etsi.org/ngsi-ld/default-context/temperature\"[*].\"value\" ? (@ > 20)"
+        );
+        // C.6: the same term written as a JSON-LD typed value is an arm of
+        // the same OR, so the pushdown keeps the rows `qeval` keeps
+        assert_eq!(
+            got.binds[VALUE_KEYS.len()],
+            "$.\"https://uri.etsi.org/ngsi-ld/default-context/temperature\"[*].\"value\".\"@value\" ? (@ > 20)"
         );
         assert!(
             got.sql.starts_with("(entity @? $2::jsonpath"),
@@ -379,7 +402,7 @@ mod tests {
     #[test]
     fn placeholders_are_numbered_from_the_offset_and_stay_unique() {
         let got = c("a==1;b==2").expect("compiles");
-        let n = VALUE_KEYS.len();
+        let n = ARMS;
         assert_eq!(got.binds.len(), 2 * n);
         for i in 0..2 * n {
             assert!(
@@ -485,7 +508,7 @@ mod tests {
             );
         }
         // the sql is placeholders and compiler constants only
-        let skeleton: Vec<String> = (1..=VALUE_KEYS.len())
+        let skeleton: Vec<String> = (1..=ARMS)
             .map(|n| format!("entity @? ${n}::jsonpath"))
             .collect();
         assert_eq!(got.sql, format!("({})", skeleton.join(" OR ")));
@@ -515,15 +538,15 @@ mod tests {
     fn instance_leaf_roots_at_the_instance_and_numbers_from_first() {
         let want = QValue::Num(25.0);
         let got = compile_instance_leaf(Some((CmpOp::Gt, &want)), "qi.data", 7).expect("compiles");
-        assert_eq!(got.binds.len(), VALUE_KEYS.len());
+        assert_eq!(got.binds.len(), ARMS);
         assert_eq!(got.binds[0], "$.\"value\" ? (@ > 25)");
         assert!(
             got.sql.starts_with("(qi.data @? $7::jsonpath"),
             "{}",
             got.sql
         );
-        assert!(got.sql.contains(&format!("${}", 7 + VALUE_KEYS.len() - 1)));
-        assert!(!got.sql.contains(&format!("${}", 7 + VALUE_KEYS.len())));
+        assert!(got.sql.contains(&format!("${}", 7 + ARMS - 1)));
+        assert!(!got.sql.contains(&format!("${}", 7 + ARMS)));
         // existence form
         assert_eq!(
             compile_instance_leaf(None, "qi.data", 1)

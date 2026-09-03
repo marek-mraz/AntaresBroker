@@ -54,8 +54,8 @@ static PINNED: &[(&str, &str)] = &[
 ];
 
 /// 4.4: "The NGSI-LD Core @context is publicly available at
-/// https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld and shall
-/// contain all the terms as mandated by annex B." It is what this broker
+/// `https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld` and
+/// shall contain all the terms as mandated by annex B." It is what this broker
 /// advertises (the Link header of a `application/json` answer, the `@context`
 /// of an `ld+json` one, the context a forwarded request carries) and the
 /// document merged last when a request names no @context of its own. Older
@@ -2701,7 +2701,7 @@ mod tests {
     }
 
     /// 4.4, V1.9.1: "The NGSI-LD Core @context is publicly available at
-    /// https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld and
+    /// `https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld` and
     /// shall contain all the terms as mandated by annex B." A request that
     /// names no @context of its own is answered under that document alone,
     /// so the terms V1.9 added have to expand from the implicit core — not

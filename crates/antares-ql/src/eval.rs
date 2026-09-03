@@ -231,12 +231,11 @@ fn collect(
     // dotted access, kept as a superset of the 4.9 bracket form)
     if let Some((kind, v)) = comparable_value(inst) {
         if let Some(nested) = navigate(v, rest) {
-            let nested = nested.clone();
             match bracket {
-                None => out.push((kind, nested)),
+                None => push_target(kind, nested, out),
                 Some(b) => {
-                    if let Some(deeper) = navigate(&nested, b) {
-                        out.push((kind, deeper.clone()));
+                    if let Some(deeper) = navigate(nested, b) {
+                        push_target(kind, deeper, out);
                     }
                 }
             }
@@ -263,7 +262,7 @@ fn terminal(
             // value shall be expanded according to the @context."
             out.push((kind, expand_vocab(v, ctx)));
         }
-        (None, _) => out.push((kind, v.clone())),
+        (None, _) => push_target(kind, v, out),
         (Some(b), TargetKind::LanguageMap) => {
             let Some(map) = v.as_object() else { return };
             if b.len() != 1 {
@@ -288,7 +287,7 @@ fn terminal(
             // MemberExpression into the compound value; undefined result =
             // "the target element shall be considered as non-existent"
             if let Some(nested) = navigate(v, b) {
-                out.push((kind, nested.clone()));
+                push_target(kind, nested, out);
             }
         }
     }
@@ -309,6 +308,30 @@ fn navigate<'a>(v: &'a Value, path: &[String]) -> Option<&'a Value> {
         cur = cur.get(seg)?;
     }
     Some(cur)
+}
+
+/// 4.9 target value: annex C.6 lets a Property value be written as a JSON-LD
+/// typed value, and the Value the Property carries is then the `@value`
+/// member rather than the object around it. Members of a list are unwrapped
+/// one by one, and a compound value — an object with no `@value` — is left
+/// whole, so a MemberExpression still navigates it.
+fn untyped(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => o.get("@value").cloned().unwrap_or_else(|| v.clone()),
+        Value::Array(a) => Value::Array(a.iter().map(untyped).collect()),
+        other => other.clone(),
+    }
+}
+
+/// One target, with the typed-value unwrap on the kinds that can carry one.
+/// A JsonProperty is not one of them: the core `@context` types its `json`
+/// member `@json`, so an `@value` inside it is data, not JSON-LD.
+fn push_target(kind: TargetKind, v: &Value, out: &mut Vec<(TargetKind, Value)>) {
+    let v = match kind {
+        TargetKind::Value | TargetKind::ValueList => untyped(v),
+        _ => v.clone(),
+    };
+    out.push((kind, v));
 }
 
 fn comparable_value(inst: &Value) -> Option<(TargetKind, &Value)> {
@@ -669,6 +692,73 @@ mod clause_4_9_extensions {
         // no resolver → no match, never an error
         let ast = parse_q("sensor{humidity}==40").expect("parse");
         assert!(!eval_q(&ast, &station, &ctx(), &|_| None));
+    }
+
+    /// 4.9: "If the target element is a Property, the target value is defined
+    /// as the Value associated to such Property." Annex C.6 writes a
+    /// DateTime-valued Property either as a string with `valueType` or as the
+    /// JSON-LD typed value `{"@type": "DateTime", "@value": …}`; both carry
+    /// the same Value, so both answer a Query Term the same way. The
+    /// `!=` case is the one that goes wrong in both directions: 4.9 p.92
+    /// makes a datatype mismatch a MATCH, so an unread wrapper turns the
+    /// entity whose value IS the queried one into a match.
+    #[test]
+    fn a_typed_value_is_compared_by_the_value_it_carries() {
+        let typed = expand(json!({"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle",
+            "testedAt": {"type": "Property",
+                "value": {"@type": "DateTime", "@value": "2018-12-04T12:00:00Z"}}}));
+        let bare = expand(json!({"id": "urn:ngsi-ld:Vehicle:2", "type": "Vehicle",
+            "testedAt": {"type": "Property", "value": "2018-12-04T12:00:00Z"}}));
+        for (term, want) in [
+            ("testedAt==2018-12-04T12:00:00Z", true),
+            ("testedAt!=2018-12-04T12:00:00Z", false),
+            ("testedAt>=2017-12-24T12:00:00Z", true),
+            ("testedAt<=2019-01-01T00:00:00Z", true),
+            ("testedAt>2019-01-01T00:00:00Z", false),
+            ("testedAt", true),
+        ] {
+            assert_eq!(q(&typed, term), want, "typed value, {term}");
+            assert_eq!(q(&bare, term), want, "bare value, {term}");
+        }
+    }
+
+    /// The same rule reaches a number written as a typed value, and the
+    /// members of a ListProperty (4.5.6), whose Values are compared one by
+    /// one — 4.9 Equal: "identical or equivalent to ANY of the list values".
+    #[test]
+    fn a_typed_number_and_a_typed_list_member_are_compared_the_same_way() {
+        let e = expand(json!({"id": "urn:ngsi-ld:Vehicle:3", "type": "Vehicle",
+            "speed": {"type": "Property", "value": {"@type": "Number", "@value": 60}},
+            "marks": {"type": "ListProperty", "valueList": [
+                {"@type": "DateTime", "@value": "2018-12-04T12:00:00Z"},
+                {"@type": "DateTime", "@value": "2020-01-01T00:00:00Z"}]}}));
+        assert!(q(&e, "speed==60"));
+        assert!(q(&e, "speed>50"));
+        assert!(!q(&e, "speed==61"));
+        assert!(q(&e, "marks==2020-01-01T00:00:00Z"));
+        assert!(!q(&e, "marks==2019-01-01T00:00:00Z"));
+
+        // The datatype names the value space; what 4.9 compares is the Value
+        // itself, so a number written in its lexical form stays a string and
+        // a Number Query Term value is a different datatype (p.92).
+        let lexical = expand(json!({"id": "urn:ngsi-ld:Vehicle:5", "type": "Vehicle",
+            "speed": {"type": "Property",
+                "value": {"@type": "http://www.w3.org/2001/XMLSchema#double",
+                          "@value": "3.5"}}}));
+        assert!(!q(&lexical, "speed>3"));
+        assert!(q(&lexical, "speed==\"3.5\""));
+    }
+
+    /// A JsonProperty holds arbitrary JSON — the core `@context` types it
+    /// `@json`, so nothing inside it is interpreted as JSON-LD. An `@value`
+    /// member there is data, and the target value stays the whole JSON
+    /// (4.9: "the target value is defined as the JSON value").
+    #[test]
+    fn the_json_of_a_json_property_is_not_read_as_a_typed_value() {
+        let e = expand(json!({"id": "urn:ngsi-ld:Vehicle:4", "type": "Vehicle",
+            "ticket": {"type": "JsonProperty", "json": {"@value": 5}}}));
+        assert!(!q(&e, "ticket==5"));
+        assert!(q(&e, "ticket[@value]==5"));
     }
 }
 

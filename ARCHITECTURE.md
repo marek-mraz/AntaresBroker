@@ -81,7 +81,7 @@ module's header comment.
 | `repr.rs` | 1 600 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs; 4.5.23 Linked Entity Retrieval (inline and flat, the lookup budget) and the 4.5.16 GeoJSON Feature/FeatureCollection shapes — what every module needs to render a document |
 | `history.rs` | 260 | the producer side of temporal recording: the per-request change buffer and the 4.5.7/4.5.8 delete mirrors that record a deleted Entity or Attribute in history |
 | `stamp.rs` | 50 | 4.8, 5.2.4 system attributes of a write: `createdAt`/`modifiedAt` on the entity and on every attribute instance |
-| `mirror.rs` | 350 | the change event and the two document mirrors (`Change`, `DocMirror`, `SubMirror`, `TenantIndex`) that state, notify and history share; names no other module |
+| `mirror.rs` | 530 | the change event and the two document mirrors (`Change`, `DocMirror`, `SubMirror`, `TenantIndex`) that state, notify and history share, with the registration index (`reg_keys`, `bucketed`, `matching`) the federation read path selects candidates through; names no other module |
 | `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |

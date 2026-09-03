@@ -15,11 +15,164 @@ pub type Change = (String, Option<Value>, Option<Value>);
 /// registrations (fed by `ANTARES_REGISTRY` deltas). Postgres stays the
 /// system of record — this map is a cache with exactly one writer (the
 /// watcher task); readers only snapshot.
+///
+/// A snapshot hands out `Arc`s, not copies. When this mirror is installed
+/// it IS the federation read path's registration source ([`Self::matching`]
+/// replaces the store's `matching_registrations`), and a broker at the
+/// 100 000-registration target that deep-copied every document per
+/// distributed request paid 84 ms and a hundred megabytes for a set it only
+/// ever reads. The documents are immutable once applied — a changed
+/// registration arrives as a whole new document — so sharing them costs a
+/// refcount and nothing else.
 #[derive(Default)]
 pub struct DocMirror {
-    map: std::sync::RwLock<
-        std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
-    >,
+    map: std::sync::RwLock<std::collections::HashMap<String, RegIndex>>,
+}
+
+/// One tenant's registrations, plus the two dimensions a distributed read
+/// narrows on before it evaluates 5.12 matching per registration.
+///
+/// The buckets are the mirror's answer to the same question
+/// `matching_registrations` pushes into the store's `csource_index`, and
+/// they obey the same contract: a bucket may only ever drop a registration
+/// `reg_candidate` would reject anyway. So a registration lands in `any_*`
+/// — the set no key can exclude — whenever the dimension cannot decide it:
+/// a `RegistrationInfo` with no `entities` at all, an `EntityInfo` with no
+/// `type` (5.12 restricts such an entry by id alone), or an `EntityInfo`
+/// carrying an `idPattern` (5.12 condition 5 forwards on a pattern whatever
+/// ids were asked for).
+///
+/// The membership is per REGISTRATION, not per `EntityInfo` — a
+/// registration whose one entry carries the asked-for type and whose other
+/// carries the asked-for id is kept, where the store's per-row `WHERE` drops
+/// it. Wider than the store, which is the safe direction for a prefilter.
+#[derive(Default)]
+struct RegIndex {
+    docs: std::collections::HashMap<String, std::sync::Arc<Value>>,
+    by_type: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    by_id: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    any_type: std::collections::HashSet<String>,
+    any_id: std::collections::HashSet<String>,
+}
+
+/// The type and id keys one registration document occupies. `None` for a
+/// dimension means no key of it can exclude this registration.
+fn reg_keys(doc: &Value) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let (mut types, mut ids) = (Vec::new(), Vec::new());
+    let (mut any_type, mut any_id) = (false, false);
+    // No `information` at all is not a shape 5.2.9 allows, and nothing can
+    // be read off it — the registration stays in both broad sets rather
+    // than being narrowed out on a document this code does not understand.
+    let Some(infos) = doc.get("information").and_then(Value::as_array) else {
+        return (None, None);
+    };
+    if infos.is_empty() {
+        return (None, None);
+    }
+    for info in infos {
+        // 5.2.9: a RegistrationInfo may name only propertyNames /
+        // relationshipNames, which restricts attributes and no entity.
+        let Some(entities) = info.get("entities").and_then(Value::as_array) else {
+            return (None, None);
+        };
+        if entities.is_empty() {
+            return (None, None);
+        }
+        for ei in entities {
+            match crate::registry::ei_types(ei) {
+                ts if ts.is_empty() => any_type = true,
+                ts => types.extend(ts.into_iter().map(str::to_owned)),
+            }
+            if ei.get("idPattern").is_some() {
+                any_id = true;
+            } else {
+                match ei.get("id").and_then(Value::as_str) {
+                    Some(id) => ids.push(id.to_owned()),
+                    None => any_id = true,
+                }
+            }
+        }
+    }
+    ((!any_type).then_some(types), (!any_id).then_some(ids))
+}
+
+/// The registrations a set of keys can reach: the ones filed under a named
+/// key, plus every one the dimension cannot decide. `None` in, `None` out —
+/// the caller asked nothing of this dimension, so it narrows nothing.
+fn bucketed<'a>(
+    keys: Option<&[String]>,
+    by: &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
+    any: &'a std::collections::HashSet<String>,
+) -> Option<std::collections::HashSet<&'a str>> {
+    let keys = keys?;
+    let mut out: std::collections::HashSet<&str> = any.iter().map(String::as_str).collect();
+    for k in keys {
+        if let Some(ids) = by.get(k) {
+            out.extend(ids.iter().map(String::as_str));
+        }
+    }
+    Some(out)
+}
+
+impl RegIndex {
+    /// Drop a registration from the documents and from every bucket it is
+    /// filed under. The keys come from the document being removed, so the
+    /// index never needs a second copy of them.
+    fn remove(&mut self, id: &str) {
+        let Some(old) = self.docs.remove(id) else {
+            return;
+        };
+        let (types, ids) = reg_keys(&old);
+        let unfile =
+            |keys: Option<Vec<String>>,
+             by: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+             any: &mut std::collections::HashSet<String>| {
+                match keys {
+                    None => {
+                        any.remove(id);
+                    }
+                    Some(ks) => {
+                        for k in ks {
+                            if let Some(set) = by.get_mut(&k) {
+                                set.remove(id);
+                                if set.is_empty() {
+                                    by.remove(&k);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        unfile(types, &mut self.by_type, &mut self.any_type);
+        unfile(ids, &mut self.by_id, &mut self.any_id);
+    }
+
+    fn insert(&mut self, id: &str, doc: Value) {
+        self.remove(id);
+        let (types, ids) = reg_keys(&doc);
+        let file =
+            |keys: Option<Vec<String>>,
+             by: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+             any: &mut std::collections::HashSet<String>| {
+                match keys {
+                    None => {
+                        any.insert(id.to_owned());
+                    }
+                    Some(ks) => {
+                        for k in ks {
+                            by.entry(k).or_default().insert(id.to_owned());
+                        }
+                    }
+                }
+            };
+        file(types, &mut self.by_type, &mut self.any_type);
+        file(ids, &mut self.by_id, &mut self.any_id);
+        self.docs.insert(id.to_owned(), std::sync::Arc::new(doc));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
 }
 
 /// Both mirror flavours accept `{tenant, id, doc|null}` deltas — the seam
@@ -315,9 +468,7 @@ impl DocMirror {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match doc {
             Some(d) => {
-                map.entry(tenant.to_owned())
-                    .or_default()
-                    .insert(id.to_owned(), d);
+                map.entry(tenant.to_owned()).or_default().insert(id, d);
             }
             None => {
                 if let Some(t) = map.get_mut(tenant) {
@@ -330,13 +481,45 @@ impl DocMirror {
         }
     }
 
-    pub fn docs(&self, tenant: &str) -> Vec<Value> {
-        self.map
+    /// The registrations of one tenant that can match these ids and types,
+    /// shared rather than copied.
+    ///
+    /// Both dimensions are optional and each narrows on its own; an absent
+    /// one is a dimension the caller asked nothing about, never an empty
+    /// answer. With both given a registration has to survive both, which is
+    /// the store's rule too.
+    pub fn matching(
+        &self,
+        tenant: &str,
+        ids: Option<&[String]>,
+        types: Option<&[String]>,
+    ) -> Vec<std::sync::Arc<Value>> {
+        let map = self
+            .map
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(tenant)
-            .map(|t| t.values().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(t) = map.get(tenant) else {
+            return Vec::new();
+        };
+        let by_type = bucketed(types, &t.by_type, &t.any_type);
+        let by_id = bucketed(ids, &t.by_id, &t.any_id);
+        let pick = |keys: std::collections::HashSet<&str>| -> Vec<std::sync::Arc<Value>> {
+            keys.into_iter()
+                .filter_map(|k| t.docs.get(k).map(std::sync::Arc::clone))
+                .collect()
+        };
+        match (by_type, by_id) {
+            (None, None) => t.docs.values().map(std::sync::Arc::clone).collect(),
+            (Some(k), None) | (None, Some(k)) => pick(k),
+            (Some(a), Some(b)) => pick(a.intersection(&b).copied().collect()),
+        }
+    }
+
+    pub fn docs(&self, tenant: &str) -> Vec<Value> {
+        self.matching(tenant, None, None)
+            .into_iter()
+            .map(|d| (*d).clone())
+            .collect()
     }
 
     #[cfg(any(test, feature = "test-kit"))]
