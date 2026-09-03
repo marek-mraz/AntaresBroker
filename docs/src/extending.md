@@ -310,6 +310,58 @@ batch endpoints are the right target for a façade that receives many
 records at once (an STA `POST /Observations` array), because one batch
 request is one pass through that machinery instead of N.
 
+### The four mappings
+
+These are recorded, not built. Each becomes its own crate behind its own
+off-by-default feature the day a deployment names the client that needs it;
+until then the seam above is the deliverable, and this is the design work
+already done so that day is a translation exercise rather than a research
+one. What each mapping shows is how little of it is new code: almost every
+line is a query parameter the NGSI-LD API already has.
+
+**SensorThings 1.1 (OGC 18-088).** The entity model maps onto Smart Data
+Models types: `Thing` and `Sensor` are Entities (`Device`),
+`ObservedProperty` is the Attribute name, `Datastream` is the pairing of
+the two — a `Device` and one of its Attributes — and `Location` and
+`FeatureOfInterest` are the Entity's `location` GeoProperty. `Observation`
+is the one that decides the shape of the whole façade: an Observation is an
+Attribute instance at a point in time, which is history, not current state.
+So `Observations?$filter=phenomenonTime ge <t>` is
+`GET /temporal/entities?timerel=after&timeAt=<t>`, and the temporal
+resources (6.18-6.22) carry the bulk of the API rather than
+`/entities`. The query options are near-identities: `$filter` is a subset
+of `q`, `$expand` is `join=inline`, `$select` is `attrs`, and `$top`/`$skip`
+are `limit`/`offset`. `$orderby` is the one that needs care — NGSI-LD
+orders temporal results by `observedAt`, so an `$orderby` on anything else
+is either refused or paid for in the façade.
+
+**OGC API — Features Core (OGC 17-069r4).** The nearest to free of the
+four. `collections` is `GET /types` (6.25), a collection's `items` is
+`GET /entities?type=<type>` with `Accept: application/geo+json`, which the
+broker already renders as a FeatureCollection (6.3.15). `bbox` is
+`georel=within` with a Polygon `geometry`; `datetime` is the temporal API
+again, `timerel=between` for an interval and `timerel=after`/`before` for
+an open one. `limit` is `limit`, `numberMatched` comes from
+`count=true` → `NGSILD-Results-Count` (6.3.13), and `numberReturned` is the
+length of what was answered. Only CRS84 is offered, which is what
+IETF RFC 7946 fixes and what the broker stores.
+
+**WFS 2.0 (OGC 09-025r2).** An XML rendering over the OGC API Features
+mapping above, for a client that cannot move — never a second mapping.
+`GetCapabilities` is built from `/types`, `DescribeFeatureType` from
+`/types/{type}` (6.26), and `GetFeature` is the Features `items` request
+with the answer serialized as GML instead of GeoJSON. A `Filter` element is
+translated into the same `q` subset the STA `$filter` uses. Nothing in a
+WFS façade may reach the broker except through the Features translation:
+two mappings for one data model is how they drift.
+
+**OData 4.01.** There is no separate mapping. SensorThings' query options
+ARE an OData subset, so the parser that serves `$filter`, `$orderby`,
+`$select`, `$top`, `$skip` and `$count` for STA is the same one an OData
+façade uses; what differs is the entity model in front of it. An OData
+façade is therefore the STA crate with a different naming layer, and the
+day one is asked for, that is the shape to build.
+
 ### How to add a storage backend
 
 `examples/plugin-example` is the worked answer: a crate outside `crates/`
