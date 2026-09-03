@@ -772,6 +772,25 @@ where
         .await
 }
 
+/// 6.6 Entity Attribute and 6.7 Entity Attribute Instance name one Attribute
+/// in the PATH rather than in the payload. The range is the encoded segment
+/// inside `url`, so a translated name can be written back over it; the name
+/// comes back percent-decoded, which is the form an `@context` expands. The
+/// segment stops at the next `/`, so `/attrs/{name}/value` and
+/// `/attrs/{name}/{instanceId}` both name `{name}` and nothing more.
+fn path_attr_segment(url: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let path_end = url.find('?').unwrap_or(url.len());
+    let at = url[..path_end].find("/attrs/")? + "/attrs/".len();
+    let rest = &url[at..path_end];
+    let end = at + rest.find('/').unwrap_or(rest.len());
+    (end > at).then(|| {
+        (
+            at..end,
+            crate::negotiate::percent_decode(&url.as_bytes()[at..end]),
+        )
+    })
+}
+
 /// Table 5.2.9-2 and 5.2.34: one forward's outcome, booked on the
 /// registration it was made for. `ok` is the table's own failure
 /// definition — "an HTTP response code other than 2xx".
@@ -809,7 +828,7 @@ fn note_forward(st: &AppState, tenant: &TenantId, reg: &FedReg, ok: bool) {
 pub async fn forward(
     st: &AppState,
     method: reqwest::Method,
-    url: String,
+    mut url: String,
     query: &[(String, String)],
     headers: &HeaderMap,
     tenant: &TenantId,
@@ -885,16 +904,6 @@ pub async fn forward(
     if reg.local_only && !query.iter().any(|(k, _)| k == "local") {
         query.push(("local".into(), "true".into()));
     }
-    // 6.6 Entity Attribute / 6.7 Entity Attribute Instance: the path names one
-    // Attribute, so the payload is an Attribute Fragment (5.6.4, 5.6.14,
-    // 5.6.19) rather than an Entity.
-    let single_attr_resource = url
-        .split('?')
-        .next()
-        .unwrap_or(url.as_str())
-        .split("/attrs/")
-        .nth(1)
-        .is_some_and(|rest| !rest.is_empty());
     if let Some(reg_ctx_url) = csi_get("jsonldContext") {
         // 5.5.10: both URLs are Tenant data — the caller's own @context and one
         // the Registration names — so they resolve within the forwarding
@@ -918,21 +927,47 @@ pub async fn forward(
             // the body here changes the write the client asked for.
             let mut translated: Option<Value> = None;
             let mut can_switch = true;
+            // 6.6/6.7 name their Attribute in the PATH, which the Context
+            // Source expands with the @context the forward advertises — so
+            // the segment is translated with the payload or switching the
+            // context renames the target Attribute. 4.3.6.6 compacts
+            // "payload and query parameters" and the path is neither, but it
+            // carries a term the same compaction has to reach, or the rule
+            // cannot be applied to these resources at all. A name that does
+            // not expand to an absolute IRI is no term to translate, and the
+            // whole request stays in the @context its names are already in.
+            let path_swap = match path_attr_segment(&url) {
+                Some((range, name)) => match antares_jsonld::expand_attr_name(&name, &orig) {
+                    Ok(iri) => Some((range, path_segment(&target.compact_iri(&iri)))),
+                    Err(_) => {
+                        can_switch = false;
+                        None
+                    }
+                },
+                None => None,
+            };
             match body.as_ref() {
                 // nothing to translate
                 None => {}
-                // 6.6/6.7: a resource that names ONE Attribute takes an
-                // Attribute Fragment, not an Entity — its `type` is an
-                // Attribute type and its `value` a value, so reading it as an
-                // Entity turns the value into a sub-Attribute. Its Attribute
-                // name travels in the PATH, which the peer expands with the
-                // @context this request advertises, so switching the context
-                // without rewriting the path renames the target Attribute.
-                // ponytail: the whole request stays in the original @context,
-                // at the cost of the 4.3.6.6 payload compaction for this one
-                // resource; translate the path segment and compact the
-                // fragment through expand_attr_fragment to lift it.
-                Some(_) if single_attr_resource => can_switch = false,
+                // 6.6/6.7 take an Attribute Fragment (5.6.4, 5.6.14, 5.6.19),
+                // not an Entity — its `type` is an Attribute type and its
+                // `value` a value, so reading it as an Entity would turn the
+                // value into a sub-Attribute. `expand_attr_fragment` is the
+                // reader the partial-update handler itself uses, and
+                // `compact_instance` its inverse.
+                Some(v) if path_swap.is_some() => match v.as_object() {
+                    Some(o) => match antares_jsonld::expand_attr_fragment(o, &orig) {
+                        Ok(exp) => {
+                            let mut re = antares_jsonld::compact::compact_instance(&exp, &target);
+                            if let Some(m) = re.as_object_mut() {
+                                m.remove("@context");
+                            }
+                            translated = Some(re);
+                        }
+                        Err(_) => can_switch = false,
+                    },
+                    None => can_switch = false,
+                },
                 Some(v) => match v.as_object() {
                     // a 5.2.23 Query body carries no entity terms to recompact
                     Some(o) if o.get("type").and_then(Value::as_str) == Some("Query") => {}
@@ -969,6 +1004,9 @@ pub async fn forward(
             // different Fully Qualified Names (5.5.7) and write Attributes
             // the client never named.
             if can_switch {
+                if let Some((range, seg)) = path_swap {
+                    url.replace_range(range, &seg);
+                }
                 if let Some(re) = translated {
                     body = Some(re);
                 }
@@ -2604,6 +2642,66 @@ mod tests {
             spec.types,
             Some(vec!["(Home;Vehicle),Building".to_owned()]),
             "the selection travels as one expression"
+        );
+    }
+
+    /// 6.6/6.7: which part of a forwarded URL names the Attribute. The
+    /// segment ends at the next `/`, so the `value` sub-resource and a 6.7
+    /// instanceId are outside it, and a query string is never part of a path.
+    #[test]
+    fn the_path_attribute_segment_is_the_one_between_attrs_and_the_next_slash() {
+        let name = |u: &str| path_attr_segment(u).map(|(_, n)| n);
+        assert_eq!(
+            name("/entities/urn:x/attrs/speed"),
+            Some("speed".to_owned())
+        );
+        assert_eq!(
+            name("/entities/urn:x/attrs/speed/value"),
+            Some("speed".to_owned())
+        );
+        assert_eq!(
+            name("/temporal/entities/urn:x/attrs/speed/urn:ngsi-ld:instance:1"),
+            Some("speed".to_owned())
+        );
+        assert_eq!(
+            name("/entities/urn:x/attrs/speed?type=Vehicle"),
+            Some("speed".to_owned())
+        );
+        // percent-decoded, because that is the form an @context expands
+        assert_eq!(
+            name("/entities/urn:x/attrs/http%3A%2F%2Fa.example%2Fs"),
+            Some("http://a.example/s".to_owned())
+        );
+        // resources that name no Attribute
+        assert_eq!(name("/entities/urn:x"), None);
+        assert_eq!(name("/entities/urn:x/attrs"), None);
+        assert_eq!(name("/entities/urn:x/attrs/"), None);
+        assert_eq!(name("/entities/urn:x/attrs/?type=V"), None);
+        // the range addresses the ENCODED segment, so writing a translated
+        // name back over it cannot corrupt the rest of the URL
+        let url = "/entities/urn:x/attrs/speed/value?q=1";
+        let (range, _) = path_attr_segment(url).expect("segment");
+        assert_eq!(&url[range], "speed");
+    }
+
+    /// 4.3.6.6 recompaction where the request @context and the registered one
+    /// are the same document is the identity: the Context Source receives the
+    /// Attribute Fragment the client sent, sub-Attributes and all. Any other
+    /// answer would rewrite a payload the clause only asked to re-spell.
+    #[test]
+    fn an_attribute_fragment_round_trips_through_one_context_unchanged() {
+        let ctx = antares_jsonld::core_context();
+        let frag = serde_json::json!({
+            "type": "Property",
+            "value": 56,
+            "source": {"type": "Property", "value": "Speedometer"},
+        });
+        let exp = antares_jsonld::expand_attr_fragment(frag.as_object().expect("obj"), &ctx)
+            .expect("the fragment expands");
+        assert_eq!(
+            antares_jsonld::compact::compact_instance(&exp, &ctx),
+            frag,
+            "the same @context in and out must change nothing"
         );
     }
 

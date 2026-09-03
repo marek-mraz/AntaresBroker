@@ -218,19 +218,40 @@ async fn a_forward_never_advertises_a_context_its_terms_are_not_in() {
     );
 }
 
+/// The request line of the forward the mock saw.
+fn target_of(head: &str) -> String {
+    head.lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// A 5.6.4 Attribute Fragment (`{"type": "Property", "value": …}`) is a body
 /// shape the recompaction also sees, and it is NOT an Entity: read as one,
-/// its `type` is an Entity Type and its `value` an Attribute name. Whatever
-/// the broker forwards, the peer must still receive the fragment the client
-/// sent — under the @context that fragment's terms are in.
+/// its `type` is an Entity Type and its `value` an Attribute name. It is read
+/// with `expand_attr_fragment` and written back with `compact_instance`, so
+/// its sub-Attributes are translated and its reserved members are not.
+///
+/// The Attribute the request names travels in the PATH (6.6), which the
+/// Context Source expands with the @context the forward advertises: the
+/// segment is translated with the payload, or the write lands on an
+/// Attribute the client never named. Here the client's `speed` and the
+/// registered context's `velocity` are the same Fully Qualified Name.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_attribute_fragment_is_not_recompacted_into_an_entity() {
+async fn an_attribute_fragment_travels_as_a_fragment_and_its_path_is_translated() {
     let st = state();
     let ctx = format!("http://127.0.0.1:{}/ctx.jsonld", context_server());
     let m = mock_source();
     register(&st, m.port, &ctx, &["updateAttrs"]).await;
 
-    let frag = serde_json::json!({"type": "Property", "value": 42});
+    // the sub-Attribute is `speed` again, so a fragment read as a fragment
+    // translates it and a fragment read as an Entity could not
+    let frag = serde_json::json!({
+        "type": "Property",
+        "value": 42,
+        "speed": {"type": "Property", "value": 1},
+    });
     let (status, body) = send(
         &st,
         "PATCH",
@@ -243,9 +264,58 @@ async fn an_attribute_fragment_is_not_recompacted_into_an_entity() {
     let head = m.head.lock().expect("lock").clone();
     let sent = m.body.lock().expect("lock").clone();
     assert!(!head.is_empty(), "the update must reach the Context Source");
+    assert_eq!(
+        link_of(&head),
+        Some(format!(
+            "<{ctx}>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""
+        )),
+        "4.3.6.6 forwards WITH the registered @context: {head}"
+    );
+    assert!(
+        target_of(&head).contains("/attrs/velocity"),
+        "the path names the Attribute in the registered @context: {head}"
+    );
     let sent: serde_json::Value = serde_json::from_str(&sent).expect("forwarded body is JSON");
     assert_eq!(
-        sent, frag,
-        "the forwarded Attribute Fragment must still be the fragment: {sent}"
+        sent,
+        serde_json::json!({
+            "type": "Property",
+            "value": 42,
+            "velocity": {"type": "Property", "value": 1},
+        }),
+        "the fragment stays a fragment and its sub-Attribute is translated: {sent}"
+    );
+}
+
+/// 5.6.5 delete Attribute carries NO payload, so nothing about the body can
+/// tell the broker which Attribute the request is about — only the path can.
+/// A forward that switched the @context and left the segment alone would
+/// delete a different Attribute at the Context Source, or none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_of_a_named_attribute_translates_its_path() {
+    let st = state();
+    let ctx = format!("http://127.0.0.1:{}/ctx.jsonld", context_server());
+    let m = mock_source();
+    register(&st, m.port, &ctx, &["deleteAttrs"]).await;
+
+    let (status, body) = send(
+        &st,
+        "DELETE",
+        &format!("/ngsi-ld/v1/entities/{ENTITY}/attrs/speed"),
+        None,
+    )
+    .await;
+    assert!(status < 400, "delete attribute: {status} {body}");
+
+    let head = m.head.lock().expect("lock").clone();
+    assert!(!head.is_empty(), "the delete must reach the Context Source");
+    let target = target_of(&head);
+    assert!(
+        target.contains("/attrs/velocity"),
+        "the deleted Attribute is named in the registered @context: {head}"
+    );
+    assert!(
+        !target.contains("/attrs/speed"),
+        "`speed` under the registered @context is another Attribute entirely: {head}"
     );
 }

@@ -69,6 +69,24 @@ so do the ones the binding sets itself: `Host`, `Via`, `Link`, `Connection`,
 4.3.6.8 give their own meaning; the forward acts on them, and passing them
 through raw would corrupt the negotiation they steer.
 
+### The registered `@context`
+
+`"jsonldContext"` names a `@context` the Context Source reads its terms in,
+and the forward is recompacted into it: the payload, the term-bearing query
+parameters (`attrs`, `type`, `geoproperty`) and — for the resources that
+name one Attribute in the path, `/entities/{id}/attrs/{name}` and its
+temporal and `value` variants — the path segment itself. The segment is not
+one of the two things 4.3.6.6 lists, but it carries a term the Context
+Source expands with the `@context` the forward advertises, so a request that
+switched the context and left the segment alone would write to a different
+Attribute.
+
+The whole request travels in one `@context` or none of it does. A payload
+the broker cannot express in the registered context — a batch array, a body
+that does not re-expand — makes the forward fall back to the request's own
+context, logged as a warning, because advertising the registered context
+over terms that are not in it is how a peer writes Attributes nobody named.
+
 ### Timeout and cooldown
 
 `management.timeout` (5.2.34) bounds one forward in milliseconds; the
