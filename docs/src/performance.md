@@ -112,6 +112,35 @@ What the run says, in the order it matters:
   and fail at 1 500 while every query shape holds the harness ceiling of
   5 000 rps; the in-memory write path holds 5 000 rps on 0.47 cores.
 
+### The update shape
+
+The ladder above is the query shape. `perf-weekly` run `33797374897`, same
+ccx53 box, runs it again against the update shape — the write path with the
+notification pipeline behind it — once per store:
+
+| store | 1 core | 2 cores | 4 cores | 8 cores | efficiency at 2 / 4 / 8 | cores used at 8 | peak threads at 8 |
+|---|---|---|---|---|---|---|---|
+| memory | 13 635 req/s | 19 498 req/s | 11 573 req/s | 12 538 req/s | 71 % / 21 % / 11 % | 6.78 | 44 |
+| file | 3 870 req/s | 4 492 req/s | 3 744 req/s | 3 617 req/s | 58 % / 24 % / 12 % | 0.94 | 17 |
+
+Updates do not merely scale worse than queries: past two cores they scale
+backwards, and eight cores serve fewer requests per second than one while
+burning 6.78 of them. Something serializes and the cores spend their time
+arriving at it.
+
+Not the store's map lock, which is what a single-tenant ladder would blame
+and what tenant sharding would answer: this ladder drives one tenant, so
+sharding by tenant would leave every request on the same shard and change
+nothing. What the write path does that the query path does not is hand the
+worker's queue to another thread — `block_in_place` — for every document it
+writes, so the store can commit without stalling an async worker. In `file`
+mode that commit is an fsync and the hop is the point. In `memory` mode
+there is no commit: the write is a lock and a map insert, and the hop is the
+whole cost, paid once per write and paid more the more cores there are to
+hand work between. The hop is now taken only where something blocks; the
+paths that hold the write section for a whole scan (the 4.22 sweep, the two
+purges) still take it in either mode.
+
 ### The exit criterion
 
 `perf-weekly` run `33683839528` sets what the runtime work has to hold. A

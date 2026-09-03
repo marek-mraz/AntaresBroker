@@ -120,14 +120,27 @@ const ALL_KINDS: [Kind; 9] = [
 /// Run `f` off the tokio worker pool when called from a multi-thread runtime:
 /// a per-commit fsync must never stall an async worker. Outside a
 /// runtime (unit tests, startup) it just runs inline.
-fn on_blocking<T>(f: impl FnOnce() -> T) -> T {
+///
+/// `durable` is what decides. A per-document write blocks only where it
+/// commits, so it passes `shadow.is_some()`: in `memory` mode that write is
+/// a lock and a map insert, and handing a worker's queue to another thread —
+/// a handoff, and past the pool's live threads a spawn — costs more than the
+/// write and costs more the more cores there are to hand work between. The
+/// paths that hold the write section for a whole SCAN (the 4.22 sweep, the
+/// two purges) pass `true` whatever the mode: what makes them long there is
+/// the scan, not the commit.
+fn on_blocking<T>(durable: bool, f: impl FnOnce() -> T) -> T {
     // wasm32: single-threaded, no tokio runtime — always inline.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(h) = tokio::runtime::Handle::try_current() {
-        if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-            return tokio::task::block_in_place(f);
+    if durable {
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(f);
+            }
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = durable;
     f()
 }
 
@@ -390,12 +403,12 @@ impl Store {
     /// file under ticking sensors) grows without bound. `file` mode persists
     /// each removal. Returns how many docs were reaped or pruned.
     ///
-    /// Runs through `on_blocking` like every other mutating path: it holds
-    /// the write-critical section for a full scan and issues one
-    /// `Durability::Immediate` (fsync) commit per reaped doc, which must
+    /// Runs through `on_blocking` like every other mutating path: in `file`
+    /// mode it holds the write-critical section for a full scan and issues
+    /// one `Durability::Immediate` (fsync) commit per reaped doc, which must
     /// never happen on an async worker thread.
     pub fn sweep_expired(&self, now: &str) -> usize {
-        on_blocking(|| self.sweep_expired_locked(now))
+        on_blocking(true, || self.sweep_expired_locked(now))
     }
 
     fn sweep_expired_locked(&self, now: &str) -> usize {
@@ -508,7 +521,7 @@ impl Store {
     /// Drop every document of the given kinds for one tenant; `true` when
     /// the tenant held any of them. Persisted per key in `file` mode.
     pub fn purge_kinds(&self, tenant: &TenantId, kinds: &[Kind]) -> bool {
-        on_blocking(|| {
+        on_blocking(true, || {
             let mut inner = self.write_inner();
             let mut hit = false;
             for kind in kinds {
@@ -530,7 +543,7 @@ impl Store {
         // its documents and go with it — a row that outlived its Tenant would
         // hand the next holder of that name a stranger's term mappings. A
         // Cached row belongs to no Tenant and stays.
-        on_blocking(|| {
+        on_blocking(true, || {
             let mut inner = self.write_inner();
             let dead: Vec<String> = inner
                 .contexts
@@ -614,7 +627,7 @@ impl Store {
     /// Insert a new resource; `false` if the id already exists.
     pub fn create(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
         let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
-        let created = on_blocking(|| {
+        let created = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
             let m = Self::map_mut(&mut inner, kind)
@@ -639,7 +652,7 @@ impl Store {
     /// answers 201 with a Location header instead of a silent 204.
     pub fn upsert(&self, tenant: &TenantId, kind: Kind, id: &str, doc: Value) -> bool {
         let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
-        let (prev, expired) = on_blocking(|| {
+        let (prev, expired) = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             let expired = self.is_expired(&inner, kind, tenant.as_str(), id);
             let prev = Self::map_mut(&mut inner, kind)
@@ -674,7 +687,7 @@ impl Store {
     /// anyway, and leaving it would resurrect the 409.
     pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> bool {
         let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
-        let removed = on_blocking(|| {
+        let removed = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             // an expired doc is left in place for the sweep to reap: removing
             // it here without persisting the removal would resurrect it on
@@ -710,7 +723,7 @@ impl Store {
         keep: &dyn Fn(&Value) -> bool,
     ) -> Option<Value> {
         let _order = self.emit_ordered();
-        let removed = on_blocking(|| {
+        let removed = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             if self.is_expired(&inner, Kind::Entity, tenant.as_str(), id) {
                 return None;
@@ -825,7 +838,7 @@ impl Store {
         f: impl FnOnce(&mut Value) -> Result<T, E>,
     ) -> Option<Result<T, E>> {
         let _order = (kind == Kind::Entity).then(|| self.emit_ordered());
-        let (result, change) = on_blocking(|| {
+        let (result, change) = on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             if self.is_expired(&inner, kind, tenant.as_str(), id) {
                 return None; // 4.22: invalid, so absent
@@ -872,7 +885,7 @@ impl Store {
         id: &str,
         doc: Value,
     ) -> Result<(), NgsiError> {
-        on_blocking(|| {
+        on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             // The row that is there decides whether this call may replace it,
             // the row that arrives decides whether it may be stored: the two
@@ -918,7 +931,7 @@ impl Store {
     }
 
     pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> bool {
-        on_blocking(|| {
+        on_blocking(self.shadow.is_some(), || {
             let mut inner = self.write_inner();
             let hit = inner
                 .contexts
