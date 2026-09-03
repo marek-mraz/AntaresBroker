@@ -306,10 +306,20 @@ impl AppState {
                 if Loader::is_pinned_core(url) {
                     return true;
                 }
-                let id = hosted_row_id(&*store, tenant, url).unwrap_or_else(|| {
-                    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes()).to_string()
-                });
-                match store.context_get(tenant, &id) {
+                // One read, not two: a bump runs on every counted use of a
+                // non-pinned @context, and the hosted probe already carries
+                // the row it found.
+                let held = hosted_row(&*store, tenant, url);
+                let (id, row) = match held {
+                    Some((id, row)) => (id, Ok(Some(row))),
+                    None => {
+                        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes())
+                            .to_string();
+                        let row = store.context_get(tenant, &id);
+                        (id, row)
+                    }
+                };
+                match row {
                     // the row is what the store handed back, and `Value`'s
                     // index panics on anything that is not an object; a row
                     // that cannot carry the counters is left uncounted
