@@ -31,8 +31,11 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// An engine that narrows every read and allows every write, so a test can
-/// seed through the same router it then reads through.
+/// An engine that narrows the reads a narrowing can reach
+/// (`policy::FILTERABLE`) and allows everything else, so a test can seed and
+/// register through the same router it then reads through. A Filter on any
+/// other clause is a refusal, which is the seam's own rule and not this
+/// engine's.
 struct Narrowing(Filter);
 
 impl PolicyEngine for Narrowing {
@@ -41,10 +44,10 @@ impl PolicyEngine for Narrowing {
     }
 
     fn decide<'a>(&'a self, _s: &'a Subject, op: &'a Operation<'a>) -> DecisionFuture<'a> {
-        let answer = if op.clause.starts_with("5.6") {
-            Decision::Allow
-        } else {
+        let answer = if antares_api::policy::FILTERABLE.contains(&op.clause) {
             Decision::Filter(self.0.clone())
+        } else {
+            Decision::Allow
         };
         Box::pin(std::future::ready(answer))
     }

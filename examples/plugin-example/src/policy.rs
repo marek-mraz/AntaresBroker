@@ -25,7 +25,7 @@
 //! every query the tenant runs.
 
 use antares_api::policy::{
-    Decision, DecisionFuture, Filter, NotifyDecision, Operation, PolicyEngine, Subject,
+    Decision, DecisionFuture, Filter, NotifyDecision, Operation, PolicyEngine, Subject, FILTERABLE,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -211,8 +211,13 @@ impl ExamplePolicy {
             return Decision::Deny(format!("entity type {t} is not available to this subject"));
         }
         match rule.filter() {
-            Some(f) => Decision::Filter(f),
-            None => Decision::Allow,
+            // A narrowing is offered only where the broker can serve less
+            // (`policy::FILTERABLE`); on a write the seam refuses a Filter
+            // rather than drop it, and this rule is about what may be seen,
+            // not about what may be written. The type denial above has
+            // already had its say on the write.
+            Some(f) if FILTERABLE.contains(&op.clause) => Decision::Filter(f),
+            _ => Decision::Allow,
         }
     }
 }
@@ -288,6 +293,25 @@ mod tests {
             e.judge(&subject("acme"), &op),
             Decision::Filter(_)
         ));
+    }
+
+    /// A rule that narrows a read does not narrow a write: the seam has no
+    /// place to apply a projection to a create, and refuses a Filter it
+    /// would otherwise drop, so the engine allows the write outright.
+    #[test]
+    fn a_narrowing_rule_does_not_narrow_a_write() {
+        let e = engine();
+        let body = json!({"id": "urn:ngsi-ld:Vehicle:1", "type": ["Vehicle"]});
+        for clause in ["5.6.1", "5.6.6", "5.8.1"] {
+            let op = Operation {
+                body: Some(&body),
+                ..Operation::new(clause)
+            };
+            assert!(
+                matches!(e.judge(&subject("acme"), &op), Decision::Allow),
+                "{clause} was narrowed"
+            );
+        }
     }
 
     /// A create names its type in the body, not in a type selector.

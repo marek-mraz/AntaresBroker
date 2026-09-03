@@ -76,7 +76,7 @@ clause, ids, types, attrs, `q`, `scopeQ`, geo, body. `Decision` is
 | `Deny` | 403 with ProblemDetails whose `type` is an Antares URI — Table 6.3.2-1 has no access-denied type, so this is an Antares decision with its own `AntaresSpecificTests` and a 6.3.2 ledger note |
 | `Filter` | narrows: the `q` is conjoined into the query the store runs and travels on forwards, `omit`/`pick` go through the 5.2.14.1 projection the notification path already has, and a merged federated result is filtered after the merge |
 | `Filter { restricted: true }` | the same, plus `Antares-Results-Restricted: true` (see the amendment) |
-| `Filter` on purge (5.6.21), snapshot fill (5.16) or tenant purge | answered as `Deny` — there is no narrowed form of "delete everything" |
+| `Filter` on anything outside `policy::FILTERABLE` | answered as `Deny` — there is no narrowed form of "delete everything", and no handler outside that list reads the filter at all |
 
 The conjunction is made on the `antares-ql` AST, never on the query
 string, so the precedence trap a gateway rewrite has to distribute around
@@ -91,6 +91,16 @@ projection belongs to one level, where a bare `omit` name deliberately
 leaves that member alone on a joined document — and it travels down the
 join walk unchanged. A Relationship the narrowing removes is not traversed
 either.
+
+A narrowing is refused where it cannot be applied. Only the reads in
+`policy::FILTERABLE` hand the `Filter` to the code that serves the answer:
+retrieve and query Entities, their two temporal twins, and the EntityMap
+creations those queries page through. Every other operation is performed
+whole — a create writes its Entity or does not — so a `Filter` there would
+be dropped, and the broker would do in full what the engine believed it had
+narrowed. That is the one direction the seam may not fail in, so those
+clauses answer a narrowing the way 5.6.21 does: `Deny`. An engine that
+means to let such an operation through says `Allow`.
 
 A `pick`/`omit` name is one Attribute name (6.5.3.1), not a 4.21 projection
 expression, because that grammar reads a dot as the sub-attribute path

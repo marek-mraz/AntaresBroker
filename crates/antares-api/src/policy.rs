@@ -58,6 +58,15 @@ pub const ENGINE_FAILED: &str = "the policy engine failed";
 /// ([`resolve`]).
 pub const WHOLE_TENANT: [&str; 4] = ["5.6.21", "5.16.1", "5.16.2", "5.16.7"];
 
+/// The clauses whose handlers read the [`Filter`] an engine returns: the
+/// reads that can serve less than they were asked for. Every other clause
+/// takes its operation whole — a create either writes the Entity or does
+/// not — so a [`Decision::Filter`] there would be dropped, and the broker
+/// would perform in full an operation the engine believed it had narrowed.
+/// That is the one direction the seam may not fail in, so those clauses
+/// answer a narrowing as a deny ([`resolve`]).
+pub const FILTERABLE: [&str; 6] = ["5.7.1", "5.7.2", "5.7.3", "5.7.4", "5.14.4", "5.14.5"];
+
 /// Who is asking. The headers are the ones a deployment names for the
 /// seam to carry, copied verbatim and never interpreted: the broker does
 /// not know what a token is. They never leave this process — stripped from every
@@ -329,19 +338,25 @@ impl PolicyEngine for AllowAll {
     }
 }
 
-/// A `Filter` on an operation that acts on the whole tenant has no
-/// meaning — "purge every entity, but only the ones you may see" is a
-/// different operation from the one the client asked for, and answering it
-/// would delete less than the 204 claims. Those operations take the strict
-/// reading: narrow means refuse.
+/// A `Filter` only means something where the broker can serve less than it
+/// was asked for, and [`FILTERABLE`] is that list. Everywhere else the
+/// narrowing would be silently dropped: "purge every entity, but only the
+/// ones you may see" is a different operation from the one the client
+/// asked for and would delete less than the 204 claims, and a create writes
+/// its Entity or does not. Those operations take the strict reading: narrow
+/// means refuse. An empty `Filter` asks for nothing and is an allow.
 pub fn resolve(clause: &str, decision: Decision) -> Decision {
     match decision {
-        Decision::Filter(f) if WHOLE_TENANT.contains(&clause) => {
+        Decision::Filter(f) if !FILTERABLE.contains(&clause) => {
             if f.is_empty() {
                 Decision::Allow
-            } else {
+            } else if WHOLE_TENANT.contains(&clause) {
                 Decision::Deny(format!(
                     "{clause} acts on everything the tenant holds and cannot be narrowed"
+                ))
+            } else {
+                Decision::Deny(format!(
+                    "{clause} is performed whole or not at all and cannot be narrowed"
                 ))
             }
         }
@@ -606,9 +621,14 @@ pub async fn run_policy_contract(engine: &dyn PolicyEngine) {
         }
     }
 
-    // An operation over everything the tenant holds is allowed or refused,
-    // never done to less than it says.
-    for clause in WHOLE_TENANT {
+    // An operation the broker performs whole is allowed or refused, never
+    // done to less than it says: WHOLE_TENANT because there is no narrowed
+    // form of "delete everything", and the writes because no handler there
+    // reads a Filter at all (FILTERABLE).
+    for clause in WHOLE_TENANT
+        .iter()
+        .chain(["5.6.1", "5.6.6", "5.8.1", "5.9.2"].iter())
+    {
         assert!(
             !matches!(
                 decide(engine, &subject, &Operation::new(clause)).await,
@@ -846,7 +866,27 @@ mod tests {
                 Decision::Deny(_)
             ));
         }
-        assert_eq!(resolve("5.6.1", narrowed.clone()), narrowed);
+        // and every other clause outside FILTERABLE, because the handler
+        // there never reads the Filter
+        for clause in ["5.6.1", "5.6.6", "5.8.1", "5.9.2", "5.13.2", "5.7.5"] {
+            assert!(
+                matches!(resolve(clause, narrowed.clone()), Decision::Deny(_)),
+                "{clause} dropped a narrowing instead of refusing it"
+            );
+        }
+    }
+
+    /// The reads that do read it keep it: the seam refuses what would be
+    /// dropped, and nothing more.
+    #[test]
+    fn a_filterable_read_keeps_its_narrowing() {
+        let narrowed = Decision::Filter(Filter {
+            omit: vec!["speed".into()],
+            ..Filter::default()
+        });
+        for clause in FILTERABLE {
+            assert_eq!(resolve(clause, narrowed.clone()), narrowed, "{clause}");
+        }
     }
 
     #[test]

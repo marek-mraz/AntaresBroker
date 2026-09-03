@@ -308,7 +308,9 @@ async fn a_narrowing_answer_to_a_whole_tenant_operation_is_a_refusal() {
         q: Some(antares_ql::parse_q("speed<50").expect("q")),
         ..Filter::default()
     }));
-    seed(&st).await;
+    // no seed: the gate answers before the operation reads anything, and
+    // this engine narrows the create too, which is refused for the same
+    // reason the four operations below are
     let snapshot = json!({"type": "Snapshot", "snapshotQueries": [
         {"type": "Query", "entities": [{"type": "Vehicle"}]}]});
     for (method, path, body) in [
