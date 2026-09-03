@@ -198,6 +198,9 @@ loses service, never its access rules.
 `ANTARES_POLICY` names the engine, `allow-all` by default. That built-in
 engine decides nothing, and it is the one the shipped image and every CI
 gate run — conformance is asserted against it, never against an addon.
+Selecting it attaches no engine at all, so a broker on the default pays a
+branch per operation instead of a boxed decision and a timer; `/q/health`
+still reports `allow-all`, because that is the decision it takes.
 An unknown name is fatal at startup and lists the shelf the binary was
 built with, so a typo cannot quietly serve every request wide open.
 

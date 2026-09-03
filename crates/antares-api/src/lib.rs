@@ -19,17 +19,30 @@
 /// `Filter` the engine narrowed the operation to, or the refusal that
 /// becomes a 403. It is a macro because a gate reads as one line at the
 /// call site and the alternative is the same eight lines in every handler.
+///
+/// With no engine attached there is nothing to ask, so nothing is built:
+/// the operation, the subject and its headers, the boxed future and the
+/// [`policy::TIMEOUT`] timer all belong to the arm that has an engine to
+/// ask. A broker running the default pays one branch per operation.
 macro_rules! gate {
     ($st:expr, $tenant:expr, $headers:expr, $clause:expr $(, $field:ident: $value:expr)* $(,)?) => {
-        $crate::policy::gate(
-            $st.policy.as_ref(),
-            &$crate::snapshots::asking_tenant(&$st, $tenant),
-            $headers,
-            &$crate::policy::Operation {
-                $($field: $value,)*
-                ..$crate::policy::Operation::new($clause)
-            },
-        )
+        async {
+            match &$st.policy {
+                None => Ok($crate::policy::Filter::default()),
+                Some(engine) => {
+                    $crate::policy::gate(
+                        engine.as_ref(),
+                        &$crate::snapshots::asking_tenant(&$st, $tenant),
+                        $headers,
+                        &$crate::policy::Operation {
+                            $($field: $value,)*
+                            ..$crate::policy::Operation::new($clause)
+                        },
+                    )
+                    .await
+                }
+            }
+        }
     };
 }
 
@@ -786,7 +799,7 @@ async fn health(
     // to answer before the seam denies for it (ADR-0020). An operator
     // reading `allow-all` here knows no engine is attached.
     body["policy"] = serde_json::json!({
-        "engine": state.policy.name(),
+        "engine": state.policy_name(),
         "timeoutMs": u64::try_from(policy::TIMEOUT.as_millis()).unwrap_or(u64::MAX),
     });
     // Configured caps + rejection counters, for observability.

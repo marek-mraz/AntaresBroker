@@ -864,7 +864,12 @@ async fn run(
     let (policy_name, build_policy) =
         policy_engine(std::env::var("ANTARES_POLICY").ok().as_deref())?;
     tracing::info!("policy engine: {policy_name}");
-    state = state.with_policy(build_policy());
+    // The built-in engine is attached as no engine at all: it decides
+    // nothing, and a gate with nothing to ask skips the whole apparatus
+    // rather than boxing a future that always answers allow.
+    if policy_name != antares_api::policy::BUILT_IN_NAME {
+        state = state.with_policy(build_policy());
+    }
     // A notification binding compiled in from outside the workspace mounts
     // exactly like the two shipped ones: one registration, no core-crate
     // edit. It is not in a release build — the feature is off by default,

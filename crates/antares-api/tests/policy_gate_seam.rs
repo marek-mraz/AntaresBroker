@@ -240,6 +240,45 @@ async fn every_route_asks_the_policy_engine_exactly_once() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// ADR-0020: a broker with no engine attached takes the gate's answer
+/// without building an operation, a subject, a boxed future or a timer. The
+/// bypass is safe only if it decides what the built-in engine decides, so
+/// every declared route is answered twice — once with no engine, once with
+/// `AllowAll` attached by hand — and the two answers must agree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_built_in_answer_is_the_bypassed_answer() {
+    let routes = declared_routes();
+    assert!(
+        routes.len() > 50,
+        "the route list came out empty or truncated: {routes:?}"
+    );
+    assert!(
+        AppState::new("me".into()).policy.is_none(),
+        "the default state must attach no engine, or nothing is bypassed"
+    );
+    let mut differ = Vec::new();
+    for (method, path) in &routes {
+        let bypassed = antares_api::router(AppState::new("me".into()))
+            .oneshot(request_for(method, path))
+            .await
+            .expect("response")
+            .status();
+        let asked = antares_api::router(
+            AppState::new("me".into()).with_policy(Arc::new(antares_api::policy::AllowAll)),
+        )
+        .oneshot(request_for(method, path))
+        .await
+        .expect("response")
+        .status();
+        if bypassed != asked {
+            differ.push(format!(
+                "{method} {path}: no engine answered {bypassed}, allow-all answered {asked}"
+            ));
+        }
+    }
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
 /// A refusal is a 403 in this broker's own namespace, with the engine's
 /// reason — never an ETSI error type, because Table 6.3.2-1 names none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

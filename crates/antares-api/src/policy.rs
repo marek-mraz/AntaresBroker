@@ -324,14 +324,27 @@ pub trait PolicyEngine: Send + Sync {
     ) -> NotifyDecision;
 }
 
+/// The name of the engine the broker ships, which is also the name
+/// `/q/health` reports when no engine is attached at all: the two are the
+/// same decision — allow — and an operator reading it learns what the
+/// broker does, not which object made it happen.
+pub const BUILT_IN_NAME: &str = "allow-all";
+
 /// The engine the broker ships, and the one conformance is asserted
 /// against: it decides nothing, so the broker behaves exactly as it did
 /// before the seam existed.
+///
+/// A deployment that attaches no engine does not get an instance of this:
+/// it gets no engine at all ([`AppState::policy`](crate::state::AppState)
+/// is `None`), and every gate answers the empty [`Filter`] without building
+/// a [`Subject`], boxing a future or arming the [`TIMEOUT`] timer. The two
+/// paths decide the same thing, which is what
+/// `the_built_in_answer_is_the_bypassed_answer` holds them to.
 pub struct AllowAll;
 
 impl PolicyEngine for AllowAll {
     fn name(&self) -> &str {
-        "allow-all"
+        BUILT_IN_NAME
     }
 
     fn decide<'a>(&'a self, _subject: &'a Subject, _op: &'a Operation<'a>) -> DecisionFuture<'a> {

@@ -125,11 +125,14 @@ pub struct AppState {
     /// One egress policy for notifications and federation forwards
     /// (scheme allowlist, private-range deny, per-destination breakers).
     pub egress: Arc<crate::egress::Egress>,
-    /// The policy engine every operation is asked about (ADR-0020).
-    /// `AllowAll` unless a deployment attached its own with
-    /// [`AppState::with_policy`], so the broker behaves exactly as it did
-    /// before the seam existed.
-    pub policy: Arc<dyn crate::policy::PolicyEngine>,
+    /// The policy engine every operation is asked about (ADR-0020), or
+    /// `None` when a deployment attached none with
+    /// [`AppState::with_policy`] — the default, where the broker behaves
+    /// exactly as it did before the seam existed. `None` is not an instance
+    /// of `AllowAll`: the gate takes its answer without building a subject,
+    /// boxing a future or arming a timer, so a broker with no engine pays
+    /// nothing for the seam.
+    pub policy: Option<Arc<dyn crate::policy::PolicyEngine>>,
     /// Set the moment SIGTERM arrives, BEFORE the listener stops
     /// accepting — `/q/health` then answers 503 DRAINING so the load balancer
     /// takes this instance out while its socket still works.
@@ -419,7 +422,7 @@ impl AppState {
             mem_stats: None,
             bus_stats: None,
             egress: Arc::new(crate::egress::Egress::new(egress_policy)),
-            policy: Arc::new(crate::policy::AllowAll),
+            policy: None,
             draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_changes: Arc::default(),
             sub_sync: None,
@@ -444,8 +447,16 @@ impl AppState {
     /// state is shared.
     #[must_use]
     pub fn with_policy(mut self, engine: Arc<dyn crate::policy::PolicyEngine>) -> Self {
-        self.policy = engine;
+        self.policy = Some(engine);
         self
+    }
+
+    /// The engine `/q/health` reports. No engine reports the built-in name:
+    /// the decision an operator reads is the one the broker takes.
+    pub fn policy_name(&self) -> &str {
+        self.policy
+            .as_ref()
+            .map_or(crate::policy::BUILT_IN_NAME, |e| e.name())
     }
 
     /// Register one more notification binding (6.3.8). A deployment adds a

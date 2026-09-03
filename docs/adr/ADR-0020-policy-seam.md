@@ -231,8 +231,15 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
   authorization decision of its own, it asks the engine and obeys.
   `docs/policies.md` stays the reference for what an engine outside the
   tree looks like.
-- Deployments that run `AllowAll` — the default, the image, every gate —
-  pay one virtual call per request and one per notification.
+- Deployments that run the built-in engine — the default, the image,
+  every gate — attach no engine at all: `AppState::policy` is `None`, and
+  a gate with nothing to ask returns the empty `Filter` without building
+  the operation, copying the subject headers, boxing a future or arming
+  the timeout timer. One branch per request and one per notification.
+  Selecting `allow-all` by name is the same thing: the broker skips the
+  install, `/q/health` still reports `allow-all`, and every route answers
+  what it answers with the engine attached by hand
+  (`the_built_in_answer_is_the_bypassed_answer`).
 
 ## Confirmation
 

@@ -1971,31 +1971,36 @@ async fn deliver_as(
     // The subject is the subscriber's, stored when the subscription was
     // created — delivery is broker-initiated and there is no request here
     // to read one off.
-    match crate::policy::pre_notify(
-        st.policy.as_ref(),
-        &crate::policy::stored_subject(tenant, sub),
-        sub,
-        &mut body,
-    ) {
-        crate::policy::NotifyDecision::Deliver => {}
-        crate::policy::NotifyDecision::Drop => {
-            tracing::debug!("subscription {sub_id} notification dropped by the policy engine");
-            return;
-        }
-        crate::policy::NotifyDecision::Filter(f) => {
-            // a condition the notification path cannot re-run is not a
-            // narrowing it can claim to have applied
-            if f.q.is_some() || f.scope_q.is_some() {
-                tracing::error!(
-                    "policy engine {} narrowed a notification with a query; dropping it",
-                    st.policy.name()
-                );
+    // With no engine attached the answer is Deliver and the subject is
+    // never read out of the subscription — this runs once per notification
+    // per subscription.
+    if let Some(engine) = &st.policy {
+        match crate::policy::pre_notify(
+            engine.as_ref(),
+            &crate::policy::stored_subject(tenant, sub),
+            sub,
+            &mut body,
+        ) {
+            crate::policy::NotifyDecision::Deliver => {}
+            crate::policy::NotifyDecision::Drop => {
+                tracing::debug!("subscription {sub_id} notification dropped by the policy engine");
                 return;
             }
-            let f = crate::repr::compacted_filter(&f, ctx);
-            if let Some(arr) = body.get_mut("data").and_then(Value::as_array_mut) {
-                for e in arr.iter_mut() {
-                    f.project(e);
+            crate::policy::NotifyDecision::Filter(f) => {
+                // a condition the notification path cannot re-run is not a
+                // narrowing it can claim to have applied
+                if f.q.is_some() || f.scope_q.is_some() {
+                    tracing::error!(
+                        "policy engine {} narrowed a notification with a query; dropping it",
+                        engine.name()
+                    );
+                    return;
+                }
+                let f = crate::repr::compacted_filter(&f, ctx);
+                if let Some(arr) = body.get_mut("data").and_then(Value::as_array_mut) {
+                    for e in arr.iter_mut() {
+                        f.project(e);
+                    }
                 }
             }
         }
