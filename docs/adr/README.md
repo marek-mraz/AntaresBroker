@@ -26,6 +26,7 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0018](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0018-ci-actions-pinned-by-tag.md) | CI actions are pinned by tag, third-party binaries by version | accepted, implemented |
 | [ADR-0019](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0019-remote-notification-endpoint.md) | The distributed-subscription notification receiver lives outside the ETSI namespace | accepted, implemented |
 | [ADR-0020](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0020-policy-seam.md) | The policy seam: one trait, one built-in engine, every engine an addon | accepted, amended (the narrowing marker header) |
+| [ADR-0021](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0021-jsonld-context-tenancy.md) | A stored `@context` belongs to the Tenant that stored it, a Cached copy to none | accepted, implemented |
 
 ## Format
 

@@ -334,6 +334,23 @@ pub struct PgDocStore {
     pool: PgPool,
 }
 
+/// Arm the Row-Level Security policy on `jsonld_contexts` for one call.
+///
+/// `antares.tenant` is transaction-scoped, so it is set inside the caller's
+/// own transaction. `None` leaves it unset, and `current_setting` then
+/// returns NULL: the policy's `tenant_id = current_setting(...)` arm is NULL
+/// for every row and only `tenant_id IS NULL` — the Cached rows — remains.
+/// That is what the boot warm and the Cached write-through want.
+async fn set_context_tenant(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: Option<&TenantId>,
+) -> Result<(), sqlx::Error> {
+    match tenant {
+        Some(t) => super::set_tenant(tx, t).await,
+        None => Ok(()),
+    }
+}
+
 impl PgDocStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -822,11 +839,19 @@ impl PgDocStore {
         })
     }
 
-    // jsonldContexts — the ONE cross-tenant table, no RLS by design: Cached
-    // rows are copies of public documents every tenant shares. The
-    // tenant-authored kinds (Hosted, ImplicitlyCreated, 5.13.1) carry their
-    // owning tenant in the stored document's "owner" member, enforced where
-    // they are served, listed and deleted (5.13).
+    // jsonldContexts — a `tenant_id` GENERATED from the row's kind and its
+    // "owner" member, under the Row-Level Security policy 0006 installs
+    // (ADR-0021). A Cached row's tenant is NULL and every Tenant reaches it;
+    // every other kind is reachable only by the Tenant that stored it.
+    //
+    // Both halves of the belt, as everywhere else in this store: the explicit
+    // `tenant_id IS NULL OR tenant_id = $n` predicate on every statement, and
+    // the policy behind it. The predicate is what holds under the roles that
+    // bypass RLS (a superuser, a BYPASSRLS role); the policy is what holds
+    // when a future statement forgets the predicate. The GUC is
+    // transaction-scoped, so each call below opens its own transaction and
+    // sets it — and leaves it unset for `tenant: None`, which is the
+    // policy's "rows belonging to no Tenant".
     ///
     /// 5.13.1: "Implementations shall periodically invalidate the 'Cached'
     /// @contexts." A Cached row is written per distinct external URL a request
@@ -835,20 +860,37 @@ impl PgDocStore {
     /// ceiling evicts the oldest Cached rows. `Hosted` and
     /// `ImplicitlyCreated` rows are resources the broker serves on demand
     /// (5.13.2, 5.13.4), not cache, and are never evicted.
-    pub fn context_put(&self, id: &str, doc: &Value, kind: &str) -> Result<(), sqlx::Error> {
+    pub fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: &Value,
+        kind: &str,
+    ) -> Result<(), sqlx::Error> {
         wait(async {
+            let mut tx = self.pool.begin().await?;
+            set_context_tenant(&mut tx, tenant).await?;
             // `xmax` is zero on a fresh row and the locking transaction's id
             // on the conflict path: the eviction then runs only when the table
             // actually grew, never on a usage bump rewriting a row in place.
+            // The `WHERE` on the conflict path is the write half of the rule:
+            // a row another Tenant owns is not replaced, the statement returns
+            // no row, and `fetch_one` raises rather than silently doing
+            // nothing. Nothing in the broker reaches it — every id is minted
+            // by the caller — so it is a backstop, and it is the one the
+            // driver contract probes.
             let inserted: bool = sqlx::query_scalar(
                 "INSERT INTO jsonld_contexts (id, body, kind) VALUES ($1, $2, $3)
                  ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, kind = EXCLUDED.kind
+                 WHERE jsonld_contexts.tenant_id IS NOT DISTINCT FROM $4
+                    OR jsonld_contexts.tenant_id IS NULL
                  RETURNING xmax::text = '0'",
             )
             .bind(id)
             .bind(doc)
             .bind(kind)
-            .fetch_one(&self.pool)
+            .bind(tenant.map(TenantId::as_str))
+            .fetch_one(&mut *tx)
             .await?;
             if inserted && kind == "Cached" {
                 sqlx::query(
@@ -857,31 +899,51 @@ impl PgDocStore {
                         ORDER BY created_at DESC, id DESC OFFSET $1)",
                 )
                 .bind(crate::store::MAX_CACHED_CONTEXTS as i64)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
+            tx.commit().await?;
             Ok(())
         })
     }
 
-    pub fn context_get(&self, id: &str) -> Result<Option<Value>, sqlx::Error> {
+    pub fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, sqlx::Error> {
         wait(async {
-            let row = sqlx::query("SELECT body FROM jsonld_contexts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+            let mut tx = self.pool.begin().await?;
+            set_context_tenant(&mut tx, tenant).await?;
+            let row = sqlx::query(
+                "SELECT body FROM jsonld_contexts
+                  WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+            )
+            .bind(id)
+            .bind(tenant.map(TenantId::as_str))
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.commit().await?;
             Ok(row.map(|r| r.get::<Value, _>(0)))
         })
     }
 
-    pub fn context_delete(&self, id: &str) -> Result<bool, sqlx::Error> {
+    pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, sqlx::Error> {
         wait(async {
-            Ok(sqlx::query("DELETE FROM jsonld_contexts WHERE id = $1")
-                .bind(id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                == 1)
+            let mut tx = self.pool.begin().await?;
+            set_context_tenant(&mut tx, tenant).await?;
+            let gone = sqlx::query(
+                "DELETE FROM jsonld_contexts
+                  WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+            )
+            .bind(id)
+            .bind(tenant.map(TenantId::as_str))
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                == 1;
+            tx.commit().await?;
+            Ok(gone)
         })
     }
 
@@ -890,11 +952,18 @@ impl PgDocStore {
     /// decoded and never resident. A row's body may be 5 MiB and only the
     /// `Cached` rows are capped in number, so selecting whole rows here was
     /// a multi-gigabyte read on the boot path.
-    pub fn context_list_meta(&self) -> Result<Vec<Value>, sqlx::Error> {
+    pub fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, sqlx::Error> {
         wait(async {
-            let rows = sqlx::query("SELECT body - 'body' FROM jsonld_contexts ORDER BY id")
-                .fetch_all(&self.pool)
-                .await?;
+            let mut tx = self.pool.begin().await?;
+            set_context_tenant(&mut tx, tenant).await?;
+            let rows = sqlx::query(
+                "SELECT body - 'body' FROM jsonld_contexts
+                  WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY id",
+            )
+            .bind(tenant.map(TenantId::as_str))
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
             Ok(rows.into_iter().map(|r| r.get::<Value, _>(0)).collect())
         })
     }

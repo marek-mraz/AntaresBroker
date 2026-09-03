@@ -268,28 +268,38 @@ static CONTEXT_ROWS: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jsonld_contexts_cross_tenant_roundtrip() {
+async fn jsonld_contexts_roundtrip() {
     let url = require_db!();
     let _rows = CONTEXT_ROWS.lock().await;
     let pool = pg::connect(&url, 5).await.expect("connect");
     let s = PgDocStore::new(pool);
+    // A Cached row belongs to no Tenant (ADR-0021) and is written and read
+    // with none; the Hosted probe below carries no `owner` member, so its
+    // generated tenant is the default Tenant's.
+    let owner = TenantId::default();
     let id = "https://example.org/ctx/test.jsonld";
-    let _ = s.context_delete(id);
-    s.context_put(id, &json!({"@context": {"n": "https://x/n"}}), "Cached")
-        .expect("put");
-    assert!(s.context_get(id).expect("get").is_some());
+    let _ = s.context_delete(None, id);
+    s.context_put(
+        None,
+        id,
+        &json!({"@context": {"n": "https://x/n"}}),
+        "Cached",
+    )
+    .expect("put");
+    assert!(s.context_get(None, id).expect("get").is_some());
     // The listing read carries metadata and never the stored document: a
     // body is accepted up to 5 MiB and only the Cached rows are capped in
     // number, so a read that carried bodies was gigabytes on the boot path.
     // The row is found by id, and the document comes back only from `get`.
     s.context_put(
+        Some(&owner),
         "urn:meta:probe",
         &json!({"localId": "urn:meta:probe", "kind": "Hosted",
                 "body": {"@context": {"big": "https://x/big"}}}),
         "Hosted",
     )
     .expect("put");
-    let meta = s.context_list_meta().expect("list");
+    let meta = s.context_list_meta(Some(&owner)).expect("list");
     let probe = meta
         .iter()
         .find(|c| c["localId"] == "urn:meta:probe")
@@ -300,13 +310,17 @@ async fn jsonld_contexts_cross_tenant_roundtrip() {
     );
     assert_eq!(probe["kind"], "Hosted", "the metadata itself survives");
     assert_eq!(
-        s.context_get("urn:meta:probe").expect("get").expect("row")["body"]["@context"]["big"],
+        s.context_get(Some(&owner), "urn:meta:probe")
+            .expect("get")
+            .expect("row")["body"]["@context"]["big"],
         "https://x/big",
         "the document is still readable by id"
     );
-    assert!(s.context_delete("urn:meta:probe").expect("delete"));
-    assert!(s.context_delete(id).expect("delete"));
-    assert!(s.context_get(id).expect("get").is_none());
+    assert!(s
+        .context_delete(Some(&owner), "urn:meta:probe")
+        .expect("delete"));
+    assert!(s.context_delete(None, id).expect("delete"));
+    assert!(s.context_get(None, id).expect("get").is_none());
 }
 
 /// The 047_06 leftover-subscription bug: a bookkeeping writeback racing a
@@ -405,7 +419,7 @@ async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
     .await
     .expect("seed hosted");
 
-    s.context_put("ctxcap:new", &json!({"@context": {}}), "Cached")
+    s.context_put(None, "ctxcap:new", &json!({"@context": {}}), "Cached")
         .expect("put one over the ceiling");
     let count = |kind: &'static str| {
         let pool = pool.clone();
@@ -423,25 +437,32 @@ async fn clause_5_13_1_cached_contexts_are_capped_oldest_first() {
         "the ceiling holds after the put"
     );
     assert!(
-        s.context_get("ctxcap:new").expect("get").is_some(),
+        s.context_get(None, "ctxcap:new").expect("get").is_some(),
         "the new entry is the one kept"
     );
     assert!(
-        s.context_get("ctxcap:1").expect("get").is_none(),
+        s.context_get(None, "ctxcap:1").expect("get").is_none(),
         "the oldest Cached entry is the one evicted"
     );
     assert!(
-        s.context_get("ctxcap:2").expect("get").is_some(),
+        s.context_get(None, "ctxcap:2").expect("get").is_some(),
         "eviction stops at the ceiling — the second-oldest stays"
     );
     assert!(
-        s.context_get("ctxcap:hosted").expect("get").is_some(),
+        s.context_get(Some(&TenantId::default()), "ctxcap:hosted")
+            .expect("get")
+            .is_some(),
         "a Hosted entry is tenant-authored and must never be evicted"
     );
 
     // and a Hosted put never triggers eviction of anything
-    s.context_put("ctxcap:hosted2", &json!({"@context": {}}), "Hosted")
-        .expect("put hosted");
+    s.context_put(
+        Some(&TenantId::default()),
+        "ctxcap:hosted2",
+        &json!({"@context": {}}),
+        "Hosted",
+    )
+    .expect("put hosted");
     assert_eq!(count("Hosted").await, 2, "both Hosted entries stay");
     assert_eq!(count("Cached").await, cap, "a Hosted put evicts nothing");
 

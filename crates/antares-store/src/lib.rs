@@ -251,6 +251,32 @@ pub struct Delivery {
     pub prev_success: Option<Value>,
 }
 
+/// ADR-0021: the Tenant a stored `@context` row belongs to, or `None` when it
+/// belongs to none.
+///
+/// 5.13.1 "Cached" is a copy of a public document the broker downloaded for
+/// whoever named its URL, so every Tenant reaches it. "Hosted" and
+/// "ImplicitlyCreated" are documents a client stored THROUGH a Tenant, and
+/// 5.5.7 makes their term mappings decide what that Tenant's payloads mean;
+/// the owner travels in the row. A row written before the member existed
+/// reads as the default Tenant's, and so does a row whose `kind` is missing
+/// altogether: no writer produces one, and an unrecognised row is safer read
+/// as somebody's than as everybody's.
+pub fn context_row_owner(row: &Value) -> Option<&str> {
+    (row["kind"].as_str() != Some("Cached"))
+        .then(|| row["owner"].as_str().unwrap_or(TenantId::DEFAULT))
+}
+
+/// Whether a call acting for `tenant` — `None` for no Tenant at all — reaches
+/// the row. The rule [`context_row_owner`] states, in the form the stores and
+/// the API both need.
+pub fn context_row_visible(row: &Value, tenant: Option<&TenantId>) -> bool {
+    match context_row_owner(row) {
+        None => true,
+        Some(owner) => tenant.is_some_and(|t| t.as_str() == owner),
+    }
+}
+
 /// Current-state storage: everything except the temporal evolution.
 ///
 /// Contract carried over from the enum seam it replaces: every mutate is
@@ -516,12 +542,22 @@ pub trait CurrentStateDriver: Send + Sync {
         let _ = tenant;
         Err(NgsiError::OperationNotSupported("tenant purge".into()))
     }
-    /// 5.13 @context documents, shared across tenants by design.
-    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError>;
-    /// Read a stored @context document by id; `None` if absent.
-    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError>;
-    /// Delete a stored @context document; `false` if it was absent.
-    fn context_delete(&self, id: &str) -> Result<bool, NgsiError>;
+    /// 5.13 @context documents. `tenant` is the Tenant the call acts for, and
+    /// `None` means no Tenant at all — the boot warm and the `Cached`
+    /// write-through, which touch documents downloaded from public URLs.
+    ///
+    /// A backend enforces ADR-0021 on it: a `Cached` row belongs to no Tenant
+    /// and is reachable with any `tenant`, and every other kind is reachable
+    /// only by the Tenant named in its `owner` member. A backend that ignores
+    /// the parameter fails the driver contract.
+    fn context_put(&self, tenant: Option<&TenantId>, id: &str, doc: Value)
+        -> Result<(), NgsiError>;
+    /// Read a stored @context document by id; `None` if absent or owned by
+    /// another Tenant.
+    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError>;
+    /// Delete a stored @context document; `false` if it was absent or owned
+    /// by another Tenant.
+    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError>;
     /// Every stored @context document.
     /// Every stored `@context` row WITHOUT its `body` member — the url,
     /// localId, kind, owner and usage counters, and not the document.
@@ -532,7 +568,7 @@ pub trait CurrentStateDriver: Send + Sync {
     /// gigabytes — on the boot path, where it decides whether the broker
     /// starts at all. The callers that need one body ask for it by id
     /// ([`Self::context_get`]); nothing needs them all at once.
-    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError>;
+    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError>;
 }
 
 /// Typed sugar over the boxed mutate seam — call sites keep their
@@ -1056,16 +1092,25 @@ mod tests {
         fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
             Ok(Vec::new())
         }
-        fn context_put(&self, _id: &str, _doc: Value) -> Result<(), NgsiError> {
+        fn context_put(
+            &self,
+            _t: Option<&TenantId>,
+            _id: &str,
+            _doc: Value,
+        ) -> Result<(), NgsiError> {
             Ok(())
         }
-        fn context_get(&self, _id: &str) -> Result<Option<Value>, NgsiError> {
+        fn context_get(
+            &self,
+            _t: Option<&TenantId>,
+            _id: &str,
+        ) -> Result<Option<Value>, NgsiError> {
             Ok(None)
         }
-        fn context_delete(&self, _id: &str) -> Result<bool, NgsiError> {
+        fn context_delete(&self, _t: Option<&TenantId>, _id: &str) -> Result<bool, NgsiError> {
             Ok(false)
         }
-        fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
+        fn context_list_meta(&self, _t: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
             Ok(Vec::new())
         }
     }

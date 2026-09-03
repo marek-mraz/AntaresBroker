@@ -897,7 +897,9 @@ async fn run(
         // put up to MAX_CONTEXT_BYTES per row in memory at once, capped only
         // for Cached rows and not at all for the rest — a boot that a client
         // could make impossible by storing large @contexts.
-        for row in state.store.context_list_meta().unwrap_or_default() {
+        // No Tenant: the store then hands back the rows that belong to none
+        // (ADR-0021), which is exactly the `Cached` set this warm wants.
+        for row in state.store.context_list_meta(None).unwrap_or_default() {
             if row.get("kind").and_then(|v| v.as_str()) != Some("Cached") {
                 continue;
             }
@@ -908,7 +910,7 @@ async fn run(
             ) else {
                 continue;
             };
-            let Some(full) = state.store.context_get(id).ok().flatten() else {
+            let Some(full) = state.store.context_get(None, id).ok().flatten() else {
                 continue;
             };
             if let Some(v) = full.pointer("/body/@context") {

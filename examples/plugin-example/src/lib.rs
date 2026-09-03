@@ -15,8 +15,8 @@
 
 use antares_model::{NgsiError, TenantId};
 use antares_store::{
-    filter, BatchMutateFn, ChangeHook, CurrentStateDriver, Kind, MutateFn, TemporalDriver,
-    TenantStats,
+    context_row_visible, filter, BatchMutateFn, ChangeHook, CurrentStateDriver, Kind, MutateFn,
+    TemporalDriver, TenantStats,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -541,41 +541,69 @@ impl CurrentStateDriver for ExampleStore {
         Ok(true)
     }
 
-    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
-        self.contexts
+    /// ADR-0021: a `Cached` row belongs to no Tenant and every caller reaches
+    /// it; every other kind belongs to the Tenant its `owner` member names.
+    /// `context_row_visible` is the broker's own statement of that rule, so a
+    /// plugin store enforces exactly what the built-in ones do — an
+    /// implementation that ignored `tenant` here would hand one Tenant's term
+    /// mappings to another.
+    fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError> {
+        let mut rows = self
+            .contexts
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_owned(), doc);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !rows
+            .get(id)
+            .is_none_or(|held| context_row_visible(held, tenant))
+            || !context_row_visible(&doc, tenant)
+        {
+            return Err(NgsiError::InternalError(
+                "@context belongs to another tenant".into(),
+            ));
+        }
+        rows.insert(id.to_owned(), doc);
         Ok(())
     }
 
-    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
+    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
         Ok(self
             .contexts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
+            .filter(|row| context_row_visible(row, tenant))
             .cloned())
     }
 
-    fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
-        Ok(self
+    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+        let mut rows = self
             .contexts
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(id)
-            .is_some())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !rows
+            .get(id)
+            .is_some_and(|row| context_row_visible(row, tenant))
+        {
+            return Ok(false);
+        }
+        Ok(rows.remove(id).is_some())
     }
 
     /// Rows without their `body`: a body may be 5 MiB and only the `Cached`
     /// rows are capped in number, so a plugin that returned whole rows here
     /// would put gigabytes on the boot path.
-    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
+    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
         Ok(self
             .contexts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
+            .filter(|v| context_row_visible(v, tenant))
             .map(|v| {
                 let mut row = v.clone();
                 if let Some(o) = row.as_object_mut() {

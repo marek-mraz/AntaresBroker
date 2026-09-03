@@ -659,11 +659,16 @@ struct FetchedDoc {
 }
 
 impl FetchedDoc {
-    /// Does this document resolve for `tenant`? A resolution with no Tenant
-    /// in scope (a broker-internal one) sees every entry.
+    /// Does this document resolve for `tenant`? A document owned by no Tenant
+    /// resolves for everyone; one owned by a Tenant resolves for that Tenant
+    /// alone, and for a resolution with no Tenant in scope it does not resolve
+    /// at all. The store answers the same question about the row this document
+    /// was read from (ADR-0021), so a `None` that saw every owner here would
+    /// be a rule the two layers disagree on.
     fn serves(&self, tenant: Option<&TenantId>) -> bool {
         match (&self.owner, tenant) {
-            (None, _) | (Some(_), None) => true,
+            (None, _) => true,
+            (Some(_), None) => false,
             (Some(owner), Some(t)) => owner == t,
         }
     }
@@ -719,15 +724,21 @@ pub struct Loader {
 /// use itself (5.13.3.5, one client use = one hit).
 pub const INTERNAL_FETCH_HEADER: &str = "x-antares-ctx-fetch";
 
-/// (url, parsed `@context` value) — called on every fresh remote fetch.
-pub type CacheWriter = Box<dyn Fn(&str, &Value) + Send + Sync>;
-/// url -> "the shared row still exists" (after bumping its hit counter).
-pub type UsageBump = Box<dyn Fn(&str) -> bool + Send + Sync>;
-/// url -> the `@context` value of the row this broker HOSTS under it, with
-/// the Tenant that owns it (5.13.1 Hosted/ImplicitlyCreated; `None` = owned
-/// by no Tenant). The store is where a broker-local @context comes from —
-/// see [`Loader::set_local_lookup`].
-pub type LocalLookup = Box<dyn Fn(&str) -> Option<(Option<TenantId>, Value)> + Send + Sync>;
+/// (the Tenant the resolution acts for, url, parsed `@context` value) —
+/// called on every fresh remote fetch. The row it writes is `Cached` and so
+/// belongs to no Tenant, but reaching the store to write it is a call the
+/// store answers per Tenant (ADR-0021).
+pub type CacheWriter = Box<dyn Fn(Option<&TenantId>, &str, &Value) + Send + Sync>;
+/// (Tenant, url) -> "the shared row still exists" (after bumping its hit
+/// counter). A Hosted row is only bumped by the Tenant that owns it, which
+/// is also the only Tenant whose resolutions reach it.
+pub type UsageBump = Box<dyn Fn(Option<&TenantId>, &str) -> bool + Send + Sync>;
+/// (Tenant, url) -> the `@context` value of the row this broker HOSTS under
+/// it, with the Tenant that owns it (5.13.1 Hosted/ImplicitlyCreated;
+/// `None` = owned by no Tenant). The store is where a broker-local @context
+/// comes from — see [`Loader::set_local_lookup`].
+pub type LocalLookup =
+    Box<dyn Fn(Option<&TenantId>, &str) -> Option<(Option<TenantId>, Value)> + Send + Sync>;
 
 impl Default for Loader {
     fn default() -> Self {
@@ -869,7 +880,7 @@ impl Loader {
     /// load balancer). Returns true when the hook reported the row GONE
     /// (deleted through another instance): local copies are evicted so the
     /// next resolution refetches and re-creates the entry.
-    pub async fn bump_url(&self, url: &str) -> bool {
+    pub async fn bump_url(&self, tenant: Option<&TenantId>, url: &str) -> bool {
         let now = Self::now();
         {
             let mut map = self.usage.write().await;
@@ -912,7 +923,7 @@ impl Loader {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
         {
-            Some(f) => f(url),
+            Some(f) => f(tenant, url),
             None => true,
         };
         if row_exists {
@@ -1030,7 +1041,7 @@ impl Loader {
                 let urls = self.merged_urls.get(&key);
                 let mut deleted_elsewhere = false;
                 for url in urls.iter().flat_map(|u| u.iter()) {
-                    if self.bump_url(url).await {
+                    if self.bump_url(tenant, url).await {
                         deleted_elsewhere = true;
                     } else {
                         counted.push(url.clone());
@@ -1059,8 +1070,8 @@ impl Loader {
                 // cache means the write-through never ran — a counted use
                 // re-creates the entry (5.13.5.4): refetch (bump_url just
                 // evicted the warm copy) so the row exists, then count on it.
-                if self.bump_url(url).await && self.fetch(url, tenant).await.is_ok() {
-                    let _ = self.bump_url(url).await;
+                if self.bump_url(tenant, url).await && self.fetch(url, tenant).await.is_ok() {
+                    let _ = self.bump_url(tenant, url).await;
                 }
             }
         }
@@ -1230,7 +1241,7 @@ impl Loader {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .and_then(|f| f(url));
+            .and_then(|f| f(tenant, url));
         if let Some((owner, value)) = hosted {
             let doc = FetchedDoc {
                 value: Arc::new(value),
@@ -1360,7 +1371,7 @@ impl Loader {
         // Write-through: persist what was just fetched.
         if let Ok(w) = self.cache_writer.read() {
             if let Some(w) = w.as_ref() {
-                w(url, &arc);
+                w(tenant, url, &arc);
             }
         }
         Ok(arc)
@@ -2068,7 +2079,7 @@ mod tests {
         });
         for i in 0..4100 {
             let _ = loader
-                .bump_url(&format!("https://ctx.example/{i}.jsonld"))
+                .bump_url(None, &format!("https://ctx.example/{i}.jsonld"))
                 .await;
         }
         let list = loader.usage_list().await;

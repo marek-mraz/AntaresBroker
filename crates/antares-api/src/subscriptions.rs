@@ -807,6 +807,7 @@ pub async fn create(
                 let local_id = uuid::Uuid::new_v4().to_string();
                 let url = format!("{}/{local_id}", crate::contexts::base_url(headers));
                 st.store.context_put(
+                    Some(&tenant),
                     &local_id,
                     serde_json::json!({
                         "url": url,

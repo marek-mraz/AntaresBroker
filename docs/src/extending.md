@@ -406,7 +406,9 @@ A backend from outside the workspace:
    a mutate never inserts (ADR-0005, ETSI 047_06), a rejected mutate commits
    nothing, batch results align with the input ids, `upsert` and
    `batch_upsert` answer opposite polarities, a query never drops a matching
-   row and never crosses a tenant. Call both from the crate's own tests, the
+   row and never crosses a tenant, and a stored `@context` answers only the
+   tenant that stored it — a `Cached` copy of a public document belongs to
+   none and every tenant reaches it (ADR-0021). Call both from the crate's own tests, the
    way `examples/plugin-example/tests/contract.rs` does. A driver whose calls
    block on an async runtime needs a multi-threaded runtime context.
 4. Register it in `antares-broker`: an optional dependency, one feature that

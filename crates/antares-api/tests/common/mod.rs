@@ -364,17 +364,22 @@ impl CurrentStateDriver for Double {
     fn subscription_tenants(&self) -> Result<Vec<String>, NgsiError> {
         self.inner.subscription_tenants()
     }
-    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
-        self.inner.context_put(id, doc)
+    fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError> {
+        self.inner.context_put(tenant, id, doc)
     }
-    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
-        self.inner.context_get(id)
+    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
+        self.inner.context_get(tenant, id)
     }
-    fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
-        self.inner.context_delete(id)
+    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+        self.inner.context_delete(tenant, id)
     }
-    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
-        self.inner.context_list_meta()
+    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+        self.inner.context_list_meta(tenant)
     }
     // The trait's PROVIDED methods delegate too. Left out, each one answers
     // the trait's own default — `OperationNotSupported`, an empty inventory,

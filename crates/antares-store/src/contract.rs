@@ -698,6 +698,81 @@ pub fn run_current_state_contract(
         "the contract's own subscription must be removable"
     );
 
+    // ADR-0021: a stored @context is a Tenant's document. "Hosted" and
+    // "ImplicitlyCreated" rows hold term mappings authored through one
+    // Tenant's requests, and 5.5.7 makes those mappings decide what that
+    // Tenant's payloads mean, so a backend that answered every caller would
+    // hand one Tenant's meaning of its own data to another. "Cached" is a
+    // copy of a public document (5.13.1) and belongs to no Tenant.
+    let hosted_id = format!("{prefix}-ctx-hosted");
+    let cached_id = format!("{prefix}-ctx-cached");
+    let hosted = json!({"localId": hosted_id, "kind": "Hosted", "owner": a.as_str(),
+                        "body": {"@context": {"t": "https://example.org/t"}}});
+    d.context_put(Some(a), &hosted_id, hosted.clone())
+        .expect("the owning tenant stores its own @context");
+    d.context_put(
+        None,
+        &cached_id,
+        json!({"localId": cached_id, "kind": "Cached", "body": {"@context": {}}}),
+    )
+    .expect("a Cached copy belongs to no tenant");
+
+    assert!(
+        d.context_get(Some(a), &hosted_id)
+            .expect("context_get")
+            .is_some(),
+        "the owning tenant must read its own @context"
+    );
+    assert!(
+        d.context_get(Some(b), &hosted_id)
+            .expect("context_get")
+            .is_none(),
+        "another tenant's Hosted @context must be as absent as one never stored"
+    );
+    assert!(
+        d.context_get(None, &hosted_id)
+            .expect("context_get")
+            .is_none(),
+        "no tenant in scope must reach a tenant's @context"
+    );
+    assert!(
+        d.context_list_meta(Some(b))
+            .expect("context_list_meta")
+            .iter()
+            .all(|r| r["localId"] != hosted_id.as_str()),
+        "another tenant's @context must not be listed"
+    );
+    assert!(
+        !d.context_delete(Some(b), &hosted_id)
+            .expect("context_delete"),
+        "another tenant must not delete it"
+    );
+    assert!(
+        d.context_put(Some(b), &hosted_id, hosted).is_err(),
+        "another tenant must not overwrite it either"
+    );
+    assert!(
+        d.context_get(Some(a), &hosted_id)
+            .expect("context_get")
+            .is_some(),
+        "the owner's @context must survive every foreign attempt"
+    );
+    for t in [Some(a), Some(b), None] {
+        assert!(
+            d.context_get(t, &cached_id).expect("context_get").is_some(),
+            "a Cached copy is a public document every tenant reaches"
+        );
+    }
+    assert!(
+        d.context_delete(Some(a), &hosted_id)
+            .expect("context_delete"),
+        "the contract's own @context must be removable by its owner"
+    );
+    assert!(
+        d.context_delete(None, &cached_id).expect("context_delete"),
+        "and the Cached copy by anyone"
+    );
+
     for id in [&e1, &e2] {
         assert!(
             d.delete(a, Kind::Entity, id).expect("delete"),

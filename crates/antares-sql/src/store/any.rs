@@ -1033,6 +1033,10 @@ impl AnyStore {
                     "entity_map_docs",
                     "dist_subs",
                     "dead_letters",
+                    // ADR-0021: `tenant_id` is GENERATED from the row's kind
+                    // and owner, so a Cached row's is NULL and this DELETE
+                    // takes only what the Tenant stored itself.
+                    "jsonld_contexts",
                 ] {
                     sqlx::query(sqlx::AssertSqlSafe(format!(
                         "DELETE FROM {table} WHERE tenant_id = $1"
@@ -1077,12 +1081,25 @@ impl AnyStore {
         }
     }
 
-    pub fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
+    pub fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError> {
+        // ADR-0021, the write half no `WHERE` on an existing row can state:
+        // the row that ARRIVES must belong to the caller too, or a Tenant
+        // could store term mappings under another Tenant's name and decide
+        // what that Tenant's payloads mean (5.5.7). Postgres says the same
+        // thing as the policy's WITH CHECK; this holds under the roles that
+        // bypass RLS.
+        if !antares_store::context_row_visible(&doc, tenant) {
+            return Err(NgsiError::InternalError(
+                "@context belongs to another tenant".into(),
+            ));
+        }
         match self {
-            AnyStore::Mem(s) => {
-                let _: () = s.context_put(id, doc);
-                Ok(())
-            }
+            AnyStore::Mem(s) => s.context_put(tenant, id, doc),
             #[cfg(feature = "postgres")]
             AnyStore::Pg(p) => {
                 let kind = doc
@@ -1090,32 +1107,36 @@ impl AnyStore {
                     .and_then(Value::as_str)
                     .unwrap_or("Cached")
                     .to_owned();
-                p.docs.context_put(id, &doc, &kind).map_err(db)
+                p.docs.context_put(tenant, id, &doc, &kind).map_err(db)
             }
         }
     }
 
-    pub fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
+    pub fn context_get(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+    ) -> Result<Option<Value>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.context_get(id)),
+            AnyStore::Mem(s) => Ok(s.context_get(tenant, id)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_get(id).map_err(db),
+            AnyStore::Pg(p) => p.docs.context_get(tenant, id).map_err(db),
         }
     }
 
-    pub fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
+    pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.context_delete(id)),
+            AnyStore::Mem(s) => Ok(s.context_delete(tenant, id)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_delete(id).map_err(db),
+            AnyStore::Pg(p) => p.docs.context_delete(tenant, id).map_err(db),
         }
     }
 
-    pub fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
+    pub fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
         match self {
-            AnyStore::Mem(s) => Ok(s.context_list_meta()),
+            AnyStore::Mem(s) => Ok(s.context_list_meta(tenant)),
             #[cfg(feature = "postgres")]
-            AnyStore::Pg(p) => p.docs.context_list_meta().map_err(db),
+            AnyStore::Pg(p) => p.docs.context_list_meta(tenant).map_err(db),
         }
     }
 }
@@ -1356,17 +1377,22 @@ impl antares_store::CurrentStateDriver for AnyStore {
     fn purge_tenant(&self, tenant: &TenantId) -> Result<bool, NgsiError> {
         AnyStore::purge_tenant(self, tenant)
     }
-    fn context_put(&self, id: &str, doc: Value) -> Result<(), NgsiError> {
-        AnyStore::context_put(self, id, doc)
+    fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError> {
+        AnyStore::context_put(self, tenant, id, doc)
     }
-    fn context_get(&self, id: &str) -> Result<Option<Value>, NgsiError> {
-        AnyStore::context_get(self, id)
+    fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Result<Option<Value>, NgsiError> {
+        AnyStore::context_get(self, tenant, id)
     }
-    fn context_delete(&self, id: &str) -> Result<bool, NgsiError> {
-        AnyStore::context_delete(self, id)
+    fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> Result<bool, NgsiError> {
+        AnyStore::context_delete(self, tenant, id)
     }
-    fn context_list_meta(&self) -> Result<Vec<Value>, NgsiError> {
-        AnyStore::context_list_meta(self)
+    fn context_list_meta(&self, tenant: Option<&TenantId>) -> Result<Vec<Value>, NgsiError> {
+        AnyStore::context_list_meta(self, tenant)
     }
 }
 

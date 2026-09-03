@@ -12,8 +12,8 @@
 //! each attribute instance) — output layers strip them unless sysAttrs.
 
 use ::redb::{Database, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
-use antares_model::TenantId;
-use antares_store::{filter, ChangeHook, Kind};
+use antares_model::{NgsiError, TenantId};
+use antares_store::{context_row_owner, context_row_visible, filter, ChangeHook, Kind};
 
 mod redb;
 use self::redb::{
@@ -525,7 +525,25 @@ impl Store {
 
     /// Remove the tenant from every kind, history included.
     pub fn purge_tenant(&self, tenant: &TenantId) -> bool {
-        self.purge_kinds(tenant, &ALL_KINDS)
+        let existed = self.purge_kinds(tenant, &ALL_KINDS);
+        // ADR-0021: the Tenant's Hosted and ImplicitlyCreated @contexts are
+        // its documents and go with it — a row that outlived its Tenant would
+        // hand the next holder of that name a stranger's term mappings. A
+        // Cached row belongs to no Tenant and stays.
+        on_blocking(|| {
+            let mut inner = self.write_inner();
+            let dead: Vec<String> = inner
+                .contexts
+                .iter()
+                .filter(|(_, row)| context_row_owner(row) == Some(tenant.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in dead {
+                self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), None);
+                inner.contexts.remove(&id);
+            }
+        });
+        existed
     }
 
     pub fn subscription_tenants(&self) -> Vec<String> {
@@ -843,11 +861,31 @@ impl Store {
     // jsonldContexts: one keyspace for the whole process (key = context id, no
     // tenant prefix) — Cached rows are copies of public documents shared by
     // every tenant. Ownership of the tenant-authored kinds (Hosted,
-    // ImplicitlyCreated, 5.13.1) travels in the document's "owner" member and
-    // is enforced where the entries are served, listed and deleted (5.13).
-    pub fn context_put(&self, id: &str, doc: Value) {
+    // ImplicitlyCreated, 5.13.1) travels in the document's "owner" member,
+    // and every call below is answered through it (ADR-0021): the Postgres
+    // arm has the same rule as a Row-Level Security policy over a generated
+    // `tenant_id` column, and this arm, which has no policy engine under it,
+    // applies it in the store.
+    pub fn context_put(
+        &self,
+        tenant: Option<&TenantId>,
+        id: &str,
+        doc: Value,
+    ) -> Result<(), NgsiError> {
         on_blocking(|| {
             let mut inner = self.write_inner();
+            // The row that is there decides whether this call may replace it,
+            // the row that arrives decides whether it may be stored: the two
+            // halves of the policy the Postgres arm writes as USING and WITH
+            // CHECK. Both are backstops — every caller mints its own id.
+            let held = inner.contexts.get(id);
+            if !held.is_none_or(|r| context_row_visible(r, tenant))
+                || !context_row_visible(&doc, tenant)
+            {
+                return Err(NgsiError::InternalError(
+                    "@context belongs to another tenant".into(),
+                ));
+            }
             self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), Some(&doc));
             let cached = doc.get("kind").and_then(Value::as_str) == Some("Cached");
             inner.contexts.insert(id.to_owned(), doc);
@@ -865,23 +903,29 @@ impl Store {
                     inner.contexts.remove(&id);
                 }
             }
-        });
+            Ok(())
+        })
     }
 
-    pub fn context_get(&self, id: &str) -> Option<Value> {
+    pub fn context_get(&self, tenant: Option<&TenantId>, id: &str) -> Option<Value> {
         self.inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contexts
             .get(id)
+            .filter(|r| context_row_visible(r, tenant))
             .cloned()
     }
 
-    pub fn context_delete(&self, id: &str) -> bool {
+    pub fn context_delete(&self, tenant: Option<&TenantId>, id: &str) -> bool {
         on_blocking(|| {
             let mut inner = self.write_inner();
-            let hit = inner.contexts.remove(id).is_some();
+            let hit = inner
+                .contexts
+                .get(id)
+                .is_some_and(|r| context_row_visible(r, tenant));
             if hit {
+                inner.contexts.remove(id);
                 self.persist(T_JSONLD_CONTEXTS, id.as_bytes(), None);
             }
             hit
@@ -891,12 +935,13 @@ impl Store {
     /// Every row without its `body` member (the `@context` document itself).
     /// A body may be 5 MiB and only the `Cached` rows are capped in number,
     /// so cloning whole rows here was a multi-gigabyte copy on the boot path.
-    pub fn context_list_meta(&self) -> Vec<Value> {
+    pub fn context_list_meta(&self, tenant: Option<&TenantId>) -> Vec<Value> {
         self.inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contexts
             .values()
+            .filter(|v| context_row_visible(v, tenant))
             .map(|v| {
                 let mut row = v.clone();
                 if let Some(o) = row.as_object_mut() {
@@ -1262,7 +1307,14 @@ mod tests {
             for kind in ALL_KINDS {
                 assert!(s.create(&t, kind, "urn:x:1", json!({"kind": format!("{kind:?}")})));
             }
-            s.context_put("ctx1", json!({"@context": {}}));
+            // a row the writers actually produce: the kind is what decides
+            // whose it is (ADR-0021), and a Cached copy belongs to no Tenant
+            s.context_put(
+                None,
+                "ctx1",
+                json!({"localId": "ctx1", "kind": "Cached", "body": {"@context": {}}}),
+            )
+            .expect("store");
         }
         let s = Store::open_file(&dir).expect("reopen");
         for kind in ALL_KINDS {
@@ -1271,7 +1323,7 @@ mod tests {
                 format!("{kind:?}")
             );
         }
-        assert!(s.context_get("ctx1").is_some());
+        assert!(s.context_get(None, "ctx1").is_some());
         // tenant isolation intact after rebuild
         assert!(s
             .get(&TenantId::default(), Kind::Entity, "urn:x:1")
@@ -1294,8 +1346,9 @@ mod tests {
                 Ok(())
             });
             assert!(matches!(r, Some(Ok(()))));
-            s.context_put("ctx", json!({}));
-            assert!(s.context_delete("ctx"));
+            s.context_put(None, "ctx", json!({"localId": "ctx", "kind": "Cached"}))
+                .expect("store");
+            assert!(s.context_delete(None, "ctx"));
         }
         let s = Store::open_file(&dir).expect("reopen");
         assert!(
@@ -1303,7 +1356,7 @@ mod tests {
             "phantom 409 trap"
         );
         assert_eq!(s.get(&t, Kind::Entity, "urn:kept").expect("kept")["n"], 2);
-        assert!(s.context_get("ctx").is_none());
+        assert!(s.context_get(None, "ctx").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1612,6 +1665,78 @@ mod tests {
         assert_eq!(s.sweep_expired("2026-01-01T00:00:00Z"), 0, "idempotent");
     }
 
+    /// ADR-0021 + 4.14: the memory/file arm has no Row-Level Security under
+    /// it, so the rule a Postgres deployment gets from the database is this
+    /// store's own job. A Hosted @context holds term mappings authored
+    /// through one Tenant's requests and belongs to that Tenant alone; a
+    /// Cached copy of a public document belongs to none and every Tenant
+    /// reaches it. A store that answered every caller would hand one
+    /// Tenant's term mappings to another, and 5.5.7 makes those mappings
+    /// decide what its payloads mean.
+    #[test]
+    fn clause_5_13_1_a_stored_context_answers_only_its_own_tenant() {
+        let s = Store::default();
+        let alpha = TenantId::new("alpha").expect("tenant");
+        let beta = TenantId::new("beta").expect("tenant");
+        let hosted = json!({"localId": "h", "kind": "Hosted", "owner": "alpha",
+                            "body": {"@context": {"a": "https://alpha.example/a"}}});
+        s.context_put(Some(&alpha), "h", hosted.clone())
+            .expect("the owner stores its own row");
+        s.context_put(
+            None,
+            "c",
+            json!({"localId": "c", "kind": "Cached", "body": {"@context": {}}}),
+        )
+        .expect("a Cached copy belongs to no Tenant");
+
+        assert!(
+            s.context_get(Some(&alpha), "h").is_some(),
+            "its owner reads it"
+        );
+        assert!(
+            s.context_get(Some(&beta), "h").is_none(),
+            "another Tenant's Hosted @context is as absent as one never stored"
+        );
+        assert!(
+            s.context_get(None, "h").is_none(),
+            "no Tenant in scope reaches no Tenant's documents"
+        );
+        for t in [Some(&alpha), Some(&beta), None] {
+            assert!(
+                s.context_get(t, "c").is_some(),
+                "a Cached copy is a public document and is shared"
+            );
+        }
+        assert!(
+            !s.context_delete(Some(&beta), "h"),
+            "a foreign delete takes nothing"
+        );
+        assert!(
+            s.context_put(Some(&beta), "h", hosted).is_err(),
+            "and a foreign write does not overwrite it either"
+        );
+        assert!(
+            s.context_list_meta(Some(&beta))
+                .iter()
+                .all(|r| r["localId"] != "h"),
+            "another Tenant's row is not listed"
+        );
+        assert!(
+            s.context_get(Some(&alpha), "h").is_some(),
+            "the owner's row survived every foreign attempt"
+        );
+
+        s.purge_tenant(&alpha);
+        assert!(
+            s.context_get(Some(&alpha), "h").is_none(),
+            "purging the Tenant takes the @contexts it stored"
+        );
+        assert!(
+            s.context_get(None, "c").is_some(),
+            "and leaves the copy that belongs to no Tenant"
+        );
+    }
+
     /// 5.13.1: "Implementations shall periodically invalidate the 'Cached'
     /// @contexts." The memory/file arm holds one entry per distinct external
     /// URL a request referenced — client-controlled — so the same ceiling and
@@ -1622,15 +1747,22 @@ mod tests {
         let s = Store::default();
         let entry = |kind: &str, created: &str| json!({"kind": kind, "createdAt": created, "body": {"@context": {}}});
         // a Hosted entry older than every Cached one: age must not decide
-        s.context_put("hosted", entry("Hosted", "2000-01-01T00:00:00Z"));
+        s.context_put(
+            Some(&TenantId::default()),
+            "hosted",
+            entry("Hosted", "2000-01-01T00:00:00Z"),
+        )
+        .expect("store");
         for i in 0..MAX_CACHED_CONTEXTS {
             s.context_put(
+                None,
                 &format!("cached-{i:05}"),
                 entry("Cached", &format!("2026-01-01T00:00:{:02}Z", i % 60)),
-            );
+            )
+            .expect("store");
         }
         let cached = |s: &Store| {
-            s.context_list_meta()
+            s.context_list_meta(Some(&TenantId::default()))
                 .iter()
                 .filter(|d| d["kind"] == "Cached")
                 .count()
@@ -1642,19 +1774,24 @@ mod tests {
         );
 
         // one more Cached entry evicts exactly one — the oldest
-        s.context_put("cached-new", entry("Cached", "2026-06-01T00:00:00Z"));
+        s.context_put(None, "cached-new", entry("Cached", "2026-06-01T00:00:00Z"))
+            .expect("store");
         assert_eq!(cached(&s), MAX_CACHED_CONTEXTS, "the ceiling holds");
-        assert!(s.context_get("cached-new").is_some(), "the new entry stays");
         assert!(
-            s.context_get("cached-00000").is_none(),
+            s.context_get(None, "cached-new").is_some(),
+            "the new entry stays"
+        );
+        assert!(
+            s.context_get(None, "cached-00000").is_none(),
             "the oldest Cached entry is the one evicted"
         );
         assert!(
-            s.context_get("cached-00001").is_some(),
+            s.context_get(None, "cached-00001").is_some(),
             "eviction stops at the ceiling"
         );
         assert!(
-            s.context_get("hosted").is_some(),
+            s.context_get(Some(&TenantId::default()), "hosted")
+                .is_some(),
             "a Hosted entry is never a candidate, however old"
         );
     }

@@ -201,6 +201,144 @@ async fn rls_denies_cross_tenant_reads_and_writes() {
     assert_eq!(n, 0, "no tenant in scope must mean no rows");
 }
 
+/// ADR-0021 + 4.14: a stored @context is under the same Row-Level Security as
+/// every other Tenant-bearing row. A Hosted document holds term mappings
+/// authored through one Tenant's requests, and 5.5.7 makes those mappings
+/// decide what that Tenant's payloads mean, so another Tenant must not read
+/// it, rewrite it or delete it. A Cached copy is a public document the broker
+/// downloaded (5.13.1): it belongs to no Tenant and every Tenant reaches it.
+///
+/// Proven as the non-superuser role the deployment runs under, with SQL that
+/// names no tenant at all — the belt has to bite where the code forgot to.
+#[tokio::test]
+async fn rls_scopes_hosted_contexts_and_shares_cached_ones() {
+    let url = require_db!();
+    let admin = pg::connect(&url, 5).await.expect("connect");
+    for stmt in [
+        "DO $$ BEGIN CREATE ROLE antares_app LOGIN PASSWORD 'app';
+         EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+        "GRANT USAGE ON SCHEMA public TO antares_app",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO antares_app",
+    ] {
+        sqlx::query(stmt).execute(&admin).await.expect(stmt);
+    }
+    let app_url = url.replace("antares:antares@", "antares_app:app@");
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&app_url)
+        .await
+        .expect("app-role connect");
+
+    let ta = TenantId::new("ctxrls_a").expect("ta");
+    let tb = TenantId::new("ctxrls_b").expect("tb");
+    let hosted = "ctxrls:hosted";
+    let cached = "ctxrls:cached";
+    for id in [hosted, cached] {
+        sqlx::query("DELETE FROM jsonld_contexts WHERE id = $1")
+            .bind(id)
+            .execute(&admin)
+            .await
+            .expect("clean");
+    }
+
+    // Tenant a stores one Hosted @context and one Cached copy.
+    let mut tx = app.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &ta).await.expect("set_tenant a");
+    sqlx::query(
+        "INSERT INTO jsonld_contexts (id, body, kind) VALUES
+           ($1, jsonb_build_object('owner', $3::text, 'kind', 'Hosted'), 'Hosted'),
+           ($2, jsonb_build_object('kind', 'Cached'), 'Cached')",
+    )
+    .bind(hosted)
+    .bind(cached)
+    .bind(ta.as_str())
+    .execute(&mut *tx)
+    .await
+    .expect("insert as a");
+    tx.commit().await.expect("commit");
+
+    let seen = |t: Option<&TenantId>, id: &'static str| {
+        let app = app.clone();
+        let t = t.map(|t| t.as_str().to_owned());
+        async move {
+            let mut tx = app.begin().await.expect("tx");
+            if let Some(t) = &t {
+                let tid = TenantId::new(t).expect("tenant");
+                pg::set_tenant(&mut tx, &tid).await.expect("set_tenant");
+            }
+            let n: i64 = sqlx::query("SELECT count(*) FROM jsonld_contexts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("count")
+                .get(0);
+            n
+        }
+    };
+    assert_eq!(seen(Some(&ta), hosted).await, 1, "its owner reads it");
+    assert_eq!(
+        seen(Some(&tb), hosted).await,
+        0,
+        "another Tenant's Hosted @context must be invisible"
+    );
+    assert_eq!(
+        seen(None, hosted).await,
+        0,
+        "no Tenant in scope reaches no Tenant's documents"
+    );
+    for t in [Some(&ta), Some(&tb), None] {
+        assert_eq!(
+            seen(t, cached).await,
+            1,
+            "a Cached copy is a public document and belongs to no Tenant"
+        );
+    }
+
+    // Tenant b can neither rewrite nor delete what it cannot see, and cannot
+    // forge a row into another Tenant either (WITH CHECK).
+    let mut tx = app.begin().await.expect("tx");
+    pg::set_tenant(&mut tx, &tb).await.expect("set_tenant b");
+    let touched = sqlx::query("UPDATE jsonld_contexts SET body = '{}'::jsonb WHERE id = $1")
+        .bind(hosted)
+        .execute(&mut *tx)
+        .await
+        .expect("update")
+        .rows_affected();
+    assert_eq!(touched, 0, "RLS must hide the row from an UPDATE");
+    let removed = sqlx::query("DELETE FROM jsonld_contexts WHERE id = $1")
+        .bind(hosted)
+        .execute(&mut *tx)
+        .await
+        .expect("delete")
+        .rows_affected();
+    assert_eq!(removed, 0, "RLS must hide the row from a DELETE");
+    let forged = sqlx::query(
+        "INSERT INTO jsonld_contexts (id, body, kind)
+         VALUES ('ctxrls:forged', jsonb_build_object('owner', $1::text), 'Hosted')",
+    )
+    .bind(ta.as_str())
+    .execute(&mut *tx)
+    .await;
+    assert!(
+        forged.is_err(),
+        "WITH CHECK must reject an @context forged into another Tenant"
+    );
+    drop(tx); // rollback
+
+    assert_eq!(
+        seen(Some(&ta), hosted).await,
+        1,
+        "the owner's @context survived every foreign attempt"
+    );
+    for id in [hosted, cached] {
+        sqlx::query("DELETE FROM jsonld_contexts WHERE id = $1")
+            .bind(id)
+            .execute(&admin)
+            .await
+            .expect("cleanup");
+    }
+}
+
 /// Purging a tenant empties every tenant-bearing table for it in one
 /// transaction and touches no row of another tenant.
 #[tokio::test(flavor = "multi_thread")]
@@ -252,6 +390,18 @@ async fn purge_tenant_empties_every_tenant_table() {
                 "{kind:?}"
             );
         }
+        // ADR-0021: a Hosted @context belongs to the Tenant that stored it,
+        // so it is one more table the purge has to reach.
+        CurrentStateDriver::context_put(
+            &store,
+            Some(t),
+            &format!("ctx-{}", t.as_str()),
+            serde_json::json!({"url": format!("http://b.example/ngsi-ld/v1/jsonldContexts/ctx-{}", t.as_str()),
+                               "localId": format!("ctx-{}", t.as_str()), "kind": "Hosted",
+                               "owner": t.as_str(), "createdAt": "2026-08-04T09:00:00Z",
+                               "body": {"@context": {"n": "https://x/n"}}}),
+        )
+        .expect("hosted @context");
         TemporalDriver::create(&store, t, "urn:x:1", doc("urn:x:1")).expect("temporal");
         store
             .temporal_append(
@@ -263,8 +413,9 @@ async fn purge_tenant_empties_every_tenant_table() {
             )
             .expect("append");
     }
-    const TABLES: [&str; 12] = [
+    const TABLES: [&str; 13] = [
         "entities",
+        "jsonld_contexts",
         "subscriptions",
         "csource_subscriptions",
         "csource_registrations",

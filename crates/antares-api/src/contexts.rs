@@ -124,34 +124,38 @@ fn cached_from_row(doc: &Value) -> CtxEntry {
     CtxEntry::Cached(row_usage(doc))
 }
 
-/// Ownership of a stored row (5.13.1). Hosted and ImplicitlyCreated rows hold
-/// term mappings authored through one tenant's requests and are visible,
-/// servable and deletable only through that tenant; Cached rows are copies of
-/// public documents the broker fetched and belong to no tenant. Rows written
-/// before the owner member existed belong to the default tenant.
+/// Ownership of a stored row (5.13.1, ADR-0021). Hosted and ImplicitlyCreated
+/// rows hold term mappings authored through one tenant's requests and are
+/// visible, servable and deletable only through that tenant; Cached rows are
+/// copies of public documents the broker fetched and belong to no tenant.
+/// Rows written before the owner member existed belong to the default tenant.
+///
+/// The store answers the same question over its own `tenant_id`, so a row
+/// another Tenant owns does not reach this check under Postgres. Both stay:
+/// the day they disagree, the database is the one that refuses.
 fn row_visible(doc: &Value, tenant: &TenantId) -> bool {
-    doc["kind"].as_str() == Some("Cached")
-        || doc["owner"].as_str().unwrap_or(TenantId::DEFAULT) == tenant.as_str()
+    antares_store::context_row_visible(doc, Some(tenant))
 }
 
 /// 5.13.1: a Hosted or ImplicitlyCreated @context holds term mappings
 /// authored through one Tenant's requests, so it is one of that Tenant's
-/// documents and a purge of the Tenant takes it too. The row carries its
-/// owner inside the document — `jsonld_contexts` is keyed by local id
-/// alone and has no tenant column — so the store's tenant-keyed purge
-/// cannot reach it. A Cached row is a copy of a public document and belongs
-/// to no Tenant (see `row_visible`), so it stays.
-// ponytail: one scan of jsonld_contexts per purge, which is an admin
-// operation; a tenant column and an index if it ever runs hot.
+/// documents and a purge of the Tenant takes it too. A Cached row is a copy
+/// of a public document and belongs to no Tenant (see `row_visible`), so it
+/// stays.
+///
+/// The rows themselves also go with the store's own `purge_tenant`
+/// (ADR-0021). What only this pass can do is release the loader's warm copy
+/// and usage entry for each URL, which live in this process and would
+/// otherwise keep serving a document whose row is gone.
 pub async fn purge_tenant(st: &AppState, tenant: &TenantId) -> Result<(), NgsiError> {
-    for row in st.store.context_list_meta()? {
+    for row in st.store.context_list_meta(Some(tenant))? {
         if row["kind"].as_str() == Some("Cached") || !row_visible(&row, tenant) {
             continue;
         }
         let Some(local_id) = row["localId"].as_str() else {
             continue;
         };
-        st.store.context_delete(local_id)?;
+        st.store.context_delete(Some(tenant), local_id)?;
         if let Some(url) = row["url"].as_str() {
             st.loader.usage_remove(url).await;
         }
@@ -163,7 +167,7 @@ pub async fn purge_tenant(st: &AppState, tenant: &TenantId) -> Result<(), NgsiEr
 /// lookup: a store failure is an error, never "not found" — answering 404 for
 /// a hiccup would tell the client to add the @context a second time.
 async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> ApiResult<Option<CtxEntry>> {
-    if let Some(doc) = st.store.context_get(id)? {
+    if let Some(doc) = st.store.context_get(Some(tenant), id)? {
         // Cached rows are addressable by their deterministic localId too.
         if doc["kind"].as_str() == Some("Cached") {
             return Ok(Some(cached_from_row(&doc)));
@@ -176,7 +180,7 @@ async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> ApiResult<Opt
     // the row's own url still has to match the id.
     if let Some(pos) = id.rfind("/ngsi-ld/v1/jsonldContexts/") {
         let local_id = &id[pos + "/ngsi-ld/v1/jsonldContexts/".len()..];
-        if let Some(doc) = st.store.context_get(local_id)? {
+        if let Some(doc) = st.store.context_get(Some(tenant), local_id)? {
             if doc["url"].as_str() == Some(id) && row_visible(&doc, tenant) {
                 return Ok(Some(CtxEntry::Stored(doc)));
             }
@@ -190,7 +194,7 @@ async fn find_entry(st: &AppState, tenant: &TenantId, id: &str) -> ApiResult<Opt
     // is uuid5(url), so a URL-shaped id resolves in O(1).
     if id.starts_with("http://") || id.starts_with("https://") {
         let rid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id.as_bytes()).to_string();
-        if let Some(doc) = st.store.context_get(&rid)? {
+        if let Some(doc) = st.store.context_get(Some(tenant), &rid)? {
             if doc["kind"].as_str() == Some("Cached") {
                 return Ok(Some(cached_from_row(&doc)));
             }
@@ -258,7 +262,7 @@ pub async fn add_context(
             "owner": tenant.as_str(),
             "body": {"@context": ctx_val.clone()},
         });
-        st.store.context_put(&local_id, doc)?;
+        st.store.context_put(Some(&tenant), &local_id, doc)?;
         // stored FOR the adding Tenant (5.13.1 Hosted): 5.5.10 confines the
         // mappings to that Tenant's operations, so resolution is scoped the
         // same way the serve/list/delete paths above are
@@ -310,7 +314,7 @@ pub async fn list_contexts(
             String,
             Option<antares_jsonld::CtxUsage>,
         )> = Vec::new();
-        for c in st.store.context_list_meta()? {
+        for c in st.store.context_list_meta(Some(&tenant))? {
             let kind = c["kind"].as_str().unwrap_or("Hosted").to_owned();
             if !keep(&kind) || !row_visible(&c, &tenant) {
                 continue;
@@ -436,11 +440,11 @@ pub async fn serve_context(
         match &entry {
             CtxEntry::Stored(doc) if !internal_fetch && doc["kind"] == "ImplicitlyCreated" => {
                 if let Some(u) = doc["url"].as_str() {
-                    let _ = st.loader.bump_url(u).await;
+                    let _ = st.loader.bump_url(Some(&tenant), u).await;
                 }
             }
             CtxEntry::Cached(u) if !internal_fetch => {
-                let _ = st.loader.bump_url(&u.url).await;
+                let _ = st.loader.bump_url(Some(&tenant), &u.url).await;
             }
             _ => {}
         }
@@ -503,12 +507,12 @@ pub async fn delete_context(
                 // The write-through row shares the deterministic local id —
                 // deleting the API entry must delete the persisted copy too,
                 // or a restart resurrects a deleted @context (5.13.5).
-                let _ = st.store.context_delete(&u.local_id);
+                let _ = st.store.context_delete(Some(&tenant), &u.local_id);
                 Ok(no_content(&tenant))
             }
             Some(CtxEntry::Stored(doc)) => {
                 let lid = doc["localId"].as_str().unwrap_or(&id);
-                st.store.context_delete(lid)?;
+                st.store.context_delete(Some(&tenant), lid)?;
                 if let Some(url) = doc.get("url").and_then(Value::as_str) {
                     st.loader.usage_remove(url).await;
                 }
@@ -541,11 +545,9 @@ mod tests {
     }
 
     /// 5.13.1 + 5.5.10: purging a Tenant takes the @contexts authored through
-    /// ITS requests and nothing else. `jsonld_contexts` is keyed by local id
-    /// alone, so the store's tenant-keyed purge cannot reach these rows and
-    /// this walk is the only thing standing between one Tenant's deletion and
-    /// another Tenant's term mappings. A Cached row is a copy of a public
-    /// document and belongs to no Tenant, so it survives every purge.
+    /// ITS requests and nothing else — one Tenant's deletion must not reach
+    /// another Tenant's term mappings, and a Cached row is a copy of a public
+    /// document belonging to no Tenant, so it survives every purge.
     #[tokio::test]
     async fn clause_5_13_1_a_tenant_purge_takes_only_its_own_contexts() {
         let st = AppState::new("antares-ctx-purge".into());
@@ -554,18 +556,23 @@ mod tests {
         let base = "http://broker.example/ngsi-ld/v1/jsonldContexts";
         for (lid, owner) in [("hosted-alpha", &alpha), ("hosted-beta", &beta)] {
             st.store
-                .context_put(lid, hosted_row(&format!("{base}/{lid}"), lid, owner))
+                .context_put(
+                    Some(owner),
+                    lid,
+                    hosted_row(&format!("{base}/{lid}"), lid, owner),
+                )
                 .expect("store the Hosted @context");
         }
         // an ImplicitlyCreated wrapper is owned the same way a Hosted one is
         let mut implicit = hosted_row(&format!("{base}/implicit-alpha"), "implicit-alpha", &alpha);
         implicit["kind"] = json!("ImplicitlyCreated");
         st.store
-            .context_put("implicit-alpha", implicit)
+            .context_put(Some(&alpha), "implicit-alpha", implicit)
             .expect("store the ImplicitlyCreated @context");
         // and a Cached copy, which carries no owner at all
         st.store
             .context_put(
+                None,
                 "cached-shared",
                 json!({"url": "https://example.org/ctx.jsonld", "localId": "cached-shared",
                        "kind": "Cached", "createdAt": now_iso()}),
@@ -575,38 +582,46 @@ mod tests {
         let mut legacy = hosted_row(&format!("{base}/legacy"), "legacy", &alpha);
         legacy.as_object_mut().expect("row object").remove("owner");
         st.store
-            .context_put("legacy", legacy)
+            .context_put(Some(&TenantId::default()), "legacy", legacy)
             .expect("store legacy");
 
         purge_tenant(&st, &alpha).await.expect("purge alpha");
 
-        let present = |lid: &str| st.store.context_get(lid).expect("store read").is_some();
+        // read as the row's own Tenant: a purge that took the row and a
+        // store that hides it from its owner are different failures, and the
+        // assertions below are about the first.
+        let present = |owner: Option<&TenantId>, lid: &str| {
+            st.store
+                .context_get(owner, lid)
+                .expect("store read")
+                .is_some()
+        };
         assert!(
-            !present("hosted-alpha"),
+            !present(Some(&alpha), "hosted-alpha"),
             "the purged Tenant's Hosted row goes"
         );
         assert!(
-            !present("implicit-alpha"),
+            !present(Some(&alpha), "implicit-alpha"),
             "and so does its ImplicitlyCreated wrapper"
         );
         assert!(
-            present("hosted-beta"),
+            present(Some(&beta), "hosted-beta"),
             "another Tenant's Hosted @context must survive a purge it has no part in"
         );
         assert!(
-            present("cached-shared"),
+            present(None, "cached-shared"),
             "a Cached copy belongs to no Tenant and is not purged with one"
         );
         assert!(
-            present("legacy"),
+            present(Some(&TenantId::default()), "legacy"),
             "an owner-less row belongs to the default Tenant, not to alpha"
         );
         // the same purge run against the default Tenant reaches the legacy row
         purge_tenant(&st, &TenantId::default())
             .await
             .expect("purge default");
-        assert!(!present("legacy"));
-        assert!(present("hosted-beta"), "still beta's");
+        assert!(!present(Some(&TenantId::default()), "legacy"));
+        assert!(present(Some(&beta), "hosted-beta"), "still beta's");
     }
 
     /// 5.13.4.4: a stored @context resolves by its locally unique URI —
@@ -621,7 +636,7 @@ mod tests {
         let local_id = "b2a1c0de-0000-4000-8000-000000000001";
         let url = format!("http://broker.example/ngsi-ld/v1/jsonldContexts/{local_id}");
         st.store
-            .context_put(local_id, hosted_row(&url, local_id, &owner))
+            .context_put(Some(&owner), local_id, hosted_row(&url, local_id, &owner))
             .expect("store the @context");
         assert!(
             find_entry(&st, &owner, local_id)
@@ -729,7 +744,7 @@ mod tests {
         let lid = "b2a1c0de-0000-4000-8000-000000000002";
         let url = format!("http://broker.example/ngsi-ld/v1/jsonldContexts/{lid}");
         st.store
-            .context_put(lid, hosted_row(&url, lid, &alpha))
+            .context_put(Some(&alpha), lid, hosted_row(&url, lid, &alpha))
             .expect("store the @context");
         let mut foreign = HeaderMap::new();
         foreign.insert("NGSILD-Tenant", "beta".parse().expect("tenant header"));
@@ -777,7 +792,10 @@ mod tests {
             );
         }
         assert!(
-            st.store.context_get(lid).expect("store").is_some(),
+            st.store
+                .context_get(Some(&alpha), lid)
+                .expect("store")
+                .is_some(),
             "the owning Tenant's @context survived a foreign delete"
         );
         // and the owner still reaches it
