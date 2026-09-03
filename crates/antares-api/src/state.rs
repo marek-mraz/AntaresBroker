@@ -66,6 +66,13 @@ static PROPAGATED: [axum::http::HeaderName; 3] = [
     axum::http::HeaderName::from_static("link"),
 ];
 
+tokio::task_local! {
+    /// How many [`AppState::call`] frames this task is already inside, held
+    /// against [`crate::bounds::MAX_INPROCESS_CALL_DEPTH`]. Absent outside a
+    /// façade call, which reads as zero.
+    static INPROCESS_DEPTH: usize;
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn CurrentStateDriver>,
@@ -543,6 +550,20 @@ impl AppState {
         req: axum::http::Request<axum::body::Body>,
     ) -> axum::response::Response {
         use axum::response::IntoResponse as _;
+        // A façade route that translates into a request its own surface
+        // serves would call itself for as long as the stack lasts, and
+        // every frame builds a router. The chain is counted per task, so a
+        // façade over a façade is served and a loop is not.
+        let depth = INPROCESS_DEPTH.try_with(|d| *d).unwrap_or(0);
+        if depth >= crate::bounds::MAX_INPROCESS_CALL_DEPTH {
+            return crate::negotiate::ApiError::from(antares_model::NgsiError::InternalError(
+                format!(
+                    "in-process call depth exceeded {}",
+                    crate::bounds::MAX_INPROCESS_CALL_DEPTH
+                ),
+            ))
+            .into_response();
+        }
         let router = self.inbound.get_or_init(|| {
             // Every layer of a built router captured an `AppState` clone, so
             // the memo owns states. The clone it is built from must NOT be
@@ -576,7 +597,10 @@ impl AppState {
             }
         }
         let req = axum::http::Request::from_parts(parts, body);
-        match tower::ServiceExt::oneshot(router.clone(), req).await {
+        match INPROCESS_DEPTH
+            .scope(depth + 1, tower::ServiceExt::oneshot(router.clone(), req))
+            .await
+        {
             Ok(r) => r,
             // `Router`'s error is `Infallible`; the arm stays honest rather
             // than unwrapping (the workspace denies unwrap outside tests).

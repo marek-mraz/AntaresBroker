@@ -47,6 +47,7 @@ impl ApiSurface for Facade {
             .route("/things", get(things))
             .route("/echo", get(echo))
             .route("/toolong", get(toolong))
+            .route("/nest", get(nest))
             .route("/seen", get(seen))
     }
     fn version_info(&self) -> Value {
@@ -78,6 +79,27 @@ async fn echo(State(st): State<AppState>, headers: HeaderMap) -> Response {
 async fn toolong(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let long = "a".repeat(antares_api::bounds::MAX_URI_BYTES);
     let req = Request::get(format!("/ngsi-ld/v1/entities?type=Vehicle&q={long}"))
+        .body(Body::empty())
+        .expect("inner request");
+    st.call(&headers, req).await
+}
+
+/// A façade route that reaches the broker by calling its own surface. Real
+/// façades do this — an OData `$expand` served by the SensorThings façade —
+/// and a translation that lands back on the route it came from is a loop
+/// the broker has to end, not the façade. `left` is how many more hops this
+/// one wants; the ceiling is reached before it runs out when it asks for
+/// more than the broker allows.
+async fn nest(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let left: usize = q.get("left").and_then(|v| v.parse().ok()).unwrap_or(0);
+    if left == 0 {
+        return axum::Json(json!({"bottom": true})).into_response();
+    }
+    let req = Request::get(format!("/x/f0/nest?left={}", left - 1))
         .body(Body::empty())
         .expect("inner request");
     st.call(&headers, req).await
@@ -352,5 +374,48 @@ async fn a_state_that_made_an_in_process_call_still_releases_its_store() {
     panic!(
         "the store outlived its state: {} owners left",
         Arc::strong_count(&store)
+    );
+}
+
+/// A façade cannot spend the broker's stack either: `AppState::call` counts
+/// the frames one request is already inside and refuses past
+/// `MAX_INPROCESS_CALL_DEPTH`. A chain shorter than the ceiling is served —
+/// a façade over a façade is a design the seam invites — and a route that
+/// keeps translating into itself is ended with the broker's own 500 rather
+/// than by the stack. The refusal names no path and no façade.
+#[tokio::test]
+async fn a_facade_that_calls_itself_is_ended_by_the_broker_not_by_the_stack() {
+    let (st, _) = state();
+    let ceiling = antares_api::bounds::MAX_INPROCESS_CALL_DEPTH;
+
+    // One frame short of the ceiling: every hop is served.
+    let (code, body) = send(&st, "GET", &format!("/x/f0/nest?left={}", ceiling - 2), &[]).await;
+    assert_eq!(code, StatusCode::OK, "a chain inside the ceiling: {body}");
+    assert_eq!(body["bottom"], json!(true), "{body}");
+
+    // A loop asks for far more than the ceiling allows.
+    let (code, body) = send(&st, "GET", &format!("/x/f0/nest?left={}", ceiling * 4), &[]).await;
+    assert_eq!(
+        code,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the ceiling ends the loop: {body}"
+    );
+    assert_eq!(
+        body["title"], "InternalError",
+        "Table 6.3.2-1 names the type: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        !detail.contains("/x/f0") && !detail.contains("nest"),
+        "the refusal names the ceiling, not the caller's route: {detail}"
+    );
+
+    // The ceiling is published, so a façade author can read it.
+    let (code, health) = send(&st, "GET", "/q/health", &[]).await;
+    assert_eq!(code, StatusCode::OK, "{health}");
+    assert_eq!(
+        health["limits"]["maxInProcessCallDepth"],
+        json!(ceiling),
+        "{health}"
     );
 }

@@ -51,6 +51,7 @@ progress). A memory-store broker answers:
     "maxFedResponseBytes": 16777216,
     "maxFoldDocs": 100000,
     "maxGeoVertices": 1024,
+    "maxInProcessCallDepth": 8,
     "maxJoinLevel": 10,
     "maxJsonDepth": 64,
     "maxPeerWarnings": 8,

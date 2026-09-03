@@ -274,6 +274,16 @@ copy stands aside. What a façade must never do is derive a tenant from
 anything the broker did not validate: `NGSILD-Tenant` is checked once, in
 `negotiate`, and that check is the whole of 6.3.14.
 
+**The depth rule.** A façade may call the broker, and a façade may be what
+the broker's route reaches, so a translation can legitimately sit several
+frames deep. What it may not do is close the circle: a route that translates
+into a request its own surface serves would call itself for as long as the
+stack lasts. `AppState::call` counts the frames one task is already inside
+and answers the ninth with `InternalError`
+(`maxInProcessCallDepth` in `/q/health`). The count is per task, so work a
+handler spawns starts a new chain — a notification is not inside the request
+that caused it.
+
 **The representation to ask for.** Most of a mapping is already an option
 on the NGSI-LD request, and asking for the right one is the difference
 between a translation and a rewrite:

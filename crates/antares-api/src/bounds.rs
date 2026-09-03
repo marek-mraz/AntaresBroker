@@ -91,6 +91,21 @@ pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new
 /// warnings the clause obliges this broker to raise about the other sources.
 pub const MAX_PEER_WARNINGS: usize = 8;
 
+/// → 500 InternalError. How many [`crate::AppState::call`] frames one
+/// request may be inside. The in-process handle is the façade seam, and a
+/// façade legitimately calls the broker while another façade legitimately
+/// calls it, so the ceiling is a depth rather than a refusal of the second
+/// call. Without one a `/x/` route that translates into a request its own
+/// surface serves recurses until the stack ends, and each frame builds a
+/// router of its own. Eight carries a façade over a façade over the broker
+/// several times and still ends the loop in milliseconds, an order of
+/// magnitude below what ends the process: with the guard removed, a route
+/// asking for thirty-two hops overflows a 2 MiB thread stack in a debug
+/// build. The count is per task — work a handler spawns starts a new chain,
+/// which is right, since a notification is not inside the request that
+/// caused it.
+pub const MAX_INPROCESS_CALL_DEPTH: usize = 8;
+
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 /// → 400 BadRequestData. Documents one @context resolution may fetch, owned
 /// by the loader that enforces it (`antares_jsonld`), and the ceiling on how
@@ -143,6 +158,7 @@ impl LimitStats {
             "maxFedFanout": *MAX_FED_FANOUT,
             "maxFedInflight": *MAX_FED_INFLIGHT,
             "maxJoinLevel": MAX_JOIN_LEVEL,
+            "maxInProcessCallDepth": MAX_INPROCESS_CALL_DEPTH,
             "maxPeerWarnings": MAX_PEER_WARNINGS,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
@@ -388,6 +404,7 @@ mod tests {
                 "maxFedResponseBytes",
                 "maxFoldDocs",
                 "maxGeoVertices",
+                "maxInProcessCallDepth",
                 "maxJoinLevel",
                 "maxJsonDepth",
                 "maxPeerWarnings",
