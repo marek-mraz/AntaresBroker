@@ -10,3 +10,10 @@ race:tokio::runtime::io::driver
 # free as racing with the other thread's decrement. Scoped to that one
 # module: a real race elsewhere in moka is still reported.
 race:moka::common::concurrent::arc
+# The two-broker proxy fixture (crates/antares-api/tests/common/net.rs) runs
+# one thread per relayed connection and one more for that connection's return
+# direction. A connection the broker is holding open is still being copied
+# when the test binary exits, so the parent has not reached its join and the
+# sanitizer reports the finished child as leaked. Test scaffolding, scoped to
+# that module: a thread the broker leaks is still reported.
+thread:common::net::
