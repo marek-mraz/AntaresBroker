@@ -164,7 +164,7 @@ source:
 GET /ngsi-ld/v1/entities?options=sysAttrs&type=ParkingSpot&attrs=status
 Accept: application/json
 Via: 1.1 broker-a
-Link: <https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
+Link: <https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"
 ```
 
 Entity halves from several sources merge per 4.5.5 before pagination.

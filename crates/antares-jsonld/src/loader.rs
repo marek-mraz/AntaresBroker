@@ -53,8 +53,14 @@ static PINNED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The core context this broker itself advertises (Link header default).
-pub const CORE_CONTEXT: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
+/// 4.4: "The NGSI-LD Core @context is publicly available at
+/// https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld and shall
+/// contain all the terms as mandated by annex B." It is what this broker
+/// advertises (the Link header of a `application/json` answer, the `@context`
+/// of an `ld+json` one, the context a forwarded request carries) and the
+/// document merged last when a request names no @context of its own. Older
+/// core versions stay in `PINNED` because a client may still reference one.
+pub const CORE_CONTEXT: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld";
 
 /// Usage bookkeeping for one externally-referenced @context URL (5.13.3.5:
 /// localId, createdAt, numberOfHits, lastUsage of "Cached" entries).
@@ -2694,6 +2700,38 @@ mod tests {
         }
     }
 
+    /// 4.4, V1.9.1: "The NGSI-LD Core @context is publicly available at
+    /// https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld and
+    /// shall contain all the terms as mandated by annex B." A request that
+    /// names no @context of its own is answered under that document alone,
+    /// so the terms V1.9 added have to expand from the implicit core — not
+    /// only when a client spells the v1.9 URL out. Under an older core they
+    /// fall through @vocab into the default context, and a member the broker
+    /// itself renders (`Snapshot`, `valueType`, `orderBy`) then carries a
+    /// name no other implementation reads as the core term.
+    #[tokio::test]
+    async fn the_implicit_core_context_is_the_one_v1_9_1_names() {
+        assert_eq!(
+            CORE_CONTEXT,
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
+        );
+        let core = Loader::new().core();
+        for (term, iri) in [
+            ("Snapshot", "https://uri.etsi.org/ngsi-ld/Snapshot"),
+            ("orderBy", "https://uri.etsi.org/ngsi-ld/orderBy"),
+            ("collation", "https://uri.etsi.org/ngsi-ld/collation"),
+            ("valueType", "https://uri.etsi.org/ngsi-ld/hasValueType"),
+            ("objectLists", "https://uri.etsi.org/ngsi-ld/hasObjectLists"),
+            ("aggrMethods", "https://uri.etsi.org/ngsi-ld/aggrMethods"),
+        ] {
+            assert_eq!(
+                core.expand_key(term),
+                iri,
+                "{term} must expand to its Annex B IRI, not through @vocab"
+            );
+        }
+    }
+
     /// Annex B (normative), V1.9.1: the core @context served for the v1.9
     /// URL is that version's document. The terms V1.9 added are the test —
     /// a v1.8 document under the v1.9 name expands every one of them
@@ -2733,9 +2771,8 @@ mod tests {
                 "{term} must expand to its Annex B IRI, not through @vocab"
             );
         }
-        // renamed by the V1.9 annex; the v1.8 spelling stays reachable
-        // because 4.4 merges the served Core @context (v1.8) last, so a
-        // resolve sees the union — the documents themselves are the test.
+        // renamed by the V1.9 annex, and the rename is only visible if the
+        // document under the v1.9 name really is the v1.9 one.
         assert_eq!(
             ctx.expand_key("objectLists"),
             "https://uri.etsi.org/ngsi-ld/hasObjectLists"

@@ -35,7 +35,7 @@ curl -i -X POST localhost:9090/ngsi-ld/v1/entities \
     "id": "urn:ngsi-ld:TemperatureSensor:001",
     "type": "TemperatureSensor",
     "temperature": {"type": "Property", "value": 21.5, "unitCode": "CEL"},
-    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
   }'
 # HTTP/1.1 201 Created
 # Location: /ngsi-ld/v1/entities/urn:ngsi-ld:TemperatureSensor:001
@@ -57,7 +57,7 @@ curl -i -X POST localhost:9090/ngsi-ld/v1/subscriptions \
     "entities": [{"type": "TemperatureSensor"}],
     "watchedAttributes": ["temperature"],
     "notification": {"endpoint": {"uri": "http://127.0.0.1:9491/notify"}},
-    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
   }'
 # HTTP/1.1 201 Created
 ```
@@ -71,7 +71,7 @@ curl -i -X PATCH \
   localhost:9090/ngsi-ld/v1/entities/urn:ngsi-ld:TemperatureSensor:001/attrs/temperature \
   -H 'Content-Type: application/ld+json' \
   -d '{"type": "Property", "value": 42.0,
-       "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+       "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"}'
 # HTTP/1.1 204 No Content
 ```
 
@@ -105,7 +105,7 @@ curl -s -X POST localhost:9392/ngsi-ld/v1/entities \
   -H 'Content-Type: application/ld+json' \
   -d '{"id": "urn:ngsi-ld:ParkingSpot:B:042", "type": "ParkingSpot",
        "status": {"type": "Property", "value": "free"},
-       "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+       "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"}'
 ```
 
 Tell broker A that broker B serves `ParkingSpot` entities:
@@ -118,7 +118,7 @@ curl -i -X POST localhost:9391/ngsi-ld/v1/csourceRegistrations \
     "type": "ContextSourceRegistration",
     "information": [{"entities": [{"type": "ParkingSpot"}]}],
     "endpoint": "http://127.0.0.1:9392",
-    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"
+    "@context": "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"
   }'
 # HTTP/1.1 201 Created
 ```

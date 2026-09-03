@@ -1486,7 +1486,7 @@ mod tests {
                           "proofValue": "zQeVbY4oey5q2M3XKaxup3tmzN4DRFTLVqpLMweBrSxMY"}}});
         let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
             .expect("C.11-shaped ngsildproof is valid");
-        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/ngsildproof"][0];
+        let inst = &out["https://uri.etsi.org/ngsi-ld/ngsildproof"][0];
         assert_eq!(inst["entityIdSealed"], "urn:ngsi-ld:Store:002");
         assert_eq!(
             inst["entityTypeSealed"], "https://uri.etsi.org/ngsi-ld/default-context/Store",
@@ -1621,7 +1621,7 @@ mod tests {
                             "entityTypeSealed": "Store"}});
         let out = expand_entity(doc.as_object().unwrap(), &core(), ExpandOpts::default())
             .expect("the ngsildproof Property is the one carrier");
-        let inst = &out["https://uri.etsi.org/ngsi-ld/default-context/ngsildproof"][0];
+        let inst = &out["https://uri.etsi.org/ngsi-ld/ngsildproof"][0];
         assert_eq!(inst["entityIdSealed"], "urn:ngsi-ld:Store:1");
     }
 

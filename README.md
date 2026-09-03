@@ -64,7 +64,7 @@ curl -i -X POST localhost:9090/ngsi-ld/v1/entities \
   -H 'Content-Type: application/ld+json' \
   -d '{"id":"urn:ngsi-ld:TemperatureSensor:001","type":"TemperatureSensor",
        "temperature":{"type":"Property","value":21.5,"unitCode":"CEL"},
-       "@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld"}'
+       "@context":"https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.9.jsonld"}'
 # HTTP/1.1 201 Created
 # Location: /ngsi-ld/v1/entities/urn:ngsi-ld:TemperatureSensor:001
 
