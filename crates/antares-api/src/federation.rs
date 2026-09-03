@@ -1174,12 +1174,26 @@ pub async fn forward(
                 let status = resp.status().as_u16();
                 st.egress.record_success(tenant.as_str(), &url);
                 note_forward(st, tenant, reg, (200..300).contains(&status));
-                let peer_warnings: Vec<String> = resp
-                    .headers()
-                    .get_all("NGSILD-Warning")
+                // 6.3.17: the peer's own values travel on (4.3.6.4), but
+                // only up to the cap — the list is written by the peer and
+                // sent by this broker, and past the cap one source would
+                // both outgrow the fan-out and crowd out the warnings the
+                // clause obliges this broker to raise about the others.
+                // The head is kept: a source states its own outcome before
+                // the ones it relays.
+                let all = resp.headers().get_all("NGSILD-Warning");
+                let peer_warnings: Vec<String> = all
                     .iter()
                     .filter_map(|v| v.to_str().ok().map(str::to_owned))
+                    .take(crate::bounds::MAX_PEER_WARNINGS)
                     .collect();
+                if all.iter().count() > peer_warnings.len() {
+                    tracing::warn!(
+                        "registration {} sent more than {} NGSILD-Warning values; the rest were dropped",
+                        reg.reg_id,
+                        crate::bounds::MAX_PEER_WARNINGS
+                    );
+                }
                 let body = read_body_capped(resp).await;
                 (status, body, peer_warnings)
             }

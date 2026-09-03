@@ -53,6 +53,7 @@ progress). A memory-store broker answers:
     "maxGeoVertices": 1024,
     "maxJoinLevel": 10,
     "maxJsonDepth": 64,
+    "maxPeerWarnings": 8,
     "maxQLinkLookups": 512,
     "maxQNodes": 512,
     "maxRegexCache": 1024,

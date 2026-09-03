@@ -81,6 +81,16 @@ pub static MAX_FED_FANOUT: std::sync::LazyLock<usize> = std::sync::LazyLock::new
         .filter(|n| *n > 0)
         .unwrap_or(8)
 });
+/// 6.3.17: `NGSILD-Warning` values relayed from ONE Context Source. The
+/// clause makes a peer's warnings part of this broker's answer (4.3.6.4 puts
+/// a deeper hop's abnormality on the response that survived it), so the list
+/// is written by the peer but sent by this broker to a client that never
+/// addressed it. Table 6.3.17-1 defines four codes and a cascade adds a few
+/// per hop, so eight carries a real cascade; past it a source would make the
+/// response grow faster than the fan-out does, and would crowd out the
+/// warnings the clause obliges this broker to raise about the other sources.
+pub const MAX_PEER_WARNINGS: usize = 8;
+
 pub const MAX_JOIN_LEVEL: usize = 10; // → 400 BadRequestData
 /// → 400 BadRequestData. Documents one @context resolution may fetch, owned
 /// by the loader that enforces it (`antares_jsonld`), and the ceiling on how
@@ -133,6 +143,7 @@ impl LimitStats {
             "maxFedFanout": *MAX_FED_FANOUT,
             "maxFedInflight": *MAX_FED_INFLIGHT,
             "maxJoinLevel": MAX_JOIN_LEVEL,
+            "maxPeerWarnings": MAX_PEER_WARNINGS,
             "maxContextFetches": MAX_CONTEXT_FETCHES,
             "maxQNodes": MAX_Q_NODES,
             "maxQLinkLookups": MAX_Q_LINK_LOOKUPS,
@@ -379,6 +390,7 @@ mod tests {
                 "maxGeoVertices",
                 "maxJoinLevel",
                 "maxJsonDepth",
+                "maxPeerWarnings",
                 "maxQLinkLookups",
                 "maxQNodes",
                 "maxRegexCache",

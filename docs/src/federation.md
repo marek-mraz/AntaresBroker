@@ -182,10 +182,14 @@ saw it:
 | 111 | the source answered 2xx with a payload that is not NGSI-LD |
 
 A 404 from a source is a miss, not a warning. Warnings a peer returns
-travel back to the client next to the broker's own. Beyond the
-registration cooldown, a per-host breaker pauses an endpoint whose
-forwards keep timing out; a source that answers, even with an error, is
-never paused.
+travel back to the client next to the broker's own, up to eight per
+source (`maxPeerWarnings` in `/q/health`): the list is written by the
+source but sent by this broker, and eight carries a real cascade without
+letting one source outgrow the fan-out or bury what the broker has to
+say about the others. A source that sends more has the rest dropped and
+a line written to the log. Beyond the registration cooldown, a per-host
+breaker pauses an endpoint whose forwards keep timing out; a source that
+answers, even with an error, is never paused.
 
 ## Distributed writes
 
