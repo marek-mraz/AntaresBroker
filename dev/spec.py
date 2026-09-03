@@ -791,7 +791,7 @@ def architecture_size_violations():
             )
     text = doc.read_text(encoding="utf-8")
     for name in sorted(sizes):
-        if name.endswith(".rs") and name not in ("geo.rs", "qeval.rs", "regexcache.rs"):
+        if name.endswith(".rs"):
             if not re.search(rf"^\| `{re.escape(name)}` \|", text, re.M):
                 out.append(f"ARCHITECTURE.md: the module table has no row for {name}")
     return out

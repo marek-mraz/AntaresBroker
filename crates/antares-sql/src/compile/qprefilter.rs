@@ -2,7 +2,7 @@
 //! 5.7.4.4 S2 — the values filter compiled to a SUPERSET SQL prefilter.
 //!
 //! The temporal store keeps one row per Attribute instance, so the entity
-//! doc `qeval::eval_q` sees does not exist SQL-side until the expensive
+//! doc `eval::eval_q` sees does not exist SQL-side until the expensive
 //! per-entity reconstruction has already happened. This module narrows the
 //! ENTITY set before reconstruction instead: each q leaf the exact compiler
 //! (`compile::q`) can reproduce becomes one windowed EXISTS over

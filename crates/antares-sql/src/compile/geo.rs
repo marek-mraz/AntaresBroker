@@ -3,7 +3,7 @@
 //! over the extracted `entities.location` column (GIST-indexed).
 //!
 //! Same one-directional contract as the other compilers: this may only
-//! NARROW, and `antares_api::geo::GeoQuery::matches` stays the arbiter. Three
+//! NARROW, and `antares_ql::geo::GeoQuery::matches` stays the arbiter. Three
 //! places where the two engines could disagree are handled by deliberately
 //! widening rather than by hoping they agree:
 //!

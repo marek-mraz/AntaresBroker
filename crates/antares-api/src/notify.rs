@@ -1394,12 +1394,12 @@ pub async fn interval_tick(st: &AppState) {
                 // parses shared per distinct expression text, as in
                 // conditions_match — the sweep re-runs per due subscription
                 let q_ast = sub_str(&sub, "q").and_then(|q| {
-                    crate::regexcache::q_node(&crate::negotiate::percent_decode(q.as_bytes()))
+                    antares_ql::regex::q_node(&crate::negotiate::percent_decode(q.as_bytes()))
                 });
                 let geo = sub.get("geoQ").and_then(Value::as_object).and_then(|g| {
                     let key = serde_json::to_string(g).unwrap_or_default();
-                    crate::regexcache::geo_query(&key, || {
-                        crate::geo::GeoQuery::from_params(&geo_params(g))
+                    antares_ql::regex::geo_query(&key, || {
+                        antares_ql::geo::GeoQuery::from_params(&geo_params(g))
                             .ok()
                             .flatten()
                     })

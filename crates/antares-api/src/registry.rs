@@ -132,7 +132,7 @@ pub struct CsrSpec {
     /// 5.2.9 location ("Location for which the Context Source may be able
     /// to provide information") + 4.3.6.1: a geo query is only distributed
     /// to registrations whose location geometry matches it.
-    pub geo: Option<crate::geo::GeoQuery>,
+    pub geo: Option<antares_ql::geo::GeoQuery>,
     /// 5.2.9 observationInterval/managementInterval: "matched against the
     /// observationInterval for overlap" — a temporal read is only
     /// distributed to registrations whose declared interval overlaps the
@@ -169,7 +169,7 @@ fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
             }
         }
         if let Some(p) = ei_pat {
-            if let Ok(re) = crate::regexcache::compile(p) {
+            if let Ok(re) = antares_ql::regex::compile(p) {
                 if ids.iter().any(|i| re.find(i).is_some()) {
                     return true;
                 }
@@ -178,7 +178,7 @@ fn entity_info_matches(spec: &CsrSpec, ei: &Value, ctx: &Context) -> bool {
     }
     if let Some(qp) = &spec.id_pattern {
         if let Some(rid) = ei_id {
-            if crate::regexcache::compile(qp).is_ok_and(|re| re.find(rid).is_some()) {
+            if antares_ql::regex::compile(qp).is_ok_and(|re| re.find(rid).is_some()) {
                 return true;
             }
         }
@@ -256,7 +256,7 @@ pub(crate) fn csf_matches(csf: &antares_ql::QNode, reg: &Value, ctx: &Context) -
         };
         pseudo.insert(ctx.expand_key(k), inst);
     }
-    crate::qeval::eval_q(csf, &Value::Object(pseudo), ctx, &|_| None)
+    antares_ql::eval::eval_q(csf, &Value::Object(pseudo), ctx, &|_| None)
 }
 
 pub fn csr_matches(spec: &CsrSpec, doc: &Value, ctx: &Context) -> bool {
@@ -309,7 +309,9 @@ pub fn csr_matches_subscription(sub: &Value, reg: &Value, ctx: &Context) -> bool
         }
     }
     if let Some(g) = sub.get("geoQ").and_then(Value::as_object) {
-        if let Ok(Some(gq)) = crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g)) {
+        if let Ok(Some(gq)) =
+            antares_ql::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))
+        {
             match reg.get("location") {
                 Some(geom) => {
                     if !gq.matches_geometry(geom) {

@@ -87,7 +87,7 @@ fn norm_entity_selectors(v: &Value, ctx: &Context) -> Result<Value, NgsiError> {
                     let p = ev
                         .as_str()
                         .ok_or_else(|| bad("idPattern must be a string".into()))?;
-                    crate::regexcache::compile(p)
+                    antares_ql::regex::compile(p)
                         .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
                     ne.insert("idPattern".into(), ev.clone());
                 }
@@ -418,7 +418,7 @@ fn norm_member(
             let g = v
                 .as_object()
                 .ok_or_else(|| bad("geoQ must be an object".into()))?;
-            crate::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))?
+            antares_ql::geo::GeoQuery::from_params(&antares_matcher::geo_params(g))?
                 .ok_or_else(|| bad("geoQ requires georel (5.2.13)".into()))?;
             let mut ng = g.clone();
             if let Some(gp) = g.get("geoproperty").and_then(Value::as_str) {

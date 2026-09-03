@@ -3,7 +3,7 @@
 //! through BOTH engines:
 //!
 //! * the in-memory evaluator (`geo::GeoQuery::matches`, `scope_matches`,
-//!   `qeval::eval_q`) — the arbiter, and what `memory`/`file` modes use;
+//!   `eval::eval_q`) — the arbiter, and what `memory`/`file` modes use;
 //! * the compiled SQL (`antares-sql/src/compile/*`) executed by PostGIS.
 //!
 //! The invariant under test is the one the whole pushdown rests on: **SQL may
@@ -223,7 +223,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        let gq = antares_api::geo::GeoQuery::from_params(&params)
+        let gq = antares_ql::geo::GeoQuery::from_params(&params)
             .expect("valid geoquery")
             .expect("present");
 
@@ -327,7 +327,7 @@ async fn compiled_sql_never_drops_a_row_the_evaluator_keeps() {
     .iter()
     .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
     .collect();
-    let gq = antares_api::geo::GeoQuery::from_params(&params)
+    let gq = antares_ql::geo::GeoQuery::from_params(&params)
         .expect("valid")
         .expect("present");
     let spec = gq.to_sql_spec(&ctx);
@@ -504,7 +504,7 @@ async fn exactness_gated_pushdown_pages_projects_and_counts() {
 
 /// 4.9 on the CURRENT-STATE path, under the contract the whole file rests
 /// on: SQL may only narrow. The temporal side of `q=` has a battery of
-/// deliberately awkward shapes against `qeval::eval_q`; the current-state
+/// deliberately awkward shapes against `eval::eval_q`; the current-state
 /// side had one hand-written filter over ten uniform rooms, which is the
 /// half of the compiler most likely to drop a row — the value classes it
 /// meets are whatever a client stored, not a fixture of matching type.
@@ -664,7 +664,7 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
         let ast = antares_ql::parse_q(q).unwrap_or_else(|e| panic!("q={q} does not parse: {e:?}"));
         let expected: Vec<&str> = docs
             .iter()
-            .filter(|(_, d)| antares_api::qeval::eval_q(&ast, d, &ctx, &|_| None))
+            .filter(|(_, d)| antares_ql::eval::eval_q(&ast, d, &ctx, &|_| None))
             .map(|(id, _)| *id)
             .collect();
         let got = ids(&store
@@ -708,7 +708,7 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
         );
         let d = &docs.iter().find(|(id, _)| *id == out).expect("fixture").1;
         assert!(
-            !antares_api::qeval::eval_q(&ast, d, &ctx, &|_| None),
+            !antares_ql::eval::eval_q(&ast, d, &ctx, &|_| None),
             "case bug: {out} matches speed>25"
         );
     }
@@ -737,7 +737,7 @@ async fn current_state_q_prefilter_narrows_but_never_drops() {
 /// datasetId multi-instance, out-of-window decoys), a battery of q filters
 /// spanning the 4.9 grammar, and for each:
 ///
-/// * every entity whose WINDOWED doc `qeval::eval_q` accepts MUST come back
+/// * every entity whose WINDOWED doc `eval::eval_q` accepts MUST come back
 ///   from SQL (superset — a drop here is two store modes disagreeing);
 /// * for filters whose every leaf compiles, known non-matches must be
 ///   EXCLUDED SQL-side (tightness — proves the prefilter reached the DB).
@@ -920,7 +920,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
         let ast = antares_ql::parse_q(q).expect("parse");
         let expected: Vec<&str> = docs
             .iter()
-            .filter(|(_, d)| antares_api::qeval::eval_q(&ast, &windowed(d), &ctx, &|_| None))
+            .filter(|(_, d)| antares_ql::eval::eval_q(&ast, &windowed(d), &ctx, &|_| None))
             .map(|(id, _)| *id)
             .collect();
         let tf = antares_sql::store::filter::TemporalFilter {
@@ -949,7 +949,7 @@ async fn temporal_q_prefilter_narrows_but_never_drops() {
             // an excluded id must really be a non-match, or the case is wrong
             let d = &docs.iter().find(|(id, _)| id == out).expect("fixture").1;
             assert!(
-                !antares_api::qeval::eval_q(&ast, &windowed(d), &ctx, &|_| None),
+                !antares_ql::eval::eval_q(&ast, &windowed(d), &ctx, &|_| None),
                 "case bug: {out} actually matches q={q}"
             );
         }

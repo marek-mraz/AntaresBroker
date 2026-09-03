@@ -65,7 +65,7 @@ Eleven modules stay public because a host or a surface reaches into them:
 | `negotiate` | `ApiError`/`ApiResult`, `tenant_from`, `CleanParams`, `QUERY_PARAMS` — what an `ApiSurface` needs to answer like the broker |
 | `policy` | the policy seam (ADR-0020): `PolicyEngine`, `Subject`, `Operation`, `Decision`, `Filter`, `NotifyDecision`, the built-in `AllowAll`, and the fail-closed `decide`/`pre_notify` an engine is called through |
 | `notify` | `seed_mirror`, `process_change`, `record_temporal_change`, `interval_tick`: the pipeline steps a host drives |
-| `qeval` | `antares_ql::eval` re-exported: `eval_q`, in-memory `q` evaluation over a stored document |
+| `eval` | `antares_ql::eval` re-exported: `eval_q`, in-memory `q` evaluation over a stored document |
 | `state` | `AppState`, its builders (`with_drivers`, `with_store`, `with_sink`, `with_surface`, `with_surfaces`, `with_policy`) and `call`, the in-process handle a façade surface drives the NGSI-LD router through |
 
 Everything else is `pub(crate)`. There is no ratchet on this: once an item

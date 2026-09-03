@@ -88,12 +88,11 @@ module's header comment.
 | `policy.rs` | 996 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, the clauses a narrowing can reach and the refusal everywhere else, the fail-closed calls that deny on a panic or a timeout, and the stored subject a notification is decided under |
 | `state.rs` | 930 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
-`geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
-own almost nothing: each is a handful of lines re-exporting `antares_ql::geo`,
-`::eval` and `::regex` so the broker-side paths (`crate::geo::GeoQuery`,
-`crate::qeval::eval_q`, `crate::regexcache::compile`) stay stable while the
-evaluation itself lives in the crate a gateway can use on its own. That
-includes the 4.9 precedence between `expandValues` and `jsonKeys`
+Geoquery evaluation, the `q=` evaluator and the caches of compiled client
+query text are not in that table because they are not this crate's: they are
+`antares_ql::geo`, `::eval` and `::regex`, named by those paths at every call
+site here, and the evaluation lives in the crate a gateway can use on its
+own. That includes the 4.9 precedence between `expandValues` and `jsonKeys`
 (`antares_ql::eval::expansion_list`): the entity query, the temporal query
 and a Subscription's notification condition (Table 5.2.12-1) all carry the
 pair, and the matcher cannot reach the broker crate, so the rule lives beside

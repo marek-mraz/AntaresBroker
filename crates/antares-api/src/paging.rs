@@ -312,7 +312,7 @@ pub fn order_entities(
             .get("orderGeometry")
             .cloned()
             .unwrap_or_else(|| "Point".into());
-        Some(crate::geo::parse_ref_geometry(&gtype, &coords).map_err(bad)?)
+        Some(antares_ql::geo::parse_ref_geometry(&gtype, &coords).map_err(bad)?)
     } else {
         None
     };
@@ -459,10 +459,10 @@ pub fn order_entities(
                     let Some(refg) = refg.as_ref() else {
                         return std::cmp::Ordering::Equal;
                     };
-                    let da =
-                        order_value(a, k, ctx).and_then(|v| crate::geo::order_distance_m(refg, &v));
-                    let db =
-                        order_value(b, k, ctx).and_then(|v| crate::geo::order_distance_m(refg, &v));
+                    let da = order_value(a, k, ctx)
+                        .and_then(|v| antares_ql::geo::order_distance_m(refg, &v));
+                    let db = order_value(b, k, ctx)
+                        .and_then(|v| antares_ql::geo::order_distance_m(refg, &v));
                     match (da, db) {
                         (Some(x), Some(y)) => {
                             let mut o = x.total_cmp(&y);

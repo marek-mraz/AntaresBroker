@@ -96,7 +96,7 @@ impl FedReg {
             || self
                 .ent_patterns
                 .iter()
-                .any(|p| crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some()))
+                .any(|p| antares_ql::regex::compile(p).is_ok_and(|re| re.find(id).is_some()))
     }
     /// Does this registration cover the given expanded attribute IRI?
     pub fn covers_attr(&self, iri: &str) -> bool {
@@ -1812,7 +1812,9 @@ fn query_spec(ctx: &Context, params: &HashMap<String, String>) -> crate::registr
             .get("datasetId")
             .map(|s| s.split(',').map(|d| d.trim().to_owned()).collect()),
         csf: params.get("csf").and_then(|c| antares_ql::parse_q(c).ok()),
-        geo: crate::geo::GeoQuery::from_params(params).ok().flatten(),
+        geo: antares_ql::geo::GeoQuery::from_params(params)
+            .ok()
+            .flatten(),
         ..Default::default()
     }
 }
@@ -1866,7 +1868,7 @@ fn admits_import(reg: &FedReg, spec: &crate::registry::CsrSpec, id: &str) -> boo
         || spec
             .id_pattern
             .as_deref()
-            .is_some_and(|p| crate::regexcache::compile(p).is_ok_and(|re| re.find(id).is_some()))
+            .is_some_and(|p| antares_ql::regex::compile(p).is_ok_and(|re| re.find(id).is_some()))
 }
 
 pub async fn fed_query(

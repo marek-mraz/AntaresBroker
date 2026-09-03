@@ -113,7 +113,7 @@ fn norm_registration_info(v: &Value, ctx: &Context) -> Result<Value, NgsiError> 
                                     let p = ev
                                         .as_str()
                                         .ok_or_else(|| bad("idPattern must be a string".into()))?;
-                                    crate::regexcache::compile(p)
+                                    antares_ql::regex::compile(p)
                                         .map_err(|_| bad(format!("invalid idPattern {p:?}")))?;
                                     ne.insert("idPattern".into(), ev.clone());
                                 }
@@ -432,7 +432,7 @@ fn norm_reg_member(
             let ok = v
                 .as_object()
                 .and_then(|o| Some((o.get("type")?.as_str()?, o.get("coordinates")?)))
-                .is_some_and(|(t, c)| crate::geo::parse_ref_geometry(t, c).is_ok());
+                .is_some_and(|(t, c)| antares_ql::geo::parse_ref_geometry(t, c).is_ok());
             if !ok {
                 return Err(bad(format!("{k} must be a 4.7 GeoJSON geometry (5.2.9)")));
             }
@@ -657,7 +657,7 @@ fn check_entity_conflict(
                     ei_types(e),
                     e.get("idPattern")
                         .and_then(Value::as_str)
-                        .and_then(|p| crate::regexcache::compile(p).ok()),
+                        .and_then(|p| antares_ql::regex::compile(p).ok()),
                 )
             })
             .collect();
@@ -1081,7 +1081,7 @@ pub async fn query_registrations(
         spec.id_pattern = params
             .get("idPattern")
             .map(|p| {
-                crate::regexcache::compile(p)
+                antares_ql::regex::compile(p)
                     .map(|_| p.clone())
                     .map_err(|_| bad(format!("invalid idPattern {p:?}")))
             })
@@ -1108,7 +1108,7 @@ pub async fn query_registrations(
             q_attr_roots(&ast, &mut roots);
             attrs.extend(roots.into_iter().map(|r| ctx.expand_key(&r)));
         }
-        let geo = crate::geo::GeoQuery::from_params(&params)?;
+        let geo = antares_ql::geo::GeoQuery::from_params(&params)?;
         if let Some(g) = &geo {
             attrs.push(ctx.expand_key(&g.geoproperty));
         }

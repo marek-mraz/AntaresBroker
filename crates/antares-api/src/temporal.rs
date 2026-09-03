@@ -1662,7 +1662,7 @@ fn window_conditions_match(
     doc: &Value,
     tq: Option<&TemporalQ>,
     q_ast: Option<&antares_ql::QNode>,
-    geo: Option<&crate::geo::GeoQuery>,
+    geo: Option<&antares_ql::geo::GeoQuery>,
     ctx: &Context,
 ) -> bool {
     // 5.7.4.4 S2/S3: the values filter and geoquery are checked against
@@ -1680,7 +1680,7 @@ fn window_conditions_match(
         }
     }
     if let Some(ast) = q_ast {
-        if !crate::qeval::eval_q(ast, &eval_doc, ctx, &|_| None) {
+        if !antares_ql::eval::eval_q(ast, &eval_doc, ctx, &|_| None) {
             return false;
         }
     }
@@ -1790,9 +1790,9 @@ pub(crate) async fn query_temporal_inner(
     // query — term values expanded against the @context before executing,
     // less the Attributes jsonKeys declares uninterpretable.
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
-        crate::qeval::apply_expand_values(
+        antares_ql::eval::apply_expand_values(
             ast,
-            crate::qeval::expansion_list(
+            antares_ql::eval::expansion_list(
                 params.get("expandValues").map(String::as_str),
                 params.get("jsonKeys").map(String::as_str),
             )
@@ -1807,9 +1807,9 @@ pub(crate) async fn query_temporal_inner(
     let narrowed = filter.narrow_params(params)?;
     let params = &narrowed;
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
-        crate::qeval::apply_expand_values(
+        antares_ql::eval::apply_expand_values(
             ast,
-            crate::qeval::expansion_list(
+            antares_ql::eval::expansion_list(
                 params.get("expandValues").map(String::as_str),
                 params.get("jsonKeys").map(String::as_str),
             )
@@ -1834,7 +1834,7 @@ pub(crate) async fn query_temporal_inner(
     }
     let id_pattern = match params.get("idPattern") {
         Some(p) => Some(
-            crate::regexcache::compile(p)
+            antares_ql::regex::compile(p)
                 .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
         ),
         None => None,
@@ -1847,7 +1847,7 @@ pub(crate) async fn query_temporal_inner(
     let attrs_filter = selection(&trepr);
     // only the attrs= param excludes entities; pick is projection-only
     let entity_attr_filter = trepr.attrs.clone();
-    let geo = crate::geo::GeoQuery::from_params(params)?;
+    let geo = antares_ql::geo::GeoQuery::from_params(params)?;
 
     // Push entity narrowing (ids/types/attrs) and instance-window
     // pruning (range + RANK()-capped lastN) into the store. The loop below

@@ -11,7 +11,7 @@
 //! as a separate list.
 //!
 //! The compiler is deliberately partial. It returns `None` for any shape it
-//! cannot reproduce EXACTLY as `qeval::eval_q` would evaluate it, and the
+//! cannot reproduce EXACTLY as `eval::eval_q` would evaluate it, and the
 //! caller then falls back to fetching the rows the other predicates select
 //! and filtering them in memory. A wrong row is a compliance bug; a slow
 //! query is a benchmark item.
@@ -21,7 +21,7 @@
 //! its comparable value under one of `value`/`object`/`languageMap`/`vocab`/
 //! `json`/`valueList`/`objectList`.
 //!
-//! The AST holds TERMS, not IRIs — `qeval` expands them against the request
+//! The AST holds TERMS, not IRIs — `eval` expands them against the request
 //! `@context` at evaluation time. The compiler therefore takes the same
 //! expander as a closure rather than depending on `antares-jsonld`: one
 //! function, no crate edge, and the two paths cannot disagree about what a
@@ -29,7 +29,7 @@
 
 use crate::{CmpOp, QNode, QValue};
 
-/// The comparable-value members, in `qeval::comparable_value` order. That
+/// The comparable-value members, in `eval::comparable_value` order. That
 /// function returns the FIRST present member; we OR over all of them, which
 /// is identical for valid NGSI-LD (an attribute instance carries exactly one)
 /// and only diverges for a document that is already invalid.
@@ -44,7 +44,7 @@ const VALUE_KEYS: &[&str] = &[
 ];
 
 /// The members whose value a client may write as a JSON-LD typed value
-/// (annex C.6) — `qeval::push_target` unwraps exactly these. A JsonProperty
+/// (annex C.6) — `eval::push_target` unwraps exactly these. A JsonProperty
 /// is deliberately absent: the core `@context` types its `json` member
 /// `@json`, so an `@value` inside it is data.
 const TYPED_KEYS: &[&str] = &["value", "valueList"];
@@ -188,12 +188,12 @@ pub fn value_or_filter(
         .iter()
         .map(|k| format!(".\"{k}\""))
         // C.6: a value written as a JSON-LD typed value carries it under
-        // `@value`, and `qeval::untyped` compares that member — one more
+        // `@value`, and `eval::untyped` compares that member — one more
         // step for the members that can hold one.
         .chain(TYPED_KEYS.iter().map(|k| format!(".\"{k}\".\"@value\"")));
     for step in steps {
         // lax mode (the default) auto-unwraps arrays at every step, which is
-        // exactly `qeval::compare`'s "any element of an array value matches".
+        // exactly `eval::compare`'s "any element of an array value matches".
         let jp = match filter {
             Some(f) => format!("{prefix}{step}{f}"),
             None => format!("{prefix}{step}"),
@@ -222,11 +222,11 @@ pub fn lang_filter(op: CmpOp, want: &QValue) -> Option<String> {
 
 /// Dotted q path → jsonpath prefix addressing the instance objects.
 /// Exact only while every segment is an attribute step (`attr.sub.subsub`);
-/// `qeval::collect` falls back to navigating INTO a value object when a
+/// `eval::collect` falls back to navigating INTO a value object when a
 /// segment is not a sub-attribute, and that ambiguity is not reproducible in
 /// one jsonpath — so those queries stay in-memory.
 fn path_expr(path: &[String], expand: &dyn Fn(&str) -> String) -> Option<String> {
-    // Only single-segment paths are unambiguous. For a longer one `qeval::
+    // Only single-segment paths are unambiguous. For a longer one `eval::
     // collect` picks between a sub-attribute step and navigation INTO the
     // value object based on what the DOCUMENT happens to hold — a per-row
     // decision no single jsonpath reproduces. Refuse rather than guess.
@@ -272,7 +272,7 @@ fn cmp_filter(op: CmpOp, want: &QValue) -> Option<String> {
         }
         _ => {}
     }
-    // Ordering against a STRING is left to the evaluator: `qeval::compare`
+    // Ordering against a STRING is left to the evaluator: `eval::compare`
     // orders with Rust's byte-wise `str` comparison, while jsonpath orders
     // through the database collation. They agree on ASCII and can disagree
     // elsewhere, and disagreeing HERE drops a matching row (a compliance
@@ -320,7 +320,7 @@ fn literal(v: &QValue) -> Option<String> {
             // 4.9 numbers are parsed to f64, but jsonb holds exact `numeric`:
             // past 2^53 the f64 the query carries is no longer the integer the
             // client wrote, so the compiled predicate would refuse rows
-            // `qeval` (which compares f64 to f64 on BOTH sides) keeps. Leave
+            // `eval` (which compares f64 to f64 on BOTH sides) keeps. Leave
             // those to the evaluator rather than narrow wrongly.
             if n.abs() >= 9_007_199_254_740_992.0 {
                 return None;
@@ -387,7 +387,7 @@ mod tests {
             "$.\"https://uri.etsi.org/ngsi-ld/default-context/temperature\"[*].\"value\" ? (@ > 20)"
         );
         // C.6: the same term written as a JSON-LD typed value is an arm of
-        // the same OR, so the pushdown keeps the rows `qeval` keeps
+        // the same OR, so the pushdown keeps the rows `eval` keeps
         assert_eq!(
             got.binds[VALUE_KEYS.len()],
             "$.\"https://uri.etsi.org/ngsi-ld/default-context/temperature\"[*].\"value\".\"@value\" ? (@ > 20)"

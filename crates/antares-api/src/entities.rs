@@ -5,7 +5,6 @@
 use crate::history::mirror_delete_entity;
 use crate::negotiate::*;
 use crate::paging::{attach_warnings, order_entities, page_params, paginate, paginate_pre};
-use crate::qeval::eval_q;
 use crate::repr::{apply, parse_repr};
 use crate::repr::{
     collect_flat_beyond, compact_for, inline_join_beyond, to_geojson_collection,
@@ -15,6 +14,7 @@ use crate::stamp::stamp_new;
 use crate::state::{now_iso, AppState};
 use antares_jsonld::{expand_entity, is_ngsi_null, ExpandOpts};
 use antares_model::{NgsiError, TenantId};
+use antares_ql::eval::eval_q;
 use antares_ql::parse_q;
 use antares_store::CurrentStateDriverExt;
 use antares_store::Kind;
@@ -359,7 +359,7 @@ async fn retrieve_entity_inner(
     // refusal here would tell the caller the Entity is there.
     if let Some(ast) = &filter.q {
         let lookup = |uri: &str| st.store.get(&tenant, Kind::Entity, uri).ok().flatten();
-        if !crate::qeval::eval_q(ast, &doc, &ctx, &lookup) {
+        if !antares_ql::eval::eval_q(ast, &doc, &ctx, &lookup) {
             return Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into());
         }
     }
@@ -1063,7 +1063,7 @@ pub fn filter_entities_paged(
                 return Err(NgsiError::BadRequestData(format!("invalid idPattern {p:?}")).into());
             }
             Some(
-                crate::regexcache::compile(p)
+                antares_ql::regex::compile(p)
                     .map_err(|_| NgsiError::BadRequestData(format!("invalid idPattern {p:?}")))?,
             )
         }
@@ -1093,9 +1093,9 @@ pub fn filter_entities_paged(
         // against the supplied @context using JSON-LD type coercion prior to
         // executing the query" (EXAMPLE 12), less the Attributes jsonKeys
         // declares uninterpretable as JSON-LD.
-        Some(q) => Some(crate::qeval::apply_expand_values(
+        Some(q) => Some(antares_ql::eval::apply_expand_values(
             parse_q(q)?,
-            crate::qeval::expansion_list(
+            antares_ql::eval::expansion_list(
                 params.get("expandValues").map(String::as_str),
                 params.get("jsonKeys").map(String::as_str),
             )
@@ -1105,7 +1105,7 @@ pub fn filter_entities_paged(
         None => None,
     };
     let scope_q = params.get("scopeQ");
-    let geo = crate::geo::GeoQuery::from_params(params)?;
+    let geo = antares_ql::geo::GeoQuery::from_params(params)?;
 
     // Hand the store what it can filter on. A backend that can push
     // the predicate down (postgres/timescale) returns fewer rows — and says
