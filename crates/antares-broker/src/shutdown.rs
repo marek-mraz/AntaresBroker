@@ -509,26 +509,22 @@ mod tests {
     /// waiting there would only burn the deadline. Needs a live database —
     /// the outbox table exists on the Pg arm alone, so the memory store can
     /// never exercise the wait (it answers an empty page and falls through).
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs a live database (ANTARES_TEST_DATABASE_URL)"]
     async fn outbox_flush_waits_for_pending_rows_and_only_when_asked() {
         use antares_sql::store::any::{AnyStore, PgBackend};
         use antares_sql::store::Kind;
         let url = std::env::var("ANTARES_TEST_DATABASE_URL")
             .expect("ANTARES_TEST_DATABASE_URL: this test is asked for by name where a DB exists");
-        // Multi-thread: this test drives the store from `block_on` inside a
-        // synchronous closure, which a current-thread runtime cannot host.
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let connect = || {
+        // a nested fn, not a closure: connecting is awaited, and an async
+        // closure is not a stable language feature
+        async fn connect(url: &str) -> AnyStore {
             AnyStore::Pg(PgBackend::new(
-                rt.block_on(antares_sql::store::pg::connect(&url, 5))
+                antares_sql::store::pg::connect(url, 5)
+                    .await
                     .expect("connect+migrate"),
             ))
-        };
+        }
         let run = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -539,7 +535,7 @@ mod tests {
 
         // One committed-but-unpublished row: outbox on, then a write. Nothing
         // publishes it here — a unit test wires no bus drain task.
-        let store = connect();
+        let store = connect(&url).await;
         store.set_outbox(true);
         store
             .create(
@@ -565,14 +561,15 @@ mod tests {
 
         // Not asked to flush: the pending row may not delay the close at all.
         let t0 = Instant::now();
-        rt.block_on(drain(
+        drain(
             &inflight,
             &AtomicUsize::new(0),
             &store,
             &antares_store::NoTemporal,
             Duration::from_millis(400),
             false,
-        ));
+        )
+        .await;
         let closed = t0.elapsed();
         assert!(
             closed < Duration::from_millis(250),
@@ -581,16 +578,17 @@ mod tests {
 
         // Asked to flush: the rows stay pending, so the flush must hold the
         // process to its deadline rather than exit on top of them.
-        let store = connect();
+        let store = connect(&url).await;
         let t0 = Instant::now();
-        rt.block_on(drain(
+        drain(
             &inflight,
             &AtomicUsize::new(0),
             &store,
             &antares_store::NoTemporal,
             Duration::from_millis(400),
             true,
-        ));
+        )
+        .await;
         let waited = t0.elapsed();
         assert!(
             waited >= Duration::from_millis(400),
@@ -604,7 +602,7 @@ mod tests {
         // Leave the shared table as it was found: ack only our own seqs (a
         // blanket ack would delete another test's pending rows) and drop the
         // probe entity with the outbox off, so the delete enqueues nothing.
-        let store = connect();
+        let store = connect(&url).await;
         store
             .delete(&tenant, Kind::Entity, &id)
             .await
