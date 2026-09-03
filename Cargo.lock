@@ -73,6 +73,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wasm-bindgen-futures",
  "web-time",

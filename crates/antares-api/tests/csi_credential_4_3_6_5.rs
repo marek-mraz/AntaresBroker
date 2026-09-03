@@ -182,7 +182,13 @@ async fn the_credential_is_conveyed_on_the_forward() {
     let secret = "Bearer csi-travels-8c1f";
     let st = state();
     let (port, seen) = peer(reply("200 OK", "[]"));
-    register(&st, "urn:ngsi-ld:ContextSourceRegistration:e3a", port, secret).await;
+    register(
+        &st,
+        "urn:ngsi-ld:ContextSourceRegistration:e3a",
+        port,
+        secret,
+    )
+    .await;
 
     let (code, _, body) = call(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle").await;
     assert_eq!(code, StatusCode::OK, "{body}");
@@ -201,15 +207,33 @@ async fn the_credential_is_conveyed_on_the_forward() {
 async fn a_failing_forward_writes_the_credential_nowhere() {
     let secret = "Bearer csi-stays-home-4d7e";
     let st = state();
-    let (port, seen) = peer(reply("500 Internal Server Error", r#"{"detail":"upstream"}"#));
-    register(&st, "urn:ngsi-ld:ContextSourceRegistration:e3b", port, secret).await;
+    let (port, seen) = peer(reply(
+        "500 Internal Server Error",
+        r#"{"detail":"upstream"}"#,
+    ));
+    register(
+        &st,
+        "urn:ngsi-ld:ContextSourceRegistration:e3b",
+        port,
+        secret,
+    )
+    .await;
     let dead = dead_port();
-    register(&st, "urn:ngsi-ld:ContextSourceRegistration:e3c", dead, secret).await;
+    register(
+        &st,
+        "urn:ngsi-ld:ContextSourceRegistration:e3c",
+        dead,
+        secret,
+    )
+    .await;
 
     let (code, headers, body) = call(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle").await;
     assert!(code.is_success() || code.is_server_error(), "{code}");
     assert!(
-        seen.lock().expect("lock").iter().any(|r| r.contains(secret)),
+        seen.lock()
+            .expect("lock")
+            .iter()
+            .any(|r| r.contains(secret)),
         "the forward that was supposed to fail never carried the credential"
     );
     // 6.3.17: the source did answer, so the response says so
