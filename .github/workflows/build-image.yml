@@ -43,6 +43,13 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The image is built from the default features; this is the check that
+      # they still carry no addon, run before the build rather than after, so
+      # a red gate costs no image.
+      - name: No addon in the shipped build
+        run: ./dev/check-no-addon.sh
 
       - name: Build antares-local:${{ env.TAG }} (dep layer cached across runs)
         uses: docker/build-push-action@v6

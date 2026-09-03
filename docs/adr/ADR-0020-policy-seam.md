@@ -204,8 +204,16 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
 - A counting engine, reachable from no socket, walks every route of
   `router()` and asserts each operation hits the gate exactly once. A
   handler that skips the gate is a red test, not a review finding.
-- `cargo tree -p antares-broker` with default features names no engine
-  crate, and the release gate proves no addon is in the shipped image.
+- `dev/check-no-addon.sh` is the release gate: `cargo tree -p
+  antares-broker -e normal --locked` with the default features may name no
+  crate under `examples/` and no engine or façade crate. It runs in
+  `workspace.yml` (so on every `ci` and `full`), immediately before the
+  release binary build in `full.yml`, and before the image is built in
+  `build-image.yml`; it refuses a suspiciously small tree and self-tests
+  by proving its pattern DOES match a build carrying the addon, so it can
+  never be a grep that has never matched anything. `k8s-smoke.yml` asserts
+  the other half from the deployed image: `/q/health` reports the policy
+  engine `allow-all` and no surface beyond `admin`.
   `policy_shelf_tests` in `antares-broker` asserts the shelf of a build
   without the addon feature is exactly `allow-all`, that no selection is
   that engine, and that an unknown name is fatal rather than wide open.

@@ -182,6 +182,13 @@ gate run — conformance is asserted against it, never against an addon.
 An unknown name is fatal at startup and lists the shelf the binary was
 built with, so a typo cannot quietly serve every request wide open.
 
+That an addon stays out of a release is a gate, not a convention:
+`dev/check-no-addon.sh` runs on every `ci`, before the release binary
+build and before the image build, and refuses a dependency tree naming a
+crate under `examples/` or any engine or façade crate; `k8s-smoke` then
+asserts the deployed image reports `allow-all` and no surface beyond
+`admin`.
+
 Adding one is a struct implementing the trait plus an entry in
 `POLICY_SHELF` (`crates/antares-broker/src/main.rs`); no core crate
 changes. Hold it to `antares_api::policy::run_policy_contract` (behind the

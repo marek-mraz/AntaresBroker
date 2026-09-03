@@ -261,6 +261,11 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get install -y -q musl-tools
+      # The released binary runs the core alone. Checked HERE and not only
+      # in the test gate, because this is where the artifact people download
+      # is produced.
+      - name: No addon in the shipped build
+        run: ./dev/check-no-addon.sh
       - name: Build + package
         run: |
           # --locked: the released binary and the released image must be built

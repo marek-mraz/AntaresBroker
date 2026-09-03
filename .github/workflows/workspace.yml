@@ -217,6 +217,13 @@ jobs:
       # from a list kept by hand, so a new route cannot ship undocumented.
       - name: Route docs check
         run: ./dev/check-route-docs.sh
+      # No addon in the shipped build: an engine, a façade or a driver from
+      # outside `crates/` is an off-by-default feature, and conformance is
+      # asserted against the core alone. The gate self-tests — it proves the
+      # pattern matches a build that DOES carry the addon before trusting a
+      # clean one.
+      - name: No addon in the shipped build
+        run: ./dev/check-no-addon.sh
       # SQL-injection guard: dynamically assembled SQL (AssertSqlSafe, or an
       # sqlx query built with format!) belongs to the antares-sql backend
       # source and nowhere else. Everything a request supplies reaches the
