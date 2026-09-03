@@ -879,14 +879,17 @@ pub async fn check_proxied_overlap(
 /// registration never stalls another tenant's write. The map only grows,
 /// one entry per tenant that ever wrote a registration.
 ///
-/// Async on purpose: the Postgres driver answers a store call by parking
-/// the calling thread on the runtime's I/O driver, and a waiter blocked in
-/// a plain `Mutex::lock` would hold a runtime worker hostage; once the
-/// worker that owns the I/O driver is among the waiters, the holder never
-/// gets its query result and the whole broker stops accepting.
+/// A `tokio::sync::Mutex`, not a `std` one: the guarded section awaits the
+/// store between the check and the write, and a `std` guard cannot be held
+/// across an await.
 ///
-/// ponytail: process-local, so two broker pods do not exclude each other;
-/// a database-level lock held across the section is the upgrade.
+/// ponytail: process-local, so two broker pods sharing one database do not
+/// exclude each other and the check-then-write races between them (the gap
+/// the 5.9.2.4 ledger entry names). A database lock held across the section
+/// is the upgrade, and it pins a connection for the whole overlap scan —
+/// holders that each still need a connection to run that scan exhaust the
+/// pool and wait on each other, so the upgrade owes a bound on how many may
+/// hold at once.
 static REGISTRATION_WRITE: std::sync::Mutex<
     std::collections::BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
