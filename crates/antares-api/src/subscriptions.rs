@@ -501,8 +501,10 @@ fn norm_member(
         // body or a patch fragment — so dropping the member here stops a
         // subscriber both from seeding it and from replacing it later.
         // __via is the same class: the 6.3.18 chain comes from the Via
-        // HTTP header of the creating request, never from the body.
-        "__context" | "__via" => return Ok(()),
+        // HTTP header of the creating request, never from the body, and so
+        // is __subject. The prefix as a whole is the broker's, so a member
+        // added later cannot be forgotten here.
+        k if k.starts_with("__") => return Ok(()),
         "scopeQ" | "lang" | "subscriptionName" | "name" | "description" | "jsonldContext"
         | "ngsildConformance" | "datasetId" => {
             out.insert(k.to_owned(), v.clone());
@@ -587,7 +589,9 @@ pub fn present_subscription(doc: &Value, ctx: &Context, sys_attrs: bool, csource
     let mut out = Map::new();
     for (k, v) in obj {
         match k.as_str() {
-            "__context" | "__via" => continue,
+            // 5.8.3/5.8.4 serve the 5.2.12 data type, which has no member
+            // under this prefix — see policy::SUBJECT_MEMBER
+            k if k.starts_with("__") => continue,
             "createdAt" | "modifiedAt" if !sys_attrs => continue,
             "entities" => {
                 let entities: Vec<Value> = v
@@ -784,6 +788,16 @@ pub async fn create(
     // outbound and refuse to re-forward a copy that has looped back.
     if let Some(via) = crate::federation::inbound_via(headers) {
         norm.insert("__via".into(), Value::String(via));
+    }
+    // ADR-0020: 5.8.6 delivery is broker-initiated, so there is no request
+    // to read a subject off when the notification is sent. The subject is
+    // the subscriber's, taken from the creating request and kept the way
+    // the notification @context is — internal member, never rendered, never
+    // forwarded, never settable by a client.
+    if let Some(subject) =
+        crate::policy::subject_member(&crate::policy::subject_of(&tenant, headers))
+    {
+        norm.insert(crate::policy::SUBJECT_MEMBER.into(), subject);
     }
     // Array @context (>1 entry): the broker must host it at its own URL as an
     // ImplicitlyCreated @context, surfaced via jsonldContext (5.13.1, 050_03)

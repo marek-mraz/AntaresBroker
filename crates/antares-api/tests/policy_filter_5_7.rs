@@ -419,6 +419,29 @@ async fn the_narrowing_reaches_the_temporal_query() {
     }
 }
 
+/// ADR-0020 asks an engine to write its rules against IRIs. 4.21 reads a
+/// dot as the sub-attribute path separator, so a name run through that
+/// grammar would be truncated at the first dot of the authority
+/// (`https://uri.etsi.org/…` → the member `https://uri`) and would remove
+/// nothing — silently, which is the worst way for a projection to fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_projection_named_as_an_iri_removes_the_member_it_names() {
+    let st = state(Filter {
+        omit: vec!["https://uri.etsi.org/ngsi-ld/default-context/colour".into()],
+        ..Filter::default()
+    });
+    seed(&st).await;
+    let (code, list) = send(&st, "GET", "/ngsi-ld/v1/entities?type=Vehicle", None).await;
+    assert_eq!(code, StatusCode::OK, "{list}");
+    for e in list.as_array().expect("array") {
+        assert!(e.get("speed").is_some(), "more was removed than named: {e}");
+        assert!(
+            e.get("colour").is_none(),
+            "an IRI-named omit matched nothing: {e}"
+        );
+    }
+}
+
 /// 5.14.4.4 builds the EntityMap from the query's own candidate set, and
 /// Table 5.2.39-1/-2 give that map `id`, `type`, `expiresAt`, `entityMap`
 /// and `linkedMaps` — no Entity members, so `pick` and `omit` have nothing

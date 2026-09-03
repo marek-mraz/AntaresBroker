@@ -619,12 +619,14 @@ fn reduced_copy(
         "lastFailure",
         "createdAt",
         "modifiedAt",
-        "__context",
-        "__via",
         "localOnly",
     ] {
         o.remove(k);
     }
+    // every broker-internal member, not a list of the ones known today:
+    // __context, __via and the ADR-0020 __subject are this broker's own
+    // record and none of them may cross to a Context Source
+    o.retain(|k, _| !k.starts_with("__"));
     o.insert("id".into(), Value::String(remote_id.to_owned()));
     // reduce the entity selectors to the registration information
     let reg_entities: Vec<Value> = reg

@@ -83,6 +83,31 @@ string, so the precedence trap a gateway rewrite has to distribute around
 cannot occur. Narrowing is silent: a caller cannot tell a hidden entity
 from an absent one, and a retrieve of a hidden entity is 404.
 
+A `pick`/`omit` name is expanded against the request's own `@context`, so
+an engine may write it either as a short name or as the IRI this decision
+asks for; it is one Attribute name (6.5.3.1), not a 4.21 projection
+expression, because that grammar reads a dot as the sub-attribute path
+separator and would truncate an IRI at the first dot of its authority.
+
+**What a notification answer may be.** `pre_notify` narrows by projection
+only. `Drop` is not a failed delivery: 5.11.7 moves `notification.timesSent`
+and `lastNotification` for a notification that "shall be sent", and one the
+engine dropped never was — the same reading the broker already applies to a
+cooldown (5.2.15) and an open circuit. A `Filter` carrying `q` or `scopeQ`
+is refused as a `Drop`: the entities were selected by the subscription's own
+conditions long before the seam sees them, there is nothing left to re-run a
+query against, and delivering unfiltered would report a narrowing that never
+happened.
+
+**Whose subject a notification is under.** 5.8.6 delivery is
+broker-initiated, so no request is in flight when it is decided. The subject
+is the subscriber's, taken from the creating request and stored with the
+subscription in `__subject` — a broker-internal member beside the `__context`
+that same clause already keeps there. The `__` prefix as a whole is the
+broker's: a client can set no member under it, no served representation
+carries one (5.8.3/5.8.4 serve the 5.2.12 data type, which defines none), and
+the 5.8.1.4 copy forwarded to a Context Source is stripped of all of them.
+
 **Fail closed.** An engine error, panic or timeout
 (`ANTARES_POLICY_TIMEOUT_MS`) is `Deny`. `AllowAll` has no error path.
 
@@ -155,6 +180,13 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
   crate, and the release gate proves no addon is in the shipped image.
 - A test that fails when a subject header survives `federation::forward`.
 - `/q/health` names the active engine and its timeout.
+- `tests/policy_notify_5_8_6.rs`: a dropped notification is no attempt at
+  all (no POST, no `timesSent`, no `lastNotification`, no `lastFailure`)
+  while a delivered one still counts; the projection removes what the engine
+  named and nothing else, named as a short name or as an IRI; a `Filter`
+  carrying a `q` is dropped; the engine is asked about the subscriber and
+  not about whoever's write triggered the notification; and the stored
+  subject appears in no representation and can be set by no client.
 - `tests/policy_filter_5_7.rs`: what the raw read answers, what the
   narrowed one answers, and what is not in it — over the entity query, the
   retrieve, the attribute retrieve, the batch query, the temporal query and

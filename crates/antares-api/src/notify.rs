@@ -1901,6 +1901,45 @@ async fn deliver_as(
     if let Some(r) = trigger_reason {
         body["triggerReason"] = Value::String(r.into());
     }
+    // ADR-0020: the engine sees the notification the broker means to send,
+    // before it is encoded — the data entities are still the 5.2.14.1
+    // documents the subscription asked for, not a FeatureCollection or a
+    // set of @context-injected ones, so a projection lands on entities the
+    // engine can name. Before the bookkeeping below, because 5.8.6 moves
+    // timesSent for a notification that "shall be sent": one that is
+    // dropped here never was, exactly like a cooldown or an open breaker.
+    // The subject is the subscriber's, stored when the subscription was
+    // created — delivery is broker-initiated and there is no request here
+    // to read one off.
+    match crate::policy::pre_notify(
+        st.policy.as_ref(),
+        &crate::policy::stored_subject(tenant, sub),
+        sub,
+        &mut body,
+    ) {
+        crate::policy::NotifyDecision::Deliver => {}
+        crate::policy::NotifyDecision::Drop => {
+            tracing::debug!("subscription {sub_id} notification dropped by the policy engine");
+            return;
+        }
+        crate::policy::NotifyDecision::Filter(f) => {
+            // a condition the notification path cannot re-run is not a
+            // narrowing it can claim to have applied
+            if f.q.is_some() || f.scope_q.is_some() {
+                tracing::error!(
+                    "policy engine {} narrowed a notification with a query; dropping it",
+                    st.policy.name()
+                );
+                return;
+            }
+            let f = crate::repr::compacted_filter(&f, ctx);
+            if let Some(arr) = body.get_mut("data").and_then(Value::as_array_mut) {
+                for e in arr.iter_mut() {
+                    f.project(e);
+                }
+            }
+        }
+    }
     // 5.8.6: a subscription's ngsildConformance pins the notification format —
     // amend the data entities per the 4.3.6.8 fallbacks.
     if let Some(ver) = sub_str(sub, "ngsildConformance").and_then(crate::conformance::parse_version)

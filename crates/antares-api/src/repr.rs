@@ -122,14 +122,14 @@ pub fn narrow_projection(
     ctx: &Context,
 ) -> Result<(), NgsiError> {
     if !f.omit.is_empty() {
-        let mut nodes = parse_projection(&f.omit.join(","), ctx)?;
+        let mut nodes = policy_nodes(&f.omit, ctx);
         match omit {
             Some(own) => own.append(&mut nodes),
             None => *omit = Some(nodes),
         }
     }
     if !f.pick.is_empty() {
-        let allowed = parse_projection(&f.pick.join(","), ctx)?;
+        let allowed = policy_nodes(&f.pick, ctx);
         let mut kept = match pick.take() {
             None => allowed,
             Some(own) => own
@@ -145,6 +145,50 @@ pub fn narrow_projection(
         *pick = Some(kept);
     }
     Ok(())
+}
+
+/// The same `pick`/`omit` names in the form an already-compacted document
+/// carries them. The query path folds a policy projection into the
+/// request's own representation, where the names are IRIs; a notification
+/// is compacted by `notify::build_data` long before the seam sees it, so
+/// there the names have to travel the other way — parsed against the same
+/// `@context` the document was compacted with, then compacted back. An
+/// engine writes one rule set either way, and a rule written as an IRI
+/// (which is what ADR-0020 asks of an engine) removes the member it names
+/// rather than silently matching nothing.
+pub fn compacted_filter(f: &crate::policy::Filter, ctx: &Context) -> crate::policy::Filter {
+    let names = |raw: &[String]| -> Vec<String> {
+        policy_nodes(raw, ctx)
+            .iter()
+            .map(|n| ctx.compact_iri(&n.iri))
+            .collect()
+    };
+    crate::policy::Filter {
+        pick: names(&f.pick),
+        omit: names(&f.omit),
+        ..f.clone()
+    }
+}
+
+/// A policy's `pick`/`omit` names as projection nodes, expanded against the
+/// request's own `@context`.
+///
+/// Deliberately NOT the 4.21 parser: 6.5.3.1 lets those members name `"id"`,
+/// `"type"`, `"scope"` or one projected Attribute, and ADR-0020 asks an
+/// engine to write its rules against IRIs — while 4.21 reads a dot as the
+/// sub-attribute path separator, so `https://uri.etsi.org/…/colour` through
+/// that grammar becomes the member `https://uri` and removes nothing. An
+/// engine names one member; it is expanded, and both forms of the name are
+/// kept so the projection matches a document whichever form its keys are in.
+fn policy_nodes(names: &[String], ctx: &Context) -> Vec<ProjNode> {
+    names
+        .iter()
+        .map(|n| ProjNode {
+            raw: n.clone(),
+            iri: ctx.expand_key(n),
+            children: None,
+        })
+        .collect()
 }
 
 /// Maximum `{…}` selection depth of a projection tree — the number of

@@ -272,7 +272,13 @@ pub const SCOPE_NOT_NARROWABLE: &str =
 #[derive(Debug, Clone, PartialEq)]
 pub enum NotifyDecision {
     Deliver,
-    /// Send it, narrowed: the same projection the query path applies.
+    /// Send it, narrowed: the same `pick`/`omit` projection the query path
+    /// applies, over the entities of `data`. A notification `Filter` that
+    /// carries `q` or `scopeQ` is refused as a [`NotifyDecision::Drop`]:
+    /// the entities were selected by the subscription's own conditions long
+    /// before this point, there is nothing left to re-run the query against,
+    /// and delivering the notification unfiltered would tell the engine a
+    /// narrowing was applied that never was.
     Filter(Filter),
     /// Do not send. 5.8.6 counts this as no attempt at all — the
     /// notification was never sent, so it is neither a success nor a
@@ -444,6 +450,41 @@ pub fn subject_of(tenant: &antares_model::TenantId, headers: &HeaderMap) -> Subj
     Subject {
         tenant: tenant.clone(),
         headers: carried,
+    }
+}
+
+/// The member a Subscription carries its creator's subject in. A
+/// broker-internal member like `__context` and `__via`: a client can
+/// neither set it nor read it back, it is stripped from every served
+/// representation and from the 5.8.1.4 copy forwarded to a Context Source,
+/// and 5.2.12 defines no such member — the whole `__` prefix is the
+/// broker's, so a member added later inherits every one of those rules
+/// instead of a new list to forget.
+pub(crate) const SUBJECT_MEMBER: &str = "__subject";
+
+/// The stored form of a subject: only the headers a deployment named, since
+/// the tenant is where the subscription already lives. `None` when the
+/// subject carries nothing, so a deployment that named no header stores no
+/// member at all.
+pub(crate) fn subject_member(subject: &Subject) -> Option<Value> {
+    (!subject.headers.is_empty())
+        .then(|| serde_json::to_value(&subject.headers).ok())
+        .flatten()
+}
+
+/// The subject a notification is delivered under: the one stored when the
+/// subscription was created. A subscription created before the deployment
+/// named its headers — or by the broker itself, for the 5.8.1.4 internal
+/// copies — simply has none, and the engine is asked about a subject with
+/// no headers rather than about the wrong one.
+pub(crate) fn stored_subject(tenant: &antares_model::TenantId, sub: &Value) -> Subject {
+    Subject {
+        tenant: tenant.clone(),
+        headers: sub
+            .get(SUBJECT_MEMBER)
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
     }
 }
 

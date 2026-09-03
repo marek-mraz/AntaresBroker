@@ -78,14 +78,14 @@ module's header comment.
 | `snapshots.rs` | 1 600 | 5.16 snapshots under synthetic `snap-…` tenants |
 | `contexts.rs` | 880 | 5.13 `/jsonldContexts` |
 | `conformance.rs` | 760 | 6.3.21 version negotiation |
-| `repr.rs` | 1 500 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs; 4.5.23 Linked Entity Retrieval (inline and flat, the lookup budget) and the 4.5.16 GeoJSON Feature/FeatureCollection shapes — what every module needs to render a document |
+| `repr.rs` | 1 600 | 6.3.7, 4.5.4 representations: normalized, concise, keyValues, sysAttrs; 4.5.23 Linked Entity Retrieval (inline and flat, the lookup budget) and the 4.5.16 GeoJSON Feature/FeatureCollection shapes — what every module needs to render a document |
 | `history.rs` | 260 | the producer side of temporal recording: the per-request change buffer and the 4.5.7/4.5.8 delete mirrors that record a deleted Entity or Attribute in history |
 | `stamp.rs` | 50 | 4.8, 5.2.4 system attributes of a write: `createdAt`/`modifiedAt` on the entity and on every attribute instance |
 | `mirror.rs` | 350 | the change event and the two document mirrors (`Change`, `DocMirror`, `SubMirror`, `TenantIndex`) that state, notify and history share; names no other module |
 | `bounds.rs` | 500 | every cap: body, URI, JSON depth, batch, fan-out, in-flight, regex program size; reported by `/q/health` |
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
-| `policy.rs` | 780 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, and the fail-closed call that denies on a panic or a timeout |
+| `policy.rs` | 890 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, the fail-closed calls that deny on a panic or a timeout, and the stored subject a notification is decided under |
 | `state.rs` | 770 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
