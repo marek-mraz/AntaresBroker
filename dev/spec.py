@@ -942,6 +942,42 @@ def ledger_body_violations():
     return out
 
 
+def ledger_process_marks():
+    """`dev/prod-grep.sh` skips `docs/spec/` on purpose — a clause body is the
+    ETSI text and carries the standard's own dates and edition numbers — but
+    `evidence` and `notes` are this repository's prose and the no-process-marks
+    rule applies to them. A note that dates itself against a session ("gap
+    closed this pass") or names the instruction that produced it tells a later
+    reader nothing durable: which pass, whose directive. Git carries the when
+    and the why; the ledger carries what the code does. Scoped to the two
+    hand-written fields, and to phrases that can only be process — a clause
+    body saying "this" is untouched."""
+    marks = re.compile(
+        r"\bthis (?:pass|session|run of)\b"
+        r"|\buser directive\b"
+        r"|\bthe user (?:asked|said|wants|requested|directed)\b"
+        r"|\bper the user\b",
+        re.I,
+    )
+    out = []
+    for path in sorted(SPEC.rglob("*.md")):
+        try:
+            meta = read_frontmatter(path)
+        except yaml.YAMLError:
+            continue  # the parse failure is reported by cmd_check itself
+        for field in ("evidence", "notes"):
+            value = (meta or {}).get(field)
+            if not isinstance(value, str):
+                continue
+            for m in marks.finditer(value):
+                out.append(
+                    f"{path.relative_to(ROOT)}: {field} says {m.group(0)!r} — "
+                    f"the ledger states what the code does, not when or on "
+                    f"whose word it was written"
+                )
+    return out
+
+
 def ledger_citation_violations():
     """Evidence is only evidence if a reader can reach it. A file or a test the
     hand-written fields name, and the repository does not hold, points at
@@ -1032,6 +1068,7 @@ def cmd_check():
 
     errors.extend(ledger_prose_violations())
     errors.extend(ledger_citation_violations())
+    errors.extend(ledger_process_marks())
     errors.extend(ledger_body_violations())
     errors.extend(chapter_violations())
     errors.extend(statement_coverage_violations())
