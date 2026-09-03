@@ -5,6 +5,11 @@
 //   update  PATCH /entities/{id}/attrs  (5.6.3, one Property per request),
 //           spread over the same 100 entities — the write shape, which is
 //           what takes the store's writer lock
+//   facade  GET /x/example/things?kind=Vehicle — the reference façade, which
+//           answers by driving the NGSI-LD router in process
+//   facade-twin  GET /entities?type=Vehicle&options=keyValues — the request
+//           that façade makes, so the pair prices the seam's round trip.
+//           Both need a binary built with the plugin-example feature.
 // Closed model (constant VUs) on purpose here: this measures what the
 // broker sustains at a fixed concurrency (c50, c200), which is what the
 // published tables of other brokers report. k6-baseline.js keeps the open
@@ -12,13 +17,14 @@
 //
 //   k6 run -e SHAPE=query -e VUS=50 -e DURATION=5s dev/perf/k6-shapes.js
 //
-// Env: BROKER_URL, SHAPE (query|retrieve|update), VUS (50), DURATION (5s),
+// Env: BROKER_URL, SHAPE (query|retrieve|update|facade|facade-twin), VUS (50), DURATION (5s),
 //      TENANT (unset = default tenant), SEED (entities are urn:ngsi-ld:Vehicle:shape:<n>).
 
 import http from "k6/http";
 import { check } from "k6";
 
-const BASE = `${__ENV.BROKER_URL || "http://localhost:9090"}/ngsi-ld/v1`;
+const ROOT = __ENV.BROKER_URL || "http://localhost:9090";
+const BASE = `${ROOT}/ngsi-ld/v1`;
 const SHAPE = __ENV.SHAPE || "query";
 const N = 100;
 const headers = __ENV.TENANT ? { "NGSILD-Tenant": __ENV.TENANT } : {};
@@ -53,7 +59,12 @@ export function setup() {
 
 export default function () {
   let r;
-  if (SHAPE === "retrieve") {
+  if (SHAPE === "facade") {
+    r = http.get(`${ROOT}/x/example/things?kind=Vehicle`, { headers });
+  } else if (SHAPE === "facade-twin") {
+    // exactly what the façade asks the broker, so the difference is the seam
+    r = http.get(`${BASE}/entities?type=Vehicle&options=keyValues`, { headers });
+  } else if (SHAPE === "retrieve") {
     r = http.get(`${BASE}/entities/urn:ngsi-ld:Vehicle:shape:${__ITER % N}`, { headers });
   } else if (SHAPE === "update") {
     // 5.6.3 Update Attributes: 204 on success. One Property, so the request

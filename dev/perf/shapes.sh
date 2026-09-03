@@ -43,6 +43,14 @@ print(f\"{s['http_reqs']['rate']:.0f} {s['http_req_duration']['p(99)']:.2f}\")")
       "$BIN" > "$OUT/shapes-$store.log" 2>&1 & PID=$!
     until curl -sf -o /dev/null "http://127.0.0.1:$PORT/q/health"; do sleep 0.05; done
     IFS=, read -ra specs <<<"${SPECS:-query 50,query 200,retrieve 50}"
+    # The façade pair prices the in-process seam: the reference façade route
+    # against the NGSI-LD request it makes. It exists only in a build with
+    # the plugin-example feature, and a shipped build carries no addon, so
+    # the rows are added when the route answers and skipped when it does not.
+    if [ -z "${SPECS:-}" ] && curl -sf -o /dev/null \
+         "http://127.0.0.1:$PORT/x/example/things?kind=Vehicle"; then
+      specs+=("facade 50" "facade-twin 50")
+    fi
     for spec in "${specs[@]}"; do
       echo "shapes $store ${spec// /-c}" > "$OUT/phase"
       read -r shape vus <<<"$spec"

@@ -21,7 +21,7 @@ runs in CI; `k6` is the only tool it needs.
 | table | script | method |
 |---|---|---|
 | startup and idle footprint | `startup.sh` | exec to the first `200` from `/q/health`, median of five, `VmRSS` right after, per store |
-| throughput per shape | `shapes.sh` | 100 five-attribute entities; `GET /entities?type=Vehicle&limit=20` at 50 and 200 concurrent clients, `GET /entities/{id}` at 50 (`SPECS` picks other rows, the PostgreSQL dispatch runs 64, 256 and 1 024 clients); five seconds, median of three runs, p99 from the same runs |
+| throughput per shape | `shapes.sh` | 100 five-attribute entities; `GET /entities?type=Vehicle&limit=20` at 50 and 200 concurrent clients, `GET /entities/{id}` at 50 (`SPECS` picks other rows, the PostgreSQL dispatch runs 64, 256 and 1 024 clients); five seconds, median of three runs, p99 from the same runs. The `facade` and `facade-twin` shapes run the same pair only when the binary under test serves `/x/example/things` — a shipped build does not |
 | core scaling | `core-scale.sh` | broker pinned to 1, 2, 4, 8 physical cores with `taskset`, load generator on the remaining cores; refuses a step it cannot isolate. `cores used` is the broker's CPU time over the window against the cores it was allotted; `peak threads` is the largest thread count of the process, which is where a blocking-thread ceiling shows (a parked store call is one OS thread; the cap is the connection limit plus 1024) |
 | saturation knee | `saturate.sh` | open model, +500 rps every 30 s until p99 passes 50 ms or errors pass 0.1 %; the knee is the last stage that held, the curve is a CSV; `cores used` and `peak threads` as in core scaling, over the whole sweep |
 | noise profile | `variance.py` | the same commit measured ten times; the fence for a future regression gate is `Q3 + 3·IQR` of each metric's own history |
@@ -233,6 +233,42 @@ folds the newest bundles into `/reports/perf/latest/`.
 
 If you would rather not rent hardware, disable the two workflows (Actions
 → workflow → *⋯* → *Disable workflow*) so the weekly runs stop going red.
+
+## What a façade costs
+
+A façade for another standard answers by driving this broker's own NGSI-LD
+router in process ([Façades for another
+standard](extending.md#façades-for-another-standard)). The seam's own cost
+is a JSON round trip: the inner answer is serialized to bytes, parsed, and
+re-serialized into the façade's envelope. Everything else about the request
+happens exactly once.
+
+Measured with the reference façade (`GET /x/example/things?kind=Vehicle`)
+against the NGSI-LD request it wraps
+(`GET /entities?type=Vehicle&options=keyValues`), both through the same
+router in the same process, 200 calls each, medians of five repetitions,
+release build:
+
+| answer | façade | the request it wraps | the round trip |
+|---|---|---|---|
+| 100 five-attribute Entities | 265-297 µs | 199-226 µs | **66-71 µs** |
+| nothing matched | 112-127 µs | 107-157 µs | **under 10 µs** |
+
+The comparison is in process on purpose: the number is about a serialize
+and a parse, and a socket between the two halves would measure the socket.
+`dev/perf/shapes.sh` runs the same pair end to end against a built binary
+(the `facade` shape, skipped unless the binary was built with the reference
+plugin); the table above is the per-call figure.
+
+What it decides: the seam has almost no fixed cost — an empty answer's
+round trip does not clear the noise — and what it does cost is
+proportional to the answer, about 0.7 µs per Entity on this shape. A typed
+operations layer, one where a façade reached the handlers through Rust
+types instead of through JSON, would save exactly that and nothing else.
+Sixty-six microseconds on a hundred-Entity page is not a reason to build
+and maintain a second, typed API surface beside the HTTP one, so that box
+stays closed until a façade measures this as its ceiling rather than as its
+rounding error.
 
 ## What the numbers are not
 

@@ -235,3 +235,69 @@ fn a_facade_cannot_mount_under_the_ngsi_ld_api_root() {
         assert!(err.contains(prefix), "the message names the prefix: {err}");
     }
 }
+
+/// What the seam costs: the façade route beside the NGSI-LD request it
+/// wraps, through the same router, in the same process.
+///
+/// The comparison is deliberately in-process. The seam's own cost is the
+/// JSON round trip — the inner answer is serialized to bytes, parsed, and
+/// re-serialized into the façade's envelope — and a socket between the two
+/// would only add noise to a number that is not about a socket. What the
+/// number decides is whether a typed operations layer is worth building:
+/// a façade that reached the handlers through Rust types instead of JSON
+/// would save exactly this and nothing else, and that is a large amount of
+/// code to trade for it. `dev/perf/shapes.sh` runs the same pair end to end
+/// against a built binary; this is the per-call figure.
+///
+/// The assertion is only that neither path has broken; the numbers it
+/// prints are what `docs/src/performance.md` records.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_facade_round_trip_measured_against_its_ngsi_ld_twin() {
+    const N: usize = 100;
+    const ROUNDS: usize = 200;
+    let (st, _) = state();
+    for n in 0..N {
+        create(&st, "facadeperf", &format!("urn:ngsi-ld:Vehicle:{n}")).await;
+    }
+    let router = antares_api::router(st.clone());
+    let time = |uri: &'static str| {
+        let router = router.clone();
+        async move {
+            let mut samples = Vec::with_capacity(ROUNDS);
+            for _ in 0..ROUNDS {
+                let req = Request::get(uri)
+                    .header("NGSILD-Tenant", "facadeperf")
+                    .body(Body::empty())
+                    .expect("request");
+                let t = std::time::Instant::now();
+                let resp = router.clone().oneshot(req).await.expect("response");
+                assert_eq!(resp.status(), StatusCode::OK);
+                let _ = resp.into_body().collect().await.expect("body");
+                samples.push(t.elapsed());
+            }
+            samples.sort_unstable();
+            samples[ROUNDS / 2]
+        }
+    };
+    // warm: the first calls pay for the memoized router and the @context
+    let _ = time("/x/example/things?kind=Vehicle").await;
+    let facade = time("/x/example/things?kind=Vehicle").await;
+    let twin = time("/ngsi-ld/v1/entities?type=Vehicle&options=keyValues").await;
+    // ...and the same pair over an answer with nothing in it, which is the
+    // seam's fixed floor: one router dispatch and an empty round trip, with
+    // no payload for the JSON cost to scale with.
+    let empty_facade = time("/x/example/things?kind=Nothing").await;
+    let empty_twin = time("/ngsi-ld/v1/entities?type=Nothing&options=keyValues").await;
+
+    eprintln!(
+        "F4 MEASUREMENT entities={N} rounds={ROUNDS} facade={facade:?} twin={twin:?} \
+         round_trip={:?} | empty facade={empty_facade:?} twin={empty_twin:?} \
+         round_trip={:?}",
+        facade.saturating_sub(twin),
+        empty_facade.saturating_sub(empty_twin)
+    );
+    assert!(
+        facade < std::time::Duration::from_secs(1),
+        "the façade route took {facade:?} per call"
+    );
+}
