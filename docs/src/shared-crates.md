@@ -60,7 +60,7 @@ Eleven modules stay public because a host or a surface reaches into them:
 | `conformance` | `prefer_version_layer`, the middleware that answers the version `Prefer` |
 | `egress` | `Egress`, the notification egress policy and its per-registration record |
 | `geo` | `antares_ql::geo` re-exported, so a surface parses a geo query (`GeoQuery::from_params`) the way the broker does |
-| `history` | `drain_errors`, the dead-letter counter |
+| `history` | `drain_errors`, the count of post-response history writes a driver failed |
 | `mirror` | `Mirror`, `DocMirror`, `SubMirror` and the `Change` tuple: the change pipeline a bus driver feeds |
 | `negotiate` | `ApiError`/`ApiResult`, `tenant_from`, `CleanParams`, `QUERY_PARAMS` — what an `ApiSurface` needs to answer like the broker |
 | `policy` | the policy seam (ADR-0020): `PolicyEngine`, `Subject`, `Operation`, `Decision`, `Filter`, `NotifyDecision`, the built-in `AllowAll`, and the fail-closed `decide`/`pre_notify` an engine is called through |

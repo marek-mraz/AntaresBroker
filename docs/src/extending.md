@@ -105,7 +105,7 @@ check cannot do is judge a name it does not resolve: under the default
 it, and the addresses the name stands for are judged where they are dialled.
 A sink that opens its own socket therefore owes that filter —
 `EgressPolicy::ip_is_metadata` and `ip_is_private` over the resolved answer,
-before connecting, as the MQTT binding does in `connect_addr` and every
+before connecting, as the MQTT binding does in `checked_addr` and every
 reqwest client does through `PolicyResolver`. A sink that opens no socket
 says so by returning `false` from `network()`; every binding shipped here
 returns the default `true`, and a unit test holds that.
