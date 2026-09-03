@@ -128,8 +128,21 @@ the 5.8.1.4 copy forwarded to a Context Source is stripped of all of them.
 
 **The subject never travels.** The subject headers are stripped from
 every forwarded request in `federation::forward`, and never enter a
-notification, a log line, a dead letter or a peer registration. `/q` is
-outside the seam: the admin surface is the gateway's to protect.
+notification, a log line, a dead letter or a peer registration. That
+stripping has to be active rather than incidental: 4.3.6.5 lets a
+registration name a header to copy from the triggering request
+(`"urn:ngsi-ld:request"`), and a registration is client-supplied, so
+whoever can register a Context Source could otherwise read the identity of
+every request that fans out to it. The names in
+`ANTARES_POLICY_SUBJECT_HEADERS` are dropped from that copy — dropped, not
+refused at 5.9.2, because which headers a deployment made subject headers
+is not something a client gets to probe by watching which registrations
+fail. The one place the subject does travel is the broker's own
+subscription mirror: 5.8.6 delivery is broker-initiated, and a pod that
+mirrored a subscription without its subject would decide every notification
+under nobody. That is the broker's own state, the same value the store row
+holds, not a peer. `/q` is outside the seam: the admin surface is the
+gateway's to protect.
 
 **Every engine is an addon**, in the sense `plugin-example` is: a crate
 outside `crates/`, behind an off-by-default `antares-broker` feature,
@@ -193,7 +206,12 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
   handler that skips the gate is a red test, not a review finding.
 - `cargo tree -p antares-broker` with default features names no engine
   crate, and the release gate proves no addon is in the shipped image.
-- A test that fails when a subject header survives `federation::forward`.
+- `tests/policy_subject_on_the_wire_p6.rs`: a registration that asks for
+  the subject header by the 4.3.6.5 copy value does not get it while an
+  ordinary header it asks for still arrives; a 5.8.1.4 forwarded
+  subscription copy carries no internal member and no subject; a change
+  event carries none; no response echoes one back; and the subscription
+  mirror keeps it, on purpose, with the reason in the test.
 - `/q/health` names the active engine and its timeout.
 - `tests/policy_maps_snapshots_5_14_5_16.rs`: a map built for one subject is
   not reused by another and is answered like an expired one; retrieve and

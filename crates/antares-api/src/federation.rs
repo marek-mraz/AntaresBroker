@@ -999,7 +999,23 @@ pub async fn forward(
     // "urn:ngsi-ld:request" copies the header from the triggering request
     // (dropped when the triggering request did not carry it).
     for (k, v) in &reg.csi {
-        if CSI_SKIP.contains(&k.to_ascii_lowercase().as_str()) {
+        let lower = k.to_ascii_lowercase();
+        if CSI_SKIP.contains(&lower.as_str()) {
+            continue;
+        }
+        // ADR-0020: the subject never leaves this process. A registration is
+        // client-supplied, so without this a registration that names the
+        // subject header with "urn:ngsi-ld:request" would copy the identity
+        // of every request that fans out to it onto the wire — the peer
+        // would be handed a credential the broker was only ever given to
+        // ask its own engine about. Dropped rather than refused at 5.9.2:
+        // which headers a deployment made subject headers is not something
+        // a client gets to probe by watching which registrations fail.
+        if crate::policy::SUBJECT_HEADERS.contains(&lower) {
+            tracing::warn!(
+                "registration {} asks for the policy subject header {k:?}; not forwarded",
+                reg.reg_id
+            );
             continue;
         }
         let val = if v == "urn:ngsi-ld:request" {
