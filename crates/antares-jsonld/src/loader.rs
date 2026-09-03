@@ -387,6 +387,21 @@ impl reqwest::dns::Resolve for PolicyResolver {
     }
 }
 
+/// One rustls crypto provider per process, installed before the first
+/// client is built. reqwest is compiled provider-less (`rustls-no-provider`)
+/// because its own `rustls` feature would pull aws-lc-rs beside ring, and a
+/// provider-less client PANICS at build time with none installed. ring is
+/// the workspace's only provider, so a second call here would be the same
+/// choice; the result is discarded because another crate installing the same
+/// provider first is success, not a conflict.
+#[cfg(not(target_arch = "wasm32"))]
+fn install_crypto_provider() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// The one outbound-client constructor: every reqwest client in the
 /// broker — @context fetches, notifications, federation forwards — is built
 /// from this, so the policy cannot be forgotten at a call site. Timeouts stay
@@ -432,6 +447,7 @@ pub fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
         }
         attempt.follow()
     });
+    install_crypto_provider();
     let mut b = reqwest::Client::builder()
         .redirect(redirect)
         .dns_resolver(std::sync::Arc::new(PolicyResolver(policy)));
@@ -1603,6 +1619,23 @@ mod tests {
         assert!(
             matches!(err, NgsiError::BadRequestData(_)),
             "invalid (no @context member) → BadRequestData, got {err:?}"
+        );
+    }
+
+    /// reqwest is compiled provider-less, and a client built while no rustls
+    /// crypto provider is installed does not error — it PANICS inside
+    /// `build()`. The one constructor installs ring first, so every client in
+    /// the broker is buildable; a feature change that drops the install fails
+    /// here instead of at the first outbound request in production.
+    #[test]
+    fn a_client_builds_with_no_crypto_provider_installed_beforehand() {
+        assert!(
+            client_builder(EgressPolicy {
+                allow_private: true,
+            })
+            .build()
+            .is_ok(),
+            "the outbound-client constructor must install a crypto provider"
         );
     }
 

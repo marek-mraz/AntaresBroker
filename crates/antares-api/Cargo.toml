@@ -47,7 +47,7 @@ axum = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
 # uuid v4 randomness on the browser target (crypto.getRandomValues)
 uuid = { workspace = true, features = ["js"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
 # default axum minus "http1"+"tokio": the router without the listener.
 axum = { version = "0.8", default-features = false, features = [
     "form", "json", "matched-path", "original-uri", "query", "tower-log", "tracing",

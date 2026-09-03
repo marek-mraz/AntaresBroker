@@ -22,12 +22,15 @@ workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+# reqwest is built provider-less so the workspace stays on ONE rustls stack
+# with ring; the provider is installed here, once, before the first client.
+rustls = { workspace = true }
 # moka's clock panics on wasm32 — the browser build uses src/minicache.rs
 moka = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 web-time = { workspace = true }
 send_wrapper = { workspace = true }
 # Real fetch deadlines — the browser fetch has no client-level timeout

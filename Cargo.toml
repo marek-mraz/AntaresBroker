@@ -40,7 +40,12 @@ antares-notifier = { path = "crates/antares-notifier", default-features = false 
 antares-plugin-example = { path = "examples/plugin-example" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# One HTTP client major in the build: `opentelemetry-otlp` takes 0.13, so the
+# broker does too. `rustls-no-provider` rather than `rustls`, which would
+# pull aws-lc-rs beside ring — the provider is installed once in
+# `antares_jsonld::client_builder`, and trust anchors come from the
+# platform store (the image carries one) widened by ANTARES_EXTRA_CA_FILE.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "query"] }
 chrono = { version = "0.4", features = ["serde"] }
 # 4.23.3 EXAMPLES 6/7: orderBy collation — ICU4X collator, compiled data
 icu_collator = "2"
