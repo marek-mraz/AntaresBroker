@@ -264,8 +264,9 @@ async fn retrieve_entity_inner(
         .into());
     }
     let ctx = request_context(&st.loader, headers).await?;
-    gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
-    let repr = parse_repr(params, &ctx)?;
+    let filter = gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
+    let mut repr = parse_repr(params, &ctx)?;
+    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &ctx)?;
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
     antares_model::EntityId::new(id)?;
@@ -352,6 +353,21 @@ async fn retrieve_entity_inner(
         ))
         .into());
     }
+    // ADR-0020: an Entity outside the engine's narrowing answers the way
+    // 5.7.1.4 answers an absent one — "If the NGSI-LD Entity does not
+    // exist, an error of type ResourceNotFound shall be raised" — because a
+    // refusal here would tell the caller the Entity is there.
+    if let Some(ast) = &filter.q {
+        let lookup = |uri: &str| st.store.get(&tenant, Kind::Entity, uri).ok().flatten();
+        if !crate::qeval::eval_q(ast, &doc, &ctx, &lookup) {
+            return Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into());
+        }
+    }
+    if let Some(scope) = &filter.scope_q {
+        if !crate::scope_matches(scope, &doc) {
+            return Err(NgsiError::ResourceNotFound(format!("entity {id} not found")).into());
+        }
+    }
     // 5.7.1: attrs projection with no matching attribute ⇒ 404
     if let Some(want) = &repr.attrs {
         if !want.iter().any(|a| doc.get(a).is_some()) {
@@ -422,6 +438,7 @@ async fn retrieve_entity_inner(
     };
     let mut resp = respond_prefer(StatusCode::OK, payload, &ctx, accept, &tenant, headers);
     attach_warnings(&mut resp, &warnings);
+    filter.mark_restricted(resp.headers_mut());
     Ok(resp)
 }
 
@@ -534,14 +551,14 @@ async fn query_entities_outer(
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
-    gate!(
+    let filter = gate!(
         st, &tenant, headers, "5.7.2",
         q: q_ast.as_ref(),
         scope_q: params.get("scopeQ").map(String::as_str),
     )
     .await?;
     let Some(map_ref) = single_header(headers, "NGSILD-EntityMap")? else {
-        return query_entities_inner(st, &params, headers).await;
+        return query_entities_inner(st, &params, headers, &filter).await;
     };
     // 5.7.2.4: an unknown parameter and a too-wide query are BadRequestData
     // for this request, whether or not it carries an EntityMap reference —
@@ -558,7 +575,7 @@ async fn query_entities_outer(
     let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
         // 5.5.14: expired or inaccessible → a new EntityMap is created
         params.insert("entityMap".into(), "true".into());
-        return query_entities_inner(st, &params, headers).await;
+        return query_entities_inner(st, &params, headers, &filter).await;
     };
     let ctx = request_context(&st.loader, headers).await?;
     // a request that references a live map does not create a new one
@@ -660,7 +677,10 @@ async fn query_entities_outer(
         // the empty id sentinel
         params.remove("limit");
     }
-    let mut resp = query_entities_inner(st, &params, headers).await?;
+    // The narrowing reaches the answer here; the map's own contents are
+    // still the ones the query built, which is what P5's per-subject map is
+    // for.
+    let mut resp = query_entities_inner(st, &params, headers, &filter).await?;
     // "The location of the EntityMap used in the query operation is
     // returned in the response" (6.4.3.2-2)
     if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{map_id}").parse() {
@@ -704,6 +724,7 @@ async fn query_entities_inner(
     st: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
+    filter: &crate::policy::Filter,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     check_params(params, crate::negotiate::QUERY_PARAMS)?;
@@ -712,8 +733,19 @@ async fn query_entities_inner(
 
     // 5.7.2.4 a-e: id/idPattern alone are NOT sufficient, and the attrs
     // list / q must include "at least one non-system Attribute" to qualify.
+    // The judgement is about what the CLIENT asked for, so it reads the
+    // request's own `q` — a policy condition is not the client's filter and
+    // does not make a wide query narrow (ADR-0020).
+    let has_filter = qualifies_non_wide(
+        params,
+        params.get("q").map(|q| parse_q(q)).transpose()?.as_ref(),
+    );
+    // Everything below reads the narrowed query: the store push-down, the
+    // local re-check 5.7.2.4 runs over merged results, and the query the
+    // request is forwarded with.
+    let narrowed = filter.narrow_params(params)?;
+    let params = &narrowed;
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?;
-    let has_filter = qualifies_non_wide(params, q_ast.as_ref());
     // 5.7.2.4 validation bullets (p.201), in the spec's own order.
     if params.get("type").map(String::as_str) == Some("*")
         && params.get("local").map(String::as_str) == Some("false")
@@ -755,7 +787,8 @@ async fn query_entities_inner(
         .into());
     }
 
-    let repr = parse_repr(params, &ctx)?;
+    let mut repr = parse_repr(params, &ctx)?;
+    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, filter, &ctx)?;
     let join = parse_join(params)?;
     check_linked_projection(&repr, &join)?;
     // 5.7.2.4: filter conditions using Linked Entity attributes need join,
@@ -905,7 +938,7 @@ async fn query_entities_inner(
     // 6.4.3.2: entityMap=true — the EntityMap for this query is (re)created;
     // the response carries NGSILD-EntityMap and 201 Created.
     if params.get("entityMap").map(String::as_str) == Some("true") {
-        let map = build_query_map(st, &tenant, headers, &ctx, params).await?;
+        let map = build_query_map(st, &tenant, headers, &ctx, params, filter).await?;
         *resp.status_mut() = StatusCode::CREATED;
         if let Some(id) = map.get("id").and_then(Value::as_str) {
             if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
@@ -913,6 +946,7 @@ async fn query_entities_inner(
             }
         }
     }
+    filter.mark_restricted(resp.headers_mut());
     Ok(resp)
 }
 
@@ -2216,8 +2250,9 @@ async fn retrieve_attr_inner(
     let tenant = tenant_from(headers)?;
     check_params(params, &["options", "format", "lang", "datasetId", "local"])?;
     let ctx = request_context(&st.loader, headers).await?;
-    gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
-    let repr = parse_repr(params, &ctx)?;
+    let filter = gate!(st, &tenant, headers, "5.7.1", ids: &[id]).await?;
+    let mut repr = parse_repr(params, &ctx)?;
+    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &ctx)?;
     antares_model::EntityId::new(id)?;
     antares_model::check_attr_name(attr)?;
     let doc = st
@@ -2266,7 +2301,9 @@ async fn retrieve_attr_inner(
         member
     };
     let accept = parse_accept(headers)?;
-    Ok(respond(StatusCode::OK, body, &ctx, accept, &tenant))
+    let mut resp = respond(StatusCode::OK, body, &ctx, accept, &tenant);
+    filter.mark_restricted(resp.headers_mut());
+    Ok(resp)
 }
 
 /// 5.14.4.4: run the (split-reduced when applicable) local query and record
@@ -2284,6 +2321,7 @@ pub(crate) async fn build_query_map(
     headers: &HeaderMap,
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
+    filter: &crate::policy::Filter,
 ) -> ApiResult<Value> {
     let q_ast = params
         .get("q")
@@ -2298,6 +2336,9 @@ pub(crate) async fn build_query_map(
         )
         .into());
     }
+    // the candidate set is the NARROWED query's (ADR-0020)
+    let narrowed = filter.narrow_params(params)?;
+    let params = &narrowed;
     // 5.14.4.4: invalid entity ids / csf are BadRequestData
     if let Some(ids) = params.get("id") {
         for id in ids.split(',') {

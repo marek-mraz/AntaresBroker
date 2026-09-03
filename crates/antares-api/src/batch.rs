@@ -1328,7 +1328,7 @@ async fn batch_query_inner(
     )?;
     // POST query IS Query Entities: geo+json is a valid Accept here (6.3.15)
     let accept = parse_accept_geo(headers)?;
-    gate!(st, &tenant, headers, "5.7.2").await?;
+    let filter = gate!(st, &tenant, headers, "5.7.2").await?;
     let parsed = parse_body(&st.loader, headers, body, BodyKind::Standard).await?;
     let q = parsed.object(NgsiError::BadRequestData(
         "query body must be an object".into(),
@@ -1368,6 +1368,11 @@ async fn batch_query_inner(
         )
         .into());
     }
+    // ADR-0020: the engine's narrowing joins the Query's own filters here,
+    // after the "too wide" judgement — which is about what the client asked
+    // for. Everything below reads the narrowed query, the forwarded one
+    // included.
+    let vp = filter.narrow_params(&vp)?;
     let fed = if crate::federation::active(&vp)
         && !crate::federation::via_loop(
             headers,
@@ -1401,7 +1406,8 @@ async fn batch_query_inner(
     )?;
     // body members (pick/omit/attrs/lang/datasetId) shape the representation
     // exactly like their 6.3.7 query-parameter twins
-    let repr = parse_repr(&page_params, &parsed.ctx)?;
+    let mut repr = parse_repr(&page_params, &parsed.ctx)?;
+    crate::repr::narrow_projection(&mut repr.pick, &mut repr.omit, &filter, &parsed.ctx)?;
     let join = crate::entities::parse_join(&vp)?;
     crate::entities::check_linked_projection(&repr, &join)?;
     let mut payload: Vec<Value> = page
@@ -1476,6 +1482,7 @@ async fn batch_query_inner(
             resp.headers_mut().insert("NGSILD-Results-Count", v);
         }
     }
+    filter.mark_restricted(resp.headers_mut());
     Ok(resp)
 }
 

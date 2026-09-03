@@ -1,6 +1,7 @@
 # ADR-0020 — The policy seam: one trait, one built-in engine, every engine an addon
 
-Date: 2026-09-02. Status: accepted. Reverses the "no policy code in the
+Date: 2026-09-02. Status: accepted, amended (the narrowing marker header).
+Reverses the "no policy code in the
 broker" reading of the standing PEP decision (SECURITY.md,
 `docs/roadmap-1.0.md`, `docs/policies.md`), which otherwise stands.
 
@@ -74,7 +75,7 @@ clause, ids, types, attrs, `q`, `scopeQ`, geo, body. `Decision` is
 | `Allow` | nothing |
 | `Deny` | 403 with ProblemDetails whose `type` is an Antares URI — Table 6.3.2-1 has no access-denied type, so this is an Antares decision with its own `AntaresSpecificTests` and a 6.3.2 ledger note |
 | `Filter` | narrows: the `q` is conjoined into the query the store runs and travels on forwards, `omit`/`pick` go through the 5.2.14.1 projection the notification path already has, and a merged federated result is filtered after the merge |
-| `Filter { restricted: true }` | the same, plus `NGSILD-Results-Restricted: true` |
+| `Filter { restricted: true }` | the same, plus `Antares-Results-Restricted: true` (see the amendment) |
 | `Filter` on purge (5.6.21), snapshot fill (5.16) or tenant purge | answered as `Deny` — there is no narrowed form of "delete everything" |
 
 The conjunction is made on the `antares-ql` AST, never on the query
@@ -102,6 +103,23 @@ function of its configuration — the argument `surface.rs` already makes
 for the `/x/` prefixes. Conformance is therefore asserted against the
 built-in engine, and a deployment running another engine makes no
 conformance claim.
+
+## Amendment: the narrowing marker is an Antares header
+
+This decision first named the marker `NGSILD-Results-Restricted`. It is
+sent as `Antares-Results-Restricted` instead.
+
+`NGSILD-` is ETSI's prefix, and clause 6.3 defines what it carries:
+`NGSILD-Tenant` (6.3.1), `NGSILD-EntityMap`, `NGSILD-Results-Count` and
+`NGSILD-Warning`. A broker-invented header under that prefix claims a name
+CIM 009 has not assigned, and a later version that assigns it to something
+else turns every Antares deployment into a client-visible conflict. The
+same reasoning already puts the access-denied error type on an Antares URI
+rather than under `https://uri.etsi.org/ngsi-ld/errors/`: where the
+standard is silent, Antares answers in its own namespace and says so.
+
+Nothing else changes — the header is still advisory, still sent only when
+the engine sets `restricted`, and a narrowing is otherwise silent.
 
 ## Consequences
 
@@ -137,3 +155,8 @@ conformance claim.
   crate, and the release gate proves no addon is in the shipped image.
 - A test that fails when a subject header survives `federation::forward`.
 - `/q/health` names the active engine and its timeout.
+- `tests/policy_filter_5_7.rs`: what the raw read answers, what the
+  narrowed one answers, and what is not in it — over the entity query, the
+  retrieve, the attribute retrieve, the batch query, the temporal query and
+  retrieve, the EntityMap candidate set and a merged federated result; the
+  marker header on each read it narrowed.

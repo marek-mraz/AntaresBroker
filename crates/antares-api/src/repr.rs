@@ -103,6 +103,50 @@ pub fn parse_repr(params: &HashMap<String, String>, ctx: &Context) -> Result<Rep
     Ok(r)
 }
 
+/// Narrow a representation by a policy decision (ADR-0020).
+///
+/// `omit` is appended to whatever the request asked to omit: removing more
+/// members can only remove more. `pick` intersects with the request's,
+/// because a pick that added a name would serve a member the request did
+/// not ask for and the engine's narrowing would have widened the answer.
+///
+/// The Entity frame survives a policy pick. 6.5.3.1 makes `pick` reduce an
+/// Entity "down to only contain the listed Entity members", and a client
+/// that wants `id` back names it; but the engine is restricting what may be
+/// seen rather than choosing a representation, and 5.2.4 makes `id` and
+/// `type` the Entity — a document without them is not one.
+pub fn narrow_projection(
+    pick: &mut Option<Vec<ProjNode>>,
+    omit: &mut Option<Vec<ProjNode>>,
+    f: &crate::policy::Filter,
+    ctx: &Context,
+) -> Result<(), NgsiError> {
+    if !f.omit.is_empty() {
+        let mut nodes = parse_projection(&f.omit.join(","), ctx)?;
+        match omit {
+            Some(own) => own.append(&mut nodes),
+            None => *omit = Some(nodes),
+        }
+    }
+    if !f.pick.is_empty() {
+        let allowed = parse_projection(&f.pick.join(","), ctx)?;
+        let mut kept = match pick.take() {
+            None => allowed,
+            Some(own) => own
+                .into_iter()
+                .filter(|n| allowed.iter().any(|a| a.iri == n.iri))
+                .collect(),
+        };
+        for frame in parse_projection("id,type", ctx)? {
+            if !kept.iter().any(|n| n.raw == frame.raw) {
+                kept.push(frame);
+            }
+        }
+        *pick = Some(kept);
+    }
+    Ok(())
+}
+
 /// Maximum `{…}` selection depth of a projection tree — the number of
 /// Linked Entity hops it implies (5.7.1.4: must not exceed joinLevel).
 pub fn proj_depth(nodes: &[ProjNode]) -> usize {

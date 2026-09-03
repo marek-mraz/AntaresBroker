@@ -639,12 +639,22 @@ async fn run_temporal_query(
         }
         vp.insert("limit".into(), st.max_limit.to_string());
         vp.insert("offset".into(), offset.to_string());
-        let resp = crate::temporal::query_temporal_inner(st, &vp, &headers)
-            .await
-            .map_err(|e| match e {
-                ApiError::Ngsi(n) => n,
-                other => opaque("temporal query execution", &other),
-            })?;
+        // The fill runs after the request that created the snapshot has
+        // been answered, under a header map that is not the client's, so
+        // the narrowing the creating subject was given is not in scope here
+        // — a snapshot under a policy is P5's box (ADR-0020: a `Filter` on
+        // a fill is a `Deny`, and the fill records whose it is).
+        let resp = crate::temporal::query_temporal_inner(
+            st,
+            &vp,
+            &headers,
+            &crate::policy::Filter::default(),
+        )
+        .await
+        .map_err(|e| match e {
+            ApiError::Ngsi(n) => n,
+            other => opaque("temporal query execution", &other),
+        })?;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .map_err(|e| opaque("temporal result read", &e))?;

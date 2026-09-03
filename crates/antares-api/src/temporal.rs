@@ -1404,14 +1404,16 @@ async fn query_temporal_outer(
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
-    gate!(st, &tenant, headers, "5.7.4", scope_q: params.get("scopeQ").map(String::as_str)).await?;
+    let filter =
+        gate!(st, &tenant, headers, "5.7.4", scope_q: params.get("scopeQ").map(String::as_str))
+            .await?;
     let Some(map_ref) = single_header(headers, "NGSILD-EntityMap")? else {
-        return query_temporal_inner(st, &params, headers).await;
+        return query_temporal_inner(st, &params, headers, &filter).await;
     };
     let map_id = map_ref.rsplit('/').next().unwrap_or(&map_ref).to_owned();
     let Some(mut map) = crate::entity_map::map_if_accessible(st, &tenant, &map_id) else {
         params.insert("entityMap".into(), "true".into());
-        return query_temporal_inner(st, &params, headers).await;
+        return query_temporal_inner(st, &params, headers, &filter).await;
     };
     params.remove("entityMap");
     // 5.5.9.3: the map fixes the candidate set and the request's own filters
@@ -1436,7 +1438,7 @@ async fn query_temporal_outer(
         }
         eff.insert("limit".into(), st.max_limit.to_string());
         eff.insert("id".into(), chunk.join(","));
-        let resp = query_temporal_inner(st, &eff, headers).await?;
+        let resp = query_temporal_inner(st, &eff, headers, &filter).await?;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .map_err(|_| NgsiError::InternalError("entityMap recheck read".into()))?;
@@ -1479,7 +1481,7 @@ async fn query_temporal_outer(
             ids.join(",")
         },
     );
-    let mut resp = query_temporal_inner(st, &params, headers).await?;
+    let mut resp = query_temporal_inner(st, &params, headers, &filter).await?;
     if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{map_id}").parse() {
         resp.headers_mut().insert("NGSILD-EntityMap", v);
     }
@@ -1728,6 +1730,7 @@ pub(crate) async fn query_temporal_inner(
     st: &AppState,
     params: &HashMap<String, String>,
     headers: &HeaderMap,
+    filter: &crate::policy::Filter,
 ) -> ApiResult<Response> {
     let tenant = tenant_from(headers)?;
     check_params(
@@ -1783,10 +1786,19 @@ pub(crate) async fn query_temporal_inner(
     let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
         crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
     });
-    let scope_q = params.get("scopeQ").map(String::as_str);
     check_temporal_query(st, params, headers, &tenant, &ctx, q_ast.as_ref())?;
+    // ADR-0020: the engine's narrowing joins the request's own filters after
+    // 5.7.4.4's "too wide" judgement, which is about what the client asked
+    // for. Everything below reads the narrowed query, the forward included.
+    let narrowed = filter.narrow_params(params)?;
+    let params = &narrowed;
+    let q_ast = params.get("q").map(|q| parse_q(q)).transpose()?.map(|ast| {
+        crate::qeval::apply_expand_values(ast, params.get("expandValues").map(String::as_str), &ctx)
+    });
+    let scope_q = params.get("scopeQ").map(String::as_str);
     let tq = TemporalQ::from_params(params, true)?;
-    let trepr = parse_trepr(params, &ctx)?;
+    let mut trepr = parse_trepr(params, &ctx)?;
+    crate::repr::narrow_projection(&mut trepr.pick, &mut trepr.omit, filter, &ctx)?;
     // 5.7.4.4: {…} projection is Linked Entity retrieval — unconditional 400
     reject_linked_projection(&trepr, "5.7.4.4")?;
     let last_n = trepr.last_n;
@@ -2102,7 +2114,7 @@ pub(crate) async fn query_temporal_inner(
     // 6.18.3.2: entityMap=true — the temporal EntityMap for this query is
     // (re)created; the response carries NGSILD-EntityMap and 201 Created.
     if params.get("entityMap").map(String::as_str) == Some("true") {
-        let map = build_temporal_map(st, &tenant, headers, &ctx, params).await?;
+        let map = build_temporal_map(st, &tenant, headers, &ctx, params, filter).await?;
         *resp.status_mut() = StatusCode::CREATED;
         if let Some(id) = map.get("id").and_then(Value::as_str) {
             if let Ok(v) = format!("/ngsi-ld/v1/entityMaps/{id}").parse() {
@@ -2110,6 +2122,7 @@ pub(crate) async fn query_temporal_inner(
             }
         }
     }
+    filter.mark_restricted(resp.headers_mut());
     Ok(resp)
 }
 
@@ -2175,9 +2188,10 @@ async fn retrieve_temporal_inner(
         )?;
         let accept = parse_accept(headers)?;
         let ctx = request_context(&st.loader, headers).await?;
-        gate!(st, &tenant, headers, "5.7.3", ids: &[id]).await?;
+        let filter = gate!(st, &tenant, headers, "5.7.3", ids: &[id]).await?;
         let tq = TemporalQ::from_params(params, false)?;
-        let trepr = parse_trepr(params, &ctx)?;
+        let mut trepr = parse_trepr(params, &ctx)?;
+        crate::repr::narrow_projection(&mut trepr.pick, &mut trepr.omit, &filter, &ctx)?;
         // 5.7.3.4: "If projection attributes are present and indicate the
         // use of Linked Entity retrieval, an error of type BadRequestData
         // shall be raised" — unconditional, temporal defines no join.
@@ -2320,6 +2334,7 @@ async fn retrieve_temporal_inner(
             }
         }
         crate::paging::attach_warnings(&mut resp, &warnings);
+        filter.mark_restricted(resp.headers_mut());
         Ok(resp)
     }
 }
@@ -3012,7 +3027,7 @@ pub async fn batch_temporal_query(
             &["limit", "offset", "count", "options", "format", "local"],
         )?;
         parse_accept(&headers)?;
-        gate!(st, &tenant, &headers, "5.7.4").await?;
+        let filter = gate!(st, &tenant, &headers, "5.7.4").await?;
 
         let parsed = parse_body(&st.loader, &headers, &body, BodyKind::Standard).await?;
         let q = parsed.object(NgsiError::BadRequestData(
@@ -3026,7 +3041,7 @@ pub async fn batch_temporal_query(
         // and aggrParams (5.2.44).
         let mut vp: HashMap<String, String> = params.clone();
         crate::paging::query_doc_params(q, true, &mut vp)?;
-        query_temporal_inner(&st, &vp, &headers).await
+        query_temporal_inner(&st, &vp, &headers, &filter).await
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -3043,6 +3058,7 @@ pub(crate) async fn build_temporal_map(
     headers: &HeaderMap,
     ctx: &antares_jsonld::Context,
     params: &HashMap<String, String>,
+    filter: &crate::policy::Filter,
 ) -> ApiResult<Value> {
     if !params.contains_key("timerel") {
         return Err(NgsiError::BadRequestData(
@@ -3085,7 +3101,7 @@ pub(crate) async fn build_temporal_map(
     eff.insert("limit".into(), st.max_limit.to_string());
     // Box::pin: build_temporal_map is reachable from query_temporal_inner
     // (entityMap=true), so this recursive edge needs indirection.
-    let resp = Box::pin(query_temporal_inner(st, &eff, headers)).await?;
+    let resp = Box::pin(query_temporal_inner(st, &eff, headers, filter)).await?;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .map_err(|e| NgsiError::InternalError(format!("temporal candidate read: {e}")))?;

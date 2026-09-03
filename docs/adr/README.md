@@ -25,7 +25,7 @@ One file per irreversible decision, numbered, never rewritten.
 | [ADR-0017](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0017-drivers-are-named-not-enumerated.md) | A driver is identified by its name, not by an enum value | accepted, implemented |
 | [ADR-0018](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0018-ci-actions-pinned-by-tag.md) | CI actions are pinned by tag, third-party binaries by version | accepted, implemented |
 | [ADR-0019](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0019-remote-notification-endpoint.md) | The distributed-subscription notification receiver lives outside the ETSI namespace | accepted, implemented |
-| [ADR-0020](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0020-policy-seam.md) | The policy seam: one trait, one built-in engine, every engine an addon | accepted |
+| [ADR-0020](https://github.com/marek-mraz/AntaresBroker/blob/master/docs/adr/ADR-0020-policy-seam.md) | The policy seam: one trait, one built-in engine, every engine an addon | accepted, amended (the narrowing marker header) |
 
 ## Format
 

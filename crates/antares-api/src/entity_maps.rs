@@ -128,7 +128,7 @@ async fn create_map(
 ) -> Response {
     let go = async {
         let tenant = tenant_from(&headers)?;
-        gate!(
+        let filter = gate!(
             st,
             &tenant,
             &headers,
@@ -149,12 +149,17 @@ async fn create_map(
         check_params(&vp, &allowed)?;
         let accept = parse_accept(&headers)?;
         let ctx = request_context(&st.loader, &headers).await?;
+        // 5.14.4/5.14.5: the map is the id set of the query it was built
+        // from, so it is built from the NARROWED query — an id the subject
+        // may not see never enters the map it will page through.
         let doc = if temporal {
-            crate::temporal::build_temporal_map(&st, &tenant, &headers, &ctx, &vp).await?
+            crate::temporal::build_temporal_map(&st, &tenant, &headers, &ctx, &vp, &filter).await?
         } else {
-            crate::entities::build_query_map(&st, &tenant, &headers, &ctx, &vp).await?
+            crate::entities::build_query_map(&st, &tenant, &headers, &ctx, &vp, &filter).await?
         };
-        Ok::<_, ApiError>(created_response(doc, &ctx, accept, &tenant))
+        let mut resp = created_response(doc, &ctx, accept, &tenant);
+        filter.mark_restricted(resp.headers_mut());
+        Ok::<_, ApiError>(resp)
     };
     go.await.unwrap_or_else(|e| e.into_response())
 }
@@ -266,6 +271,7 @@ mod tests {
             &HeaderMap::new(),
             &antares_jsonld::Context::default(),
             &params(&[("type", "Vehicle"), ("local", "true")]),
+            &crate::policy::Filter::default(),
         )
         .await
         .expect("EntityMap");
@@ -284,6 +290,7 @@ mod tests {
             &HeaderMap::new(),
             &antares_jsonld::Context::default(),
             &params(&[("type", "Ship"), ("local", "true")]),
+            &crate::policy::Filter::default(),
         )
         .await
         .expect("EntityMap");

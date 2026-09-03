@@ -164,7 +164,7 @@ pub struct Filter {
     pub omit: Vec<String>,
     /// If non-empty, the only members served beside the document frame.
     pub pick: Vec<String>,
-    /// Answer `NGSILD-Results-Restricted: true`, so a client can know the
+    /// Answer [`RESTRICTED_HEADER`]`: true`, so a client can know the
     /// answer was narrowed. Narrowing is otherwise silent.
     pub restricted: bool,
 }
@@ -175,9 +175,11 @@ pub struct Filter {
 const FRAME: [&str; 3] = ["id", "type", "@context"];
 
 impl Filter {
-    /// Apply `pick`/`omit` to one served document. Removal only: whatever
-    /// members come out were in the document already, which is the property
-    /// [`run_policy_contract`] asserts.
+    /// Apply `pick`/`omit` to one document by member name. This is the
+    /// reference semantics [`run_policy_contract`] holds an engine's answer
+    /// against; a served document is projected through the request's own
+    /// 5.5.2 representation instead (`repr::narrow_projection`), where the
+    /// names are expanded against the request `@context` first.
     pub fn project(&self, doc: &mut Value) {
         let Some(obj) = doc.as_object_mut() else {
             return;
@@ -198,7 +200,73 @@ impl Filter {
     pub fn is_empty(&self) -> bool {
         self.q.is_none() && self.scope_q.is_none() && self.omit.is_empty() && self.pick.is_empty()
     }
+
+    /// The request's own query parameters, narrowed by this decision.
+    ///
+    /// The `q` conjunction is made on the AST and rendered back once
+    /// (`antares_ql`'s renderer parenthesises an `Or` inside an `And`, so
+    /// 4.9's `;`-over-`|` precedence is the renderer's problem and not the
+    /// rule writer's). Every consumer below reads the narrowed parameters:
+    /// the store push-down, the local re-check that 5.7.2.4 runs over
+    /// merged results, and the query the request is forwarded with.
+    ///
+    /// A `scopeQ` narrowing is set when the request carries none. When it
+    /// carries one the two cannot be merged — 4.19 conjoins with `;` inside
+    /// a parenthesised group while `,` and `|` separate groups outside it,
+    /// so wrapping two arbitrary expressions changes what they mean — and
+    /// the seam answers the only way that is not wider than the engine
+    /// decided: it refuses.
+    /// Say the answer was narrowed, when the engine asked for it to be
+    /// said. Narrowing is otherwise silent: a caller cannot tell an Entity
+    /// it may not see from one that is not there.
+    pub fn mark_restricted(&self, headers: &mut HeaderMap) {
+        if self.restricted {
+            headers.insert(
+                RESTRICTED_HEADER,
+                axum::http::HeaderValue::from_static("true"),
+            );
+        }
+    }
+
+    pub fn narrow_params(
+        &self,
+        params: &std::collections::HashMap<String, String>,
+    ) -> Result<std::collections::HashMap<String, String>, Denied> {
+        let mut out = params.clone();
+        if let Some(extra) = &self.q {
+            let narrowed = match out.get("q").map(|q| antares_ql::parse_q(q)).transpose() {
+                Ok(Some(own)) => QNode::And(vec![own, extra.clone()]),
+                Ok(None) => extra.clone(),
+                // the request's own `q` is parsed and refused long before a
+                // filter reaches it; an unparsable one here is a caller that
+                // narrowed something it never validated
+                Err(_) => return Err(Denied(ENGINE_FAILED.to_owned())),
+            };
+            out.insert("q".to_owned(), narrowed.to_string());
+        }
+        if let Some(scope) = &self.scope_q {
+            if out.contains_key("scopeQ") {
+                return Err(Denied(SCOPE_NOT_NARROWABLE.to_owned()));
+            }
+            out.insert("scopeQ".to_owned(), scope.clone());
+        }
+        Ok(out)
+    }
 }
+
+/// The response header a `Filter { restricted: true }` adds. It is not in
+/// the `NGSILD-` namespace: that prefix is ETSI's, carries the headers
+/// clause 6.3 defines (`NGSILD-Tenant`, `NGSILD-EntityMap`,
+/// `NGSILD-Results-Count`, `NGSILD-Warning`), and a broker-invented header
+/// under it would collide with whatever a later version puts there — the
+/// same reason a refusal answers `urn:antares:error:AccessDenied` rather
+/// than an invented `uri.etsi.org` type.
+pub const RESTRICTED_HEADER: &str = "Antares-Results-Restricted";
+
+/// The refusal a `scopeQ` narrowing gets when the request brought its own
+/// (see [`Filter::narrow_params`]).
+pub const SCOPE_NOT_NARROWABLE: &str =
+    "the request's own scope query cannot be narrowed by the policy engine";
 
 /// What an engine may answer about one notification, for one subscription.
 #[derive(Debug, Clone, PartialEq)]
