@@ -422,8 +422,13 @@ impl AppState {
     /// scheme then validate and deliver through it. Call before the state is
     /// shared — a clone already handed out keeps the registry it was made
     /// with.
+    ///
+    /// Not behind `test-kit`, unlike the mirror accessors beside it: this is
+    /// the sink seam itself (ADR-0016), the call `docs/src/extending.md`
+    /// tells a deployment to make, and `examples/plugin-example` is the host
+    /// that proves it from outside. A release library without it has no
+    /// notification binding seam at all.
     #[must_use]
-    #[cfg(any(test, feature = "test-kit"))]
     pub fn with_sink(mut self, sink: Box<dyn antares_notifier::NotificationSink>) -> Self {
         match Arc::get_mut(&mut self.sinks) {
             Some(reg) => reg.register(sink),

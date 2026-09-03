@@ -181,6 +181,7 @@ dependencies = [
  "antares-api",
  "antares-model",
  "antares-notifier",
+ "antares-ql",
  "antares-store",
  "axum",
  "http-body-util",

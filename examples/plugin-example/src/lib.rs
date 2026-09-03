@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! A driver plugin, written the way one from outside this repository would
 //! be: nothing here is reachable from a core crate, and the broker mounts it
-//! through the same three seams any deployment has — the two storage driver
-//! traits, one `ApiSurface`, one `NotificationSink`.
+//! through the same four seams any deployment has — the two storage driver
+//! traits, one `ApiSurface`, one `NotificationSink`, one `PolicyEngine`.
 //!
 //! The store is deliberately the simplest thing that is CORRECT rather than
 //! the fastest: one ordered map keyed by (tenant, kind, id), no indexes, no
@@ -22,8 +22,10 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::RwLock;
 
+mod policy;
 mod sink;
 mod surface;
+pub use policy::{ExamplePolicy, POLICY_NAME, RULES_ENV};
 pub use sink::MemorySink;
 pub use surface::ExampleSurface;
 

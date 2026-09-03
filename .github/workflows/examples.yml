@@ -17,10 +17,10 @@ jobs:
   plugin-example:
     # The reference plugin is the proof that the seams are usable from
     # outside `crates/`: a broker built with it serves its store, its
-    # temporal history, its HTTP surface and its notification binding, and
-    # the whole conformance suite runs through that driver. A red run here
-    # means a seam changed shape without its documented extension point
-    # following.
+    # temporal history, its HTTP surface, its notification binding and its
+    # policy engine, and the whole conformance suite runs through that
+    # driver. A red run here means a seam changed shape without its
+    # documented extension point following.
     name: Reference plugin (all suites)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -35,7 +35,7 @@ jobs:
       - name: Build the broker on the plugin driver
         run: cargo build --locked -p antares-broker --features plugin-example
 
-      - name: The four seams are served from outside the workspace
+      - name: The five seams are served from outside the workspace
         run: |
           # The alias is how other parties reach this broker, and it lands in
           # the notification endpoint of every Subscription copy 5.8.1.4
@@ -57,6 +57,9 @@ jobs:
               "temporal": h.get("temporal") == "example",
               "surface": "example" in (h.get("surfaces") or {}),
               "sink": "memory" in (h.get("notificationSchemes") or []),
+              # the conformance suite below runs on the engine the broker
+              # ships, never on the addon (ADR-0020)
+              "policy": (h.get("policy") or {}).get("engine") == "allow-all",
           }
           for seam, ok in checks.items():
               print(f"{seam}: {'ok' if ok else 'MISSING'}")
@@ -72,9 +75,44 @@ jobs:
             RESULTS_DIR=results/plugin-example STOP_ON_ERROR=0 MQTT=0 \
             dev/etsi-run.sh
 
-      - name: Stop the broker
+      - name: The policy seam, driven by the reference engine
+        # The suite above ran on the default engine — allow-all, the one the
+        # broker ships and the one conformance is asserted against. This step
+        # starts a SECOND broker beside it, on the example engine, and runs
+        # the folder of Antares-specific tests that exercise what an engine
+        # can do: refuse an operation, narrow a query, project a document and
+        # project a notification. The venv is the one dev/etsi-run.sh built.
+        run: |
+          cat > policy-rules.json <<'JSON'
+          {
+            "acme": {"denyTypes": ["PolicySecret"], "omit": ["price"]},
+            "beta": {"q": "speed<100"}
+          }
+          JSON
+          ANTARES_HTTP_PORT=9091 ANTARES_STORE=example \
+            ANTARES_HOST_ALIAS=localhost ANTARES_SWEEP_SECS=2 \
+            ANTARES_EGRESS_ALLOW_PRIVATE=true \
+            ANTARES_POLICY=example \
+            ANTARES_POLICY_RULES="$PWD/policy-rules.json" \
+            ANTARES_POLICY_SUBJECT_HEADERS=X-Subject \
+            target/debug/antares & echo $! > policy-broker.pid
+          for i in $(seq 100); do curl -sf localhost:9091/q/health >/dev/null && break; sleep 0.2; done
+          engine=$(curl -sf localhost:9091/q/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["policy"]["engine"])')
+          [ "$engine" = example ] || { echo "policy engine: '$engine'"; exit 1; }
+          cd ngsi-ld-test-suite && ../.venv/bin/robot \
+            --variable url:http://localhost:9091/ngsi-ld/v1 \
+            --variable notification_server_host:127.0.0.1 \
+            --variable notification_server_port:8095 \
+            --variable context_source_host:127.0.0.1 \
+            --variable context_source_port:8096 \
+            --outputdir ../results/plugin-example/policy \
+            AntaresSpecificTests/policy_engine.robot
+
+      - name: Stop the brokers
         if: always()
-        run: kill "$(cat broker.pid)" 2>/dev/null || true
+        run: |
+          kill "$(cat broker.pid)" 2>/dev/null || true
+          kill "$(cat policy-broker.pid)" 2>/dev/null || true
 
       - uses: actions/upload-artifact@v6
         if: always()

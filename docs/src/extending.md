@@ -27,7 +27,7 @@ Every optional capability is one cargo feature plus a registration in
 | `antares-notifier` | `mqtt` | on | `rumqttc` + `rustls` |
 | `antares-broker` | `console` | off | `tokio-console` support; only arms under `RUSTFLAGS="--cfg tokio_unstable"` |
 | `antares-broker` | `mqtt` | on | forwards `antares-api/mqtt`; off, MQTT endpoints fail at subscription creation. Measured on one release build: 27.2 → 26.0 MB binary, 58.1 → 55.4 MiB idle RSS |
-| `antares-broker` | `plugin-example` | off | the reference plugin (`examples/plugin-example`): one more backend, surface and notification binding, all from outside `crates/`. Never in a shipped build |
+| `antares-broker` | `plugin-example` | off | the reference plugin (`examples/plugin-example`): one more backend, surface, notification binding and policy engine, all from outside `crates/`. Never in a shipped build |
 
 The browser artifact (`antares-wasm`) is the one build with `postgres`
 off: it drives the same router over the memory store and the OPFS shadow.
@@ -137,9 +137,9 @@ changes.
 ### How to add a storage backend
 
 `examples/plugin-example` is the worked answer: a crate outside `crates/`
-that implements `CurrentStateDriver`, `TemporalDriver`, one `ApiSurface`
-and one `NotificationSink`, and reaches a running broker through one
-cargo feature. Read it first — it is short, and it is built and tested
+that implements `CurrentStateDriver`, `TemporalDriver`, one `ApiSurface`,
+one `NotificationSink` and one `PolicyEngine`, and reaches a running broker
+through one cargo feature. Read it first — it is short, and it is built and tested
 with the workspace so it cannot drift from the seams it demonstrates.
 
 A backend from outside the workspace:
@@ -166,8 +166,8 @@ A backend from outside the workspace:
 4. Register it in `antares-broker`: an optional dependency, one feature that
    turns it on, and the name in the three shelves it belongs to —
    `store_shelf()` for the backend, `SURFACE_SHELF` for a surface,
-   `AppState::with_sink` for a binding. Each is one `#[cfg(feature = …)]`
-   line. Name the environment variables the backend reads in its doc
+   `AppState::with_sink` for a binding, `POLICY_SHELF` for a policy engine.
+   Each is one `#[cfg(feature = …)]` line. Name the environment variables the backend reads in its doc
    comment; `dev/check-env-docs.sh` requires a row for each in
    `docs/src/configuration.md`.
 5. Prove it against the conformance suite, not only against the contract:

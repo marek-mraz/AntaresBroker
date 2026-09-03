@@ -86,7 +86,7 @@ module's header comment.
 | `egress.rs` | 470 | SSRF wall and per-destination circuit breakers for notifications, forwards, `@context` fetches |
 | `surface.rs` | 100 | `ApiSurface`: HTTP surfaces mounted beside the API root, on the reserved prefixes `/q` and `/x` |
 | `policy.rs` | 890 | the policy seam (ADR-0020): `PolicyEngine`, `Subject`/`Operation`/`Decision`/`Filter`, the built-in `AllowAll` engine, the fail-closed calls that deny on a panic or a timeout, and the stored subject a notification is decided under |
-| `state.rs` | 770 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
+| `state.rs` | 830 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
 own nothing: each is a handful of lines re-exporting `antares_ql::geo`,

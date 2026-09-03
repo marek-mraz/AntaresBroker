@@ -206,6 +206,21 @@ the engine sets `restricted`, and a narrowing is otherwise silent.
   handler that skips the gate is a red test, not a review finding.
 - `cargo tree -p antares-broker` with default features names no engine
   crate, and the release gate proves no addon is in the shipped image.
+  `policy_shelf_tests` in `antares-broker` asserts the shelf of a build
+  without the addon feature is exactly `allow-all`, that no selection is
+  that engine, and that an unknown name is fatal rather than wide open.
+- The seam is proven from outside `crates/`, which is what makes it a seam:
+  `examples/plugin-example/src/policy.rs` is an engine written the way a
+  deployment's would be — static per-tenant rules from a JSON document —
+  and `examples/plugin-example/tests/policy.rs` runs `run_policy_contract`
+  against it and then answers real requests through `router()`: a denied
+  Entity type is 403 `urn:antares:error:AccessDenied` while the next type
+  in the same tenant is 201, and the engine's `q` and omit list narrow a
+  query the store ran. `AntaresSpecificTests/policy_engine.robot` repeats
+  it against a running broker built with that engine, adding the
+  notification projection and the Context Source forward; `examples.yml`
+  runs the conformance suite on `allow-all` and that folder on the addon,
+  in the same job.
 - `tests/policy_subject_on_the_wire_p6.rs`: a registration that asks for
   the subject header by the 4.3.6.5 copy value does not get it while an
   ordinary header it asks for still arrives; a 5.8.1.4 forwarded

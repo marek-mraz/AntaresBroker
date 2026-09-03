@@ -21,6 +21,11 @@ const KNOWN_KEYS: &[&str] = &[
     // to http://{host_alias}.
     "ANTARES_PUBLIC_URL",
     "ANTARES_ROLES",
+    // The example policy engine's rules document; accepted only in a build
+    // that carries the engine, so a release binary rejects it like any
+    // other key it has no code for.
+    #[cfg(feature = "plugin-example")]
+    antares_plugin_example::RULES_ENV,
     "ANTARES_DATABASE_URL",
     "ANTARES_STORE",
     // Temporal driver: a store mode, or `none` — history off (temporal
@@ -488,9 +493,15 @@ type PolicyCtor = fn() -> std::sync::Arc<dyn antares_api::policy::PolicyEngine>;
 /// engine from outside this workspace joins the list behind its own
 /// off-by-default feature, exactly as a store or a surface does, and is
 /// absent from a release build.
-const POLICY_SHELF: &[(&str, PolicyCtor)] = &[("allow-all", || {
-    std::sync::Arc::new(antares_api::policy::AllowAll)
-})];
+const POLICY_SHELF: &[(&str, PolicyCtor)] = &[
+    ("allow-all", || {
+        std::sync::Arc::new(antares_api::policy::AllowAll)
+    }),
+    #[cfg(feature = "plugin-example")]
+    (antares_plugin_example::POLICY_NAME, || {
+        std::sync::Arc::new(antares_plugin_example::ExamplePolicy::from_env())
+    }),
+];
 
 /// ANTARES_POLICY → the engine every operation is asked about; absent =
 /// `allow-all`. An unknown name is fatal and names the shelf: a deployment
@@ -1640,6 +1651,69 @@ mod api_surface_tests {
             let err = api_surfaces(Some(raw)).expect_err(&format!("{raw:?} selects nothing"));
             assert!(err.contains("ANTARES_API_SURFACES"), "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_shelf_tests {
+    use super::*;
+
+    fn shelf() -> Vec<&'static str> {
+        POLICY_SHELF.iter().map(|(n, _)| *n).collect()
+    }
+
+    /// ADR-0020: the broker ships one engine, and conformance is asserted
+    /// against it. A release build carries no other — an engine reaches the
+    /// shelf only through an off-by-default feature, so this assertion is
+    /// what "no addon in the shipped build" means for the policy seam.
+    #[cfg(not(feature = "plugin-example"))]
+    #[test]
+    fn the_shipped_build_carries_only_the_built_in_engine() {
+        assert_eq!(shelf(), vec!["allow-all"]);
+    }
+
+    /// No selection is the built-in engine, which is the only default that
+    /// keeps a broker without a policy behaving like a broker.
+    #[test]
+    fn no_selection_is_the_built_in_engine() {
+        for raw in [None, Some(""), Some("  ")] {
+            assert_eq!(policy_engine(raw).expect("default").0, "allow-all");
+        }
+    }
+
+    /// A typo must not serve every request wide open, so it is fatal and
+    /// the message names what this binary was built with.
+    #[test]
+    fn an_unknown_engine_is_fatal_and_names_the_shelf() {
+        let err = policy_engine(Some("opa")).expect_err("unknown engine");
+        assert!(err.contains("ANTARES_POLICY"), "{err}");
+        for name in shelf() {
+            assert!(err.contains(name), "the message lists {name}: {err}");
+        }
+    }
+
+    /// An engine compiled in from outside `crates/` is selected by name
+    /// exactly like the built-in one — and, given no rules to enforce,
+    /// refuses every operation rather than allowing it (ADR-0020: a broken
+    /// engine costs service, never access rules).
+    #[cfg(feature = "plugin-example")]
+    #[test]
+    fn a_plugin_engine_is_on_the_shelf_and_fails_closed() {
+        let name = antares_plugin_example::POLICY_NAME;
+        assert!(shelf().contains(&name), "the shelf omits it: {:?}", shelf());
+        let (selected, build) = policy_engine(Some(name)).expect("selection");
+        assert_eq!(selected, name);
+        assert_eq!(build().name(), name);
+        assert!(
+            std::env::var(antares_plugin_example::RULES_ENV).is_err(),
+            "this test reads the engine built with no rules document"
+        );
+        assert!(
+            antares_plugin_example::ExamplePolicy::from_env()
+                .broken()
+                .is_some(),
+            "an engine selected without rules would otherwise allow everything"
+        );
     }
 }
 
