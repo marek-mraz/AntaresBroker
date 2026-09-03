@@ -49,7 +49,7 @@ fn start_env(port: u16, roles: &str, db: &str, nats: &str, extra: &[(&str, &str)
 }
 
 fn wait_healthy(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + stretch(30);
     loop {
         let r = http(port, "GET", "/q/health", None, None);
         if r.starts_with("HTTP/1.1 200") {
@@ -140,8 +140,17 @@ fn receiver() -> (u16, Arc<Mutex<Vec<String>>>) {
     (port, seen)
 }
 
+/// Every wait in this file, stretched by the same factor the rest of the
+/// tree uses. This is the heaviest test here — four broker processes, a
+/// real Postgres and a real NATS, with a SIGKILL drill in the middle — so
+/// it is the one that most needs the stretch when a sanitizer run slows
+/// every one of them down at once.
+fn stretch(secs: u64) -> Duration {
+    Duration::from_secs(secs * antares_api::state::slow_factor())
+}
+
 fn wait_for<F: Fn() -> bool>(what: &str, secs: u64, f: F) {
-    let deadline = Instant::now() + Duration::from_secs(secs);
+    let deadline = Instant::now() + stretch(secs);
     while !f() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(200));
