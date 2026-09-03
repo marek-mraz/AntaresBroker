@@ -43,6 +43,28 @@ fn subject_header() -> &'static str {
     "X-Subject"
 }
 
+/// An engine that allows everything and remembers which tenant it was
+/// asked about.
+struct Recording(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl PolicyEngine for Recording {
+    fn name(&self) -> &str {
+        "recording"
+    }
+
+    fn decide<'a>(&'a self, s: &'a Subject, _op: &'a Operation<'a>) -> DecisionFuture<'a> {
+        self.0
+            .lock()
+            .expect("seen")
+            .push(s.tenant.as_str().to_owned());
+        Box::pin(std::future::ready(Decision::Allow))
+    }
+
+    fn pre_notify(&self, _s: &Subject, _sub: &Value, _n: &mut Value) -> NotifyDecision {
+        NotifyDecision::Deliver
+    }
+}
+
 /// An engine that answers every operation with the same decision.
 struct Fixed(Decision);
 
@@ -359,6 +381,50 @@ async fn an_empty_filter_on_a_whole_tenant_operation_is_an_allow() {
     )
     .await;
     assert_eq!(code, StatusCode::CREATED, "{body}");
+}
+
+/// 6.3.22 answers a request from a Snapshot's frozen copy by swapping the
+/// tenant for the internal one that copy lives under. The subject asking is
+/// unchanged by that, and so is the tenant an engine is asked about: a rule
+/// set is keyed by tenant, and a snapshot-scoped read judged under
+/// "snap-<uuid>" would match no rule any deployment ever wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_scoped_read_is_judged_under_the_callers_tenant() {
+    subject_header();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let st = AppState::new("me".into()).with_policy(Arc::new(Recording(seen.clone())));
+    seed(&st).await;
+    let (code, _, body) = call(
+        &st,
+        "POST",
+        "snapshots",
+        Some("alice"),
+        None,
+        Some(json!({"id": "urn:ngsi-ld:Snapshot:p7", "type": "Snapshot",
+                    "snapshotQueries": [{"type": "Query", "entities": [{"type": "Vehicle"}]}]})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED, "{body}");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/ngsi-ld/v1/entities?type=Vehicle")
+        .header(subject_header(), "alice")
+        .header("NGSILD-Snapshot", "urn:ngsi-ld:Snapshot:p7")
+        .body(Body::empty())
+        .expect("req");
+    let resp = antares_api::router(st.clone())
+        .oneshot(req)
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let seen = seen.lock().expect("seen").clone();
+    assert!(!seen.is_empty(), "the engine was never asked");
+    assert!(
+        seen.iter().all(|t| !t.starts_with("snap-")),
+        "the engine was asked about a snapshot's internal tenant: {seen:?}"
+    );
 }
 
 /// 5.2.41 Table 5.2.41-1/-2 lists every member a Snapshot has. Whose it is

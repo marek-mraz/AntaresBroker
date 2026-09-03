@@ -407,6 +407,20 @@ pub(crate) fn snapshot_of_synth(st: &AppState, synth: &str) -> Option<(TenantId,
     Some((owner, doc.get("snapshot")?.as_str()?.to_owned()))
 }
 
+/// The tenant an operation is judged under. 6.3.22 scopes a request to a
+/// Snapshot by swapping the tenant for the snapshot's internal one, so the
+/// handlers below it serve the frozen copy; the subject asking is still the
+/// owner tenant's. An engine keyed by tenant — which is the shape every
+/// rule set has — would otherwise be asked about an id no deployment ever
+/// wrote a rule for, and every snapshot-scoped read would step out from
+/// under its rules. Only a synthetic tenant costs the lookup.
+pub(crate) fn asking_tenant(st: &AppState, tenant: &TenantId) -> TenantId {
+    match snapshot_of_synth(st, tenant.as_str()) {
+        Some((owner, _)) => owner,
+        None => tenant.clone(),
+    }
+}
+
 /// 5.5.15: "If an implementation determines that it is low on resources,
 /// it may delete one or more snapshots", considering snapshotPriority
 /// (lowest first; earliest expiresAt breaks ties). The resource signal is

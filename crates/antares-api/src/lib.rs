@@ -23,7 +23,7 @@ macro_rules! gate {
     ($st:expr, $tenant:expr, $headers:expr, $clause:expr $(, $field:ident: $value:expr)* $(,)?) => {
         $crate::policy::gate(
             $st.policy.as_ref(),
-            $tenant,
+            &$crate::snapshots::asking_tenant(&$st, $tenant),
             $headers,
             &$crate::policy::Operation {
                 $($field: $value,)*

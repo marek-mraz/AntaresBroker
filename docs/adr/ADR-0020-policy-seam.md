@@ -102,6 +102,13 @@ narrowed. That is the one direction the seam may not fail in, so those
 clauses answer a narrowing the way 5.6.21 does: `Deny`. An engine that
 means to let such an operation through says `Allow`.
 
+The tenant an operation is judged under is the caller's. 6.3.22 answers a
+request from a Snapshot's frozen copy by swapping the tenant for the
+internal one that copy lives under, and a rule set is keyed by tenant, so a
+snapshot-scoped read judged under `snap-<uuid>` would match no rule any
+deployment ever wrote. The gate resolves that internal tenant back to its
+owner before it asks.
+
 A `pick`/`omit` name is one Attribute name (6.5.3.1), not a 4.21 projection
 expression, because that grammar reads a dot as the sub-attribute path
 separator and would truncate an IRI at the first dot of its authority. It is
