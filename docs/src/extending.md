@@ -27,7 +27,7 @@ Every optional capability is one cargo feature plus a registration in
 | `antares-notifier` | `mqtt` | on | `rumqttc` + `rustls` |
 | `antares-broker` | `console` | off | `tokio-console` support; only arms under `RUSTFLAGS="--cfg tokio_unstable"` |
 | `antares-broker` | `mqtt` | on | forwards `antares-api/mqtt`; off, MQTT endpoints fail at subscription creation. Measured on one release build: 27.2 → 26.0 MB binary, 58.1 → 55.4 MiB idle RSS |
-| `antares-broker` | `plugin-example` | off | the reference plugin (`examples/plugin-example`): one more backend, surface, notification binding and policy engine, all from outside `crates/`. Never in a shipped build |
+| `antares-broker` | `plugin-example` | off | the reference plugin (`examples/plugin-example`): one more backend, surface, notification binding, policy engine and façade route, all from outside `crates/`. Never in a shipped build |
 
 The browser artifact (`antares-wasm`) is the one build with `postgres`
 off: it drives the same router over the memory store and the OPFS shadow.
@@ -214,6 +214,101 @@ contract and then answers real requests through the router;
 `ngsi-ld-test-suite/AntaresSpecificTests/policy_engine.robot` does the same
 against a running broker, and `.github/workflows/examples.yml` runs the
 conformance suite on `allow-all` and that folder on the engine, in one job.
+
+### Façades for another standard
+
+A SensorThings, OGC API, WFS or OData surface is an `ApiSurface` like any
+other, with one extra rule: it answers by driving this broker's NGSI-LD API
+in process, through `AppState::call`, and never by reaching the store. That
+is the whole design. Every façade request becomes an NGSI-LD request, so
+negotiation, the bounds wall, tenancy, the policy seam, history and
+notifications happen once, in the code that already implements CIM 009 —
+and there is no second data path to keep in step with the first.
+
+```rust,ignore
+async fn things(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let req = Request::get("/ngsi-ld/v1/entities?type=Device&options=keyValues")
+        .body(Body::empty())?;
+    let resp = st.call(&headers, req).await;   // the broker answers
+    // ...translate the answer into the standard's own shape
+}
+```
+
+`examples/plugin-example/src/surface.rs` is the worked one, and
+`examples/plugin-example/tests/facade.rs` is the contract it is held to.
+
+**The tenant rule.** A façade maps its own notion of a caller — a path
+segment, a subdomain, a header its standard defines — to `NGSILD-Tenant`,
+and to nothing else. `AppState::call` copies `NGSILD-Tenant`,
+`NGSILD-Snapshot`, `Link` and the policy subject headers from the outer
+request when the inner one does not set them, so a façade that has no
+tenant notion of its own inherits the caller's and cannot get it wrong. A
+façade that DOES map its own sets the header on the inner request, and the
+copy stands aside. What a façade must never do is derive a tenant from
+anything the broker did not validate: `NGSILD-Tenant` is checked once, in
+`negotiate`, and that check is the whole of 6.3.14.
+
+**The representation to ask for.** Most of a mapping is already an option
+on the NGSI-LD request, and asking for the right one is the difference
+between a translation and a rewrite:
+
+| the façade wants | ask for | clause |
+|---|---|---|
+| values without the NGSI-LD envelope | `options=keyValues` | 4.5.4 |
+| the envelope, minus what is inferable | `options=concise` | 4.5.2.3 ff. |
+| GeoJSON Features | `Accept: application/geo+json` | 6.3.15 |
+| history rather than current state | the `/temporal/entities` resources | 6.18-6.22 |
+| only some Attributes | `attrs=` | 6.4.3.2 |
+| a count of what matched | `count=true` → `NGSILD-Results-Count` | 6.3.13 |
+
+**The error table.** A façade keeps the broker's status — it is the verdict
+on the operation, and the façade has no better one — and re-renders the
+body in its own vocabulary. A caller of a SensorThings API is not expecting
+Table 6.3.2-1 ProblemDetails, and a façade that passed them through would
+be telling its clients to parse a second error model. What each type means
+to a translation:
+
+| NGSI-LD error (Table 6.3.2-1) | status | what the façade's caller did |
+|---|---|---|
+| `InvalidRequest`, `BadRequestData` | 400 | sent something the broker will not accept — a bad filter, a malformed body |
+| `TooComplexQuery`, `TooManyResults` | 403 | asked for more than a cap allows; the façade's own paging is what avoids it |
+| `ResourceNotFound`, `NonexistentTenant` | 404 | named an entity, or a tenant, that is not there |
+| `AlreadyExists`, `Conflict` | 409 | created something twice, or a registration that clashes |
+| `OperationNotSupported` | 422 | asked for an operation the broker does not offer on that resource |
+| `NoMultiTenantSupport` | 501 | named a tenant a single-tenant deployment cannot serve |
+| `InternalError` | 500 | nothing; the broker failed |
+| `LdContextNotAvailable` | 504 | named an `@context` the broker could not fetch |
+
+6.3.4's own statuses (411, 413, 414, 415, 406) carry no body at all, so a
+façade fills the message from the reason phrase rather than from a payload
+that is not there.
+
+**The paging map.** The broker pages with `limit`/`offset` and answers with
+RFC 8288 `Link` headers, `rel="next"` and `rel="prev"`, carrying the
+response media type; `count=true` adds `NGSILD-Results-Count` (6.3.10,
+6.3.13). Each standard renders the same two facts — where the next page is,
+and how many there are — its own way:
+
+| standard | next page | total |
+|---|---|---|
+| SensorThings 1.1 | `@iot.nextLink`, an absolute URL | `@iot.count` with `$count=true` |
+| OData | `$skip`/`$top` on the next request | `@odata.count` |
+| OGC API — Features | a `rel="next"` entry in `links` | `numberMatched`, `numberReturned` |
+
+The façade rewrites the broker's `Link` into its own form rather than
+re-deriving the offsets: the broker already knows whether there IS a next
+page, and a façade that recomputed it would page differently from the API
+it fronts.
+
+**The write rule.** A façade writes through the NGSI-LD write resources —
+`POST /entities`, the `/entityOperations/*` batch endpoints, the temporal
+resources — and never through `AppState::store`. A store call skips
+expansion, validation, the policy seam, the history recording layer and the
+change hook that feeds subscriptions: an Entity written that way is in the
+database, absent from every notification, and absent from history. The
+batch endpoints are the right target for a façade that receives many
+records at once (an STA `POST /Observations` array), because one batch
+request is one pass through that machinery instead of N.
 
 ### How to add a storage backend
 
