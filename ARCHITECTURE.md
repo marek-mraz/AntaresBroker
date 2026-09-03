@@ -89,10 +89,13 @@ module's header comment.
 | `state.rs` | 930 | `AppState`: store, bus flag, mirror, HTTP clients, delivery policy, sinks, surfaces, hooks |
 
 `geo.rs`, `qeval.rs` and `regexcache.rs` are not in that table because they
-own nothing: each is a handful of lines re-exporting `antares_ql::geo`,
+own almost nothing: each is a handful of lines re-exporting `antares_ql::geo`,
 `::eval` and `::regex` so the broker-side paths (`crate::geo::GeoQuery`,
 `crate::qeval::eval_q`, `crate::regexcache::compile`) stay stable while the
-evaluation itself lives in the crate a gateway can use on its own.
+evaluation itself lives in the crate a gateway can use on its own. The one
+exception is `qeval::expansion_list`, which settles the 4.9 precedence
+between `expandValues` and `jsonKeys` — a rule about two query parameters
+rather than about the query language, so it stays on the broker side.
 
 ## 4. A request, end to end
 
@@ -213,7 +216,7 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   makes every round trip a cross-thread wakeup (measured p99 at 500
   updates/s: 49 ms to 2 s), so it is not the exit. This is the single
   largest architectural lever left; reversing it touches every driver
-  and every store call in `antares-api` (115 `st.store.` and 21
+  and every store call in `antares-api` (116 `st.store.` and 21
   `st.temporal.` expressions), and the object-safe shape for it
   already exists in the tree: `antares-notifier`'s `DeliveryFuture`, a
   boxed `Send` future returned from a trait method.
@@ -245,10 +248,6 @@ Stated so they are not rediscovered. Each is measured, not guessed.
   `AppState::with_drivers`, and the temporal query's paging decision asks
   `TemporalDriver::q_pushdown_exact`, which only the Postgres arm answers
   from its prefilter. `workspace.yml` checks the dependency tree.
-- ADR-0014 names five hook phases; two of them, `on_request` and
-  `pre_notify`, have no seam in code. The seams that exist are the
-  `ChangeHook`, the temporal drain, the `NotificationSink` boundary and the
-  tower layer stack.
 - `csource.rs` serialises registration writes on one process-wide
   `tokio::sync::Mutex` (`REGISTRATION_WRITE`) shared by every tenant, and
   the 5.9.2.4 overlap check of an idPattern-only registration walks up to
@@ -273,8 +272,6 @@ Stated so they are not rediscovered. Each is measured, not guessed.
 - Registration candidate selection reads on the order of a thousand
   rows per federated query on a 10 000-registration registry; the
   `csource_index` needs a type-first shape.
-- Registration counters of Table 5.2.9-2 (`timesSent`, `timesFailed`,
-  `lastSuccess`, `lastFailure`, `status`) are not produced.
 - Duplication has a measured floor rather than a target of zero.
   `dev/dup-check.sh` ratchets the workspace at 65 token clones over 779
   lines (`dev/dup-baseline.json`), 590 of them in `antares-api`, and at 12

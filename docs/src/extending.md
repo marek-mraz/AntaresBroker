@@ -21,7 +21,7 @@ Every optional capability is one cargo feature plus a registration in
 | crate | feature | default | what it compiles |
 |---|---|---|---|
 | `antares-api` | `mqtt` | on | the MQTT notification binding (`antares-notifier/mqtt`) |
-| `antares-api` | `postgres` | on | forwards `antares-sql/postgres` |
+| `antares-api` | `test-kit`, `postgres` | off | the in-crate test harness (`AppState::new` over the built-in store) and, with `postgres`, the Postgres-backed integration tests; both are reached only through this crate's own dev-dependency, never by a binary |
 | `antares-api` | `sonic` | off | `sonic-rs` on the batch-ingest hot path (x86_64 / aarch64); `serde_json` is the compiled fallback |
 | `antares-sql` | `postgres` | on | the Postgres and TimescaleDB backend (`sqlx`); off in the browser build |
 | `antares-notifier` | `mqtt` | on | `rumqttc` + `rustls` |
@@ -451,10 +451,10 @@ Five phases exist. Extensions attach to a phase; they never define one.
 
 | phase | fires | seam in code | failure policy |
 |---|---|---|---|
-| `on_request` | after parse and validation, before the operation | tower layer on the router | fail-closed |
+| `on_request` | after parse and validation, before the operation | `policy::decide`, called by the `gate!` in each handler | fail-closed |
 | `on_change` | after commit, with the before/after documents | `ChangeHook` (`antares-store`); on Postgres the same change rides the transactional outbox to the bus | fail-open |
 | `temporal_event` | in the post-response drain, with the whole request's events | `history::drain` and the gate chain in `crates/antares-api/src/history.rs` | fail-open |
-| `pre_notify` | notification built, before send | `NotificationSink` | fail-open |
+| `pre_notify` | notification built, before send | `policy::pre_notify`, then the `NotificationSink` | fail-closed: an engine that panics drops the notification |
 | `on_response` | render and annotate | tower layer | fail-closed |
 
 Failure policy follows the hook's role. An observer (metrics, audit)

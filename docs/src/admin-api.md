@@ -113,6 +113,7 @@ Prometheus text with the `antares_` prefix:
 | `antares_notification_changes_dropped_total` | Change events the notifier dropped under back-pressure. |
 | `antares_notification_task_panics_total` | Delivery tasks that panicked (a bug, never expected). |
 | `antares_change_lag_seconds` | Age of the change a notifier is handling. |
+| `antares_policy_failures_total` | Decisions the policy seam had to make itself because the engine did not, by reason (`panic`, `timeout`). Always zero under the built-in `allow-all` engine. |
 | `antares_pg_transaction_begin_seconds` | `postgres`/`timescale`: time to obtain a pooled connection and open a transaction — the pool wait plus one BEGIN round trip. |
 | `antares_pg_pool_timeouts_total` | `postgres`/`timescale`: acquire timeouts, each one a request answered 503 with `Retry-After`. |
 

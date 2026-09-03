@@ -26,12 +26,13 @@ and an `antares-worker` Deployment with matcher/notifier/temporal/registry),
 per flow the other manifests use; egress stays open because notification
 endpoints, Context Sources and `@context` URLs are client data, gated by
 `ANTARES_EGRESS_ALLOW_PRIVATE` and the scheme allowlist rather than by a
-CIDR list). All pod specs set `enableServiceLinks: false` (kubelet's injected `ANTARES_*`
-service-link vars would otherwise trip the unknown-config check; the broker
-also exempts those exact shapes). Proven by k8s-smoke.yml's `k8s-manifests`
+CIDR list). Both broker pod specs set `enableServiceLinks: false` (kubelet's injected
+`ANTARES_*` service-link vars would otherwise trip the unknown-config check;
+the broker also exempts those exact shapes). Proven by k8s-smoke.yml's `k8s-manifests`
 kind smoke (dispatch): apply + every `rollout status` green.
 
-- A worker pod serves **only** `/q/health`, `/q/ready`, `/q/metrics` — the
+- A worker pod serves the `/q` admin surface and nothing else — health,
+  readiness, metrics, the tenant calls and the dead-letter admin. The
   NGSI-LD API exists only on pods with the `api` role.
 - `ANTARES_BUS=nats` requires a shared store (`postgres`/`timescale`) and
   refuses to boot otherwise; `bus=local` requires all roles in one process.
