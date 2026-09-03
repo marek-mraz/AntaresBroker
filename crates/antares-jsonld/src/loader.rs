@@ -398,7 +398,8 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// `client_builder` calls it, so every client this workspace builds is
 /// covered. It is public because a DEPENDENCY can build a client too — the
 /// OTLP exporter does, from inside `opentelemetry-http` — and a binary must
-/// therefore install the provider before it wires anything up.
+/// therefore install the provider before it wires anything up. The browser
+/// owns TLS behind `fetch`, so on wasm32 this is a no-op by design.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install_crypto_provider() {
     static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -406,6 +407,10 @@ pub fn install_crypto_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }
+
+#[cfg(target_arch = "wasm32")]
+#[allow(missing_docs)] // documented on the native arm above
+pub fn install_crypto_provider() {}
 
 /// The one outbound-client constructor: every reqwest client in the
 /// broker — @context fetches, notifications, federation forwards — is built
