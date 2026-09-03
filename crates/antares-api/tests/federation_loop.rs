@@ -1001,6 +1001,75 @@ async fn clause_5_6_8_remote_204_upsert_is_update_not_create() {
     assert_eq!(m.hits.load(Ordering::SeqCst), 1, "one batch forward");
 }
 
+/// The other half of that rule. 5.6.8.4's distributed branch says to "Merge
+/// the returned list of Entities successfully created with S", so an Entity
+/// a Context Source created is one this request created — and 5.6.8.5's
+/// second bullet then applies to the whole answer: 201, S carrying that id.
+/// The local copy exists first, so the local half replaces rather than
+/// creates and the 201 can only have come from the source.
+#[tokio::test(flavor = "multi_thread")]
+async fn clause_5_6_8_a_remote_201_puts_its_created_ids_in_s() {
+    // the id spelled out, because the mock serves one static reply
+    let m = mock_replying(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\
+         Content-Length: 28\r\n\r\n[\"urn:ngsi-ld:Vehicle:d018\"]",
+    );
+    let st = state();
+    let reg = serde_json::json!({
+        "id": "urn:ngsi-ld:ContextSourceRegistration:ups-201",
+        "type": "ContextSourceRegistration",
+        "mode": "inclusive",
+        "operations": ["upsertBatch"],
+        "information": [{"entities": [{"type": "Vehicle", "id": ENTITY}]}],
+        "endpoint": format!("http://127.0.0.1:{}", m.port),
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/csourceRegistrations")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", reg.len())
+        .body(Body::from(reg))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    // the local copy, so the local half of the upsert updates
+    let seed = serde_json::json!({"id": ENTITY, "type": "Vehicle",
+                                  "speed": {"type": "Property", "value": 1}})
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entities")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", seed.len())
+        .body(Body::from(seed))
+        .expect("request");
+    assert_eq!(send(&st, req).await.status(), StatusCode::CREATED);
+
+    let body = serde_json::json!([
+        {"id": ENTITY, "type": "Vehicle", "speed": {"type": "Property", "value": 7}}
+    ])
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/ngsi-ld/v1/entityOperations/upsert")
+        .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
+        .body(Body::from(body))
+        .expect("request");
+    let res = send(&st, req).await;
+    assert_eq!(res.status(), StatusCode::CREATED, "the source created one");
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        doc,
+        serde_json::json!([ENTITY]),
+        "S is the created ids alone (5.6.8.5)"
+    );
+}
+
 /// 5.6.21.4: a matched registration forwards the purge only when it
 /// supports purgeEntity; an unsupported matched registration — any mode,
 /// redirect included — contributes a Conflict and is never contacted.
