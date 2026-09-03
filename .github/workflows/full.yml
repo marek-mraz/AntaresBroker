@@ -240,6 +240,69 @@ jobs:
             "$IMG:$SHA-amd64" "$IMG:$SHA-arm64"
           echo -e "\n## Released: \`$IMG:$VER\` + \`$IMG:latest\` (multi-arch amd64+arm64; amd64 = the tested bytes, matrix + serial, all four store modes green)" >> "$GITHUB_STEP_SUMMARY"
 
+  upgrade-path:
+    # Data written by the PREVIOUS release must be served by this one. The
+    # binaries are built from the two commits and pointed at one store in
+    # turn, so the proof is the real artifact pair rather than a migration
+    # read by eye. Nothing to prove on the FIRST tag: there is no N-1.
+    name: Upgrade path from the previous release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the previous tag has to be reachable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve the previous release tag
+        id: prev
+        run: |
+          VER="${GITHUB_REF#refs/tags/}"
+          PREV=$(git tag --list 'v*' --sort=-v:refname | grep -v "^$VER$" | head -1)
+          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+          if [ -z "$PREV" ]; then
+            echo "No previous v* tag: $VER is the first release, nothing to upgrade from." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Build this release
+        if: steps.prev.outputs.tag != ''
+        run: |
+          cargo build --locked --release -p antares-broker
+          cp "$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/release/antares" \
+            "$RUNNER_TEMP/antares-new"
+      - name: Build the previous release
+        if: steps.prev.outputs.tag != ''
+        run: |
+          git worktree add "$RUNNER_TEMP/prev" "${{ steps.prev.outputs.tag }}"
+          cd "$RUNNER_TEMP/prev"
+          cargo build --locked --release -p antares-broker
+          cp "$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/release/antares" \
+            "$RUNNER_TEMP/antares-old"
+      - name: Serve the previous release's data (file + postgres)
+        if: steps.prev.outputs.tag != ''
+        env:
+          ANTARES_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: |
+          ./dev/upgrade-path.sh "$RUNNER_TEMP/antares-old" "$RUNNER_TEMP/antares-new"
+          echo "Upgrade path from ${{ steps.prev.outputs.tag }}: file + postgres green." \
+            >> "$GITHUB_STEP_SUMMARY"
+
   release-binaries:
     # Static musl binaries per arch — release assets.
     name: Release binary (${{ matrix.target }})

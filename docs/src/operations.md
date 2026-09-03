@@ -360,6 +360,16 @@ the replay — restore it from database backup (per-store recipes above).
 The `file` store carries a format version: a downgraded or corrupted file
 is refused at startup rather than partially served.
 
+Rolling a minor version in place is proven on every release tag rather than
+asserted: `upgrade-path` builds the previous tag's binary and this one, lets
+the old binary write an entity, its history and a subscription through the
+standard API, then points the new binary at that same `file` and `postgres`
+store and requires all three back — the entity at its last value, the
+history intact, and the stored subscription firing on a write the new binary
+accepts. Run it against any two binaries with
+`dev/upgrade-path.sh OLD NEW` (`ANTARES_TEST_DATABASE_URL` adds the postgres
+half).
+
 ## Where the proofs run
 
 | Claim | Workflow |
@@ -370,5 +380,6 @@ is refused at startup rather than partially served.
 | Zero-downtime rolling update | `roll-weekly` (Tue 04:17 UTC + dispatch) + the full-run `-nats` matrix cells (10-pod fleet rolling under the whole suite) |
 | Role-pair exactly-once semantics (duplicated matcher/notifier/temporal/registry pods) | ci.yml nats job (`nats_e2e::role_pairs_exactly_once_semantics`, live PG + NATS) |
 | NATS bus + role split e2e | ci.yml nats job (`nats_e2e`, live PG + NATS) |
+| Data written by the previous release is served by this one (file + postgres) | full.yml `upgrade-path` on every `v*` tag: the two release binaries are built and pointed at one store in turn (`dev/upgrade-path.sh`) |
 | k8s manifests boot | k8s-smoke.yml kind smoke (dispatch) |
 | Coverage | strict.yml coverage job (daily line-coverage floor) + etsi-coverage.yml (Mon 04:41 UTC) → merged lcov/html on the report page |
