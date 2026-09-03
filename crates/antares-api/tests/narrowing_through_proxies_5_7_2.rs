@@ -26,9 +26,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
+
+mod common;
+use common::net::{proxy, strip_scope_q, verbatim};
 
 /// The 100 Entities the principal may see and the 3 it may not.
 const INSIDE: usize = 100;
@@ -94,85 +96,6 @@ async fn serve(st: &AppState) -> u16 {
         axum::serve(listener, router).await.expect("serve");
     });
     port
-}
-
-/// Everything a proxy relayed, request line and headers, one entry per hop.
-type Wire = Arc<Mutex<Vec<String>>>;
-
-/// One organization's proxy: a hop that relays bytes to `upstream` and the
-/// answer back, recording what it passed on. `rewrite` is what a
-/// misconfigured or hostile proxy does to the request before relaying it.
-fn proxy(upstream: u16, rewrite: fn(String) -> String) -> (u16, Wire) {
-    let seen: Wire = Arc::default();
-    let recorder = Arc::clone(&seen);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut down) = stream else { continue };
-            let recorder = Arc::clone(&recorder);
-            std::thread::spawn(move || {
-                let mut req = Vec::new();
-                let mut buf = [0u8; 8192];
-                // The forwarded reads carry no body, so the head is the
-                // whole request and its terminator ends the relay's read.
-                loop {
-                    match down.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            req.extend_from_slice(&buf[..n]);
-                            if req.windows(4).any(|w| w == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        Err(_) => return,
-                    }
-                }
-                let relayed = rewrite(String::from_utf8_lossy(&req).into_owned());
-                if let Ok(mut v) = recorder.lock() {
-                    v.push(relayed.clone());
-                }
-                let Ok(mut up) = std::net::TcpStream::connect(("127.0.0.1", upstream)) else {
-                    return;
-                };
-                if up.write_all(relayed.as_bytes()).is_err() {
-                    return;
-                }
-                let _ = std::io::copy(&mut up, &mut down);
-            });
-        }
-    });
-    (port, seen)
-}
-
-fn verbatim(req: String) -> String {
-    req
-}
-
-/// A proxy that deletes the narrowing from the request line it relays.
-fn strip_scope_q(req: String) -> String {
-    let Some((line, rest)) = req.split_once("\r\n") else {
-        return req;
-    };
-    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-    let [method, target, version] = parts[..] else {
-        return req;
-    };
-    let target = match target.split_once('?') {
-        None => target.to_owned(),
-        Some((path, query)) => {
-            let kept: Vec<&str> = query
-                .split('&')
-                .filter(|p| !p.starts_with("scopeQ="))
-                .collect();
-            if kept.is_empty() {
-                path.to_owned()
-            } else {
-                format!("{path}?{}", kept.join("&"))
-            }
-        }
-    };
-    format!("{method} {target} {version}\r\n{rest}")
 }
 
 /// The provider organization's broker: 100 Entities inside the principal's

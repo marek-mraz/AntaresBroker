@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: EUPL-1.2
-//! Store doubles shared by the integration tests.
+//! Doubles shared by the integration tests: store drivers, and the network
+//! fixtures a two-organization deployment needs — the proxy an organization
+//! runs in front of its broker, and the endpoint a notification lands on.
 //!
 //! One copy: a second hand-written driver would drift from the trait the
 //! moment a method is added, and the drift is invisible until a test that
 //! was meant to exercise a refusal quietly delegates instead.
 #![allow(dead_code)] // every test binary compiles this module, none uses all of it
+
+pub mod net;
 
 use antares_model::{NgsiError, TenantId};
 use antares_store::{CurrentStateDriver, Kind};
